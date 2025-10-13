@@ -359,7 +359,7 @@ func TestConcurrentIDGeneration(t *testing.T) {
 
 	results := make(chan result, numIssues)
 
-	// Create issues concurrently
+	// Create issues concurrently (goroutines, not processes)
 	for i := 0; i < numIssues; i++ {
 		go func(n int) {
 			issue := &types.Issue{
@@ -389,5 +389,93 @@ func TestConcurrentIDGeneration(t *testing.T) {
 
 	if len(ids) != numIssues {
 		t.Errorf("Expected %d unique IDs, got %d", numIssues, len(ids))
+	}
+}
+
+// TestMultiProcessIDGeneration tests ID generation across multiple processes
+// This test simulates the real-world scenario of multiple `bd create` commands
+// running in parallel, which is what triggers the race condition.
+func TestMultiProcessIDGeneration(t *testing.T) {
+	// Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "beads-multiprocess-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Initialize database
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	store.Close()
+
+	// Spawn multiple processes that each open the DB and create an issue
+	const numProcesses = 20
+	type result struct {
+		id  string
+		err error
+	}
+
+	results := make(chan result, numProcesses)
+
+	for i := 0; i < numProcesses; i++ {
+		go func(n int) {
+			// Each goroutine simulates a separate process by opening a new connection
+			procStore, err := New(dbPath)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer procStore.Close()
+
+			ctx := context.Background()
+			issue := &types.Issue{
+				Title:     "Multi-process test",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+			}
+
+			err = procStore.CreateIssue(ctx, issue, "test-user")
+			results <- result{id: issue.ID, err: err}
+		}(i)
+	}
+
+	// Collect results
+	ids := make(map[string]bool)
+	var errors []error
+
+	for i := 0; i < numProcesses; i++ {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+			continue
+		}
+		if ids[res.id] {
+			t.Errorf("Duplicate ID generated: %s", res.id)
+		}
+		ids[res.id] = true
+	}
+
+	// With the bug, we expect UNIQUE constraint errors
+	if len(errors) > 0 {
+		t.Logf("Got %d errors (expected with current implementation):", len(errors))
+		for _, err := range errors {
+			t.Logf("  - %v", err)
+		}
+	}
+
+	t.Logf("Successfully created %d unique issues out of %d attempts", len(ids), numProcesses)
+
+	// After the fix, all should succeed
+	if len(ids) != numProcesses {
+		t.Errorf("Expected %d unique IDs, got %d", numProcesses, len(ids))
+	}
+
+	if len(errors) > 0 {
+		t.Errorf("Expected no errors, got %d", len(errors))
 	}
 }
