@@ -232,15 +232,16 @@ func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*Collis
 	for _, collision := range collisions {
 		oldID := collision.ID
 
-		// Allocate new ID
-		s.idMu.Lock()
+		// Allocate new ID using atomic counter
 		prefix, err := s.GetConfig(ctx, "issue_prefix")
 		if err != nil || prefix == "" {
 			prefix = "bd"
 		}
-		newID := fmt.Sprintf("%s-%d", prefix, s.nextID)
-		s.nextID++
-		s.idMu.Unlock()
+		nextID, err := s.getNextIDForPrefix(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate new ID for collision %s: %w", oldID, err)
+		}
+		newID := fmt.Sprintf("%s-%d", prefix, nextID)
 
 		// Record mapping
 		idMapping[oldID] = newID
