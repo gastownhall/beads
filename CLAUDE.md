@@ -266,14 +266,58 @@ go tool cover -html=coverage.out
 ./bd ready
 ```
 
+## Version Management
+
+**IMPORTANT**: When the user asks to "bump the version" or mentions a new version number (e.g., "bump to 0.9.3"), use the version bump script:
+
+```bash
+# Preview changes (shows diff, doesn't commit)
+./scripts/bump-version.sh 0.9.3
+
+# Auto-commit the version bump
+./scripts/bump-version.sh 0.9.3 --commit
+git push origin main
+```
+
+**What it does:**
+- Updates ALL version files (CLI, plugin, MCP server, docs) in one command
+- Validates semantic versioning format
+- Shows diff preview
+- Verifies all versions match after update
+- Creates standardized commit message
+
+**User will typically say:**
+- "Bump to 0.9.3"
+- "Update version to 1.0.0"
+- "Rev the project to 0.9.4"
+- "Increment the version"
+
+**You should:**
+1. Run `./scripts/bump-version.sh <version> --commit`
+2. Push to GitHub
+3. Confirm all versions updated correctly
+
+**Files updated automatically:**
+- `cmd/bd/version.go` - CLI version
+- `.claude-plugin/plugin.json` - Plugin version
+- `.claude-plugin/marketplace.json` - Marketplace version
+- `integrations/beads-mcp/pyproject.toml` - MCP server version
+- `README.md` - Documentation version
+- `PLUGIN.md` - Version requirements
+
+**Why this matters:** We had version mismatches (bd-66) when only `version.go` was updated. This script prevents that by updating all components atomically.
+
+See `scripts/README.md` for more details.
+
 ## Release Process (Maintainers)
 
-1. Update version in code (if applicable)
-2. Update CHANGELOG.md (if exists)
-3. Run full test suite
-4. Tag release: `git tag v0.x.0`
-5. Push tag: `git push origin v0.x.0`
-6. GitHub Actions handles the rest
+1. Bump version with `./scripts/bump-version.sh <version> --commit`
+2. Update CHANGELOG.md with release notes
+3. Run full test suite: `go test ./...`
+4. Push version bump: `git push origin main`
+5. Tag release: `git tag v<version>`
+6. Push tag: `git push origin v<version>`
+7. GitHub Actions handles the rest
 
 ---
 
