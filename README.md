@@ -82,6 +82,24 @@ paru -S beads-git
 
 Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
 
+### Claude Code Plugin
+
+Prefer a one-command installation in Claude Code? Install the beads plugin for instant access via slash commands and MCP tools:
+
+```bash
+# In Claude Code
+/plugin marketplace add steveyegge/beads
+/plugin install beads
+```
+
+The plugin includes:
+- Slash commands: `/bd-ready`, `/bd-create`, `/bd-show`, `/bd-update`, `/bd-close`, etc.
+- Full MCP server with all bd tools
+- Task agent for autonomous execution
+- Auto-configured for instant use
+
+See [PLUGIN.md](PLUGIN.md) for complete plugin documentation.
+
 #### Windows 11
 For Windows you must build from source.
 Assumes git, go-lang and mingw-64 installed and in path.
@@ -711,7 +729,8 @@ Check out the **[examples/](examples/)** directory for:
 - **[Bash agent](examples/bash-agent/)** - Shell script agent example
 - **[Git hooks](examples/git-hooks/)** - Automatic export/import on git operations
 - **[Branch merge workflow](examples/branch-merge/)** - Handle ID collisions when merging branches
-- **[Claude Desktop MCP](examples/claude-desktop-mcp/)** - MCP server integration (coming soon)
+- **[Claude Desktop MCP](examples/claude-desktop-mcp/)** - MCP server for Claude Desktop
+- **[Claude Code Plugin](PLUGIN.md)** - One-command installation with slash commands and MCP tools
 
 ## FAQ
 

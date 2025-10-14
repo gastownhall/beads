@@ -1,0 +1,37 @@
+{
+  "name": "beads",
+  "description": "AI-supervised issue tracker for coding workflows. Manage tasks, discover work, and maintain context with simple CLI commands.",
+  "version": "0.9.0",
+  "author": {
+    "name": "Steve Yegge",
+    "url": "https://github.com/steveyegge"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/steveyegge/beads"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/steveyegge/beads",
+  "keywords": [
+    "issue-tracker",
+    "task-management",
+    "ai-workflow",
+    "agent-memory",
+    "mcp-server"
+  ],
+  "mcpServers": {
+    "beads": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}/integrations/beads-mcp",
+        "run",
+        "beads-mcp"
+      ],
+      "env": {
+        "BEADS_PATH": "bd",
+        "BEADS_ACTOR": "${USER}"
+      }
+    }
+  }
+}
