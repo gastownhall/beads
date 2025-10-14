@@ -42,19 +42,46 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		args = append(args, filter.Limit)
 	}
 
-	// Single query template
+	// Query with recursive CTE to propagate blocking through parent-child hierarchy
+	// Algorithm:
+	// 1. Find issues directly blocked by 'blocks' dependencies
+	// 2. Recursively propagate blockage to all descendants via 'parent-child' links
+	// 3. Exclude all blocked issues (both direct and transitive) from ready work
 	query := fmt.Sprintf(`
+		WITH RECURSIVE
+		  -- Step 1: Find issues blocked directly by dependencies
+		  blocked_directly AS (
+		    SELECT DISTINCT d.issue_id
+		    FROM dependencies d
+		    JOIN issues blocker ON d.depends_on_id = blocker.id
+		    WHERE d.type = 'blocks'
+		      AND blocker.status IN ('open', 'in_progress', 'blocked')
+		  ),
+
+		  -- Step 2: Propagate blockage to all descendants via parent-child
+		  blocked_transitively AS (
+		    -- Base case: directly blocked issues
+		    SELECT issue_id, 0 as depth
+		    FROM blocked_directly
+
+		    UNION ALL
+
+		    -- Recursive case: children of blocked issues inherit blockage
+		    SELECT d.issue_id, bt.depth + 1
+		    FROM blocked_transitively bt
+		    JOIN dependencies d ON d.depends_on_id = bt.issue_id
+		    WHERE d.type = 'parent-child'
+		      AND bt.depth < 50
+		  )
+
+		-- Step 3: Select ready issues (excluding all blocked)
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		WHERE %s
 		  AND NOT EXISTS (
-		    SELECT 1 FROM dependencies d
-		    JOIN issues blocked ON d.depends_on_id = blocked.id
-		    WHERE d.issue_id = i.id
-		      AND d.type = 'blocks'
-		      AND blocked.status IN ('open', 'in_progress', 'blocked')
+		    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
 		  )
 		ORDER BY i.priority ASC, i.created_at DESC
 		%s
