@@ -349,3 +349,51 @@ async def test_dependency_types(bd_client):
     show_params = ShowIssueParams(issue_id=issue1.id)
     shown = await bd_client.show(show_params)
     assert len(shown.dependencies) > 0
+
+
+@pytest.mark.asyncio
+async def test_init_creates_beads_directory(bd_executable):
+    """Test that init creates .beads directory in current working directory.
+
+    This is a critical test for the bug where init was using --db flag
+    and creating the database in the wrong location.
+    """
+    import asyncio
+    from beads_mcp.bd_client import BdClient
+    from beads_mcp.models import InitParams
+
+    # Create a temporary directory to test in
+    with tempfile.TemporaryDirectory(prefix="beads_init_test_", dir="/tmp") as temp_dir:
+        temp_path = Path(temp_dir)
+        beads_dir = temp_path / ".beads"
+
+        # Ensure .beads doesn't exist yet
+        assert not beads_dir.exists()
+
+        # Create client WITHOUT beads_db set (this was the bug!)
+        client = BdClient(bd_path=bd_executable, beads_db=None)
+
+        # Change to temp directory and run init
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(temp_dir)
+
+            # Initialize with custom prefix
+            params = InitParams(prefix="test")
+            result = await client.init(params)
+
+            # Verify .beads directory was created in current directory
+            assert beads_dir.exists(), f".beads directory not created in {temp_dir}"
+            assert beads_dir.is_dir(), f".beads exists but is not a directory"
+
+            # Verify database file was created with correct prefix
+            db_files = list(beads_dir.glob("*.db"))
+            assert len(db_files) > 0, "No database file created in .beads/"
+            assert any("test" in str(db.name) for db in db_files), \
+                f"Database file doesn't contain prefix 'test': {[db.name for db in db_files]}"
+
+            # Verify success message
+            assert "initialized" in result.lower() or "created" in result.lower()
+
+        finally:
+            os.chdir(original_cwd)

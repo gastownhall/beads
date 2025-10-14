@@ -462,7 +462,11 @@ class BdClient:
         if params.prefix:
             cmd.extend(["--prefix", params.prefix])
 
-        cmd.extend(self._global_flags())
+        # NOTE: Do NOT add --db flag for init!
+        # init creates a NEW database in the current directory.
+        # Only add actor-related flags.
+        if self.actor:
+            cmd.extend(["--actor", self.actor])
 
         try:
             process = await asyncio.create_subprocess_exec(
