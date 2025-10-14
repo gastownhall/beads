@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	// Import SQLite driver
@@ -19,9 +18,7 @@ import (
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
-	db     *sql.DB
-	nextID int
-	idMu   sync.Mutex // Protects nextID from concurrent access
+	db *sql.DB
 }
 
 // New creates a new SQLite storage backend
@@ -53,12 +50,8 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to migrate dirty_issues table: %w", err)
 	}
 
-	// Get next ID
-	nextID := getNextID(db)
-
 	return &SQLiteStorage{
-		db:     db,
-		nextID: nextID,
+		db: db,
 	}, nil
 }
 
@@ -97,56 +90,42 @@ func migrateDirtyIssuesTable(db *sql.DB) error {
 	return nil
 }
 
-// getNextID determines the next issue ID to use
-func getNextID(db *sql.DB) int {
-	// Get prefix from config, default to "bd"
-	var prefix string
-	err := db.QueryRow("SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&prefix)
-	if err != nil || prefix == "" {
-		prefix = "bd"
+// getNextIDForPrefix atomically generates the next ID for a given prefix
+// Uses the issue_counters table for atomic, cross-process ID generation
+func (s *SQLiteStorage) getNextIDForPrefix(ctx context.Context, prefix string) (int, error) {
+	var nextID int
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO issue_counters (prefix, last_id)
+		VALUES (?, 1)
+		ON CONFLICT(prefix) DO UPDATE SET
+			last_id = last_id + 1
+		RETURNING last_id
+	`, prefix).Scan(&nextID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate next ID for prefix %s: %w", prefix, err)
 	}
+	return nextID, nil
+}
 
-	// Find the maximum numeric ID for this prefix
-	// Use SUBSTR to extract numeric part after prefix and hyphen, then CAST to INTEGER
-	// This ensures we get numerical max, not alphabetical (bd-10 > bd-9, not bd-9 > bd-10)
-	var maxNum sql.NullInt64
-	query := `
-		SELECT MAX(CAST(SUBSTR(id, LENGTH(?) + 2) AS INTEGER))
+// SyncAllCounters synchronizes all ID counters based on existing issues in the database
+// This scans all issues and updates counters to prevent ID collisions with auto-generated IDs
+func (s *SQLiteStorage) SyncAllCounters(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO issue_counters (prefix, last_id)
+		SELECT
+			substr(id, 1, instr(id, '-') - 1) as prefix,
+			MAX(CAST(substr(id, instr(id, '-') + 1) AS INTEGER)) as max_id
 		FROM issues
-		WHERE id LIKE ? || '-%'
-	`
-	err = db.QueryRow(query, prefix, prefix).Scan(&maxNum)
-	if err != nil || !maxNum.Valid {
-		return 1 // Start from 1 if table is empty or no matching IDs
+		WHERE instr(id, '-') > 0
+		  AND substr(id, instr(id, '-') + 1) GLOB '[0-9]*'
+		GROUP BY prefix
+		ON CONFLICT(prefix) DO UPDATE SET
+			last_id = MAX(last_id, excluded.last_id)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to sync counters: %w", err)
 	}
-
-	// Check for malformed IDs (non-numeric suffixes) and warn
-	// SQLite's CAST returns 0 for invalid integers, never NULL
-	// So we detect malformed IDs by checking if CAST returns 0 AND suffix doesn't start with '0'
-	malformedQuery := `
-		SELECT id FROM issues
-		WHERE id LIKE ? || '-%'
-		AND CAST(SUBSTR(id, LENGTH(?) + 2) AS INTEGER) = 0
-		AND SUBSTR(id, LENGTH(?) + 2, 1) != '0'
-	`
-	rows, err := db.Query(malformedQuery, prefix, prefix, prefix)
-	if err == nil {
-		defer rows.Close()
-		var malformedIDs []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				malformedIDs = append(malformedIDs, id)
-			}
-		}
-		if len(malformedIDs) > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: Found %d malformed issue IDs with non-numeric suffixes: %v\n",
-				len(malformedIDs), malformedIDs)
-			fmt.Fprintf(os.Stderr, "These IDs are being ignored for ID generation. Consider fixing them.\n")
-		}
-	}
-
-	return int(maxNum.Int64) + 1
+	return nil
 }
 
 // CreateIssue creates a new issue
@@ -156,9 +135,14 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Generate ID if not set (thread-safe)
+	// Generate ID if not set (using atomic counter table)
 	if issue.ID == "" {
-		s.idMu.Lock()
+		// Sync all counters first to ensure we don't collide with existing issues
+		// This handles the case where the database was created before this fix
+		// or issues were imported without syncing counters
+		if err := s.SyncAllCounters(ctx); err != nil {
+			return fmt.Errorf("failed to sync counters: %w", err)
+		}
 
 		// Get prefix from config, default to "bd"
 		prefix, err := s.GetConfig(ctx, "issue_prefix")
@@ -166,9 +150,13 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 			prefix = "bd"
 		}
 
-		issue.ID = fmt.Sprintf("%s-%d", prefix, s.nextID)
-		s.nextID++
-		s.idMu.Unlock()
+		// Atomically get next ID from counter table
+		nextID, err := s.getNextIDForPrefix(ctx, prefix)
+		if err != nil {
+			return err
+		}
+
+		issue.ID = fmt.Sprintf("%s-%d", prefix, nextID)
 	}
 
 	// Set timestamps

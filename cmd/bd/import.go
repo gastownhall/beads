@@ -238,7 +238,14 @@ Behavior:
 			}
 		}
 
-		// Phase 5: Process dependencies
+		// Phase 5: Sync ID counters after importing issues with explicit IDs
+		// This prevents ID collisions with subsequently auto-generated issues
+		if err := sqliteStore.SyncAllCounters(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync ID counters: %v\n", err)
+			// Don't exit - this is not fatal, just a warning
+		}
+
+		// Phase 6: Process dependencies
 		// Do this after all issues are created to handle forward references
 		var depsCreated, depsSkipped int
 		for _, issue := range allIssues {
