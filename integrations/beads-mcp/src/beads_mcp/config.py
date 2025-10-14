@@ -43,21 +43,27 @@ class Config(BaseSettings):
         """Validate BEADS_PATH points to an executable bd binary.
 
         Args:
-            v: Path to bd executable
+            v: Path to bd executable (can be command name or absolute path)
 
         Returns:
-            Validated path
+            Validated absolute path
 
         Raises:
             ValueError: If path is invalid or not executable
         """
         path = Path(v)
 
+        # If not an absolute/existing path, try to find it in PATH
         if not path.exists():
-            raise ValueError(
-                f"bd executable not found at: {v}\n"
-                + "Please verify BEADS_PATH points to a valid bd executable."
-            )
+            found = shutil.which(v)
+            if found:
+                v = found
+                path = Path(v)
+            else:
+                raise ValueError(
+                    f"bd executable not found at: {v}\n"
+                    + "Please verify BEADS_PATH points to a valid bd executable."
+                )
 
         if not os.access(v, os.X_OK):
             raise ValueError(

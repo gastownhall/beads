@@ -26,7 +26,6 @@
         "beads-mcp"
       ],
       "env": {
-        "BEADS_PATH": "bd",
         "BEADS_ACTOR": "${USER}"
       }
     }
