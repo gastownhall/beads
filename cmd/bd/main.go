@@ -755,7 +755,7 @@ var listCmd = &cobra.Command{
 
 		fmt.Printf("\nFound %d issues:\n\n", len(issues))
 		for _, issue := range issues {
-			fmt.Printf("%s [P%d] %s\n", issue.ID, issue.Priority, issue.Status)
+			fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
 			fmt.Printf("  %s\n", issue.Title)
 			if issue.Assignee != "" {
 				fmt.Printf("  Assignee: %s\n", issue.Assignee)
