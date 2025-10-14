@@ -12,8 +12,8 @@ import (
 	"time"
 
 	// Import SQLite driver
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/steveyegge/beads/internal/types"
+	_ "modernc.org/sqlite"
 )
 
 // SQLiteStorage implements the Storage interface using SQLite
@@ -25,12 +25,12 @@ type SQLiteStorage struct {
 func New(path string) (*SQLiteStorage, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	// Open database with WAL mode for better concurrency
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=ON")
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_foreign_keys=ON")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -247,7 +247,6 @@ func (s *SQLiteStorage) ensureCounterInitialized(ctx context.Context, prefix str
 		ON CONFLICT(prefix) DO UPDATE SET
 			last_id = MAX(last_id, excluded.last_id)
 	`, prefix, prefix, prefix, prefix)
-
 	if err != nil {
 		return fmt.Errorf("failed to initialize counter for prefix %s: %w", prefix, err)
 	}

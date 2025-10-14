@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/steveyegge/beads/internal/types"
+	_ "modernc.org/sqlite"
 )
 
 // TestMigrateIssueCountersTable tests that the migration properly creates
@@ -24,7 +24,7 @@ func TestMigrateIssueCountersTable(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Step 1: Create database with old schema (no issue_counters table)
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=ON")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_foreign_keys=ON")
 	if err != nil {
 		t.Fatalf("failed to open database: %v", err)
 	}

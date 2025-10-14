@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	_ "modernc.org/sqlite"
 )
 
 func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
@@ -475,4 +476,3 @@ func TestMultiProcessIDGeneration(t *testing.T) {
 		t.Errorf("Expected %d unique IDs, got %d", numProcesses, len(ids))
 	}
 }
-

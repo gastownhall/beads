@@ -53,7 +53,7 @@ package main
 
 import (
     "database/sql"
-    _ "github.com/mattn/go-sqlite3"
+    _ "modernc.org/sqlite"
 )
 
 const myAppSchema = `
@@ -84,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_execution ON myapp_checkpoints(execut
 `
 
 func InitializeMyAppSchema(dbPath string) error {
-    db, err := sql.Open("sqlite3", dbPath)
+    db, err := sql.Open("sqlite", dbPath)
     if err != nil {
         return err
     }
@@ -408,7 +408,7 @@ You can always access bd's database directly:
 ```go
 import (
     "database/sql"
-    _ "github.com/mattn/go-sqlite3"
+    _ "modernc.org/sqlite"
     "github.com/steveyegge/beads"
 )
 
@@ -419,7 +419,7 @@ if dbPath == "" {
 }
 
 // Open the same database bd uses
-db, err := sql.Open("sqlite3", dbPath)
+db, err := sql.Open("sqlite", dbPath)
 if err != nil {
     log.Fatal(err)
 }

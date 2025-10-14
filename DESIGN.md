@@ -1000,8 +1000,7 @@ Minimal dependencies:
 ```go
 // Core
 database/sql
-github.com/mattn/go-sqlite3  // SQLite driver
-github.com/lib/pq            // PostgreSQL driver
+modernc.org/sqlite          // SQLite driver (pure Go, no CGO)
 
 // CLI
 github.com/spf13/cobra       // CLI framework
