@@ -16,6 +16,9 @@
     "agent-memory",
     "mcp-server"
   ],
+  "engines": {
+    "beads": ">=0.9.0"
+  },
   "mcpServers": {
     "beads": {
       "command": "uv",
