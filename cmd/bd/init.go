@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -27,6 +28,10 @@ and database file. Optionally specify a custom issue prefix.`,
 			}
 			prefix = filepath.Base(cwd)
 		}
+
+		// Normalize prefix: strip trailing hyphens
+		// The hyphen is added automatically during ID generation
+		prefix = strings.TrimRight(prefix, "-")
 
 		// Create .beads directory
 		beadsDir := ".beads"
