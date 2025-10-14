@@ -1016,6 +1016,17 @@ github.com/stretchr/testify  // Test assertions
 
 No frameworks, no ORMs. Keep it simple.
 
+**Note on SQLite Driver**: We use `modernc.org/sqlite`, a pure Go implementation that enables:
+- Cross-compilation without C toolchain
+- Faster builds (no CGO overhead)
+- Static binary distribution
+- Deployment in CGO-restricted environments
+
+**Concurrency Limitation**: The pure Go driver may experience "database is locked" errors under extreme concurrent load (100+ simultaneous operations). This is acceptable because:
+- Normal usage with WAL mode handles typical concurrent operations well
+- The limitation only appears in stress tests, not real-world usage
+- For very high concurrency needs (many simultaneous writers), consider the CGO-enabled `github.com/mattn/go-sqlite3` driver or PostgreSQL
+
 ---
 
 ## Open Questions

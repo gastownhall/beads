@@ -859,6 +859,8 @@ kill <pid>
 rm .beads/*.db-journal .beads/*.db-wal .beads/*.db-shm
 ```
 
+**Note**: bd uses a pure Go SQLite driver (`modernc.org/sqlite`) for better portability. Under extreme concurrent load (100+ simultaneous operations), you may see "database is locked" errors. This is a known limitation of the pure Go implementation and does not affect normal usage. For very high concurrency scenarios, consider using the CGO-enabled driver or PostgreSQL (planned for future release).
+
 ### `failed to import: issue already exists`
 
 You're trying to import issues that conflict with existing ones. Options:
