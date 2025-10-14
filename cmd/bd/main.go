@@ -83,10 +83,14 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
-		// Set actor from env or default
+		// Set actor from flag, env, or default
+		// Priority: --actor flag > BD_ACTOR env > USER env > "unknown"
 		if actor == "" {
-			actor = os.Getenv("USER")
-			if actor == "" {
+			if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+				actor = bdActor
+			} else if user := os.Getenv("USER"); user != "" {
+				actor = user
+			} else {
 				actor = "unknown"
 			}
 		}
@@ -517,7 +521,7 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db or ~/.beads/default.db)")
-	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $USER)")
+	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BD_ACTOR or $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
 	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
