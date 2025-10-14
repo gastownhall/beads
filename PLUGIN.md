@@ -73,6 +73,10 @@ After installation, restart Claude Code to activate the MCP server.
 
 ## Available Commands
 
+### Version Management
+
+- **`/bd-version`** - Check bd CLI, plugin, and MCP server versions
+
 ### Core Workflow Commands
 
 - **`/bd-ready`** - Find tasks with no blockers, ready to work on
@@ -224,6 +228,58 @@ git commit -m "Add feature tracking"
 git pull
 bd ready  # Fresh data from git!
 ```
+
+## Updating
+
+The beads plugin has three components that may need updating:
+
+### 1. Plugin Updates
+
+Check for plugin updates:
+```bash
+/plugin update beads
+```
+
+Claude Code will pull the latest version from GitHub. After updating, **restart Claude Code** to apply MCP server changes.
+
+### 2. bd CLI Updates
+
+The plugin requires the `bd` CLI to be installed. Update it separately:
+
+```bash
+# Quick update
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
+
+# Or with go
+go install github.com/steveyegge/beads/cmd/bd@latest
+```
+
+### 3. Version Compatibility
+
+Check version compatibility:
+```bash
+/bd-version
+```
+
+This will show:
+- bd CLI version
+- Plugin version
+- MCP server status
+- Compatibility warnings if versions mismatch
+
+**Recommended update workflow:**
+1. Check versions: `/bd-version`
+2. Update bd CLI if needed (see above)
+3. Update plugin: `/plugin update beads`
+4. Restart Claude Code
+5. Verify: `/bd-version`
+
+### Version Numbering
+
+Beads follows semantic versioning. The plugin version tracks the bd CLI version:
+- Plugin 0.9.x requires bd CLI 0.9.0+
+- Major version bumps may introduce breaking changes
+- Check CHANGELOG.md for release notes
 
 ## Troubleshooting
 
