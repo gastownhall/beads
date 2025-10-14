@@ -4,11 +4,13 @@ This document explains our approach to `golangci-lint` warnings in this codebase
 
 ## Current Status
 
-Running `golangci-lint run ./...` currently reports ~100 "issues". However, these are not actual code quality problems - they are false positives or intentional patterns that reflect idiomatic Go practice.
+Running `golangci-lint run ./...` currently reports ~200 "issues". However, these are not actual code quality problems - they are false positives or intentional patterns that reflect idiomatic Go practice.
+
+**Note**: The count increased from ~100 to ~200 between Oct 12-14, 2025, due to significant test coverage additions for collision resolution (1100+ lines) and auto-flush features (300+ lines). All new warnings follow the same idiomatic patterns documented below.
 
 ## Issue Breakdown
 
-### errcheck (73 issues)
+### errcheck (159 issues)
 
 **Pattern**: Unchecked errors from `defer` cleanup operations
 **Status**: Intentional and idiomatic
@@ -27,9 +29,9 @@ defer os.RemoveAll(tmpDir)  // in tests
 
 Fixing these would add noise without improving code quality. The critical cleanup operations (where errors matter) are already checked explicitly.
 
-### revive (17 issues)
+### revive (21 issues)
 
-**Pattern 1**: Unused parameters in Cobra command handlers (15 issues)
+**Pattern 1**: Unused parameters in Cobra command handlers (18 issues)
 **Status**: Required by interface
 
 Examples:
@@ -41,13 +43,14 @@ Run: func(cmd *cobra.Command, args []string) {
 
 **Rationale**: Cobra requires this exact function signature. Renaming to `_` would make the code less clear when parameters *are* used.
 
-**Pattern 2**: Package naming (2 issues)
+**Pattern 2**: Package naming (3 issues)
 - `package types` - Clear and appropriate for a types package
 - `SQLiteStorage` - Intentional; `sqlite.Storage` would be confusing with the interface
+- Blank import comment - Required for database driver registration
 
-### gosec (7 issues)
+### gosec (19 issues)
 
-**Pattern 1**: G201 - SQL string formatting (4 issues)
+**Pattern 1**: G201 - SQL string formatting (6 issues)
 **Status**: False positive - all SQL is validated
 
 All dynamic SQL construction uses:
@@ -55,25 +58,30 @@ All dynamic SQL construction uses:
 - Parameterized queries for all values
 - Safe string building for clauses like ORDER BY and LIMIT
 
-**Pattern 2**: G304 - File inclusion via variable (2 issues)
-**Status**: Intended feature - user-specified file paths for import/export
+**Pattern 2**: G304 - File inclusion via variable (11 issues)
+**Status**: Intended feature - user-specified file paths for import/export/test fixtures
 
-**Pattern 3**: G301 - Directory permissions (1 issue)
-**Status**: Acceptable - 0755 is reasonable for a database directory
+All file paths are either:
+- User-provided CLI arguments (expected for import/export commands)
+- Test fixtures in controlled test environments
+- Validated paths with security checks (e.g., markdown.go uses validateMarkdownPath)
 
-### dupl (2 issues)
+**Pattern 3**: G301 - Directory permissions (2 issues)
+**Status**: Acceptable - 0755 is reasonable for database directories
 
-**Pattern**: Test code duplication
+### gocyclo (1 issue)
+
+**Pattern**: High cyclomatic complexity in `TestExportImport` (31)
 **Status**: Acceptable
 
-Test code duplication is often preferable to premature test abstraction. These tests are clear and maintainable as-is.
+This comprehensive integration test covers multiple scenarios (export, import, filters, updates). The complexity comes from thorough test coverage, not production code. Splitting would reduce readability.
 
-### goconst (1 issue)
+### goconst (2 issues)
 
-**Pattern**: Repeated string constant in tests
+**Pattern**: Repeated string constants in tests
 **Status**: Acceptable
 
-The string `"test-user"` appears multiple times in test code. Extracting this to a constant would not improve test readability.
+Repeated test strings like `"test-user"` and file paths appear multiple times. Extracting these to constants would not improve test readability or maintainability.
 
 ## golangci-lint Configuration Challenges
 
@@ -89,7 +97,7 @@ This appears to be a known limitation of golangci-lint's configuration system.
 **For contributors**: Don't be alarmed by the lint warnings. The code quality is high.
 
 **For code review**: Focus on:
-- New issues introduced by changes (not the baseline 100)
+- New issues introduced by changes (not the baseline ~200)
 - Actual logic errors
 - Missing error checks on critical operations (file writes, database commits)
 - Security concerns beyond gosec's false positives

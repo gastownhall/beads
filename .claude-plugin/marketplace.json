@@ -1,0 +1,15 @@
+{
+  "name": "beads-marketplace",
+  "description": "Local marketplace for beads plugin development",
+  "owner": {
+    "name": "Steve Yegge"
+  },
+  "plugins": [
+    {
+      "name": "beads",
+      "source": ".",
+      "description": "AI-supervised issue tracker for coding workflows",
+      "version": "0.9.2"
+    }
+  ]
+}

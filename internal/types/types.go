@@ -22,6 +22,7 @@ type Issue struct {
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	ClosedAt           *time.Time     `json:"closed_at,omitempty"`
+	ExternalRef        *string        `json:"external_ref,omitempty"` // e.g., "gh-9", "jira-ABC"
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 }
 

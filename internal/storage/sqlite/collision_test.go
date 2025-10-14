@@ -1027,3 +1027,78 @@ func TestUpdateDependencyReferences(t *testing.T) {
 		t.Errorf("expected 0 dependencies for bd-2, got %d", len(deps2))
 	}
 }
+
+// BenchmarkReplaceIDReferences benchmarks the old approach (compiling regex every time)
+func BenchmarkReplaceIDReferences(b *testing.B) {
+	// Simulate a realistic scenario: 10 ID mappings
+	idMapping := make(map[string]string)
+	for i := 1; i <= 10; i++ {
+		idMapping[fmt.Sprintf("bd-%d", i)] = fmt.Sprintf("bd-%d", i+100)
+	}
+
+	text := "This mentions bd-1, bd-2, bd-3, bd-4, and bd-5 multiple times. " +
+		"Also bd-6, bd-7, bd-8, bd-9, and bd-10 are referenced here."
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = replaceIDReferences(text, idMapping)
+	}
+}
+
+// BenchmarkReplaceIDReferencesWithCache benchmarks the new cached approach
+func BenchmarkReplaceIDReferencesWithCache(b *testing.B) {
+	// Simulate a realistic scenario: 10 ID mappings
+	idMapping := make(map[string]string)
+	for i := 1; i <= 10; i++ {
+		idMapping[fmt.Sprintf("bd-%d", i)] = fmt.Sprintf("bd-%d", i+100)
+	}
+
+	text := "This mentions bd-1, bd-2, bd-3, bd-4, and bd-5 multiple times. " +
+		"Also bd-6, bd-7, bd-8, bd-9, and bd-10 are referenced here."
+
+	// Pre-compile the cache (this is done once in real usage)
+	cache, err := buildReplacementCache(idMapping)
+	if err != nil {
+		b.Fatalf("failed to build cache: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = replaceIDReferencesWithCache(text, cache)
+	}
+}
+
+// BenchmarkReplaceIDReferencesMultipleTexts simulates the real-world scenario:
+// processing multiple text fields (4 per issue) across 100 issues
+func BenchmarkReplaceIDReferencesMultipleTexts(b *testing.B) {
+	// 10 ID mappings (typical collision scenario)
+	idMapping := make(map[string]string)
+	for i := 1; i <= 10; i++ {
+		idMapping[fmt.Sprintf("bd-%d", i)] = fmt.Sprintf("bd-%d", i+100)
+	}
+
+	// Simulate 100 issues with 4 text fields each
+	texts := make([]string, 400)
+	for i := 0; i < 400; i++ {
+		texts[i] = fmt.Sprintf("Issue %d mentions bd-1, bd-2, and bd-5", i)
+	}
+
+	b.Run("without cache", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for _, text := range texts {
+				_ = replaceIDReferences(text, idMapping)
+			}
+		}
+	})
+
+	b.Run("with cache", func(b *testing.B) {
+		cache, _ := buildReplacementCache(idMapping)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for _, text := range texts {
+				_ = replaceIDReferencesWithCache(text, cache)
+			}
+		}
+	})
+}

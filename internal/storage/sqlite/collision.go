@@ -232,15 +232,16 @@ func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*Collis
 	for _, collision := range collisions {
 		oldID := collision.ID
 
-		// Allocate new ID
-		s.idMu.Lock()
+		// Allocate new ID using atomic counter
 		prefix, err := s.GetConfig(ctx, "issue_prefix")
 		if err != nil || prefix == "" {
 			prefix = "bd"
 		}
-		newID := fmt.Sprintf("%s-%d", prefix, s.nextID)
-		s.nextID++
-		s.idMu.Unlock()
+		nextID, err := s.getNextIDForPrefix(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate new ID for collision %s: %w", oldID, err)
+		}
+		newID := fmt.Sprintf("%s-%d", prefix, nextID)
 
 		// Record mapping
 		idMapping[oldID] = newID
@@ -266,6 +267,13 @@ func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*Collis
 // updateReferences updates all text field references and dependency records
 // to point to new IDs based on the idMapping
 func updateReferences(ctx context.Context, s *SQLiteStorage, idMapping map[string]string) error {
+	// Pre-compile all regexes once for the entire operation
+	// This avoids recompiling the same patterns for each text field
+	cache, err := buildReplacementCache(idMapping)
+	if err != nil {
+		return fmt.Errorf("failed to build replacement cache: %w", err)
+	}
+
 	// Update text fields in all issues (both DB and incoming)
 	// We need to update issues in the database
 	dbIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
@@ -276,26 +284,26 @@ func updateReferences(ctx context.Context, s *SQLiteStorage, idMapping map[strin
 	for _, issue := range dbIssues {
 		updates := make(map[string]interface{})
 
-		// Update description
-		newDesc := replaceIDReferences(issue.Description, idMapping)
+		// Update description using cached regexes
+		newDesc := replaceIDReferencesWithCache(issue.Description, cache)
 		if newDesc != issue.Description {
 			updates["description"] = newDesc
 		}
 
-		// Update design
-		newDesign := replaceIDReferences(issue.Design, idMapping)
+		// Update design using cached regexes
+		newDesign := replaceIDReferencesWithCache(issue.Design, cache)
 		if newDesign != issue.Design {
 			updates["design"] = newDesign
 		}
 
-		// Update notes
-		newNotes := replaceIDReferences(issue.Notes, idMapping)
+		// Update notes using cached regexes
+		newNotes := replaceIDReferencesWithCache(issue.Notes, cache)
 		if newNotes != issue.Notes {
 			updates["notes"] = newNotes
 		}
 
-		// Update acceptance criteria
-		newAC := replaceIDReferences(issue.AcceptanceCriteria, idMapping)
+		// Update acceptance criteria using cached regexes
+		newAC := replaceIDReferencesWithCache(issue.AcceptanceCriteria, cache)
 		if newAC != issue.AcceptanceCriteria {
 			updates["acceptance_criteria"] = newAC
 		}
@@ -316,32 +324,76 @@ func updateReferences(ctx context.Context, s *SQLiteStorage, idMapping map[strin
 	return nil
 }
 
+// idReplacementCache stores pre-compiled regexes for ID replacements
+// This avoids recompiling the same regex patterns for each text field
+type idReplacementCache struct {
+	oldID       string
+	newID       string
+	placeholder string
+	regex       *regexp.Regexp
+}
+
+// buildReplacementCache pre-compiles all regex patterns for an ID mapping
+// This cache should be created once per ID mapping and reused for all text replacements
+func buildReplacementCache(idMapping map[string]string) ([]*idReplacementCache, error) {
+	cache := make([]*idReplacementCache, 0, len(idMapping))
+	i := 0
+	for oldID, newID := range idMapping {
+		// Use word boundary regex for exact matching
+		pattern := fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(oldID))
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile regex for %s: %w", oldID, err)
+		}
+
+		cache = append(cache, &idReplacementCache{
+			oldID:       oldID,
+			newID:       newID,
+			placeholder: fmt.Sprintf("__PLACEHOLDER_%d__", i),
+			regex:       re,
+		})
+		i++
+	}
+	return cache, nil
+}
+
+// replaceIDReferencesWithCache replaces all occurrences of old IDs with new IDs using a pre-compiled cache
+// Uses a two-phase approach to avoid replacement conflicts: first replace with placeholders, then replace with new IDs
+func replaceIDReferencesWithCache(text string, cache []*idReplacementCache) string {
+	if len(cache) == 0 || text == "" {
+		return text
+	}
+
+	// Phase 1: Replace all old IDs with unique placeholders
+	result := text
+	for _, entry := range cache {
+		result = entry.regex.ReplaceAllString(result, entry.placeholder)
+	}
+
+	// Phase 2: Replace all placeholders with new IDs
+	for _, entry := range cache {
+		result = strings.ReplaceAll(result, entry.placeholder, entry.newID)
+	}
+
+	return result
+}
+
 // replaceIDReferences replaces all occurrences of old IDs with new IDs in text
 // Uses word-boundary regex to ensure exact matches (bd-10 but not bd-100)
 // Uses a two-phase approach to avoid replacement conflicts: first replace with
 // placeholders, then replace placeholders with new IDs
+//
+// Note: This function compiles regexes on every call. For better performance when
+// processing multiple text fields with the same ID mapping, use buildReplacementCache()
+// and replaceIDReferencesWithCache() instead.
 func replaceIDReferences(text string, idMapping map[string]string) string {
-	// Phase 1: Replace all old IDs with unique placeholders
-	placeholders := make(map[string]string)
-	result := text
-	i := 0
-	for oldID, newID := range idMapping {
-		placeholder := fmt.Sprintf("__PLACEHOLDER_%d__", i)
-		placeholders[placeholder] = newID
-
-		// Use word boundary regex for exact matching
-		pattern := fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(oldID))
-		re := regexp.MustCompile(pattern)
-		result = re.ReplaceAllString(result, placeholder)
-		i++
+	// Build cache (compiles regexes)
+	cache, err := buildReplacementCache(idMapping)
+	if err != nil {
+		// Fallback to no replacement if regex compilation fails
+		return text
 	}
-
-	// Phase 2: Replace all placeholders with new IDs
-	for placeholder, newID := range placeholders {
-		result = strings.ReplaceAll(result, placeholder, newID)
-	}
-
-	return result
+	return replaceIDReferencesWithCache(text, cache)
 }
 
 // updateDependencyReferences updates dependency records to use new IDs

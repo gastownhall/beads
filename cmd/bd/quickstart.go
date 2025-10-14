@@ -82,7 +82,16 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("  Applications can extend bd's SQLite database:\n")
 		fmt.Printf("    • Add your own tables (e.g., %s)\n", cyan("myapp_executions"))
 		fmt.Printf("    • Join with %s table for powerful queries\n", cyan("issues"))
-		fmt.Printf("    • See %s for integration patterns\n\n", cyan("EXTENDING.md"))
+		fmt.Printf("    • See database extension docs for integration patterns:\n")
+		fmt.Printf("      %s\n\n", cyan("https://github.com/steveyegge/beads/blob/main/EXTENDING.md"))
+
+		fmt.Printf("%s\n", bold("GIT WORKFLOW (AUTO-SYNC)"))
+		fmt.Printf("  bd automatically keeps git in sync:\n")
+		fmt.Printf("    • %s Export to JSONL after CRUD operations (5s debounce)\n", green("✓"))
+		fmt.Printf("    • %s Import from JSONL when newer than DB (after %s)\n", green("✓"), cyan("git pull"))
+		fmt.Printf("    • %s Works seamlessly across machines and team members\n", green("✓"))
+		fmt.Printf("    • No manual export/import needed!\n")
+		fmt.Printf("  Disable with: %s or %s\n\n", cyan("--no-auto-flush"), cyan("--no-auto-import"))
 
 		fmt.Printf("%s\n", green("Ready to start!"))
 		fmt.Printf("Run %s to create your first issue.\n\n", cyan("bd create \"My first issue\""))

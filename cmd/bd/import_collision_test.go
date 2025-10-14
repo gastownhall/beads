@@ -968,3 +968,79 @@ func TestImportWithDependenciesInJSONL(t *testing.T) {
 		t.Errorf("Dependency target = %s, want bd-1", deps[0].DependsOnID)
 	}
 }
+
+func TestImportCounterSyncAfterHighID(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-collision-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			t.Logf("Warning: cleanup failed: %v", err)
+		}
+	}()
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	testStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	defer func() {
+		if err := testStore.Close(); err != nil {
+			t.Logf("Warning: failed to close store: %v", err)
+		}
+	}()
+
+	ctx := context.Background()
+
+	if err := testStore.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue prefix: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Auto issue %d", i+1),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create auto issue %d: %v", i+1, err)
+		}
+	}
+
+	highIDIssue := &types.Issue{
+		ID:        "bd-100",
+		Title:     "High ID issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := testStore.CreateIssue(ctx, highIDIssue, "import"); err != nil {
+		t.Fatalf("Failed to import high ID issue: %v", err)
+	}
+
+	// Step 4: Sync counters after import (mimics import command behavior)
+	if err := testStore.SyncAllCounters(ctx); err != nil {
+		t.Fatalf("Failed to sync counters: %v", err)
+	}
+
+	// Step 5: Create another auto-generated issue
+	// This should get bd-101 (counter should have synced to 100), not bd-4
+	newIssue := &types.Issue{
+		Title:     "New issue after import",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := testStore.CreateIssue(ctx, newIssue, "test"); err != nil {
+		t.Fatalf("Failed to create new issue: %v", err)
+	}
+
+	if newIssue.ID != "bd-101" {
+		t.Errorf("Expected new issue to get ID bd-101, got %s", newIssue.ID)
+	}
+}

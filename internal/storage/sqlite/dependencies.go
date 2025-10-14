@@ -110,6 +110,12 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
+	// Mark both issues as dirty for incremental export
+	// (dependencies are exported with each issue, so both need updating)
+	if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
+		return err
+	}
+
 	return tx.Commit()
 }
 
@@ -137,6 +143,11 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
+	// Mark both issues as dirty for incremental export
+	if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
+		return err
+	}
+
 	return tx.Commit()
 }
 
@@ -145,7 +156,7 @@ func (s *SQLiteStorage) GetDependencies(ctx context.Context, issueID string) ([]
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		JOIN dependencies d ON i.id = d.depends_on_id
 		WHERE d.issue_id = ?
@@ -164,7 +175,7 @@ func (s *SQLiteStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
 		WHERE d.depends_on_id = ?
@@ -243,20 +254,26 @@ func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string
 	return depsMap, nil
 }
 
-// GetDependencyTree returns the full dependency tree
+// GetDependencyTree returns the full dependency tree with deduplication
+// When multiple paths lead to the same node (diamond dependencies), the node
+// appears only once at its shallowest depth in the tree.
 func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int) ([]*types.TreeNode, error) {
 	if maxDepth <= 0 {
 		maxDepth = 50
 	}
 
-	// Use recursive CTE to build tree
+	// First, build the complete tree with all paths using recursive CTE
+	// We need to track the full path to handle proper tree structure
 	rows, err := s.db.QueryContext(ctx, `
 		WITH RECURSIVE tree AS (
 			SELECT
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
 				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
-				0 as depth
+				i.external_ref,
+				0 as depth,
+				i.id as path,
+				i.id as parent_id
 			FROM issues i
 			WHERE i.id = ?
 
@@ -266,36 +283,52 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
 				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
-				t.depth + 1
+				i.external_ref,
+				t.depth + 1,
+				t.path || '→' || i.id,
+				t.id
 			FROM issues i
 			JOIN dependencies d ON i.id = d.depends_on_id
 			JOIN tree t ON d.issue_id = t.id
 			WHERE t.depth < ?
+			  AND t.path NOT LIKE '%' || i.id || '%'
 		)
-		SELECT * FROM tree
-		ORDER BY depth, priority
+		SELECT id, title, status, priority, description, design,
+		       acceptance_criteria, notes, issue_type, assignee,
+		       estimated_minutes, created_at, updated_at, closed_at,
+		       external_ref, depth, parent_id
+		FROM tree
+		ORDER BY depth, priority, id
 	`, issueID, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependency tree: %w", err)
 	}
 	defer rows.Close()
 
+	// Use a map to track nodes we've seen and deduplicate
+	// Key: issue ID, Value: minimum depth where we saw it
+	seen := make(map[string]int)
 	var nodes []*types.TreeNode
+
 	for rows.Next() {
 		var node types.TreeNode
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
+		var externalRef sql.NullString
+		var parentID string // Currently unused, but available for future parent relationship display
 
 		err := rows.Scan(
 			&node.ID, &node.Title, &node.Status, &node.Priority,
 			&node.Description, &node.Design, &node.AcceptanceCriteria,
 			&node.Notes, &node.IssueType, &assignee, &estimatedMinutes,
-			&node.CreatedAt, &node.UpdatedAt, &closedAt, &node.Depth,
+			&node.CreatedAt, &node.UpdatedAt, &closedAt, &externalRef,
+			&node.Depth, &parentID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan tree node: %w", err)
 		}
+		_ = parentID // Silence unused variable warning
 
 		if closedAt.Valid {
 			node.ClosedAt = &closedAt.Time
@@ -307,9 +340,23 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 		if assignee.Valid {
 			node.Assignee = assignee.String
 		}
+		if externalRef.Valid {
+			node.ExternalRef = &externalRef.String
+		}
 
 		node.Truncated = node.Depth == maxDepth
 
+		// Deduplicate: only include a node the first time we see it (shallowest depth)
+		// Since we ORDER BY depth, priority, id - the first occurrence is at minimum depth
+		if prevDepth, exists := seen[node.ID]; exists {
+			// We've seen this node before at depth prevDepth
+			// Skip this duplicate occurrence
+			_ = prevDepth // Avoid unused variable warning
+			continue
+		}
+
+		// Mark this node as seen at this depth
+		seen[node.ID] = node.Depth
 		nodes = append(nodes, &node)
 	}
 
@@ -404,12 +451,13 @@ func scanIssues(rows *sql.Rows) ([]*types.Issue, error) {
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
+		var externalRef sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -424,6 +472,9 @@ func scanIssues(rows *sql.Rows) ([]*types.Issue, error) {
 		}
 		if assignee.Valid {
 			issue.Assignee = assignee.String
+		}
+		if externalRef.Valid {
+			issue.ExternalRef = &externalRef.String
 		}
 
 		issues = append(issues, &issue)

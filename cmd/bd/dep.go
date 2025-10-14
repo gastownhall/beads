@@ -35,6 +35,9 @@ var depAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		// Schedule auto-flush
+		markDirtyAndScheduleFlush()
+
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":       "added",
@@ -61,6 +64,9 @@ var depRemoveCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Schedule auto-flush
+		markDirtyAndScheduleFlush()
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{

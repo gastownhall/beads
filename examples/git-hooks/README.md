@@ -1,14 +1,31 @@
 # Git Hooks for Beads
 
-Automatic export/import of beads issues during git operations.
+Optional git hooks for immediate export/import of beads issues.
+
+**NOTE**: As of bd v0.9+, **auto-sync is enabled by default!** These hooks are optional and provide:
+- **Immediate export** (no 5-second debounce wait)
+- **Guaranteed import** after every git operation
+- **Extra safety** for critical workflows
 
 ## What These Hooks Do
 
-- **pre-commit**: Exports SQLite → JSONL before every commit
-- **post-merge**: Imports JSONL → SQLite after git pull/merge
-- **post-checkout**: Imports JSONL → SQLite after branch switching
+- **pre-commit**: Exports SQLite → JSONL before every commit (immediate, no debounce)
+- **post-merge**: Imports JSONL → SQLite after git pull/merge (guaranteed)
+- **post-checkout**: Imports JSONL → SQLite after branch switching (guaranteed)
 
 This keeps your `.beads/issues.jsonl` (committed to git) in sync with your local SQLite database (gitignored).
+
+## Do You Need These Hooks?
+
+**Most users don't need hooks anymore!** bd automatically:
+- Exports after CRUD operations (5-second debounce)
+- Imports when JSONL is newer than DB
+
+**Install hooks if you:**
+- Want immediate export (no waiting 5 seconds)
+- Want guaranteed import after every git operation
+- Need extra certainty for team workflows
+- Prefer explicit automation over automatic behavior
 
 ## Installation
 

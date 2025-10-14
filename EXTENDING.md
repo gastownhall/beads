@@ -53,7 +53,7 @@ package main
 
 import (
     "database/sql"
-    _ "github.com/mattn/go-sqlite3"
+    _ "modernc.org/sqlite"
 )
 
 const myAppSchema = `
@@ -84,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_execution ON myapp_checkpoints(execut
 `
 
 func InitializeMyAppSchema(dbPath string) error {
-    db, err := sql.Open("sqlite3", dbPath)
+    db, err := sql.Open("sqlite", dbPath)
     if err != nil {
         return err
     }
@@ -99,12 +99,11 @@ func InitializeMyAppSchema(dbPath string) error {
 
 ```go
 import (
-    "github.com/steveyegge/beads/internal/storage/sqlite"
-    "github.com/steveyegge/beads/internal/types"
+    "github.com/steveyegge/beads"
 )
 
 // Open bd's storage
-store, err := sqlite.New(dbPath)
+store, err := beads.NewSQLiteStorage(dbPath)
 if err != nil {
     log.Fatal(err)
 }
@@ -115,7 +114,7 @@ if err := InitializeMyAppSchema(dbPath); err != nil {
 }
 
 // Use bd to find ready work
-readyIssues, err := store.GetReady(ctx, types.IssueFilter{Limit: 10})
+readyIssues, err := store.GetReadyWork(ctx, beads.WorkFilter{Limit: 10})
 if err != nil {
     log.Fatal(err)
 }
@@ -409,11 +408,18 @@ You can always access bd's database directly:
 ```go
 import (
     "database/sql"
-    _ "github.com/mattn/go-sqlite3"
+    _ "modernc.org/sqlite"
+    "github.com/steveyegge/beads"
 )
 
+// Auto-discover bd's database path
+dbPath := beads.FindDatabasePath()
+if dbPath == "" {
+    log.Fatal("No bd database found. Run 'bd init' first.")
+}
+
 // Open the same database bd uses
-db, err := sql.Open("sqlite3", ".beads/myapp.db")
+db, err := sql.Open("sqlite", dbPath)
 if err != nil {
     log.Fatal(err)
 }
@@ -429,6 +435,10 @@ err = db.QueryRow(`
 _, err = db.Exec(`
     INSERT INTO myapp_executions (issue_id, status) VALUES (?, ?)
 `, issueID, "running")
+
+// Find corresponding JSONL path (for git hooks, monitoring, etc.)
+jsonlPath := beads.FindJSONLPath(dbPath)
+fmt.Printf("BD exports to: %s\n", jsonlPath)
 ```
 
 ## Summary

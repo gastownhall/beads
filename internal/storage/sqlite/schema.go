@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS issues (
     estimated_minutes INTEGER,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    closed_at DATETIME
+    closed_at DATETIME,
+    external_ref TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE INDEX IF NOT EXISTS idx_dependencies_issue ON dependencies(issue_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON dependencies(depends_on_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_type ON dependencies(depends_on_id, type);
 
 -- Labels table
 CREATE TABLE IF NOT EXISTS labels (
@@ -71,17 +73,58 @@ CREATE TABLE IF NOT EXISTS config (
     value TEXT NOT NULL
 );
 
--- Ready work view
+-- Metadata table (for storing internal state like import hashes)
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Dirty issues table (for incremental JSONL export)
+-- Tracks which issues have changed since last export
+CREATE TABLE IF NOT EXISTS dirty_issues (
+    issue_id TEXT PRIMARY KEY,
+    marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_dirty_issues_marked_at ON dirty_issues(marked_at);
+
+-- Issue counters table (for atomic ID generation)
+CREATE TABLE IF NOT EXISTS issue_counters (
+    prefix TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL DEFAULT 0
+);
+
+-- Ready work view (with hierarchical blocking)
+-- Uses recursive CTE to propagate blocking through parent-child hierarchy
 CREATE VIEW IF NOT EXISTS ready_issues AS
+WITH RECURSIVE
+  -- Find issues blocked directly by dependencies
+  blocked_directly AS (
+    SELECT DISTINCT d.issue_id
+    FROM dependencies d
+    JOIN issues blocker ON d.depends_on_id = blocker.id
+    WHERE d.type = 'blocks'
+      AND blocker.status IN ('open', 'in_progress', 'blocked')
+  ),
+  -- Propagate blockage to all descendants via parent-child
+  blocked_transitively AS (
+    -- Base case: directly blocked issues
+    SELECT issue_id, 0 as depth
+    FROM blocked_directly
+    UNION ALL
+    -- Recursive case: children of blocked issues inherit blockage
+    SELECT d.issue_id, bt.depth + 1
+    FROM blocked_transitively bt
+    JOIN dependencies d ON d.depends_on_id = bt.issue_id
+    WHERE d.type = 'parent-child'
+      AND bt.depth < 50
+  )
 SELECT i.*
 FROM issues i
 WHERE i.status = 'open'
   AND NOT EXISTS (
-    SELECT 1 FROM dependencies d
-    JOIN issues blocked ON d.depends_on_id = blocked.id
-    WHERE d.issue_id = i.id
-      AND d.type = 'blocks'
-      AND blocked.status IN ('open', 'in_progress', 'blocked')
+    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
   );
 
 -- Blocked issues view

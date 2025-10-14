@@ -17,11 +17,20 @@ bd ready --json
 # Create new issue
 bd create "Issue title" -t bug|feature|task -p 0-4 -d "Description" --json
 
+# Create with explicit ID (for parallel workers)
+bd create "Issue title" --id worker1-100 -p 1 --json
+
+# Create multiple issues from markdown file
+bd create -f feature-plan.md --json
+
 # Update issue status
 bd update <id> --status in_progress --json
 
-# Link discovered work
+# Link discovered work (old way)
 bd dep add <discovered-id> <parent-id> --type discovered-from
+
+# Create and link in one command (new way)
+bd create "Issue title" -t bug -p 1 --deps discovered-from:<parent-id> --json
 
 # Complete work
 bd close <id> --reason "Done" --json
@@ -43,10 +52,10 @@ bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve
 2. **Claim your task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
 4. **Discover new work**: If you find bugs or TODOs, create issues:
-   - `bd create "Found bug in auth" -t bug -p 1 --json`
-   - Link it: `bd dep add <new-id> <current-id> --type discovered-from`
+   - Old way (two commands): `bd create "Found bug in auth" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
+   - New way (one command): `bd create "Found bug in auth" -t bug -p 1 --deps discovered-from:<current-id> --json`
 5. **Complete**: `bd close <id> --reason "Implemented"`
-6. **Export**: Run `bd export -o .beads/issues.jsonl` before committing
+6. **Export**: Changes auto-sync to `.beads/issues.jsonl` (5-second debounce)
 
 ### Issue Types
 
@@ -99,29 +108,32 @@ beads/
 
 1. **Run tests**: `go test ./...`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
-3. **Export issues**: `bd export -o .beads/issues.jsonl`
-4. **Update docs**: If you changed behavior, update README.md or other docs
-5. **Git add both**: `git add .beads/issues.jsonl <your-changes>`
+3. **Update docs**: If you changed behavior, update README.md or other docs
+4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
 
 ### Git Workflow
 
+**Auto-sync is now automatic!** bd automatically:
+- **Exports** to JSONL after any CRUD operation (5-second debounce)
+- **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
+
 ```bash
-# Make changes
-git add <files>
+# Make changes and create/update issues
+bd create "Fix bug" -p 1
+bd update bd-42 --status in_progress
 
-# Export beads issues
-bd export -o .beads/issues.jsonl
-git add .beads/issues.jsonl
+# JSONL is automatically updated after 5 seconds
 
-# Commit
+# Commit (JSONL is already up-to-date)
+git add .
 git commit -m "Your message"
 
-# After pull
-git pull
-bd import -i .beads/issues.jsonl  # Sync SQLite cache
+# After pull - JSONL is automatically imported
+git pull  # bd commands will auto-import the updated JSONL
+bd ready  # Fresh data from git!
 ```
 
-Or use the git hooks in `examples/git-hooks/` for automation.
+**Optional**: Use the git hooks in `examples/git-hooks/` for immediate export (no 5-second wait) and guaranteed import after git operations. Not required with auto-sync enabled.
 
 ### Handling Import Collisions
 
@@ -169,7 +181,7 @@ Run `bd stats` to see overall progress.
 - **Core CLI**: Mature, but always room for polish
 - **Examples**: Growing collection of agent integrations
 - **Documentation**: Comprehensive but can always improve
-- **MCP Server**: Planned (see bd-5)
+- **MCP Server**: Implemented at `integrations/beads-mcp/` with Claude Code plugin
 - **Migration Tools**: Planned (see bd-6)
 
 ### 1.0 Milestone
@@ -227,12 +239,13 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 - Always use `--json` flags for programmatic use
 - Link discoveries with `discovered-from` to maintain context
 - Check `bd ready` before asking "what next?"
-- Export to JSONL before committing (or use git hooks)
+- Auto-sync is automatic! JSONL updates after CRUD ops, imports after git pull
+- Use `--no-auto-flush` or `--no-auto-import` to disable automatic sync if needed
 - Use `bd dep tree` to understand complex dependencies
 - Priority 0-1 issues are usually more important than 2-4
 - Use `--dry-run` to preview import collisions before resolving
 - Use `--resolve-collisions` for safe automatic branch merges
-- After resolving collisions, run `bd export` to save the updated state
+- Use `--id` flag with `bd create` to partition ID space for parallel workers (e.g., `worker1-100`, `worker2-500`)
 
 ## Building and Testing
 
@@ -253,14 +266,58 @@ go tool cover -html=coverage.out
 ./bd ready
 ```
 
+## Version Management
+
+**IMPORTANT**: When the user asks to "bump the version" or mentions a new version number (e.g., "bump to 0.9.3"), use the version bump script:
+
+```bash
+# Preview changes (shows diff, doesn't commit)
+./scripts/bump-version.sh 0.9.3
+
+# Auto-commit the version bump
+./scripts/bump-version.sh 0.9.3 --commit
+git push origin main
+```
+
+**What it does:**
+- Updates ALL version files (CLI, plugin, MCP server, docs) in one command
+- Validates semantic versioning format
+- Shows diff preview
+- Verifies all versions match after update
+- Creates standardized commit message
+
+**User will typically say:**
+- "Bump to 0.9.3"
+- "Update version to 1.0.0"
+- "Rev the project to 0.9.4"
+- "Increment the version"
+
+**You should:**
+1. Run `./scripts/bump-version.sh <version> --commit`
+2. Push to GitHub
+3. Confirm all versions updated correctly
+
+**Files updated automatically:**
+- `cmd/bd/version.go` - CLI version
+- `.claude-plugin/plugin.json` - Plugin version
+- `.claude-plugin/marketplace.json` - Marketplace version
+- `integrations/beads-mcp/pyproject.toml` - MCP server version
+- `README.md` - Documentation version
+- `PLUGIN.md` - Version requirements
+
+**Why this matters:** We had version mismatches (bd-66) when only `version.go` was updated. This script prevents that by updating all components atomically.
+
+See `scripts/README.md` for more details.
+
 ## Release Process (Maintainers)
 
-1. Update version in code (if applicable)
-2. Update CHANGELOG.md (if exists)
-3. Run full test suite
-4. Tag release: `git tag v0.x.0`
-5. Push tag: `git push origin v0.x.0`
-6. GitHub Actions handles the rest
+1. Bump version with `./scripts/bump-version.sh <version> --commit`
+2. Update CHANGELOG.md with release notes
+3. Run full test suite: `go test ./...`
+4. Push version bump: `git push origin main`
+5. Tag release: `git tag v<version>`
+6. Push tag: `git push origin v<version>`
+7. GitHub Actions handles the rest
 
 ---
 

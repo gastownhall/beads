@@ -4,13 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // AddComment adds a comment to an issue
 func (s *SQLiteStorage) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, comment)
 		VALUES (?, ?, ?, ?)
 	`, issueID, types.EventCommented, actor, comment)
@@ -19,14 +26,25 @@ func (s *SQLiteStorage) AddComment(ctx context.Context, issueID, actor, comment 
 	}
 
 	// Update issue updated_at timestamp
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE issues SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
-	`, issueID)
+	now := time.Now()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE issues SET updated_at = ? WHERE id = ?
+	`, now, issueID)
 	if err != nil {
 		return fmt.Errorf("failed to update timestamp: %w", err)
 	}
 
-	return nil
+	// Mark issue as dirty for incremental export
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at)
+		VALUES (?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+	`, issueID, now)
+	if err != nil {
+		return fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // GetEvents returns the event history for an issue

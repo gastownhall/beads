@@ -71,6 +71,35 @@ go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/  # or anywhere in your PATH
 ```
 
+#### Arch Linux
+
+```bash
+# Install from AUR
+yay -S beads-git
+# or
+paru -S beads-git
+```
+
+Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
+
+### Claude Code Plugin
+
+Prefer a one-command installation in Claude Code? Install the beads plugin for instant access via slash commands and MCP tools:
+
+```bash
+# In Claude Code
+/plugin marketplace add steveyegge/beads
+/plugin install beads
+```
+
+The plugin includes:
+- Slash commands: `/bd-ready`, `/bd-create`, `/bd-show`, `/bd-update`, `/bd-close`, etc.
+- Full MCP server with all bd tools
+- Task agent for autonomous execution
+- Auto-configured for instant use
+
+See [PLUGIN.md](PLUGIN.md) for complete plugin documentation.
+
 #### Windows 11
 For Windows you must build from source.
 Assumes git, go-lang and mingw-64 installed and in path.
@@ -156,11 +185,11 @@ When you install bd on any machine with your project repo, you get:
 **How it works:**
 1. Each machine has a local SQLite cache (`.beads/*.db`) - gitignored
 2. Source of truth is JSONL (`.beads/issues.jsonl`) - committed to git
-3. `bd export` syncs SQLite → JSONL before commits
-4. `bd import` syncs JSONL → SQLite after pulls
+3. Auto-export syncs SQLite → JSONL after CRUD operations (5-second debounce)
+4. Auto-import syncs JSONL → SQLite when JSONL is newer (e.g., after `git pull`)
 5. Git handles distribution; AI handles merge conflicts
 
-**The result:** Agents on your laptop, your desktop, and your coworker's machine all query and update what *feels* like a single shared database, but it's really just git doing what git does best - syncing text files across machines.
+**The result:** Agents on your laptop, your desktop, and your coworker's machine all query and update what *feels* like a single shared database, but it's really just git doing what git does best - syncing text files across machines. No manual export/import needed!
 
 No PostgreSQL instance. No MySQL server. No hosted service. Just install bd, clone the repo, and you're connected to the "database."
 
@@ -173,17 +202,109 @@ bd create "Fix bug" -d "Description" -p 1 -t bug
 bd create "Add feature" --description "Long description" --priority 2 --type feature
 bd create "Task" -l "backend,urgent" --assignee alice
 
+# Explicit ID (useful for parallel workers to avoid conflicts)
+bd create "Worker task" --id worker1-100 -p 1
+
 # Get JSON output for programmatic use
 bd create "Fix bug" -d "Description" --json
+
+# Create multiple issues from a markdown file
+bd create -f feature-plan.md
 ```
 
 Options:
+- `-f, --file` - Create multiple issues from markdown file
 - `-d, --description` - Issue description
 - `-p, --priority` - Priority (0-4, 0=highest)
 - `-t, --type` - Type (bug|feature|task|epic|chore)
 - `-a, --assignee` - Assign to user
 - `-l, --labels` - Comma-separated labels
+- `--id` - Explicit issue ID (e.g., `worker1-100` for ID space partitioning)
 - `--json` - Output in JSON format
+
+#### Creating Issues from Markdown
+
+You can draft multiple issues in a markdown file and create them all at once. This is useful for planning features or converting written notes into tracked work.
+
+Markdown format:
+```markdown
+## Issue Title
+
+Optional description text here.
+
+### Priority
+1
+
+### Type
+feature
+
+### Description
+More detailed description (overrides text after title).
+
+### Design
+Design notes and implementation details.
+
+### Acceptance Criteria
+- Must do this
+- Must do that
+
+### Assignee
+username
+
+### Labels
+label1, label2, label3
+
+### Dependencies
+bd-10, bd-20
+```
+
+Example markdown file (`auth-improvements.md`):
+```markdown
+## Add OAuth2 support
+
+We need to support OAuth2 authentication.
+
+### Priority
+1
+
+### Type
+feature
+
+### Assignee
+alice
+
+### Labels
+auth, high-priority
+
+## Add rate limiting
+
+### Priority
+0
+
+### Type
+bug
+
+### Description
+Auth endpoints are vulnerable to brute force attacks.
+
+### Labels
+security, urgent
+```
+
+Create all issues:
+```bash
+bd create -f auth-improvements.md
+# ✓ Created 2 issues from auth-improvements.md:
+#   bd-42: Add OAuth2 support [P1, feature]
+#   bd-43: Add rate limiting [P0, bug]
+```
+
+**Notes:**
+- Each `## Heading` creates a new issue
+- Sections (`### Priority`, `### Type`, etc.) are optional
+- Defaults: Priority=2, Type=task
+- Text immediately after the title becomes the description (unless overridden by `### Description`)
+- All standard issue fields are supported
 
 ### Viewing Issues
 
@@ -289,6 +410,36 @@ Beads has four types of dependencies:
 
 Only `blocks` dependencies affect the ready work queue.
 
+### Hierarchical Blocking
+
+**Important:** Blocking propagates through parent-child hierarchies. When a parent (epic) is blocked, all of its children are automatically blocked, even if they have no direct blockers.
+
+This transitive blocking behavior ensures that subtasks don't show up as ready work when their parent epic is blocked:
+
+```bash
+# Create an epic and a child task
+bd create "Epic: User Authentication" -t epic -p 1
+bd create "Task: Add login form" -t task -p 1
+bd dep add bd-2 bd-1 --type parent-child  # bd-2 is child of bd-1
+
+# Block the epic
+bd create "Design authentication system" -t task -p 0
+bd dep add bd-1 bd-3 --type blocks  # bd-1 blocked by bd-3
+
+# Now both bd-1 (epic) AND bd-2 (child task) are blocked
+bd ready  # Neither will show up
+bd blocked  # Shows both bd-1 and bd-2 as blocked
+```
+
+**Blocking propagation rules:**
+- `blocks` + `parent-child` together create transitive blocking (up to 50 levels deep)
+- Children of blocked parents are automatically blocked
+- Grandchildren, great-grandchildren, etc. are also blocked recursively
+- `related` and `discovered-from` do **NOT** propagate blocking
+- Only direct `blocks` dependencies and inherited parent blocking affect ready work
+
+This design ensures that work on child tasks doesn't begin until the parent epic's blockers are resolved, maintaining logical work order in complex hierarchies.
+
 ### Dependency Type Usage
 
 - **blocks**: Use when issue X cannot start until issue Y is completed
@@ -309,8 +460,12 @@ Only `blocks` dependencies affect the ready work queue.
 - **discovered-from**: Use when you discover new work while working on an issue
   ```bash
   # While working on bd-20, you discover a bug
+  # Old way (two commands):
   bd create "Fix edge case bug" -t bug -p 1
   bd dep add bd-21 bd-20 --type discovered-from  # bd-21 discovered from bd-20
+
+  # New way (single command with --deps):
+  bd create "Fix edge case bug" -t bug -p 1 --deps discovered-from:bd-20
   ```
 
 The `discovered-from` type is particularly useful for AI-supervised workflows, where the AI can automatically create issues for discovered work and link them back to the parent task.
@@ -447,10 +602,10 @@ bd uses a dual-storage approach:
 This gives you:
 - ✅ **Git-friendly storage** - Text diffs, AI-resolvable conflicts
 - ✅ **Fast queries** - SQLite indexes for dependency graphs
-- ✅ **Simple workflow** - Export before commit, import after pull
+- ✅ **Automatic sync** - Auto-export after CRUD ops, auto-import after pulls
 - ✅ **No daemon required** - In-process SQLite, ~10-100ms per command
 
-When you run `bd create`, it writes to SQLite. Before committing to git, run `bd export` to sync to JSONL. After pulling, run `bd import` to sync back to SQLite. Git hooks can automate this.
+When you run `bd create`, it writes to SQLite. After 5 seconds of inactivity, changes automatically export to JSONL. After `git pull`, the next bd command automatically imports if JSONL is newer. No manual steps needed!
 
 ## Export/Import (JSONL Format)
 
@@ -609,7 +764,9 @@ Each line is a complete JSON issue object:
 
 ## Git Workflow
 
-**Recommended approach**: Use JSONL export as source of truth, SQLite database as ephemeral cache (not committed to git).
+**Automatic sync by default!** bd now automatically syncs between SQLite and JSONL:
+- **Auto-export**: After CRUD operations, changes flush to JSONL after 5 seconds of inactivity
+- **Auto-import**: When JSONL is newer than DB (e.g., after `git pull`), next bd command imports automatically
 
 ### Setup
 
@@ -627,18 +784,21 @@ Add to git:
 ### Workflow
 
 ```bash
-# Export before committing
-bd export -o .beads/issues.jsonl
-git add .beads/issues.jsonl
+# Create/update issues - they auto-export after 5 seconds
+bd create "Fix bug" -p 1
+bd update bd-42 --status in_progress
+
+# Commit (JSONL is already up-to-date)
+git add .
 git commit -m "Update issues"
 git push
 
-# Import after pulling
+# Pull and use - auto-imports if JSONL is newer
 git pull
-bd import -i .beads/issues.jsonl
+bd ready  # Automatically imports first, then shows ready work
 ```
 
-### Automated with Git Hooks
+### Optional: Git Hooks for Immediate Sync
 
 Create `.git/hooks/pre-commit`:
 ```bash
@@ -687,7 +847,8 @@ Check out the **[examples/](examples/)** directory for:
 - **[Bash agent](examples/bash-agent/)** - Shell script agent example
 - **[Git hooks](examples/git-hooks/)** - Automatic export/import on git operations
 - **[Branch merge workflow](examples/branch-merge/)** - Handle ID collisions when merging branches
-- **[Claude Desktop MCP](examples/claude-desktop-mcp/)** - MCP server integration (coming soon)
+- **[Claude Desktop MCP](examples/claude-desktop-mcp/)** - MCP server for Claude Desktop
+- **[Claude Code Plugin](PLUGIN.md)** - One-command installation with slash commands and MCP tools
 
 ## FAQ
 
@@ -719,12 +880,22 @@ For true multi-agent coordination, you'd need additional tooling (like locks or 
 
 ### Do I need to run export/import manually?
 
-No! Install the git hooks from [examples/git-hooks/](examples/git-hooks/):
+**No! Sync is automatic by default.**
+
+bd automatically:
+- **Exports** to JSONL after CRUD operations (5-second debounce)
+- **Imports** from JSONL when it's newer than DB (after `git pull`)
+
+**Optional**: For immediate export (no 5-second wait) and guaranteed import after git operations, install the git hooks:
 ```bash
 cd examples/git-hooks && ./install.sh
 ```
 
-The hooks automatically export before commits and import after pulls/merges/checkouts. Set it up once, forget about it.
+**Disable auto-sync** if needed:
+```bash
+bd --no-auto-flush create "Issue"   # Disable auto-export
+bd --no-auto-import list            # Disable auto-import
+```
 
 ### Can I track issues for multiple projects?
 
@@ -765,7 +936,7 @@ See [examples/](examples/) for scripting patterns. Contributions welcome!
 
 ### Is this production-ready?
 
-**Current status: Alpha (v0.9.0)**
+**Current status: Alpha (v0.9.2)**
 
 bd is in active development and being dogfooded on real projects. The core functionality (create, update, dependencies, ready work, collision resolution) is stable and well-tested. However:
 
@@ -835,6 +1006,8 @@ kill <pid>
 # Remove lock files (safe if no bd processes running)
 rm .beads/*.db-journal .beads/*.db-wal .beads/*.db-shm
 ```
+
+**Note**: bd uses a pure Go SQLite driver (`modernc.org/sqlite`) for better portability. Under extreme concurrent load (100+ simultaneous operations), you may see "database is locked" errors. This is a known limitation of the pure Go implementation and does not affect normal usage. For very high concurrency scenarios, consider using the CGO-enabled driver or PostgreSQL (planned for future release).
 
 ### `failed to import: issue already exists`
 
@@ -947,7 +1120,13 @@ go build -o bd ./cmd/bd
 
 # Run
 ./bd create "Test issue"
+
+# Bump version
+./scripts/bump-version.sh 0.9.3           # Update all versions, show diff
+./scripts/bump-version.sh 0.9.3 --commit  # Update and auto-commit
 ```
+
+See [scripts/README.md](scripts/README.md) for more development scripts.
 
 ## License
 

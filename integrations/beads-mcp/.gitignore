@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+build/
+dist/
+wheels/
+*.egg-info
+__pycache__
+
+# Virtual environments
+.venv
+/.env
+/CLAUDE.md
+/TODO.md
+/.coverage

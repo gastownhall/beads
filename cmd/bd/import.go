@@ -222,6 +222,13 @@ Behavior:
 						updates["estimated_minutes"] = nil
 					}
 				}
+				if _, ok := rawData["external_ref"]; ok {
+					if issue.ExternalRef != nil {
+						updates["external_ref"] = *issue.ExternalRef
+					} else {
+						updates["external_ref"] = nil
+					}
+				}
 
 				if err := store.UpdateIssue(ctx, issue.ID, updates, "import"); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating issue %s: %v\n", issue.ID, err)
@@ -238,7 +245,16 @@ Behavior:
 			}
 		}
 
-		// Phase 5: Process dependencies
+		// Phase 5: Sync ID counters after importing issues with explicit IDs
+		// This prevents ID collisions with subsequently auto-generated issues
+		// CRITICAL: If this fails, subsequent auto-generated IDs WILL collide with imported issues
+		if err := sqliteStore.SyncAllCounters(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to sync ID counters: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Cannot proceed - auto-generated IDs would collide with imported issues.\n")
+			os.Exit(1)
+		}
+
+		// Phase 6: Process dependencies
 		// Do this after all issues are created to handle forward references
 		var depsCreated, depsSkipped int
 		for _, issue := range allIssues {
@@ -286,6 +302,9 @@ Behavior:
 				depsCreated++
 			}
 		}
+
+		// Schedule auto-flush after import completes
+		markDirtyAndScheduleFlush()
 
 		// Print summary
 		fmt.Fprintf(os.Stderr, "Import complete: %d created, %d updated", created, updated)
