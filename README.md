@@ -10,6 +10,13 @@ Drop Beads into any project where you're using a coding agent, and you'll enjoy 
 
 Instant start:
 
+**Claude Code users:**
+```bash
+/plugin marketplace add steveyegge/beads
+/plugin install beads
+```
+
+**Everyone else:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
 ```
@@ -82,9 +89,9 @@ paru -S beads-git
 
 Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
 
-### Claude Code Plugin
+### Claude Code Plugin (Recommended for Claude Code Users)
 
-Prefer a one-command installation in Claude Code? Install the beads plugin for instant access via slash commands and MCP tools:
+**The easiest way to use Beads in Claude Code!** One-command installation with zero configuration:
 
 ```bash
 # In Claude Code
@@ -92,11 +99,25 @@ Prefer a one-command installation in Claude Code? Install the beads plugin for i
 /plugin install beads
 ```
 
-The plugin includes:
-- Slash commands: `/bd-ready`, `/bd-create`, `/bd-show`, `/bd-update`, `/bd-close`, etc.
-- Full MCP server with all bd tools
-- Task agent for autonomous execution
-- Auto-configured for instant use
+**Why use the plugin?**
+- ✨ **Zero manual setup** - No need to install Go or build from source
+- 🔧 **MCP tools built-in** - Agents can use beads directly without Bash commands
+- ⚡ **Instant availability** - Works immediately after plugin install
+- 🎯 **Slash commands** - Quick access to common operations
+- 🤖 **Agent-ready** - MCP tools like `mcp__plugin_beads_beads__ready`, `mcp__plugin_beads_beads__create`, etc.
+
+**What you get:**
+- **Slash commands**: `/bd-ready`, `/bd-create`, `/bd-show`, `/bd-update`, `/bd-close`, etc.
+- **Full MCP server**: All bd tools available via MCP protocol (agents use these automatically)
+- **Task agent**: Autonomous task execution
+- **Auto-configured**: bd CLI installed and configured automatically
+
+**For agents:** After plugin installation, agents can use MCP tools directly instead of calling `bd` commands via Bash. The plugin provides tools like:
+- `mcp__plugin_beads_beads__ready` - Find ready work
+- `mcp__plugin_beads_beads__create` - Create new issues
+- `mcp__plugin_beads_beads__update` - Update issue status
+- `mcp__plugin_beads_beads__show` - Show issue details
+- ...and all other bd commands
 
 See [PLUGIN.md](PLUGIN.md) for complete plugin documentation.
 
