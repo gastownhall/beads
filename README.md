@@ -322,6 +322,36 @@ Beads has four types of dependencies:
 
 Only `blocks` dependencies affect the ready work queue.
 
+### Hierarchical Blocking
+
+**Important:** Blocking propagates through parent-child hierarchies. When a parent (epic) is blocked, all of its children are automatically blocked, even if they have no direct blockers.
+
+This transitive blocking behavior ensures that subtasks don't show up as ready work when their parent epic is blocked:
+
+```bash
+# Create an epic and a child task
+bd create "Epic: User Authentication" -t epic -p 1
+bd create "Task: Add login form" -t task -p 1
+bd dep add bd-2 bd-1 --type parent-child  # bd-2 is child of bd-1
+
+# Block the epic
+bd create "Design authentication system" -t task -p 0
+bd dep add bd-1 bd-3 --type blocks  # bd-1 blocked by bd-3
+
+# Now both bd-1 (epic) AND bd-2 (child task) are blocked
+bd ready  # Neither will show up
+bd blocked  # Shows both bd-1 and bd-2 as blocked
+```
+
+**Blocking propagation rules:**
+- `blocks` + `parent-child` together create transitive blocking (up to 50 levels deep)
+- Children of blocked parents are automatically blocked
+- Grandchildren, great-grandchildren, etc. are also blocked recursively
+- `related` and `discovered-from` do **NOT** propagate blocking
+- Only direct `blocks` dependencies and inherited parent blocking affect ready work
+
+This design ensures that work on child tasks doesn't begin until the parent epic's blockers are resolved, maintaining logical work order in complex hierarchies.
+
 ### Dependency Type Usage
 
 - **blocks**: Use when issue X cannot start until issue Y is completed

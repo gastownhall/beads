@@ -658,3 +658,96 @@ func TestReadyIssuesViewMatchesGetReadyWork(t *testing.T) {
 		t.Errorf("Expected task1 to be blocked in VIEW (parent is blocked)")
 	}
 }
+
+// TestDeepHierarchyBlocking tests blocking propagation through 50-level deep hierarchy
+func TestDeepHierarchyBlocking(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a blocker at the root
+	blocker := &types.Issue{Title: "Root Blocker", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	store.CreateIssue(ctx, blocker, "test-user")
+
+	// Create 50-level hierarchy: root → level1 → level2 → ... → level50
+	var issues []*types.Issue
+	for i := 0; i < 50; i++ {
+		issue := &types.Issue{
+			Title:      "Level " + string(rune(i)),
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeEpic,
+		}
+		store.CreateIssue(ctx, issue, "test-user")
+		issues = append(issues, issue)
+
+		if i == 0 {
+			// First level: blocked by blocker
+			store.AddDependency(ctx, &types.Dependency{
+				IssueID:     issue.ID,
+				DependsOnID: blocker.ID,
+				Type:        types.DepBlocks,
+			}, "test-user")
+		} else {
+			// Each subsequent level: child of previous level
+			store.AddDependency(ctx, &types.Dependency{
+				IssueID:     issue.ID,
+				DependsOnID: issues[i-1].ID,
+				Type:        types.DepParentChild,
+			}, "test-user")
+		}
+	}
+
+	// Get ready work
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+
+	// Build set of ready IDs
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	// Only the blocker should be ready
+	if len(ready) != 1 {
+		t.Errorf("Expected exactly 1 ready issue (the blocker), got %d", len(ready))
+	}
+
+	if !readyIDs[blocker.ID] {
+		t.Errorf("Expected blocker to be ready")
+	}
+
+	// All 50 levels should be blocked
+	for i, issue := range issues {
+		if readyIDs[issue.ID] {
+			t.Errorf("Expected level %d (issue %s) to be blocked, but it was ready", i, issue.ID)
+		}
+	}
+
+	// Now close the blocker and verify all levels become ready
+	store.CloseIssue(ctx, blocker.ID, "Done", "test-user")
+
+	ready, err = store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed after closing blocker: %v", err)
+	}
+
+	// All 50 levels should now be ready
+	if len(ready) != 50 {
+		t.Errorf("Expected 50 ready issues after closing blocker, got %d", len(ready))
+	}
+
+	readyIDs = make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	for i, issue := range issues {
+		if !readyIDs[issue.ID] {
+			t.Errorf("Expected level %d (issue %s) to be ready after blocker closed, but it was blocked", i, issue.ID)
+		}
+	}
+}
