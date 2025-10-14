@@ -156,7 +156,7 @@ func (s *SQLiteStorage) GetDependencies(ctx context.Context, issueID string) ([]
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		JOIN dependencies d ON i.id = d.depends_on_id
 		WHERE d.issue_id = ?
@@ -175,7 +175,7 @@ func (s *SQLiteStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
 		WHERE d.depends_on_id = ?
@@ -267,6 +267,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
 				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
 				0 as depth
 			FROM issues i
 			WHERE i.id = ?
@@ -277,6 +278,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
 				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
 				t.depth + 1
 			FROM issues i
 			JOIN dependencies d ON i.id = d.depends_on_id
@@ -297,12 +299,13 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
+		var externalRef sql.NullString
 
 		err := rows.Scan(
 			&node.ID, &node.Title, &node.Status, &node.Priority,
 			&node.Description, &node.Design, &node.AcceptanceCriteria,
 			&node.Notes, &node.IssueType, &assignee, &estimatedMinutes,
-			&node.CreatedAt, &node.UpdatedAt, &closedAt, &node.Depth,
+			&node.CreatedAt, &node.UpdatedAt, &closedAt, &externalRef, &node.Depth,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan tree node: %w", err)
@@ -317,6 +320,9 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 		}
 		if assignee.Valid {
 			node.Assignee = assignee.String
+		}
+		if externalRef.Valid {
+			node.ExternalRef = &externalRef.String
 		}
 
 		node.Truncated = node.Depth == maxDepth
@@ -415,12 +421,13 @@ func scanIssues(rows *sql.Rows) ([]*types.Issue, error) {
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
+		var externalRef sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -435,6 +442,9 @@ func scanIssues(rows *sql.Rows) ([]*types.Issue, error) {
 		}
 		if assignee.Valid {
 			issue.Assignee = assignee.String
+		}
+		if externalRef.Valid {
+			issue.ExternalRef = &externalRef.String
 		}
 
 		issues = append(issues, &issue)

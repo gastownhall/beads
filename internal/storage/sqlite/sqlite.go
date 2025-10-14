@@ -55,6 +55,11 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to migrate issue_counters table: %w", err)
 	}
 
+	// Migrate existing databases to add external_ref column if missing
+	if err := migrateExternalRefColumn(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate external_ref column: %w", err)
+	}
+
 	return &SQLiteStorage{
 		db: db,
 	}, nil
@@ -152,6 +157,47 @@ func migrateIssueCountersTable(db *sql.DB) error {
 	}
 
 	// Table exists and is initialized (either was already populated, or we just synced it)
+	return nil
+}
+
+// migrateExternalRefColumn checks if the external_ref column exists and adds it if missing.
+// This ensures existing databases created before the external reference feature get migrated automatically.
+func migrateExternalRefColumn(db *sql.DB) error {
+	// Check if external_ref column exists
+	var columnExists bool
+	rows, err := db.Query("PRAGMA table_info(issues)")
+	if err != nil {
+		return fmt.Errorf("failed to check schema: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt *string
+		err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk)
+		if err != nil {
+			return fmt.Errorf("failed to scan column info: %w", err)
+		}
+		if name == "external_ref" {
+			columnExists = true
+			break
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error reading column info: %w", err)
+	}
+
+	if !columnExists {
+		// Add external_ref column
+		_, err := db.Exec(`ALTER TABLE issues ADD COLUMN external_ref TEXT`)
+		if err != nil {
+			return fmt.Errorf("failed to add external_ref column: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -277,13 +323,14 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		INSERT INTO issues (
 			id, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, updated_at, external_ref
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
 		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
+		issue.ExternalRef,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert issue: %w", err)
@@ -323,18 +370,19 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
 	var assignee sql.NullString
+	var externalRef sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at
+		       created_at, updated_at, closed_at, external_ref
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
 		&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.UpdatedAt, &closedAt,
+		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 	)
 
 	if err == sql.ErrNoRows {
@@ -354,6 +402,9 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	if assignee.Valid {
 		issue.Assignee = assignee.String
 	}
+	if externalRef.Valid {
+		issue.ExternalRef = &externalRef.String
+	}
 
 	return &issue, nil
 }
@@ -370,6 +421,7 @@ var allowedUpdateFields = map[string]bool{
 	"notes":               true,
 	"issue_type":          true,
 	"estimated_minutes":   true,
+	"external_ref":        true,
 }
 
 // UpdateIssue updates fields on an issue
@@ -575,7 +627,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	querySQL := fmt.Sprintf(`
 		SELECT id, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at
+		       created_at, updated_at, closed_at, external_ref
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

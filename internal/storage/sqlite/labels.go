@@ -108,7 +108,7 @@ func (s *SQLiteStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		JOIN labels l ON i.id = l.issue_id
 		WHERE l.label = ?

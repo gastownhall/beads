@@ -238,6 +238,9 @@ func autoImportIfNewer() {
 			if issue.EstimatedMinutes != nil {
 				updates["estimated_minutes"] = *issue.EstimatedMinutes
 			}
+			if issue.ExternalRef != nil {
+				updates["external_ref"] = *issue.ExternalRef
+			}
 
 			_ = store.UpdateIssue(ctx, issue.ID, updates, "auto-import")
 		} else {
@@ -512,6 +515,7 @@ var createCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		explicitID, _ := cmd.Flags().GetString("id")
+		externalRef, _ := cmd.Flags().GetString("external-ref")
 
 		// Validate explicit ID format if provided (prefix-number)
 		if explicitID != "" {
@@ -528,6 +532,11 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		var externalRefPtr *string
+		if externalRef != "" {
+			externalRefPtr = &externalRef
+		}
+
 		issue := &types.Issue{
 			ID:                 explicitID, // Set explicit ID if provided (empty string if not)
 			Title:              title,
@@ -538,6 +547,7 @@ var createCmd = &cobra.Command{
 			Priority:           priority,
 			IssueType:          types.IssueType(issueType),
 			Assignee:           assignee,
+			ExternalRef:        externalRefPtr,
 		}
 
 		ctx := context.Background()
@@ -577,6 +587,7 @@ func init() {
 	createCmd.Flags().StringP("assignee", "a", "", "Assignee")
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
+	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	rootCmd.AddCommand(createCmd)
 }
 
@@ -768,6 +779,10 @@ var updateCmd = &cobra.Command{
 			acceptanceCriteria, _ := cmd.Flags().GetString("acceptance-criteria")
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
+		if cmd.Flags().Changed("external-ref") {
+			externalRef, _ := cmd.Flags().GetString("external-ref")
+			updates["external_ref"] = externalRef
+		}
 
 		if len(updates) == 0 {
 			fmt.Println("No updates specified")
@@ -802,6 +817,7 @@ func init() {
 	updateCmd.Flags().String("design", "", "Design notes")
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance-criteria", "", "Acceptance criteria")
+	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	rootCmd.AddCommand(updateCmd)
 }
 

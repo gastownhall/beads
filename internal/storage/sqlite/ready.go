@@ -46,7 +46,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	query := fmt.Sprintf(`
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		WHERE %s
 		  AND NOT EXISTS (
@@ -76,7 +76,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		    i.created_at, i.updated_at, i.closed_at,
+		    i.created_at, i.updated_at, i.closed_at, i.external_ref,
 		    COUNT(d.depends_on_id) as blocked_by_count,
 		    GROUP_CONCAT(d.depends_on_id, ',') as blocker_ids
 		FROM issues i
@@ -99,13 +99,14 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
+		var externalRef sql.NullString
 		var blockerIDsStr string
 
 		err := rows.Scan(
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &issue.BlockedByCount,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &issue.BlockedByCount,
 			&blockerIDsStr,
 		)
 		if err != nil {
@@ -121,6 +122,9 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		}
 		if assignee.Valid {
 			issue.Assignee = assignee.String
+		}
+		if externalRef.Valid {
+			issue.ExternalRef = &externalRef.String
 		}
 
 		// Parse comma-separated blocker IDs

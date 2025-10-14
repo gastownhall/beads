@@ -222,6 +222,13 @@ Behavior:
 						updates["estimated_minutes"] = nil
 					}
 				}
+				if _, ok := rawData["external_ref"]; ok {
+					if issue.ExternalRef != nil {
+						updates["external_ref"] = *issue.ExternalRef
+					} else {
+						updates["external_ref"] = nil
+					}
+				}
 
 				if err := store.UpdateIssue(ctx, issue.ID, updates, "import"); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating issue %s: %v\n", issue.ID, err)
