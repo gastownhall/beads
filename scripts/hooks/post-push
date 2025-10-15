@@ -1,0 +1,17 @@
+#!/bin/bash
+# Post-push hook: Rebuild and install bd CLI after successful push
+
+set -e
+
+# Check if any Go files changed in the push
+# Use the reflog to find what was just pushed
+if git log --name-only -1 origin/main..HEAD 2>/dev/null | grep -q '\.go$' || \
+   git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q '\.go$'; then
+    echo ""
+    echo "Go files changed, rebuilding bd CLI..."
+    go install ./cmd/bd
+    echo "✓ bd CLI installed successfully"
+    echo ""
+fi
+
+exit 0
