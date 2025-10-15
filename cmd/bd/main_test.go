@@ -820,3 +820,224 @@ func TestAutoImportDisabled(t *testing.T) {
 	storeActive = false
 	storeMutex.Unlock()
 }
+
+// TestAutoImportWithCollision tests that auto-import detects collisions and preserves local changes
+func TestAutoImportWithCollision(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-collision-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath = filepath.Join(tmpDir, "test.db")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+
+	testStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	defer testStore.Close()
+
+	store = testStore
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	defer func() {
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	}()
+
+	ctx := context.Background()
+
+	// Create issue in DB with status=closed
+	closedTime := time.Now().UTC()
+	dbIssue := &types.Issue{
+		ID:        "test-col-1",
+		Title:     "Local version",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		ClosedAt:  &closedTime,
+	}
+	if err := testStore.CreateIssue(ctx, dbIssue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	// Create JSONL with same ID but status=open (conflict)
+	jsonlIssue := &types.Issue{
+		ID:        "test-col-1",
+		Title:     "Remote version",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+	json.NewEncoder(f).Encode(jsonlIssue)
+	f.Close()
+
+	// Run auto-import
+	autoImportIfNewer()
+
+	// Verify local changes preserved (status still closed)
+	result, err := testStore.GetIssue(ctx, "test-col-1")
+	if err != nil {
+		t.Fatalf("Failed to get issue: %v", err)
+	}
+	if result.Status != types.StatusClosed {
+		t.Errorf("Expected status=closed (local preserved), got %s", result.Status)
+	}
+	if result.Title != "Local version" {
+		t.Errorf("Expected title='Local version', got '%s'", result.Title)
+	}
+}
+
+// TestAutoImportNoCollision tests happy path with no conflicts
+func TestAutoImportNoCollision(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-nocoll-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath = filepath.Join(tmpDir, "test.db")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+
+	testStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	defer testStore.Close()
+
+	store = testStore
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	defer func() {
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	}()
+
+	ctx := context.Background()
+
+	// Create issue in DB
+	dbIssue := &types.Issue{
+		ID:        "test-noc-1",
+		Title:     "Same version",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := testStore.CreateIssue(ctx, dbIssue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	// Create JSONL with exact match + new issue
+	newIssue := &types.Issue{
+		ID:        "test-noc-2",
+		Title:     "Brand new issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeBug,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+	json.NewEncoder(f).Encode(dbIssue)
+	json.NewEncoder(f).Encode(newIssue)
+	f.Close()
+
+	// Run auto-import
+	autoImportIfNewer()
+
+	// Verify new issue imported
+	result, err := testStore.GetIssue(ctx, "test-noc-2")
+	if err != nil {
+		t.Fatalf("Failed to get issue: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected new issue to be imported")
+	}
+	if result.Title != "Brand new issue" {
+		t.Errorf("Expected title='Brand new issue', got '%s'", result.Title)
+	}
+}
+
+// TestAutoImportClosedAtInvariant tests that auto-import enforces status/closed_at invariant
+func TestAutoImportClosedAtInvariant(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-invariant-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath = filepath.Join(tmpDir, "test.db")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+
+	testStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	defer testStore.Close()
+
+	store = testStore
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	defer func() {
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	}()
+
+	ctx := context.Background()
+
+	// Create JSONL with closed issue but missing closed_at
+	closedIssue := &types.Issue{
+		ID:        "test-inv-1",
+		Title:     "Closed without timestamp",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		ClosedAt:  nil, // Missing!
+	}
+
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+	json.NewEncoder(f).Encode(closedIssue)
+	f.Close()
+
+	// Run auto-import
+	autoImportIfNewer()
+
+	// Verify closed_at was set
+	result, err := testStore.GetIssue(ctx, "test-inv-1")
+	if err != nil {
+		t.Fatalf("Failed to get issue: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected issue to be created")
+	}
+	if result.ClosedAt == nil {
+		t.Error("Expected closed_at to be set for closed issue")
+	}
+}

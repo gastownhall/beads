@@ -406,14 +406,14 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		INSERT INTO issues (
 			id, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, updated_at, closed_at, external_ref
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
 		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
-		issue.ExternalRef,
+		issue.ClosedAt, issue.ExternalRef,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert issue: %w", err)
