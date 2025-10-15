@@ -53,7 +53,20 @@ Agents report that they enjoy working with Beads, and they will use it spontaneo
 
 ## Installation
 
-### Quick Install (Recommended)
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap steveyegge/beads
+brew install bd
+```
+
+**Why Homebrew?**
+- ✅ Simple one-command install
+- ✅ Automatic updates via `brew upgrade`
+- ✅ No need to install Go
+- ✅ Handles PATH setup automatically
+
+### Quick Install Script (All Platforms)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
