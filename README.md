@@ -2,6 +2,22 @@
 
 **Give your coding agent a memory upgrade**
 
+> **🚨 CRITICAL BUG - DATA CORRUPTION RISK (bd-228)**
+>
+> Auto-import silently overwrites local changes when pulling from Git, without collision detection or warning. This affects multi-developer workflows and agent swarms. **Your local work may be silently discarded.**
+>
+> **Impact**: Manual updates and closes can be reverted by auto-import after `git pull`.
+>
+> **Workaround**: Disable auto-import with `--no-auto-import` flag until fixed:
+> ```bash
+> bd --no-auto-import ready
+> bd --no-auto-import update bd-1 --status closed
+> ```
+>
+> **Status**: P0 bug being investigated. See issue bd-228 for details and progress.
+>
+> ---
+
 > **⚠️ Alpha Status**: This project is in active development. The core features work well, but expect API changes before 1.0. Use for development/internal projects first.
 
 Beads is a lightweight memory system for coding agents, using a graph-based issue tracker. Four kinds of dependencies work to chain your issues together like beads, making them easy for agents to follow for long distances, and reliably perform complex task streams in the right order.
