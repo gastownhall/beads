@@ -63,10 +63,10 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by status")
-	listCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
+	listCmd.Flags().StringP("status", "s", "", "Filter by status (open, in_progress, blocked, closed)")
+	listCmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	listCmd.Flags().StringP("type", "t", "", "Filter by type")
+	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore)")
 	listCmd.Flags().IntP("limit", "n", 0, "Limit results")
 	rootCmd.AddCommand(listCmd)
 }
