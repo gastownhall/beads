@@ -134,6 +134,40 @@ Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
 
 See [PLUGIN.md](PLUGIN.md) for complete plugin documentation.
 
+### MCP Server (For Sourcegraph Amp, Claude Desktop, and other MCP clients)
+
+If you're using an MCP-compatible tool other than Claude Code, you can install the beads MCP server:
+
+```bash
+# Using uv (recommended)
+uv tool install beads-mcp
+
+# Or using pip
+pip install beads-mcp
+```
+
+Then add to your MCP client configuration. For Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "beads": {
+      "command": "beads-mcp"
+    }
+  }
+}
+```
+
+For other MCP clients, refer to their documentation for how to configure MCP servers.
+
+**What you get:**
+- Full bd functionality exposed via MCP protocol
+- Tools for creating, updating, listing, and closing issues
+- Ready work detection and dependency management
+- All without requiring Bash commands
+
+See [integrations/beads-mcp/README.md](integrations/beads-mcp/README.md) for detailed MCP server documentation.
+
 #### Windows 11
 For Windows you must build from source.
 Assumes git, go-lang and mingw-64 installed and in path.
