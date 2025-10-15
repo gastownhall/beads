@@ -364,29 +364,36 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 			return fmt.Errorf("failed to get config: %w", err)
 		}
 
-		// Ensure counter is initialized for this prefix (lazy initialization within transaction)
-		// Use INSERT OR IGNORE to make this idempotent and avoid race conditions
-		// This will safely initialize the counter if it doesn't exist, or do nothing if it does
-		_, err = conn.ExecContext(ctx, `
-			INSERT OR IGNORE INTO issue_counters (prefix, last_id)
-			SELECT ?, COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0)
-			FROM issues
-			WHERE id LIKE ? || '-%'
-			  AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*'
-		`, prefix, prefix, prefix, prefix)
-		if err != nil {
-			return fmt.Errorf("failed to initialize counter for prefix %s: %w", prefix, err)
-		}
-
-		// Atomically get next ID from counter table (within transaction)
+		// Atomically initialize counter (if needed) and get next ID (within transaction)
+		// This ensures the counter starts from the max existing ID, not 1
+		// CRITICAL: We rely on BEGIN IMMEDIATE above to serialize this operation across processes
+		//
+		// The query works as follows:
+		// 1. Try to INSERT with last_id = MAX(existing IDs) or 1 if none exist
+		// 2. ON CONFLICT: update last_id to MAX(existing last_id, new calculated last_id) + 1
+		// 3. RETURNING gives us the final incremented value
+		//
+		// This atomically handles three cases:
+		// - Counter doesn't exist: initialize from existing issues and return next ID
+		// - Counter exists but lower than max ID: update to max and return next ID
+		// - Counter exists and correct: just increment and return next ID
 		var nextID int
 		err = conn.QueryRowContext(ctx, `
 			INSERT INTO issue_counters (prefix, last_id)
-			VALUES (?, 1)
+			SELECT ?, COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0) + 1
+			FROM issues
+			WHERE id LIKE ? || '-%'
+			  AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*'
 			ON CONFLICT(prefix) DO UPDATE SET
-				last_id = last_id + 1
+				last_id = MAX(
+					last_id,
+					(SELECT COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0)
+					 FROM issues
+					 WHERE id LIKE ? || '-%'
+					   AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*')
+				) + 1
 			RETURNING last_id
-		`, prefix).Scan(&nextID)
+		`, prefix, prefix, prefix, prefix, prefix, prefix, prefix).Scan(&nextID)
 		if err != nil {
 			return fmt.Errorf("failed to generate next ID for prefix %s: %w", prefix, err)
 		}
