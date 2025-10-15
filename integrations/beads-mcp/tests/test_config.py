@@ -1,7 +1,5 @@
 """Tests for beads_mcp.config module."""
 
-import os
-import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,11 +17,9 @@ class TestConfig:
         monkeypatch.delenv("BEADS_PATH", raising=False)
 
         # Mock shutil.which to return a test path
-        with patch("shutil.which", return_value="/usr/local/bin/bd"):
-            # Mock os.access to say the file is executable
-            with patch("os.access", return_value=True):
-                config = Config()
-                assert config.beads_path == "/usr/local/bin/bd"
+        with patch("shutil.which", return_value="/usr/local/bin/bd"), patch("os.access", return_value=True):
+            config = Config()
+            assert config.beads_path == "/usr/local/bin/bd"
 
     def test_beads_path_from_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that BEADS_PATH environment variable is respected."""
@@ -41,11 +37,9 @@ class TestConfig:
         monkeypatch.setenv("BEADS_PATH", "bd")
 
         # Mock shutil.which to simulate finding bd in PATH
-        with patch("shutil.which", return_value="/usr/local/bin/bd"):
-            # Mock os.access to say the file is executable
-            with patch("os.access", return_value=True):
-                config = Config()
-                assert config.beads_path == "/usr/local/bin/bd"
+        with patch("shutil.which", return_value="/usr/local/bin/bd"), patch("os.access", return_value=True):
+            config = Config()
+            assert config.beads_path == "/usr/local/bin/bd"
 
     def test_beads_path_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that invalid BEADS_PATH raises ValueError."""
