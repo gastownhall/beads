@@ -120,6 +120,57 @@ func TestIssueValidation(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "closed issue without closed_at",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusClosed,
+				Priority:  2,
+				IssueType: TypeFeature,
+				ClosedAt:  nil,
+			},
+			wantErr: true,
+			errMsg:  "closed issues must have closed_at timestamp",
+		},
+		{
+			name: "open issue with closed_at",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusOpen,
+				Priority:  2,
+				IssueType: TypeFeature,
+				ClosedAt:  timePtr(time.Now()),
+			},
+			wantErr: true,
+			errMsg:  "non-closed issues cannot have closed_at timestamp",
+		},
+		{
+			name: "in_progress issue with closed_at",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusInProgress,
+				Priority:  2,
+				IssueType: TypeFeature,
+				ClosedAt:  timePtr(time.Now()),
+			},
+			wantErr: true,
+			errMsg:  "non-closed issues cannot have closed_at timestamp",
+		},
+		{
+			name: "closed issue with closed_at",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusClosed,
+				Priority:  2,
+				IssueType: TypeFeature,
+				ClosedAt:  timePtr(time.Now()),
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -285,6 +336,10 @@ func TestTreeNodeEmbedding(t *testing.T) {
 
 func intPtr(i int) *int {
 	return &i
+}
+
+func timePtr(t time.Time) *time.Time {
+	return &t
 }
 
 func contains(s, substr string) bool {

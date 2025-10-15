@@ -46,6 +46,13 @@ func (i *Issue) Validate() error {
 	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
 		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
+	// Enforce closed_at invariant: closed_at should be set if and only if status is closed
+	if i.Status == StatusClosed && i.ClosedAt == nil {
+		return fmt.Errorf("closed issues must have closed_at timestamp")
+	}
+	if i.Status != StatusClosed && i.ClosedAt != nil {
+		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
+	}
 	return nil
 }
 

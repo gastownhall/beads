@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS issues (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     closed_at DATETIME,
-    external_ref TEXT
+    external_ref TEXT,
+    CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);

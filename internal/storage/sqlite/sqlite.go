@@ -67,6 +67,11 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to migrate composite indexes: %w", err)
 	}
 
+	// Migrate existing databases to add status/closed_at CHECK constraint
+	if err := migrateClosedAtConstraint(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate closed_at constraint: %w", err)
+	}
+
 	return &SQLiteStorage{
 		db: db,
 	}, nil
@@ -235,6 +240,53 @@ func migrateCompositeIndexes(db *sql.DB) error {
 	}
 
 	// Index exists, no migration needed
+	return nil
+}
+
+// migrateClosedAtConstraint cleans up inconsistent status/closed_at data.
+// The CHECK constraint is in the schema for new databases, but we can't easily
+// add it to existing tables without recreating them. Instead, we clean the data
+// and rely on application code (UpdateIssue, import.go) to maintain the invariant.
+func migrateClosedAtConstraint(db *sql.DB) error {
+	// Check if there are any inconsistent rows
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM issues
+		WHERE (CASE WHEN status = 'closed' THEN 1 ELSE 0 END) <>
+		      (CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END)
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to count inconsistent issues: %w", err)
+	}
+
+	if count == 0 {
+		// No inconsistent data, nothing to do
+		return nil
+	}
+
+	// Clean inconsistent data: trust the status field
+	// Strategy: If status != 'closed' but closed_at is set, clear closed_at
+	//          If status = 'closed' but closed_at is not set, set it to updated_at (best guess)
+	_, err = db.Exec(`
+		UPDATE issues
+		SET closed_at = NULL
+		WHERE status != 'closed' AND closed_at IS NOT NULL
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to clear closed_at for non-closed issues: %w", err)
+	}
+
+	_, err = db.Exec(`
+		UPDATE issues
+		SET closed_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+		WHERE status = 'closed' AND closed_at IS NULL
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to set closed_at for closed issues: %w", err)
+	}
+
+	// Migration complete - data is now consistent
 	return nil
 }
 
@@ -570,6 +622,26 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 		setClauses = append(setClauses, fmt.Sprintf("%s = ?", key))
 		args = append(args, value)
 	}
+
+	// Auto-manage closed_at when status changes (enforce invariant)
+	if statusVal, ok := updates["status"]; ok {
+		newStatus := statusVal.(string)
+		if newStatus == string(types.StatusClosed) {
+			// Changing to closed: ensure closed_at is set
+			if _, hasClosedAt := updates["closed_at"]; !hasClosedAt {
+				now := time.Now()
+				updates["closed_at"] = now
+				setClauses = append(setClauses, "closed_at = ?")
+				args = append(args, now)
+			}
+		} else if oldIssue.Status == types.StatusClosed {
+			// Changing from closed to something else: clear closed_at
+			updates["closed_at"] = nil
+			setClauses = append(setClauses, "closed_at = ?")
+			args = append(args, nil)
+		}
+	}
+
 	args = append(args, id)
 
 	// Start transaction
@@ -604,6 +676,9 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	if statusVal, ok := updates["status"]; ok {
 		if statusVal == string(types.StatusClosed) {
 			eventType = types.EventClosed
+		} else if oldIssue.Status == types.StatusClosed {
+			// Reopening a closed issue
+			eventType = types.EventReopened
 		} else {
 			eventType = types.EventStatusChanged
 		}

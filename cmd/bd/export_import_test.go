@@ -37,6 +37,7 @@ func TestExportImport(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test issues
+	now := time.Now()
 	issues := []*types.Issue{
 		{
 			ID:          "test-1",
@@ -45,8 +46,8 @@ func TestExportImport(t *testing.T) {
 			Status:      types.StatusOpen,
 			Priority:    1,
 			IssueType:   types.TypeBug,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		},
 		{
 			ID:          "test-2",
@@ -56,8 +57,8 @@ func TestExportImport(t *testing.T) {
 			Priority:    2,
 			IssueType:   types.TypeFeature,
 			Assignee:    "alice",
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		},
 		{
 			ID:          "test-3",
@@ -66,8 +67,9 @@ func TestExportImport(t *testing.T) {
 			Status:      types.StatusClosed,
 			Priority:    3,
 			IssueType:   types.TypeTask,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			ClosedAt:    &now,
 		},
 	}
 
@@ -177,7 +179,7 @@ func TestExportImport(t *testing.T) {
 		// Import as update
 		updates := map[string]interface{}{
 			"title":  issue.Title,
-			"status": issue.Status,
+			"status": string(issue.Status),
 		}
 		if err := store.UpdateIssue(ctx, issue.ID, updates, "test"); err != nil {
 			t.Fatalf("UpdateIssue failed: %v", err)

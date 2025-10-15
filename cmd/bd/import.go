@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -237,6 +238,18 @@ Behavior:
 				updated++
 			} else {
 				// Create new issue
+				// Normalize closed_at based on status before creating (enforce invariant)
+				if issue.Status == types.StatusClosed {
+					// Status is closed: ensure closed_at is set
+					if issue.ClosedAt == nil {
+						now := time.Now()
+						issue.ClosedAt = &now
+					}
+				} else {
+					// Status is not closed: ensure closed_at is NULL
+					issue.ClosedAt = nil
+				}
+
 				if err := store.CreateIssue(ctx, issue, "import"); err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating issue %s: %v\n", issue.ID, err)
 					os.Exit(1)

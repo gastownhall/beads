@@ -282,6 +282,125 @@ func TestCloseIssue(t *testing.T) {
 	}
 }
 
+func TestClosedAtInvariant(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("UpdateIssue auto-sets closed_at when closing", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, issue, "test-user")
+		if err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Update to closed without providing closed_at
+		updates := map[string]interface{}{
+			"status": string(types.StatusClosed),
+		}
+		err = store.UpdateIssue(ctx, issue.ID, updates, "test-user")
+		if err != nil {
+			t.Fatalf("UpdateIssue failed: %v", err)
+		}
+
+		// Verify closed_at was auto-set
+		updated, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if updated.Status != types.StatusClosed {
+			t.Errorf("Status should be closed, got %v", updated.Status)
+		}
+		if updated.ClosedAt == nil {
+			t.Error("ClosedAt should be auto-set when changing to closed status")
+		}
+	})
+
+	t.Run("UpdateIssue clears closed_at when reopening", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, issue, "test-user")
+		if err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Close the issue
+		err = store.CloseIssue(ctx, issue.ID, "Done", "test-user")
+		if err != nil {
+			t.Fatalf("CloseIssue failed: %v", err)
+		}
+
+		// Verify it's closed with closed_at set
+		closed, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if closed.ClosedAt == nil {
+			t.Fatal("ClosedAt should be set after closing")
+		}
+
+		// Reopen the issue
+		updates := map[string]interface{}{
+			"status": string(types.StatusOpen),
+		}
+		err = store.UpdateIssue(ctx, issue.ID, updates, "test-user")
+		if err != nil {
+			t.Fatalf("UpdateIssue failed: %v", err)
+		}
+
+		// Verify closed_at was cleared
+		reopened, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if reopened.Status != types.StatusOpen {
+			t.Errorf("Status should be open, got %v", reopened.Status)
+		}
+		if reopened.ClosedAt != nil {
+			t.Error("ClosedAt should be cleared when reopening issue")
+		}
+	})
+
+	t.Run("CreateIssue rejects closed issue without closed_at", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Test",
+			Status:    types.StatusClosed,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			ClosedAt:  nil, // Invalid: closed without closed_at
+		}
+		err := store.CreateIssue(ctx, issue, "test-user")
+		if err == nil {
+			t.Error("CreateIssue should reject closed issue without closed_at")
+		}
+	})
+
+	t.Run("CreateIssue rejects open issue with closed_at", func(t *testing.T) {
+		now := time.Now()
+		issue := &types.Issue{
+			Title:     "Test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			ClosedAt:  &now, // Invalid: open with closed_at
+		}
+		err := store.CreateIssue(ctx, issue, "test-user")
+		if err == nil {
+			t.Error("CreateIssue should reject open issue with closed_at")
+		}
+	})
+}
+
 func TestSearchIssues(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -292,13 +411,20 @@ func TestSearchIssues(t *testing.T) {
 	issues := []*types.Issue{
 		{Title: "Bug in login", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeBug},
 		{Title: "Feature request", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeFeature},
-		{Title: "Another bug", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeBug},
+		{Title: "Another bug", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug},
 	}
 
 	for _, issue := range issues {
 		err := store.CreateIssue(ctx, issue, "test-user")
 		if err != nil {
 			t.Fatalf("CreateIssue failed: %v", err)
+		}
+		// Close the third issue
+		if issue.Title == "Another bug" {
+			err = store.CloseIssue(ctx, issue.ID, "Done", "test-user")
+			if err != nil {
+				t.Fatalf("CloseIssue failed: %v", err)
+			}
 		}
 	}
 
@@ -375,7 +501,7 @@ func TestGetStatistics(t *testing.T) {
 	issues := []*types.Issue{
 		{Title: "Open task", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
 		{Title: "In progress task", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask},
-		{Title: "Closed task", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Closed task", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
 		{Title: "Another open task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	}
 
