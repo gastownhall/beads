@@ -20,8 +20,10 @@ class TestConfig:
 
         # Mock shutil.which to return a test path
         with patch("shutil.which", return_value="/usr/local/bin/bd"):
-            config = Config()
-            assert config.beads_path == "/usr/local/bin/bd"
+            # Mock os.access to say the file is executable
+            with patch("os.access", return_value=True):
+                config = Config()
+                assert config.beads_path == "/usr/local/bin/bd"
 
     def test_beads_path_from_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that BEADS_PATH environment variable is respected."""

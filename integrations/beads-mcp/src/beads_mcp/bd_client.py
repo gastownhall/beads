@@ -101,12 +101,8 @@ class BdClient:
         self.bd_path = bd_path if bd_path is not None else config.beads_path
         self.beads_db = beads_db if beads_db is not None else config.beads_db
         self.actor = actor if actor is not None else config.beads_actor
-        self.no_auto_flush = (
-            no_auto_flush if no_auto_flush is not None else config.beads_no_auto_flush
-        )
-        self.no_auto_import = (
-            no_auto_import if no_auto_import is not None else config.beads_no_auto_import
-        )
+        self.no_auto_flush = no_auto_flush if no_auto_flush is not None else config.beads_no_auto_flush
+        self.no_auto_import = no_auto_import if no_auto_import is not None else config.beads_no_auto_import
         self.working_dir = working_dir if working_dir is not None else config.beads_working_dir
 
     def _get_working_dir(self) -> str:
@@ -161,9 +157,7 @@ class BdClient:
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
-            raise BdNotFoundError(
-                BdNotFoundError.installation_message(self.bd_path)
-            ) from e
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
 
         if process.returncode != 0:
             raise BdCommandError(
@@ -205,9 +199,7 @@ class BdClient:
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
-            raise BdNotFoundError(
-                BdNotFoundError.installation_message(self.bd_path)
-            ) from e
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
 
         if process.returncode != 0:
             raise BdCommandError(
@@ -220,9 +212,7 @@ class BdClient:
         version_output = stdout.decode().strip()
         match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_output)
         if not match:
-            raise BdVersionError(
-                f"Could not parse bd version from: {version_output}"
-            )
+            raise BdVersionError(f"Could not parse bd version from: {version_output}")
 
         version = tuple(int(x) for x in match.groups())
 
@@ -418,9 +408,7 @@ class BdClient:
             )
             _stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
-            raise BdNotFoundError(
-                BdNotFoundError.installation_message(self.bd_path)
-            ) from e
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
 
         if process.returncode != 0:
             raise BdCommandError(
@@ -446,9 +434,7 @@ class BdClient:
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
-            raise BdNotFoundError(
-                BdNotFoundError.installation_message(self.bd_path)
-            ) from e
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
 
         if process.returncode != 0:
             raise BdCommandError(
@@ -513,9 +499,7 @@ class BdClient:
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
-            raise BdNotFoundError(
-                BdNotFoundError.installation_message(self.bd_path)
-            ) from e
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
 
         if process.returncode != 0:
             raise BdCommandError(

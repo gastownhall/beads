@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +31,7 @@ class Config(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="")
 
-    beads_path: str = _default_beads_path()
+    beads_path: str = Field(default_factory=_default_beads_path)
     beads_db: str | None = None
     beads_actor: str | None = None
     beads_no_auto_flush: bool = False
@@ -71,9 +71,7 @@ class Config(BaseSettings):
                 )
 
         if not os.access(v, os.X_OK):
-            raise ValueError(
-                f"bd executable at {v} is not executable.\nPlease check file permissions."
-            )
+            raise ValueError(f"bd executable at {v} is not executable.\nPlease check file permissions.")
 
         return v
 
@@ -97,8 +95,7 @@ class Config(BaseSettings):
         path = Path(v)
         if not path.exists():
             raise ValueError(
-                f"BEADS_DB points to non-existent file: {v}\n"
-                + "Please verify the database path is correct."
+                f"BEADS_DB points to non-existent file: {v}\n" + "Please verify the database path is correct."
             )
 
         return v
@@ -124,7 +121,7 @@ def load_config() -> Config:
     except Exception as e:
         default_path = _default_beads_path()
         error_msg = (
-            f"Beads MCP Server Configuration Error\n\n"
+            "Beads MCP Server Configuration Error\n\n"
             + f"{e}\n\n"
             + "Common fix: Install the bd CLI first:\n"
             + "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash\n\n"

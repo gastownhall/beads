@@ -370,30 +370,22 @@ async def test_init_creates_beads_directory(bd_executable):
         # Ensure .beads doesn't exist yet
         assert not beads_dir.exists()
 
-        # Create client WITHOUT beads_db set (this was the bug!)
-        client = BdClient(bd_path=bd_executable, beads_db=None)
+        # Create client WITHOUT beads_db set and WITH working_dir set to temp_dir
+        client = BdClient(bd_path=bd_executable, beads_db=None, working_dir=temp_dir)
 
-        # Change to temp directory and run init
-        original_cwd = os.getcwd()
-        try:
-            os.chdir(temp_dir)
+        # Initialize with custom prefix (no need to chdir!)
+        params = InitParams(prefix="test")
+        result = await client.init(params)
 
-            # Initialize with custom prefix
-            params = InitParams(prefix="test")
-            result = await client.init(params)
+        # Verify .beads directory was created in temp directory
+        assert beads_dir.exists(), f".beads directory not created in {temp_dir}"
+        assert beads_dir.is_dir(), f".beads exists but is not a directory"
 
-            # Verify .beads directory was created in current directory
-            assert beads_dir.exists(), f".beads directory not created in {temp_dir}"
-            assert beads_dir.is_dir(), f".beads exists but is not a directory"
+        # Verify database file was created with correct prefix
+        db_files = list(beads_dir.glob("*.db"))
+        assert len(db_files) > 0, "No database file created in .beads/"
+        assert any("test" in str(db.name) for db in db_files), \
+            f"Database file doesn't contain prefix 'test': {[db.name for db in db_files]}"
 
-            # Verify database file was created with correct prefix
-            db_files = list(beads_dir.glob("*.db"))
-            assert len(db_files) > 0, "No database file created in .beads/"
-            assert any("test" in str(db.name) for db in db_files), \
-                f"Database file doesn't contain prefix 'test': {[db.name for db in db_files]}"
-
-            # Verify success message
-            assert "initialized" in result.lower() or "created" in result.lower()
-
-        finally:
-            os.chdir(original_cwd)
+        # Verify success message
+        assert "initialized" in result.lower() or "created" in result.lower()

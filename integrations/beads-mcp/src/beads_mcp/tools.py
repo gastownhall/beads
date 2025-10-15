@@ -68,13 +68,9 @@ async def beads_ready_work(
 
 
 async def beads_list_issues(
-    status: Annotated[
-        IssueStatus | None, "Filter by status (open, in_progress, blocked, closed)"
-    ] = None,
+    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, closed)"] = None,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
-    issue_type: Annotated[
-        IssueType | None, "Filter by type (bug, feature, task, epic, chore)"
-    ] = None,
+    issue_type: Annotated[IssueType | None, "Filter by type (bug, feature, task, epic, chore)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     limit: Annotated[int, "Maximum number of issues to return (1-1000)"] = 50,
 ) -> list[Issue]:
@@ -110,9 +106,7 @@ async def beads_create_issue(
     acceptance: Annotated[str | None, "Acceptance criteria"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
     priority: Annotated[int, "Priority (0-4, 0=highest)"] = 2,
-    issue_type: Annotated[
-        IssueType, "Type: bug, feature, task, epic, or chore"
-    ] = DEFAULT_ISSUE_TYPE,
+    issue_type: Annotated[IssueType, "Type: bug, feature, task, epic, or chore"] = DEFAULT_ISSUE_TYPE,
     assignee: Annotated[str | None, "Assignee username"] = None,
     labels: Annotated[list[str] | None, "List of labels"] = None,
     id: Annotated[str | None, "Explicit issue ID (e.g., bd-42)"] = None,
@@ -243,9 +237,7 @@ async def beads_blocked() -> list[BlockedIssue]:
 
 
 async def beads_init(
-    prefix: Annotated[
-        str | None, "Issue prefix (e.g., 'myproject' for myproject-1, myproject-2)"
-    ] = None,
+    prefix: Annotated[str | None, "Issue prefix (e.g., 'myproject' for myproject-1, myproject-2)"] = None,
 ) -> str:
     """Initialize bd in current directory.
 

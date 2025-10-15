@@ -216,7 +216,7 @@ async def debug_env() -> str:
     info.append(f"USER: {os.environ.get('USER', 'NOT SET')}\n")
     info.append("\n=== All Environment Variables ===\n")
     for key, value in sorted(os.environ.items()):
-        if not key.startswith('_'):  # Skip internal vars
+        if not key.startswith("_"):  # Skip internal vars
             info.append(f"{key}={value}\n")
     return "".join(info)
 
