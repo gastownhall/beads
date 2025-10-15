@@ -163,6 +163,7 @@ func findJSONLPath() string {
 
 // autoImportIfNewer checks if JSONL content changed (via hash) and imports if so
 // Fixes bd-84: Hash-based comparison is git-proof (mtime comparison fails after git pull)
+// Fixes bd-228: Now uses collision detection to prevent silently overwriting local changes
 func autoImportIfNewer() {
 	// Find JSONL path
 	jsonlPath := findJSONLPath()
@@ -207,7 +208,7 @@ func autoImportIfNewer() {
 		fmt.Fprintf(os.Stderr, "Debug: auto-import triggered (hash changed)\n")
 	}
 
-	// Content changed - perform silent import
+	// Content changed - parse all issues
 	scanner := bufio.NewScanner(strings.NewReader(string(jsonlData)))
 	var allIssues []*types.Issue
 
@@ -233,7 +234,49 @@ func autoImportIfNewer() {
 		return
 	}
 
-	// Import issues (create new, update existing)
+	// Detect collisions before importing (bd-228 fix)
+	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+	if !ok {
+		// Not SQLite - fall back to simple import without collision detection
+		autoImportWithoutCollisionDetection(ctx, allIssues, currentHash)
+		return
+	}
+
+	collisionResult, err := sqlite.DetectCollisions(ctx, sqliteStore, allIssues)
+	if err != nil {
+		// Collision detection failed, skip import to be safe
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, collision detection error: %v\n", err)
+		}
+		return
+	}
+
+	// If collisions detected, warn user and skip colliding issues
+	if len(collisionResult.Collisions) > 0 {
+		fmt.Fprintf(os.Stderr, "\nWarning: Auto-import detected %d issue collision(s)\n", len(collisionResult.Collisions))
+		fmt.Fprintf(os.Stderr, "Your local changes are preserved. The following issues were NOT updated:\n\n")
+		for _, collision := range collisionResult.Collisions {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", collision.ID, collision.IncomingIssue.Title)
+			fmt.Fprintf(os.Stderr, "    Conflicting fields: %v\n", collision.ConflictingFields)
+		}
+		fmt.Fprintf(os.Stderr, "\nTo merge these changes, run:\n")
+		fmt.Fprintf(os.Stderr, "  bd import -i %s --resolve-collisions\n\n", jsonlPath)
+
+		// Remove colliding issues from the import list
+		safeIssues := make([]*types.Issue, 0)
+		collidingIDs := make(map[string]bool)
+		for _, collision := range collisionResult.Collisions {
+			collidingIDs[collision.ID] = true
+		}
+		for _, issue := range allIssues {
+			if !collidingIDs[issue.ID] {
+				safeIssues = append(safeIssues, issue)
+			}
+		}
+		allIssues = safeIssues
+	}
+
+	// Import non-colliding issues (exact matches + new issues)
 	for _, issue := range allIssues {
 		existing, err := store.GetIssue(ctx, issue.ID)
 		if err != nil {
@@ -296,6 +339,69 @@ func autoImportIfNewer() {
 
 	// Store new hash after successful import
 	_ = store.SetMetadata(ctx, "last_import_hash", currentHash)
+}
+
+// autoImportWithoutCollisionDetection is a fallback for non-SQLite backends
+// This preserves the old behavior for compatibility
+func autoImportWithoutCollisionDetection(ctx context.Context, allIssues []*types.Issue, hash string) {
+	// Import issues without collision detection (old behavior)
+	for _, issue := range allIssues {
+		existing, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+
+		if existing != nil {
+			updates := make(map[string]interface{})
+			updates["title"] = issue.Title
+			updates["description"] = issue.Description
+			updates["design"] = issue.Design
+			updates["acceptance_criteria"] = issue.AcceptanceCriteria
+			updates["notes"] = issue.Notes
+			updates["status"] = issue.Status
+			updates["priority"] = issue.Priority
+			updates["issue_type"] = issue.IssueType
+			updates["assignee"] = issue.Assignee
+			if issue.EstimatedMinutes != nil {
+				updates["estimated_minutes"] = *issue.EstimatedMinutes
+			}
+			if issue.ExternalRef != nil {
+				updates["external_ref"] = *issue.ExternalRef
+			}
+
+			_ = store.UpdateIssue(ctx, issue.ID, updates, "auto-import")
+		} else {
+			_ = store.CreateIssue(ctx, issue, "auto-import")
+		}
+	}
+
+	// Import dependencies
+	for _, issue := range allIssues {
+		if len(issue.Dependencies) == 0 {
+			continue
+		}
+
+		existingDeps, err := store.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, dep := range issue.Dependencies {
+			exists := false
+			for _, existing := range existingDeps {
+				if existing.DependsOnID == dep.DependsOnID && existing.Type == dep.Type {
+					exists = true
+					break
+				}
+			}
+
+			if !exists {
+				_ = store.AddDependency(ctx, dep, "auto-import")
+			}
+		}
+	}
+
+	_ = store.SetMetadata(ctx, "last_import_hash", hash)
 }
 
 // checkVersionMismatch checks if the binary version matches the database version
