@@ -36,6 +36,7 @@ class Config(BaseSettings):
     beads_actor: str | None = None
     beads_no_auto_flush: bool = False
     beads_no_auto_import: bool = False
+    beads_working_dir: str | None = None
 
     @field_validator("beads_path")
     @classmethod
@@ -132,6 +133,7 @@ def load_config() -> Config:
             + "Advanced configuration (optional):\n"
             + f"  BEADS_PATH            - Path to bd executable (default: {default_path})\n"
             + "  BEADS_DB              - Path to beads database file (default: auto-discover)\n"
+            + "  BEADS_WORKING_DIR     - Working directory for bd commands (default: $PWD or cwd)\n"
             + "  BEADS_ACTOR           - Actor name for audit trail (default: $USER)\n"
             + "  BEADS_NO_AUTO_FLUSH   - Disable automatic JSONL sync (default: false)\n"
             + "  BEADS_NO_AUTO_IMPORT  - Disable automatic JSONL import (default: false)"

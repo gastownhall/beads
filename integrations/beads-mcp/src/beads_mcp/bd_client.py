@@ -76,6 +76,7 @@ class BdClient:
     actor: str | None
     no_auto_flush: bool
     no_auto_import: bool
+    working_dir: str | None
 
     def __init__(
         self,
@@ -84,6 +85,7 @@ class BdClient:
         actor: str | None = None,
         no_auto_flush: bool | None = None,
         no_auto_import: bool | None = None,
+        working_dir: str | None = None,
     ):
         """Initialize bd client.
 
@@ -93,6 +95,7 @@ class BdClient:
             actor: Actor name for audit trail (optional, loads from config if not provided)
             no_auto_flush: Disable automatic JSONL sync (optional, loads from config if not provided)
             no_auto_import: Disable automatic JSONL import (optional, loads from config if not provided)
+            working_dir: Working directory for bd commands (optional, loads from config/env if not provided)
         """
         config = load_config()
         self.bd_path = bd_path if bd_path is not None else config.beads_path
@@ -104,6 +107,18 @@ class BdClient:
         self.no_auto_import = (
             no_auto_import if no_auto_import is not None else config.beads_no_auto_import
         )
+        self.working_dir = working_dir if working_dir is not None else config.beads_working_dir
+
+    def _get_working_dir(self) -> str:
+        """Get working directory for bd commands.
+
+        Returns:
+            Working directory path, falls back to current directory if not configured
+        """
+        if self.working_dir:
+            return self.working_dir
+        # Fall back to PWD environment variable or current directory
+        return os.environ.get("PWD", os.getcwd())
 
     def _global_flags(self) -> list[str]:
         """Build list of global flags for bd commands.
@@ -142,7 +157,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._get_working_dir(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -186,7 +201,7 @@ class BdClient:
                 "version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._get_working_dir(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -399,7 +414,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._get_working_dir(),
             )
             _stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -427,7 +442,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._get_working_dir(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -494,7 +509,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._get_working_dir(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
