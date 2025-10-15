@@ -74,7 +74,7 @@ The installer will:
 ### Manual Install
 
 ```bash
-# Using go install (requires Go 1.21+)
+# Using go install (requires Go 1.23+)
 go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or build from source
