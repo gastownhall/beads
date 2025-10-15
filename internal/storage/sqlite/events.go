@@ -107,9 +107,9 @@ func (s *SQLiteStorage) GetStatistics(ctx context.Context) (*types.Statistics, e
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) as total,
-			SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open,
-			SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-			SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed
+			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) as open,
+			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress,
+			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed
 		FROM issues
 	`).Scan(&stats.TotalIssues, &stats.OpenIssues, &stats.InProgressIssues, &stats.ClosedIssues)
 	if err != nil {

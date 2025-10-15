@@ -346,6 +346,76 @@ func TestSearchIssues(t *testing.T) {
 	}
 }
 
+func TestGetStatistics(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Test statistics on empty database (regression test for NULL handling)
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed on empty database: %v", err)
+	}
+
+	if stats.TotalIssues != 0 {
+		t.Errorf("Expected 0 total issues, got %d", stats.TotalIssues)
+	}
+	if stats.OpenIssues != 0 {
+		t.Errorf("Expected 0 open issues, got %d", stats.OpenIssues)
+	}
+	if stats.InProgressIssues != 0 {
+		t.Errorf("Expected 0 in-progress issues, got %d", stats.InProgressIssues)
+	}
+	if stats.ClosedIssues != 0 {
+		t.Errorf("Expected 0 closed issues, got %d", stats.ClosedIssues)
+	}
+
+	// Create some issues to verify statistics work with data
+	issues := []*types.Issue{
+		{Title: "Open task", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{Title: "In progress task", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Closed task", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Another open task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	}
+
+	for _, issue := range issues {
+		err := store.CreateIssue(ctx, issue, "test-user")
+		if err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+		// Close the one that should be closed
+		if issue.Title == "Closed task" {
+			err = store.CloseIssue(ctx, issue.ID, "Done", "test-user")
+			if err != nil {
+				t.Fatalf("CloseIssue failed: %v", err)
+			}
+		}
+	}
+
+	// Get statistics with data
+	stats, err = store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed with data: %v", err)
+	}
+
+	if stats.TotalIssues != 4 {
+		t.Errorf("Expected 4 total issues, got %d", stats.TotalIssues)
+	}
+	if stats.OpenIssues != 2 {
+		t.Errorf("Expected 2 open issues, got %d", stats.OpenIssues)
+	}
+	if stats.InProgressIssues != 1 {
+		t.Errorf("Expected 1 in-progress issue, got %d", stats.InProgressIssues)
+	}
+	if stats.ClosedIssues != 1 {
+		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
+	}
+	if stats.ReadyIssues != 2 {
+		t.Errorf("Expected 2 ready issues (open with no blockers), got %d", stats.ReadyIssues)
+	}
+}
+
 // Note: High-concurrency stress tests were removed as the pure Go SQLite driver
 // (modernc.org/sqlite) can experience "database is locked" errors under extreme
 // parallel load (100+ simultaneous operations). This is a known limitation and
