@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 
 from .config import load_config
@@ -124,6 +125,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -167,6 +169,7 @@ class BdClient:
                 "version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -380,6 +383,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
             )
             _stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -407,6 +411,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
@@ -473,6 +478,7 @@ class BdClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
