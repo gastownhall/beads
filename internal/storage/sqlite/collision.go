@@ -244,6 +244,11 @@ func countReferences(issueID string, allIssues []*types.Issue, allDeps map[strin
 func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, allIssues []*types.Issue) (map[string]string, error) {
 	idMapping := make(map[string]string)
 
+	// Sync counters before remapping to avoid ID collisions
+	if err := s.SyncAllCounters(ctx); err != nil {
+		return nil, fmt.Errorf("failed to sync ID counters: %w", err)
+	}
+
 	// For each collision (in order of ascending reference score)
 	for _, collision := range collisions {
 		oldID := collision.ID
