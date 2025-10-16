@@ -929,6 +929,48 @@ bd sync --no-push                 # Commit but don't push
 
 The `bd sync` command automatically resolves ID collisions using the same logic as `bd import --resolve-collisions`, making it safe for concurrent updates from multiple devices.
 
+#### Background Sync with `bd daemon`
+
+For continuous automatic syncing, run the bd daemon in the background:
+
+```bash
+# Start daemon with auto-commit and auto-push
+bd daemon --auto-commit --auto-push
+
+# Check daemon status
+bd daemon --status
+
+# Stop daemon
+bd daemon --stop
+```
+
+The daemon will:
+- Poll for changes at configurable intervals (default: 5 minutes)
+- Export pending database changes to JSONL
+- Auto-commit changes (if `--auto-commit` flag set)
+- Auto-push commits (if `--auto-push` flag set)
+- Pull remote changes periodically
+- Auto-import when remote changes detected
+- Log all activity to `.beads/daemon.log`
+
+Options:
+```bash
+bd daemon --interval 10m              # Custom sync interval
+bd daemon --auto-commit               # Auto-commit changes
+bd daemon --auto-push                 # Auto-push commits (requires auto-commit)
+bd daemon --log /var/log/bd.log       # Custom log file path
+bd daemon --status                    # Show daemon status
+bd daemon --stop                      # Stop running daemon
+```
+
+The daemon is ideal for:
+- Always-on development machines
+- Multi-agent workflows where agents need continuous sync
+- Background sync for team collaboration
+- CI/CD pipelines that track issue status
+
+The daemon gracefully shuts down on SIGTERM and maintains a PID file at `.beads/daemon.pid` for process management.
+
 ### Optional: Git Hooks for Immediate Sync
 
 Create `.git/hooks/pre-commit`:
