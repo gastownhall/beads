@@ -18,34 +18,38 @@ var labelCmd = &cobra.Command{
 	Short: "Manage issue labels",
 }
 
+// executeLabelCommand executes a label operation and handles output
+func executeLabelCommand(issueID, label, operation string, operationFunc func(context.Context, string, string, string) error) {
+	ctx := context.Background()
+	if err := operationFunc(ctx, issueID, label, actor); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Schedule auto-flush
+	markDirtyAndScheduleFlush()
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":   operation,
+			"issue_id": issueID,
+			"label":    label,
+		})
+		return
+	}
+
+	green := color.New(color.FgGreen).SprintFunc()
+	// Capitalize first letter manually (strings.Title is deprecated)
+	capitalizedOp := strings.ToUpper(operation[:1]) + operation[1:]
+	fmt.Printf("%s %s label '%s' to %s\n", green("✓"), capitalizedOp, label, issueID)
+}
+
 var labelAddCmd = &cobra.Command{
 	Use:   "add [issue-id] [label]",
 	Short: "Add a label to an issue",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		issueID := args[0]
-		label := args[1]
-
-		ctx := context.Background()
-		if err := store.AddLabel(ctx, issueID, label, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
-
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":   "added",
-				"issue_id": issueID,
-				"label":    label,
-			})
-			return
-		}
-
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Added label '%s' to %s\n", green("✓"), label, issueID)
+		executeLabelCommand(args[0], args[1], "added", store.AddLabel)
 	},
 }
 
@@ -54,29 +58,7 @@ var labelRemoveCmd = &cobra.Command{
 	Short: "Remove a label from an issue",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		issueID := args[0]
-		label := args[1]
-
-		ctx := context.Background()
-		if err := store.RemoveLabel(ctx, issueID, label, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
-
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":   "removed",
-				"issue_id": issueID,
-				"label":    label,
-			})
-			return
-		}
-
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Removed label '%s' from %s\n", green("✓"), label, issueID)
+		executeLabelCommand(args[0], args[1], "removed", store.RemoveLabel)
 	},
 }
 

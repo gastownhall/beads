@@ -86,3 +86,4 @@ issues:
         - dupl        # Test duplication is acceptable
         - goconst     # Test constants are acceptable
         - errcheck    # Test cleanup errors are acceptable
+        - gocyclo     # Test complexity is acceptable

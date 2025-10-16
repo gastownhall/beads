@@ -183,6 +183,102 @@ func validateMarkdownPath(path string) (string, error) {
 //
 //   ### Dependencies
 //   bd-10, bd-20
+// markdownParseState holds state for parsing markdown files
+type markdownParseState struct {
+	issues         []*IssueTemplate
+	currentIssue   *IssueTemplate
+	currentSection string
+	sectionContent strings.Builder
+}
+
+// finalizeSection processes and resets the current section
+func (s *markdownParseState) finalizeSection() {
+	if s.currentIssue == nil || s.currentSection == "" {
+		return
+	}
+	content := s.sectionContent.String()
+	processIssueSection(s.currentIssue, s.currentSection, content)
+	s.sectionContent.Reset()
+}
+
+// handleH2Header handles H2 headers (new issue titles)
+func (s *markdownParseState) handleH2Header(matches []string) {
+	// Finalize previous section if any
+	s.finalizeSection()
+
+	// Save previous issue if any
+	if s.currentIssue != nil {
+		s.issues = append(s.issues, s.currentIssue)
+	}
+
+	// Start new issue
+	s.currentIssue = &IssueTemplate{
+		Title:     strings.TrimSpace(matches[1]),
+		Priority:  2,      // Default priority
+		IssueType: "task", // Default type
+	}
+	s.currentSection = ""
+}
+
+// handleH3Header handles H3 headers (section titles)
+func (s *markdownParseState) handleH3Header(matches []string) {
+	// Finalize previous section
+	s.finalizeSection()
+
+	// Start new section
+	s.currentSection = strings.TrimSpace(matches[1])
+}
+
+// handleContentLine handles regular content lines
+func (s *markdownParseState) handleContentLine(line string) {
+	if s.currentIssue == nil {
+		return
+	}
+
+	// Content within a section
+	if s.currentSection != "" {
+		if s.sectionContent.Len() > 0 {
+			s.sectionContent.WriteString("\n")
+		}
+		s.sectionContent.WriteString(line)
+		return
+	}
+
+	// First lines after title (before any section) become description
+	if s.currentIssue.Description == "" && line != "" {
+		if s.currentIssue.Description != "" {
+			s.currentIssue.Description += "\n"
+		}
+		s.currentIssue.Description += line
+	}
+}
+
+// finalize completes parsing and returns the results
+func (s *markdownParseState) finalize() ([]*IssueTemplate, error) {
+	// Finalize last section and issue
+	s.finalizeSection()
+	if s.currentIssue != nil {
+		s.issues = append(s.issues, s.currentIssue)
+	}
+
+	// Check if we found any issues
+	if len(s.issues) == 0 {
+		return nil, fmt.Errorf("no issues found in markdown file (expected ## Issue Title format)")
+	}
+
+	return s.issues, nil
+}
+
+// createMarkdownScanner creates a scanner with appropriate buffer size
+func createMarkdownScanner(file *os.File) *bufio.Scanner {
+	scanner := bufio.NewScanner(file)
+	// Increase buffer size for large markdown files
+	const maxScannerBuffer = 1024 * 1024 // 1MB
+	buf := make([]byte, maxScannerBuffer)
+	scanner.Buffer(buf, maxScannerBuffer)
+	return scanner
+}
+
 func parseMarkdownFile(path string) ([]*IssueTemplate, error) {
 	// Validate and clean the file path
 	cleanPath, err := validateMarkdownPath(path)
@@ -199,91 +295,31 @@ func parseMarkdownFile(path string) ([]*IssueTemplate, error) {
 		_ = file.Close() // Close errors on read-only operations are not actionable
 	}()
 
-	var issues []*IssueTemplate
-	var currentIssue *IssueTemplate
-	var currentSection string
-	var sectionContent strings.Builder
-
-	scanner := bufio.NewScanner(file)
-	// Increase buffer size for large markdown files
-	const maxScannerBuffer = 1024 * 1024 // 1MB
-	buf := make([]byte, maxScannerBuffer)
-	scanner.Buffer(buf, maxScannerBuffer)
-
-	// Helper to finalize current section
-	finalizeSection := func() {
-		if currentIssue == nil || currentSection == "" {
-			return
-		}
-		content := sectionContent.String()
-		processIssueSection(currentIssue, currentSection, content)
-		sectionContent.Reset()
-	}
+	state := &markdownParseState{}
+	scanner := createMarkdownScanner(file)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		// Check for H2 (new issue)
 		if matches := h2Regex.FindStringSubmatch(line); matches != nil {
-			// Finalize previous section if any
-			finalizeSection()
-
-			// Save previous issue if any
-			if currentIssue != nil {
-				issues = append(issues, currentIssue)
-			}
-
-			// Start new issue
-			currentIssue = &IssueTemplate{
-				Title:     strings.TrimSpace(matches[1]),
-				Priority:  2,        // Default priority
-				IssueType: "task",   // Default type
-			}
-			currentSection = ""
+			state.handleH2Header(matches)
 			continue
 		}
 
 		// Check for H3 (section within issue)
 		if matches := h3Regex.FindStringSubmatch(line); matches != nil {
-			// Finalize previous section
-			finalizeSection()
-
-			// Start new section
-			currentSection = strings.TrimSpace(matches[1])
+			state.handleH3Header(matches)
 			continue
 		}
 
-		// Regular content line - append to current section
-		if currentIssue != nil && currentSection != "" {
-			if sectionContent.Len() > 0 {
-				sectionContent.WriteString("\n")
-			}
-			sectionContent.WriteString(line)
-		} else if currentIssue != nil && currentSection == "" && currentIssue.Description == "" {
-			// First lines after title (before any section) become description
-			if line != "" {
-				if currentIssue.Description != "" {
-					currentIssue.Description += "\n"
-				}
-				currentIssue.Description += line
-			}
-		}
-	}
-
-	// Finalize last section and issue
-	finalizeSection()
-	if currentIssue != nil {
-		issues = append(issues, currentIssue)
+		// Regular content line
+		state.handleContentLine(line)
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading file: %w", err)
 	}
 
-	// Check if we found any issues
-	if len(issues) == 0 {
-		return nil, fmt.Errorf("no issues found in markdown file (expected ## Issue Title format)")
-	}
-
-	return issues, nil
+	return state.finalize()
 }

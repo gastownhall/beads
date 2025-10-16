@@ -579,6 +579,157 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	return nil
 }
 
+// validateBatchIssues validates all issues in a batch and sets timestamps
+func validateBatchIssues(issues []*types.Issue) error {
+	now := time.Now()
+	for i, issue := range issues {
+		if issue == nil {
+			return fmt.Errorf("issue %d is nil", i)
+		}
+
+		issue.CreatedAt = now
+		issue.UpdatedAt = now
+
+		if err := issue.Validate(); err != nil {
+			return fmt.Errorf("validation failed for issue %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// generateBatchIDs generates IDs for all issues that need them atomically
+func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
+	// Count how many issues need IDs
+	needIDCount := 0
+	for _, issue := range issues {
+		if issue.ID == "" {
+			needIDCount++
+		}
+	}
+
+	if needIDCount == 0 {
+		return nil
+	}
+
+	// Get prefix from config
+	var prefix string
+	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
+	if err == sql.ErrNoRows || prefix == "" {
+		prefix = "bd"
+	} else if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+
+	// Atomically reserve ID range
+	var nextID int
+	err = conn.QueryRowContext(ctx, `
+		INSERT INTO issue_counters (prefix, last_id)
+		SELECT ?, COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0) + ?
+		FROM issues
+		WHERE id LIKE ? || '-%'
+		  AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*'
+		ON CONFLICT(prefix) DO UPDATE SET
+			last_id = MAX(
+				last_id,
+				(SELECT COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0)
+				 FROM issues
+				 WHERE id LIKE ? || '-%'
+				   AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*')
+			) + ?
+		RETURNING last_id
+	`, prefix, prefix, needIDCount, prefix, prefix, prefix, prefix, prefix, needIDCount).Scan(&nextID)
+	if err != nil {
+		return fmt.Errorf("failed to generate ID range: %w", err)
+	}
+
+	// Assign IDs sequentially from the reserved range
+	currentID := nextID - needIDCount + 1
+	for i := range issues {
+		if issues[i].ID == "" {
+			issues[i].ID = fmt.Sprintf("%s-%d", prefix, currentID)
+			currentID++
+		}
+	}
+	return nil
+}
+
+// bulkInsertIssues inserts all issues using a prepared statement
+func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
+	stmt, err := conn.PrepareContext(ctx, `
+		INSERT INTO issues (
+			id, title, description, design, acceptance_criteria, notes,
+			status, priority, issue_type, assignee, estimated_minutes,
+			created_at, updated_at, closed_at, external_ref
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, issue := range issues {
+		_, err = stmt.ExecContext(ctx,
+			issue.ID, issue.Title, issue.Description, issue.Design,
+			issue.AcceptanceCriteria, issue.Notes, issue.Status,
+			issue.Priority, issue.IssueType, issue.Assignee,
+			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
+			issue.ClosedAt, issue.ExternalRef,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+		}
+	}
+	return nil
+}
+
+// bulkRecordEvents records creation events for all issues
+func bulkRecordEvents(ctx context.Context, conn *sql.Conn, issues []*types.Issue, actor string) error {
+	stmt, err := conn.PrepareContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, new_value)
+		VALUES (?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare event statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, issue := range issues {
+		eventData, err := json.Marshal(issue)
+		if err != nil {
+			// Fall back to minimal description if marshaling fails
+			eventData = []byte(fmt.Sprintf(`{"id":"%s","title":"%s"}`, issue.ID, issue.Title))
+		}
+
+		_, err = stmt.ExecContext(ctx, issue.ID, types.EventCreated, actor, string(eventData))
+		if err != nil {
+			return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
+		}
+	}
+	return nil
+}
+
+// bulkMarkDirty marks all issues as dirty for incremental export
+func bulkMarkDirty(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
+	stmt, err := conn.PrepareContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at)
+		VALUES (?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare dirty statement: %w", err)
+	}
+	defer stmt.Close()
+
+	dirtyTime := time.Now()
+	for _, issue := range issues {
+		_, err = stmt.ExecContext(ctx, issue.ID, dirtyTime)
+		if err != nil {
+			return fmt.Errorf("failed to mark dirty %s: %w", issue.ID, err)
+		}
+	}
+	return nil
+}
+
 // CreateIssues creates multiple issues atomically in a single transaction.
 // This provides significant performance improvements over calling CreateIssue in a loop:
 // - Single connection acquisition
@@ -630,34 +781,22 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 //   - Single issue creation (use CreateIssue for simplicity)
 //   - Interactive user operations (use CreateIssue)
 func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
-	// Handle empty batch
 	if len(issues) == 0 {
 		return nil
 	}
 
-	// Phase 1: Check for nil and validate all issues first (fail-fast)
-	now := time.Now()
-	for i, issue := range issues {
-		if issue == nil {
-			return fmt.Errorf("issue %d is nil", i)
-		}
-
-		issue.CreatedAt = now
-		issue.UpdatedAt = now
-
-		if err := issue.Validate(); err != nil {
-			return fmt.Errorf("validation failed for issue %d: %w", i, err)
-		}
+	// Phase 1: Validate all issues first (fail-fast)
+	if err := validateBatchIssues(issues); err != nil {
+		return err
 	}
 
-	// Phase 2: Acquire dedicated connection and start transaction
+	// Phase 2: Acquire connection and start transaction
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Begin IMMEDIATE transaction to acquire write lock early
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
 	}
@@ -665,129 +804,28 @@ func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 	committed := false
 	defer func() {
 		if !committed {
-			conn.ExecContext(context.Background(), "ROLLBACK")
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
 
-	// Phase 3: Batch ID generation
-	// Count how many issues need IDs
-	needIDCount := 0
-	for _, issue := range issues {
-		if issue.ID == "" {
-			needIDCount++
-		}
+	// Phase 3: Generate IDs for issues that need them
+	if err := generateBatchIDs(ctx, conn, issues); err != nil {
+		return err
 	}
 
-	// Generate ID range atomically if needed
-	if needIDCount > 0 {
-		// Get prefix from config
-		var prefix string
-		err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
-		if err == sql.ErrNoRows || prefix == "" {
-			prefix = "bd"
-		} else if err != nil {
-			return fmt.Errorf("failed to get config: %w", err)
-		}
-
-		// Atomically reserve ID range: [nextID-needIDCount+1, nextID]
-		// This is the key optimization - one counter update instead of N
-		var nextID int
-		err = conn.QueryRowContext(ctx, `
-			INSERT INTO issue_counters (prefix, last_id)
-			SELECT ?, COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0) + ?
-			FROM issues
-			WHERE id LIKE ? || '-%'
-			  AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*'
-			ON CONFLICT(prefix) DO UPDATE SET
-				last_id = MAX(
-					last_id,
-					(SELECT COALESCE(MAX(CAST(substr(id, LENGTH(?) + 2) AS INTEGER)), 0)
-					 FROM issues
-					 WHERE id LIKE ? || '-%'
-					   AND substr(id, LENGTH(?) + 2) GLOB '[0-9]*')
-				) + ?
-			RETURNING last_id
-		`, prefix, prefix, needIDCount, prefix, prefix, prefix, prefix, prefix, needIDCount).Scan(&nextID)
-		if err != nil {
-			return fmt.Errorf("failed to generate ID range: %w", err)
-		}
-
-		// Assign IDs sequentially from the reserved range
-		currentID := nextID - needIDCount + 1
-		for i := range issues {
-			if issues[i].ID == "" {
-				issues[i].ID = fmt.Sprintf("%s-%d", prefix, currentID)
-				currentID++
-			}
-		}
+	// Phase 4: Bulk insert issues
+	if err := bulkInsertIssues(ctx, conn, issues); err != nil {
+		return err
 	}
 
-	// Phase 4: Bulk insert issues using prepared statement
-	stmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO issues (
-			id, title, description, design, acceptance_criteria, notes,
-			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at, closed_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, issue := range issues {
-		_, err = stmt.ExecContext(ctx,
-			issue.ID, issue.Title, issue.Description, issue.Design,
-			issue.AcceptanceCriteria, issue.Notes, issue.Status,
-			issue.Priority, issue.IssueType, issue.Assignee,
-			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
-			issue.ClosedAt, issue.ExternalRef,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
-		}
+	// Phase 5: Record creation events
+	if err := bulkRecordEvents(ctx, conn, issues, actor); err != nil {
+		return err
 	}
 
-	// Phase 5: Bulk record creation events
-	eventStmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, new_value)
-		VALUES (?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare event statement: %w", err)
-	}
-	defer eventStmt.Close()
-
-	for _, issue := range issues {
-		eventData, err := json.Marshal(issue)
-		if err != nil {
-			// Fall back to minimal description if marshaling fails
-			eventData = []byte(fmt.Sprintf(`{"id":"%s","title":"%s"}`, issue.ID, issue.Title))
-		}
-
-		_, err = eventStmt.ExecContext(ctx, issue.ID, types.EventCreated, actor, string(eventData))
-		if err != nil {
-			return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
-		}
-	}
-
-	// Phase 6: Bulk mark dirty for incremental export
-	dirtyStmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare dirty statement: %w", err)
-	}
-	defer dirtyStmt.Close()
-
-	dirtyTime := time.Now()
-	for _, issue := range issues {
-		_, err = dirtyStmt.ExecContext(ctx, issue.ID, dirtyTime)
-		if err != nil {
-			return fmt.Errorf("failed to mark dirty %s: %w", issue.ID, err)
-		}
+	// Phase 6: Mark issues dirty for incremental export
+	if err := bulkMarkDirty(ctx, conn, issues); err != nil {
+		return err
 	}
 
 	// Phase 7: Commit transaction
@@ -858,6 +896,124 @@ var allowedUpdateFields = map[string]bool{
 	"external_ref":        true,
 }
 
+// validatePriority validates a priority value
+func validatePriority(value interface{}) error {
+	if priority, ok := value.(int); ok {
+		if priority < 0 || priority > 4 {
+			return fmt.Errorf("priority must be between 0 and 4 (got %d)", priority)
+		}
+	}
+	return nil
+}
+
+// validateStatus validates a status value
+func validateStatus(value interface{}) error {
+	if status, ok := value.(string); ok {
+		if !types.Status(status).IsValid() {
+			return fmt.Errorf("invalid status: %s", status)
+		}
+	}
+	return nil
+}
+
+// validateIssueType validates an issue type value
+func validateIssueType(value interface{}) error {
+	if issueType, ok := value.(string); ok {
+		if !types.IssueType(issueType).IsValid() {
+			return fmt.Errorf("invalid issue type: %s", issueType)
+		}
+	}
+	return nil
+}
+
+// validateTitle validates a title value
+func validateTitle(value interface{}) error {
+	if title, ok := value.(string); ok {
+		if len(title) == 0 || len(title) > 500 {
+			return fmt.Errorf("title must be 1-500 characters")
+		}
+	}
+	return nil
+}
+
+// validateEstimatedMinutes validates an estimated_minutes value
+func validateEstimatedMinutes(value interface{}) error {
+	if mins, ok := value.(int); ok {
+		if mins < 0 {
+			return fmt.Errorf("estimated_minutes cannot be negative")
+		}
+	}
+	return nil
+}
+
+// fieldValidators maps field names to their validation functions
+var fieldValidators = map[string]func(interface{}) error{
+	"priority":           validatePriority,
+	"status":             validateStatus,
+	"issue_type":         validateIssueType,
+	"title":              validateTitle,
+	"estimated_minutes":  validateEstimatedMinutes,
+}
+
+// validateFieldUpdate validates a field update value
+func validateFieldUpdate(key string, value interface{}) error {
+	if validator, ok := fieldValidators[key]; ok {
+		return validator(value)
+	}
+	return nil
+}
+
+// determineEventType determines the event type for an update based on old and new status
+func determineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
+	statusVal, hasStatus := updates["status"]
+	if !hasStatus {
+		return types.EventUpdated
+	}
+
+	newStatus, ok := statusVal.(string)
+	if !ok {
+		return types.EventUpdated
+	}
+
+	if newStatus == string(types.StatusClosed) {
+		return types.EventClosed
+	}
+	if oldIssue.Status == types.StatusClosed {
+		return types.EventReopened
+	}
+	return types.EventStatusChanged
+}
+
+// manageClosedAt automatically manages the closed_at field based on status changes
+func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+	statusVal, hasStatus := updates["status"]
+	if !hasStatus {
+		return setClauses, args
+	}
+
+	newStatus, ok := statusVal.(string)
+	if !ok {
+		return setClauses, args
+	}
+
+	if newStatus == string(types.StatusClosed) {
+		// Changing to closed: ensure closed_at is set
+		if _, hasClosedAt := updates["closed_at"]; !hasClosedAt {
+			now := time.Now()
+			updates["closed_at"] = now
+			setClauses = append(setClauses, "closed_at = ?")
+			args = append(args, now)
+		}
+	} else if oldIssue.Status == types.StatusClosed {
+		// Changing from closed to something else: clear closed_at
+		updates["closed_at"] = nil
+		setClauses = append(setClauses, "closed_at = ?")
+		args = append(args, nil)
+	}
+
+	return setClauses, args
+}
+
 // UpdateIssue updates fields on an issue
 func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	// Get old issue for event
@@ -880,37 +1036,8 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 		}
 
 		// Validate field values
-		switch key {
-		case "priority":
-			if priority, ok := value.(int); ok {
-				if priority < 0 || priority > 4 {
-					return fmt.Errorf("priority must be between 0 and 4 (got %d)", priority)
-				}
-			}
-		case "status":
-			if status, ok := value.(string); ok {
-				if !types.Status(status).IsValid() {
-					return fmt.Errorf("invalid status: %s", status)
-				}
-			}
-		case "issue_type":
-			if issueType, ok := value.(string); ok {
-				if !types.IssueType(issueType).IsValid() {
-					return fmt.Errorf("invalid issue type: %s", issueType)
-				}
-			}
-		case "title":
-			if title, ok := value.(string); ok {
-				if len(title) == 0 || len(title) > 500 {
-					return fmt.Errorf("title must be 1-500 characters")
-				}
-			}
-		case "estimated_minutes":
-			if mins, ok := value.(int); ok {
-				if mins < 0 {
-					return fmt.Errorf("estimated_minutes cannot be negative")
-				}
-			}
+		if err := validateFieldUpdate(key, value); err != nil {
+			return err
 		}
 
 		setClauses = append(setClauses, fmt.Sprintf("%s = ?", key))
@@ -918,26 +1045,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	}
 
 	// Auto-manage closed_at when status changes (enforce invariant)
-	if statusVal, ok := updates["status"]; ok {
-		newStatus, ok := statusVal.(string)
-		if !ok {
-			return fmt.Errorf("status must be a string")
-		}
-		if newStatus == string(types.StatusClosed) {
-			// Changing to closed: ensure closed_at is set
-			if _, hasClosedAt := updates["closed_at"]; !hasClosedAt {
-				now := time.Now()
-				updates["closed_at"] = now
-				setClauses = append(setClauses, "closed_at = ?")
-				args = append(args, now)
-			}
-		} else if oldIssue.Status == types.StatusClosed {
-			// Changing from closed to something else: clear closed_at
-			updates["closed_at"] = nil
-			setClauses = append(setClauses, "closed_at = ?")
-			args = append(args, nil)
-		}
-	}
+	setClauses, args = manageClosedAt(oldIssue, updates, setClauses, args)
 
 	args = append(args, id)
 
@@ -969,17 +1077,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	oldDataStr := string(oldData)
 	newDataStr := string(newData)
 
-	eventType := types.EventUpdated
-	if statusVal, ok := updates["status"]; ok {
-		if statusVal == string(types.StatusClosed) {
-			eventType = types.EventClosed
-		} else if oldIssue.Status == types.StatusClosed {
-			// Reopening a closed issue
-			eventType = types.EventReopened
-		} else {
-			eventType = types.EventStatusChanged
-		}
-	}
+	eventType := determineEventType(oldIssue, updates)
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)

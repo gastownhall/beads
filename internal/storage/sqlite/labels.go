@@ -8,26 +8,31 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddLabel adds a label to an issue
-func (s *SQLiteStorage) AddLabel(ctx context.Context, issueID, label, actor string) error {
+// executeLabelOperation executes a label operation (add or remove) within a transaction
+func (s *SQLiteStorage) executeLabelOperation(
+	ctx context.Context,
+	issueID, actor string,
+	labelSQL string,
+	labelSQLArgs []interface{},
+	eventType types.EventType,
+	eventComment string,
+	operationError string,
+) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO labels (issue_id, label)
-		VALUES (?, ?)
-	`, issueID, label)
+	_, err = tx.ExecContext(ctx, labelSQL, labelSQLArgs...)
 	if err != nil {
-		return fmt.Errorf("failed to add label: %w", err)
+		return fmt.Errorf("%s: %w", operationError, err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, comment)
 		VALUES (?, ?, ?, ?)
-	`, issueID, types.EventLabelAdded, actor, fmt.Sprintf("Added label: %s", label))
+	`, issueID, eventType, actor, eventComment)
 	if err != nil {
 		return fmt.Errorf("failed to record event: %w", err)
 	}
@@ -45,40 +50,28 @@ func (s *SQLiteStorage) AddLabel(ctx context.Context, issueID, label, actor stri
 	return tx.Commit()
 }
 
+// AddLabel adds a label to an issue
+func (s *SQLiteStorage) AddLabel(ctx context.Context, issueID, label, actor string) error {
+	return s.executeLabelOperation(
+		ctx, issueID, actor,
+		`INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)`,
+		[]interface{}{issueID, label},
+		types.EventLabelAdded,
+		fmt.Sprintf("Added label: %s", label),
+		"failed to add label",
+	)
+}
+
 // RemoveLabel removes a label from an issue
 func (s *SQLiteStorage) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM labels WHERE issue_id = ? AND label = ?
-	`, issueID, label)
-	if err != nil {
-		return fmt.Errorf("failed to remove label: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, issueID, types.EventLabelRemoved, actor, fmt.Sprintf("Removed label: %s", label))
-	if err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
-
-	// Mark issue as dirty for incremental export
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`, issueID, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
-	return tx.Commit()
+	return s.executeLabelOperation(
+		ctx, issueID, actor,
+		`DELETE FROM labels WHERE issue_id = ? AND label = ?`,
+		[]interface{}{issueID, label},
+		types.EventLabelRemoved,
+		fmt.Sprintf("Removed label: %s", label),
+		"failed to remove label",
+	)
 }
 
 // GetLabels returns all labels for an issue
