@@ -447,5 +447,5 @@ Common enhancement requests:
 - Custom summarization prompts (bd-264)
 - Alternative LLM backends (local models)
 - Configurable eligibility rules
-- Batch restore operations
 - Compaction analytics dashboard
+- Optional snapshot retention for restore (if requested)

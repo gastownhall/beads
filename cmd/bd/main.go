@@ -1039,7 +1039,6 @@ var showCmd = &cobra.Command{
 				compactedDate = issue.CompactedAt.Format("2006-01-02")
 			}
 			fmt.Printf("%s Compacted: %s (%s)\n", tierEmoji, compactedDate, tierName)
-			fmt.Printf("💾 Restore: bd compact --restore %s\n", issue.ID)
 		}
 
 		if issue.Description != "" {

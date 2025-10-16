@@ -28,7 +28,7 @@ var compactCmd = &cobra.Command{
 	Long: `Compact old closed issues using semantic summarization.
 
 Compaction reduces database size by summarizing closed issues that are no longer
-actively referenced. Full restore capability is maintained via snapshots.
+actively referenced. This is permanent graceful decay - original content is discarded.
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
