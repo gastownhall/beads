@@ -48,15 +48,36 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 			os.Exit(1)
 		}
 
-		// Step 1: Export pending changes
-		fmt.Println("→ Exporting pending changes to JSONL...")
-		if err := exportToJSONL(ctx, jsonlPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+		// Preflight: check for merge/rebase in progress
+		if inMerge, err := gitHasUnmergedPaths(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking git state: %v\n", err)
+			os.Exit(1)
+		} else if inMerge {
+			fmt.Fprintf(os.Stderr, "Error: unmerged paths or merge in progress\n")
+			fmt.Fprintf(os.Stderr, "Hint: resolve conflicts, run 'bd import' if needed, then 'bd sync' again\n")
 			os.Exit(1)
 		}
 
+		// Preflight: check for upstream tracking
+		if !noPull && !gitHasUpstream() {
+			fmt.Fprintf(os.Stderr, "Error: no upstream configured for current branch\n")
+			fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name> (then rerun bd sync)\n")
+			os.Exit(1)
+		}
+
+		// Step 1: Export pending changes
+		if dryRun {
+			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
+		} else {
+			fmt.Println("→ Exporting pending changes to JSONL...")
+			if err := exportToJSONL(ctx, jsonlPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Step 2: Check if there are changes to commit
-		hasChanges, err := gitHasChanges(jsonlPath)
+		hasChanges, err := gitHasChanges(ctx, jsonlPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error checking git status: %v\n", err)
 			os.Exit(1)
@@ -67,7 +88,7 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 				fmt.Println("→ [DRY RUN] Would commit changes to git")
 			} else {
 				fmt.Println("→ Committing changes to git...")
-				if err := gitCommit(jsonlPath, message); err != nil {
+				if err := gitCommit(ctx, jsonlPath, message); err != nil {
 					fmt.Fprintf(os.Stderr, "Error committing: %v\n", err)
 					os.Exit(1)
 				}
@@ -82,7 +103,7 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 				fmt.Println("→ [DRY RUN] Would pull from remote")
 			} else {
 				fmt.Println("→ Pulling from remote...")
-				if err := gitPull(); err != nil {
+				if err := gitPull(ctx); err != nil {
 					fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
 					fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
 					os.Exit(1)
@@ -103,7 +124,7 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 				fmt.Println("→ [DRY RUN] Would push to remote")
 			} else {
 				fmt.Println("→ Pushing to remote...")
-				if err := gitPush(); err != nil {
+				if err := gitPush(ctx); err != nil {
 					fmt.Fprintf(os.Stderr, "Error pushing: %v\n", err)
 					fmt.Fprintf(os.Stderr, "Hint: pull may have brought new changes, run 'bd sync' again\n")
 					os.Exit(1)
@@ -133,9 +154,41 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
+// gitHasUnmergedPaths checks for unmerged paths or merge in progress
+func gitHasUnmergedPaths() (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status failed: %w", err)
+	}
+	
+	// Check for unmerged status codes (DD, AU, UD, UA, DU, AA, UU)
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) >= 2 {
+			s := line[:2]
+			if s == "DD" || s == "AU" || s == "UD" || s == "UA" || s == "DU" || s == "AA" || s == "UU" {
+				return true, nil
+			}
+		}
+	}
+	
+	// Check if MERGE_HEAD exists (merge in progress)
+	if exec.Command("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").Run() == nil {
+		return true, nil
+	}
+	
+	return false, nil
+}
+
+// gitHasUpstream checks if the current branch has an upstream configured
+func gitHasUpstream() bool {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	return cmd.Run() == nil
+}
+
 // gitHasChanges checks if the specified file has uncommitted changes
-func gitHasChanges(filePath string) (bool, error) {
-	cmd := exec.Command("git", "status", "--porcelain", filePath)
+func gitHasChanges(ctx context.Context, filePath string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", filePath)
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git status failed: %w", err)
@@ -144,9 +197,9 @@ func gitHasChanges(filePath string) (bool, error) {
 }
 
 // gitCommit commits the specified file
-func gitCommit(filePath string, message string) error {
+func gitCommit(ctx context.Context, filePath string, message string) error {
 	// Stage the file
-	addCmd := exec.Command("git", "add", filePath)
+	addCmd := exec.CommandContext(ctx, "git", "add", filePath)
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
@@ -157,7 +210,7 @@ func gitCommit(filePath string, message string) error {
 	}
 
 	// Commit
-	commitCmd := exec.Command("git", "commit", "-m", message)
+	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed: %w\n%s", err, output)
@@ -167,8 +220,8 @@ func gitCommit(filePath string, message string) error {
 }
 
 // gitPull pulls from the current branch's upstream
-func gitPull() error {
-	cmd := exec.Command("git", "pull")
+func gitPull(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "pull")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git pull failed: %w\n%s", err, output)
@@ -177,8 +230,8 @@ func gitPull() error {
 }
 
 // gitPush pushes to the current branch's upstream
-func gitPush() error {
-	cmd := exec.Command("git", "push")
+func gitPush(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "push")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push failed: %w\n%s", err, output)
@@ -248,6 +301,12 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 		return fmt.Errorf("failed to replace JSONL file: %w", err)
 	}
 
+	// Set appropriate file permissions (0644: rw-r--r--)
+	if err := os.Chmod(jsonlPath, 0644); err != nil {
+		// Non-fatal warning
+		fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
+	}
+
 	// Clear dirty flags for exported issues
 	if err := store.ClearDirtyIssuesByID(ctx, exportedIDs); err != nil {
 		// Non-fatal warning
@@ -262,8 +321,14 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 
 // importFromJSONL imports the JSONL file by running the import command
 func importFromJSONL(ctx context.Context, jsonlPath string) error {
+	// Get current executable path to avoid "./bd" path issues
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot resolve current executable: %w", err)
+	}
+	
 	// Run import command with --resolve-collisions to automatically handle conflicts
-	cmd := exec.Command("./bd", "import", "-i", jsonlPath, "--resolve-collisions")
+	cmd := exec.CommandContext(ctx, exe, "import", "-i", jsonlPath, "--resolve-collisions")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("import failed: %w\n%s", err, output)
