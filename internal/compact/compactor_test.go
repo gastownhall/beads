@@ -224,18 +224,6 @@ func TestCompactTier1_WithAPI(t *testing.T) {
 	if afterIssue.AcceptanceCriteria != "" {
 		t.Error("acceptance criteria should be cleared")
 	}
-
-	snapshots, err := store.GetSnapshots(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("failed to get snapshots: %v", err)
-	}
-	if len(snapshots) == 0 {
-		t.Fatal("snapshot should exist")
-	}
-	snapshot := snapshots[0]
-	if snapshot.Description != issue.Description {
-		t.Error("snapshot should preserve original description")
-	}
 }
 
 func TestCompactTier1Batch_DryRun(t *testing.T) {

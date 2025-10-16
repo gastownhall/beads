@@ -12,15 +12,14 @@ import (
 )
 
 var (
-	compactDryRun   bool
-	compactTier     int
-	compactAll      bool
-	compactID       string
-	compactForce    bool
-	compactBatch    int
-	compactWorkers  int
-	compactStats    bool
-	compactRestore  string
+	compactDryRun  bool
+	compactTier    int
+	compactAll     bool
+	compactID      string
+	compactForce   bool
+	compactBatch   int
+	compactWorkers int
+	compactStats   bool
 )
 
 var compactCmd = &cobra.Command{
@@ -41,7 +40,6 @@ Examples:
   bd compact --id bd-42                 # Compact specific issue
   bd compact --id bd-42 --force         # Force compact (bypass checks)
   bd compact --stats                    # Show statistics
-  bd compact --restore bd-42            # Restore from snapshot
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
@@ -54,11 +52,6 @@ Examples:
 
 		if compactStats {
 			runCompactStats(ctx, sqliteStore)
-			return
-		}
-
-		if compactRestore != "" {
-			runCompactRestore(ctx, sqliteStore, compactRestore)
 			return
 		}
 
@@ -367,11 +360,6 @@ func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 }
 
-func runCompactRestore(ctx context.Context, store *sqlite.SQLiteStorage, issueID string) {
-	fmt.Fprintf(os.Stderr, "Error: --restore not yet implemented\n")
-	os.Exit(1)
-}
-
 func progressBar(current, total int) string {
 	const width = 40
 	if total == 0 {
@@ -398,7 +386,6 @@ func init() {
 	compactCmd.Flags().IntVar(&compactBatch, "batch-size", 10, "Issues per batch")
 	compactCmd.Flags().IntVar(&compactWorkers, "workers", 5, "Parallel workers")
 	compactCmd.Flags().BoolVar(&compactStats, "stats", false, "Show compaction statistics")
-	compactCmd.Flags().StringVar(&compactRestore, "restore", "", "Restore issue from snapshot")
 
 	rootCmd.AddCommand(compactCmd)
 }

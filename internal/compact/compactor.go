@@ -88,10 +88,6 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 		return fmt.Errorf("dry-run: would compact %s (original size: %d bytes)", issueID, originalSize)
 	}
 
-	if err := c.store.CreateSnapshot(ctx, issue, 1); err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
 	summary, err := c.haiku.SummarizeTier1(ctx, issue)
 	if err != nil {
 		return fmt.Errorf("failed to summarize with Haiku: %w", err)
@@ -234,10 +230,6 @@ func (c *Compactor) compactSingleWithResult(ctx context.Context, issueID string,
 	}
 
 	result.OriginalSize = len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-
-	if err := c.store.CreateSnapshot(ctx, issue, 1); err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
-	}
 
 	summary, err := c.haiku.SummarizeTier1(ctx, issue)
 	if err != nil {

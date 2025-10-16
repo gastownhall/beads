@@ -110,69 +110,7 @@ func BenchmarkCheckEligibility(b *testing.B) {
 	}
 }
 
-func BenchmarkCreateSnapshot(b *testing.B) {
-	store, cleanup := setupBenchDB(b)
-	defer cleanup()
-	ctx := context.Background()
-
-	issue := &types.Issue{
-		ID:                 "bd-1",
-		Title:              "Test Issue",
-		Description:        "Original description with substantial content",
-		Design:             "Design notes with additional context",
-		Notes:              "Additional notes for the issue",
-		AcceptanceCriteria: "Must meet all requirements",
-		Status:             "closed",
-		Priority:           2,
-		IssueType:          "task",
-		ClosedAt:           timePtr(time.Now()),
-	}
-	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-		b.Fatalf("Failed to create issue: %v", err)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := store.CreateSnapshot(ctx, issue, i%5+1); err != nil {
-			b.Fatalf("CreateSnapshot failed: %v", err)
-		}
-	}
-}
-
-func BenchmarkGetSnapshots(b *testing.B) {
-	store, cleanup := setupBenchDB(b)
-	defer cleanup()
-	ctx := context.Background()
-
-	issue := &types.Issue{
-		ID:          "bd-1",
-		Title:       "Test",
-		Description: "Test description",
-		Status:      "closed",
-		Priority:    2,
-		IssueType:   "task",
-		ClosedAt:    timePtr(time.Now()),
-	}
-	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-		b.Fatalf("Failed to create issue: %v", err)
-	}
-
-	for i := 1; i <= 5; i++ {
-		if err := store.CreateSnapshot(ctx, issue, i); err != nil {
-			b.Fatalf("CreateSnapshot failed: %v", err)
-		}
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, err := store.GetSnapshots(ctx, issue.ID)
-		if err != nil {
-			b.Fatalf("GetSnapshots failed: %v", err)
-		}
-	}
-}
-
-func generateID(b testing.TB, prefix string, n int) string {
+func generateID(b testing.TB, prefix string, n int) string{
 	b.Helper()
 	return prefix + string(rune('0'+n/10)) + string(rune('0'+n%10))
 }
