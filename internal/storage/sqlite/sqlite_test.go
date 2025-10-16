@@ -192,6 +192,432 @@ func TestGetIssueNotFound(t *testing.T) {
 	}
 }
 
+func TestCreateIssues(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		issues     []*types.Issue
+		wantErr    bool
+		checkFunc  func(t *testing.T, issues []*types.Issue)
+	}{
+		{
+			name:    "empty batch",
+			issues:  []*types.Issue{},
+			wantErr: false,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				if len(issues) != 0 {
+					t.Errorf("expected 0 issues, got %d", len(issues))
+				}
+			},
+		},
+		{
+			name: "single issue",
+			issues: []*types.Issue{
+				{
+					Title:     "Single issue",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: false,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				if len(issues) != 1 {
+					t.Fatalf("expected 1 issue, got %d", len(issues))
+				}
+				if issues[0].ID == "" {
+					t.Error("issue ID should be set")
+				}
+				if !issues[0].CreatedAt.After(time.Time{}) {
+					t.Error("CreatedAt should be set")
+				}
+				if !issues[0].UpdatedAt.After(time.Time{}) {
+					t.Error("UpdatedAt should be set")
+				}
+			},
+		},
+		{
+			name: "multiple issues",
+			issues: []*types.Issue{
+				{
+					Title:     "Issue 1",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				{
+					Title:     "Issue 2",
+					Status:    types.StatusInProgress,
+					Priority:  2,
+					IssueType: types.TypeBug,
+				},
+				{
+					Title:     "Issue 3",
+					Status:    types.StatusOpen,
+					Priority:  3,
+					IssueType: types.TypeFeature,
+				},
+			},
+			wantErr: false,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				if len(issues) != 3 {
+					t.Fatalf("expected 3 issues, got %d", len(issues))
+				}
+				for i, issue := range issues {
+					if issue.ID == "" {
+						t.Errorf("issue %d: ID should be set", i)
+					}
+					if !issue.CreatedAt.After(time.Time{}) {
+						t.Errorf("issue %d: CreatedAt should be set", i)
+					}
+					if !issue.UpdatedAt.After(time.Time{}) {
+						t.Errorf("issue %d: UpdatedAt should be set", i)
+					}
+				}
+				// Verify IDs are unique
+				ids := make(map[string]bool)
+				for _, issue := range issues {
+					if ids[issue.ID] {
+						t.Errorf("duplicate ID found: %s", issue.ID)
+					}
+					ids[issue.ID] = true
+				}
+			},
+		},
+		{
+			name: "mixed ID assignment - explicit and auto-generated",
+			issues: []*types.Issue{
+				{
+					ID:        "custom-1",
+					Title:     "Custom ID 1",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				{
+					Title:     "Auto ID",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				{
+					ID:        "custom-2",
+					Title:     "Custom ID 2",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: false,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				if len(issues) != 3 {
+					t.Fatalf("expected 3 issues, got %d", len(issues))
+				}
+				if issues[0].ID != "custom-1" {
+					t.Errorf("expected ID 'custom-1', got %s", issues[0].ID)
+				}
+				if issues[1].ID == "" || issues[1].ID == "custom-1" || issues[1].ID == "custom-2" {
+					t.Errorf("expected auto-generated ID, got %s", issues[1].ID)
+				}
+				if issues[2].ID != "custom-2" {
+					t.Errorf("expected ID 'custom-2', got %s", issues[2].ID)
+				}
+			},
+		},
+		{
+			name: "validation error - missing title",
+			issues: []*types.Issue{
+				{
+					Title:     "Valid issue",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				{
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "validation error - invalid priority",
+			issues: []*types.Issue{
+				{
+					Title:     "Test",
+					Status:    types.StatusOpen,
+					Priority:  10,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "validation error - invalid status",
+			issues: []*types.Issue{
+				{
+					Title:     "Test",
+					Status:    "invalid",
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "duplicate ID error",
+			issues: []*types.Issue{
+				{
+					ID:        "duplicate-id",
+					Title:     "First issue",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				{
+					ID:        "duplicate-id",
+					Title:     "Second issue",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "closed_at invariant - open status with closed_at",
+			issues: []*types.Issue{
+				{
+					Title:     "Invalid closed_at",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+					ClosedAt:  &time.Time{},
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "closed_at invariant - closed status without closed_at",
+			issues: []*types.Issue{
+				{
+					Title:     "Missing closed_at",
+					Status:    types.StatusClosed,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "nil item in batch",
+			issues: []*types.Issue{
+				{
+					Title:     "Valid issue",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+				},
+				nil,
+			},
+			wantErr: true,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				// Should not be called on error
+			},
+		},
+		{
+			name: "valid closed issue with closed_at",
+			issues: []*types.Issue{
+				{
+					Title:     "Properly closed",
+					Status:    types.StatusClosed,
+					Priority:  1,
+					IssueType: types.TypeTask,
+					ClosedAt:  func() *time.Time { t := time.Now(); return &t }(),
+				},
+			},
+			wantErr: false,
+			checkFunc: func(t *testing.T, issues []*types.Issue) {
+				if len(issues) != 1 {
+					t.Fatalf("expected 1 issue, got %d", len(issues))
+				}
+				if issues[0].Status != types.StatusClosed {
+					t.Errorf("expected closed status, got %s", issues[0].Status)
+				}
+				if issues[0].ClosedAt == nil {
+					t.Error("ClosedAt should be set for closed issue")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateIssues(ctx, tt.issues, "test-user")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateIssues() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				// Verify IDs weren't auto-generated on error (timestamps may be set)
+				for i, issue := range tt.issues {
+					if issue == nil {
+						continue
+					}
+					// Allow pre-set IDs (custom-1, existing-id, duplicate-id, etc.)
+					hasCustomID := issue.ID != "" && (issue.ID == "custom-1" || issue.ID == "custom-2" || 
+						issue.ID == "duplicate-id" || issue.ID == "existing-id")
+					if !hasCustomID && issue.ID != "" {
+						t.Errorf("issue %d: ID should not be auto-generated on error, got %s", i, issue.ID)
+					}
+				}
+			}
+
+			if !tt.wantErr && tt.checkFunc != nil {
+				tt.checkFunc(t, tt.issues)
+			}
+		})
+	}
+}
+
+func TestCreateIssuesRollback(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("rollback on validation error", func(t *testing.T) {
+		// Create a valid issue first
+		validIssue := &types.Issue{
+			Title:     "Valid issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, validIssue, "test-user")
+		if err != nil {
+			t.Fatalf("failed to create valid issue: %v", err)
+		}
+
+		// Try to create batch with one valid and one invalid issue
+		issues := []*types.Issue{
+			{
+				Title:     "Another valid issue",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+			},
+			{
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+			},
+		}
+
+		err = store.CreateIssues(ctx, issues, "test-user")
+		if err == nil {
+			t.Fatal("expected error for invalid batch, got nil")
+		}
+
+		// Verify the "Another valid issue" was rolled back by searching all issues
+		filter := types.IssueFilter{}
+		allIssues, err := store.SearchIssues(ctx, "", filter)
+		if err != nil {
+			t.Fatalf("failed to search issues: %v", err)
+		}
+
+		// Should only have the first valid issue, not the rolled-back one
+		if len(allIssues) != 1 {
+			t.Errorf("expected 1 issue after rollback, got %d", len(allIssues))
+		}
+
+		if len(allIssues) > 0 && allIssues[0].ID != validIssue.ID {
+			t.Errorf("expected only the first valid issue, got %s", allIssues[0].ID)
+		}
+	})
+
+	t.Run("rollback on conflict with existing ID", func(t *testing.T) {
+		// Create an issue with explicit ID
+		existingIssue := &types.Issue{
+			ID:        "existing-id",
+			Title:     "Existing issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, existingIssue, "test-user")
+		if err != nil {
+			t.Fatalf("failed to create existing issue: %v", err)
+		}
+
+		// Try to create batch with conflicting ID
+		issues := []*types.Issue{
+			{
+				Title:     "Should rollback",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+			},
+			{
+				ID:        "existing-id",
+				Title:     "Conflict",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+			},
+		}
+
+		err = store.CreateIssues(ctx, issues, "test-user")
+		if err == nil {
+			t.Fatal("expected error for duplicate ID, got nil")
+		}
+
+		// Verify rollback - "Should rollback" issue should not exist
+		filter := types.IssueFilter{}
+		allIssues, err := store.SearchIssues(ctx, "", filter)
+		if err != nil {
+			t.Fatalf("failed to search issues: %v", err)
+		}
+
+		// Count should only include the pre-existing issues
+		foundRollback := false
+		for _, issue := range allIssues {
+			if issue.Title == "Should rollback" {
+				foundRollback = true
+				break
+			}
+		}
+
+		if foundRollback {
+			t.Error("expected rollback of all issues in batch, but 'Should rollback' was found")
+		}
+	})
+}
+
 func TestUpdateIssue(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()

@@ -518,9 +518,13 @@ func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 		return nil
 	}
 
-	// Phase 1: Set timestamps and validate all issues first (fail-fast)
+	// Phase 1: Check for nil and validate all issues first (fail-fast)
 	now := time.Now()
 	for i, issue := range issues {
+		if issue == nil {
+			return fmt.Errorf("issue %d is nil", i)
+		}
+
 		issue.CreatedAt = now
 		issue.UpdatedAt = now
 
