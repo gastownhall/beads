@@ -20,6 +20,9 @@ bd create "Issue title" -t bug|feature|task -p 0-4 -d "Description" --json
 # Create with explicit ID (for parallel workers)
 bd create "Issue title" --id worker1-100 -p 1 --json
 
+# Create with labels
+bd create "Issue title" -t bug -p 1 -l bug,critical --json
+
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
 
@@ -31,6 +34,15 @@ bd dep add <discovered-id> <parent-id> --type discovered-from
 
 # Create and link in one command (new way)
 bd create "Issue title" -t bug -p 1 --deps discovered-from:<parent-id> --json
+
+# Label management
+bd label add <id> <label> --json
+bd label remove <id> <label> --json
+bd label list <id> --json
+bd label list-all --json
+
+# Filter issues by label
+bd list --label bug,critical --json
 
 # Complete work
 bd close <id> --reason "Done" --json

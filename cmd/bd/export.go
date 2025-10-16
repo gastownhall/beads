@@ -92,6 +92,16 @@ Output to stdout by default, or use -o flag for file output.`,
 			issue.Dependencies = allDeps[issue.ID]
 		}
 
+		// Populate labels for all issues
+		for _, issue := range issues {
+			labels, err := store.GetLabels(ctx, issue.ID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", issue.ID, err)
+				os.Exit(1)
+			}
+			issue.Labels = labels
+		}
+
 		// Open output
 		out := os.Stdout
 		var tempFile *os.File

@@ -393,6 +393,48 @@ func autoImportIfNewer() {
 		}
 	}
 
+	// Import labels (skip colliding issues to maintain consistency)
+	for _, issue := range allIssues {
+		// Skip if this issue was filtered out due to collision
+		if collidingIDs[issue.ID] {
+			continue
+		}
+
+		if issue.Labels == nil {
+			continue
+		}
+
+		// Get existing labels
+		existingLabels, err := store.GetLabels(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+
+		// Convert to maps for comparison
+		existingLabelMap := make(map[string]bool)
+		for _, label := range existingLabels {
+			existingLabelMap[label] = true
+		}
+		importedLabelMap := make(map[string]bool)
+		for _, label := range issue.Labels {
+			importedLabelMap[label] = true
+		}
+
+		// Add missing labels
+		for _, label := range issue.Labels {
+			if !existingLabelMap[label] {
+				_ = store.AddLabel(ctx, issue.ID, label, "auto-import")
+			}
+		}
+
+		// Remove labels not in imported data
+		for _, label := range existingLabels {
+			if !importedLabelMap[label] {
+				_ = store.RemoveLabel(ctx, issue.ID, label, "auto-import")
+			}
+		}
+	}
+
 	// Store new hash after successful import
 	_ = store.SetMetadata(ctx, "last_import_hash", currentHash)
 }
@@ -598,6 +640,14 @@ func flushToJSONL() {
 			return
 		}
 		issue.Dependencies = deps
+
+		// Get labels for this issue
+		labels, err := store.GetLabels(ctx, issueID)
+		if err != nil {
+			recordFailure(fmt.Errorf("failed to get labels for %s: %w", issueID, err))
+			return
+		}
+		issue.Labels = labels
 
 		// Update map
 		issueMap[issueID] = issue
@@ -1039,6 +1089,7 @@ var listCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		issueType, _ := cmd.Flags().GetString("type")
 		limit, _ := cmd.Flags().GetInt("limit")
+		labels, _ := cmd.Flags().GetStringSlice("label")
 
 		filter := types.IssueFilter{
 			Limit: limit,
@@ -1058,6 +1109,9 @@ var listCmd = &cobra.Command{
 		if issueType != "" {
 			t := types.IssueType(issueType)
 			filter.IssueType = &t
+		}
+		if len(labels) > 0 {
+			filter.Labels = labels
 		}
 
 		ctx := context.Background()
@@ -1089,6 +1143,7 @@ func init() {
 	listCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type")
+	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (comma-separated)")
 	listCmd.Flags().IntP("limit", "n", 0, "Limit results")
 	rootCmd.AddCommand(listCmd)
 }

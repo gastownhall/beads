@@ -316,6 +316,54 @@ Behavior:
 			}
 		}
 
+		// Phase 7: Process labels
+		// Sync labels for all imported issues
+		var labelsAdded, labelsRemoved int
+		for _, issue := range allIssues {
+			if issue.Labels == nil {
+				continue
+			}
+
+			// Get current labels for the issue
+			currentLabels, err := store.GetLabels(ctx, issue.ID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", issue.ID, err)
+				os.Exit(1)
+			}
+
+			// Convert slices to maps for easier comparison
+			currentLabelMap := make(map[string]bool)
+			for _, label := range currentLabels {
+				currentLabelMap[label] = true
+			}
+			importedLabelMap := make(map[string]bool)
+			for _, label := range issue.Labels {
+				importedLabelMap[label] = true
+			}
+
+			// Add missing labels
+			for _, label := range issue.Labels {
+				if !currentLabelMap[label] {
+					if err := store.AddLabel(ctx, issue.ID, label, "import"); err != nil {
+						fmt.Fprintf(os.Stderr, "Error adding label %s to %s: %v\n", label, issue.ID, err)
+						os.Exit(1)
+					}
+					labelsAdded++
+				}
+			}
+
+			// Remove labels not in imported data
+			for _, label := range currentLabels {
+				if !importedLabelMap[label] {
+					if err := store.RemoveLabel(ctx, issue.ID, label, "import"); err != nil {
+						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, issue.ID, err)
+						os.Exit(1)
+					}
+					labelsRemoved++
+				}
+			}
+		}
+
 		// Schedule auto-flush after import completes
 		markDirtyAndScheduleFlush()
 
@@ -332,6 +380,16 @@ Behavior:
 		}
 		if len(idMapping) > 0 {
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(idMapping))
+		}
+		if labelsAdded > 0 || labelsRemoved > 0 {
+			fmt.Fprintf(os.Stderr, ", %d labels synced", labelsAdded+labelsRemoved)
+			if labelsAdded > 0 && labelsRemoved > 0 {
+				fmt.Fprintf(os.Stderr, " (%d added, %d removed)", labelsAdded, labelsRemoved)
+			} else if labelsAdded > 0 {
+				fmt.Fprintf(os.Stderr, " (%d added)", labelsAdded)
+			} else {
+				fmt.Fprintf(os.Stderr, " (%d removed)", labelsRemoved)
+			}
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 	},
