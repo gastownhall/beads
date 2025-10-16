@@ -154,6 +154,115 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 	return tx.Commit()
 }
 
+// addDependencyUnchecked adds a dependency with minimal validation, used during
+// import/remap operations where we're preserving existing dependencies with new IDs.
+// Skips semantic validation (parent-child direction) but keeps essential checks:
+// - Issue existence validation
+// - Self-dependency prevention
+// - Cycle detection
+func (s *SQLiteStorage) addDependencyUnchecked(ctx context.Context, dep *types.Dependency, actor string) error {
+	// Validate dependency type
+	if !dep.Type.IsValid() {
+		return fmt.Errorf("invalid dependency type: %s", dep.Type)
+	}
+
+	// Validate that both issues exist
+	issueExists, err := s.GetIssue(ctx, dep.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to check issue %s: %w", dep.IssueID, err)
+	}
+	if issueExists == nil {
+		return fmt.Errorf("issue %s not found", dep.IssueID)
+	}
+
+	dependsOnExists, err := s.GetIssue(ctx, dep.DependsOnID)
+	if err != nil {
+		return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
+	}
+	if dependsOnExists == nil {
+		return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
+	}
+
+	// Prevent self-dependency
+	if dep.IssueID == dep.DependsOnID {
+		return fmt.Errorf("issue cannot depend on itself")
+	}
+
+	// NOTE: We skip parent-child direction validation here because during import/remap,
+	// we're just updating IDs on existing dependencies that were already validated.
+
+	dep.CreatedAt = time.Now()
+	dep.CreatedBy = actor
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Cycle detection (same as AddDependency)
+	var cycleExists bool
+	err = tx.QueryRowContext(ctx, `
+		WITH RECURSIVE paths AS (
+			SELECT
+				issue_id,
+				depends_on_id,
+				1 as depth
+			FROM dependencies
+			WHERE issue_id = ?
+
+			UNION ALL
+
+			SELECT
+				d.issue_id,
+				d.depends_on_id,
+				p.depth + 1
+			FROM dependencies d
+			JOIN paths p ON d.issue_id = p.depends_on_id
+			WHERE p.depth < ?
+		)
+		SELECT EXISTS(
+			SELECT 1 FROM paths
+			WHERE depends_on_id = ?
+		)
+	`, dep.DependsOnID, maxDependencyDepth, dep.IssueID).Scan(&cycleExists)
+
+	if err != nil {
+		return fmt.Errorf("failed to check for cycles: %w", err)
+	}
+
+	if cycleExists {
+		return fmt.Errorf("cannot add dependency: would create a cycle (%s → %s → ... → %s)",
+			dep.IssueID, dep.DependsOnID, dep.IssueID)
+	}
+
+	// Insert dependency
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
+		VALUES (?, ?, ?, ?, ?)
+	`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedAt, dep.CreatedBy)
+	if err != nil {
+		return fmt.Errorf("failed to add dependency: %w", err)
+	}
+
+	// Record event
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?)
+	`, dep.IssueID, types.EventDependencyAdded, actor,
+		fmt.Sprintf("Added dependency: %s %s %s", dep.IssueID, dep.Type, dep.DependsOnID))
+	if err != nil {
+		return fmt.Errorf("failed to record event: %w", err)
+	}
+
+	// Mark both issues as dirty
+	if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 // RemoveDependency removes a dependency
 func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)

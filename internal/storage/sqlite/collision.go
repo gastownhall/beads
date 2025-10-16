@@ -474,7 +474,9 @@ func updateDependencyReferences(ctx context.Context, s *SQLiteStorage, idMapping
 		}
 
 		// Add new dependency with updated IDs
-		if err := s.AddDependency(ctx, update.newDep, "import-remap"); err != nil {
+		// Use addDependencyUnchecked to skip semantic validation (like parent-child direction)
+		// since we're just remapping existing dependencies that were already validated
+		if err := s.addDependencyUnchecked(ctx, update.newDep, "import-remap"); err != nil {
 			return fmt.Errorf("failed to add updated dependency %s -> %s: %w",
 				update.newDep.IssueID, update.newDep.DependsOnID, err)
 		}
