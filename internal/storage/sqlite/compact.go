@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // CompactionCandidate represents an issue eligible for compaction
@@ -278,10 +280,16 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 
 // ApplyCompaction updates the compaction metadata for an issue after successfully compacting it.
 // This sets compaction_level, compacted_at, and original_size fields.
-func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int) error {
+func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int, compressedSize int) error {
 	now := time.Now().UTC()
 	
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	
+	_, err = tx.ExecContext(ctx, `
 		UPDATE issues
 		SET compaction_level = ?,
 		    compacted_at = ?,
@@ -292,6 +300,27 @@ func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, lev
 	
 	if err != nil {
 		return fmt.Errorf("failed to apply compaction metadata: %w", err)
+	}
+	
+	reductionPct := 0.0
+	if originalSize > 0 {
+		reductionPct = (1.0 - float64(compressedSize)/float64(originalSize)) * 100
+	}
+	
+	eventData := fmt.Sprintf(`{"tier":%d,"original_size":%d,"compressed_size":%d,"reduction_pct":%.1f}`,
+		level, originalSize, compressedSize, reductionPct)
+	
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, comment)
+		VALUES (?, ?, 'compactor', ?)
+	`, issueID, types.EventCompacted, eventData)
+	
+	if err != nil {
+		return fmt.Errorf("failed to record compaction event: %w", err)
+	}
+	
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	
 	return nil

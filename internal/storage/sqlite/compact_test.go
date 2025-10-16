@@ -333,7 +333,7 @@ func TestApplyCompaction(t *testing.T) {
 	}
 
 	originalSize := len(issue.Description)
-	err := store.ApplyCompaction(ctx, issue.ID, 1, originalSize)
+	err := store.ApplyCompaction(ctx, issue.ID, 1, originalSize, 500)
 	if err != nil {
 		t.Fatalf("ApplyCompaction failed: %v", err)
 	}

@@ -843,11 +843,14 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var estimatedMinutes sql.NullInt64
 	var assignee sql.NullString
 	var externalRef sql.NullString
+	var compactedAt sql.NullTime
+	var originalSize sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at, external_ref
+		       created_at, updated_at, closed_at, external_ref,
+		       compaction_level, compacted_at, original_size
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -855,6 +858,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
+		&issue.CompactionLevel, &compactedAt, &originalSize,
 	)
 
 	if err == sql.ErrNoRows {
@@ -876,6 +880,12 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if externalRef.Valid {
 		issue.ExternalRef = &externalRef.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
 	}
 
 	return &issue, nil

@@ -1003,6 +1003,30 @@ var showCmd = &cobra.Command{
 		fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 		fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
+		// Show compaction status
+		if issue.CompactionLevel > 0 {
+			tierEmoji := ""
+			if issue.CompactionLevel == 1 {
+				tierEmoji = "🗜️ "
+			} else if issue.CompactionLevel == 2 {
+				tierEmoji = "📦 "
+			}
+			fmt.Printf("\n%sCompacted: Tier %d", tierEmoji, issue.CompactionLevel)
+			if issue.CompactedAt != nil {
+				fmt.Printf(" on %s", issue.CompactedAt.Format("2006-01-02"))
+			}
+			if issue.OriginalSize > 0 {
+				currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+				saved := issue.OriginalSize - currentSize
+				if saved > 0 {
+					reduction := float64(saved) / float64(issue.OriginalSize) * 100
+					fmt.Printf(" (%.0f%% reduction, saved %d bytes)", reduction, saved)
+				}
+			}
+			fmt.Println()
+			fmt.Printf("💾 Restore: bd compact --restore %s\n", issue.ID)
+		}
+
 		if issue.Description != "" {
 			fmt.Printf("\nDescription:\n%s\n", issue.Description)
 		}
