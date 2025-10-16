@@ -634,7 +634,8 @@ func flushToJSONL() {
 	})
 
 	// Write to temp file first, then rename (atomic)
-	tempPath := jsonlPath + ".tmp"
+	// Use PID in filename to avoid collisions between concurrent bd commands (bd-306)
+	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
 	f, err := os.Create(tempPath)
 	if err != nil {
 		recordFailure(fmt.Errorf("failed to create temp file: %w", err))
