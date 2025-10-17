@@ -55,8 +55,8 @@ var rootCmd = &cobra.Command{
 	Short: "bd - Dependency-aware issue tracker",
 	Long:  `Issues chained together like beads. A lightweight issue tracker with first-class dependency support.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Skip database initialization for init and daemon commands
-		if cmd.Name() == "init" || cmd.Name() == "daemon" {
+		// Skip database initialization for commands that don't need a database
+		if cmd.Name() == "init" || cmd.Name() == "daemon" || cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "quickstart" {
 			return
 		}
 
@@ -72,9 +72,11 @@ var rootCmd = &cobra.Command{
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {
-				// Fallback to default location (will be created by init command)
-				home, _ := os.UserHomeDir()
-				dbPath = filepath.Join(home, ".beads", "default.db")
+				// No database found - error out instead of falling back to ~/.beads
+				fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
+				fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
+				fmt.Fprintf(os.Stderr, "      or set BEADS_DB environment variable to specify a database\n")
+				os.Exit(1)
 			}
 		}
 

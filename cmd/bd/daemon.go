@@ -115,11 +115,8 @@ func ensureBeadsDir() (string, error) {
 	if dbPath != "" {
 		beadsDir = filepath.Dir(dbPath)
 	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve home directory: %w", err)
-		}
-		beadsDir = filepath.Join(home, ".beads")
+		// No database path - error out instead of falling back to ~/.beads
+		return "", fmt.Errorf("no database path configured (run 'bd init' or set BEADS_DB)")
 	}
 
 	if err := os.MkdirAll(beadsDir, 0700); err != nil {
@@ -446,13 +443,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		if foundDB := beads.FindDatabasePath(); foundDB != "" {
 			daemonDBPath = foundDB
 		} else {
-			// Fallback to default location
-			home, err := os.UserHomeDir()
-			if err != nil {
-				log("Error: cannot resolve home directory: %v", err)
-				os.Exit(1)
-			}
-			daemonDBPath = filepath.Join(home, ".beads", "default.db")
+			// No database found - error out instead of falling back to ~/.beads
+			log("Error: no beads database found")
+			log("Hint: run 'bd init' to create a database or set BEADS_DB environment variable")
+			os.Exit(1)
 		}
 	}
 	

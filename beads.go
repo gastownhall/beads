@@ -53,9 +53,8 @@ func NewSQLiteStorage(dbPath string) (Storage, error) {
 // FindDatabasePath discovers the bd database path using bd's standard search order:
 //  1. $BEADS_DB environment variable
 //  2. .beads/*.db in current directory or ancestors
-//  3. ~/.beads/default.db (fallback)
 //
-// Returns empty string if no database is found at (1) or (2) and (3) doesn't exist.
+// Returns empty string if no database is found.
 func FindDatabasePath() string {
 	// 1. Check environment variable
 	if envDB := os.Getenv("BEADS_DB"); envDB != "" {
@@ -67,15 +66,7 @@ func FindDatabasePath() string {
 		return foundDB
 	}
 
-	// 3. Try home directory default
-	if home, err := os.UserHomeDir(); err == nil {
-		defaultDB := filepath.Join(home, ".beads", "default.db")
-		// Only return if it exists
-		if _, err := os.Stat(defaultDB); err == nil {
-			return defaultDB
-		}
-	}
-
+	// No fallback to ~/.beads - return empty string
 	return ""
 }
 

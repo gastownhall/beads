@@ -149,12 +149,20 @@ class BdClient:
         """
         cmd = [self.bd_path, *args, *self._global_flags(), "--json"]
 
+        # Log database routing for debugging
+        import sys
+        working_dir = self._get_working_dir()
+        db_info = self.beads_db if self.beads_db else "auto-discover"
+        print(f"[beads-mcp] Running bd command: {' '.join(args)}", file=sys.stderr)
+        print(f"[beads-mcp]   Database: {db_info}", file=sys.stderr)
+        print(f"[beads-mcp]   Working dir: {working_dir}", file=sys.stderr)
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self._get_working_dir(),
+                cwd=working_dir,
             )
             stdout, stderr = await process.communicate()
         except FileNotFoundError as e:
