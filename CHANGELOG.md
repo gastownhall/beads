@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2025-10-17
+
+### Added
+- **Daemon RPC Architecture**: Production-ready RPC protocol for client-daemon communication (bd-110, bd-111, bd-112, bd-114, bd-117)
+  - Unix socket-based RPC enables faster command execution via long-lived daemon process
+  - Automatic client detection with graceful fallback to direct mode
+  - Serializes SQLite writes and batches git operations to prevent concurrent access issues
+  - Resolves database corruption, git lock contention, and ID counter conflicts with multiple agents
+  - Comprehensive integration tests and stress testing with 4+ concurrent agents
+- **Issue Deletion**: `bd delete` command for removing issues with comprehensive cleanup
+  - Safely removes issues from database and JSONL export
+  - Cleans up dependencies and references to deleted issues
+  - Works correctly with git-based workflows
+- **Issue Restoration**: `bd restore` command for recovering compacted/deleted issues
+  - Restores issues from git history when needed
+  - Preserves references and dependency relationships
+- **Prefix Renaming**: `bd rename-prefix` command for batch ID prefix changes
+  - Updates all issue IDs and text references throughout the database
+  - Useful for project rebranding or namespace changes
+- **Comprehensive Testing**: Added scripttest-based integration tests (#59)
+  - End-to-end coverage for CLI workflows
+  - Tests for init command edge cases (bd-70)
+
+### Fixed
+- **Critical**: Metadata errors causing crashes on first import (bd-663)
+  - Auto-import now treats missing metadata as first import instead of failing
+  - Eliminates initialization errors in fresh repositories
+- **Critical**: N+1 query pattern in auto-import (bd-666)
+  - Replaced per-issue queries with batch fetching
+  - Dramatically improves performance for large imports
+- **Critical**: Duplicate issue imports (bd-421)
+  - Added deduplication logic to prevent importing same issue multiple times
+  - Maintains data integrity during repeated imports
+- **Bug**: Auto-flush missing after renumber/rename-prefix (bd-346)
+  - Commands now properly export to JSONL after completion
+  - Ensures git sees latest changes immediately
+- **Bug**: Renumber ID collision with UUID temp IDs (bd-345)
+  - Uses proper UUID-based temporary IDs to prevent conflicts during renumbering
+  - ID counter now correctly syncs after renumbering operations
+- **Bug**: Collision resolution dependency handling (bd-437)
+  - Uses unchecked dependency addition during collision remapping
+  - Prevents spurious cycle detection errors
+- **Bug**: macOS crashes documented (closes #3, bd-87)
+  - Added CGO_ENABLED=1 workaround documentation for macOS builds
+
+### Changed
+- CLI commands now prefer RPC when daemon is running
+  - Improved error reporting and diagnostics for RPC failures
+  - More consistent exit codes and status messages
+- Internal command architecture refactored for RPC client/server sharing
+  - Reduced code duplication between direct and daemon modes
+  - Improved reliability of background operations
+- Ready work sort order flipped to show oldest issues first
+  - Helps prioritize long-standing work items
+
+### Performance
+- Faster command execution through RPC-backed daemon (up to 10x improvement)
+- N+1 query elimination in list/show operations
+- Reduced write amplification from improved auto-flush behavior
+- Cycle detection performance benchmarks added (bd-311)
+
+### Testing
+- Integration tests for daemon RPC request/response flows
+- End-to-end coverage for delete/restore lifecycles  
+- Regression tests for metadata handling, auto-flush, ID counter sync
+- Comprehensive tests for collision detection in auto-import (bd-401)
+
+### Documentation
+- Release process documentation added (RELEASING.md)
+- Multiple workstreams warning banner for development coordination
+
 ## [0.9.8] - 2025-10-16
 
 ### Added
