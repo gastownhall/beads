@@ -57,6 +57,9 @@ bd show <id> --json
 bd rename-prefix kw- --dry-run  # Preview changes
 bd rename-prefix kw- --json     # Apply rename
 
+# Restore compacted issue from git history
+bd restore <id>  # View full history at time of compaction
+
 # Import with collision detection
 bd import -i .beads/issues.jsonl --dry-run             # Preview only
 bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve

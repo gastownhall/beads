@@ -83,7 +83,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		  AND NOT EXISTS (
 		    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
 		  )
-		ORDER BY i.priority ASC, i.created_at DESC
+		ORDER BY i.priority ASC, i.created_at ASC
 		%s
 	`, whereSQL, limitSQL)
 

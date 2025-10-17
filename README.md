@@ -418,7 +418,14 @@ Uses Claude Haiku for semantic summarization. **Tier 1** (30+ days): 70-80% redu
 
 Eligibility: Must be closed with no open dependents. Tier 2 requires low reference frequency (<5 commits or <3 issues in last 90 days).
 
-**Permanent:** Original content is discarded. Recover old versions from git history if needed.
+**Permanent:** Original content is discarded. Recover old versions from git history using `bd restore <issue-id>`.
+
+**Restore Compacted Issues:**
+```bash
+bd restore bd-42  # View full history from git at time of compaction
+```
+
+The restore command checks out the git commit saved during compaction, reads the full issue from JSONL history, and displays all original content. This is read-only and doesn't modify your database.
 
 **Automation:**
 ```bash
