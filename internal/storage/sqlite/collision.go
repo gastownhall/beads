@@ -40,7 +40,11 @@ func DetectCollisions(ctx context.Context, s *SQLiteStorage, incomingIssues []*t
 		NewIssues:    make([]string, 0),
 	}
 
-	for _, incoming := range incomingIssues {
+	// Phase 1: Deduplicate within incoming batch
+	// Group by content hash to find duplicates with different IDs
+	deduped := deduplicateIncomingIssues(incomingIssues)
+
+	for _, incoming := range deduped {
 		// Check if issue exists in database
 		existing, err := s.GetIssue(ctx, incoming.ID)
 		if err != nil {
@@ -231,6 +235,61 @@ func countReferences(issueID string, allIssues []*types.Issue, allDeps map[strin
 	}
 
 	return count, nil
+}
+
+// deduplicateIncomingIssues removes content-duplicate issues within the incoming batch
+// Returns deduplicated slice, keeping the first issue ID (lexicographically) for each unique content
+func deduplicateIncomingIssues(issues []*types.Issue) []*types.Issue {
+	// Group issues by content hash (ignoring ID and timestamps)
+	type contentKey struct {
+		title              string
+		description        string
+		design             string
+		acceptanceCriteria string
+		notes              string
+		status             string
+		priority           int
+		issueType          string
+		assignee           string
+	}
+
+	seen := make(map[contentKey]*types.Issue)
+	result := make([]*types.Issue, 0, len(issues))
+
+	for _, issue := range issues {
+		key := contentKey{
+			title:              issue.Title,
+			description:        issue.Description,
+			design:             issue.Design,
+			acceptanceCriteria: issue.AcceptanceCriteria,
+			notes:              issue.Notes,
+			status:             string(issue.Status),
+			priority:           issue.Priority,
+			issueType:          string(issue.IssueType),
+			assignee:           issue.Assignee,
+		}
+
+		if existing, found := seen[key]; found {
+			// Duplicate found - keep the one with lexicographically smaller ID
+			if issue.ID < existing.ID {
+				// Replace existing with this one (smaller ID)
+				for i, r := range result {
+					if r.ID == existing.ID {
+						result[i] = issue
+						break
+					}
+				}
+				seen[key] = issue
+			}
+			// Otherwise skip this duplicate
+		} else {
+			// First time seeing this content
+			seen[key] = issue
+			result = append(result, issue)
+		}
+	}
+
+	return result
 }
 
 // RemapCollisions handles ID remapping for colliding issues
