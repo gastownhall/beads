@@ -13,6 +13,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -273,9 +274,13 @@ func renumberIssuesInDB(ctx context.Context, prefix string, idMapping map[string
 		return fmt.Errorf("failed to update dependencies: %w", err)
 	}
 
-	// Update the counter to highest new number using SetConfig
-	// The counter will be synced automatically on next issue creation
-	// For now, we don't need to explicitly update it since issues are renumbered 1..N
+	// Update the counter to the highest renumbered ID so next issue gets correct number
+	// After renumbering 108 issues, the counter should be 108 so next issue is bd-109
+	// We can't access the db field directly, so we'll call SyncAllCounters which recalculates
+	// all counters from the actual max IDs in the database
+	if err := store.(*sqlite.SQLiteStorage).SyncAllCounters(ctx); err != nil {
+		return fmt.Errorf("failed to sync counter after renumber: %w", err)
+	}
 
 	return nil
 }
