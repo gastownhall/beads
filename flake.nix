@@ -19,7 +19,7 @@
       {
         packages.default = pkgs.buildGoModule {
           pname = "beads";
-          version = "0.9.6";
+          version = "0.9.9";
 
           src = self;
 
@@ -27,7 +27,7 @@
           subPackages = [ "cmd/bd" ];
 
           # Go module dependencies hash (computed via nix build)
-          vendorHash = "sha256-WvwT48izxMxx9qQmZp/6zwv7hHgTVd9KmOJFm7RWvrI=";
+          vendorHash = "sha256-1ufUs1PvFGsSR0DTSymni3RqecEBzAm//OBUWgaTwEs=";
 
           meta = with pkgs.lib; {
             description = "beads (bd) - An issue tracker designed for AI-supervised coding workflows";
