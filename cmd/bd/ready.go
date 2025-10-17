@@ -9,6 +9,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -130,6 +131,17 @@ var blockedCmd = &cobra.Command{
 	Use:   "blocked",
 	Short: "Show blocked issues",
 	Run: func(cmd *cobra.Command, args []string) {
+		// If daemon is running but doesn't support this command, use direct storage
+		if daemonClient != nil && store == nil {
+			var err error
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
+		}
+
 		ctx := context.Background()
 		blocked, err := store.GetBlockedIssues(ctx)
 		if err != nil {
