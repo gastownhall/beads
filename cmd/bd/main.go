@@ -188,12 +188,12 @@ func autoImportIfNewer() {
 	ctx := context.Background()
 	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
 	if err != nil {
-		// Metadata not supported or error reading - this shouldn't happen
-		// since we added metadata table, but be defensive
+		// Metadata error - treat as first import rather than skipping (bd-663)
+		// This allows auto-import to recover from corrupt/missing metadata
 		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, metadata error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Debug: metadata read failed (%v), treating as first import\n", err)
 		}
-		return
+		lastHash = ""
 	}
 
 	// Compare hashes
