@@ -115,8 +115,14 @@ func ensureBeadsDir() (string, error) {
 	if dbPath != "" {
 		beadsDir = filepath.Dir(dbPath)
 	} else {
-		// No database path - error out instead of falling back to ~/.beads
-		return "", fmt.Errorf("no database path configured (run 'bd init' or set BEADS_DB)")
+		// Use public API to find database (same logic as other commands)
+		if foundDB := beads.FindDatabasePath(); foundDB != "" {
+			dbPath = foundDB // Store it for later use
+			beadsDir = filepath.Dir(foundDB)
+		} else {
+			// No database found - error out instead of falling back to ~/.beads
+			return "", fmt.Errorf("no database path configured (run 'bd init' or set BEADS_DB)")
+		}
 	}
 
 	if err := os.MkdirAll(beadsDir, 0700); err != nil {
