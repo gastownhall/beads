@@ -1180,6 +1180,24 @@ Agents may not realize an issue already exists. Prevention strategies:
 
 True deduplication logic would require fuzzy matching - contributions welcome!
 
+### `zsh: killed bd` or crashes on macOS
+
+Some users report crashes when running `bd init` or other commands on macOS. This is typically caused by CGO/SQLite compatibility issues. 
+
+**Workaround:**
+```bash
+# Build with CGO enabled
+CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Or if building from source
+git clone https://github.com/steveyegge/beads
+cd beads
+CGO_ENABLED=1 go build -o bd ./cmd/bd
+sudo mv bd /usr/local/bin/
+```
+
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+
 ## Documentation
 
 - **[README.md](README.md)** - You are here! Complete guide
