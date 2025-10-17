@@ -8,6 +8,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -23,6 +25,32 @@ var depAddCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		depType, _ := cmd.Flags().GetString("type")
 
+		// If daemon is running, use RPC
+		if daemonClient != nil {
+			depArgs := &rpc.DepAddArgs{
+				FromID:  args[0],
+				ToID:    args[1],
+				DepType: depType,
+			}
+
+			resp, err := daemonClient.AddDependency(depArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				fmt.Println(string(resp.Data))
+				return
+			}
+
+			green := color.New(color.FgGreen).SprintFunc()
+			fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
+				green("✓"), args[0], args[1], depType)
+			return
+		}
+
+		// Direct mode
 		dep := &types.Dependency{
 			IssueID:     args[0],
 			DependsOnID: args[1],
@@ -84,6 +112,31 @@ var depRemoveCmd = &cobra.Command{
 	Short: "Remove a dependency",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
+		// If daemon is running, use RPC
+		if daemonClient != nil {
+			depArgs := &rpc.DepRemoveArgs{
+				FromID: args[0],
+				ToID:   args[1],
+			}
+
+			resp, err := daemonClient.RemoveDependency(depArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				fmt.Println(string(resp.Data))
+				return
+			}
+
+			green := color.New(color.FgGreen).SprintFunc()
+			fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
+				green("✓"), args[0], args[1])
+			return
+		}
+
+		// Direct mode
 		ctx := context.Background()
 		if err := store.RemoveDependency(ctx, args[0], args[1], actor); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -113,6 +166,17 @@ var depTreeCmd = &cobra.Command{
 	Short: "Show dependency tree",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		// If daemon is running but doesn't support this command, use direct storage
+		if daemonClient != nil && store == nil {
+			var err error
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
+		}
+
 		ctx := context.Background()
 		tree, err := store.GetDependencyTree(ctx, args[0], 50)
 		if err != nil {
@@ -163,6 +227,17 @@ var depCyclesCmd = &cobra.Command{
 	Use:   "cycles",
 	Short: "Detect dependency cycles",
 	Run: func(cmd *cobra.Command, args []string) {
+		// If daemon is running but doesn't support this command, use direct storage
+		if daemonClient != nil && store == nil {
+			var err error
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
+		}
+
 		ctx := context.Background()
 		cycles, err := store.DetectCycles(ctx)
 		if err != nil {
