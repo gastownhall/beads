@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -256,5 +259,398 @@ func TestDaemonIntervalParsing(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, d)
 			}
 		})
+	}
+}
+
+func TestDaemonRPCServerIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	dbDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatalf("Failed to create beads dir: %v", err)
+	}
+
+	testDBPath := filepath.Join(dbDir, "test.db")
+	testStore, err := sqlite.New(testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer testStore.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	testIssue := &types.Issue{
+		Title:       "Test RPC issue",
+		Description: "Test RPC integration",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+	}
+	if err := testStore.CreateIssue(ctx, testIssue, "test"); err != nil {
+		t.Fatalf("Failed to create test issue: %v", err)
+	}
+
+	if testIssue.ID == "" {
+		t.Fatal("Issue ID should be set after creation")
+	}
+}
+
+func TestDaemonConcurrentOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	dbDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatalf("Failed to create beads dir: %v", err)
+	}
+
+	testDBPath := filepath.Join(dbDir, "test.db")
+	testStore, err := sqlite.New(testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer testStore.Close()
+
+	ctx := context.Background()
+	
+	numGoroutines := 10
+	errChan := make(chan error, numGoroutines)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			
+			issue := &types.Issue{
+				Title:       fmt.Sprintf("Concurrent issue %d", n),
+				Description: "Test concurrent operations",
+				Status:      types.StatusOpen,
+				Priority:    1,
+				IssueType:   types.TypeTask,
+			}
+			
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				errChan <- fmt.Errorf("goroutine %d create failed: %w", n, err)
+				return
+			}
+			
+			updates := map[string]interface{}{
+				"status": types.StatusInProgress,
+			}
+			if err := testStore.UpdateIssue(ctx, issue.ID, updates, "test"); err != nil {
+				errChan <- fmt.Errorf("goroutine %d update failed: %w", n, err)
+				return
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		t.Error(err)
+	}
+
+	issues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("Failed to search issues: %v", err)
+	}
+
+	if len(issues) != numGoroutines {
+		t.Errorf("Expected %d issues, got %d", numGoroutines, len(issues))
+	}
+}
+
+func TestDaemonSocketCleanupOnShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Use /tmp directly to avoid macOS socket path length limits (104 chars)
+	tmpDir, err := os.MkdirTemp("/tmp", "bd-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	
+	socketPath := filepath.Join(tmpDir, "test.sock")
+	testDBPath := filepath.Join(tmpDir, "test.db")
+
+	testStore, err := sqlite.New(testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+
+	server := newMockDaemonServer(socketPath, testStore)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(ctx)
+	}()
+
+	// Wait for server to be ready
+	if err := server.WaitReady(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	
+	// Verify socket exists (with retry for filesystem sync)
+	var socketFound bool
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			socketFound = true
+			break
+		} else {
+			lastErr = err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !socketFound {
+		t.Fatalf("Socket should exist after server is ready (path=%s, err=%v)", socketPath, lastErr)
+	}
+
+	cancel()
+	
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Error("Server did not shut down within timeout")
+	}
+
+	testStore.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("Socket should be cleaned up after shutdown")
+	}
+}
+
+func TestDaemonServerStartFailureSocketExists(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Use /tmp directly to avoid macOS socket path length limits (104 chars)
+	tmpDir, err := os.MkdirTemp("/tmp", "bd-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	
+	socketPath := filepath.Join(tmpDir, "test.sock")
+	testDBPath := filepath.Join(tmpDir, "test.db")
+
+	testStore1, err := sqlite.New(testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer testStore1.Close()
+
+	server1 := newMockDaemonServer(socketPath, testStore1)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	go server1.Start(ctx1)
+	
+	// Wait for server to be ready
+	if err := server1.WaitReady(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	
+	// Verify socket exists (with retry for filesystem sync)
+	var socketFound bool
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			socketFound = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !socketFound {
+		t.Fatal("Socket should exist for first server")
+	}
+
+	testStore2, err := sqlite.New(filepath.Join(tmpDir, "test2.db"))
+	if err != nil {
+		t.Fatalf("Failed to create second test database: %v", err)
+	}
+	defer testStore2.Close()
+
+	server2 := newMockDaemonServer(socketPath, testStore2)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- server2.Start(ctx2)
+	}()
+
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Error("Expected second server to fail to start, but it succeeded")
+		}
+	case <-time.After(1 * time.Second):
+	}
+
+	cancel1()
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestDaemonGracefulShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Use /tmp directly to avoid macOS socket path length limits (104 chars)
+	tmpDir, err := os.MkdirTemp("/tmp", "bd-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	
+	socketPath := filepath.Join(tmpDir, "test.sock")
+	testDBPath := filepath.Join(tmpDir, "test.db")
+
+	testStore, err := sqlite.New(testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+
+	server := newMockDaemonServer(socketPath, testStore)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	serverDone := make(chan error, 1)
+	startTime := time.Now()
+	
+	go func() {
+		serverDone <- server.Start(ctx)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-serverDone:
+		shutdownDuration := time.Since(startTime)
+		
+		if err != nil && err != context.Canceled {
+			t.Errorf("Server returned unexpected error: %v", err)
+		}
+		
+		if shutdownDuration > 3*time.Second {
+			t.Errorf("Shutdown took too long: %v", shutdownDuration)
+		}
+		
+		testStore.Close()
+		
+		if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+			t.Error("Socket should be cleaned up after graceful shutdown")
+		}
+		
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server did not shut down gracefully within timeout")
+	}
+}
+
+type mockDaemonServer struct {
+	socketPath string
+	store      storage.Storage
+	listener   net.Listener
+	mu         sync.Mutex
+	shutdown   bool
+	ready      chan error
+}
+
+func newMockDaemonServer(socketPath string, store storage.Storage) *mockDaemonServer {
+	return &mockDaemonServer{
+		socketPath: socketPath,
+		store:      store,
+		ready:      make(chan error, 1),
+	}
+}
+
+func (s *mockDaemonServer) WaitReady(timeout time.Duration) error {
+	select {
+	case err := <-s.ready:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("server did not become ready within %v", timeout)
+	}
+}
+
+func (s *mockDaemonServer) Start(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0755); err != nil {
+		return fmt.Errorf("failed to create socket directory: %w", err)
+	}
+
+	// Check if socket already exists
+	if _, err := os.Stat(s.socketPath); err == nil {
+		// Socket exists - try to connect to see if server is running
+		conn, err := net.Dial("unix", s.socketPath)
+		if err == nil {
+			conn.Close()
+			startErr := fmt.Errorf("socket already in use: %s", s.socketPath)
+			s.ready <- startErr
+			return startErr
+		}
+		// Socket is stale, remove it
+		_ = os.Remove(s.socketPath)
+	}
+
+	var err error
+	s.listener, err = net.Listen("unix", s.socketPath)
+	if err != nil {
+		startErr := fmt.Errorf("failed to listen on socket: %w", err)
+		s.ready <- startErr
+		return startErr
+	}
+	
+	// Signal that server is ready
+	s.ready <- nil
+	
+	// Set up cleanup before accepting connections
+	defer func() {
+		s.listener.Close()
+		os.Remove(s.socketPath)
+	}()
+
+	doneChan := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		s.mu.Lock()
+		s.shutdown = true
+		s.mu.Unlock()
+		s.listener.Close()
+		close(doneChan)
+	}()
+
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			s.mu.Lock()
+			shutdown := s.shutdown
+			s.mu.Unlock()
+			if shutdown {
+				<-doneChan
+				return ctx.Err()
+			}
+			return fmt.Errorf("failed to accept connection: %w", err)
+		}
+		conn.Close()
 	}
 }
