@@ -774,16 +774,9 @@ Each line is a complete JSON issue object:
 
 ### Setup
 
-Add to `.gitignore`:
-```
-.beads/*.db
-.beads/*.db-*
-```
-
-Add to git:
-```
-.beads/issues.jsonl
-```
+The `.beads/` directory is automatically configured during `bd init`:
+- Database files (`.beads/*.db`, `.beads/*.db-*`) are gitignored automatically
+- JSONL file (`.beads/issues.jsonl`) is tracked in git
 
 ### Workflow
 

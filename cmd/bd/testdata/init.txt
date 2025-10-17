@@ -2,3 +2,6 @@
 bd init --prefix test
 stdout 'initialized successfully'
 exists .beads/test.db
+exists .beads/.gitignore
+grep '^\*\.db$' .beads/.gitignore
+grep '^\*\.db-\*$' .beads/.gitignore

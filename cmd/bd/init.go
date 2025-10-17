@@ -42,6 +42,14 @@ and database file. Optionally specify a custom issue prefix.`,
 			os.Exit(1)
 		}
 
+		// Create .gitignore in .beads directory
+		gitignorePath := filepath.Join(beadsDir, ".gitignore")
+		gitignoreContent := "*.db\n*.db-*\n"
+		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create .gitignore: %v\n", err)
+			// Non-fatal - continue anyway
+		}
+
 		// Create database
 		dbPath := filepath.Join(beadsDir, prefix+".db")
 		store, err := sqlite.New(dbPath)
