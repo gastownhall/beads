@@ -1254,6 +1254,16 @@ func (s *SQLiteStorage) RenameCounterPrefix(ctx context.Context, oldPrefix, newP
 	return tx.Commit()
 }
 
+// ResetCounter deletes the counter for a prefix, forcing it to be recalculated from max ID
+// This is used by renumber to ensure the counter matches the actual max ID after renumbering
+func (s *SQLiteStorage) ResetCounter(ctx context.Context, prefix string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM issue_counters WHERE prefix = ?`, prefix)
+	if err != nil {
+		return fmt.Errorf("failed to delete counter: %w", err)
+	}
+	return nil
+}
+
 // CloseIssue closes an issue with a reason
 func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string, actor string) error {
 	now := time.Now()
