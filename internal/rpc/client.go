@@ -6,57 +6,58 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
-	"sync"
 	"time"
 )
 
-// Client is an RPC client that communicates with the bd daemon.
+// Client represents an RPC client that connects to the daemon
 type Client struct {
-	sockPath string
-	mu       sync.Mutex
-	conn     net.Conn
+	conn       net.Conn
+	socketPath string
 }
 
-// TryConnect attempts to connect to the daemon and returns a client if successful.
-// Returns nil if the daemon is not running or socket doesn't exist.
-func TryConnect(sockPath string) *Client {
-	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		return nil
+// TryConnect attempts to connect to the daemon socket
+// Returns nil if no daemon is running
+func TryConnect(socketPath string) (*Client, error) {
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		return nil, nil
 	}
 
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	client := &Client{
-		sockPath: sockPath,
-		conn:     conn,
+		conn:       conn,
+		socketPath: socketPath,
 	}
 
-	if !client.ping() {
+	if err := client.Ping(); err != nil {
 		conn.Close()
-		return nil
+		return nil, nil
 	}
 
-	return client
+	return client, nil
 }
 
-// ping sends a test request to verify the daemon is responsive.
-func (c *Client) ping() bool {
-	req, _ := NewRequest(OpStats, nil)
-	_, err := c.Execute(req)
-	return err == nil
+// Close closes the connection to the daemon
+func (c *Client) Close() error {
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
 }
 
-// Execute sends a request to the daemon and returns the response.
-func (c *Client) Execute(req *Request) (*Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// Execute sends an RPC request and waits for a response
+func (c *Client) Execute(operation string, args interface{}) (*Response, error) {
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal args: %w", err)
+	}
 
-	if c.conn == nil {
-		return nil, fmt.Errorf("client not connected")
+	req := Request{
+		Operation: operation,
+		Args:      argsJSON,
 	}
 
 	reqJSON, err := json.Marshal(req)
@@ -64,82 +65,100 @@ func (c *Client) Execute(req *Request) (*Response, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	reqJSON = append(reqJSON, '\n')
-
-	if _, err := c.conn.Write(reqJSON); err != nil {
-		c.reconnect()
+	writer := bufio.NewWriter(c.conn)
+	if _, err := writer.Write(reqJSON); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
+	if err := writer.WriteByte('\n'); err != nil {
+		return nil, fmt.Errorf("failed to write newline: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, fmt.Errorf("failed to flush: %w", err)
+	}
 
-	scanner := bufio.NewScanner(c.conn)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			c.reconnect()
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-		c.reconnect()
-		return nil, fmt.Errorf("connection closed")
+	reader := bufio.NewReader(c.conn)
+	respLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var resp Response
-	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(respLine, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if !resp.Success {
+		return &resp, fmt.Errorf("operation failed: %s", resp.Error)
 	}
 
 	return &resp, nil
 }
 
-// reconnect attempts to reconnect to the daemon.
-func (c *Client) reconnect() error {
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-
-	var err error
-	backoff := 100 * time.Millisecond
-
-	for i := 0; i < 3; i++ {
-		c.conn, err = net.DialTimeout("unix", c.sockPath, 2*time.Second)
-		if err == nil {
-			return nil
-		}
-		time.Sleep(backoff)
-		backoff *= 2
-	}
-
-	return fmt.Errorf("failed to reconnect after 3 attempts: %w", err)
-}
-
-// Close closes the client connection.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		err := c.conn.Close()
-		c.conn = nil
+// Ping sends a ping request to verify the daemon is alive
+func (c *Client) Ping() error {
+	resp, err := c.Execute(OpPing, nil)
+	if err != nil {
 		return err
 	}
+
+	if !resp.Success {
+		return fmt.Errorf("ping failed: %s", resp.Error)
+	}
+
 	return nil
 }
 
-// SocketPath returns the default socket path for the given beads directory.
-func SocketPath(beadsDir string) string {
-	return filepath.Join(beadsDir, "bd.sock")
+// Create creates a new issue via the daemon
+func (c *Client) Create(args *CreateArgs) (*Response, error) {
+	return c.Execute(OpCreate, args)
 }
 
-// DefaultSocketPath returns the socket path in the current working directory's .beads folder.
-func DefaultSocketPath() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get working directory: %w", err)
-	}
+// Update updates an issue via the daemon
+func (c *Client) Update(args *UpdateArgs) (*Response, error) {
+	return c.Execute(OpUpdate, args)
+}
 
-	beadsDir := filepath.Join(wd, ".beads")
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return "", fmt.Errorf(".beads directory not found")
-	}
+// Close closes an issue via the daemon (operation, not connection)
+func (c *Client) CloseIssue(args *CloseArgs) (*Response, error) {
+	return c.Execute(OpClose, args)
+}
 
-	return SocketPath(beadsDir), nil
+// List lists issues via the daemon
+func (c *Client) List(args *ListArgs) (*Response, error) {
+	return c.Execute(OpList, args)
+}
+
+// Show shows an issue via the daemon
+func (c *Client) Show(args *ShowArgs) (*Response, error) {
+	return c.Execute(OpShow, args)
+}
+
+// Ready gets ready work via the daemon
+func (c *Client) Ready(args *ReadyArgs) (*Response, error) {
+	return c.Execute(OpReady, args)
+}
+
+// Stats gets statistics via the daemon
+func (c *Client) Stats() (*Response, error) {
+	return c.Execute(OpStats, nil)
+}
+
+// AddDependency adds a dependency via the daemon
+func (c *Client) AddDependency(args *DepAddArgs) (*Response, error) {
+	return c.Execute(OpDepAdd, args)
+}
+
+// RemoveDependency removes a dependency via the daemon
+func (c *Client) RemoveDependency(args *DepRemoveArgs) (*Response, error) {
+	return c.Execute(OpDepRemove, args)
+}
+
+// AddLabel adds a label via the daemon
+func (c *Client) AddLabel(args *LabelAddArgs) (*Response, error) {
+	return c.Execute(OpLabelAdd, args)
+}
+
+// RemoveLabel removes a label via the daemon
+func (c *Client) RemoveLabel(args *LabelRemoveArgs) (*Response, error) {
+	return c.Execute(OpLabelRemove, args)
 }

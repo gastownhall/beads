@@ -2,87 +2,127 @@ package rpc
 
 import "encoding/json"
 
-// Request represents an RPC request from a client to the daemon.
+// Operation constants for all bd commands
+const (
+	OpPing      = "ping"
+	OpCreate    = "create"
+	OpUpdate    = "update"
+	OpClose     = "close"
+	OpList      = "list"
+	OpShow      = "show"
+	OpReady     = "ready"
+	OpStats     = "stats"
+	OpDepAdd    = "dep_add"
+	OpDepRemove = "dep_remove"
+	OpDepTree   = "dep_tree"
+	OpLabelAdd  = "label_add"
+	OpLabelRemove = "label_remove"
+)
+
+// Request represents an RPC request from client to daemon
 type Request struct {
 	Operation string          `json:"operation"`
 	Args      json.RawMessage `json:"args"`
+	Actor     string          `json:"actor,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
 }
 
-// Response represents an RPC response from the daemon to a client.
+// Response represents an RPC response from daemon to client
 type Response struct {
 	Success bool            `json:"success"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Error   string          `json:"error,omitempty"`
 }
 
-// BatchRequest represents a batch of operations to execute atomically.
-type BatchRequest struct {
-	Operations []Request `json:"operations"`
-	Atomic     bool      `json:"atomic"`
+// CreateArgs represents arguments for the create operation
+type CreateArgs struct {
+	ID                 string   `json:"id,omitempty"`
+	Title              string   `json:"title"`
+	Description        string   `json:"description,omitempty"`
+	IssueType          string   `json:"issue_type"`
+	Priority           int      `json:"priority"`
+	Design             string   `json:"design,omitempty"`
+	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"`
+	Assignee           string   `json:"assignee,omitempty"`
+	Labels             []string `json:"labels,omitempty"`
+	Dependencies       []string `json:"dependencies,omitempty"`
 }
 
-// Operations supported by the daemon.
-const (
-	OpCreate       = "create"
-	OpUpdate       = "update"
-	OpClose        = "close"
-	OpList         = "list"
-	OpShow         = "show"
-	OpReady        = "ready"
-	OpBlocked      = "blocked"
-	OpStats        = "stats"
-	OpDepAdd       = "dep_add"
-	OpDepRemove    = "dep_remove"
-	OpDepTree      = "dep_tree"
-	OpLabelAdd     = "label_add"
-	OpLabelRemove  = "label_remove"
-	OpLabelList    = "label_list"
-	OpLabelListAll = "label_list_all"
-	OpExport       = "export"
-	OpImport       = "import"
-	OpCompact      = "compact"
-	OpRestore      = "restore"
-	OpBatch        = "batch"
-)
-
-// NewRequest creates a new RPC request with the given operation and arguments.
-func NewRequest(operation string, args interface{}) (*Request, error) {
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	return &Request{
-		Operation: operation,
-		Args:      argsJSON,
-	}, nil
+// UpdateArgs represents arguments for the update operation
+type UpdateArgs struct {
+	ID                 string  `json:"id"`
+	Title              *string `json:"title,omitempty"`
+	Status             *string `json:"status,omitempty"`
+	Priority           *int    `json:"priority,omitempty"`
+	Design             *string `json:"design,omitempty"`
+	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
+	Notes              *string `json:"notes,omitempty"`
+	Assignee           *string `json:"assignee,omitempty"`
 }
 
-// NewSuccessResponse creates a successful response with the given data.
-func NewSuccessResponse(data interface{}) (*Response, error) {
-	dataJSON, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-	return &Response{
-		Success: true,
-		Data:    dataJSON,
-	}, nil
+// CloseArgs represents arguments for the close operation
+type CloseArgs struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
 }
 
-// NewErrorResponse creates an error response with the given error message.
-func NewErrorResponse(err error) *Response {
-	return &Response{
-		Success: false,
-		Error:   err.Error(),
-	}
+// ListArgs represents arguments for the list operation
+type ListArgs struct {
+	Query     string `json:"query,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Priority  *int   `json:"priority,omitempty"`
+	IssueType string `json:"issue_type,omitempty"`
+	Assignee  string `json:"assignee,omitempty"`
+	Label     string `json:"label,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
 }
 
-// UnmarshalArgs unmarshals the request arguments into the given value.
-func (r *Request) UnmarshalArgs(v interface{}) error {
-	return json.Unmarshal(r.Args, v)
+// ShowArgs represents arguments for the show operation
+type ShowArgs struct {
+	ID string `json:"id"`
 }
 
-// UnmarshalData unmarshals the response data into the given value.
-func (r *Response) UnmarshalData(v interface{}) error {
-	return json.Unmarshal(r.Data, v)
+// ReadyArgs represents arguments for the ready operation
+type ReadyArgs struct {
+	Assignee string `json:"assignee,omitempty"`
+	Priority *int   `json:"priority,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+// DepAddArgs represents arguments for adding a dependency
+type DepAddArgs struct {
+	FromID  string `json:"from_id"`
+	ToID    string `json:"to_id"`
+	DepType string `json:"dep_type"`
+}
+
+// DepRemoveArgs represents arguments for removing a dependency
+type DepRemoveArgs struct {
+	FromID  string `json:"from_id"`
+	ToID    string `json:"to_id"`
+	DepType string `json:"dep_type,omitempty"`
+}
+
+// DepTreeArgs represents arguments for the dep tree operation
+type DepTreeArgs struct {
+	ID       string `json:"id"`
+	MaxDepth int    `json:"max_depth,omitempty"`
+}
+
+// LabelAddArgs represents arguments for adding a label
+type LabelAddArgs struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// LabelRemoveArgs represents arguments for removing a label
+type LabelRemoveArgs struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// PingResponse is the response for a ping operation
+type PingResponse struct {
+	Message string `json:"message"`
+	Version string `json:"version"`
 }
