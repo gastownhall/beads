@@ -1,0 +1,7 @@
+# Test bd blocked command
+bd init --prefix test
+bd create 'First issue'
+bd create 'Second issue' --deps test-1
+bd blocked
+stdout 'Blocked issues'
+stdout 'test-2'

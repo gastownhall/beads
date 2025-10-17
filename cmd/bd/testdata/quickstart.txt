@@ -1,0 +1,5 @@
+# Test bd quickstart command
+bd quickstart
+stdout 'Dependency-Aware'
+stdout 'bd init'
+stdout 'bd create'

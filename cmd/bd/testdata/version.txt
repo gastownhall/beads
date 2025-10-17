@@ -1,0 +1,3 @@
+# Test bd version command
+bd version
+stdout 'bd version'

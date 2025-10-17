@@ -1,0 +1,8 @@
+# Test bd update command
+bd init --prefix test
+bd create 'Issue to update'
+bd update test-1 --status in_progress
+stdout 'Updated issue:'
+
+bd show test-1
+stdout 'in_progress'

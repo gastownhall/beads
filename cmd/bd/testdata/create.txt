@@ -1,0 +1,5 @@
+# Test bd create command
+bd init --prefix test
+bd create 'Test issue'
+stdout 'Created issue:'
+stdout 'test-'

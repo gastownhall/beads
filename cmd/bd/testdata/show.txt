@@ -1,0 +1,8 @@
+# Test bd show command
+bd init --prefix test
+bd create 'Test issue for show'
+
+bd show test-1
+stdout 'Test issue for show'
+stdout 'Status:'
+stdout 'Priority:'

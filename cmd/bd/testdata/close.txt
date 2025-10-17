@@ -1,0 +1,8 @@
+# Test bd close command
+bd init --prefix test
+bd create 'Issue to close'
+bd close test-1 --reason 'Fixed'
+stdout 'Closed test-1'
+
+bd show test-1
+stdout 'closed'

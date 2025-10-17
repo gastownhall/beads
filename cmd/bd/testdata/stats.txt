@@ -1,0 +1,9 @@
+# Test bd stats command
+bd init --prefix test
+bd create 'First issue'
+bd create 'Second issue'
+bd close test-1
+bd stats
+stdout 'Total Issues:'
+stdout 'Open:'
+stdout 'Closed:'

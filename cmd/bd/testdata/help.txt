@@ -1,0 +1,7 @@
+# Test bd help command
+bd help
+stdout 'Usage:'
+stdout 'Available Commands:'
+stdout 'create'
+stdout 'list'
+stdout 'show'

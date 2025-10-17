@@ -1,0 +1,7 @@
+# Test bd list command
+bd init --prefix test
+bd create 'First issue'
+bd create 'Second issue'
+bd list
+stdout 'First issue'
+stdout 'Second issue'

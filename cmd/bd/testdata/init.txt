@@ -1,0 +1,4 @@
+# Test bd init command
+bd init --prefix test
+stdout 'initialized successfully'
+exists .beads/test.db
