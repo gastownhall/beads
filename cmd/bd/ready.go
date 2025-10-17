@@ -168,6 +168,44 @@ var statsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Show statistics",
 	Run: func(cmd *cobra.Command, args []string) {
+		// If daemon is running, use RPC
+		if daemonClient != nil {
+			resp, err := daemonClient.Stats()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			var stats types.Statistics
+			if err := json.Unmarshal(resp.Data, &stats); err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				outputJSON(stats)
+				return
+			}
+
+			cyan := color.New(color.FgCyan).SprintFunc()
+			green := color.New(color.FgGreen).SprintFunc()
+			yellow := color.New(color.FgYellow).SprintFunc()
+
+			fmt.Printf("\n%s Beads Statistics:\n\n", cyan("📊"))
+			fmt.Printf("Total Issues:      %d\n", stats.TotalIssues)
+			fmt.Printf("Open:              %s\n", green(fmt.Sprintf("%d", stats.OpenIssues)))
+			fmt.Printf("In Progress:       %s\n", yellow(fmt.Sprintf("%d", stats.InProgressIssues)))
+			fmt.Printf("Closed:            %d\n", stats.ClosedIssues)
+			fmt.Printf("Blocked:           %d\n", stats.BlockedIssues)
+			fmt.Printf("Ready:             %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
+			if stats.AverageLeadTime > 0 {
+				fmt.Printf("Avg Lead Time:     %.1f hours\n", stats.AverageLeadTime)
+			}
+			fmt.Println()
+			return
+		}
+
+		// Direct mode
 		ctx := context.Background()
 		stats, err := store.GetStatistics(ctx)
 		if err != nil {
