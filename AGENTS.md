@@ -70,6 +70,7 @@ The MCP server will:
 2. Fall back to global daemon socket (`~/.beads/bd.sock`)
 3. Automatically route requests to the correct database based on your current working directory
 4. Auto-start the daemon if it's not running (with exponential backoff on failures)
+5. Auto-detect multiple repositories and prefer global daemon when 4+ repos are found
 
 **Option 2: Multiple MCP Server Instances**
 Configure separate MCP servers for each major project:
@@ -93,9 +94,18 @@ Configure separate MCP servers for each major project:
 Each MCP instance will use its specified working directory to find the correct `.beads/*.db` database.
 
 **Which approach should you use?**
-- ✅ **Global daemon**: Best for 3+ projects, better resource usage, automatic routing
+- ✅ **Global daemon**: Best for 3+ projects, better resource usage, automatic routing (auto-started when 4+ repos detected)
 - ✅ **Multiple instances**: Best for 1-2 projects you switch between frequently
 - ✅ **Hybrid**: Run global daemon + use MCP instances for convenience
+
+**Migration helper:**
+```bash
+# Migrate from local to global daemon
+bd daemon --migrate-to-global
+
+# Or set environment variable for permanent preference
+export BEADS_PREFER_GLOBAL_DAEMON=1
+```
 
 ### CLI Quick Reference
 

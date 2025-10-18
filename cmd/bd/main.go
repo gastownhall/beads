@@ -219,6 +219,100 @@ func shouldAutoStartDaemon() bool {
 	return true // Default to enabled
 }
 
+// shouldUseGlobalDaemon determines if global daemon should be preferred
+// based on environment variables, config, or heuristics (multi-repo detection)
+func shouldUseGlobalDaemon() bool {
+	// Check explicit environment variable first
+	if pref := os.Getenv("BEADS_PREFER_GLOBAL_DAEMON"); pref != "" {
+		return pref == "1" || strings.ToLower(pref) == "true"
+	}
+	
+	// Heuristic: detect multiple beads repositories
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	
+	// Count .beads directories under home
+	repoCount := 0
+	maxDepth := 5 // Don't scan too deep
+	
+	var countRepos func(string, int) error
+	countRepos = func(dir string, depth int) error {
+		if depth > maxDepth || repoCount > 3 {
+			return filepath.SkipDir
+		}
+		
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil // Skip directories we can't read
+		}
+		
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			
+			name := entry.Name()
+			
+			// Skip hidden dirs except .beads
+			if strings.HasPrefix(name, ".") && name != ".beads" {
+				continue
+			}
+			
+			// Skip common large directories
+			if name == "node_modules" || name == "vendor" || name == "target" || name == ".git" {
+				continue
+			}
+			
+			path := filepath.Join(dir, name)
+			
+			// Check if this is a .beads directory with a database
+			if name == ".beads" {
+				dbPath := filepath.Join(path, "db.sqlite")
+				if _, err := os.Stat(dbPath); err == nil {
+					repoCount++
+					if repoCount > 3 {
+						return filepath.SkipDir
+					}
+				}
+				continue
+			}
+			
+			// Recurse into subdirectories
+			if depth < maxDepth {
+				countRepos(path, depth+1)
+			}
+		}
+		return nil
+	}
+	
+	// Scan common project directories
+	projectDirs := []string{
+		filepath.Join(home, "src"),
+		filepath.Join(home, "projects"),
+		filepath.Join(home, "code"),
+		filepath.Join(home, "workspace"),
+		filepath.Join(home, "dev"),
+	}
+	
+	for _, dir := range projectDirs {
+		if _, err := os.Stat(dir); err == nil {
+			countRepos(dir, 0)
+			if repoCount > 3 {
+				break
+			}
+		}
+	}
+	
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: found %d beads repositories, prefer global: %v\n", repoCount, repoCount > 3)
+	}
+	
+	// Use global daemon if we found more than 3 repositories
+	return repoCount > 3
+}
+
 // tryAutoStartDaemon attempts to start the daemon in the background
 // Returns true if daemon was started successfully and socket is ready
 func tryAutoStartDaemon(socketPath string) bool {
@@ -305,11 +399,20 @@ func tryAutoStartDaemon(socketPath string) bool {
 	}
 	
 	// Determine if we should start global or local daemon
+	// If requesting local socket, check if we should suggest global instead
 	isGlobal := false
 	if home, err := os.UserHomeDir(); err == nil {
 		globalSocket := filepath.Join(home, ".beads", "bd.sock")
 		if socketPath == globalSocket {
 			isGlobal = true
+		} else if shouldUseGlobalDaemon() {
+			// User has multiple repos, but requested local daemon
+			// Auto-start global daemon instead and log suggestion
+			isGlobal = true
+			socketPath = globalSocket
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: detected multiple repos, auto-starting global daemon\n")
+			}
 		}
 	}
 	

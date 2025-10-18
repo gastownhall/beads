@@ -44,6 +44,7 @@ Use --health to check daemon health and metrics.`,
 		stop, _ := cmd.Flags().GetBool("stop")
 		status, _ := cmd.Flags().GetBool("status")
 		health, _ := cmd.Flags().GetBool("health")
+		migrateToGlobal, _ := cmd.Flags().GetBool("migrate-to-global")
 		interval, _ := cmd.Flags().GetDuration("interval")
 		autoCommit, _ := cmd.Flags().GetBool("auto-commit")
 		autoPush, _ := cmd.Flags().GetBool("auto-push")
@@ -68,6 +69,11 @@ Use --health to check daemon health and metrics.`,
 
 		if health {
 			showDaemonHealth(global)
+			return
+		}
+
+		if migrateToGlobal {
+			migrateToGlobalDaemon()
 			return
 		}
 
@@ -127,6 +133,7 @@ func init() {
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().Bool("health", false, "Check daemon health and metrics")
+	daemonCmd.Flags().Bool("migrate-to-global", false, "Migrate from local to global daemon")
 	daemonCmd.Flags().String("log", "", "Log file path (default: .beads/daemon.log)")
 	daemonCmd.Flags().Bool("global", false, "Run as global daemon (socket at ~/.beads/bd.sock)")
 	rootCmd.AddCommand(daemonCmd)
@@ -326,6 +333,73 @@ func showDaemonHealth(global bool) {
 	}
 	
 	if health.Status == "unhealthy" {
+		os.Exit(1)
+	}
+}
+
+func migrateToGlobalDaemon() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot get home directory: %v\n", err)
+		os.Exit(1)
+	}
+	
+	localPIDFile := filepath.Join(".beads", "daemon.pid")
+	globalPIDFile := filepath.Join(home, ".beads", "daemon.pid")
+	
+	// Check if local daemon is running
+	localRunning, localPID := isDaemonRunning(localPIDFile)
+	if !localRunning {
+		fmt.Println("No local daemon is running")
+	} else {
+		fmt.Printf("Stopping local daemon (PID %d)...\n", localPID)
+		stopDaemon(localPIDFile)
+	}
+	
+	// Check if global daemon is already running
+	globalRunning, globalPID := isDaemonRunning(globalPIDFile)
+	if globalRunning {
+		fmt.Printf("✓ Global daemon already running (PID %d)\n", globalPID)
+		return
+	}
+	
+	// Start global daemon
+	fmt.Println("Starting global daemon...")
+	binPath, err := os.Executable()
+	if err != nil {
+		binPath = os.Args[0]
+	}
+	
+	cmd := exec.Command(binPath, "daemon", "--global")
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
+	
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+	
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to start global daemon: %v\n", err)
+		os.Exit(1)
+	}
+	
+	go cmd.Wait()
+	
+	// Wait for daemon to be ready
+	time.Sleep(2 * time.Second)
+	
+	if isRunning, pid := isDaemonRunning(globalPIDFile); isRunning {
+		fmt.Printf("✓ Global daemon started successfully (PID %d)\n", pid)
+		fmt.Println()
+		fmt.Println("Migration complete! The global daemon will now serve all your beads repositories.")
+		fmt.Println("Set BEADS_PREFER_GLOBAL_DAEMON=1 in your shell to make this permanent.")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: global daemon failed to start\n")
 		os.Exit(1)
 	}
 }

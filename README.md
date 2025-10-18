@@ -926,6 +926,7 @@ bd daemon --log /var/log/bd.log       # Custom log file path
 bd daemon --status                    # Show daemon status
 bd daemon --stop                      # Stop running daemon
 bd daemon --global                    # Run as global daemon (see below)
+bd daemon --migrate-to-global         # Migrate from local to global daemon
 ```
 
 The daemon is ideal for:
@@ -949,6 +950,9 @@ bd daemon --status --global
 
 # Stop global daemon
 bd daemon --stop --global
+
+# Migrate from local to global daemon (automatically stops local, starts global)
+bd daemon --migrate-to-global
 ```
 
 **Local vs Global Daemon:**
@@ -967,8 +971,13 @@ bd daemon --stop --global
 **How it works:**
 1. Global daemon creates socket at `~/.beads/bd.sock`
 2. CLI commands check local socket first, then fall back to global
-3. Daemon serves requests from any repository
-4. Each repo still has its own database at `.beads/*.db`
+3. Daemon auto-starts globally when 4+ beads repos are detected
+4. Daemon serves requests from any repository
+5. Each repo still has its own database at `.beads/*.db`
+
+**Auto-start global daemon:**
+- Set `BEADS_PREFER_GLOBAL_DAEMON=1` to always prefer global daemon
+- Or let bd automatically detect when global daemon is appropriate (4+ repos)
 
 **Architecture:**
 ```mermaid
