@@ -960,6 +960,7 @@ var createCmd = &cobra.Command{
 		explicitID, _ := cmd.Flags().GetString("id")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
+		forceCreate, _ := cmd.Flags().GetBool("force")
 
 		// Validate explicit ID format if provided (prefix-number)
 		if explicitID != "" {
@@ -973,6 +974,30 @@ var createCmd = &cobra.Command{
 			if _, err := fmt.Sscanf(parts[1], "%d", new(int)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (numeric suffix required, e.g., 'bd-42')\n", explicitID)
 				os.Exit(1)
+			}
+			
+			// Validate prefix matches database prefix (unless --force is used)
+			if !forceCreate {
+				requestedPrefix := parts[0]
+				ctx := context.Background()
+				
+				// Get database prefix from config
+				var dbPrefix string
+				if daemonClient != nil {
+					// Using daemon - need to get config via RPC
+					// For now, skip validation in daemon mode (needs RPC enhancement)
+				} else {
+					// Direct mode - check config
+					dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+				}
+				
+				if dbPrefix != "" && dbPrefix != requestedPrefix {
+					fmt.Fprintf(os.Stderr, "Error: prefix mismatch detected\n")
+					fmt.Fprintf(os.Stderr, "  This database uses prefix '%s-', but you specified '%s-'\n", dbPrefix, requestedPrefix)
+					fmt.Fprintf(os.Stderr, "  Did you mean to create '%s-%s'?\n", dbPrefix, parts[1])
+					fmt.Fprintf(os.Stderr, "  Use --force to create with mismatched prefix anyway\n")
+					os.Exit(1)
+				}
 			}
 		}
 
@@ -1116,6 +1141,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	rootCmd.AddCommand(createCmd)
 }
 
