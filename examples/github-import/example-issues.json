@@ -1,0 +1,52 @@
+[
+  {
+    "number": 42,
+    "title": "Add user authentication",
+    "body": "Implement JWT-based authentication.\n\nThis blocks #43 and is related to #44.",
+    "state": "open",
+    "labels": [
+      {"name": "feature"},
+      {"name": "high"},
+      {"name": "security"}
+    ],
+    "assignee": {
+      "login": "alice"
+    },
+    "created_at": "2025-01-15T10:00:00Z",
+    "updated_at": "2025-01-16T14:30:00Z",
+    "html_url": "https://github.com/example/repo/issues/42"
+  },
+  {
+    "number": 43,
+    "title": "Add API rate limiting",
+    "body": "Implement rate limiting for API endpoints.\n\nDepends on authentication (#42) being completed first.",
+    "state": "open",
+    "labels": [
+      {"name": "feature"},
+      {"name": "p1"}
+    ],
+    "assignee": {
+      "login": "bob"
+    },
+    "created_at": "2025-01-15T11:00:00Z",
+    "updated_at": "2025-01-15T11:00:00Z",
+    "html_url": "https://github.com/example/repo/issues/43"
+  },
+  {
+    "number": 44,
+    "title": "Fix login redirect bug",
+    "body": "Login page redirects to wrong URL after authentication.",
+    "state": "closed",
+    "labels": [
+      {"name": "bug"},
+      {"name": "critical"}
+    ],
+    "assignee": {
+      "login": "charlie"
+    },
+    "created_at": "2025-01-10T09:00:00Z",
+    "updated_at": "2025-01-12T16:00:00Z",
+    "closed_at": "2025-01-12T16:00:00Z",
+    "html_url": "https://github.com/example/repo/issues/44"
+  }
+]

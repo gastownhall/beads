@@ -7,6 +7,7 @@ This directory contains examples of how to integrate bd with AI agents and workf
 - **[python-agent/](python-agent/)** - Simple Python agent that discovers ready work and completes tasks
 - **[bash-agent/](bash-agent/)** - Bash script showing the full agent workflow
 - **[markdown-to-jsonl/](markdown-to-jsonl/)** - Convert markdown planning docs to bd issues
+- **[github-import/](github-import/)** - Import issues from GitHub repositories
 - **[git-hooks/](git-hooks/)** - Pre-configured git hooks for automatic export/import
 - **[branch-merge/](branch-merge/)** - Branch merge workflow with collision resolution
 - **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
