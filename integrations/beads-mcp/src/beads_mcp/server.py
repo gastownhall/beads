@@ -1,5 +1,6 @@
 """FastMCP server for beads issue tracker."""
 
+import asyncio
 import os
 import subprocess
 from functools import wraps
@@ -374,9 +375,14 @@ async def debug_env() -> str:
     return "".join(info)
 
 
+async def async_main() -> None:
+    """Async entry point for the MCP server."""
+    await mcp.run_async(transport="stdio")
+
+
 def main() -> None:
     """Entry point for the MCP server."""
-    mcp.run()
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":
