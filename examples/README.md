@@ -11,6 +11,7 @@ This directory contains examples of how to integrate bd with AI agents and workf
 - **[git-hooks/](git-hooks/)** - Pre-configured git hooks for automatic export/import
 - **[branch-merge/](branch-merge/)** - Branch merge workflow with collision resolution
 - **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
+- **[claude-code-skill/](claude-code-skill/)** - Claude Code skill for effective beads usage patterns
 
 ## Quick Start
 
