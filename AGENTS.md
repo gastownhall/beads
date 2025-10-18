@@ -154,6 +154,13 @@ bd restore <id>  # View full history at time of compaction
 # Import with collision detection
 bd import -i .beads/issues.jsonl --dry-run             # Preview only
 bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve
+
+# Multi-repo management (requires global daemon)
+bd repos list                    # List all cached repositories
+bd repos ready                   # View ready work across all repos
+bd repos ready --group           # Group by repository
+bd repos stats                   # Combined statistics
+bd repos clear-cache             # Clear repository cache
 ```
 
 ### Workflow

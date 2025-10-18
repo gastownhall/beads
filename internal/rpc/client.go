@@ -190,3 +190,23 @@ func (c *Client) RemoveLabel(args *LabelRemoveArgs) (*Response, error) {
 func (c *Client) Batch(args *BatchArgs) (*Response, error) {
 	return c.Execute(OpBatch, args)
 }
+
+// ReposList lists all cached repositories
+func (c *Client) ReposList() (*Response, error) {
+	return c.Execute(OpReposList, struct{}{})
+}
+
+// ReposReady gets ready work across all repositories
+func (c *Client) ReposReady(args *ReposReadyArgs) (*Response, error) {
+	return c.Execute(OpReposReady, args)
+}
+
+// ReposStats gets combined statistics across all repositories
+func (c *Client) ReposStats() (*Response, error) {
+	return c.Execute(OpReposStats, struct{}{})
+}
+
+// ReposClearCache clears the repository cache
+func (c *Client) ReposClearCache() (*Response, error) {
+	return c.Execute(OpReposClearCache, struct{}{})
+}

@@ -1034,6 +1034,107 @@ cd ~/projects/api && bd ready         # Uses global daemon
 
 **Note:** Global daemon doesn't require git repos, making it suitable for non-git projects or multi-repo setups.
 
+#### Multi-Repository Commands with `bd repos`
+
+**New in v0.9.12:** When using a global daemon, use `bd repos` to view and manage work across all cached repositories.
+
+```bash
+# List all cached repositories
+bd repos list
+
+# View ready work across all repos
+bd repos ready
+
+# Group ready work by repository
+bd repos ready --group
+
+# Filter by priority
+bd repos ready --priority 1
+
+# Filter by assignee
+bd repos ready --assignee alice
+
+# View combined statistics
+bd repos stats
+
+# Clear repository cache (free resources)
+bd repos clear-cache
+```
+
+**Example output:**
+
+```bash
+$ bd repos list
+
+📁 Cached Repositories (3):
+
+/Users/alice/projects/webapp
+  Prefix:       webapp-
+  Issue Count:  45
+  Status:       active
+
+/Users/alice/projects/api
+  Prefix:       api-
+  Issue Count:  12
+  Status:       active
+
+/Users/alice/projects/docs
+  Prefix:       docs-
+  Issue Count:  8
+  Status:       active
+
+$ bd repos ready --group
+
+📋 Ready work across 3 repositories:
+
+/Users/alice/projects/webapp (4 issues):
+  1. [P1] webapp-23: Fix navigation bug
+     Estimate: 30 min
+  2. [P2] webapp-45: Add loading spinner
+     Estimate: 15 min
+  ...
+
+/Users/alice/projects/api (2 issues):
+  1. [P0] api-10: Fix critical auth bug
+     Estimate: 60 min
+  2. [P1] api-12: Add rate limiting
+     Estimate: 45 min
+
+$ bd repos stats
+
+📊 Combined Statistics Across All Repositories:
+
+Total Issues:      65
+Open:              23
+In Progress:       5
+Closed:            37
+Blocked:           3
+Ready:             15
+
+📁 Per-Repository Breakdown:
+
+/Users/alice/projects/webapp:
+  Total: 45  Ready: 10  Blocked: 2
+
+/Users/alice/projects/api:
+  Total: 12  Ready: 3  Blocked: 1
+
+/Users/alice/projects/docs:
+  Total: 8  Ready: 2  Blocked: 0
+```
+
+**Requirements:**
+- Global daemon must be running (`bd daemon --global`)
+- At least one command has been run in each repository (to cache it)
+- `--json` flag available for programmatic use
+
+**Use cases:**
+- Get an overview of all active projects
+- Find highest-priority work across all repos
+- Balance workload across multiple projects
+- Track overall progress and statistics
+- Identify which repos need attention
+
 ### Optional: Git Hooks for Immediate Sync
 
 Create `.git/hooks/pre-commit`:

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -176,6 +177,14 @@ func (s *Server) handleRequest(req *Request) Response {
 		return s.handleLabelRemove(req)
 	case OpBatch:
 		return s.handleBatch(req)
+	case OpReposList:
+		return s.handleReposList(req)
+	case OpReposReady:
+		return s.handleReposReady(req)
+	case OpReposStats:
+		return s.handleReposStats(req)
+	case OpReposClearCache:
+		return s.handleReposClearCache(req)
 	default:
 		return Response{
 			Success: false,
@@ -765,4 +774,204 @@ func (s *Server) writeResponse(writer *bufio.Writer, resp Response) {
 	writer.Write(data)
 	writer.WriteByte('\n')
 	writer.Flush()
+}
+
+// Multi-repo handlers
+
+func (s *Server) handleReposList(_ *Request) Response {
+	// Keep read lock during iteration to prevent stores from being closed mid-query
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	repos := make([]RepoInfo, 0, len(s.storageCache))
+	for path, store := range s.storageCache {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stats, err := store.GetStatistics(ctx)
+		cancel()
+		if err != nil {
+			continue
+		}
+
+		// Extract prefix from a sample issue
+		filter := types.IssueFilter{Limit: 1}
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
+		issues, err := store.SearchIssues(ctx2, "", filter)
+		cancel2()
+		prefix := ""
+		if err == nil && len(issues) > 0 && len(issues[0].ID) > 0 {
+			// Extract prefix (everything before the last hyphen and number)
+			id := issues[0].ID
+			for i := len(id) - 1; i >= 0; i-- {
+				if id[i] == '-' {
+					prefix = id[:i+1]
+					break
+				}
+			}
+		}
+
+		repos = append(repos, RepoInfo{
+			Path:       path,
+			Prefix:     prefix,
+			IssueCount: stats.TotalIssues,
+			LastAccess: "active",
+		})
+	}
+
+	data, _ := json.Marshal(repos)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleReposReady(req *Request) Response {
+	var args ReposReadyArgs
+	if err := json.Unmarshal(req.Args, &args); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid args: %v", err),
+		}
+	}
+
+	// Keep read lock during iteration to prevent stores from being closed mid-query
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	if args.GroupByRepo {
+		result := make([]RepoReadyWork, 0, len(s.storageCache))
+		for path, store := range s.storageCache {
+			filter := types.WorkFilter{
+				Status: types.StatusOpen,
+				Limit:  args.Limit,
+			}
+			if args.Priority != nil {
+				filter.Priority = args.Priority
+			}
+			if args.Assignee != "" {
+				filter.Assignee = &args.Assignee
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			issues, err := store.GetReadyWork(ctx, filter)
+			cancel()
+			if err != nil || len(issues) == 0 {
+				continue
+			}
+
+			result = append(result, RepoReadyWork{
+				RepoPath: path,
+				Issues:   issues,
+			})
+		}
+
+		data, _ := json.Marshal(result)
+		return Response{
+			Success: true,
+			Data:    data,
+		}
+	}
+
+	// Flat list of all ready issues across all repos
+	allIssues := make([]ReposReadyIssue, 0)
+	for path, store := range s.storageCache {
+		filter := types.WorkFilter{
+			Status: types.StatusOpen,
+			Limit:  args.Limit,
+		}
+		if args.Priority != nil {
+			filter.Priority = args.Priority
+		}
+		if args.Assignee != "" {
+			filter.Assignee = &args.Assignee
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		issues, err := store.GetReadyWork(ctx, filter)
+		cancel()
+		if err != nil {
+			continue
+		}
+
+		for _, issue := range issues {
+			allIssues = append(allIssues, ReposReadyIssue{
+				RepoPath: path,
+				Issue:    issue,
+			})
+		}
+	}
+
+	data, _ := json.Marshal(allIssues)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleReposStats(_ *Request) Response {
+	// Keep read lock during iteration to prevent stores from being closed mid-query
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	total := types.Statistics{}
+	perRepo := make(map[string]types.Statistics)
+	errors := make(map[string]string)
+
+	for path, store := range s.storageCache {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stats, err := store.GetStatistics(ctx)
+		cancel()
+		if err != nil {
+			errors[path] = err.Error()
+			continue
+		}
+
+		perRepo[path] = *stats
+
+		// Aggregate totals
+		total.TotalIssues += stats.TotalIssues
+		total.OpenIssues += stats.OpenIssues
+		total.InProgressIssues += stats.InProgressIssues
+		total.ClosedIssues += stats.ClosedIssues
+		total.BlockedIssues += stats.BlockedIssues
+		total.ReadyIssues += stats.ReadyIssues
+		total.EpicsEligibleForClosure += stats.EpicsEligibleForClosure
+	}
+
+	result := ReposStatsResponse{
+		Total:   total,
+		PerRepo: perRepo,
+	}
+	if len(errors) > 0 {
+		result.Errors = errors
+	}
+
+	data, _ := json.Marshal(result)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleReposClearCache(_ *Request) Response {
+	// Copy stores under write lock, clear cache, then close outside lock
+	// to avoid holding lock during potentially slow Close() operations
+	s.cacheMu.Lock()
+	stores := make([]storage.Storage, 0, len(s.storageCache))
+	for _, store := range s.storageCache {
+		stores = append(stores, store)
+	}
+	s.storageCache = make(map[string]storage.Storage)
+	s.cacheMu.Unlock()
+
+	// Close all storage connections without holding lock
+	for _, store := range stores {
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close storage: %v\n", err)
+		}
+	}
+
+	return Response{
+		Success: true,
+		Data:    json.RawMessage(`{"message":"Cache cleared successfully"}`),
+	}
 }

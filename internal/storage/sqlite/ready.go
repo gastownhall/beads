@@ -10,17 +10,19 @@ import (
 )
 
 // GetReadyWork returns issues with no open blockers
+// By default, shows both 'open' and 'in_progress' issues so epics/tasks
+// ready to close are visible (bd-165)
 func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	whereClauses := []string{}
 	args := []interface{}{}
 
-	// Default to open status if not specified
+	// Default to open OR in_progress if not specified (bd-165)
 	if filter.Status == "" {
-		filter.Status = types.StatusOpen
+		whereClauses = append(whereClauses, "i.status IN ('open', 'in_progress')")
+	} else {
+		whereClauses = append(whereClauses, "i.status = ?")
+		args = append(args, filter.Status)
 	}
-
-	whereClauses = append(whereClauses, "i.status = ?")
-	args = append(args, filter.Status)
 
 	if filter.Priority != nil {
 		whereClauses = append(whereClauses, "i.priority = ?")
