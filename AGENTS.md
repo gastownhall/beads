@@ -8,7 +8,41 @@ This is **beads** (command: `bd`), an issue tracker designed for AI-supervised c
 
 We use bd (beads) for issue tracking instead of Markdown TODOs or external tools.
 
-### Quick Reference
+### MCP Server (Recommended)
+
+**RECOMMENDED**: Use the MCP (Model Context Protocol) server for the best experience! The beads MCP server provides native integration with Claude and other MCP-compatible AI assistants.
+
+**Installation:**
+```bash
+# Install the MCP server
+pip install beads-mcp
+
+# Add to your MCP settings (e.g., Claude Desktop config)
+{
+  "beads": {
+    "command": "beads-mcp",
+    "args": []
+  }
+}
+```
+
+**Benefits:**
+- Native function calls instead of shell commands
+- Automatic workspace detection
+- Better error handling and validation
+- Structured JSON responses
+- No need for `--json` flags
+
+**All bd commands are available as MCP functions** with the prefix `mcp__beads-*__`. For example:
+- `bd ready` → `mcp__beads__ready()`
+- `bd create` → `mcp__beads__create(title="...", priority=1)`
+- `bd update` → `mcp__beads__update(issue_id="bd-42", status="in_progress")`
+
+See `integrations/beads-mcp/README.md` for complete documentation.
+
+### CLI Quick Reference
+
+If you're not using the MCP server, here are the CLI commands:
 
 ```bash
 # Find ready work (no blockers)
