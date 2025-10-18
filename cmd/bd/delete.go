@@ -86,6 +86,17 @@ Force: Delete and orphan dependents
 		// Single issue deletion (legacy behavior)
 		issueID := issueIDs[0]
 		
+		// If daemon is running but doesn't support this command, use direct storage
+		if daemonClient != nil && store == nil {
+			var err error
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
+		}
+		
 		ctx := context.Background()
 		
 		// Get the issue to be deleted
@@ -358,6 +369,17 @@ func removeIssueFromJSONL(issueID string) error {
 
 // deleteBatch handles deletion of multiple issues
 func deleteBatch(cmd *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool) {
+	// If daemon is running but doesn't support this command, use direct storage
+	if daemonClient != nil && store == nil {
+		var err error
+		store, err = sqlite.New(dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+	}
+	
 	ctx := context.Background()
 	
 	// Type assert to SQLite storage
