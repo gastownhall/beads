@@ -518,6 +518,13 @@ bd create "Fix navbar bug"  # Uses ~/myproject/.beads/myapp.db
 bd --db ~/otherproject/.beads/other.db list
 ```
 
+### Environment Variables
+
+- `BEADS_DB` - Override database path
+- `BEADS_AUTO_START_DAEMON` - Enable/disable automatic daemon start (default: `true`). Set to `false` or `0` to disable.
+- `BD_ACTOR` - Set actor name for change tracking (defaults to `$USER`)
+- `BD_DEBUG` - Enable debug logging for troubleshooting
+
 ## Dependency Model
 
 Beads has four types of dependencies:
@@ -898,6 +905,8 @@ bd daemon --status
 # Stop daemon
 bd daemon --stop
 ```
+
+**Note:** As of v0.9.11, the daemon **automatically starts** when you run any `bd` command if it's not already running. You typically don't need to manually start it. The auto-start feature can be disabled by setting `BEADS_AUTO_START_DAEMON=false` or using the `--no-daemon` flag.
 
 The daemon will:
 - Poll for changes at configurable intervals (default: 5 minutes)

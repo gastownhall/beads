@@ -53,6 +53,8 @@ bd daemon --global
 # MCP server automatically discovers and uses the global daemon
 ```
 
+**Note:** As of v0.9.11, the daemon **auto-starts automatically** when you run any `bd` command. You typically don't need to manually start it. To disable auto-start, set `BEADS_AUTO_START_DAEMON=false`.
+
 Your MCP config stays simple:
 ```json
 {
@@ -67,6 +69,7 @@ The MCP server will:
 1. Check for local daemon socket (`.beads/bd.sock`)
 2. Fall back to global daemon socket (`~/.beads/bd.sock`)
 3. Automatically route requests to the correct database based on your current working directory
+4. Auto-start the daemon if it's not running (with exponential backoff on failures)
 
 **Option 2: Multiple MCP Server Instances**
 Configure separate MCP servers for each major project:

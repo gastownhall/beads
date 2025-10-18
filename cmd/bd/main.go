@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -104,6 +106,25 @@ var rootCmd = &cobra.Command{
 				}
 				return // Skip direct storage initialization
 			}
+			
+			// Daemon not running - try auto-start if enabled
+			if shouldAutoStartDaemon() {
+				if os.Getenv("BD_DEBUG") != "" {
+					fmt.Fprintf(os.Stderr, "Debug: attempting to auto-start daemon\n")
+				}
+				if tryAutoStartDaemon(socketPath) {
+					// Retry connection after auto-start
+					client, err := rpc.TryConnect(socketPath)
+					if err == nil && client != nil {
+						daemonClient = client
+						if os.Getenv("BD_DEBUG") != "" {
+							fmt.Fprintf(os.Stderr, "Debug: connected to auto-started daemon at %s\n", socketPath)
+						}
+						return // Skip direct storage initialization
+					}
+				}
+			}
+			
 			if os.Getenv("BD_DEBUG") != "" {
 				fmt.Fprintf(os.Stderr, "Debug: daemon not available, using direct mode\n")
 			}
@@ -166,6 +187,155 @@ var rootCmd = &cobra.Command{
 			_ = store.Close()
 		}
 	},
+}
+
+// shouldAutoStartDaemon checks if daemon auto-start is enabled
+func shouldAutoStartDaemon() bool {
+	// Check environment variable (default: true)
+	autoStart := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_AUTO_START_DAEMON")))
+	if autoStart != "" {
+		// Accept common falsy values
+		return autoStart != "false" && autoStart != "0" && autoStart != "no" && autoStart != "off"
+	}
+	return true // Default to enabled
+}
+
+// tryAutoStartDaemon attempts to start the daemon in the background
+// Returns true if daemon was started successfully and socket is ready
+func tryAutoStartDaemon(socketPath string) bool {
+	// Check if we've failed recently (exponential backoff)
+	if !canRetryDaemonStart() {
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: skipping auto-start due to recent failures\n")
+		}
+		return false
+	}
+	
+	// Use lockfile to prevent multiple processes from starting daemon simultaneously
+	lockPath := socketPath + ".startlock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		// Someone else is already starting daemon, wait for socket readiness
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: another process is starting daemon, waiting for readiness\n")
+		}
+		return waitForSocketReadiness(socketPath, 5*time.Second)
+	}
+	
+	// Write our PID to lockfile
+	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	lockFile.Close()
+	defer os.Remove(lockPath)
+	
+	// Determine if we should start global or local daemon
+	isGlobal := false
+	if home, err := os.UserHomeDir(); err == nil {
+		globalSocket := filepath.Join(home, ".beads", "bd.sock")
+		if socketPath == globalSocket {
+			isGlobal = true
+		}
+	}
+	
+	// Build daemon command using absolute path for security
+	binPath, err := os.Executable()
+	if err != nil {
+		binPath = os.Args[0] // Fallback
+	}
+	
+	args := []string{"daemon"}
+	if isGlobal {
+		args = append(args, "--global")
+	}
+	
+	// Start daemon in background with proper I/O redirection
+	cmd := exec.Command(binPath, args...)
+	
+	// Redirect stdio to /dev/null to prevent daemon output in foreground
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
+	
+	// Set working directory to database directory for local daemon
+	if !isGlobal && dbPath != "" {
+		cmd.Dir = filepath.Dir(dbPath)
+	}
+	
+	// Detach from parent process
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+	
+	if err := cmd.Start(); err != nil {
+		recordDaemonStartFailure()
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: failed to start daemon: %v\n", err)
+		}
+		return false
+	}
+	
+	// Reap the process to avoid zombies
+	go cmd.Wait()
+	
+	// Wait for socket to be ready with actual connection test
+	if waitForSocketReadiness(socketPath, 5*time.Second) {
+		recordDaemonStartSuccess()
+		return true
+	}
+	
+	recordDaemonStartFailure()
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: daemon socket not ready after 5 seconds\n")
+	}
+	return false
+}
+
+// waitForSocketReadiness waits for daemon socket to be ready by testing actual connections
+func waitForSocketReadiness(socketPath string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		// Try actual connection, not just file existence
+		client, err := rpc.TryConnect(socketPath)
+		if err == nil && client != nil {
+			client.Close()
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+// Daemon start failure tracking for exponential backoff
+var (
+	lastDaemonStartAttempt time.Time
+	daemonStartFailures    int
+)
+
+func canRetryDaemonStart() bool {
+	if daemonStartFailures == 0 {
+		return true
+	}
+	
+	// Exponential backoff: 5s, 10s, 20s, 40s, 80s, 120s (capped at 120s)
+	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second
+	if backoff > 120*time.Second {
+		backoff = 120 * time.Second
+	}
+	
+	return time.Since(lastDaemonStartAttempt) > backoff
+}
+
+func recordDaemonStartSuccess() {
+	daemonStartFailures = 0
+}
+
+func recordDaemonStartFailure() {
+	lastDaemonStartAttempt = time.Now()
+	daemonStartFailures++
+	// No cap needed - backoff is capped at 120s in canRetryDaemonStart
 }
 
 // getSocketPath returns the daemon socket path based on the database location
