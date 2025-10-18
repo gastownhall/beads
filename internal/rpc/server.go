@@ -54,6 +54,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to listen on socket: %w", err)
 	}
 
+	// Set socket permissions to 0600 for security (owner only)
+	if err := os.Chmod(s.socketPath, 0600); err != nil {
+		s.listener.Close()
+		return fmt.Errorf("failed to set socket permissions: %w", err)
+	}
+
 	go s.handleSignals()
 
 	for {

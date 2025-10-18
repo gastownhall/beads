@@ -76,6 +76,14 @@ Use --status to check if daemon is running.`,
 			os.Exit(1)
 		}
 
+		// Global daemon doesn't support auto-commit/auto-push (no sync loop)
+		if global && (autoCommit || autoPush) {
+			fmt.Fprintf(os.Stderr, "Error: --auto-commit and --auto-push are not supported with --global\n")
+			fmt.Fprintf(os.Stderr, "Hint: global daemon runs in routing mode and doesn't perform background sync\n")
+			fmt.Fprintf(os.Stderr, "      Use local daemon (without --global) for auto-commit/auto-push features\n")
+			os.Exit(1)
+		}
+
 		// Validate we're in a git repo (skip for global daemon)
 		if !global && !isGitRepo() {
 			fmt.Fprintf(os.Stderr, "Error: not in a git repository\n")
@@ -492,8 +500,58 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 
 	log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
 
-	// Open SQLite database (daemon owns exclusive connection)
-	// Use the same dbPath resolution logic as other commands
+	// Global daemon runs in routing mode without opening a database
+	if global {
+		globalDir, err := getGlobalBeadsDir()
+		if err != nil {
+			log("Error: cannot get global beads directory: %v", err)
+			os.Exit(1)
+		}
+		socketPath := filepath.Join(globalDir, "bd.sock")
+		
+		// Create server with nil storage - uses per-request routing
+		server := rpc.NewServer(socketPath, nil)
+		
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		
+		// Start RPC server in background
+		serverErrChan := make(chan error, 1)
+		go func() {
+			log("Starting global RPC server: %s", socketPath)
+			if err := server.Start(ctx); err != nil {
+				log("RPC server error: %v", err)
+				serverErrChan <- err
+			}
+		}()
+		
+		// Wait for server to start or fail
+		select {
+		case err := <-serverErrChan:
+			log("RPC server failed to start: %v", err)
+			os.Exit(1)
+		case <-time.After(2 * time.Second):
+			log("Global RPC server started")
+		}
+		
+		// Wait for shutdown signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+		
+		sig := <-sigChan
+		log("Received signal: %v", sig)
+		log("Shutting down global daemon...")
+		
+		cancel()
+		if err := server.Stop(); err != nil {
+			log("Error stopping server: %v", err)
+		}
+		
+		log("Global daemon stopped")
+		return
+	}
+
+	// Local daemon mode - open database and run sync loop
 	daemonDBPath := dbPath
 	if daemonDBPath == "" {
 		// Try to find database in current repo
@@ -518,17 +576,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	log("Database opened: %s", daemonDBPath)
 
 	// Start RPC server
-	var socketPath string
-	if global {
-		globalDir, err := getGlobalBeadsDir()
-		if err != nil {
-			log("Error: cannot get global beads directory: %v", err)
-			os.Exit(1)
-		}
-		socketPath = filepath.Join(globalDir, "bd.sock")
-	} else {
-		socketPath = filepath.Join(filepath.Dir(daemonDBPath), "bd.sock")
-	}
+	socketPath := filepath.Join(filepath.Dir(daemonDBPath), "bd.sock")
 	server := rpc.NewServer(socketPath, store)
 	
 	ctx, cancel := context.WithCancel(context.Background())
