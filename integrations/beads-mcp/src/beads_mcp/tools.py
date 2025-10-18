@@ -51,12 +51,13 @@ async def _get_client() -> BdClientBase:
         
         _client = create_bd_client(
             prefer_daemon=use_daemon,
-            workspace_root=workspace_root
+            working_dir=workspace_root
         )
 
-    # Check version once per server lifetime
+    # Check version once per server lifetime (only for CLI client)
     if not _version_checked:
-        await _client._check_version()
+        if hasattr(_client, '_check_version'):
+            await _client._check_version()
         _version_checked = True
 
     return _client

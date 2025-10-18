@@ -637,16 +637,39 @@ def create_bd_client(
     if prefer_daemon:
         try:
             from .bd_daemon_client import BdDaemonClient
+            from pathlib import Path
 
-            # Create daemon client with working_dir for context
-            client = BdDaemonClient(
-                working_dir=working_dir,
-                actor=actor,
-            )
-            # Try to ping - if this works, use daemon
-            # Note: This is sync check, actual usage is async
-            # The caller will need to handle daemon not running at call time
-            return client
+            # Check if daemon socket exists before creating client
+            # Walk up from working_dir to find .beads/bd.sock
+            search_dir = Path(working_dir) if working_dir else Path.cwd()
+            socket_found = False
+
+            current = search_dir.resolve()
+            while True:
+                beads_dir = current / ".beads"
+                if beads_dir.is_dir():
+                    sock_path = beads_dir / "bd.sock"
+                    if sock_path.exists():
+                        socket_found = True
+                        break
+                    # Found .beads but no socket - daemon not running
+                    break
+
+                # Move up one directory
+                parent = current.parent
+                if parent == current:
+                    # Reached filesystem root
+                    break
+                current = parent
+
+            if socket_found:
+                # Daemon is running, use it
+                client = BdDaemonClient(
+                    working_dir=working_dir,
+                    actor=actor,
+                )
+                return client
+            # No socket found, fall through to CLI client
         except ImportError:
             # Daemon client not available (shouldn't happen but be defensive)
             pass
