@@ -122,6 +122,17 @@ You can use both together for the best experience:
 - Plugin for quick operations
 - Skill for intelligent workflow decisions
 
+### Why CLI Instead of MCP?
+
+This skill teaches Claude to use the bd CLI directly (via Bash commands like `bd ready`, `bd create`, etc.) rather than relying on MCP tools. This approach has several benefits:
+
+- **Lower context usage** - No MCP server prompt loaded into every session, saving tokens
+- **Works everywhere** - Only requires bd binary installed, no MCP server setup needed
+- **Explicit operations** - All bd commands visible in conversation history for transparency
+- **Full functionality** - CLI supports `--json` flag for programmatic parsing just like MCP
+
+The MCP server is excellent for interactive use, but for autonomous agent workflows where context efficiency matters, direct CLI usage is more practical. The skill provides the guidance Claude needs to use the CLI effectively.
+
 ## Contributing
 
 Found ways to improve the skill? Contributions welcome! See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
