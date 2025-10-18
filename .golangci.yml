@@ -1,91 +1,82 @@
-# golangci-lint configuration for beads
-# See https://golangci-lint.run/usage/configuration/
-
-version: 2
-
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
   enable:
-    # Core linters (always available)
-    - errcheck      # Check for unchecked errors
-    - govet         # Go vet
-    - ineffassign   # Detect ineffectual assignments
-    - staticcheck   # Static analysis
-    - unused        # Find unused code
-
-    # Additional linters
-    - revive        # Fast, configurable, extensible linter
-    - misspell      # Fix commonly misspelled English words
-    - unconvert     # Remove unnecessary type conversions
-    - unparam       # Find unused function parameters
-    - goconst       # Find repeated strings that could be constants
-    - gocyclo       # Check cyclomatic complexity
-    - dupl          # Find duplicated code
-    - gosec         # Security-focused linter
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: false
-    exclude-functions:
-      - (*database/sql.DB).Close
-      - (*database/sql.Rows).Close
-      - (*database/sql.Tx).Rollback
-
-  gocyclo:
-    min-complexity: 15
-
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-
-  dupl:
-    threshold: 100
-
-  misspell:
-    locale: US
-
-  revive:
+    - dupl
+    - goconst
+    - gocyclo
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    gocyclo:
+      min-complexity: 15
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: var-naming
-      - name: exported
-
+      - linters:
+          - dupl
+          - errcheck
+          - goconst
+          - gocyclo
+        path: _test\.go
+      - path: (.+)\.go$
+        text: Error return value.*\.Close.*is not checked
+      - path: (.+)\.go$
+        text: Error return value.*\.Rollback.*is not checked
+      - path: (.+)\.go$
+        text: Error return value.*\.RemoveAll.*is not checked
+      - path: (.+)\.go$
+        text: 'unused-parameter: parameter ''cmd'' seems to be unused'
+      - path: (.+)\.go$
+        text: 'unused-parameter: parameter ''args'' seems to be unused'
+      - path: (.+)\.go$
+        text: 'var-naming: avoid meaningless package names'
+      - path: (.+)\.go$
+        text: exported.*SQLiteStorage.*stutters
+      - path: (.+)\.go$
+        text: 'G201: SQL string formatting'
+      - path: (.+)\.go$
+        text: G304.*file inclusion via variable
+      - path: (.+)\.go$
+        text: 'G301: Expect directory permissions'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  # Exclude known false positives and idiomatic patterns
-  exclude:
-    # Idiomatic Go: ignoring errors from defer cleanup
-    - "Error return value.*\\.Close.*is not checked"
-    - "Error return value.*\\.Rollback.*is not checked"
-    - "Error return value.*\\.RemoveAll.*is not checked"
-
-    # Cobra handlers: unused params required by interface
-    - "unused-parameter: parameter 'cmd' seems to be unused"
-    - "unused-parameter: parameter 'args' seems to be unused"
-
-    # Style preferences: naming decisions
-    - "var-naming: avoid meaningless package names"
-    - "exported.*SQLiteStorage.*stutters"
-
-    # False positives: validated SQL construction
-    - "G201: SQL string formatting"
-
-    # False positives: user-specified file paths (intended feature)
-    - "G304.*file inclusion via variable"
-
-    # False positive: directory is for user data
-    - "G301: Expect directory permissions"
-
-  # Exclude some linters from running on tests
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - dupl        # Test duplication is acceptable
-        - goconst     # Test constants are acceptable
-        - errcheck    # Test cleanup errors are acceptable
-        - gocyclo     # Test complexity is acceptable
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
