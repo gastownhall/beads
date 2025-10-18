@@ -1347,9 +1347,15 @@ var showCmd = &cobra.Command{
 			if jsonOutput {
 				fmt.Println(string(resp.Data))
 			} else {
+				// Check if issue exists (daemon returns null for non-existent issues)
+				if string(resp.Data) == "null" || len(resp.Data) == 0 {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", args[0])
+					os.Exit(1)
+				}
+
 				// Parse response and use existing formatting code
 				type IssueDetails struct {
-					*types.Issue
+					types.Issue
 					Labels       []string       `json:"labels,omitempty"`
 					Dependencies []*types.Issue `json:"dependencies,omitempty"`
 					Dependents   []*types.Issue `json:"dependents,omitempty"`
@@ -1359,7 +1365,7 @@ var showCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 					os.Exit(1)
 				}
-				issue := details.Issue
+				issue := &details.Issue
 
 				cyan := color.New(color.FgCyan).SprintFunc()
 				
