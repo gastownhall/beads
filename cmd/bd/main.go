@@ -43,7 +43,6 @@ var (
 	needsFullExport   = false // Set to true when IDs change (renumber, rename-prefix)
 	flushMutex        sync.Mutex
 	flushTimer        *time.Timer
-	flushDebounce     = 5 * time.Second
 	storeMutex        sync.Mutex // Protects store access from background goroutine
 	storeActive       = false    // Tracks if store is available
 	flushFailureCount = 0        // Consecutive flush failures
@@ -187,6 +186,24 @@ var rootCmd = &cobra.Command{
 			_ = store.Close()
 		}
 	},
+}
+
+// getDebounceDuration returns the auto-flush debounce duration
+// Configurable via BEADS_FLUSH_DEBOUNCE (e.g., "500ms", "10s")
+// Defaults to 5 seconds if not set or invalid
+func getDebounceDuration() time.Duration {
+	envVal := os.Getenv("BEADS_FLUSH_DEBOUNCE")
+	if envVal == "" {
+		return 5 * time.Second
+	}
+	
+	duration, err := time.ParseDuration(envVal)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: invalid BEADS_FLUSH_DEBOUNCE value '%s', using default 5s\n", envVal)
+		return 5 * time.Second
+	}
+	
+	return duration
 }
 
 // shouldAutoStartDaemon checks if daemon auto-start is enabled
@@ -737,7 +754,7 @@ func markDirtyAndScheduleFlush() {
 	}
 
 	// Schedule new flush
-	flushTimer = time.AfterFunc(flushDebounce, func() {
+	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
 		flushToJSONL()
 	})
 }
@@ -761,7 +778,7 @@ func markDirtyAndScheduleFullExport() {
 	}
 
 	// Schedule new flush
-	flushTimer = time.AfterFunc(flushDebounce, func() {
+	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
 		flushToJSONL()
 	})
 }

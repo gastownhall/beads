@@ -46,6 +46,22 @@ Risks:
 			os.Exit(1)
 		}
 
+		// Renumber command needs direct access to storage
+		// Ensure we have a direct store connection
+		if store == nil {
+			var err error
+			if dbPath == "" {
+				fmt.Fprintf(os.Stderr, "Error: no database path found\n")
+				os.Exit(1)
+			}
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
+		}
+
 		ctx := context.Background()
 
 		// Get prefix from config, or derive from first issue if not set

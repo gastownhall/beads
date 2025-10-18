@@ -429,7 +429,7 @@ func buildReplacementCache(idMapping map[string]string) ([]*idReplacementCache, 
 		cache = append(cache, &idReplacementCache{
 			oldID:       oldID,
 			newID:       newID,
-			placeholder: fmt.Sprintf("__PLACEHOLDER_%d__", i),
+			placeholder: fmt.Sprintf("\x00REMAP\x00_%d_\x00", i),
 			regex:       re,
 		})
 		i++

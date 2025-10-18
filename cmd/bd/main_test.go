@@ -114,9 +114,8 @@ func TestAutoFlushDebounce(t *testing.T) {
 	storeMutex.Unlock()
 
 	// Set short debounce for testing (100ms)
-	originalDebounce := flushDebounce
-	flushDebounce = 100 * time.Millisecond
-	defer func() { flushDebounce = originalDebounce }()
+	os.Setenv("BEADS_FLUSH_DEBOUNCE", "100ms")
+	defer os.Unsetenv("BEADS_FLUSH_DEBOUNCE")
 
 	// Reset auto-flush state
 	autoFlushEnabled = true
