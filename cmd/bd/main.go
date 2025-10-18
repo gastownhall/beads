@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -504,17 +505,23 @@ func checkVersionMismatch() {
 
 	// Compare versions: warn if binary is older than database
 	if dbVersion != Version {
-		// Simple string comparison is sufficient for detecting version mismatch
-		// We're not trying to parse semantic versions, just detect "different"
 		yellow := color.New(color.FgYellow, color.Bold).SprintFunc()
 		fmt.Fprintf(os.Stderr, "\n%s\n", yellow("⚠️  WARNING: Version mismatch detected!"))
 		fmt.Fprintf(os.Stderr, "%s\n", yellow(fmt.Sprintf("⚠️  Your bd binary (v%s) differs from the database version (v%s)", Version, dbVersion)))
 
-		// Determine if binary is likely older (heuristic: lower version number)
-		if Version < dbVersion {
+		// Use semantic version comparison (requires v prefix)
+		binaryVer := "v" + Version
+		dbVer := "v" + dbVersion
+		
+		// semver.Compare returns -1 if binaryVer < dbVer, 0 if equal, 1 if binaryVer > dbVer
+		cmp := semver.Compare(binaryVer, dbVer)
+		
+		if cmp < 0 {
+			// Binary is older than database
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears to be OUTDATED."))
 			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Some features may not work correctly. Rebuild: go build -o bd ./cmd/bd"))
-		} else {
+		} else if cmp > 0 {
+			// Binary is newer than database
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears NEWER than the database."))
 			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  The database will be upgraded automatically."))
 			// Update stored version to current
