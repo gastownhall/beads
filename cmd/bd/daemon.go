@@ -262,7 +262,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	configureDaemonProcess(cmd)
 	
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
