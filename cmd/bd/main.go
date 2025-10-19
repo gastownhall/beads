@@ -712,12 +712,33 @@ func autoImportIfNewer() {
 	}
 
 	// Detect collisions before importing (bd-228 fix)
-	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-	if !ok {
-		// Not SQLite - skip auto-import to avoid silent data loss without collision detection
-		fmt.Fprintf(os.Stderr, "Auto-import disabled for non-SQLite backend (no collision detection).\n")
-		fmt.Fprintf(os.Stderr, "To import manually, run: bd import -i %s\n", jsonlPath)
-		return
+	// Auto-import needs direct SQLite access for collision detection
+	var sqliteStore *sqlite.SQLiteStorage
+	
+	if store != nil {
+		// Direct mode - try to use existing store
+		var ok bool
+		sqliteStore, ok = store.(*sqlite.SQLiteStorage)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Auto-import disabled for non-SQLite backend (no collision detection).\n")
+			fmt.Fprintf(os.Stderr, "To import manually, run: bd import -i %s\n", jsonlPath)
+			return
+		}
+	} else {
+		// Daemon mode - open direct connection for auto-import
+		if dbPath == "" {
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, no database path\n")
+			}
+			return
+		}
+		var err error
+		sqliteStore, err = sqlite.New(dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Auto-import failed: could not open database: %v\n", err)
+			return
+		}
+		defer sqliteStore.Close()
 	}
 
 	collisionResult, err := sqlite.DetectCollisions(ctx, sqliteStore, allIssues)
