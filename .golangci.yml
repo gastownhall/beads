@@ -1,7 +1,12 @@
 version: "2"
+
 run:
+  timeout: 5m
   tests: true
+
 linters:
+  default: standard
+
   enable:
     - dupl
     - goconst
@@ -11,6 +16,7 @@ linters:
     - revive
     - unconvert
     - unparam
+
   settings:
     dupl:
       threshold: 100
@@ -32,20 +38,20 @@ linters:
       rules:
         - name: var-naming
         - name: exported
+
   exclusions:
     generated: lax
-    presets:
-      - comments
-      - common-false-positives
-      - legacy
-      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
     rules:
-      - linters:
+      - path: _test\.go
+        linters:
           - dupl
           - errcheck
           - goconst
           - gocyclo
-        path: _test\.go
       - path: (.+)\.go$
         text: Error return value.*\.Close.*is not checked
       - path: (.+)\.go$
@@ -66,17 +72,7 @@ linters:
         text: G304.*file inclusion via variable
       - path: (.+)\.go$
         text: 'G301: Expect directory permissions'
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-formatters:
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
