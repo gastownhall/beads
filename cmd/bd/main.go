@@ -680,7 +680,7 @@ func autoImportIfNewer() {
 	}
 
 	// Content changed - parse all issues
-	scanner := bufio.NewScanner(strings.NewReader(string(jsonlData)))
+	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
 	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024) // 2MB buffer for large JSON lines
 	var allIssues []*types.Issue
 	lineNo := 0
@@ -711,199 +711,68 @@ func autoImportIfNewer() {
 		return
 	}
 
-	// Detect collisions before importing (bd-228 fix)
-	// Auto-import needs direct SQLite access for collision detection
-	var sqliteStore *sqlite.SQLiteStorage
-	
-	if store != nil {
-		// Direct mode - try to use existing store
-		var ok bool
-		sqliteStore, ok = store.(*sqlite.SQLiteStorage)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Auto-import disabled for non-SQLite backend (no collision detection).\n")
-			fmt.Fprintf(os.Stderr, "To import manually, run: bd import -i %s\n", jsonlPath)
-			return
-		}
-	} else {
-		// Daemon mode - open direct connection for auto-import
-		if dbPath == "" {
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, no database path\n")
-			}
-			return
-		}
-		var err error
-		sqliteStore, err = sqlite.New(dbPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Auto-import failed: could not open database: %v\n", err)
-			return
-		}
-		defer sqliteStore.Close()
+	// Use shared import logic (bd-157)
+	opts := ImportOptions{
+		ResolveCollisions: true,  // Auto-import always resolves collisions
+		DryRun:            false,
+		SkipUpdate:        false,
+		Strict:            false,
 	}
-
-	collisionResult, err := sqlite.DetectCollisions(ctx, sqliteStore, allIssues)
+	
+	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
 	if err != nil {
-		// Collision detection failed, skip import to be safe
-		fmt.Fprintf(os.Stderr, "Auto-import skipped: collision detection error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Auto-import failed: %v\n", err)
 		return
 	}
-
-	// If collisions detected, auto-resolve them by remapping to new IDs
-	if len(collisionResult.Collisions) > 0 {
-		// Get all existing issues for scoring
-		allExistingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Auto-import failed: error getting existing issues: %v\n", err)
-			return
-		}
-
-		// Score collisions
-		if err := sqlite.ScoreCollisions(ctx, sqliteStore, collisionResult.Collisions, allExistingIssues); err != nil {
-			fmt.Fprintf(os.Stderr, "Auto-import failed: error scoring collisions: %v\n", err)
-			return
-		}
-
-		// Remap collisions
-		idMapping, err := sqlite.RemapCollisions(ctx, sqliteStore, collisionResult.Collisions, allExistingIssues)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Auto-import failed: error remapping collisions: %v\n", err)
-			return
+	
+	// Show collision remapping notification if any occurred
+	if len(result.IDMapping) > 0 {
+		// Build title lookup map to avoid O(n^2) search
+		titleByID := make(map[string]string)
+		for _, issue := range allIssues {
+			titleByID[issue.ID] = issue.Title
 		}
 		
-		// Show concise notification
+		// Sort remappings by old ID for consistent output
+		type mapping struct {
+			oldID string
+			newID string
+		}
+		mappings := make([]mapping, 0, len(result.IDMapping))
+		for oldID, newID := range result.IDMapping {
+			mappings = append(mappings, mapping{oldID, newID})
+		}
+		sort.Slice(mappings, func(i, j int) bool {
+			return mappings[i].oldID < mappings[j].oldID
+		})
+		
 		maxShow := 10
-		numRemapped := len(idMapping)
+		numRemapped := len(mappings)
 		if numRemapped < maxShow {
 			maxShow = numRemapped
 		}
 		
 		fmt.Fprintf(os.Stderr, "\nAuto-import: remapped %d colliding issue(s) to new IDs:\n", numRemapped)
-		i := 0
-		for oldID, newID := range idMapping {
-			if i >= maxShow {
-				break
-			}
-			// Find the collision detail to get title
-			var title string
-			for _, collision := range collisionResult.Collisions {
-				if collision.ID == oldID {
-					title = collision.IncomingIssue.Title
-					break
-				}
-			}
-			fmt.Fprintf(os.Stderr, "  %s → %s (%s)\n", oldID, newID, title)
-			i++
+		for i := 0; i < maxShow; i++ {
+			m := mappings[i]
+			title := titleByID[m.oldID]
+			fmt.Fprintf(os.Stderr, "  %s → %s (%s)\n", m.oldID, m.newID, title)
 		}
 		if numRemapped > maxShow {
 			fmt.Fprintf(os.Stderr, "  ... and %d more\n", numRemapped-maxShow)
 		}
 		fmt.Fprintf(os.Stderr, "\n")
-		
-		// Remove colliding issues from allIssues (they were already created with new IDs by RemapCollisions)
-		collidingIDs := make(map[string]bool)
-		for _, collision := range collisionResult.Collisions {
-			collidingIDs[collision.ID] = true
-		}
-		filteredIssues := make([]*types.Issue, 0)
-		for _, issue := range allIssues {
-			if !collidingIDs[issue.ID] {
-				filteredIssues = append(filteredIssues, issue)
-			}
-		}
-		allIssues = filteredIssues
 	}
 
-	// Batch fetch all existing issues to avoid N+1 query pattern (bd-666)
-	allExistingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Auto-import failed: error fetching existing issues: %v\n", err)
-		return
-	}
-	
-	// Build map for O(1) lookup
-	existingByID := make(map[string]*types.Issue)
-	for _, issue := range allExistingIssues {
-		existingByID[issue.ID] = issue
-	}
-
-	// Import non-colliding issues (exact matches + new issues)
-	for _, issue := range allIssues {
-		existing := existingByID[issue.ID]
-
-		if existing != nil {
-			// Update existing issue
-			updates := make(map[string]interface{})
-			updates["title"] = issue.Title
-			updates["description"] = issue.Description
-			updates["design"] = issue.Design
-			updates["acceptance_criteria"] = issue.AcceptanceCriteria
-			updates["notes"] = issue.Notes
-			updates["status"] = issue.Status
-			updates["priority"] = issue.Priority
-			updates["issue_type"] = issue.IssueType
-			updates["assignee"] = issue.Assignee
-			if issue.EstimatedMinutes != nil {
-				updates["estimated_minutes"] = *issue.EstimatedMinutes
-			}
-			if issue.ExternalRef != nil {
-				updates["external_ref"] = *issue.ExternalRef
-			}
-
-			// Enforce status/closed_at invariant (bd-226)
-			if issue.Status == "closed" {
-				// Issue is closed - ensure closed_at is set
-				if issue.ClosedAt != nil {
-					updates["closed_at"] = *issue.ClosedAt
-				} else if !issue.UpdatedAt.IsZero() {
-					updates["closed_at"] = issue.UpdatedAt
-				} else {
-					updates["closed_at"] = time.Now().UTC()
-				}
-			} else {
-				// Issue is not closed - ensure closed_at is null
-				updates["closed_at"] = nil
-			}
-
-			_ = store.UpdateIssue(ctx, issue.ID, updates, "auto-import")
+	// Schedule export to sync JSONL after successful import
+	changed := (result.Created + result.Updated + len(result.IDMapping)) > 0
+	if changed {
+		if len(result.IDMapping) > 0 {
+			// Remappings may affect many issues, do a full export
+			markDirtyAndScheduleFullExport()
 		} else {
-			// Create new issue - enforce invariant before creation
-			if issue.Status == "closed" {
-				if issue.ClosedAt == nil {
-					now := time.Now().UTC()
-					issue.ClosedAt = &now
-				}
-			} else {
-				issue.ClosedAt = nil
-			}
-			_ = store.CreateIssue(ctx, issue, "auto-import")
-		}
-	}
-
-	// Import dependencies
-	for _, issue := range allIssues {
-		if len(issue.Dependencies) == 0 {
-			continue
-		}
-
-		// Get existing dependencies
-		existingDeps, err := store.GetDependencyRecords(ctx, issue.ID)
-		if err != nil {
-			continue
-		}
-
-		// Add missing dependencies
-		for _, dep := range issue.Dependencies {
-			exists := false
-			for _, existing := range existingDeps {
-				if existing.DependsOnID == dep.DependsOnID && existing.Type == dep.Type {
-					exists = true
-					break
-				}
-			}
-
-			if !exists {
-				_ = store.AddDependency(ctx, dep, "auto-import")
-			}
+			// Regular import, incremental export is fine
+			markDirtyAndScheduleFlush()
 		}
 	}
 
