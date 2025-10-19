@@ -30,33 +30,11 @@ bd is a graph-based issue tracker for persistent memory across sessions. Use for
 
 ## Surviving Compaction Events
 
-**Critical**: Compaction events delete conversation history but preserve beads. After compaction, bd state is your only persistent memory.
+**Critical**: After compaction, bd state is your only persistent memory. Write notes as if explaining to a future agent with zero conversation context.
 
-**What survives compaction:**
-- All bead data (issues, notes, dependencies, status)
-- Complete work history and context
+**Key insight**: TodoWrite disappears after compaction, but bead notes survive. Use notes to capture: COMPLETED work, IN PROGRESS status, BLOCKERS, and KEY DECISIONS.
 
-**What doesn't survive:**
-- Conversation history
-- TodoWrite lists
-- Recent discussion context
-
-**Writing notes for post-compaction recovery:**
-
-Write notes as if explaining to a future agent with zero conversation context:
-
-**Pattern:**
-```markdown
-notes field format:
-- COMPLETED: Specific deliverables ("implemented JWT refresh endpoint + rate limiting")
-- IN PROGRESS: Current state + next immediate step ("testing password reset flow, need user input on email template")
-- BLOCKERS: What's preventing progress
-- KEY DECISIONS: Important context or user guidance
-```
-
-**After compaction:** `bd show <issue-id>` reconstructs full context from notes field.
-
-**For complete compaction recovery workflow, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#compaction-survival)
+**For complete compaction recovery workflow and note-taking patterns, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#compaction-survival)
 
 ## Session Start Protocol
 
@@ -106,15 +84,7 @@ bd automatically selects the appropriate database:
 
 **Use case for global database**: Cross-project tracking, personal task management, knowledge work that doesn't belong to a specific project.
 
-**When to use --db flag explicitly:**
-- Accessing a specific database outside current directory
-- Working with multiple databases (e.g., project database + reference database)
-- Example: `bd --db /path/to/reference/terms.db list`
-
-**Database discovery rules:**
-- bd looks for `.beads/*.db` in current working directory
-- If not found, uses `~/.beads/default.db`
-- Shell cwd can reset between commands - use absolute paths with --db when operating on non-local databases
+**Database discovery**: bd looks for `.beads/*.db` in current directory, falls back to `~/.beads/default.db`. Use `--db` flag for explicit database selection.
 
 **For complete session start workflows, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#session-start)
 
@@ -259,50 +229,12 @@ bd supports four dependency types:
 ## Integration with TodoWrite
 
 **Both tools complement each other at different timescales:**
+- **TodoWrite** - Short-term working memory (this hour), disappears after session
+- **Beads** - Long-term episodic memory (this week/month), survives compaction
 
-### Temporal Layering Pattern
+**The Handoff Pattern**: Read bead → Create TodoWrite items → Work → Update bead notes with outcomes → TodoWrite disappears, bead survives.
 
-**TodoWrite** (short-term working memory - this hour):
-- Tactical execution: "Review Section 3", "Expand Q&A answers"
-- Marked completed as you go
-- Present/future tense ("Review", "Expand", "Create")
-- Ephemeral: Disappears when session ends
-
-**Beads** (long-term episodic memory - this week/month):
-- Strategic objectives: "Continue work on strategic planning document"
-- Key decisions and outcomes in notes field
-- Past tense in notes ("COMPLETED", "Discovered", "Blocked by")
-- Persistent: Survives compaction and session boundaries
-
-### The Handoff Pattern
-
-1. **Session start**: Read bead → Create TodoWrite items for immediate actions
-2. **During work**: Mark TodoWrite items completed as you go
-3. **Reach milestone**: Update bead notes with outcomes + context
-4. **Session end**: TodoWrite disappears, bead survives with enriched notes
-
-**After compaction**: TodoWrite is gone forever, but bead notes reconstruct what happened.
-
-### Example: TodoWrite tracks execution, Beads capture meaning
-
-**TodoWrite:**
-```
-[completed] Implement login endpoint
-[in_progress] Add password hashing with bcrypt
-[pending] Create session middleware
-```
-
-**Corresponding bead notes:**
-```
-bd update issue-123 --notes "COMPLETED: Login endpoint with bcrypt password
-hashing (12 rounds). KEY DECISION: Using JWT tokens (not sessions) for stateless
-auth - simplifies horizontal scaling. IN PROGRESS: Session middleware implementation.
-NEXT: Need user input on token expiry time (1hr vs 24hr trade-off)."
-```
-
-**Don't duplicate**: TodoWrite tracks execution, Beads captures meaning and context.
-
-**For patterns on transitioning between tools mid-session, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md#integration-patterns)
+**For complete temporal layering pattern, examples, and integration workflows, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md#integration-patterns)
 
 ## Common Patterns
 
