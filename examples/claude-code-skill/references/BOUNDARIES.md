@@ -59,7 +59,7 @@ Work with blockers, prerequisites, or hierarchical structure.
 Tasks with fuzzy boundaries, exploration, or strategic thinking.
 
 **Examples:**
-- Policy proposal requiring stakeholder analysis and evidence gathering
+- Architecture decision requiring research into frameworks and trade-offs
 - API design requiring research into multiple options
 - Performance optimization requiring measurement and experimentation
 - Documentation requiring understanding system architecture
@@ -248,27 +248,27 @@ Rare, but happens when bd issue turns out simpler than expected.
 
 ## Real-World Examples
 
-### Example 1: Strategic Document Development
+### Example 1: Database Migration Planning
 
-**Scenario**: Developing policy proposal requiring research, stakeholder analysis, evidence gathering.
+**Scenario**: Planning migration from MySQL to PostgreSQL for production application.
 
 **Why bd**:
-- Multi-session research across days
+- Multi-session work across days/weeks
 - Fuzzy boundaries - scope emerges through investigation
-- Side quests - discover related policies to analyze
-- Dependencies - can't write recommendations until research complete
+- Side quests - discover schema incompatibilities requiring refactoring
+- Dependencies - can't migrate data until schema validated
 - Project memory - need to resume after interruptions
 
 **bd structure**:
 ```
-barb-epic: "Develop BARB metrics policy proposal"
-  ├─ barb-1: "Research existing BARB documentation"
-  ├─ barb-2: "Analyze stakeholder positions" (blocks recommendations)
-  ├─ barb-3: "Gather evidence for alternative approaches"
-  └─ barb-4: "Draft policy recommendations" (blocked by barb-2)
+db-epic: "Migrate production database to PostgreSQL"
+  ├─ db-1: "Audit current MySQL schema and queries"
+  ├─ db-2: "Research PostgreSQL equivalents for MySQL features" (blocks schema design)
+  ├─ db-3: "Design PostgreSQL schema with type mappings"
+  └─ db-4: "Create migration scripts and test data integrity" (blocked by db-3)
 ```
 
-**TodoWrite role**: None initially. Might use TodoWrite for single-session writing sprints once research complete.
+**TodoWrite role**: None initially. Might use TodoWrite for single-session testing sprints once migration scripts ready.
 
 ### Example 2: Simple Feature Implementation
 
@@ -387,6 +387,32 @@ refactor-4: "Update payment controller to use shared validation"
 - Rotten half-implemented plans
 
 **Solution**: Force yourself to use bd for next multi-session project. Experience the difference in organization and resumability.
+
+### Mistake 6: Always Asking Before Creating Issues (or Never Asking)
+
+**When to create directly** (no user question needed):
+- **Bug reports**: Clear scope, specific problem ("Found: auth doesn't check profile permissions")
+- **Research tasks**: Investigative work ("Research workaround for Slides export")
+- **Technical TODOs**: Discovered during implementation ("Add validation to form handler")
+- **Side quest capture**: Discoveries that need tracking ("Issue: MCP can't read Shared Drive files")
+
+**Why create directly**: Asking slows discovery capture. User expects proactive issue creation for clear-cut problems.
+
+**When to ask first** (get user input):
+- **Strategic work**: Fuzzy boundaries, multiple valid approaches ("Should we implement X or Y pattern?")
+- **Potential duplicates**: Might overlap with existing work
+- **Large epics**: Multiple approaches, unclear scope ("Plan migration strategy")
+- **Major scope changes**: Changing direction of existing issue
+
+**Why ask**: Ensures alignment on fuzzy work, prevents duplicate effort, clarifies scope before investment.
+
+**Rule of thumb**: If you can write a clear, specific issue title and description in one sentence, create directly. If you need user input to clarify the work, ask first.
+
+**Examples**:
+- ✅ Create directly: "workspace MCP: Google Doc → .docx export fails with UTF-8 encoding error"
+- ✅ Create directly: "Research: Workarounds for reading Google Slides from Shared Drives"
+- ❓ Ask first: "Should we refactor the auth system now or later?" (strategic decision)
+- ❓ Ask first: "I found several data validation issues, should I file them all?" (potential overwhelming)
 
 ## The Transition Point
 

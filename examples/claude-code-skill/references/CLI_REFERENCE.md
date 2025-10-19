@@ -20,6 +20,9 @@ Complete command reference for bd (beads) CLI tool. All commands support `--json
 - [Monitoring Commands](#monitoring-commands)
   - [bd stats](#bd-stats) - Project statistics
   - [bd blocked](#bd-blocked) - Find blocked work
+- [Data Management Commands](#data-management-commands)
+  - [bd export](#bd-export) - Export database to JSONL
+  - [bd import](#bd-import) - Import issues from JSONL
 - [Setup Commands](#setup-commands)
   - [bd init](#bd-init) - Initialize database
   - [bd quickstart](#bd-quickstart) - Show quick start guide
@@ -44,6 +47,8 @@ Complete command reference for bd (beads) CLI tool. All commands support `--json
 | `bd dep cycles` | Detect circular dependencies | (no flags) |
 | `bd stats` | Get project statistics | `--json` |
 | `bd blocked` | Find blocked issues | `--json` |
+| `bd export` | Export issues to JSONL | `--json` |
+| `bd import` | Import issues from JSONL | `--resolve-collisions` |
 | `bd init` | Initialize bd in directory | `--prefix` |
 | `bd quickstart` | Show quick start guide | (no flags) |
 
@@ -235,6 +240,61 @@ Use to identify bottlenecks when ready list is empty.
 
 ---
 
+## Data Management Commands
+
+### bd export
+
+Export all issues to JSONL format.
+
+```bash
+bd export > issues.jsonl
+bd export --json  # Same output, explicit flag
+```
+
+**Use cases:**
+- Manual backup before risky operations
+- Sharing issues across databases
+- Version control / git tracking
+- Data migration or analysis
+
+**Note**: bd auto-exports to `.beads/*.jsonl` after each operation (5s debounce). Manual export is rarely needed.
+
+---
+
+### bd import
+
+Import issues from JSONL format.
+
+```bash
+bd import < issues.jsonl
+bd import --resolve-collisions < issues.jsonl
+```
+
+**Flags:**
+- `--resolve-collisions` - Automatically remap conflicting issue IDs
+
+**Use cases for --resolve-collisions:**
+- **Reimporting** after manual JSONL edits - if you closed an issue in the JSONL that's still open in DB
+- **Merging databases** - importing issues from another database with overlapping IDs
+- **Restoring from backup** - when database state has diverged from JSONL
+
+**What --resolve-collisions does:**
+1. Detects ID conflicts (same ID, different status/content)
+2. Remaps conflicting imports to new IDs
+3. Updates all references and dependencies to use new IDs
+4. Reports remapping (e.g., "mit-1 → bd-4")
+
+**Without --resolve-collisions**: Import fails on first conflict.
+
+**Example scenario:**
+```bash
+# You have: mit-1 (open) in database
+# Importing: mit-1 (closed) from JSONL
+# Result: Import creates bd-4 with closed status, preserves existing mit-1
+```
+
+---
+
 ## Setup Commands
 
 ### bd init
@@ -342,6 +402,65 @@ bd automatically syncs with git:
 **Files**:
 - `.beads/*.jsonl` - Source of truth (git-tracked)
 - `.beads/*.db` - Local cache (gitignored)
+
+### Git Integration Troubleshooting
+
+**Problem: `.gitignore` ignores entire `.beads/` directory**
+
+**Symptom**: JSONL file not tracked in git, can't commit beads
+
+**Cause**: Incorrect `.gitignore` pattern blocks everything
+
+**Fix**:
+```bash
+# Check .gitignore
+cat .gitignore | grep beads
+
+# ❌ WRONG (ignores everything including JSONL):
+.beads/
+
+# ✅ CORRECT (ignores only SQLite cache):
+.beads/*.db
+.beads/*.db-*
+```
+
+**After fixing**: Remove the `.beads/` line and add the specific patterns. Then `git add .beads/issues.jsonl`.
+
+---
+
+### Permission Troubleshooting
+
+**Problem: bd commands prompt for permission despite whitelist**
+
+**Symptom**: `bd` commands ask for confirmation even with `Bash(bd:*)` in settings.local.json
+
+**Root Cause**: Wildcard patterns in settings.local.json don't actually work - not for bd, not for git, not for any Bash commands. This is a general Claude Code limitation, not bd-specific.
+
+**How It Actually Works**:
+- Individual command approvals (like `Bash(bd ready)`) DO persist across sessions
+- These are stored server-side by Claude Code, not in local config files
+- Commands like `git status` work without prompting because they've been individually approved many times, creating the illusion of a working wildcard pattern
+
+**Permanent Solution**:
+1. Trigger each bd subcommand you use frequently (see command list below)
+2. When prompted, click "Yes, and don't ask again" (NOT "Allow this time")
+3. That specific command will be permanently approved across all future sessions
+
+**Common bd Commands to Approve**:
+```bash
+bd ready
+bd list
+bd stats
+bd blocked
+bd export
+bd version
+bd quickstart
+bd dep cycles
+bd --help
+bd [command] --help  # For any subcommand help
+```
+
+**Note**: Dynamic commands with arguments (like `bd show <issue-id>`, `bd create "title"`) must be approved per-use since arguments vary. Only static commands can be permanently whitelisted.
 
 ---
 

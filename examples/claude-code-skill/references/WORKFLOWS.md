@@ -5,6 +5,7 @@ Detailed step-by-step workflows for common bd usage patterns with checklists.
 ## Contents
 
 - [Session Start Workflow](#session-start) - Check bd ready, establish context
+- [Compaction Survival](#compaction-survival) - Recovering after compaction events
 - [Discovery and Issue Creation](#discovery) - Proactive issue creation during work
 - [Status Maintenance](#status-maintenance) - Keeping bd status current
 - [Epic Planning](#epic-planning) - Structuring complex work with dependencies
@@ -39,6 +40,52 @@ Session Start (when bd is available):
 **Pattern**: Always run `bd ready` when starting work where bd is available. Report status immediately to establish shared context.
 
 **Database selection**: bd auto-discovers which database to use (project-local `.beads/` takes precedence over global `~/.beads/`).
+
+---
+
+## Compaction Survival {#compaction-survival}
+
+**Critical**: After compaction events, conversation history is deleted but bd state persists. Beads are your only memory.
+
+**Post-compaction recovery checklist:**
+
+```
+After Compaction:
+- [ ] Run bd list --status in_progress to see active work
+- [ ] Run bd show <issue-id> for each in_progress issue
+- [ ] Read notes field to understand: COMPLETED, IN PROGRESS, BLOCKERS, KEY DECISIONS
+- [ ] Check dependencies: bd dep tree <issue-id> for context
+- [ ] If notes insufficient, check bd list --status open for related issues
+- [ ] Reconstruct TodoWrite list from notes if needed
+```
+
+**Pattern**: Well-written notes enable full context recovery even with zero conversation history.
+
+**Writing notes for compaction survival:**
+
+**Good note (enables recovery):**
+```
+bd update issue-42 --notes "COMPLETED: User authentication - added JWT token
+generation with 1hr expiry, implemented refresh token endpoint using rotating
+tokens pattern. IN PROGRESS: Password reset flow. Email service integration
+working. NEXT: Need to add rate limiting to reset endpoint (currently unlimited
+requests). KEY DECISION: Using bcrypt with 12 rounds after reviewing OWASP
+recommendations, tech lead concerned about response time but benchmarks show <100ms."
+```
+
+**Bad note (insufficient for recovery):**
+```
+bd update issue-42 --notes "Working on auth feature. Made some progress.
+More to do later."
+```
+
+The good note contains:
+- Specific accomplishments (what was implemented/configured)
+- Current state (which part is working, what's in progress)
+- Next concrete step (not just "continue")
+- Key context (team concerns, technical decisions with rationale)
+
+**After compaction**: `bd show issue-42` reconstructs the full context needed to continue work.
 
 ---
 

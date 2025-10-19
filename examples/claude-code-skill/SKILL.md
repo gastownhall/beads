@@ -28,6 +28,36 @@ bd is a graph-based issue tracker for persistent memory across sessions. Use for
 
 **For detailed decision criteria and examples, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md)
 
+## Surviving Compaction Events
+
+**Critical**: Compaction events delete conversation history but preserve beads. After compaction, bd state is your only persistent memory.
+
+**What survives compaction:**
+- All bead data (issues, notes, dependencies, status)
+- Complete work history and context
+
+**What doesn't survive:**
+- Conversation history
+- TodoWrite lists
+- Recent discussion context
+
+**Writing notes for post-compaction recovery:**
+
+Write notes as if explaining to a future agent with zero conversation context:
+
+**Pattern:**
+```markdown
+notes field format:
+- COMPLETED: Specific deliverables ("implemented JWT refresh endpoint + rate limiting")
+- IN PROGRESS: Current state + next immediate step ("testing password reset flow, need user input on email template")
+- BLOCKERS: What's preventing progress
+- KEY DECISIONS: Important context or user guidance
+```
+
+**After compaction:** `bd show <issue-id>` reconstructs full context from notes field.
+
+**For complete compaction recovery workflow, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#compaction-survival)
+
 ## Session Start Protocol
 
 **bd is available when:**
@@ -75,6 +105,16 @@ bd automatically selects the appropriate database:
 - **Global fallback** (`~/.beads/`): Used when no project-local database exists
 
 **Use case for global database**: Cross-project tracking, personal task management, knowledge work that doesn't belong to a specific project.
+
+**When to use --db flag explicitly:**
+- Accessing a specific database outside current directory
+- Working with multiple databases (e.g., project database + reference database)
+- Example: `bd --db /path/to/reference/terms.db list`
+
+**Database discovery rules:**
+- bd looks for `.beads/*.db` in current working directory
+- If not found, uses `~/.beads/default.db`
+- Shell cwd can reset between commands - use absolute paths with --db when operating on non-local databases
 
 **For complete session start workflows, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#session-start)
 
@@ -218,26 +258,49 @@ bd supports four dependency types:
 
 ## Integration with TodoWrite
 
-**Both tools can coexist in a session:**
+**Both tools complement each other at different timescales:**
 
-### Recommended Pattern
+### Temporal Layering Pattern
 
-1. **Use bd** for project-level issue tracking and dependencies
-2. **Use TodoWrite** as "working copy" for current session's active tasks
-3. **Sync status**: When completing TodoWrite items, update corresponding bd issues
+**TodoWrite** (short-term working memory - this hour):
+- Tactical execution: "Review Section 3", "Expand Q&A answers"
+- Marked completed as you go
+- Present/future tense ("Review", "Expand", "Create")
+- Ephemeral: Disappears when session ends
 
-### Example Flow
+**Beads** (long-term episodic memory - this week/month):
+- Strategic objectives: "Continue work on strategic planning document"
+- Key decisions and outcomes in notes field
+- Past tense in notes ("COMPLETED", "Discovered", "Blocked by")
+- Persistent: Survives compaction and session boundaries
 
+### The Handoff Pattern
+
+1. **Session start**: Read bead → Create TodoWrite items for immediate actions
+2. **During work**: Mark TodoWrite items completed as you go
+3. **Reach milestone**: Update bead notes with outcomes + context
+4. **Session end**: TodoWrite disappears, bead survives with enriched notes
+
+**After compaction**: TodoWrite is gone forever, but bead notes reconstruct what happened.
+
+### Example: TodoWrite tracks execution, Beads capture meaning
+
+**TodoWrite:**
 ```
-Session start:
-- bd ready shows: "3 issues ready to work on"
-- User chooses one: "Let's work on issue-123"
-- Create TodoWrite checklist for implementation steps
-- bd update issue-123 --status in_progress
-- Work through TodoWrite items
-- When done: bd close issue-123
-- bd ready to see what unblocked
+[completed] Implement login endpoint
+[in_progress] Add password hashing with bcrypt
+[pending] Create session middleware
 ```
+
+**Corresponding bead notes:**
+```
+bd update issue-123 --notes "COMPLETED: Login endpoint with bcrypt password
+hashing (12 rounds). KEY DECISION: Using JWT tokens (not sessions) for stateless
+auth - simplifies horizontal scaling. IN PROGRESS: Session middleware implementation.
+NEXT: Need user input on token expiry time (1hr vs 24hr trade-off)."
+```
+
+**Don't duplicate**: TodoWrite tracks execution, Beads captures meaning and context.
 
 **For patterns on transitioning between tools mid-session, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md#integration-patterns)
 
@@ -272,6 +335,28 @@ Starting work after time away:
 
 **For complete workflow walkthroughs with checklists, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md)
 
+## Use Pattern Variations
+
+bd is designed for work tracking but can serve other purposes with appropriate adaptations:
+
+### Work Tracking (Primary Use Case)
+- Issues flow through states (open → in_progress → closed)
+- Priorities and dependencies matter
+- Status tracking is essential
+- IDs are sufficient for referencing
+
+### Reference Databases / Glossaries (Alternative Use)
+- Entities are mostly static (typically always open)
+- No real workflow or state transitions
+- Names/titles more important than IDs
+- Minimal or no dependencies
+- Consider dual format: maintain markdown version alongside database for name-based lookup
+- Use separate database (not mixed with work tracking) to avoid confusion
+
+**Example**: A terminology database could use both `terms.db` (queryable) and `GLOSSARY.md` (browsable by name).
+
+**Key difference**: Work items have lifecycle; reference entities are stable knowledge.
+
 ## Issue Creation Guidelines
 
 ### When to Ask First vs Create Directly
@@ -288,7 +373,7 @@ Starting work after time away:
 - Technical debt with clear scope
 - Dependency or blocker found
 
-**Reason**: Creating issues helps clarify thinking, but for ambiguous knowledge work, discussion refines the task structure first.
+**Why ask first for knowledge work?** Task boundaries in strategic/research work are often unclear until discussed, whereas technical implementation tasks are usually well-defined. Discussion helps structure the work properly before creating issues, preventing poorly-scoped issues that need immediate revision.
 
 ### Issue Quality
 
@@ -396,6 +481,12 @@ Use JSON output when you need to parse results programmatically or extract speci
 - Use `bd list` to see all issues
 - Filter by status: `bd list --status closed`
 - Closed issues remain in database permanently
+
+**If bd show can't find issue by name:**
+- `bd show` requires issue IDs, not issue titles
+- Workaround: `bd list | grep -i "search term"` to find ID first
+- Then: `bd show issue-id` with the discovered ID
+- For glossaries/reference databases where names matter more than IDs, consider using markdown format alongside the database
 
 **If dependencies seem wrong:**
 - Use `bd show issue-id` to see full dependency tree
