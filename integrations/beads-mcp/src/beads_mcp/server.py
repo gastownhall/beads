@@ -194,19 +194,24 @@ async def set_context(workspace_root: str) -> str:
     # Resolve to git repo root if possible
     resolved_root = _resolve_workspace_root(workspace_root)
     
+    # Always set working directory and context flag
+    os.environ["BEADS_WORKING_DIR"] = resolved_root
+    os.environ["BEADS_CONTEXT_SET"] = "1"
+    
     # Find beads database
     db_path = _find_beads_db(resolved_root)
     
     if db_path is None:
+        # Clear any stale DB path
+        os.environ.pop("BEADS_DB", None)
         return (
-            f"Warning: No .beads/beads.db found in or above {resolved_root}. "
-            "You may need to run 'bd init' first. Context set but database not found."
+            f"Context set successfully:\n"
+            f"  Workspace root: {resolved_root}\n"
+            f"  Database: Not found (run 'bd init' to create)"
         )
     
-    # Update environment for bd_client
-    os.environ["BEADS_WORKING_DIR"] = resolved_root
+    # Set database path
     os.environ["BEADS_DB"] = db_path
-    os.environ["BEADS_CONTEXT_SET"] = "1"
     
     return (
         f"Context set successfully:\n"
@@ -219,7 +224,7 @@ async def set_context(workspace_root: str) -> str:
     name="where_am_i",
     description="Show current workspace context and database path",
 )
-async def where_am_i() -> str:
+async def where_am_i(workspace_root: str | None = None) -> str:
     """Show current workspace context for debugging."""
     if not os.environ.get("BEADS_CONTEXT_SET"):
         return (
@@ -242,6 +247,7 @@ async def ready_work(
     limit: int = 10,
     priority: int | None = None,
     assignee: str | None = None,
+    workspace_root: str | None = None,
 ) -> list[Issue]:
     """Find issues with no blocking dependencies that are ready to work on."""
     return await beads_ready_work(limit=limit, priority=priority, assignee=assignee)
@@ -257,6 +263,7 @@ async def list_issues(
     issue_type: IssueType | None = None,
     assignee: str | None = None,
     limit: int = 50,
+    workspace_root: str | None = None,
 ) -> list[Issue]:
     """List all issues with optional filters."""
     return await beads_list_issues(
@@ -272,7 +279,7 @@ async def list_issues(
     name="show",
     description="Show detailed information about a specific issue including dependencies and dependents.",
 )
-async def show_issue(issue_id: str) -> Issue:
+async def show_issue(issue_id: str, workspace_root: str | None = None) -> Issue:
     """Show detailed information about a specific issue."""
     return await beads_show_issue(issue_id=issue_id)
 
@@ -295,6 +302,7 @@ async def create_issue(
     labels: list[str] | None = None,
     id: str | None = None,
     deps: list[str] | None = None,
+    workspace_root: str | None = None,
 ) -> Issue:
     """Create a new issue."""
     return await beads_create_issue(
@@ -328,6 +336,7 @@ async def update_issue(
     acceptance_criteria: str | None = None,
     notes: str | None = None,
     external_ref: str | None = None,
+    workspace_root: str | None = None,
 ) -> Issue:
     """Update an existing issue."""
     return await beads_update_issue(
@@ -348,7 +357,7 @@ async def update_issue(
     description="Close (complete) an issue. Mark work as done when you've finished implementing/fixing it.",
 )
 @require_context
-async def close_issue(issue_id: str, reason: str = "Completed") -> list[Issue]:
+async def close_issue(issue_id: str, reason: str = "Completed", workspace_root: str | None = None) -> list[Issue]:
     """Close (complete) an issue."""
     return await beads_close_issue(issue_id=issue_id, reason=reason)
 
@@ -358,7 +367,7 @@ async def close_issue(issue_id: str, reason: str = "Completed") -> list[Issue]:
     description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
 )
 @require_context
-async def reopen_issue(issue_ids: list[str], reason: str | None = None) -> list[Issue]:
+async def reopen_issue(issue_ids: list[str], reason: str | None = None, workspace_root: str | None = None) -> list[Issue]:
     """Reopen one or more closed issues."""
     return await beads_reopen_issue(issue_ids=issue_ids, reason=reason)
 
@@ -373,6 +382,7 @@ async def add_dependency(
     from_id: str,
     to_id: str,
     dep_type: DependencyType = "blocks",
+    workspace_root: str | None = None,
 ) -> str:
     """Add a dependency relationship between two issues."""
     return await beads_add_dependency(
@@ -386,7 +396,7 @@ async def add_dependency(
     name="stats",
     description="Get statistics: total issues, open, in_progress, closed, blocked, ready, and average lead time.",
 )
-async def stats() -> Stats:
+async def stats(workspace_root: str | None = None) -> Stats:
     """Get statistics about tasks."""
     return await beads_stats()
 
@@ -395,7 +405,7 @@ async def stats() -> Stats:
     name="blocked",
     description="Get blocked issues showing what dependencies are blocking them from being worked on.",
 )
-async def blocked() -> list[BlockedIssue]:
+async def blocked(workspace_root: str | None = None) -> list[BlockedIssue]:
     """Get blocked issues."""
     return await beads_blocked()
 
@@ -406,7 +416,7 @@ async def blocked() -> list[BlockedIssue]:
 database with optional custom prefix for issue IDs.""",
 )
 @require_context
-async def init(prefix: str | None = None) -> str:
+async def init(prefix: str | None = None, workspace_root: str | None = None) -> str:
     """Initialize bd in current directory."""
     return await beads_init(prefix=prefix)
 
@@ -415,7 +425,7 @@ async def init(prefix: str | None = None) -> str:
     name="debug_env",
     description="Debug tool: Show environment and working directory information",
 )
-async def debug_env() -> str:
+async def debug_env(workspace_root: str | None = None) -> str:
     """Debug tool to check working directory and environment variables."""
     info = []
     info.append("=== Working Directory Debug Info ===\n")
