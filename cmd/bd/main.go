@@ -359,13 +359,19 @@ func emitVerboseWarning() {
 }
 
 func shouldAutoStartDaemon() bool {
-	// Check environment variable (default: true)
+	// Check BEADS_NO_DAEMON first (escape hatch for single-user workflows)
+	noDaemon := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_NO_DAEMON")))
+	if noDaemon == "1" || noDaemon == "true" || noDaemon == "yes" || noDaemon == "on" {
+		return false // Explicit opt-out
+	}
+
+	// Check legacy BEADS_AUTO_START_DAEMON for backward compatibility
 	autoStart := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_AUTO_START_DAEMON")))
 	if autoStart != "" {
 		// Accept common falsy values
 		return autoStart != "false" && autoStart != "0" && autoStart != "no" && autoStart != "off"
 	}
-	return true // Default to enabled
+	return true // Default to enabled (always-daemon mode)
 }
 
 // shouldUseGlobalDaemon determines if global daemon should be preferred
@@ -375,59 +381,59 @@ func shouldUseGlobalDaemon() bool {
 	if pref := os.Getenv("BEADS_PREFER_GLOBAL_DAEMON"); pref != "" {
 		return pref == "1" || strings.ToLower(pref) == "true"
 	}
-	
+
 	// Heuristic: detect multiple beads repositories
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	
+
 	// Count .beads directories under home
 	repoCount := 0
 	maxDepth := 5 // Don't scan too deep
-	
+
 	var countRepos func(string, int) error
 	countRepos = func(dir string, depth int) error {
-		if depth > maxDepth || repoCount > 3 {
+		if depth > maxDepth || repoCount > 1 {
 			return filepath.SkipDir
 		}
-		
+
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return nil // Skip directories we can't read
 		}
-		
+
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
-			
+
 			name := entry.Name()
-			
+
 			// Skip hidden dirs except .beads
 			if strings.HasPrefix(name, ".") && name != ".beads" {
 				continue
 			}
-			
+
 			// Skip common large directories
 			if name == "node_modules" || name == "vendor" || name == "target" || name == ".git" {
 				continue
 			}
-			
+
 			path := filepath.Join(dir, name)
-			
+
 			// Check if this is a .beads directory with a database
 			if name == ".beads" {
 				dbPath := filepath.Join(path, "db.sqlite")
 				if _, err := os.Stat(dbPath); err == nil {
 					repoCount++
-					if repoCount > 3 {
+					if repoCount > 1 {
 						return filepath.SkipDir
 					}
 				}
 				continue
 			}
-			
+
 			// Recurse into subdirectories
 			if depth < maxDepth {
 				countRepos(path, depth+1)
@@ -435,7 +441,7 @@ func shouldUseGlobalDaemon() bool {
 		}
 		return nil
 	}
-	
+
 	// Scan common project directories
 	projectDirs := []string{
 		filepath.Join(home, "src"),
@@ -444,22 +450,23 @@ func shouldUseGlobalDaemon() bool {
 		filepath.Join(home, "workspace"),
 		filepath.Join(home, "dev"),
 	}
-	
+
 	for _, dir := range projectDirs {
 		if _, err := os.Stat(dir); err == nil {
 			countRepos(dir, 0)
-			if repoCount > 3 {
+			if repoCount > 1 {
 				break
 			}
 		}
 	}
-	
+
 	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: found %d beads repositories, prefer global: %v\n", repoCount, repoCount > 3)
+		fmt.Fprintf(os.Stderr, "Debug: found %d beads repositories, prefer global: %v\n", repoCount, repoCount > 1)
 	}
-	
-	// Use global daemon if we found more than 3 repositories
-	return repoCount > 3
+
+	// Use global daemon if we found more than 1 repository (multi-repo workflow)
+	// This prevents concurrency issues when multiple repos are being worked on
+	return repoCount > 1
 }
 
 // tryAutoStartDaemon attempts to start the daemon in the background
