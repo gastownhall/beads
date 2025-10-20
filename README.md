@@ -413,6 +413,36 @@ bd rename-prefix kw-
 bd list  # Shows kw-* issues
 ```
 
+### Labels
+
+Add flexible metadata to issues for filtering and organization:
+
+```bash
+# Add labels during creation
+bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
+
+# Add/remove labels
+bd label add bd-42 security
+bd label remove bd-42 urgent
+
+# List labels
+bd label list bd-42              # Labels on one issue
+bd label list-all                # All labels with counts
+
+# Filter by labels
+bd list --label backend,auth     # AND: must have ALL labels
+bd list --label-any frontend,ui  # OR: must have AT LEAST ONE
+
+# JSON output
+bd label list-all --json
+```
+
+**See [LABELS.md](LABELS.md) for complete documentation:**
+- Label workflows and best practices
+- Common label patterns (components, domains, size, quality gates)
+- Advanced filtering techniques
+- Integration with CI/CD and automation
+
 ### Dependencies
 
 ```bash
@@ -1527,6 +1557,7 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
 ## Documentation
 
 - **[README.md](README.md)** - You are here! Complete guide
+- **[LABELS.md](LABELS.md)** - Complete label system guide: workflows, filtering, best practices
 - **[TEXT_FORMATS.md](TEXT_FORMATS.md)** - JSONL format analysis and merge strategies
 - **[GIT_WORKFLOW.md](GIT_WORKFLOW.md)** - Historical analysis of binary vs text approaches
 - **[EXTENDING.md](EXTENDING.md)** - Database extension patterns
