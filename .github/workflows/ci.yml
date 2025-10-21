@@ -44,6 +44,23 @@ jobs:
           file: ./coverage.out
           fail_ci_if_error: false
 
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        run: go build -v ./cmd/bd
+
+      - name: Test
+        run: go test -v ./...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
