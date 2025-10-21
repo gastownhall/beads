@@ -99,10 +99,14 @@ func (c *Client) Execute(operation string, args interface{}) (*Response, error) 
 		return nil, fmt.Errorf("failed to marshal args: %w", err)
 	}
 
+	// Get current working directory for database routing
+	cwd, _ := os.Getwd()
+
 	req := Request{
 		Operation:     operation,
 		Args:          argsJSON,
 		ClientVersion: ClientVersion,
+		Cwd:           cwd,
 	}
 
 	reqJSON, err := json.Marshal(req)
