@@ -91,9 +91,21 @@ var readyCmd = &cobra.Command{
 		ctx := context.Background()
 		issues, err := store.GetReadyWork(ctx, filter)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 		}
+
+	// If no ready work found, check if git has issues and auto-import
+	if len(issues) == 0 {
+		if checkAndAutoImport(ctx, store) {
+			// Re-run the query after import
+			issues, err = store.GetReadyWork(ctx, filter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
 
 		if jsonOutput {
 			// Always output array, even if empty
@@ -225,9 +237,21 @@ var statsCmd = &cobra.Command{
 		ctx := context.Background()
 		stats, err := store.GetStatistics(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 		}
+
+	// If no issues found, check if git has issues and auto-import
+	if stats.TotalIssues == 0 {
+		if checkAndAutoImport(ctx, store) {
+			// Re-run the stats after import
+			stats, err = store.GetStatistics(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
 
 		if jsonOutput {
 			outputJSON(stats)

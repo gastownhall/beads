@@ -137,9 +137,21 @@ var listCmd = &cobra.Command{
 		ctx := context.Background()
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 		}
+
+	// If no issues found, check if git has issues and auto-import
+	if len(issues) == 0 {
+		if checkAndAutoImport(ctx, store) {
+			// Re-run the query after import
+			issues, err = store.SearchIssues(ctx, "", filter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
 
 		// Handle format flag
 		if formatStr != "" {

@@ -462,6 +462,13 @@ Happy coding! 🔗
 
 ### Quick Start
 
+**FIRST TIME?** Import existing issues from git:
+```bash
+bd import -i .beads/issues.jsonl --json
+# Or if issues.jsonl is empty in working tree but exists in git:
+git show HEAD:.beads/issues.jsonl | bd import -i /dev/stdin --json
+```
+
 **Check for ready work:**
 ```bash
 bd ready --json
