@@ -18,7 +18,8 @@ import (
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
 }
 
 // New creates a new SQLite storage backend
@@ -96,7 +97,8 @@ func New(path string) (*SQLiteStorage, error) {
 	}
 
 	return &SQLiteStorage{
-		db: db,
+		db:     db,
+		dbPath: path,
 	}, nil
 }
 
@@ -472,6 +474,22 @@ func (s *SQLiteStorage) SyncAllCounters(ctx context.Context) error {
 	return nil
 }
 
+// derivePrefixFromPath derives the issue prefix from the database file path
+// Database file is named like ".beads/wy-.db" -> prefix should be "wy"
+func derivePrefixFromPath(dbPath string) string {
+	dbFileName := filepath.Base(dbPath)
+	// Strip ".db" extension
+	dbFileName = strings.TrimSuffix(dbFileName, ".db")
+	// Strip trailing hyphen (if any)
+	prefix := strings.TrimSuffix(dbFileName, "-")
+	
+	// Fallback if filename is weird
+	if prefix == "" {
+		prefix = "bd"
+	}
+	return prefix
+}
+
 // CreateIssue creates a new issue
 func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	// Validate issue before creating
@@ -515,11 +533,12 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 	// Generate ID if not set (inside transaction to prevent race conditions)
 	if issue.ID == "" {
-		// Get prefix from config, default to "bd"
+		// Get prefix from config
 		var prefix string
 		err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 		if err == sql.ErrNoRows || prefix == "" {
-			prefix = "bd"
+			// Config not set - derive prefix from database filename
+			prefix = derivePrefixFromPath(s.dbPath)
 		} else if err != nil {
 			return fmt.Errorf("failed to get config: %w", err)
 		}
@@ -631,7 +650,7 @@ func validateBatchIssues(issues []*types.Issue) error {
 }
 
 // generateBatchIDs generates IDs for all issues that need them atomically
-func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
+func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue, dbPath string) error {
 	// Count how many issues need IDs
 	needIDCount := 0
 	for _, issue := range issues {
@@ -648,7 +667,8 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 	if err == sql.ErrNoRows || prefix == "" {
-		prefix = "bd"
+		// Config not set - derive prefix from database filename
+		prefix = derivePrefixFromPath(dbPath)
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
 	}
@@ -842,7 +862,7 @@ func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 	}()
 
 	// Phase 3: Generate IDs for issues that need them
-	if err := generateBatchIDs(ctx, conn, issues); err != nil {
+	if err := generateBatchIDs(ctx, conn, issues, s.dbPath); err != nil {
 		return err
 	}
 

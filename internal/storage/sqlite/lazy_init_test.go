@@ -30,6 +30,11 @@ func TestLazyCounterInitialization(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Set the issue prefix to "bd" for this test
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
 	// Create some issues with explicit IDs (simulating import)
 	existingIssues := []string{"bd-5", "bd-10", "bd-15"}
 	for _, id := range existingIssues {
@@ -181,6 +186,11 @@ func TestCounterInitializationFromExisting(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+
+	// Set the issue prefix to "bd" for this test
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
 
 	// Create issues with explicit IDs, out of order
 	explicitIDs := []string{"bd-5", "bd-100", "bd-42", "bd-7"}

@@ -188,6 +188,13 @@ func TestMigrateIssueCountersTableEmptyDB(t *testing.T) {
 
 	// Create first issue - should work fine
 	ctx := context.Background()
+	
+	// Set the issue prefix to "bd" for this test
+	err = store.SetConfig(ctx, "issue_prefix", "bd")
+	if err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	
 	issue := &types.Issue{
 		Title:     "First issue",
 		Status:    types.StatusOpen,
@@ -225,6 +232,13 @@ func TestMigrateIssueCountersTableIdempotent(t *testing.T) {
 
 	// Create some issues
 	ctx := context.Background()
+	
+	// Set the issue prefix to "bd" for this test
+	err = store1.SetConfig(ctx, "issue_prefix", "bd")
+	if err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	
 	issue := &types.Issue{
 		Title:     "Test issue",
 		Status:    types.StatusOpen,
