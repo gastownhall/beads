@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -49,17 +50,23 @@ func (s *SQLiteStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*type
 	for rows.Next() {
 		var epic types.Issue
 		var totalChildren, closedChildren int
+		var assignee sql.NullString
 
 		err := rows.Scan(
 			&epic.ID, &epic.Title, &epic.Description, &epic.Design,
 			&epic.AcceptanceCriteria, &epic.Notes, &epic.Status,
-			&epic.Priority, &epic.IssueType, &epic.Assignee,
+			&epic.Priority, &epic.IssueType, &assignee,
 			&epic.EstimatedMinutes, &epic.CreatedAt, &epic.UpdatedAt,
 			&epic.ClosedAt, &epic.ExternalRef,
 			&totalChildren, &closedChildren,
 		)
 		if err != nil {
 			return nil, err
+		}
+
+		// Convert sql.NullString to string
+		if assignee.Valid {
+			epic.Assignee = assignee.String
 		}
 
 		eligibleForClose := false
