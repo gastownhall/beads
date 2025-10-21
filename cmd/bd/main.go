@@ -96,15 +96,44 @@ var rootCmd = &cobra.Command{
 
 		// Initialize database path
 		if dbPath == "" {
+			cwd, err := os.Getwd()
+			localBeadsDir := ""
+			if err == nil {
+				localBeadsDir = filepath.Join(cwd, ".beads")
+			}
+			
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
+				
+				// Special case for import: if we found a database but there's a local .beads/
+				// directory without a database, prefer creating a local database
+				if cmd.Name() == "import" && localBeadsDir != "" {
+					if _, err := os.Stat(localBeadsDir); err == nil {
+						// Check if found database is NOT in the local .beads/ directory
+						if !strings.HasPrefix(dbPath, localBeadsDir+string(filepath.Separator)) {
+							// Use local .beads/vc.db instead for import
+							dbPath = filepath.Join(localBeadsDir, "vc.db")
+						}
+					}
+				}
 			} else {
-				// No database found - error out instead of falling back to ~/.beads
-				fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-				fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
-				fmt.Fprintf(os.Stderr, "      or set BEADS_DB environment variable to specify a database\n")
-				os.Exit(1)
+				// For import command, allow creating database if .beads/ directory exists
+				if cmd.Name() == "import" && localBeadsDir != "" {
+					if _, err := os.Stat(localBeadsDir); err == nil {
+						// .beads/ directory exists - set dbPath for import to create
+						dbPath = filepath.Join(localBeadsDir, "vc.db")
+					}
+				}
+				
+				// If dbPath still not set, error out
+				if dbPath == "" {
+					// No database found - error out instead of falling back to ~/.beads
+					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
+					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
+					fmt.Fprintf(os.Stderr, "      or set BEADS_DB environment variable to specify a database\n")
+					os.Exit(1)
+				}
 			}
 		}
 
