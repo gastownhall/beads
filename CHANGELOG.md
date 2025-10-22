@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Critical**: Multiple daemon race condition (bd-54)
+  - Implemented file locking (`daemon.lock`) to prevent multiple daemons per repository
+  - Uses `flock` on Unix, `LockFileEx` on Windows for process-level exclusivity
+  - Lock held for daemon lifetime, automatically released on exit
+  - Eliminates race conditions in concurrent daemon start attempts
+  - Backward compatible: Falls back to PID check for pre-lock daemons during upgrades
+
 ## [0.11.0] - 2025-10-22
 
 ### Added

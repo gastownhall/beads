@@ -128,14 +128,18 @@ func TestIsDaemonRunning_CurrentProcess(t *testing.T) {
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "test.pid")
 
-	currentPID := os.Getpid()
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(currentPID)), 0644); err != nil {
-		t.Fatalf("Failed to write PID file: %v", err)
+	// Acquire the daemon lock to simulate a running daemon
+	beadsDir := filepath.Dir(pidFile)
+	lock, err := acquireDaemonLock(beadsDir, false)
+	if err != nil {
+		t.Fatalf("Failed to acquire daemon lock: %v", err)
 	}
+	defer lock.Close()
 
+	currentPID := os.Getpid()
 	isRunning, pid := isDaemonRunning(pidFile)
 	if !isRunning {
-		t.Error("Expected daemon running (current process PID)")
+		t.Error("Expected daemon running (lock held)")
 	}
 	if pid != currentPID {
 		t.Errorf("Expected PID %d, got %d", currentPID, pid)

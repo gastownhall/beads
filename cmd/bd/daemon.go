@@ -244,21 +244,8 @@ func getLogFilePath(userPath string, global bool) (string, error) {
 }
 
 func isDaemonRunning(pidFile string) (bool, int) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false, 0
-	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return false, 0
-	}
-
-	if !isProcessRunning(pid) {
-		return false, 0
-	}
-
-	return true, pid
+	beadsDir := filepath.Dir(pidFile)
+	return tryDaemonLock(beadsDir)
 }
 
 func formatUptime(seconds float64) string {
@@ -767,6 +754,19 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
 		fmt.Fprintf(logF, "[%s] %s\n", timestamp, msg)
 	}
+
+	// Acquire daemon lock FIRST - this is the single source of truth for exclusivity
+	beadsDir := filepath.Dir(pidFile)
+	lock, err := acquireDaemonLock(beadsDir, global)
+	if err != nil {
+		if err == ErrDaemonLocked {
+			log("Daemon already running (lock held), exiting")
+			os.Exit(1)
+		}
+		log("Error acquiring daemon lock: %v", err)
+		os.Exit(1)
+	}
+	defer lock.Close()
 
 	myPID := os.Getpid()
 	pidFileCreated := false

@@ -754,6 +754,8 @@ Issue is "ready" if status is `open` and it has no open `blocks` dependencies.
 beads/
 ├── cmd/bd/              # CLI entry point
 │   ├── main.go          # Core commands (create, list, show, update, close)
+│   ├── daemon.go        # Background daemon for auto-sync
+│   ├── daemon_lock.go   # Daemon exclusivity enforcement
 │   ├── init.go          # Project initialization
 │   ├── quickstart.go    # Interactive guide
 │   └── ...
@@ -763,6 +765,17 @@ beads/
 │       └── sqlite/      # SQLite implementation
 └── EXTENDING.md         # Database extension guide
 ```
+
+### Daemon Locking
+
+bd ensures only one daemon runs per repository using file locking:
+
+- **Lock file**: `.beads/daemon.lock` holds an exclusive file lock (via `flock` on Unix, `LockFileEx` on Windows)
+- **Process-level exclusivity**: The lock is held by the daemon process for its entire lifetime
+- **Automatic cleanup**: Lock is automatically released when daemon exits (via file descriptor close)
+- **Race condition prevention**: Multiple simultaneous daemon starts are safely serialized by the lock
+
+The lock file is the single source of truth for daemon status. Commands like `bd daemon --status` check lock availability rather than PID file contents, eliminating race conditions where multiple daemons could start simultaneously.
 
 ## Extending bd
 
