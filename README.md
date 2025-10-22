@@ -2,14 +2,6 @@
 
 **Give your coding agent a memory upgrade**
 
-> **🚨 CRITICAL WARNING - Do Not Use for Multiple Workstreams**
->
-> **v0.9.x has data duplication and data loss bugs when handling multiple workstreams.** This creates a mess that's difficult even for agents to clean up. Until further notice, **use only for single-workstream projects**. A fix is in progress.
-
-> **🚨 MCP SERVER WARNING - Single Project Only**
->
-> **Do NOT use the MCP server if you have multiple beads repositories/projects.** The MCP server currently routes issues to the wrong database when working across multiple repos. **The beads binary (bd command, v0.9.9+) works fine for multi-workstream scenarios** - instruct your agents to use the binary directly via shell commands instead of the MCP server. A fix for the MCP server is in progress.
-
 > **⚠️ Alpha Status**: This project is in active development. The core features work well, but expect API changes before 1.0. Use for development/internal projects first.
 
 Beads is a lightweight memory system for coding agents, using a graph-based issue tracker. Four kinds of dependencies work to chain your issues together like beads, making them easy for agents to follow for long distances, and reliably perform complex task streams in the right order.
