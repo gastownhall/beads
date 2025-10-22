@@ -295,6 +295,20 @@ bd import -i .beads/issues.jsonl --resolve-collisions
 **Manual resolution** (alternative):
 If you prefer manual control, resolve the Git conflict in `.beads/issues.jsonl` directly, then import normally without `--resolve-collisions`.
 
+### Advanced: Intelligent Merge Tools
+
+For Git merge conflicts in `.beads/issues.jsonl`, consider using **[beads-merge](https://github.com/neongreen/mono/tree/main/beads-merge)** - a specialized merge tool by @neongreen that:
+
+- Matches issues across conflicted JSONL files
+- Merges fields intelligently (e.g., combines labels, picks newer timestamps)
+- Resolves conflicts automatically where possible
+- Leaves remaining conflicts for manual resolution
+- Works as a Git/jujutsu merge driver
+
+**Two types of conflicts, two tools:**
+- **Git merge conflicts** (same issue modified in two branches) → Use beads-merge during git merge
+- **ID collisions** (different issues with same ID) → Use `bd import --resolve-collisions` after merge
+
 ## Current Project Status
 
 Run `bd stats` to see overall progress.

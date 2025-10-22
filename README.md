@@ -980,6 +980,21 @@ bd sync --no-push                 # Commit but don't push
 
 The `bd sync` command automatically resolves ID collisions using the same logic as `bd import --resolve-collisions`, making it safe for concurrent updates from multiple devices.
 
+#### Advanced: Custom Merge Tools
+
+When Git detects conflicts in `.beads/issues.jsonl` (e.g., the same issue was modified in different branches), you can use specialized merge tools for better resolution:
+
+**[beads-merge](https://github.com/neongreen/mono/tree/main/beads-merge)** - Intelligent JSONL merge tool by @neongreen that:
+- Matches issues across conflicted JSONL files
+- Merges fields intelligently (e.g., combines labels, picks newer timestamps)
+- Resolves as many conflicts as possible automatically
+- Leaves remaining conflicts for manual resolution
+- Works as a Git/jujutsu merge driver
+
+This is complementary to bd's `--resolve-collisions` flag:
+- **beads-merge**: Handles Git merge conflicts in JSONL (during merge)
+- **bd import --resolve-collisions**: Handles ID collisions after merge (remaps duplicate IDs)
+
 #### Background Sync with `bd daemon`
 
 For continuous automatic syncing, run the bd daemon in the background:
