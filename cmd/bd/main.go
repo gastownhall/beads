@@ -1998,10 +1998,15 @@ var updateCmd = &cobra.Command{
 			notes, _ := cmd.Flags().GetString("notes")
 			updates["notes"] = notes
 		}
+		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
+		var acceptanceCriteria string
 		if cmd.Flags().Changed("acceptance") {
-			acceptanceCriteria, _ := cmd.Flags().GetString("acceptance")
-			updates["acceptance_criteria"] = acceptanceCriteria
+		  acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
+		} else {
+			acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
 		}
+		updates["acceptance_criteria"] = acceptanceCriteria
+	}
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
@@ -2103,6 +2108,8 @@ func init() {
 	updateCmd.Flags().String("design", "", "Design notes")
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance", "", "Acceptance criteria")
+	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
+	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
 	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	rootCmd.AddCommand(updateCmd)
 }
