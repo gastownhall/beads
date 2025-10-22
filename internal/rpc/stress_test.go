@@ -305,14 +305,33 @@ func TestStressTimeouts(t *testing.T) {
 
 // TestStressNoUniqueConstraintViolations verifies no ID collisions
 func TestStressNoUniqueConstraintViolations(t *testing.T) {
+	// Save current directory and change to temp dir to prevent client from using project database
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	
 	tmpDir, err := os.MkdirTemp("", "bd-stress-unique-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
+	
+	// Change to temp dir so client.ExecuteWithCwd uses THIS directory, not project directory
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+	defer os.Chdir(origWd)
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	// Create .beads subdirectory so findDatabaseForCwd finds THIS database, not project's
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "test.db")
+	socketPath := filepath.Join(beadsDir, "bd.sock")
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
