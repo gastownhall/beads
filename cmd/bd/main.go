@@ -1998,8 +1998,8 @@ var updateCmd = &cobra.Command{
 			notes, _ := cmd.Flags().GetString("notes")
 			updates["notes"] = notes
 		}
-		if cmd.Flags().Changed("acceptance-criteria") {
-			acceptanceCriteria, _ := cmd.Flags().GetString("acceptance-criteria")
+		if cmd.Flags().Changed("acceptance") {
+			acceptanceCriteria, _ := cmd.Flags().GetString("acceptance")
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
 		if cmd.Flags().Changed("external-ref") {
@@ -2102,7 +2102,7 @@ func init() {
 	updateCmd.Flags().StringP("assignee", "a", "", "New assignee")
 	updateCmd.Flags().String("design", "", "Design notes")
 	updateCmd.Flags().String("notes", "", "Additional notes")
-	updateCmd.Flags().String("acceptance-criteria", "", "Acceptance criteria")
+	updateCmd.Flags().String("acceptance", "", "Acceptance criteria")
 	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	rootCmd.AddCommand(updateCmd)
 }
