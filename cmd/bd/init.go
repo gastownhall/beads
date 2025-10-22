@@ -85,18 +85,36 @@ bd.db
 
 		// Store the bd version in metadata (for version mismatch detection)
 		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
-			// Non-fatal - continue anyway
+		fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
+		// Non-fatal - continue anyway
 		}
 
-		if err := store.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
+		// Check if git has existing issues to import (fresh clone scenario)
+		issueCount, jsonlPath := checkGitForIssues()
+		if issueCount > 0 {
+		if !quiet {
+		fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
 		}
+		
+		if err := importFromGit(ctx, dbPath, store, jsonlPath); err != nil {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
+			}
+			// Non-fatal - continue with empty database
+		} else if !quiet {
+			fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+		}
+	}
 
-		// Skip output if quiet mode
-		if quiet {
-			return
-		}
+	if err := store.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
+	}
+
+	// Skip output if quiet mode
+	if quiet {
+		return
+	}
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()

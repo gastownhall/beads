@@ -456,11 +456,9 @@ Happy coding! 🔗
 
 ### Quick Start
 
-**FIRST TIME?** Import existing issues from git:
+**FIRST TIME?** Just run `bd init` - it auto-imports issues from git:
 ```bash
-bd import -i .beads/issues.jsonl --json
-# Or if issues.jsonl is empty in working tree but exists in git:
-git show HEAD:.beads/issues.jsonl | bd import -i /dev/stdin --json
+bd init --prefix bd
 ```
 
 **Check for ready work:**

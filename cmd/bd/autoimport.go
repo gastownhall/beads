@@ -43,7 +43,7 @@ func checkAndAutoImport(ctx context.Context, store storage.Storage) bool {
 	}
 
 	// Import from git
-	if err := importFromGit(ctx, store, jsonlPath); err != nil {
+	if err := importFromGit(ctx, dbPath, store, jsonlPath); err != nil {
 		if !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
 			fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
@@ -130,7 +130,7 @@ func findGitRoot() string {
 }
 
 // importFromGit imports issues from git HEAD
-func importFromGit(ctx context.Context, store storage.Storage, jsonlPath string) error {
+func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage, jsonlPath string) error {
 	// Get content from git
 	cmd := exec.Command("git", "show", fmt.Sprintf("HEAD:%s", jsonlPath))
 	jsonlData, err := cmd.Output()
@@ -167,6 +167,6 @@ func importFromGit(ctx context.Context, store storage.Storage, jsonlPath string)
 		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
 	}
 
-	_, err = importIssuesCore(ctx, dbPath, store, issues, opts)
+	_, err = importIssuesCore(ctx, dbFilePath, store, issues, opts)
 	return err
 }
