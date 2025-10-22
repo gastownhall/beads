@@ -45,3 +45,6 @@ Thumbs.db
 
 # Keep JSONL exports (source of truth for git)
 !.beads/*.jsonl
+
+# Ignore nix result
+result
