@@ -93,6 +93,7 @@ type ListArgs struct {
 	Label     string   `json:"label,omitempty"`      // Deprecated: use Labels
 	Labels    []string `json:"labels,omitempty"`     // AND semantics
 	LabelsAny []string `json:"labels_any,omitempty"` // OR semantics
+	IDs       []string `json:"ids,omitempty"`        // Filter by specific issue IDs
 	Limit     int      `json:"limit,omitempty"`
 }
 

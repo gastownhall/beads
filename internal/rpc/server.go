@@ -940,6 +940,21 @@ func (s *Server) handleList(req *Request) Response {
 	if len(labelsAny) > 0 {
 		filter.LabelsAny = labelsAny
 	}
+	if len(listArgs.IDs) > 0 {
+		ids := normalizeLabels(listArgs.IDs)
+		if len(ids) > 0 {
+			filter.IDs = ids
+		}
+	}
+
+	// Guard against excessive ID lists to avoid SQLite parameter limits
+	const maxIDs = 1000
+	if len(filter.IDs) > maxIDs {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("--id flag supports at most %d issue IDs, got %d", maxIDs, len(filter.IDs)),
+		}
+	}
 
 	ctx := s.reqCtx(req)
 	issues, err := store.SearchIssues(ctx, listArgs.Query, filter)

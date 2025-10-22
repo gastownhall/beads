@@ -212,6 +212,7 @@ type IssueFilter struct {
 	Labels      []string  // AND semantics: issue must have ALL these labels
 	LabelsAny   []string  // OR semantics: issue must have AT LEAST ONE of these labels
 	TitleSearch string
+	IDs         []string  // Filter by specific issue IDs
 	Limit       int
 }
 

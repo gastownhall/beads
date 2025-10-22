@@ -45,41 +45,48 @@ var listCmd = &cobra.Command{
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		titleSearch, _ := cmd.Flags().GetString("title")
+	idFilter, _ := cmd.Flags().GetString("id")
 
 		// Normalize labels: trim, dedupe, remove empty
 		labels = normalizeLabels(labels)
-		labelsAny = normalizeLabels(labelsAny)
+	labelsAny = normalizeLabels(labelsAny)
 
 		filter := types.IssueFilter{
-			Limit: limit,
+		Limit: limit,
 		}
 		if status != "" && status != "all" {
-			s := types.Status(status)
-			filter.Status = &s
+		s := types.Status(status)
+		filter.Status = &s
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
-			filter.Priority = &priority
+		priority, _ := cmd.Flags().GetInt("priority")
+		filter.Priority = &priority
 		}
 		if assignee != "" {
-			filter.Assignee = &assignee
+		filter.Assignee = &assignee
 		}
 		if issueType != "" {
-			t := types.IssueType(issueType)
-			filter.IssueType = &t
+		t := types.IssueType(issueType)
+		filter.IssueType = &t
 		}
 		if len(labels) > 0 {
-			filter.Labels = labels
+		filter.Labels = labels
 		}
 		if len(labelsAny) > 0 {
-			filter.LabelsAny = labelsAny
+		filter.LabelsAny = labelsAny
 		}
 		if titleSearch != "" {
-			filter.TitleSearch = titleSearch
+		filter.TitleSearch = titleSearch
 		}
+	if idFilter != "" {
+	ids := normalizeLabels(strings.Split(idFilter, ","))
+	if len(ids) > 0 {
+	filter.IDs = ids
+	}
+	}
 
-		// If daemon is running, use RPC
+	// If daemon is running, use RPC
 		if daemonClient != nil {
 			listArgs := &rpc.ListArgs{
 				Status:    status,
@@ -99,10 +106,13 @@ var listCmd = &cobra.Command{
 			}
 			// Forward title search via Query field (searches title/description/id)
 			if titleSearch != "" {
-				listArgs.Query = titleSearch
+			 listArgs.Query = titleSearch
 			}
+			 if len(filter.IDs) > 0 {
+			listArgs.IDs = filter.IDs
+			 }
 
-			resp, err := daemonClient.List(listArgs)
+			 resp, err := daemonClient.List(listArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -197,6 +207,7 @@ func init() {
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
+	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
 	listCmd.Flags().IntP("limit", "n", 0, "Limit results")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	rootCmd.AddCommand(listCmd)
