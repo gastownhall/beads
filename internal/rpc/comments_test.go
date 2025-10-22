@@ -1,51 +1,15 @@
 package rpc
 
 import (
-	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
-	"time"
 
-	sqlitestorage "github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestCommentOperationsViaRPC(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
-
-	store, err := sqlitestorage.New(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	defer store.Close()
-
-	server := NewServer(socketPath, store)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	serverErr := make(chan error, 1)
-	go func() {
-		serverErr <- server.Start(ctx)
-	}()
-
-	select {
-	case <-server.WaitReady():
-	case err := <-serverErr:
-		t.Fatalf("server failed to start: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for server to start")
-	}
-
-	client, err := TryConnect(socketPath)
-	if err != nil {
-		t.Fatalf("failed to connect to server: %v", err)
-	}
-	if client == nil {
-		t.Fatal("client is nil after successful connection")
-	}
-	defer client.Close()
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
 
 	createResp, err := client.Create(&CreateArgs{
 		Title:     "Comment test",
@@ -97,17 +61,5 @@ func TestCommentOperationsViaRPC(t *testing.T) {
 	}
 	if comments[0].Text != "first comment" {
 		t.Fatalf("expected comment text 'first comment', got %q", comments[0].Text)
-	}
-
-	if err := server.Stop(); err != nil {
-		t.Fatalf("failed to stop server: %v", err)
-	}
-	cancel()
-	select {
-	case err := <-serverErr:
-		if err != nil && err != context.Canceled {
-			t.Fatalf("server returned error: %v", err)
-		}
-	default:
 	}
 }

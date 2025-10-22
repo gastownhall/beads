@@ -49,7 +49,7 @@ func BenchmarkDirectCreate(b *testing.B) {
 
 // BenchmarkDaemonCreate benchmarks RPC create operations
 func BenchmarkDaemonCreate(b *testing.B) {
-	_, client, cleanup := setupBenchServer(b)
+	_, client, cleanup, _ := setupBenchServer(b)
 	defer cleanup()
 
 	b.ResetTimer()
@@ -107,7 +107,7 @@ func BenchmarkDirectUpdate(b *testing.B) {
 
 // BenchmarkDaemonUpdate benchmarks RPC update operations
 func BenchmarkDaemonUpdate(b *testing.B) {
-	_, client, cleanup := setupBenchServer(b)
+	_, client, cleanup, _ := setupBenchServer(b)
 	defer cleanup()
 
 	createArgs := &CreateArgs{
@@ -181,7 +181,7 @@ func BenchmarkDirectList(b *testing.B) {
 
 // BenchmarkDaemonList benchmarks RPC list operations
 func BenchmarkDaemonList(b *testing.B) {
-	_, client, cleanup := setupBenchServer(b)
+	_, client, cleanup, _ := setupBenchServer(b)
 	defer cleanup()
 
 	for i := 0; i < 100; i++ {
@@ -207,7 +207,7 @@ func BenchmarkDaemonList(b *testing.B) {
 
 // BenchmarkDaemonLatency measures round-trip latency
 func BenchmarkDaemonLatency(b *testing.B) {
-	_, client, cleanup := setupBenchServer(b)
+	_, client, cleanup, _ := setupBenchServer(b)
 	defer cleanup()
 
 	b.ResetTimer()
@@ -220,7 +220,7 @@ func BenchmarkDaemonLatency(b *testing.B) {
 
 // BenchmarkConcurrentAgents benchmarks concurrent agent throughput
 func BenchmarkConcurrentAgents(b *testing.B) {
-	server, _, cleanup := setupBenchServer(b)
+	server, _, cleanup, dbPath := setupBenchServer(b)
 	defer cleanup()
 
 	numAgents := 4
@@ -238,6 +238,9 @@ func BenchmarkConcurrentAgents(b *testing.B) {
 				return
 			}
 			defer client.Close()
+
+			// Set dbPath so client validates it's connected to the right daemon
+			client.dbPath = dbPath
 
 			for j := 0; j < opsPerAgent; j++ {
 				args := &CreateArgs{
@@ -260,14 +263,21 @@ func BenchmarkConcurrentAgents(b *testing.B) {
 	}
 }
 
-func setupBenchServer(b *testing.B) (*Server, *Client, func()) {
+func setupBenchServer(b *testing.B) (*Server, *Client, func(), string) {
 	tmpDir, err := os.MkdirTemp("", "bd-rpc-bench-*")
 	if err != nil {
 		b.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	// Create .beads subdirectory so findDatabaseForCwd finds THIS database, not project's
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		os.RemoveAll(tmpDir)
+		b.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "test.db")
+	socketPath := filepath.Join(beadsDir, "bd.sock")
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
@@ -286,22 +296,44 @@ func setupBenchServer(b *testing.B) (*Server, *Client, func()) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	client, err := TryConnect(socketPath)
+	// Change to tmpDir so client's os.Getwd() finds the test database
+	originalWd, err := os.Getwd()
 	if err != nil {
 		cancel()
 		server.Stop()
 		store.Close()
 		os.RemoveAll(tmpDir)
+		b.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		cancel()
+		server.Stop()
+		store.Close()
+		os.RemoveAll(tmpDir)
+		b.Fatalf("Failed to change directory: %v", err)
+	}
+
+	client, err := TryConnect(socketPath)
+	if err != nil {
+		cancel()
+		server.Stop()
+		store.Close()
+		os.Chdir(originalWd)
+		os.RemoveAll(tmpDir)
 		b.Fatalf("Failed to connect client: %v", err)
 	}
+
+	// Set the client's dbPath to the test database so it doesn't route to the wrong DB
+	client.dbPath = dbPath
 
 	cleanup := func() {
 		client.Close()
 		cancel()
 		server.Stop()
 		store.Close()
+		os.Chdir(originalWd) // Restore original working directory
 		os.RemoveAll(tmpDir)
 	}
 
-	return server, client, cleanup
+	return server, client, cleanup, dbPath
 }

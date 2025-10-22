@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -80,15 +79,9 @@ func TestVersionCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup temp environment
-			tmpDir, err := os.MkdirTemp("", "bd-version-test-*")
-			if err != nil {
-				t.Fatalf("Failed to create temp dir: %v", err)
-			}
-			defer os.RemoveAll(tmpDir)
-
-			dbPath := filepath.Join(tmpDir, "test.db")
-			socketPath := filepath.Join(tmpDir, "bd.sock")
+			// Setup isolated test environment
+			tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
+			defer cleanup()
 
 			store, err := sqlitestorage.New(dbPath)
 			if err != nil {
@@ -118,6 +111,16 @@ func TestVersionCompatibility(t *testing.T) {
 			ClientVersion = tt.clientVersion
 			defer func() { ClientVersion = originalClientVersion }()
 
+			// Change to tmpDir so client's os.Getwd() finds the test database
+			originalWd, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("Failed to get working directory: %v", err)
+			}
+			if err := os.Chdir(tmpDir); err != nil {
+				t.Fatalf("Failed to change directory: %v", err)
+			}
+			defer os.Chdir(originalWd)
+
 			client, err := TryConnect(socketPath)
 			if err != nil {
 				t.Fatalf("Failed to connect: %v", err)
@@ -126,6 +129,9 @@ func TestVersionCompatibility(t *testing.T) {
 				t.Fatal("Client is nil after successful connection")
 			}
 			defer client.Close()
+
+			// Set dbPath so client validates it's connected to the right daemon
+			client.dbPath = dbPath
 
 			// Try to create an issue (this triggers version check)
 			args := &CreateArgs{
@@ -166,14 +172,8 @@ func TestVersionCompatibility(t *testing.T) {
 }
 
 func TestHealthCheckIncludesVersionInfo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-health-version-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
+	defer cleanup()
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
@@ -196,11 +196,24 @@ func TestHealthCheckIncludesVersionInfo(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
+	// Change to tmpDir so client's os.Getwd() finds the test database
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
+
 	client, err := TryConnect(socketPath)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer client.Close()
+
+	// Set dbPath so client validates it's connected to the right daemon
+	client.dbPath = dbPath
 
 	health, err := client.Health()
 	if err != nil {
@@ -223,14 +236,8 @@ func TestHealthCheckIncludesVersionInfo(t *testing.T) {
 }
 
 func TestIncompatibleVersionInHealth(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-health-incompatible-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
+	defer cleanup()
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
@@ -253,11 +260,24 @@ func TestIncompatibleVersionInHealth(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
+	// Change to tmpDir so client's os.Getwd() finds the test database
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
+
 	client, err := TryConnect(socketPath)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer client.Close()
+
+	// Set dbPath so client validates it's connected to the right daemon
+	client.dbPath = dbPath
 
 	// Health check should succeed but report incompatible
 	health, err := client.Health()
@@ -336,14 +356,8 @@ func TestVersionCheckMessage(t *testing.T) {
 }
 
 func TestPingAndHealthBypassVersionCheck(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-bypass-version-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
+	defer cleanup()
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
@@ -366,11 +380,24 @@ func TestPingAndHealthBypassVersionCheck(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
+	// Change to tmpDir so client's os.Getwd() finds the test database
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
+
 	client, err := TryConnect(socketPath)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer client.Close()
+
+	// Set dbPath so client validates it's connected to the right daemon
+	client.dbPath = dbPath
 
 	// Ping should work despite version mismatch
 	if err := client.Ping(); err != nil {
@@ -404,14 +431,8 @@ func TestPingAndHealthBypassVersionCheck(t *testing.T) {
 }
 
 func TestMetricsOperation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-metrics-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "bd.sock")
+	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
+	defer cleanup()
 
 	store, err := sqlitestorage.New(dbPath)
 	if err != nil {
@@ -433,11 +454,24 @@ func TestMetricsOperation(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
+	// Change to tmpDir so client's os.Getwd() finds the test database
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
+
 	client, err := TryConnect(socketPath)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer client.Close()
+
+	// Set dbPath so client validates it's connected to the right daemon
+	client.dbPath = dbPath
 
 	metrics, err := client.Metrics()
 	if err != nil {

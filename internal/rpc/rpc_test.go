@@ -112,6 +112,36 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 	return server, client, cleanup
 }
 
+// setupTestServerIsolated creates an isolated test server in a temp directory
+// with .beads structure, but allows the caller to customize server/client setup.
+// Returns tmpDir, beadsDir, dbPath, socketPath, and cleanup function.
+// Caller must change to tmpDir if needed and set client.dbPath manually.
+func setupTestServerIsolated(t *testing.T) (tmpDir, beadsDir, dbPath, socketPath string, cleanup func()) {
+	tmpDir, err := os.MkdirTemp("", "bd-rpc-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	// Create .beads subdirectory so findDatabaseForCwd finds THIS database, not project's
+	beadsDir = filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	dbPath = filepath.Join(beadsDir, "test.db")
+	socketPath = filepath.Join(beadsDir, "bd.sock")
+
+	// Ensure socket doesn't exist from previous failed test
+	os.Remove(socketPath)
+
+	cleanup = func() {
+		os.RemoveAll(tmpDir)
+	}
+
+	return tmpDir, beadsDir, dbPath, socketPath, cleanup
+}
+
 func TestPing(t *testing.T) {
 	_, client, cleanup := setupTestServer(t)
 	defer cleanup()
