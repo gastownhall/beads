@@ -96,9 +96,15 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to migrate compacted_at_commit column: %w", err)
 	}
 
+	// Convert to absolute path for consistency
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
 	return &SQLiteStorage{
 		db:     db,
-		dbPath: path,
+		dbPath: absPath,
 	}, nil
 }
 
@@ -1861,4 +1867,9 @@ func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([
 // Close closes the database connection
 func (s *SQLiteStorage) Close() error {
 	return s.db.Close()
+}
+
+// Path returns the absolute path to the database file
+func (s *SQLiteStorage) Path() string {
+	return s.dbPath
 }

@@ -515,6 +515,54 @@ func (s *Server) checkVersionCompatibility(clientVersion string) error {
 	return nil
 }
 
+// validateDatabaseBinding validates that the client is connecting to the correct daemon
+// Returns error if ExpectedDB is set and doesn't match the daemon's database path
+func (s *Server) validateDatabaseBinding(req *Request) error {
+	// If client doesn't specify ExpectedDB, allow but log warning (old clients)
+	if req.ExpectedDB == "" {
+		// Log warning for audit trail
+		fmt.Fprintf(os.Stderr, "Warning: Client request without database binding validation (old client or missing ExpectedDB)\n")
+		return nil
+	}
+
+	// For multi-database daemons: If a cwd is provided, verify the client expects
+	// the database that would be selected for that cwd
+	var daemonDB string
+	if req.Cwd != "" {
+		// Use the database discovery logic to find which DB would be used
+		dbPath := s.findDatabaseForCwd(req.Cwd)
+		if dbPath != "" {
+			daemonDB = dbPath
+		} else {
+			// No database found for cwd, will fall back to default storage
+			daemonDB = s.storage.Path()
+		}
+	} else {
+		// No cwd provided, use default storage
+		daemonDB = s.storage.Path()
+	}
+
+	// Normalize both paths for comparison (resolve symlinks, clean paths)
+	expectedPath, err := filepath.EvalSymlinks(req.ExpectedDB)
+	if err != nil {
+		// If we can't resolve expected path, use it as-is
+		expectedPath = filepath.Clean(req.ExpectedDB)
+	}
+	daemonPath, err := filepath.EvalSymlinks(daemonDB)
+	if err != nil {
+		// If we can't resolve daemon path, use it as-is
+		daemonPath = filepath.Clean(daemonDB)
+	}
+
+	// Compare paths
+	if expectedPath != daemonPath {
+		return fmt.Errorf("database mismatch: client expects %s but daemon serves %s. Wrong daemon connection - check socket path",
+			req.ExpectedDB, daemonDB)
+	}
+
+	return nil
+}
+
 func (s *Server) handleRequest(req *Request) Response {
 	// Track request timing
 	start := time.Now()
@@ -524,6 +572,17 @@ func (s *Server) handleRequest(req *Request) Response {
 		latency := time.Since(start)
 		s.metrics.RecordRequest(req.Operation, latency)
 	}()
+
+	// Validate database binding (skip for health/metrics to allow diagnostics)
+	if req.Operation != OpHealth && req.Operation != OpMetrics {
+		if err := s.validateDatabaseBinding(req); err != nil {
+			s.metrics.RecordError(req.Operation)
+			return Response{
+				Success: false,
+				Error:   err.Error(),
+			}
+		}
+	}
 
 	// Check version compatibility (skip for ping/health to allow version checks)
 	if req.Operation != OpPing && req.Operation != OpHealth {

@@ -69,6 +69,9 @@ type Storage interface {
 
 	// Lifecycle
 	Close() error
+
+	// Database path (for daemon validation)
+	Path() string
 }
 
 // Config holds database configuration

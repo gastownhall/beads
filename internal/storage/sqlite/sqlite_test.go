@@ -1226,3 +1226,70 @@ func TestMetadataMultipleKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "beads-test-path-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test with relative path
+	relPath := filepath.Join(tmpDir, "test.db")
+	store, err := New(relPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer store.Close()
+
+	// Path() should return absolute path
+	path := store.Path()
+	if !filepath.IsAbs(path) {
+		t.Errorf("Path() should return absolute path, got: %s", path)
+	}
+
+	// Path should match the temp directory
+	expectedPath, _ := filepath.Abs(relPath)
+	if path != expectedPath {
+		t.Errorf("Path() returned %s, expected %s", path, expectedPath)
+	}
+}
+
+func TestMultipleStorageDistinctPaths(t *testing.T) {
+	tmpDir1, err := os.MkdirTemp("", "beads-test-path1-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir 1: %v", err)
+	}
+	defer os.RemoveAll(tmpDir1)
+
+	tmpDir2, err := os.MkdirTemp("", "beads-test-path2-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir 2: %v", err)
+	}
+	defer os.RemoveAll(tmpDir2)
+
+	store1, err := New(filepath.Join(tmpDir1, "db1.db"))
+	if err != nil {
+		t.Fatalf("failed to create storage 1: %v", err)
+	}
+	defer store1.Close()
+
+	store2, err := New(filepath.Join(tmpDir2, "db2.db"))
+	if err != nil {
+		t.Fatalf("failed to create storage 2: %v", err)
+	}
+	defer store2.Close()
+
+	// Paths should be distinct
+	path1 := store1.Path()
+	path2 := store2.Path()
+
+	if path1 == path2 {
+		t.Errorf("Multiple storage instances should have distinct paths, both returned: %s", path1)
+	}
+
+	// Both should be absolute
+	if !filepath.IsAbs(path1) || !filepath.IsAbs(path2) {
+		t.Errorf("Both paths should be absolute: path1=%s, path2=%s", path1, path2)
+	}
+}

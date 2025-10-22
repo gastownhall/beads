@@ -18,6 +18,7 @@ type Client struct {
 	conn       net.Conn
 	socketPath string
 	timeout    time.Duration
+	dbPath     string // Expected database path for validation
 }
 
 // TryConnect attempts to connect to the daemon socket
@@ -92,21 +93,34 @@ func (c *Client) SetTimeout(timeout time.Duration) {
 	c.timeout = timeout
 }
 
+// SetDatabasePath sets the expected database path for validation
+func (c *Client) SetDatabasePath(dbPath string) {
+	c.dbPath = dbPath
+}
+
 // Execute sends an RPC request and waits for a response
 func (c *Client) Execute(operation string, args interface{}) (*Response, error) {
+	return c.ExecuteWithCwd(operation, args, "")
+}
+
+// ExecuteWithCwd sends an RPC request with an explicit cwd (or current dir if empty string)
+func (c *Client) ExecuteWithCwd(operation string, args interface{}, cwd string) (*Response, error) {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal args: %w", err)
 	}
 
-	// Get current working directory for database routing
-	cwd, _ := os.Getwd()
+	// Use provided cwd, or get current working directory for database routing
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 
 	req := Request{
 		Operation:     operation,
 		Args:          argsJSON,
 		ClientVersion: ClientVersion,
 		Cwd:           cwd,
+		ExpectedDB:    c.dbPath, // Send expected database path for validation
 	}
 
 	reqJSON, err := json.Marshal(req)
