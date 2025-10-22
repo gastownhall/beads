@@ -27,7 +27,7 @@ type Issue struct {
 	CompactedAt        *time.Time     `json:"compacted_at,omitempty"`
 	CompactedAtCommit  *string        `json:"compacted_at_commit,omitempty"` // Git commit hash when compacted
 	OriginalSize       int            `json:"original_size,omitempty"`
-	Labels             []string       `json:"labels,omitempty"`       // Populated only for export/import
+	Labels             []string       `json:"labels,omitempty"` // Populated only for export/import
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import
 }

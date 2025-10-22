@@ -436,6 +436,8 @@ func migrateCompactedAtCommitColumn(db *sql.DB) error {
 	return nil
 }
 
+
+
 // getNextIDForPrefix atomically generates the next ID for a given prefix
 // Uses the issue_counters table for atomic, cross-process ID generation
 func (s *SQLiteStorage) getNextIDForPrefix(ctx context.Context, prefix string) (int, error) {
