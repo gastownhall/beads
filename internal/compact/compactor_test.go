@@ -35,6 +35,7 @@ func createClosedIssue(t *testing.T, store *sqlite.SQLiteStorage, id string) *ty
 
 	ctx := context.Background()
 	now := time.Now()
+	closedAt := now.Add(-1 * time.Second)
 	issue := &types.Issue{
 		ID:    id,
 		Title: "Test Issue",
@@ -83,7 +84,7 @@ Testing strategy:
 		IssueType:  types.TypeTask,
 		CreatedAt:  now.Add(-48 * time.Hour),
 		UpdatedAt:  now.Add(-24 * time.Hour),
-		ClosedAt:   &now,
+		ClosedAt:   &closedAt,
 	}
 
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
