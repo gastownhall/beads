@@ -1679,27 +1679,41 @@ func init() {
 }
 
 var showCmd = &cobra.Command{
-	Use:   "show [id]",
+	Use:   "show [id...]",
 	Short: "Show issue details",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// If daemon is running, use RPC
 		if daemonClient != nil {
-			showArgs := &rpc.ShowArgs{ID: args[0]}
-			resp, err := daemonClient.Show(showArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			if jsonOutput {
-				fmt.Println(string(resp.Data))
-			} else {
-				// Check if issue exists (daemon returns null for non-existent issues)
-				if string(resp.Data) == "null" || len(resp.Data) == 0 {
-					fmt.Fprintf(os.Stderr, "Issue %s not found\n", args[0])
-					os.Exit(1)
+			allDetails := []interface{}{}
+			for idx, id := range args {
+				showArgs := &rpc.ShowArgs{ID: id}
+				resp, err := daemonClient.Show(showArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+					continue
 				}
+
+				if jsonOutput {
+					type IssueDetails struct {
+						types.Issue
+						Labels       []string       `json:"labels,omitempty"`
+						Dependencies []*types.Issue `json:"dependencies,omitempty"`
+						Dependents   []*types.Issue `json:"dependents,omitempty"`
+					}
+					var details IssueDetails
+					if err := json.Unmarshal(resp.Data, &details); err == nil {
+						allDetails = append(allDetails, details)
+					}
+				} else {
+					// Check if issue exists (daemon returns null for non-existent issues)
+					if string(resp.Data) == "null" || len(resp.Data) == 0 {
+						fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+						continue
+					}
+					if idx > 0 {
+						fmt.Println("\n" + strings.Repeat("─", 60))
+					}
 
 				// Parse response and use existing formatting code
 				type IssueDetails struct {
@@ -1796,40 +1810,51 @@ var showCmd = &cobra.Command{
 					}
 				}
 
-				fmt.Println()
+					fmt.Println()
+				}
+			}
+
+			if jsonOutput && len(allDetails) > 0 {
+				outputJSON(allDetails)
 			}
 			return
 		}
 
 		// Direct mode
 		ctx := context.Background()
-		issue, err := store.GetIssue(ctx, args[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if issue == nil {
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", args[0])
-			os.Exit(1)
-		}
-
-		if jsonOutput {
-			// Include labels, dependencies, and comments in JSON output
-			type IssueDetails struct {
-				*types.Issue
-				Labels       []string         `json:"labels,omitempty"`
-				Dependencies []*types.Issue   `json:"dependencies,omitempty"`
-				Dependents   []*types.Issue   `json:"dependents,omitempty"`
-				Comments     []*types.Comment `json:"comments,omitempty"`
+		allDetails := []interface{}{}
+		for idx, id := range args {
+			issue, err := store.GetIssue(ctx, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				continue
 			}
-			details := &IssueDetails{Issue: issue}
-			details.Labels, _ = store.GetLabels(ctx, issue.ID)
-			details.Dependencies, _ = store.GetDependencies(ctx, issue.ID)
-			details.Dependents, _ = store.GetDependents(ctx, issue.ID)
-			details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
-			outputJSON(details)
-			return
-		}
+			if issue == nil {
+				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				continue
+			}
+
+			if jsonOutput {
+				// Include labels, dependencies, and comments in JSON output
+				type IssueDetails struct {
+					*types.Issue
+					Labels       []string         `json:"labels,omitempty"`
+					Dependencies []*types.Issue   `json:"dependencies,omitempty"`
+					Dependents   []*types.Issue   `json:"dependents,omitempty"`
+					Comments     []*types.Comment `json:"comments,omitempty"`
+				}
+				details := &IssueDetails{Issue: issue}
+				details.Labels, _ = store.GetLabels(ctx, issue.ID)
+				details.Dependencies, _ = store.GetDependencies(ctx, issue.ID)
+				details.Dependents, _ = store.GetDependents(ctx, issue.ID)
+				details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
+				allDetails = append(allDetails, details)
+				continue
+			}
+
+			if idx > 0 {
+				fmt.Println("\n" + strings.Repeat("─", 60))
+			}
 
 		cyan := color.New(color.FgCyan).SprintFunc()
 
@@ -1920,16 +1945,21 @@ var showCmd = &cobra.Command{
 			}
 		}
 
-		// Show comments
-		comments, _ := store.GetIssueComments(ctx, issue.ID)
-		if len(comments) > 0 {
-			fmt.Printf("\nComments (%d):\n", len(comments))
-			for _, comment := range comments {
-				fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
+			// Show comments
+			comments, _ := store.GetIssueComments(ctx, issue.ID)
+			if len(comments) > 0 {
+				fmt.Printf("\nComments (%d):\n", len(comments))
+				for _, comment := range comments {
+					fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
+				}
 			}
+
+			fmt.Println()
 		}
 
-		fmt.Println()
+		if jsonOutput && len(allDetails) > 0 {
+			outputJSON(allDetails)
+		}
 	},
 }
 
@@ -1938,9 +1968,9 @@ func init() {
 }
 
 var updateCmd = &cobra.Command{
-	Use:   "update [id]",
-	Short: "Update an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:   "update [id...]",
+	Short: "Update one or more issues",
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		updates := make(map[string]interface{})
 
@@ -1984,63 +2014,83 @@ var updateCmd = &cobra.Command{
 
 		// If daemon is running, use RPC
 		if daemonClient != nil {
-			updateArgs := &rpc.UpdateArgs{ID: args[0]}
+			updatedIssues := []*types.Issue{}
+			for _, id := range args {
+				updateArgs := &rpc.UpdateArgs{ID: id}
 
-			// Map updates to RPC args
-			if status, ok := updates["status"].(string); ok {
-				updateArgs.Status = &status
-			}
-			if priority, ok := updates["priority"].(int); ok {
-				updateArgs.Priority = &priority
-			}
-			if title, ok := updates["title"].(string); ok {
-				updateArgs.Title = &title
-			}
-			if assignee, ok := updates["assignee"].(string); ok {
-				updateArgs.Assignee = &assignee
-			}
-			if design, ok := updates["design"].(string); ok {
-				updateArgs.Design = &design
-			}
-			if notes, ok := updates["notes"].(string); ok {
-				updateArgs.Notes = &notes
-			}
-			if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
-				updateArgs.AcceptanceCriteria = &acceptanceCriteria
+				// Map updates to RPC args
+				if status, ok := updates["status"].(string); ok {
+					updateArgs.Status = &status
+				}
+				if priority, ok := updates["priority"].(int); ok {
+					updateArgs.Priority = &priority
+				}
+				if title, ok := updates["title"].(string); ok {
+					updateArgs.Title = &title
+				}
+				if assignee, ok := updates["assignee"].(string); ok {
+					updateArgs.Assignee = &assignee
+				}
+				if design, ok := updates["design"].(string); ok {
+					updateArgs.Design = &design
+				}
+				if notes, ok := updates["notes"].(string); ok {
+					updateArgs.Notes = &notes
+				}
+				if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
+					updateArgs.AcceptanceCriteria = &acceptanceCriteria
+				}
+
+				resp, err := daemonClient.Update(updateArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+					continue
+				}
+
+				if jsonOutput {
+					var issue types.Issue
+					if err := json.Unmarshal(resp.Data, &issue); err == nil {
+						updatedIssues = append(updatedIssues, &issue)
+					}
+				} else {
+					green := color.New(color.FgGreen).SprintFunc()
+					fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+				}
 			}
 
-			resp, err := daemonClient.Update(updateArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			if jsonOutput {
-				fmt.Println(string(resp.Data))
-			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Updated issue: %s\n", green("✓"), args[0])
+			if jsonOutput && len(updatedIssues) > 0 {
+				outputJSON(updatedIssues)
 			}
 			return
 		}
 
 		// Direct mode
 		ctx := context.Background()
-		if err := store.UpdateIssue(ctx, args[0], updates, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		updatedIssues := []*types.Issue{}
+		for _, id := range args {
+			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				continue
+			}
+
+			if jsonOutput {
+				issue, _ := store.GetIssue(ctx, id)
+				if issue != nil {
+					updatedIssues = append(updatedIssues, issue)
+				}
+			} else {
+				green := color.New(color.FgGreen).SprintFunc()
+				fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+			}
 		}
 
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
+		// Schedule auto-flush if any issues were updated
+		if len(args) > 0 {
+			markDirtyAndScheduleFlush()
+		}
 
-		if jsonOutput {
-			// Fetch updated issue and output
-			issue, _ := store.GetIssue(ctx, args[0])
-			outputJSON(issue)
-		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Updated issue: %s\n", green("✓"), args[0])
+		if jsonOutput && len(updatedIssues) > 0 {
+			outputJSON(updatedIssues)
 		}
 	},
 }

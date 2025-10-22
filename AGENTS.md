@@ -110,8 +110,9 @@ bd create "Issue title" -t bug -p 1 -l bug,critical --json
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
 
-# Update issue status
-bd update <id> --status in_progress --json
+# Update one or more issues
+bd update <id> [<id>...] --status in_progress --json
+bd update <id> [<id>...] --priority 1 --json
 
 # Link discovered work (old way)
 bd dep add <discovered-id> <parent-id> --type discovered-from
@@ -119,23 +120,26 @@ bd dep add <discovered-id> <parent-id> --type discovered-from
 # Create and link in one command (new way)
 bd create "Issue title" -t bug -p 1 --deps discovered-from:<parent-id> --json
 
-# Label management
-bd label add <id> <label> --json
-bd label remove <id> <label> --json
+# Label management (supports multiple IDs)
+bd label add <id> [<id>...] <label> --json
+bd label remove <id> [<id>...] <label> --json
 bd label list <id> --json
 bd label list-all --json
 
 # Filter issues by label
 bd list --label bug,critical --json
 
-# Complete work
-bd close <id> --reason "Done" --json
+# Complete work (supports multiple IDs)
+bd close <id> [<id>...] --reason "Done" --json
+
+# Reopen closed issues (supports multiple IDs)
+bd reopen <id> [<id>...] --reason "Reopening" --json
 
 # Show dependency tree
 bd dep tree <id>
 
-# Get issue details
-bd show <id> --json
+# Get issue details (supports multiple IDs)
+bd show <id> [<id>...] --json
 
 # Rename issue prefix (e.g., from 'knowledge-work-' to 'kw-')
 bd rename-prefix kw- --dry-run  # Preview changes

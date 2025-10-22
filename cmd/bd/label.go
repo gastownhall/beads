@@ -70,24 +70,102 @@ func executeLabelCommand(issueID, label, operation string, operationFunc func(co
 }
 
 var labelAddCmd = &cobra.Command{
-	Use:   "add [issue-id] [label]",
-	Short: "Add a label to an issue",
-	Args:  cobra.ExactArgs(2),
+	Use:   "add [issue-id...] [label]",
+	Short: "Add a label to one or more issues",
+	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		executeLabelCommand(args[0], args[1], "added", func(ctx context.Context, issueID, label, actor string) error {
-			return store.AddLabel(ctx, issueID, label, actor)
-		})
+		// Last arg is the label, everything before is issue IDs
+		label := args[len(args)-1]
+		issueIDs := args[:len(args)-1]
+
+		ctx := context.Background()
+		results := []map[string]interface{}{}
+
+		for _, issueID := range issueIDs {
+			var err error
+			if daemonClient != nil {
+				_, err = daemonClient.AddLabel(&rpc.LabelAddArgs{
+					ID:    issueID,
+					Label: label,
+				})
+			} else {
+				err = store.AddLabel(ctx, issueID, label, actor)
+			}
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error adding label to %s: %v\n", issueID, err)
+				continue
+			}
+
+			if jsonOutput {
+				results = append(results, map[string]interface{}{
+					"status":   "added",
+					"issue_id": issueID,
+					"label":    label,
+				})
+			} else {
+				green := color.New(color.FgGreen).SprintFunc()
+				fmt.Printf("%s Added label '%s' to %s\n", green("✓"), label, issueID)
+			}
+		}
+
+		if len(issueIDs) > 0 && daemonClient == nil {
+			markDirtyAndScheduleFlush()
+		}
+
+		if jsonOutput && len(results) > 0 {
+			outputJSON(results)
+		}
 	},
 }
 
 var labelRemoveCmd = &cobra.Command{
-	Use:   "remove [issue-id] [label]",
-	Short: "Remove a label from an issue",
-	Args:  cobra.ExactArgs(2),
+	Use:   "remove [issue-id...] [label]",
+	Short: "Remove a label from one or more issues",
+	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		executeLabelCommand(args[0], args[1], "removed", func(ctx context.Context, issueID, label, actor string) error {
-			return store.RemoveLabel(ctx, issueID, label, actor)
-		})
+		// Last arg is the label, everything before is issue IDs
+		label := args[len(args)-1]
+		issueIDs := args[:len(args)-1]
+
+		ctx := context.Background()
+		results := []map[string]interface{}{}
+
+		for _, issueID := range issueIDs {
+			var err error
+			if daemonClient != nil {
+				_, err = daemonClient.RemoveLabel(&rpc.LabelRemoveArgs{
+					ID:    issueID,
+					Label: label,
+				})
+			} else {
+				err = store.RemoveLabel(ctx, issueID, label, actor)
+			}
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error removing label from %s: %v\n", issueID, err)
+				continue
+			}
+
+			if jsonOutput {
+				results = append(results, map[string]interface{}{
+					"status":   "removed",
+					"issue_id": issueID,
+					"label":    label,
+				})
+			} else {
+				green := color.New(color.FgGreen).SprintFunc()
+				fmt.Printf("%s Removed label '%s' from %s\n", green("✓"), label, issueID)
+			}
+		}
+
+		if len(issueIDs) > 0 && daemonClient == nil {
+			markDirtyAndScheduleFlush()
+		}
+
+		if jsonOutput && len(results) > 0 {
+			outputJSON(results)
+		}
 	},
 }
 
