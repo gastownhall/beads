@@ -18,14 +18,14 @@ var mergeCmd = &cobra.Command{
 	Short: "Merge duplicate issues into a single issue",
 	Long: `Merge one or more source issues into a target issue.
 
-This command:
+This command is idempotent and safe to retry after partial failures:
 1. Validates all issues exist and no self-merge
-2. Closes source issues with reason 'Merged into bd-X'
-3. Migrates all dependencies from sources to target
-4. Updates text references in all issue descriptions/notes
+2. Migrates all dependencies from sources to target (skips if already exist)
+3. Updates text references in all issue descriptions/notes
+4. Closes source issues with reason 'Merged into bd-X' (skips if already closed)
 
 Example:
-  bd merge bd-42 bd-43 --into bd-42
+  bd merge bd-42 bd-43 --into bd-41
   bd merge bd-10 bd-11 bd-12 --into bd-10 --dry-run`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -62,7 +62,8 @@ Example:
 		}
 
 		// Perform merge
-		if err := performMerge(ctx, targetID, sourceIDs); err != nil {
+		result, err := performMerge(ctx, targetID, sourceIDs)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error performing merge: %v\n", err)
 			os.Exit(1)
 		}
@@ -71,15 +72,23 @@ Example:
 		markDirtyAndScheduleFlush()
 
 		if jsonOutput {
-			result := map[string]interface{}{
-				"target_id":  targetID,
-				"source_ids": sourceIDs,
-				"merged":     len(sourceIDs),
+			output := map[string]interface{}{
+				"target_id":           targetID,
+				"source_ids":          sourceIDs,
+				"merged":              len(sourceIDs),
+				"dependencies_added":  result.depsAdded,
+				"dependencies_skipped": result.depsSkipped,
+				"text_references":     result.textRefCount,
+				"issues_closed":       result.issuesClosed,
+				"issues_skipped":      result.issuesSkipped,
 			}
-			outputJSON(result)
+			outputJSON(output)
 		} else {
 			green := color.New(color.FgGreen).SprintFunc()
 			fmt.Printf("%s Merged %d issue(s) into %s\n", green("✓"), len(sourceIDs), targetID)
+			fmt.Printf("  - Dependencies: %d migrated, %d already existed\n", result.depsAdded, result.depsSkipped)
+			fmt.Printf("  - Text references: %d updated\n", result.textRefCount)
+			fmt.Printf("  - Source issues: %d closed, %d already closed\n", result.issuesClosed, result.issuesSkipped)
 		}
 	},
 }
@@ -121,15 +130,26 @@ func validateMerge(targetID string, sourceIDs []string) error {
 	return nil
 }
 
+// mergeResult tracks the results of a merge operation for reporting
+type mergeResult struct {
+	depsAdded     int
+	depsSkipped   int
+	textRefCount  int
+	issuesClosed  int
+	issuesSkipped int
+}
+
 // performMerge executes the merge operation
 // TODO(bd-202): Add transaction support for atomicity
-func performMerge(ctx context.Context, targetID string, sourceIDs []string) error {
+func performMerge(ctx context.Context, targetID string, sourceIDs []string) (*mergeResult, error) {
+	result := &mergeResult{}
+
 	// Step 1: Migrate dependencies from source issues to target
 	for _, sourceID := range sourceIDs {
 		// Get all dependencies where source is the dependent (source depends on X)
 		deps, err := store.GetDependencyRecords(ctx, sourceID)
 		if err != nil {
-			return fmt.Errorf("failed to get dependencies for %s: %w", sourceID, err)
+			return nil, fmt.Errorf("failed to get dependencies for %s: %w", sourceID, err)
 		}
 
 		// Migrate each dependency to target
@@ -137,7 +157,7 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 			// Skip if target already has this dependency
 			existingDeps, err := store.GetDependencyRecords(ctx, targetID)
 			if err != nil {
-				return fmt.Errorf("failed to check target dependencies: %w", err)
+				return nil, fmt.Errorf("failed to check target dependencies: %w", err)
 			}
 
 			alreadyExists := false
@@ -148,7 +168,9 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 				}
 			}
 
-			if !alreadyExists && dep.DependsOnID != targetID {
+			if alreadyExists || dep.DependsOnID == targetID {
+				result.depsSkipped++
+			} else {
 				// Add dependency to target
 				newDep := &types.Dependency{
 					IssueID:     targetID,
@@ -158,15 +180,16 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 					CreatedBy:   actor,
 				}
 				if err := store.AddDependency(ctx, newDep, actor); err != nil {
-					return fmt.Errorf("failed to migrate dependency %s -> %s: %w", targetID, dep.DependsOnID, err)
+					return nil, fmt.Errorf("failed to migrate dependency %s -> %s: %w", targetID, dep.DependsOnID, err)
 				}
+				result.depsAdded++
 			}
 		}
 
 		// Get all dependencies where source is the dependency (X depends on source)
 		allDeps, err := store.GetAllDependencyRecords(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to get all dependencies: %w", err)
+			return nil, fmt.Errorf("failed to get all dependencies: %w", err)
 		}
 
 		for issueID, depList := range allDeps {
@@ -176,7 +199,7 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 					if err := store.RemoveDependency(ctx, issueID, sourceID, actor); err != nil {
 						// Ignore "not found" errors as they may have been cleaned up
 						if !strings.Contains(err.Error(), "not found") {
-							return fmt.Errorf("failed to remove dependency %s -> %s: %w", issueID, sourceID, err)
+							return nil, fmt.Errorf("failed to remove dependency %s -> %s: %w", issueID, sourceID, err)
 						}
 					}
 
@@ -192,8 +215,12 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 						if err := store.AddDependency(ctx, newDep, actor); err != nil {
 							// Ignore if dependency already exists
 							if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
-								return fmt.Errorf("failed to add dependency %s -> %s: %w", issueID, targetID, err)
+								return nil, fmt.Errorf("failed to add dependency %s -> %s: %w", issueID, targetID, err)
+							} else {
+								result.depsSkipped++
 							}
+						} else {
+							result.depsAdded++
 						}
 					}
 				}
@@ -202,27 +229,44 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) erro
 	}
 
 	// Step 2: Update text references in all issues
-	if err := updateMergeTextReferences(ctx, sourceIDs, targetID); err != nil {
-		return fmt.Errorf("failed to update text references: %w", err)
+	refCount, err := updateMergeTextReferences(ctx, sourceIDs, targetID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update text references: %w", err)
 	}
+	result.textRefCount = refCount
 
-	// Step 3: Close source issues
+	// Step 3: Close source issues (idempotent - skip if already closed)
 	for _, sourceID := range sourceIDs {
-		reason := fmt.Sprintf("Merged into %s", targetID)
-		if err := store.CloseIssue(ctx, sourceID, reason, actor); err != nil {
-			return fmt.Errorf("failed to close source issue %s: %w", sourceID, err)
+		issue, err := store.GetIssue(ctx, sourceID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get source issue %s: %w", sourceID, err)
+		}
+		if issue == nil {
+			return nil, fmt.Errorf("source issue not found: %s", sourceID)
+		}
+
+		if issue.Status == types.StatusClosed {
+			// Already closed - skip
+			result.issuesSkipped++
+		} else {
+			reason := fmt.Sprintf("Merged into %s", targetID)
+			if err := store.CloseIssue(ctx, sourceID, reason, actor); err != nil {
+				return nil, fmt.Errorf("failed to close source issue %s: %w", sourceID, err)
+			}
+			result.issuesClosed++
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // updateMergeTextReferences updates text references from source IDs to target ID
-func updateMergeTextReferences(ctx context.Context, sourceIDs []string, targetID string) error {
+// Returns the count of text references updated
+func updateMergeTextReferences(ctx context.Context, sourceIDs []string, targetID string) (int, error) {
 	// Get all issues to scan for references
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return fmt.Errorf("failed to get all issues: %w", err)
+		return 0, fmt.Errorf("failed to get all issues: %w", err)
 	}
 
 	updatedCount := 0
@@ -284,11 +328,11 @@ func updateMergeTextReferences(ctx context.Context, sourceIDs []string, targetID
 		// Apply updates if any
 		if len(updates) > 0 {
 			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-				return fmt.Errorf("failed to update issue %s: %w", issue.ID, err)
+				return updatedCount, fmt.Errorf("failed to update issue %s: %w", issue.ID, err)
 			}
 			updatedCount++
 		}
 	}
 
-	return nil
+	return updatedCount, nil
 }
