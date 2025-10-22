@@ -87,40 +87,37 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configured prefix: %w", err)
 	}
-	
-	// Validate configured prefix
-	if strings.TrimSpace(configuredPrefix) == "" {
-		if opts.RenameOnImport {
-			return nil, fmt.Errorf("cannot rename: issue_prefix not configured in database")
-		}
-		// Skip prefix validation if prefix is not configured
-		return result, nil
-	}
-	
-	result.ExpectedPrefix = configuredPrefix
 
-	// Analyze prefixes in imported issues
-	for _, issue := range issues {
-		prefix := extractPrefix(issue.ID)
-		if prefix != configuredPrefix {
-			result.PrefixMismatch = true
-			result.MismatchPrefixes[prefix]++
-		}
-	}
+	// Only validate prefixes if a prefix is configured
+	if strings.TrimSpace(configuredPrefix) != "" {
+		result.ExpectedPrefix = configuredPrefix
 
-	// If prefix mismatch detected and not handling it, return error or warning
-	if result.PrefixMismatch && !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
-		return result, fmt.Errorf("prefix mismatch detected: database uses '%s-' but found issues with prefixes: %v (use --rename-on-import to automatically fix)", configuredPrefix, getPrefixList(result.MismatchPrefixes))
-	}
-
-	// Handle rename-on-import if requested
-	if result.PrefixMismatch && opts.RenameOnImport && !opts.DryRun {
-		if err := renameImportedIssuePrefixes(issues, configuredPrefix); err != nil {
-			return nil, fmt.Errorf("failed to rename prefixes: %w", err)
+		// Analyze prefixes in imported issues
+		for _, issue := range issues {
+			prefix := extractPrefix(issue.ID)
+			if prefix != configuredPrefix {
+				result.PrefixMismatch = true
+				result.MismatchPrefixes[prefix]++
+			}
 		}
-		// After renaming, clear the mismatch flags since we fixed them
-		result.PrefixMismatch = false
-		result.MismatchPrefixes = make(map[string]int)
+
+		// If prefix mismatch detected and not handling it, return error or warning
+		if result.PrefixMismatch && !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
+			return result, fmt.Errorf("prefix mismatch detected: database uses '%s-' but found issues with prefixes: %v (use --rename-on-import to automatically fix)", configuredPrefix, getPrefixList(result.MismatchPrefixes))
+		}
+
+		// Handle rename-on-import if requested
+		if result.PrefixMismatch && opts.RenameOnImport && !opts.DryRun {
+			if err := renameImportedIssuePrefixes(issues, configuredPrefix); err != nil {
+				return nil, fmt.Errorf("failed to rename prefixes: %w", err)
+			}
+			// After renaming, clear the mismatch flags since we fixed them
+			result.PrefixMismatch = false
+			result.MismatchPrefixes = make(map[string]int)
+		}
+	} else if opts.RenameOnImport {
+		// No prefix configured but rename was requested
+		return nil, fmt.Errorf("cannot rename: issue_prefix not configured in database")
 	}
 
 	// Phase 2: Detect collisions
