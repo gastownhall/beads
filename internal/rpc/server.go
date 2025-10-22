@@ -869,6 +869,61 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
+	// Add labels if specified
+	for _, label := range createArgs.Labels {
+		if err := store.AddLabel(ctx, issue.ID, label, s.reqActor(req)); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to add label %s: %v", label, err),
+			}
+		}
+	}
+
+	// Add dependencies if specified
+	for _, depSpec := range createArgs.Dependencies {
+		depSpec = strings.TrimSpace(depSpec)
+		if depSpec == "" {
+			continue
+		}
+
+		var depType types.DependencyType
+		var dependsOnID string
+
+		if strings.Contains(depSpec, ":") {
+			parts := strings.SplitN(depSpec, ":", 2)
+			if len(parts) != 2 {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("invalid dependency format '%s', expected 'type:id' or 'id'", depSpec),
+				}
+			}
+			depType = types.DependencyType(strings.TrimSpace(parts[0]))
+			dependsOnID = strings.TrimSpace(parts[1])
+		} else {
+			depType = types.DepBlocks
+			dependsOnID = depSpec
+		}
+
+		if !depType.IsValid() {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)", depType),
+			}
+		}
+
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: dependsOnID,
+			Type:        depType,
+		}
+		if err := store.AddDependency(ctx, dep, s.reqActor(req)); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err),
+			}
+		}
+	}
+
 	data, _ := json.Marshal(issue)
 	return Response{
 		Success: true,
