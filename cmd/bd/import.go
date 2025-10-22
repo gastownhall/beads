@@ -31,6 +31,7 @@ Behavior:
 		strict, _ := cmd.Flags().GetBool("strict")
 		resolveCollisions, _ := cmd.Flags().GetBool("resolve-collisions")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 
 		// Open input
 		in := os.Stdin
@@ -85,12 +86,28 @@ Behavior:
 			DryRun:            dryRun,
 			SkipUpdate:        skipUpdate,
 			Strict:            strict,
+			RenameOnImport:    renameOnImport,
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
 
 		// Handle errors and special cases
 		if err != nil {
+			// Check if it's a prefix mismatch error
+			if result != nil && result.PrefixMismatch {
+				fmt.Fprintf(os.Stderr, "\n=== Prefix Mismatch Detected ===\n")
+				fmt.Fprintf(os.Stderr, "Database configured prefix: %s-\n", result.ExpectedPrefix)
+				fmt.Fprintf(os.Stderr, "Found issues with different prefixes:\n")
+				for prefix, count := range result.MismatchPrefixes {
+					fmt.Fprintf(os.Stderr, "  %s- (%d issues)\n", prefix, count)
+				}
+				fmt.Fprintf(os.Stderr, "\nOptions:\n")
+				fmt.Fprintf(os.Stderr, "  --rename-on-import    Auto-rename imported issues to match configured prefix\n")
+				fmt.Fprintf(os.Stderr, "  --dry-run             Preview what would be imported\n")
+				fmt.Fprintf(os.Stderr, "\nOr use 'bd rename-prefix' after import to fix the database.\n")
+				os.Exit(1)
+			}
+			
 			// Check if it's a collision error when not resolving
 			if !resolveCollisions && result != nil && len(result.CollisionIDs) > 0 {
 				// Print collision report before exiting
@@ -107,11 +124,21 @@ Behavior:
 
 		// Handle dry-run mode
 		if dryRun {
+			if result.PrefixMismatch {
+				fmt.Fprintf(os.Stderr, "\n=== Prefix Mismatch Detected ===\n")
+				fmt.Fprintf(os.Stderr, "Database configured prefix: %s-\n", result.ExpectedPrefix)
+				fmt.Fprintf(os.Stderr, "Found issues with different prefixes:\n")
+				for prefix, count := range result.MismatchPrefixes {
+					fmt.Fprintf(os.Stderr, "  %s- (%d issues)\n", prefix, count)
+				}
+				fmt.Fprintf(os.Stderr, "\nUse --rename-on-import to automatically fix prefixes during import.\n")
+			}
+			
 			if result.Collisions > 0 {
 				fmt.Fprintf(os.Stderr, "\n=== Collision Detection Report ===\n")
 				fmt.Fprintf(os.Stderr, "COLLISIONS DETECTED: %d\n", result.Collisions)
 				fmt.Fprintf(os.Stderr, "Colliding issue IDs: %v\n", result.CollisionIDs)
-			} else {
+			} else if !result.PrefixMismatch {
 				fmt.Fprintf(os.Stderr, "No collisions detected.\n")
 			}
 			fmt.Fprintf(os.Stderr, "Would create %d new issues, update %d existing issues\n",
@@ -166,5 +193,6 @@ func init() {
 	importCmd.Flags().Bool("strict", false, "Fail on dependency errors instead of treating them as warnings")
 	importCmd.Flags().Bool("resolve-collisions", false, "Automatically resolve ID collisions by remapping")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
+	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	rootCmd.AddCommand(importCmd)
 }

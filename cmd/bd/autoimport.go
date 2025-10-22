@@ -161,9 +161,10 @@ func importFromGit(ctx context.Context, store storage.Storage, jsonlPath string)
 
 	// Use existing import logic with auto-resolve collisions
 	opts := ImportOptions{
-		ResolveCollisions: true,
-		DryRun:            false,
-		SkipUpdate:        false,
+		ResolveCollisions:  true,
+		DryRun:             false,
+		SkipUpdate:         false,
+		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
 	}
 
 	_, err = importIssuesCore(ctx, dbPath, store, issues, opts)

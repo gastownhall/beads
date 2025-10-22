@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -12,20 +14,25 @@ import (
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	ResolveCollisions bool // Auto-resolve collisions by remapping to new IDs
-	DryRun            bool // Preview changes without applying them
-	SkipUpdate        bool // Skip updating existing issues (create-only mode)
-	Strict            bool // Fail on any error (dependencies, labels, etc.)
+	ResolveCollisions  bool // Auto-resolve collisions by remapping to new IDs
+	DryRun             bool // Preview changes without applying them
+	SkipUpdate         bool // Skip updating existing issues (create-only mode)
+	Strict             bool // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport     bool // Rename imported issues to match database prefix
+	SkipPrefixValidation bool // Skip prefix validation (for auto-import)
 }
 
 // ImportResult contains statistics about the import operation
 type ImportResult struct {
-	Created      int               // New issues created
-	Updated      int               // Existing issues updated
-	Skipped      int               // Issues skipped (duplicates, errors)
-	Collisions   int               // Collisions detected
-	IDMapping    map[string]string // Mapping of remapped IDs (old -> new)
-	CollisionIDs []string          // IDs that collided
+	Created         int               // New issues created
+	Updated         int               // Existing issues updated
+	Skipped         int               // Issues skipped (duplicates, errors)
+	Collisions      int               // Collisions detected
+	IDMapping       map[string]string // Mapping of remapped IDs (old -> new)
+	CollisionIDs    []string          // IDs that collided
+	PrefixMismatch  bool              // Prefix mismatch detected
+	ExpectedPrefix  string            // Database configured prefix
+	MismatchPrefixes map[string]int    // Map of mismatched prefixes to count
 }
 
 // importIssuesCore handles the core import logic used by both manual and auto-import.
@@ -41,7 +48,8 @@ type ImportResult struct {
 // - Setting metadata (e.g., last_import_hash)
 func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
 	result := &ImportResult{
-		IDMapping: make(map[string]string),
+		IDMapping:         make(map[string]string),
+		MismatchPrefixes: make(map[string]int),
 	}
 
 	// Phase 1: Get or create SQLite store
@@ -72,6 +80,37 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 				sqliteStore.Close()
 			}
 		}()
+	}
+
+	// Phase 1.5: Check for prefix mismatches
+	configuredPrefix, err := sqliteStore.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get configured prefix: %w", err)
+	}
+	result.ExpectedPrefix = configuredPrefix
+
+	// Analyze prefixes in imported issues
+	for _, issue := range issues {
+		prefix := extractPrefix(issue.ID)
+		if prefix != configuredPrefix {
+			result.PrefixMismatch = true
+			result.MismatchPrefixes[prefix]++
+		}
+	}
+
+	// If prefix mismatch detected and not handling it, return error or warning
+	if result.PrefixMismatch && !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
+		return result, fmt.Errorf("prefix mismatch detected: database uses '%s-' but found issues with prefixes: %v (use --rename-on-import to automatically fix)", configuredPrefix, getPrefixList(result.MismatchPrefixes))
+	}
+
+	// Handle rename-on-import if requested
+	if result.PrefixMismatch && opts.RenameOnImport && !opts.DryRun {
+		if err := renameImportedIssuePrefixes(issues, configuredPrefix); err != nil {
+			return nil, fmt.Errorf("failed to rename prefixes: %w", err)
+		}
+		// After renaming, clear the mismatch flags since we fixed them
+		result.PrefixMismatch = false
+		result.MismatchPrefixes = make(map[string]int)
 	}
 
 	// Phase 2: Detect collisions
@@ -311,4 +350,93 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 	}
 
 	return result, nil
+}
+
+// extractPrefix extracts the prefix from an issue ID (e.g., "bd-123" -> "bd")
+func extractPrefix(issueID string) string {
+	parts := strings.SplitN(issueID, "-", 2)
+	if len(parts) < 2 {
+		return "" // No prefix found
+	}
+	return parts[0]
+}
+
+// getPrefixList returns a sorted list of prefixes with their counts
+func getPrefixList(prefixes map[string]int) []string {
+	var result []string
+	keys := make([]string, 0, len(prefixes))
+	for k := range prefixes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	
+	for _, prefix := range keys {
+		count := prefixes[prefix]
+		result = append(result, fmt.Sprintf("%s- (%d issues)", prefix, count))
+	}
+	return result
+}
+
+// renameImportedIssuePrefixes renames all issues and their references to match the target prefix
+func renameImportedIssuePrefixes(issues []*types.Issue, targetPrefix string) error {
+	// Build a mapping of old IDs to new IDs
+	idMapping := make(map[string]string)
+	
+	for _, issue := range issues {
+		oldPrefix := extractPrefix(issue.ID)
+		if oldPrefix != targetPrefix {
+			// Extract the numeric part
+			numPart := strings.TrimPrefix(issue.ID, oldPrefix+"-")
+			newID := fmt.Sprintf("%s-%s", targetPrefix, numPart)
+			idMapping[issue.ID] = newID
+		}
+	}
+	
+	// Now update all issues and their references
+	for _, issue := range issues {
+		// Update the issue ID itself if it needs renaming
+		if newID, ok := idMapping[issue.ID]; ok {
+			issue.ID = newID
+		}
+		
+		// Update all text references in issue fields
+		issue.Title = replaceIDReferences(issue.Title, idMapping)
+		issue.Description = replaceIDReferences(issue.Description, idMapping)
+		if issue.Design != "" {
+			issue.Design = replaceIDReferences(issue.Design, idMapping)
+		}
+		if issue.AcceptanceCriteria != "" {
+			issue.AcceptanceCriteria = replaceIDReferences(issue.AcceptanceCriteria, idMapping)
+		}
+		if issue.Notes != "" {
+			issue.Notes = replaceIDReferences(issue.Notes, idMapping)
+		}
+		
+		// Update dependency references
+		for i := range issue.Dependencies {
+			if newID, ok := idMapping[issue.Dependencies[i].IssueID]; ok {
+				issue.Dependencies[i].IssueID = newID
+			}
+			if newID, ok := idMapping[issue.Dependencies[i].DependsOnID]; ok {
+				issue.Dependencies[i].DependsOnID = newID
+			}
+		}
+		
+		// Update comment references
+		for i := range issue.Comments {
+			issue.Comments[i].Text = replaceIDReferences(issue.Comments[i].Text, idMapping)
+		}
+	}
+	
+	return nil
+}
+
+// replaceIDReferences replaces all old issue ID references with new ones in text
+func replaceIDReferences(text string, idMapping map[string]string) string {
+	result := text
+	for oldID, newID := range idMapping {
+		// Use word boundary to match full IDs only (e.g., "wy-123" but not "wy-1234")
+		result = strings.ReplaceAll(result, oldID, newID)
+	}
+	return result
 }

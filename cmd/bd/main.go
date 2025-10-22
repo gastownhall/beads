@@ -900,10 +900,11 @@ func autoImportIfNewer() {
 
 	// Use shared import logic (bd-157)
 	opts := ImportOptions{
-		ResolveCollisions: true, // Auto-import always resolves collisions
-		DryRun:            false,
-		SkipUpdate:        false,
-		Strict:            false,
+		ResolveCollisions:  true, // Auto-import always resolves collisions
+		DryRun:             false,
+		SkipUpdate:         false,
+		Strict:             false,
+		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
 	}
 
 	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
