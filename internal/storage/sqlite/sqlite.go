@@ -463,8 +463,24 @@ func (s *SQLiteStorage) getNextIDForPrefix(ctx context.Context, prefix string) (
 
 // SyncAllCounters synchronizes all ID counters based on existing issues in the database
 // This scans all issues and updates counters to prevent ID collisions with auto-generated IDs
+// Note: This unconditionally overwrites counter values, allowing them to decrease after deletions
 func (s *SQLiteStorage) SyncAllCounters(ctx context.Context) error {
+	// First, delete counters for prefixes that have no issues
 	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM issue_counters
+		WHERE prefix NOT IN (
+			SELECT DISTINCT substr(id, 1, instr(id, '-') - 1)
+			FROM issues
+			WHERE instr(id, '-') > 0
+			  AND substr(id, instr(id, '-') + 1) GLOB '[0-9]*'
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to delete orphaned counters: %w", err)
+	}
+
+	// Then, upsert counters for prefixes that have issues
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO issue_counters (prefix, last_id)
 		SELECT
 			substr(id, 1, instr(id, '-') - 1) as prefix,
@@ -474,7 +490,7 @@ func (s *SQLiteStorage) SyncAllCounters(ctx context.Context) error {
 		  AND substr(id, instr(id, '-') + 1) GLOB '[0-9]*'
 		GROUP BY prefix
 		ON CONFLICT(prefix) DO UPDATE SET
-			last_id = MAX(last_id, excluded.last_id)
+			last_id = excluded.last_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to sync counters: %w", err)
@@ -1400,7 +1416,12 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 		return fmt.Errorf("issue not found: %s", id)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Sync counters after deletion to keep them accurate
+	return s.SyncAllCounters(ctx)
 }
 
 // DeleteIssuesResult contains statistics about a batch deletion operation
@@ -1610,6 +1631,11 @@ func (s *SQLiteStorage) DeleteIssues(ctx context.Context, ids []string, cascade 
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Sync counters after deletion to keep them accurate
+	if err := s.SyncAllCounters(ctx); err != nil {
+		return nil, fmt.Errorf("failed to sync counters after deletion: %w", err)
 	}
 
 	return result, nil
