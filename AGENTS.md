@@ -151,6 +151,10 @@ bd restore <id>  # View full history at time of compaction
 # Import with collision detection
 bd import -i .beads/issues.jsonl --dry-run             # Preview only
 bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve
+
+# Merge duplicate issues
+bd merge <source-id...> --into <target-id> --json      # Consolidate duplicates
+bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 ```
 
 ### Workflow
@@ -188,6 +192,69 @@ bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve
 - `discovered-from` - Track issues discovered during work
 
 Only `blocks` dependencies affect the ready work queue.
+
+### Duplicate Detection & Merging
+
+AI agents should proactively detect and merge duplicate issues to keep the database clean:
+
+**Detection strategies:**
+
+1. **Before creating new issues**: Search for similar existing issues
+   ```bash
+   bd list --json | grep -i "authentication"
+   bd show bd-41 bd-42 --json  # Compare candidates
+   ```
+
+2. **Periodic duplicate scans**: Review issues by type or priority
+   ```bash
+   bd list --status open --priority 1 --json  # High-priority issues
+   bd list --issue-type bug --json             # All bugs
+   ```
+
+3. **During work discovery**: Check for duplicates when filing discovered-from issues
+   ```bash
+   # Before: bd create "Fix auth bug" --deps discovered-from:bd-100
+   # First: bd list --json | grep -i "auth bug"
+   # Then decide: create new or link to existing
+   ```
+
+**Merge workflow:**
+
+```bash
+# Step 1: Identify duplicates (bd-42 and bd-43 duplicate bd-41)
+bd show bd-41 bd-42 bd-43 --json
+
+# Step 2: Preview merge to verify
+bd merge bd-42 bd-43 --into bd-41 --dry-run
+
+# Step 3: Execute merge
+bd merge bd-42 bd-43 --into bd-41 --json
+
+# Step 4: Verify result
+bd dep tree bd-41  # Check unified dependency tree
+bd show bd-41 --json  # Verify merged content
+```
+
+**What gets merged:**
+- ✅ All dependencies from source → target
+- ✅ Text references updated across ALL issues (descriptions, notes, design, acceptance criteria)
+- ✅ Source issues closed with "Merged into bd-X" reason
+- ❌ Source issue content NOT copied (target keeps its original content)
+
+**Important notes:**
+- Merge preserves target issue completely; only dependencies/references migrate
+- If source issues have valuable content, manually copy it to target BEFORE merging
+- Cannot merge in daemon mode yet (bd-190); use `--no-daemon` flag
+- Operation cannot be undone (but git history preserves the original)
+
+**Best practices:**
+- Merge early to prevent dependency fragmentation
+- Choose the oldest or most complete issue as merge target
+- Add labels like `duplicate` to source issues before merging (for tracking)
+- File a discovered-from issue if you found duplicates during work:
+  ```bash
+  bd create "Found duplicates during bd-X" -p 2 --deps discovered-from:bd-X --json
+  ```
 
 ## Development Guidelines
 

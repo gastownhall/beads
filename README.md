@@ -445,6 +445,65 @@ bd rename-prefix kw-
 bd list  # Shows kw-* issues
 ```
 
+### Merging Duplicate Issues
+
+Consolidate duplicate issues into a single issue while preserving dependencies and references:
+
+```bash
+# Merge bd-42 and bd-43 into bd-41
+bd merge bd-42 bd-43 --into bd-41
+
+# Merge multiple duplicates at once
+bd merge bd-10 bd-11 bd-12 --into bd-10
+
+# Preview merge without making changes
+bd merge bd-42 bd-43 --into bd-41 --dry-run
+
+# JSON output
+bd merge bd-42 bd-43 --into bd-41 --json
+```
+
+**What the merge command does:**
+1. **Validates** all issues exist and prevents self-merge
+2. **Closes** source issues with reason `Merged into bd-X`
+3. **Migrates** all dependencies from source issues to target
+4. **Updates** text references across all issue descriptions, notes, design, and acceptance criteria
+
+**Example workflow:**
+
+```bash
+# You discover bd-42 and bd-43 are duplicates of bd-41
+bd show bd-41 bd-42 bd-43
+
+# Preview the merge
+bd merge bd-42 bd-43 --into bd-41 --dry-run
+
+# Execute the merge
+bd merge bd-42 bd-43 --into bd-41
+# ✓ Merged 2 issue(s) into bd-41
+
+# Verify the result
+bd show bd-41  # Now has dependencies from bd-42 and bd-43
+bd dep tree bd-41  # Shows unified dependency tree
+```
+
+**Important notes:**
+- Source issues are permanently closed (status: `closed`)
+- All dependencies pointing to source issues are redirected to target
+- Text references like "see bd-42" are automatically rewritten to "see bd-41"
+- Operation cannot be undone (but git history preserves the original state)
+- Not yet supported in daemon mode (use `--no-daemon` flag)
+
+**AI Agent Workflow:**
+
+When agents discover duplicate issues, they should:
+1. Search for similar issues: `bd list --json | grep "similar text"`
+2. Compare issue details: `bd show bd-41 bd-42 --json`
+3. Merge duplicates: `bd merge bd-42 --into bd-41`
+4. File a discovered-from issue if needed: `bd create "Found duplicates during bd-X" --deps discovered-from:bd-X`
+
+See [AGENTS.md](#ai-agent-integration) for complete AI integration workflow.
+
 ### Labels
 
 Add flexible metadata to issues for filtering and organization:
