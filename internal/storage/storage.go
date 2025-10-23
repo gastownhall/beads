@@ -58,6 +58,8 @@ type Storage interface {
 	// Config
 	SetConfig(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
+	GetAllConfig(ctx context.Context) (map[string]string, error)
+	DeleteConfig(ctx context.Context, key string) error
 
 	// Metadata (for internal state like import hashes)
 	SetMetadata(ctx context.Context, key, value string) error

@@ -583,6 +583,45 @@ bd stats
 bd ready --json
 ```
 
+### Configuration
+
+Manage per-project configuration for external integrations and preferences:
+
+```bash
+# Set configuration
+bd config set jira.url "https://company.atlassian.net"
+bd config set jira.project "PROJ"
+bd config set jira.status_map.todo "open"
+
+# Get configuration
+bd config get jira.url
+
+# List all configuration
+bd config list
+bd config list --json
+
+# Unset configuration
+bd config unset jira.url
+```
+
+Configuration is:
+- **Per-project**: Stored in `.beads/*.db`, isolated by project
+- **Version-control-friendly**: Queryable SQLite storage
+- **Machine-readable**: JSON output for scripts
+- **Namespace-based**: Organized by integration (e.g., `jira.*`, `linear.*`, `github.*`)
+
+**Common use cases:**
+- Jira/Linear/GitHub integration settings
+- Status and type mappings for syncing
+- API tokens and project identifiers
+- Custom integration parameters
+
+**See [CONFIG.md](CONFIG.md) for complete documentation:**
+- Configuration commands and examples
+- Namespace conventions
+- Integration patterns for Jira, Linear, GitHub
+- Scripting with JSON output
+
 ### Compaction (Memory Decay)
 
 Beads uses AI to compress old closed issues, keeping databases lightweight as they age. This is agentic memory decay - your database naturally forgets fine-grained details while preserving essential context agents need.

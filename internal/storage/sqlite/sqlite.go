@@ -1803,6 +1803,31 @@ func (s *SQLiteStorage) GetConfig(ctx context.Context, key string) (string, erro
 	return value, err
 }
 
+// GetAllConfig gets all configuration key-value pairs
+func (s *SQLiteStorage) GetAllConfig(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM config ORDER BY key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	config := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		config[key] = value
+	}
+	return config, rows.Err()
+}
+
+// DeleteConfig deletes a configuration value
+func (s *SQLiteStorage) DeleteConfig(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM config WHERE key = ?`, key)
+	return err
+}
+
 // SetMetadata sets a metadata value (for internal state like import hashes)
 func (s *SQLiteStorage) SetMetadata(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
