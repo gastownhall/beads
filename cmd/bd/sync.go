@@ -34,6 +34,7 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		noPush, _ := cmd.Flags().GetBool("no-push")
 		noPull, _ := cmd.Flags().GetBool("no-pull")
+		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
@@ -112,7 +113,7 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 
 				// Step 4: Import updated JSONL after pull
 				fmt.Println("→ Importing updated JSONL...")
-				if err := importFromJSONL(ctx, jsonlPath); err != nil {
+				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
 					fmt.Fprintf(os.Stderr, "Error importing: %v\n", err)
 					os.Exit(1)
 				}
@@ -146,6 +147,7 @@ func init() {
 	syncCmd.Flags().Bool("dry-run", false, "Preview sync without making changes")
 	syncCmd.Flags().Bool("no-push", false, "Skip pushing to remote")
 	syncCmd.Flags().Bool("no-pull", false, "Skip pulling from remote")
+	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -351,15 +353,21 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 }
 
 // importFromJSONL imports the JSONL file by running the import command
-func importFromJSONL(ctx context.Context, jsonlPath string) error {
+func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool) error {
 	// Get current executable path to avoid "./bd" path issues
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot resolve current executable: %w", err)
 	}
 
+	// Build args for import command
+	args := []string{"import", "-i", jsonlPath, "--resolve-collisions"}
+	if renameOnImport {
+		args = append(args, "--rename-on-import")
+	}
+
 	// Run import command with --resolve-collisions to automatically handle conflicts
-	cmd := exec.CommandContext(ctx, exe, "import", "-i", jsonlPath, "--resolve-collisions")
+	cmd := exec.CommandContext(ctx, exe, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("import failed: %w\n%s", err, output)
