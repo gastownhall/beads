@@ -1518,7 +1518,37 @@ Check out the **[examples/](examples/)** directory for:
 
 ### Why not just use GitHub Issues?
 
-GitHub Issues requires internet, has API rate limits, and isn't designed for agents. bd works offline, has no limits, and gives you `bd ready --json` to instantly find unblocked work. Plus, bd's distributed database means agents on multiple machines share state via git—no API calls needed.
+GitHub Issues + gh CLI can approximate some features, but fundamentally cannot replicate what AI agents need:
+
+**Key Differentiators:**
+
+1. **Typed Dependencies with Semantics**
+   - bd: Four types (`blocks`, `related`, `parent-child`, `discovered-from`) with different behaviors
+   - GH: Only "blocks/blocked by" links, no semantic enforcement, no `discovered-from` for agent work discovery
+
+2. **Deterministic Ready-Work Detection**
+   - bd: `bd ready` computes transitive blocking offline in ~10ms, no network required
+   - GH: No built-in "ready" concept; would require custom GraphQL + sync service + ongoing maintenance
+
+3. **Git-First, Offline, Branch-Scoped Task Memory**
+   - bd: Works offline, issues live on branches, mergeable with code via `bd import --resolve-collisions`
+   - GH: Cloud-first, requires network/auth, global per-repo, no branch-scoped task state
+
+4. **AI-Resolvable Conflicts & Duplicate Merge**
+   - bd: Automatic collision resolution, duplicate merge with dependency consolidation and reference rewriting
+   - GH: Manual close-as-duplicate, no safe bulk merge, no cross-reference updates
+
+5. **Extensible Local Database**
+   - bd: Add SQL tables and join with issue data locally (see [EXTENDING.md](EXTENDING.md))
+   - GH: No local database; would need to mirror data externally
+
+6. **Agent-Native APIs**
+   - bd: Consistent `--json` on all commands, dedicated MCP server with auto workspace detection
+   - GH: Mixed JSON/text output, GraphQL requires custom queries, no agent-focused MCP layer
+
+**When to use each:** GitHub Issues excels for human teams in web UI with cross-repo dashboards and integrations. bd excels for AI agents needing offline, git-synchronized task memory with graph semantics and deterministic queries.
+
+See [GitHub issue #125](https://github.com/steveyegge/beads/issues/125) for detailed comparison.
 
 ### How is this different from Taskwarrior?
 
