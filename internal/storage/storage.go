@@ -3,6 +3,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -72,6 +73,12 @@ type Storage interface {
 
 	// Database path (for daemon validation)
 	Path() string
+
+	// UnderlyingDB returns the underlying *sql.DB connection
+	// This is provided for extensions (like VC) that need to create their own tables
+	// in the same database. Extensions should use foreign keys to reference core tables.
+	// WARNING: Direct database access bypasses the storage layer. Use with caution.
+	UnderlyingDB() *sql.DB
 }
 
 // Config holds database configuration

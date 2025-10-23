@@ -1899,3 +1899,9 @@ func (s *SQLiteStorage) Close() error {
 func (s *SQLiteStorage) Path() string {
 	return s.dbPath
 }
+
+// UnderlyingDB returns the underlying *sql.DB connection
+// This allows extensions (like VC) to create their own tables in the same database
+func (s *SQLiteStorage) UnderlyingDB() *sql.DB {
+	return s.db
+}
