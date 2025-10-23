@@ -1963,3 +1963,40 @@ func (s *SQLiteStorage) IsClosed() bool {
 func (s *SQLiteStorage) UnderlyingDB() *sql.DB {
 	return s.db
 }
+
+// UnderlyingConn returns a single connection from the pool for scoped use.
+//
+// This provides a connection with explicit lifetime boundaries, useful for:
+// - One-time DDL operations (CREATE TABLE, ALTER TABLE)
+// - Migration scripts that need transaction control
+// - Operations that benefit from connection-level state
+//
+// IMPORTANT: The caller MUST close the connection when done:
+//
+//	conn, err := storage.UnderlyingConn(ctx)
+//	if err != nil {
+//	    return err
+//	}
+//	defer conn.Close()
+//
+// For general queries and transactions, prefer UnderlyingDB() which manages
+// the connection pool automatically.
+//
+// EXAMPLE (extension table migration):
+//
+//	conn, err := storage.UnderlyingConn(ctx)
+//	if err != nil {
+//	    return err
+//	}
+//	defer conn.Close()
+//
+//	_, err = conn.ExecContext(ctx, `
+//	    CREATE TABLE IF NOT EXISTS vc_executions (
+//	        id INTEGER PRIMARY KEY AUTOINCREMENT,
+//	        issue_id TEXT NOT NULL,
+//	        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+//	    )
+//	`)
+func (s *SQLiteStorage) UnderlyingConn(ctx context.Context) (*sql.Conn, error) {
+	return s.db.Conn(ctx)
+}

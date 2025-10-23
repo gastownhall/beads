@@ -79,6 +79,12 @@ type Storage interface {
 	// in the same database. Extensions should use foreign keys to reference core tables.
 	// WARNING: Direct database access bypasses the storage layer. Use with caution.
 	UnderlyingDB() *sql.DB
+
+	// UnderlyingConn returns a single connection from the pool for scoped use.
+	// Useful for migrations and DDL operations that benefit from explicit connection lifetime.
+	// The caller MUST close the connection when done to return it to the pool.
+	// For general queries, prefer UnderlyingDB() which manages the pool automatically.
+	UnderlyingConn(ctx context.Context) (*sql.Conn, error)
 }
 
 // Config holds database configuration
