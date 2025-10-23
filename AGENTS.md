@@ -309,6 +309,44 @@ bd ready  # Fresh data from git!
 
 **Optional**: Use the git hooks in `examples/git-hooks/` for immediate export (no 5-second wait) and guaranteed import after git operations. Not required with auto-sync enabled.
 
+### Git Worktrees
+
+**⚠️ Important Limitation:** Daemon mode does not work correctly with `git worktree`.
+
+**The Problem:**
+Git worktrees share the same `.git` directory and thus share the same `.beads` database. The daemon doesn't know which branch each worktree has checked out, which can cause it to commit/push to the wrong branch.
+
+**What you lose without daemon mode:**
+- **Auto-sync** - No automatic commit/push of changes (use `bd sync` manually)
+- **MCP server** - The beads-mcp server requires daemon mode for multi-repo support
+- **Background watching** - No automatic detection of remote changes
+
+**Solutions for Worktree Users:**
+
+1. **Use `--no-daemon` flag** (recommended):
+   ```bash
+   bd --no-daemon ready
+   bd --no-daemon create "Fix bug" -p 1
+   bd --no-daemon update bd-42 --status in_progress
+   ```
+
+2. **Disable daemon via environment variable** (for entire worktree session):
+   ```bash
+   export BEADS_NO_DAEMON=1
+   bd ready  # All commands use direct mode
+   ```
+
+3. **Disable auto-start** (less safe, still warns):
+   ```bash
+   export BEADS_AUTO_START_DAEMON=false
+   ```
+
+**Automatic Detection:**
+bd automatically detects when you're in a worktree and shows a prominent warning if daemon mode is active. The `--no-daemon` mode works correctly with worktrees since it operates directly on the database without shared state.
+
+**Why It Matters:**
+The daemon maintains its own view of the current working directory and git state. When multiple worktrees share the same `.beads` database, the daemon may commit changes intended for one branch to a different branch, leading to confusion and incorrect git history.
+
 ### Handling Import Collisions
 
 When merging branches or pulling changes, you may encounter ID collisions (same ID, different content). bd detects and safely handles these:

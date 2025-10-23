@@ -188,6 +188,8 @@ var rootCmd = &cobra.Command{
 					if os.Getenv("BD_DEBUG") != "" {
 						fmt.Fprintf(os.Stderr, "Debug: connected to daemon at %s (health: %s)\n", socketPath, health.Status)
 					}
+					// Warn if using daemon with git worktrees
+					warnWorktreeDaemon(dbPath)
 					return // Skip direct storage initialization
 				} else {
 					// Health check failed or daemon unhealthy
@@ -248,6 +250,8 @@ var rootCmd = &cobra.Command{
 								elapsed := time.Since(startTime).Milliseconds()
 								fmt.Fprintf(os.Stderr, "Debug: auto-start succeeded; connected at %s in %dms\n", socketPath, elapsed)
 							}
+							// Warn if using daemon with git worktrees
+							warnWorktreeDaemon(dbPath)
 							return // Skip direct storage initialization
 						} else {
 							// Auto-started daemon is unhealthy

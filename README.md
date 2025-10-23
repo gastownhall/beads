@@ -646,9 +646,43 @@ bd --db ~/otherproject/.beads/other.db list
 
 - `BEADS_DB` - Override database path
 - `BEADS_AUTO_START_DAEMON` - Enable/disable automatic daemon start (default: `true`). Set to `false` or `0` to disable.
+- `BEADS_NO_DAEMON` - Disable daemon mode entirely (same as `--no-daemon` flag). Set to `1` or `true` to disable.
 - `BD_ACTOR` - Set actor name for change tracking (defaults to `$USER`)
 - `BD_DEBUG` - Enable debug logging (connection attempts, auto-start timing, health checks)
 - `BD_VERBOSE` - Show warnings when falling back from daemon to direct mode
+
+### Git Worktrees
+
+**⚠️ Important:** Git worktrees share the same `.beads` directory, which creates issues with daemon mode.
+
+**The Problem:**
+When using `git worktree`, multiple working directories share a single `.git` directory and thus share the same `.beads` database. The daemon doesn't know which branch each worktree has checked out, which can cause it to commit/push to the wrong branch.
+
+**What you lose without daemon mode:**
+- **Auto-sync** - No automatic commit/push of changes (use `bd sync` manually)
+- **MCP server** - The beads-mcp server requires daemon mode for multi-repo support
+- **Background watching** - No automatic detection of remote changes
+
+**Solutions:**
+
+1. **Use `--no-daemon` flag** (recommended):
+   ```bash
+   bd --no-daemon ready
+   bd --no-daemon create "Fix bug" -p 1
+   ```
+
+2. **Disable daemon via environment variable**:
+   ```bash
+   export BEADS_NO_DAEMON=1
+   bd ready  # Will use direct mode
+   ```
+
+3. **Disable auto-start** (for this worktree only):
+   ```bash
+   export BEADS_AUTO_START_DAEMON=false
+   ```
+
+bd will automatically detect when you're in a worktree and show a warning if daemon mode is active. The `--no-daemon` mode works correctly with worktrees since it operates directly on the database without shared state.
 
 ### Version Compatibility
 

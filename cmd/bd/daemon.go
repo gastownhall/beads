@@ -117,6 +117,19 @@ Use --health to check daemon health and metrics.`,
 			os.Exit(1)
 		}
 
+		// Warn if starting daemon in a git worktree
+		if !global {
+			// Ensure dbPath is set for warning
+			if dbPath == "" {
+				if foundDB := beads.FindDatabasePath(); foundDB != "" {
+					dbPath = foundDB
+				}
+			}
+			if dbPath != "" {
+				warnWorktreeDaemon(dbPath)
+			}
+		}
+
 		// Start daemon
 		scope := "local"
 		if global {
