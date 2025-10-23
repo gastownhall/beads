@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **MCP Server**: Smart routing for lifecycle status changes in `update` tool (GH #123)
+  - `update(status="closed")` now routes to `close()` tool to respect approval workflows
+  - `update(status="open")` now routes to `reopen()` tool to respect approval workflows
+  - Prevents bypass of Claude Code approval settings for lifecycle events
+  - bd CLI remains unopinionated; routing happens only in MCP layer
+  - Users can now safely auto-approve benign updates (priority, notes) without exposing closure bypass
+
 ## [0.14.0] - 2025-10-22
 
 ### Added

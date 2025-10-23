@@ -361,6 +361,54 @@ async def test_update_issue_multiple_fields(sample_issue):
 
 
 @pytest.mark.asyncio
+async def test_update_issue_routes_closed_to_close(sample_issue):
+    """Test that update with status=closed routes to close tool."""
+    closed_issue = sample_issue.model_copy(
+        update={"status": "closed", "closed_at": "2024-01-02T00:00:00Z"}
+    )
+    mock_client = AsyncMock()
+    mock_client.close = AsyncMock(return_value=[closed_issue])
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(
+            issue_id="bd-1",
+            status="closed",
+            notes="Task completed"
+        )
+
+    # Should route to close, not update
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].status == "closed"
+    mock_client.close.assert_called_once()
+    mock_client.update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_issue_routes_open_to_reopen(sample_issue):
+    """Test that update with status=open routes to reopen tool."""
+    reopened_issue = sample_issue.model_copy(
+        update={"status": "open", "closed_at": None}
+    )
+    mock_client = AsyncMock()
+    mock_client.reopen = AsyncMock(return_value=[reopened_issue])
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(
+            issue_id="bd-1",
+            status="open",
+            notes="Needs more work"
+        )
+
+    # Should route to reopen, not update
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].status == "open"
+    mock_client.reopen.assert_called_once()
+    mock_client.update.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_beads_stats():
     """Test beads_stats tool."""
     stats_data = Stats(

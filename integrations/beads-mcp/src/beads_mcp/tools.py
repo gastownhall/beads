@@ -180,11 +180,27 @@ async def beads_update_issue(
     acceptance_criteria: Annotated[str | None, "Acceptance criteria"] = None,
     notes: Annotated[str | None, "Additional notes"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
-) -> Issue:
+) -> Issue | list[Issue]:
     """Update an existing issue.
 
     Claim work by setting status to 'in_progress'.
+    
+    Note: Setting status to 'closed' or 'open' will automatically route to
+    beads_close_issue() or beads_reopen_issue() respectively to ensure
+    proper approval workflows are followed.
     """
+    # Smart routing: intercept lifecycle status changes and route to dedicated tools
+    if status == "closed":
+        # Route to close tool to respect approval workflows
+        reason = notes if notes else "Completed"
+        return await beads_close_issue(issue_id=issue_id, reason=reason)
+    
+    if status == "open":
+        # Route to reopen tool to respect approval workflows
+        reason = notes if notes else "Reopened"
+        return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
+    
+    # Normal attribute updates proceed as usual
     client = await _get_client()
     params = UpdateIssueParams(
         issue_id=issue_id,

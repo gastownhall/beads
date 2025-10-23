@@ -137,7 +137,7 @@ Each instance will discover and use the database in its `BEADS_WORKING_DIR` path
 - `list` - List issues with filters (status, priority, type, assignee)
 - `ready` - Find tasks with no blockers ready to work on
 - `show` - Show detailed issue info including dependencies
-- `update` - Update issue (status, priority, design, notes, etc)
+- `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
 - `blocked` - Get blocked issues
