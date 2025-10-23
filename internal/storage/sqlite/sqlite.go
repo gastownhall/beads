@@ -665,8 +665,13 @@ func validateBatchIssues(issues []*types.Issue) error {
 			return fmt.Errorf("issue %d is nil", i)
 		}
 
-		issue.CreatedAt = now
-		issue.UpdatedAt = now
+		// Only set timestamps if not already provided
+		if issue.CreatedAt.IsZero() {
+			issue.CreatedAt = now
+		}
+		if issue.UpdatedAt.IsZero() {
+			issue.UpdatedAt = now
+		}
 
 		if err := issue.Validate(); err != nil {
 			return fmt.Errorf("validation failed for issue %d: %w", i, err)

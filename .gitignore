@@ -36,6 +36,7 @@ Thumbs.db
 # Daemon runtime files
 .beads/daemon.log
 .beads/daemon.pid
+.beads/daemon.lock
 .beads/bd.sock
 
 # .beads directory files (keep JSONL only)
