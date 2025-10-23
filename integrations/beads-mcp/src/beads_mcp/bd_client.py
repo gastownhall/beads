@@ -363,6 +363,12 @@ class BdCliClient(BdClientBase):
             BdCommandError: If issue not found
         """
         data = await self._run_command("show", params.issue_id)
+        # bd show returns an array, extract first element
+        if isinstance(data, list):
+            if not data:
+                raise BdCommandError(f"Issue not found: {params.issue_id}")
+            data = data[0]
+        
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for show {params.issue_id}")
 
@@ -431,6 +437,12 @@ class BdCliClient(BdClientBase):
             args.extend(["--external-ref", params.external_ref])
 
         data = await self._run_command(*args)
+        # bd update returns an array, extract first element
+        if isinstance(data, list):
+            if not data:
+                raise BdCommandError(f"Issue not found: {params.issue_id}")
+            data = data[0]
+        
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for update {params.issue_id}")
 
