@@ -25,7 +25,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          packages.default = pkgs.callPackage { inherit pkgs self; };
+          packages.default = pkgs.callPackage ./default.nix { inherit pkgs self; };
 
           apps.default = {
             type = "app";
