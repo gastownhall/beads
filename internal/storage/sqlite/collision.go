@@ -472,7 +472,21 @@ func replaceIDReferences(text string, idMapping map[string]string) string {
 
 // updateDependencyReferences updates dependency records to use new IDs
 // This handles both IssueID and DependsOnID fields
+// IMPORTANT: Only updates dependencies belonging to REMAPPED issues (with new IDs from idMapping).
+// Dependencies belonging to existing issues are left untouched.
+//
+// NOTE: During normal import flow, this is effectively a no-op because imported dependencies
+// haven't been added to the database yet when RemapCollisions runs. Dependencies are imported
+// later in Phase 5 of import_shared.go. However, this function still serves as a safety guard
+// and handles edge cases where dependencies might exist with the new remapped IDs.
 func updateDependencyReferences(ctx context.Context, s *SQLiteStorage, idMapping map[string]string) error {
+	// Build set of NEW remapped IDs (idMapping values)
+	// Only dependencies with these IDs as IssueID should be updated
+	newRemappedIDs := make(map[string]bool)
+	for _, newID := range idMapping {
+		newRemappedIDs[newID] = true
+	}
+
 	// Get all dependency records
 	allDeps, err := s.GetAllDependencyRecords(ctx)
 	if err != nil {
@@ -489,6 +503,17 @@ func updateDependencyReferences(ctx context.Context, s *SQLiteStorage, idMapping
 
 	for _, deps := range allDeps {
 		for _, dep := range deps {
+			// CRITICAL FIX: Only update dependencies that belong to REMAPPED issues
+			// A dependency belongs to a remapped issue if its IssueID is a NEW remapped ID
+			// (one of the VALUES in idMapping, not the keys)
+			//
+			// We must NOT check against idMapping keys (old IDs) because those are the same
+			// as existing issue IDs in the database, and we'd incorrectly modify their dependencies.
+			if !newRemappedIDs[dep.IssueID] {
+				// This dependency does not belong to a remapped issue - skip it
+				continue
+			}
+
 			needsUpdate := false
 			newIssueID := dep.IssueID
 			newDependsOnID := dep.DependsOnID
