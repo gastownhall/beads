@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2025-10-23
+
+### Added
+- **Configuration System**: New `bd config` command for managing configuration (GH #115)
+  - Environment variable definitions with validation
+  - Configuration file support (TOML/YAML/JSON)
+  - Get/set/list/unset commands for user-friendly management
+  - Validation and type checking for config values
+  - Documentation in CONFIG.md
+
 ### Fixed
 - **MCP Server**: Smart routing for lifecycle status changes in `update` tool (GH #123)
   - `update(status="closed")` now routes to `close()` tool to respect approval workflows
