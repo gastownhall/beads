@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	// Import SQLite driver
@@ -20,6 +21,7 @@ import (
 type SQLiteStorage struct {
 	db     *sql.DB
 	dbPath string
+	closed atomic.Bool // Tracks whether Close() has been called
 }
 
 // New creates a new SQLite storage backend
@@ -1892,6 +1894,7 @@ func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([
 
 // Close closes the database connection
 func (s *SQLiteStorage) Close() error {
+	s.closed.Store(true)
 	return s.db.Close()
 }
 
@@ -1900,8 +1903,63 @@ func (s *SQLiteStorage) Path() string {
 	return s.dbPath
 }
 
-// UnderlyingDB returns the underlying *sql.DB connection
+// IsClosed returns true if Close() has been called on this storage
+func (s *SQLiteStorage) IsClosed() bool {
+	return s.closed.Load()
+}
+
+// UnderlyingDB returns the underlying *sql.DB connection for extensions.
+//
 // This allows extensions (like VC) to create their own tables in the same database
+// while leveraging the existing connection pool and schema. The returned *sql.DB is
+// safe for concurrent use and shares the same transaction isolation and locking
+// behavior as the core storage operations.
+//
+// IMPORTANT SAFETY RULES:
+//
+// 1. DO NOT call Close() on the returned *sql.DB
+//    - The SQLiteStorage owns the connection lifecycle
+//    - Closing it will break all storage operations
+//    - Use storage.Close() to close the database
+//
+// 2. DO NOT modify connection pool settings
+//    - Avoid SetMaxOpenConns, SetMaxIdleConns, SetConnMaxLifetime, etc.
+//    - The storage has already configured these for optimal performance
+//
+// 3. DO NOT change SQLite PRAGMAs
+//    - The database is configured with WAL mode, foreign keys, and busy timeout
+//    - Changing these (e.g., journal_mode, synchronous, locking_mode) can cause corruption
+//
+// 4. Expect errors after storage.Close()
+//    - Check storage.IsClosed() before long-running operations if needed
+//    - Pass contexts with timeouts to prevent hanging on closed connections
+//
+// 5. Keep write transactions SHORT
+//    - SQLite has a single-writer lock even in WAL mode
+//    - Long-running write transactions will block core storage operations
+//    - Use read transactions (BEGIN DEFERRED) when possible
+//
+// GOOD PRACTICES:
+//
+// - Create extension tables with FOREIGN KEY constraints to maintain referential integrity
+// - Use the same DATETIME format (RFC3339 / ISO8601) for consistency
+// - Leverage SQLite indexes for query performance
+// - Test with -race flag to catch concurrency issues
+//
+// EXAMPLE (creating a VC extension table):
+//
+//	db := storage.UnderlyingDB()
+//	_, err := db.Exec(`
+//	    CREATE TABLE IF NOT EXISTS vc_executions (
+//	        id INTEGER PRIMARY KEY AUTOINCREMENT,
+//	        issue_id TEXT NOT NULL,
+//	        status TEXT NOT NULL,
+//	        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+//	        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+//	    );
+//	    CREATE INDEX IF NOT EXISTS idx_vc_executions_issue ON vc_executions(issue_id);
+//	`)
+//
 func (s *SQLiteStorage) UnderlyingDB() *sql.DB {
 	return s.db
 }
