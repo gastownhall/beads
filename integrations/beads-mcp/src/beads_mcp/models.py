@@ -73,6 +73,7 @@ class UpdateIssueParams(BaseModel):
     priority: int | None = Field(default=None, ge=0, le=4)
     assignee: str | None = None
     title: str | None = None
+    description: str | None = None
     design: str | None = None
     acceptance_criteria: str | None = None
     notes: str | None = None

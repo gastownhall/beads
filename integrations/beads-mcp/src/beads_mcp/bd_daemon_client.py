@@ -279,6 +279,8 @@ class BdDaemonClient(BdClientBase):
             args["assignee"] = params.assignee
         if params.title is not None:
             args["title"] = params.title
+        if params.description is not None:
+            args["description"] = params.description
 
         data = await self._send_request("update", args)
         return Issue(**(json.loads(data) if isinstance(data, str) else data))

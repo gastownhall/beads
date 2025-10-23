@@ -322,7 +322,7 @@ async def create_issue(
 
 @mcp.tool(
     name="update",
-    description="""Update an existing issue's status, priority, assignee, design notes,
+    description="""Update an existing issue's status, priority, assignee, description, design notes,
 or acceptance criteria. Use this to claim work (set status=in_progress).""",
 )
 @require_context
@@ -332,6 +332,7 @@ async def update_issue(
     priority: int | None = None,
     assignee: str | None = None,
     title: str | None = None,
+    description: str | None = None,
     design: str | None = None,
     acceptance_criteria: str | None = None,
     notes: str | None = None,
@@ -350,6 +351,7 @@ async def update_issue(
         priority=priority,
         assignee=assignee,
         title=title,
+        description=description,
         design=design,
         acceptance_criteria=acceptance_criteria,
         notes=notes,

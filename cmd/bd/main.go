@@ -2007,13 +2007,17 @@ var updateCmd = &cobra.Command{
 			updates["title"] = title
 		}
 		if cmd.Flags().Changed("assignee") {
-			assignee, _ := cmd.Flags().GetString("assignee")
-			updates["assignee"] = assignee
+		assignee, _ := cmd.Flags().GetString("assignee")
+		updates["assignee"] = assignee
 		}
-		if cmd.Flags().Changed("design") {
-			design, _ := cmd.Flags().GetString("design")
-			updates["design"] = design
+		if cmd.Flags().Changed("description") {
+		description, _ := cmd.Flags().GetString("description")
+		updates["description"] = description
 		}
+	if cmd.Flags().Changed("design") {
+		design, _ := cmd.Flags().GetString("design")
+		updates["design"] = design
+	}
 		if cmd.Flags().Changed("notes") {
 			notes, _ := cmd.Flags().GetString("notes")
 			updates["notes"] = notes
@@ -2054,11 +2058,14 @@ var updateCmd = &cobra.Command{
 					updateArgs.Title = &title
 				}
 				if assignee, ok := updates["assignee"].(string); ok {
-					updateArgs.Assignee = &assignee
+				updateArgs.Assignee = &assignee
 				}
-				if design, ok := updates["design"].(string); ok {
-					updateArgs.Design = &design
+				if description, ok := updates["description"].(string); ok {
+				updateArgs.Description = &description
 				}
+			if design, ok := updates["design"].(string); ok {
+				updateArgs.Design = &design
+			}
 				if notes, ok := updates["notes"].(string); ok {
 					updateArgs.Notes = &notes
 				}
@@ -2125,6 +2132,7 @@ func init() {
 	updateCmd.Flags().IntP("priority", "p", 0, "New priority")
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("assignee", "a", "", "New assignee")
+	updateCmd.Flags().StringP("description", "d", "", "Issue description")
 	updateCmd.Flags().String("design", "", "Design notes")
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance", "", "Acceptance criteria")

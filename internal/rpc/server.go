@@ -695,6 +695,9 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Title != nil {
 		u["title"] = *a.Title
 	}
+	if a.Description != nil {
+		u["description"] = *a.Description
+	}
 	if a.Status != nil {
 		u["status"] = *a.Status
 	}

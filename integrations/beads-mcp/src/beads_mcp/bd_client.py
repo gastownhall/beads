@@ -427,6 +427,8 @@ class BdCliClient(BdClientBase):
             args.extend(["--assignee", params.assignee])
         if params.title:
             args.extend(["--title", params.title])
+        if params.description:
+            args.extend(["--description", params.description])
         if params.design:
             args.extend(["--design", params.design])
         if params.acceptance_criteria:
