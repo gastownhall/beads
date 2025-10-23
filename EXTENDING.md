@@ -162,51 +162,113 @@ rows, err := db.Query(query)
 
 ## Real-World Example: VC Orchestrator
 
-Here's how the VC (VibeCoder) orchestrator extends bd:
+Here's how the VC (VibeCoder) orchestrator extends bd using `UnderlyingDB()`:
 
-```sql
--- VC's orchestration layer
-CREATE TABLE vc_executor_instances (
-    id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL,
-    executor_type TEXT NOT NULL,
-    status TEXT NOT NULL,  -- pending, assessing, executing, analyzing, completed, failed
-    agent_name TEXT,
-    created_at DATETIME NOT NULL,
-    claimed_at DATETIME,
-    completed_at DATETIME,
-    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-);
+```go
+package vc
 
-CREATE TABLE vc_execution_state (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    executor_id TEXT NOT NULL,
-    phase TEXT NOT NULL,  -- assessment, execution, analysis
-    state_data TEXT NOT NULL,  -- JSON checkpoint data
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (executor_id) REFERENCES vc_executor_instances(id) ON DELETE CASCADE
-);
-
--- VC can now claim ready work atomically
-UPDATE vc_executor_instances
-SET status = 'executing', claimed_at = CURRENT_TIMESTAMP, agent_name = 'agent-1'
-WHERE id = (
-    SELECT ei.id
-    FROM vc_executor_instances ei
-    JOIN issues i ON ei.issue_id = i.id
-    WHERE ei.status = 'pending'
-    AND NOT EXISTS (
-        SELECT 1 FROM dependencies d
-        JOIN issues blocked ON d.depends_on_id = blocked.id
-        WHERE d.issue_id = i.id
-        AND d.type = 'blocks'
-        AND blocked.status IN ('open', 'in_progress', 'blocked')
-    )
-    ORDER BY i.priority ASC
-    LIMIT 1
+import (
+    "database/sql"
+    "github.com/steveyegge/beads"
+    _ "modernc.org/sqlite"
 )
-RETURNING *;
+
+type VCStorage struct {
+    beads.Storage  // Embed bd's storage
+    db *sql.DB     // Cache the underlying DB
+}
+
+func NewVCStorage(dbPath string) (*VCStorage, error) {
+    // Open bd's storage
+    store, err := beads.NewSQLiteStorage(dbPath)
+    if err != nil {
+        return nil, err
+    }
+    
+    vc := &VCStorage{
+        Storage: store,
+        db:      store.UnderlyingDB(),
+    }
+    
+    // Create VC-specific tables
+    if err := vc.initSchema(); err != nil {
+        return nil, err
+    }
+    
+    return vc, nil
+}
+
+func (vc *VCStorage) initSchema() error {
+    schema := `
+    -- VC's orchestration layer
+    CREATE TABLE IF NOT EXISTS vc_executor_instances (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        executor_type TEXT NOT NULL,
+        status TEXT NOT NULL,  -- pending, assessing, executing, analyzing, completed, failed
+        agent_name TEXT,
+        created_at DATETIME NOT NULL,
+        claimed_at DATETIME,
+        completed_at DATETIME,
+        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+    );
+    
+    CREATE TABLE IF NOT EXISTS vc_execution_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        executor_id TEXT NOT NULL,
+        phase TEXT NOT NULL,  -- assessment, execution, analysis
+        state_data TEXT NOT NULL,  -- JSON checkpoint data
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (executor_id) REFERENCES vc_executor_instances(id) ON DELETE CASCADE
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_vc_executor_issue ON vc_executor_instances(issue_id);
+    CREATE INDEX IF NOT EXISTS idx_vc_executor_status ON vc_executor_instances(status);
+    CREATE INDEX IF NOT EXISTS idx_vc_execution_executor ON vc_execution_state(executor_id);
+    `
+    
+    _, err := vc.db.Exec(schema)
+    return err
+}
+
+// ClaimReadyWork atomically claims the highest priority ready work
+func (vc *VCStorage) ClaimReadyWork(agentName string) (*ExecutorInstance, error) {
+    query := `
+    UPDATE vc_executor_instances
+    SET status = 'executing', claimed_at = CURRENT_TIMESTAMP, agent_name = ?
+    WHERE id = (
+        SELECT ei.id
+        FROM vc_executor_instances ei
+        JOIN issues i ON ei.issue_id = i.id
+        WHERE ei.status = 'pending'
+        AND NOT EXISTS (
+            SELECT 1 FROM dependencies d
+            JOIN issues blocked ON d.depends_on_id = blocked.id
+            WHERE d.issue_id = i.id
+            AND d.type = 'blocks'
+            AND blocked.status IN ('open', 'in_progress', 'blocked')
+        )
+        ORDER BY i.priority ASC
+        LIMIT 1
+    )
+    RETURNING id, issue_id, executor_type, status, agent_name, claimed_at
+    `
+    
+    var ei ExecutorInstance
+    err := vc.db.QueryRow(query, agentName).Scan(
+        &ei.ID, &ei.IssueID, &ei.ExecutorType,
+        &ei.Status, &ei.AgentName, &ei.ClaimedAt,
+    )
+    return &ei, err
+}
 ```
+
+**Key benefits of this approach:**
+- ✅ VC extends bd without forking or modifying it
+- ✅ Single database = simple JOINs across layers
+- ✅ Foreign keys ensure referential integrity
+- ✅ bd handles issue tracking, VC handles orchestration
+- ✅ Can use bd's CLI alongside VC's custom operations
 
 ## Best Practices
 
@@ -403,7 +465,98 @@ SQL
 
 ## Direct Database Access
 
-You can always access bd's database directly:
+### Using UnderlyingDB() (Recommended)
+
+The recommended way to extend bd is using the `UnderlyingDB()` method on the storage instance. This gives you access to the same database connection that bd uses, ensuring consistency and avoiding connection overhead:
+
+```go
+import (
+    "database/sql"
+    "github.com/steveyegge/beads"
+    _ "modernc.org/sqlite"
+)
+
+// Open bd's storage
+store, err := beads.NewSQLiteStorage(".beads/issues.db")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+
+// Get the underlying database connection
+db := store.UnderlyingDB()
+
+// Create your extension tables using the same connection
+schema := `
+CREATE TABLE IF NOT EXISTS myapp_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    agent_id TEXT,
+    started_at DATETIME,
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+`
+
+if _, err := db.Exec(schema); err != nil {
+    log.Fatal(err)
+}
+
+// Query bd's tables
+var title string
+var priority int
+err = db.QueryRow(`
+    SELECT title, priority FROM issues WHERE id = ?
+`, issueID).Scan(&title, &priority)
+
+// Update your tables
+_, err = db.Exec(`
+    INSERT INTO myapp_executions (issue_id, status, agent_id, started_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+`, issueID, "running", "agent-1")
+
+// Join across layers
+rows, err := db.Query(`
+    SELECT i.id, i.title, e.status, e.agent_id
+    FROM issues i
+    JOIN myapp_executions e ON i.id = e.issue_id
+    WHERE e.status = 'running'
+`)
+```
+
+**Safety warnings when using UnderlyingDB():**
+
+⚠️ **NEVER** close the database connection returned by `UnderlyingDB()`. The storage instance owns this connection.
+
+⚠️ **DO NOT** modify database pool settings (SetMaxOpenConns, SetConnMaxIdleTime) or SQLite PRAGMAs (WAL mode, journal settings) as this affects bd's core operations.
+
+⚠️ **Keep transactions short** - Long write transactions will block bd's core operations. Use read transactions when possible.
+
+⚠️ **Expect errors after Close()** - Once you call `store.Close()`, operations on the underlying DB will fail. Use context cancellation to coordinate shutdown.
+
+✅ **DO** use foreign keys to reference bd's tables for referential integrity.
+
+✅ **DO** namespace your tables with your app name (e.g., `myapp_executions`).
+
+✅ **DO** create indexes for your query patterns.
+
+### When to use UnderlyingDB() vs sql.Open()
+
+**Use `UnderlyingDB()`:**
+- ✅ When you want to share the storage connection
+- ✅ When you need tables in the same database as bd
+- ✅ When you want automatic lifecycle management
+- ✅ For most extension use cases (like VC)
+
+**Use `sql.Open()` separately:**
+- When you need independent connection pool settings
+- When you need different timeout/retry behavior
+- When you're managing multiple databases
+- When you need fine-grained connection control
+
+### Alternative: Independent Connection
+
+If you need independent connection management, you can still open the database directly:
 
 ```go
 import (
@@ -418,23 +571,23 @@ if dbPath == "" {
     log.Fatal("No bd database found. Run 'bd init' first.")
 }
 
-// Open the same database bd uses
+// Open your own connection to the same database
 db, err := sql.Open("sqlite", dbPath)
 if err != nil {
     log.Fatal(err)
 }
+defer db.Close()
 
-// Query bd's tables directly
+// Configure your connection independently
+db.SetMaxOpenConns(10)
+db.SetConnMaxIdleTime(time.Minute)
+
+// Query bd's tables
 var title string
 var priority int
 err = db.QueryRow(`
     SELECT title, priority FROM issues WHERE id = ?
 `, issueID).Scan(&title, &priority)
-
-// Update your tables
-_, err = db.Exec(`
-    INSERT INTO myapp_executions (issue_id, status) VALUES (?, ?)
-`, issueID, "running")
 
 // Find corresponding JSONL path (for git hooks, monitoring, etc.)
 jsonlPath := beads.FindJSONLPath(dbPath)
