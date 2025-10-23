@@ -12,7 +12,8 @@ This is a [Claude Code](https://claude.com/claude-code) skill - a markdown-based
 - Core workflow patterns (discovery, execution, planning phases)
 - Decision criteria for when to use bd vs TodoWrite/markdown
 - Session start protocols and ready work checks
-- Issue lifecycle management
+- Compaction survival patterns (critical for Claude Code context limits)
+- Issue lifecycle management with self-check checklists
 - Integration patterns with other tools
 
 **Reference documentation:**
@@ -20,6 +21,9 @@ This is a [Claude Code](https://claude.com/claude-code) skill - a markdown-based
 - `references/CLI_REFERENCE.md` - Complete command reference with all flags
 - `references/DEPENDENCIES.md` - Deep dive into dependency types and relationship patterns
 - `references/WORKFLOWS.md` - Step-by-step workflows with checklists
+- `references/ISSUE_CREATION.md` - When to ask vs create issues, quality guidelines
+- `references/RESUMABILITY.md` - Making issues resumable across sessions with working code examples
+- `references/STATIC_DATA.md` - Using bd for reference databases and glossaries
 
 ## Why is This Useful?
 
@@ -56,17 +60,17 @@ git clone https://github.com/steveyegge/beads.git
 cd beads/examples/claude-code-skill
 
 # Create a symlink in your Claude Code skills directory
-ln -s "$(pwd)" ~/.claude/skills/bd
+ln -s "$(pwd)" ~/.claude/skills/bd-issue-tracking
 ```
 
 #### Option 2: Copy Files Directly
 
 ```bash
 # Create the skill directory
-mkdir -p ~/.claude/skills/bd
+mkdir -p ~/.claude/skills/bd-issue-tracking
 
 # Copy the skill files
-cp -r beads/examples/claude-code-skill/* ~/.claude/skills/bd/
+cp -r beads/examples/claude-code-skill/* ~/.claude/skills/bd-issue-tracking/
 ```
 
 ### Verify Installation

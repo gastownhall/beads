@@ -11,6 +11,7 @@ Detailed step-by-step workflows for common bd usage patterns with checklists.
 - [Epic Planning](#epic-planning) - Structuring complex work with dependencies
 - [Side Quest Handling](#side-quests) - Discovery during main task, assessing blocker vs deferrable, resuming
 - [Multi-Session Resume](#resume) - Returning after days/weeks away
+- [Session Handoff Workflow](#session-handoff) - Collaborative handoff between sessions
 - [Unblocking Work](#unblocking) - Handling blocked issues
 - [Integration with TodoWrite](#integration-with-todowrite) - Using both tools together
 - [Common Workflow Patterns](#common-workflow-patterns)
@@ -231,6 +232,119 @@ Resume Workflow:
 ```
 
 **Why this works**: bd preserves design decisions, acceptance criteria, and dependency context. No scrolling conversation history or reconstructing from markdown.
+
+---
+
+## Session Handoff Workflow {#session-handoff}
+
+**Collaborative handoff between sessions using notes field:**
+
+This workflow enables smooth work resumption by updating beads notes when stopping, then reading them when resuming. Works in conjunction with compaction survival - creates continuity even after conversation history is deleted.
+
+### At Session Start (Claude's responsibility)
+
+```
+Session Start with in_progress issues:
+- [ ] Run bd list --status in_progress
+- [ ] For each in_progress issue: bd show <issue-id>
+- [ ] Read notes field to understand: COMPLETED, IN PROGRESS, NEXT
+- [ ] Report to user with context from notes field
+- [ ] Example: "workspace-mcp-server-2 is in_progress. Last session:
+       completed tidying. No code written yet. Next step: create
+       markdown_to_docs.py. Should I continue with that?"
+- [ ] Wait for user confirmation or direction
+```
+
+**Pattern**: Notes field is the "read me first" guide for resuming work.
+
+### At Session End (Claude prompts user)
+
+When wrapping up work on an issue:
+
+```
+Session End Handoff:
+- [ ] Notice work reaching a stopping point
+- [ ] Prompt user: "We just completed X and started Y on <issue-id>.
+       Should I update the beads notes for next session?"
+- [ ] If yes, suggest command:
+       bd update <issue-id> --notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
+- [ ] User reviews and confirms
+- [ ] Claude executes the update
+- [ ] Notes saved for next session's resumption
+```
+
+**Pattern**: Update notes at logical stopping points, not after every keystroke.
+
+### Notes Format (Current State, Not Cumulative)
+
+```
+Good handoff note (current state):
+COMPLETED: Parsed markdown into structured format
+IN PROGRESS: Implementing Docs API insertion
+NEXT: Debug batchUpdate call - getting 400 error on formatting
+BLOCKER: None
+KEY DECISION: Using two-phase approach (insert text, then apply formatting) based on reference implementation
+
+Bad handoff note (not useful):
+Updated some stuff. Will continue later.
+```
+
+**Rules for handoff notes:**
+- Current state only (overwrite previous notes, not append)
+- Specific accomplishments (not vague progress)
+- Concrete next step (not "continue working")
+- Optional: Blockers, key decisions, references
+- Written for someone with zero conversation context
+
+### Session Handoff Checklist
+
+For Claude at session end:
+
+```
+Session End Checklist:
+- [ ] Work reaching logical stopping point
+- [ ] Prompt user about updating notes
+- [ ] If approved:
+  - [ ] Craft note with COMPLETED/IN_PROGRESS/NEXT
+  - [ ] Include blocker if stuck
+  - [ ] Include key decisions if relevant
+  - [ ] Suggest bd update command
+- [ ] Execute approved update
+- [ ] Confirm: "Saved handoff notes for next session"
+```
+
+For user (optional, but helpful):
+
+```
+User Tips:
+- [ ] When stopping work: Let Claude suggest notes update
+- [ ] When resuming: Let Claude read notes and report context
+- [ ] Avoid: Trying to remember context manually (that's what notes are for!)
+- [ ] Trust: Well-written notes will help next session pick up instantly
+```
+
+### Example: Real Session Handoff
+
+**Scenario:** Implementing markdown→Docs feature (workspace-mcp-server-2)
+
+**At End of Session 1:**
+```bash
+bd update workspace-mcp-server-2 --notes "COMPLETED: Set up skeleton with Docs
+API connection verified. Markdown parsing logic 80% done (handles *, _ modifiers).
+IN PROGRESS: Testing edge cases for nested formatting. NEXT: Implement
+batchUpdate call structure for text insertion. REFERENCE: Reference pattern at
+docs/markdown-to-docs-reference.md. No blockers, moving well."
+```
+
+**At Start of Session 2:**
+```bash
+bd show workspace-mcp-server-2
+# Output includes notes field showing exactly where we left off
+# Claude reports: "Markdown→Docs feature is 80% parsed. We were testing
+# edge cases and need to implement batchUpdate next. Want to continue?"
+```
+
+Session resumes instantly with full context, no history scrolling needed.
 
 ---
 

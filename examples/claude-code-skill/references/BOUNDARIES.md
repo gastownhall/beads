@@ -246,55 +246,6 @@ Rare, but happens when bd issue turns out simpler than expected.
 5. Note: "Completed in single session, simpler than expected"
 ```
 
-### Pattern 4: Temporal Layering (Complementary Use)
-
-**Key insight**: TodoWrite and bd operate at different timescales and serve different memory needs.
-
-**TodoWrite** (short-term working memory - this hour):
-- Tactical execution steps
-- Present/future tense ("Implement", "Test", "Deploy")
-- Marked completed as you go
-- Ephemeral: Disappears when session ends
-
-**Beads** (long-term episodic memory - this week/month):
-- Strategic objectives and context
-- Past tense in notes ("COMPLETED", "Discovered", "Blocked by")
-- Key decisions and outcomes in notes field
-- Persistent: Survives compaction and session boundaries
-
-**The Handoff Pattern:**
-1. **Session start**: Read bead → Create TodoWrite items for immediate actions
-2. **During work**: Mark TodoWrite items completed as you go
-3. **Reach milestone**: Update bead notes with outcomes + context
-4. **Session end**: TodoWrite disappears, bead survives with enriched notes
-
-**After compaction**: TodoWrite is gone forever, but bead notes reconstruct what happened.
-
-**Example - TodoWrite tracks execution, Beads capture meaning:**
-
-TodoWrite for this session:
-```
-[completed] Implement login endpoint
-[in_progress] Add password hashing with bcrypt
-[pending] Create session middleware
-```
-
-Corresponding bead notes:
-```bash
-bd update issue-123 --notes "COMPLETED: Login endpoint with bcrypt password
-hashing (12 rounds). KEY DECISION: Using JWT tokens (not sessions) for stateless
-auth - simplifies horizontal scaling. IN PROGRESS: Session middleware implementation.
-NEXT: Need user input on token expiry time (1hr vs 24hr trade-off)."
-```
-
-**Don't duplicate**: TodoWrite tracks execution, Beads captures meaning and context.
-
-**When to use this pattern:**
-- Long-running features requiring multiple sessions
-- Work that will likely face compaction
-- Need both immediate visibility (TodoWrite) and long-term memory (bd)
-- Strategic work with tactical execution steps
-
 ## Real-World Examples
 
 ### Example 1: Database Migration Planning

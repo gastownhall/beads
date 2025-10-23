@@ -26,15 +26,83 @@ bd is a graph-based issue tracker for persistent memory across sessions. Use for
 
 **Key insight**: If resuming work after 2 weeks would be difficult without bd, use bd. If the work can be picked up from a markdown skim, TodoWrite is sufficient.
 
+### Test Yourself: bd or TodoWrite?
+
+Ask these questions to decide:
+
+**Choose bd if:**
+- ❓ "Will I need this context in 2 weeks?" → Yes = bd
+- ❓ "Could conversation history get compacted?" → Yes = bd
+- ❓ "Does this have blockers/dependencies?" → Yes = bd
+- ❓ "Is this fuzzy/exploratory work?" → Yes = bd
+
+**Choose TodoWrite if:**
+- ❓ "Will this be done in this session?" → Yes = TodoWrite
+- ❓ "Is this just a task list for me right now?" → Yes = TodoWrite
+- ❓ "Is this linear with no branching?" → Yes = TodoWrite
+
+**When in doubt**: Use bd. Better to have persistent memory you don't need than to lose context you needed.
+
 **For detailed decision criteria and examples, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md)
 
 ## Surviving Compaction Events
 
-**Critical**: After compaction, bd state is your only persistent memory. Write notes as if explaining to a future agent with zero conversation context.
+**Critical**: Compaction events delete conversation history but preserve beads. After compaction, bd state is your only persistent memory.
 
-**Key insight**: TodoWrite disappears after compaction, but bead notes survive. Use notes to capture: COMPLETED work, IN PROGRESS status, BLOCKERS, and KEY DECISIONS.
+**What survives compaction:**
+- All bead data (issues, notes, dependencies, status)
+- Complete work history and context
 
-**For complete compaction recovery workflow and note-taking patterns, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#compaction-survival)
+**What doesn't survive:**
+- Conversation history
+- TodoWrite lists
+- Recent discussion context
+
+**Writing notes for post-compaction recovery:**
+
+Write notes as if explaining to a future agent with zero conversation context:
+
+**Pattern:**
+```markdown
+notes field format:
+- COMPLETED: Specific deliverables ("implemented JWT refresh endpoint + rate limiting")
+- IN PROGRESS: Current state + next immediate step ("testing password reset flow, need user input on email template")
+- BLOCKERS: What's preventing progress
+- KEY DECISIONS: Important context or user guidance
+```
+
+**After compaction:** `bd show <issue-id>` reconstructs full context from notes field.
+
+### Notes Quality Self-Check
+
+Before checkpointing (especially pre-compaction), verify your notes pass these tests:
+
+❓ **Future-me test**: "Could I resume this work in 2 weeks with zero conversation history?"
+- [ ] What was completed? (Specific deliverables, not "made progress")
+- [ ] What's in progress? (Current state + immediate next step)
+- [ ] What's blocked? (Specific blockers with context)
+- [ ] What decisions were made? (Why, not just what)
+
+❓ **Stranger test**: "Could another developer understand this without asking me?"
+- [ ] Technical choices explained (not just stated)
+- [ ] Trade-offs documented (why this approach vs alternatives)
+- [ ] User input captured (decisions that came from discussion)
+
+**Good note example:**
+```
+COMPLETED: JWT auth with RS256 (1hr access, 7d refresh tokens)
+KEY DECISION: RS256 over HS256 per security review - enables key rotation
+IN PROGRESS: Password reset flow - email service working, need rate limiting
+BLOCKERS: Waiting on user decision: reset token expiry (15min vs 1hr trade-off)
+NEXT: Implement rate limiting (5 attempts/15min) once expiry decided
+```
+
+**Bad note example:**
+```
+Working on auth. Made some progress. More to do.
+```
+
+**For complete compaction recovery workflow, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#compaction-survival)
 
 ## Session Start Protocol
 
@@ -42,24 +110,31 @@ bd is a graph-based issue tracker for persistent memory across sessions. Use for
 - Project has a `.beads/` directory (project-local database), OR
 - `~/.beads/` exists (global fallback database for any directory)
 
-**At session start, always check for bd availability and run ready check:**
+**At session start, always check for bd availability and run ready check.**
 
-1. **Always check ready work automatically** at session start
-2. **Report status** to establish shared context
+### Session Start Checklist
 
-### Quick Start Pattern
+Copy this checklist when starting any session where bd is available:
 
-```bash
-# At session start, run:
-bd ready --json
-
-# Report to user:
-"I can see X items ready to work on: [brief summary]"
-
-# If using global ~/.beads, note this in report
+```
+Session Start:
+- [ ] Run bd ready --json to see available work
+- [ ] Run bd list --status in_progress --json for active work
+- [ ] If in_progress exists: bd show <issue-id> to read notes
+- [ ] Report context to user: "X items ready: [summary]"
+- [ ] If using global ~/.beads, mention this in report
+- [ ] If nothing ready: bd blocked --json to check blockers
 ```
 
-This gives immediate shared context about available work without requiring user prompting.
+**Pattern**: Always check both `bd ready` AND `bd list --status in_progress`. Read notes field first to understand where previous session left off.
+
+**Report format**:
+- "I can see X items ready to work on: [summary]"
+- "Issue Y is in_progress. Last session: [summary from notes]. Next: [from notes]. Should I continue with that?"
+
+This establishes immediate shared context about available and active work without requiring user prompting.
+
+**For detailed collaborative handoff process, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#session-handoff)
 
 **Note**: bd auto-discovers the database:
 - Uses `.beads/*.db` in current project if exists
@@ -76,6 +151,44 @@ bd blocked --json
 
 Report blockers and suggest next steps.
 
+---
+
+## Progress Checkpointing
+
+Update bd notes at these checkpoints (don't wait for session end):
+
+**Critical triggers:**
+- ⚠️ **Context running low** - User says "running out of context" / "approaching compaction" / "close to token limit"
+- 📊 **Token budget > 70%** - Proactively checkpoint when approaching limits
+- 🎯 **Major milestone reached** - Completed significant piece of work
+- 🚧 **Hit a blocker** - Can't proceed, need to capture what was tried
+- 🔄 **Task transition** - Switching issues or about to close this one
+- ❓ **Before user input** - About to ask decision that might change direction
+
+**Proactive monitoring during session:**
+- At 70% token usage: "We're at 70% token usage - good time to checkpoint bd notes?"
+- At 85% token usage: "Approaching token limit (85%) - checkpointing current state to bd"
+- At 90% token usage: Automatically checkpoint without asking
+
+**Current token usage**: Check `<system-warning>Token usage:` messages to monitor proactively.
+
+**Checkpoint checklist:**
+
+```
+Progress Checkpoint:
+- [ ] Update notes with COMPLETED/IN_PROGRESS/NEXT format
+- [ ] Document KEY DECISIONS or BLOCKERS since last update
+- [ ] Mark current status (in_progress/blocked/closed)
+- [ ] If discovered new work: create issues with discovered-from
+- [ ] Verify notes are self-explanatory for post-compaction resume
+```
+
+**Most important**: When user says "running out of context" OR when you see >70% token usage - checkpoint immediately, even if mid-task.
+
+**Test yourself**: "If compaction happened right now, could future-me resume from these notes?"
+
+---
+
 ### Database Selection
 
 bd automatically selects the appropriate database:
@@ -84,7 +197,15 @@ bd automatically selects the appropriate database:
 
 **Use case for global database**: Cross-project tracking, personal task management, knowledge work that doesn't belong to a specific project.
 
-**Database discovery**: bd looks for `.beads/*.db` in current directory, falls back to `~/.beads/default.db`. Use `--db` flag for explicit database selection.
+**When to use --db flag explicitly:**
+- Accessing a specific database outside current directory
+- Working with multiple databases (e.g., project database + reference database)
+- Example: `bd --db /path/to/reference/terms.db list`
+
+**Database discovery rules:**
+- bd looks for `.beads/*.db` in current working directory
+- If not found, uses `~/.beads/default.db`
+- Shell cwd can reset between commands - use absolute paths with --db when operating on non-local databases
 
 **For complete session start workflows, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md#session-start)
 
@@ -141,6 +262,23 @@ bd list --assignee alice
 ```
 
 **For complete CLI reference with all flags and examples, read:** [references/CLI_REFERENCE.md](references/CLI_REFERENCE.md)
+
+## Field Usage Reference
+
+Quick guide for when and how to use each bd field:
+
+| Field | Purpose | When to Set | Update Frequency |
+|-------|---------|-------------|------------------|
+| **description** | Immutable problem statement | At creation | Never (fixed forever) |
+| **design** | Initial approach, architecture, decisions | During planning | Rarely (only if approach changes) |
+| **acceptance-criteria** | Concrete deliverables checklist (`- [ ]` syntax) | When design is clear | Mark `- [x]` as items complete |
+| **notes** | Session handoff (COMPLETED/IN_PROGRESS/NEXT) | During work | At session end, major milestones |
+| **status** | Workflow state (open→in_progress→closed) | As work progresses | When changing phases |
+| **priority** | Urgency level (0=highest, 3=lowest) | At creation | Adjust if priorities shift |
+
+**Key pattern**: Notes field is your "read me first" at session start. See [WORKFLOWS.md](references/WORKFLOWS.md#session-handoff) for session handoff details.
+
+---
 
 ## Issue Lifecycle Workflow
 
@@ -229,23 +367,86 @@ bd supports four dependency types:
 ## Integration with TodoWrite
 
 **Both tools complement each other at different timescales:**
-- **TodoWrite** - Short-term working memory (this hour), disappears after session
-- **Beads** - Long-term episodic memory (this week/month), survives compaction
 
-**The Handoff Pattern**: Read bead → Create TodoWrite items → Work → Update bead notes with outcomes → TodoWrite disappears, bead survives.
+### Temporal Layering Pattern
 
-**For complete temporal layering pattern, examples, and integration workflows, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md#integration-patterns)
+**TodoWrite** (short-term working memory - this hour):
+- Tactical execution: "Review Section 3", "Expand Q&A answers"
+- Marked completed as you go
+- Present/future tense ("Review", "Expand", "Create")
+- Ephemeral: Disappears when session ends
+
+**Beads** (long-term episodic memory - this week/month):
+- Strategic objectives: "Continue work on strategic planning document"
+- Key decisions and outcomes in notes field
+- Past tense in notes ("COMPLETED", "Discovered", "Blocked by")
+- Persistent: Survives compaction and session boundaries
+
+### The Handoff Pattern
+
+1. **Session start**: Read bead → Create TodoWrite items for immediate actions
+2. **During work**: Mark TodoWrite items completed as you go
+3. **Reach milestone**: Update bead notes with outcomes + context
+4. **Session end**: TodoWrite disappears, bead survives with enriched notes
+
+**After compaction**: TodoWrite is gone forever, but bead notes reconstruct what happened.
+
+### Example: TodoWrite tracks execution, Beads capture meaning
+
+**TodoWrite:**
+```
+[completed] Implement login endpoint
+[in_progress] Add password hashing with bcrypt
+[pending] Create session middleware
+```
+
+**Corresponding bead notes:**
+```
+bd update issue-123 --notes "COMPLETED: Login endpoint with bcrypt password
+hashing (12 rounds). KEY DECISION: Using JWT tokens (not sessions) for stateless
+auth - simplifies horizontal scaling. IN PROGRESS: Session middleware implementation.
+NEXT: Need user input on token expiry time (1hr vs 24hr trade-off)."
+```
+
+**Don't duplicate**: TodoWrite tracks execution, Beads captures meaning and context.
+
+**For patterns on transitioning between tools mid-session, read:** [references/BOUNDARIES.md](references/BOUNDARIES.md#integration-patterns)
 
 ## Common Patterns
 
 ### Pattern 1: Knowledge Work Session
 
-User asks for strategic document development:
-1. Check if bd available: `bd ready`
-2. If related epic exists, show current status
-3. Create new issues for discovered research needs
-4. Use discovered-from to track where ideas came from
-5. Update design notes as research progresses
+**Scenario**: User asks "Help me write a proposal for expanding the analytics platform"
+
+**What you see**:
+```bash
+$ bd ready
+# Returns: bd-42 "Research analytics platform expansion proposal" (in_progress)
+
+$ bd show bd-42
+Notes: "COMPLETED: Reviewed current stack (Mixpanel, Amplitude)
+IN PROGRESS: Drafting cost-benefit analysis section
+NEXT: Need user input on budget constraints before finalizing recommendations"
+```
+
+**What you do**:
+1. Read notes to understand current state
+2. Create TodoWrite for immediate work:
+   ```
+   - [ ] Draft cost-benefit analysis
+   - [ ] Ask user about budget constraints
+   - [ ] Finalize recommendations
+   ```
+3. Work on tasks, mark TodoWrite items completed
+4. At milestone, update bd notes:
+   ```bash
+   bd update bd-42 --notes "COMPLETED: Cost-benefit analysis drafted.
+   KEY DECISION: User confirmed $50k budget cap - ruled out enterprise options.
+   IN PROGRESS: Finalizing recommendations (Posthog + custom ETL).
+   NEXT: Get user review of draft before closing issue."
+   ```
+
+**Outcome**: TodoWrite disappears at session end, but bd notes preserve context for next session.
 
 ### Pattern 2: Side Quest Handling
 
@@ -267,55 +468,46 @@ Starting work after time away:
 
 **For complete workflow walkthroughs with checklists, read:** [references/WORKFLOWS.md](references/WORKFLOWS.md)
 
-## Use Pattern Variations
+## Issue Creation
 
-bd is designed for work tracking but can serve other purposes with appropriate adaptations:
+**Quick guidelines:**
+- Ask user first for knowledge work with fuzzy boundaries
+- Create directly for clear bugs, technical debt, or discovered work
+- Use clear titles, sufficient context in descriptions
+- Design field: HOW to build (can change during implementation)
+- Acceptance criteria: WHAT success looks like (should remain stable)
 
-### Work Tracking (Primary Use Case)
-- Issues flow through states (open → in_progress → closed)
-- Priorities and dependencies matter
-- Status tracking is essential
-- IDs are sufficient for referencing
+### Issue Creation Checklist
 
-### Reference Databases / Glossaries (Alternative Use)
-- Entities are mostly static (typically always open)
-- No real workflow or state transitions
-- Names/titles more important than IDs
-- Minimal or no dependencies
-- Consider dual format: maintain markdown version alongside database for name-based lookup
-- Use separate database (not mixed with work tracking) to avoid confusion
+Copy when creating new issues:
 
-**Example**: A terminology database could use both `terms.db` (queryable) and `GLOSSARY.md` (browsable by name).
+```
+Creating Issue:
+- [ ] Title: Clear, specific, action-oriented
+- [ ] Description: Problem statement (WHY this matters) - immutable
+- [ ] Design: HOW to build (can change during work)
+- [ ] Acceptance: WHAT success looks like (stays stable)
+- [ ] Priority: 0=critical, 1=high, 2=normal, 3=low
+- [ ] Type: bug/feature/task/epic/chore
+```
 
-**Key difference**: Work items have lifecycle; reference entities are stable knowledge.
+**Self-check for acceptance criteria:**
 
-## Issue Creation Guidelines
+❓ "If I changed the implementation approach, would these criteria still apply?"
+- → **Yes** = Good criteria (outcome-focused)
+- → **No** = Move to design field (implementation-focused)
 
-### When to Ask First vs Create Directly
+**Example:**
+- ✅ Acceptance: "User tokens persist across sessions and refresh automatically"
+- ❌ Wrong: "Use JWT tokens with 1-hour expiry" (that's design, not acceptance)
 
-**Ask the user before creating when:**
-- Knowledge work with fuzzy boundaries
-- Task scope is unclear
-- Multiple valid approaches exist
-- User's intent needs clarification
+**For detailed guidance on when to ask vs create, issue quality, resumability patterns, and design vs acceptance criteria, read:** [references/ISSUE_CREATION.md](references/ISSUE_CREATION.md)
 
-**Create directly when:**
-- Clear bug discovered during implementation
-- Obvious follow-up work identified
-- Technical debt with clear scope
-- Dependency or blocker found
+## Alternative Use Cases
 
-**Why ask first for knowledge work?** Task boundaries in strategic/research work are often unclear until discussed, whereas technical implementation tasks are usually well-defined. Discussion helps structure the work properly before creating issues, preventing poorly-scoped issues that need immediate revision.
+bd is primarily for work tracking, but can also serve as queryable database for static reference data (glossaries, terminology) with adaptations.
 
-### Issue Quality
-
-Use clear, specific titles and include sufficient context in descriptions to resume work later.
-
-**Use --design flag for:**
-- Implementation approach decisions, architecture notes, trade-offs considered
-
-**Use --acceptance flag for:**
-- Definition of done, testing requirements, success metrics
+**For guidance on using bd for reference databases and static data, read:** [references/STATIC_DATA.md](references/STATIC_DATA.md)
 
 ## Statistics and Monitoring
 
@@ -441,3 +633,5 @@ Detailed information organized by topic:
 | [references/CLI_REFERENCE.md](references/CLI_REFERENCE.md) | Need complete command reference, flag details, or examples |
 | [references/WORKFLOWS.md](references/WORKFLOWS.md) | Need step-by-step workflows with checklists for common scenarios |
 | [references/DEPENDENCIES.md](references/DEPENDENCIES.md) | Need deep understanding of dependency types or relationship patterns |
+| [references/ISSUE_CREATION.md](references/ISSUE_CREATION.md) | Need guidance on when to ask vs create issues, issue quality, or design vs acceptance criteria |
+| [references/STATIC_DATA.md](references/STATIC_DATA.md) | Want to use bd for reference databases, glossaries, or static data instead of work tracking |
