@@ -86,12 +86,12 @@ install_from_release() {
         version=$(wget -qO- "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
     else
         log_error "Neither curl nor wget found. Please install one of them."
-        return 0
+        return 1
     fi
 
     if [ -z "$version" ]; then
         log_error "Failed to fetch latest version"
-        return 0
+        return 1
     fi
 
     log_info "Latest version: $version"
@@ -108,14 +108,14 @@ install_from_release() {
             log_error "Download failed"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
-            return 0
+            return 1
         fi
     elif command -v wget &> /dev/null; then
         if ! wget -q -O "$archive_name" "$download_url"; then
             log_error "Download failed"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
-            return 0
+            return 1
         fi
     fi
 
@@ -125,7 +125,7 @@ install_from_release() {
     if ! tar -xzf "$archive_name"; then
         log_error "Failed to extract archive"
         rm -rf "$tmp_dir"
-        return 0
+        return 1
     fi
 
     # Determine install location
@@ -180,12 +180,12 @@ check_go() {
             echo "  - Download from https://go.dev/dl/"
             echo "  - Or use your package manager to update"
             echo ""
-            return 0
+            return 1
         fi
 
         return 0
     else
-        return 0
+        return 1
     fi
 }
 
@@ -209,7 +209,7 @@ install_with_go() {
         return 0
     else
         log_error "go install failed"
-        return 0
+        return 1
     fi
 }
 
@@ -265,12 +265,12 @@ build_from_source() {
     cd - > /dev/null || cd "$HOME"
             cd - > /dev/null
             rm -rf "$tmp_dir"
-            return 0
+            return 1
         fi
     else
         log_error "Failed to clone repository"
         rm -rf "$tmp_dir"
-        return 0
+        return 1
     fi
 }
 
@@ -289,7 +289,7 @@ verify_installation() {
         return 0
     else
         log_error "bd was installed but is not in PATH"
-        return 0
+        return 1
     fi
 }
 
