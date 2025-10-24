@@ -23,10 +23,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    # Ignore combinations that don't make sense
-    ignore:
-      - goos: windows
-        goarch: arm64
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
@@ -62,10 +58,10 @@ changelog:
       - "Merge branch"
   groups:
     - title: "Features"
-      regexp: "^.*feat[(\\w)]*:+.*$"
+      regexp: '^.*feat(\(\w+\))?:.*$'
       order: 0
     - title: "Bug Fixes"
-      regexp: "^.*fix[(\\w)]*:+.*$"
+      regexp: '^.*fix(\(\w+\))?:.*$'
       order: 1
     - title: "Others"
       order: 999
