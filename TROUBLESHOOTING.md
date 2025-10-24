@@ -1,0 +1,410 @@
+# Troubleshooting bd
+
+Common issues and solutions for bd users.
+
+## Table of Contents
+
+- [Installation Issues](#installation-issues)
+- [Database Issues](#database-issues)
+- [Git and Sync Issues](#git-and-sync-issues)
+- [Ready Work and Dependencies](#ready-work-and-dependencies)
+- [Performance Issues](#performance-issues)
+- [Agent-Specific Issues](#agent-specific-issues)
+- [Platform-Specific Issues](#platform-specific-issues)
+
+## Installation Issues
+
+### `bd: command not found`
+
+bd is not in your PATH. Either:
+
+```bash
+# Check if installed
+go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
+
+# Add Go bin to PATH (add to ~/.bashrc or ~/.zshrc)
+export PATH="$PATH:$(go env GOPATH)/bin"
+
+# Or reinstall
+go install github.com/steveyegge/beads/cmd/bd@latest
+```
+
+### `zsh: killed bd` or crashes on macOS
+
+Some users report crashes when running `bd init` or other commands on macOS. This is typically caused by CGO/SQLite compatibility issues.
+
+**Workaround:**
+```bash
+# Build with CGO enabled
+CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Or if building from source
+git clone https://github.com/steveyegge/beads
+cd beads
+CGO_ENABLED=1 go build -o bd ./cmd/bd
+sudo mv bd /usr/local/bin/
+```
+
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+
+## Database Issues
+
+### `database is locked`
+
+Another bd process is accessing the database, or SQLite didn't close properly. Solutions:
+
+```bash
+# Find and kill hanging processes
+ps aux | grep bd
+kill <pid>
+
+# Remove lock files (safe if no bd processes running)
+rm .beads/*.db-journal .beads/*.db-wal .beads/*.db-shm
+```
+
+**Note**: bd uses a pure Go SQLite driver (`modernc.org/sqlite`) for better portability. Under extreme concurrent load (100+ simultaneous operations), you may see "database is locked" errors. This is a known limitation of the pure Go implementation and does not affect normal usage. For very high concurrency scenarios, consider using the CGO-enabled driver or PostgreSQL (planned for future release).
+
+### `bd init` fails with "directory not empty"
+
+`.beads/` already exists. Options:
+
+```bash
+# Use existing database
+bd list  # Should work if already initialized
+
+# Or remove and reinitialize (DESTROYS DATA!)
+rm -rf .beads/
+bd init
+```
+
+### `failed to import: issue already exists`
+
+You're trying to import issues that conflict with existing ones. Options:
+
+```bash
+# Skip existing issues (only import new ones)
+bd import -i issues.jsonl --skip-existing
+
+# Or clear database and re-import everything
+rm .beads/*.db
+bd import -i .beads/issues.jsonl
+```
+
+### Database corruption
+
+If you suspect database corruption:
+
+```bash
+# Check database integrity
+sqlite3 .beads/*.db "PRAGMA integrity_check;"
+
+# If corrupted, reimport from JSONL
+mv .beads/*.db .beads/*.db.backup
+bd init
+bd import -i .beads/issues.jsonl
+```
+
+## Git and Sync Issues
+
+### Git merge conflict in `issues.jsonl`
+
+When both sides add issues, you'll get conflicts. Resolution:
+
+1. Open `.beads/issues.jsonl`
+2. Look for `<<<<<<< HEAD` markers
+3. Most conflicts can be resolved by **keeping both sides**
+4. Each line is independent unless IDs conflict
+5. For same-ID conflicts, keep the newest (check `updated_at`)
+
+Example resolution:
+```bash
+# After resolving conflicts manually
+git add .beads/issues.jsonl
+git commit
+bd import -i .beads/issues.jsonl  # Sync to SQLite
+```
+
+See [TEXT_FORMATS.md](TEXT_FORMATS.md) for detailed merge strategies.
+
+### ID collisions after branch merge
+
+When merging branches where different issues were created with the same ID:
+
+```bash
+# Check for collisions
+bd import -i .beads/issues.jsonl --dry-run
+
+# Automatically resolve collisions
+bd import -i .beads/issues.jsonl --resolve-collisions
+```
+
+See [ADVANCED.md#handling-import-collisions](ADVANCED.md#handling-import-collisions) for details.
+
+### Permission denied on git hooks
+
+Git hooks need execute permissions:
+
+```bash
+chmod +x .git/hooks/pre-commit
+chmod +x .git/hooks/post-merge
+chmod +x .git/hooks/post-checkout
+```
+
+Or use the installer: `cd examples/git-hooks && ./install.sh`
+
+### Auto-sync not working
+
+Check if auto-sync is enabled:
+
+```bash
+# Check if daemon is running
+ps aux | grep "bd daemon"
+
+# Manually export/import
+bd export -o .beads/issues.jsonl
+bd import -i .beads/issues.jsonl
+
+# Install git hooks for guaranteed sync
+cd examples/git-hooks && ./install.sh
+```
+
+If you disabled auto-sync with `--no-auto-flush` or `--no-auto-import`, remove those flags or use `bd sync` manually.
+
+## Ready Work and Dependencies
+
+### `bd ready` shows nothing but I have open issues
+
+Those issues probably have open blockers. Check:
+
+```bash
+# See blocked issues
+bd blocked
+
+# Show dependency tree (default max depth: 50)
+bd dep tree <issue-id>
+
+# Limit tree depth to prevent deep traversals
+bd dep tree <issue-id> --max-depth 10
+
+# Remove blocking dependency if needed
+bd dep remove <from-id> <to-id>
+```
+
+Remember: Only `blocks` dependencies affect ready work.
+
+### Circular dependency errors
+
+bd prevents dependency cycles, which break ready work detection. To fix:
+
+```bash
+# Detect all cycles
+bd dep cycles
+
+# Remove the dependency causing the cycle
+bd dep remove <from-id> <to-id>
+
+# Or redesign your dependency structure
+```
+
+### Dependencies not showing up
+
+Check the dependency type:
+
+```bash
+# Show full issue details including dependencies
+bd show <issue-id>
+
+# Visualize the dependency tree
+bd dep tree <issue-id>
+```
+
+Remember: Different dependency types have different meanings:
+- `blocks` - Hard blocker, affects ready work
+- `related` - Soft relationship, doesn't block
+- `parent-child` - Hierarchical (child depends on parent)
+- `discovered-from` - Work discovered during another issue
+
+## Performance Issues
+
+### Export/import is slow
+
+For large databases (10k+ issues):
+
+```bash
+# Export only open issues
+bd export --format=jsonl --status=open -o .beads/issues.jsonl
+
+# Or filter by priority
+bd export --format=jsonl --priority=0 --priority=1 -o critical.jsonl
+```
+
+Consider splitting large projects into multiple databases.
+
+### Commands are slow
+
+Check database size and consider compaction:
+
+```bash
+# Check database stats
+bd stats
+
+# Preview compaction candidates
+bd compact --dry-run --all
+
+# Compact old closed issues
+bd compact --days 90
+```
+
+### Large JSONL files
+
+If `.beads/issues.jsonl` is very large:
+
+```bash
+# Check file size
+ls -lh .beads/issues.jsonl
+
+# Remove old closed issues
+bd compact --days 90
+
+# Or split into multiple projects
+cd ~/project/component1 && bd init --prefix comp1
+cd ~/project/component2 && bd init --prefix comp2
+```
+
+## Agent-Specific Issues
+
+### Agent creates duplicate issues
+
+Agents may not realize an issue already exists. Prevention strategies:
+
+- Have agents search first: `bd list --json | grep "title"`
+- Use labels to mark auto-created issues: `bd create "..." -l auto-generated`
+- Review and deduplicate periodically: `bd list | sort`
+- Use `bd merge` to consolidate duplicates: `bd merge bd-2 --into bd-1`
+
+### Agent gets confused by complex dependencies
+
+Simplify the dependency structure:
+
+```bash
+# Check for overly complex trees
+bd dep tree <issue-id>
+
+# Remove unnecessary dependencies
+bd dep remove <from-id> <to-id>
+
+# Use labels instead of dependencies for loose relationships
+bd label add <issue-id> related-to-feature-X
+```
+
+### Agent can't find ready work
+
+Check if issues are blocked:
+
+```bash
+# See what's blocked
+bd blocked
+
+# See what's actually ready
+bd ready --json
+
+# Check specific issue
+bd show <issue-id>
+bd dep tree <issue-id>
+```
+
+### MCP server not working
+
+Check installation and configuration:
+
+```bash
+# Verify MCP server is installed
+pip list | grep beads-mcp
+
+# Check MCP configuration
+cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+# Test CLI works
+bd version
+bd ready
+
+# Check for daemon
+ps aux | grep "bd daemon"
+```
+
+See [integrations/beads-mcp/README.md](integrations/beads-mcp/README.md) for MCP-specific troubleshooting.
+
+## Platform-Specific Issues
+
+### Windows: Path issues
+
+```pwsh
+# Check if bd.exe is in PATH
+where.exe bd
+
+# Add Go bin to PATH (permanently)
+[Environment]::SetEnvironmentVariable(
+    "Path",
+    $env:Path + ";$env:USERPROFILE\go\bin",
+    [EnvironmentVariableTarget]::User
+)
+
+# Reload PATH in current session
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
+```
+
+### Windows: Firewall blocking daemon
+
+The daemon listens on loopback TCP. Allow `bd.exe` through Windows Firewall:
+
+1. Open Windows Security → Firewall & network protection
+2. Click "Allow an app through firewall"
+3. Add `bd.exe` and enable for Private networks
+4. Or disable firewall temporarily for testing
+
+### macOS: Gatekeeper blocking execution
+
+If macOS blocks bd:
+
+```bash
+# Remove quarantine attribute
+xattr -d com.apple.quarantine /usr/local/bin/bd
+
+# Or allow in System Preferences
+# System Preferences → Security & Privacy → General → "Allow anyway"
+```
+
+### Linux: Permission denied
+
+If you get permission errors:
+
+```bash
+# Make bd executable
+chmod +x /usr/local/bin/bd
+
+# Or install to user directory
+mkdir -p ~/.local/bin
+mv bd ~/.local/bin/
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Getting Help
+
+If none of these solutions work:
+
+1. **Check existing issues**: [GitHub Issues](https://github.com/steveyegge/beads/issues)
+2. **Enable debug logging**: `bd --verbose <command>`
+3. **File a bug report**: Include:
+   - bd version: `bd version`
+   - OS and architecture: `uname -a`
+   - Error message and full command
+   - Steps to reproduce
+4. **Join discussions**: [GitHub Discussions](https://github.com/steveyegge/beads/discussions)
+
+## Related Documentation
+
+- **[README.md](README.md)** - Core features and quick start
+- **[ADVANCED.md](ADVANCED.md)** - Advanced features
+- **[FAQ.md](FAQ.md)** - Frequently asked questions
+- **[INSTALLING.md](INSTALLING.md)** - Installation guide
+- **[TEXT_FORMATS.md](TEXT_FORMATS.md)** - JSONL format and merge strategies
