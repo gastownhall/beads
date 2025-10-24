@@ -166,8 +166,14 @@ bd restore <id>  # View full history at time of compaction
 # Import with collision detection
 bd import -i .beads/issues.jsonl --dry-run             # Preview only
 bd import -i .beads/issues.jsonl --resolve-collisions  # Auto-resolve
+bd import -i .beads/issues.jsonl --resolve-collisions --dedupe-after  # Auto-resolve + detect duplicates
 
-# Merge duplicate issues
+# Find and merge duplicate issues
+bd duplicates                                          # Show all duplicates
+bd duplicates --auto-merge                             # Automatically merge all
+bd duplicates --dry-run                                # Preview merge operations
+
+# Merge specific duplicate issues
 bd merge <source-id...> --into <target-id> --json      # Consolidate duplicates
 bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 ```
@@ -211,6 +217,22 @@ Only `blocks` dependencies affect the ready work queue.
 ### Duplicate Detection & Merging
 
 AI agents should proactively detect and merge duplicate issues to keep the database clean:
+
+**Automated duplicate detection:**
+
+```bash
+# Find all content duplicates in the database
+bd duplicates
+
+# Automatically merge all duplicates
+bd duplicates --auto-merge
+
+# Preview what would be merged
+bd duplicates --dry-run
+
+# During import (after collision resolution)
+bd import -i issues.jsonl --resolve-collisions --dedupe-after
+```
 
 **Detection strategies:**
 

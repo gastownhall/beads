@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
@@ -24,6 +25,7 @@ Behavior:
   - New issues are created
   - Collisions (same ID, different content) are detected
   - Use --resolve-collisions to automatically remap colliding issues
+  - Use --dedupe-after to find and merge content duplicates after import
   - Use --dry-run to preview changes without applying them`,
 	Run: func(cmd *cobra.Command, args []string) {
 		input, _ := cmd.Flags().GetString("input")
@@ -32,6 +34,7 @@ Behavior:
 		resolveCollisions, _ := cmd.Flags().GetBool("resolve-collisions")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
+		dedupeAfter, _ := cmd.Flags().GetBool("dedupe-after")
 
 		// Open input
 		in := os.Stdin
@@ -190,6 +193,54 @@ Behavior:
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
 		fmt.Fprintf(os.Stderr, "\n")
+
+		// Run duplicate detection if requested
+		if dedupeAfter {
+			fmt.Fprintf(os.Stderr, "\n=== Post-Import Duplicate Detection ===\n")
+
+			// Get all issues (fresh after import)
+			allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error fetching issues for deduplication: %v\n", err)
+				os.Exit(1)
+			}
+
+			duplicateGroups := findDuplicateGroups(allIssues)
+			if len(duplicateGroups) == 0 {
+				fmt.Fprintf(os.Stderr, "No duplicates found.\n")
+				return
+			}
+
+			refCounts := countReferences(allIssues)
+
+			fmt.Fprintf(os.Stderr, "Found %d duplicate group(s)\n\n", len(duplicateGroups))
+
+			for i, group := range duplicateGroups {
+				target := chooseMergeTarget(group, refCounts)
+				fmt.Fprintf(os.Stderr, "Group %d: %s\n", i+1, group[0].Title)
+
+				for _, issue := range group {
+					refs := refCounts[issue.ID]
+					marker := "  "
+					if issue.ID == target.ID {
+						marker = "→ "
+					}
+					fmt.Fprintf(os.Stderr, "  %s%s (%s, P%d, %d refs)\n",
+						marker, issue.ID, issue.Status, issue.Priority, refs)
+				}
+
+				sources := make([]string, 0, len(group)-1)
+				for _, issue := range group {
+					if issue.ID != target.ID {
+						sources = append(sources, issue.ID)
+					}
+				}
+				fmt.Fprintf(os.Stderr, "  Suggested: bd merge %s --into %s\n\n",
+					strings.Join(sources, " "), target.ID)
+			}
+
+			fmt.Fprintf(os.Stderr, "Run 'bd duplicates --auto-merge' to merge all duplicates.\n")
+		}
 	},
 }
 
@@ -198,6 +249,7 @@ func init() {
 	importCmd.Flags().BoolP("skip-existing", "s", false, "Skip existing issues instead of updating them")
 	importCmd.Flags().Bool("strict", false, "Fail on dependency errors instead of treating them as warnings")
 	importCmd.Flags().Bool("resolve-collisions", false, "Automatically resolve ID collisions by remapping")
+	importCmd.Flags().Bool("dedupe-after", false, "Detect and report content duplicates after import")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	rootCmd.AddCommand(importCmd)

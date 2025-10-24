@@ -55,6 +55,53 @@ bd rename-prefix kw-
 bd list  # Shows kw-* issues
 ```
 
+## Duplicate Detection
+
+Find issues with identical content using automated duplicate detection:
+
+```bash
+# Find all content duplicates in the database
+bd duplicates
+
+# Show duplicates in JSON format
+bd duplicates --json
+
+# Automatically merge all duplicates
+bd duplicates --auto-merge
+
+# Preview what would be merged
+bd duplicates --dry-run
+
+# Detect duplicates during import
+bd import -i issues.jsonl --resolve-collisions --dedupe-after
+```
+
+**How it works:**
+- Groups issues by content hash (title, description, design, acceptance criteria)
+- Only groups issues with matching status (open with open, closed with closed)
+- Chooses merge target by reference count (most referenced) or smallest ID
+- Reports duplicate groups with suggested merge commands
+
+**Example output:**
+
+```
+🔍 Found 3 duplicate group(s):
+
+━━ Group 1: Fix authentication bug
+→ bd-10 (open, P1, 5 references)
+  bd-42 (open, P1, 0 references)
+  Suggested: bd merge bd-42 --into bd-10
+
+💡 Run with --auto-merge to execute all suggested merges
+```
+
+**AI Agent Workflow:**
+
+1. **Periodic scans**: Run `bd duplicates` to check for duplicates
+2. **During import**: Use `--dedupe-after` to detect duplicates after collision resolution
+3. **Auto-merge**: Use `--auto-merge` to automatically consolidate duplicates
+4. **Manual review**: Use `--dry-run` to preview merges before executing
+
 ## Merging Duplicate Issues
 
 Consolidate duplicate issues into a single issue while preserving dependencies and references:
