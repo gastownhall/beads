@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Beads (bd) installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 #
 
 set -e
@@ -59,7 +59,98 @@ detect_platform() {
             ;;
     esac
 
-    echo "${os}-${arch}"
+    echo "${os}_${arch}"
+}
+
+# Download and install from GitHub releases
+install_from_release() {
+    log_info "Installing bd from GitHub releases..."
+
+    local platform=$1
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Get latest release version
+    log_info "Fetching latest release..."
+    local latest_url="https://api.github.com/repos/steveyegge/beads/releases/latest"
+    local version
+    
+    if command -v curl &> /dev/null; then
+        version=$(curl -fsSL "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+    elif command -v wget &> /dev/null; then
+        version=$(wget -qO- "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+    else
+        log_error "Neither curl nor wget found. Please install one of them."
+        return 1
+    fi
+
+    if [ -z "$version" ]; then
+        log_error "Failed to fetch latest version"
+        return 1
+    fi
+
+    log_info "Latest version: $version"
+
+    # Download URL
+    local archive_name="beads_${version#v}_${platform}.tar.gz"
+    local download_url="https://github.com/steveyegge/beads/releases/download/${version}/${archive_name}"
+    
+    log_info "Downloading $archive_name..."
+    
+    cd "$tmp_dir"
+    if command -v curl &> /dev/null; then
+        if ! curl -fsSL -o "$archive_name" "$download_url"; then
+            log_error "Download failed"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+    elif command -v wget &> /dev/null; then
+        if ! wget -q -O "$archive_name" "$download_url"; then
+            log_error "Download failed"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+    fi
+
+    # Extract archive
+    log_info "Extracting archive..."
+    if ! tar -xzf "$archive_name"; then
+        log_error "Failed to extract archive"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # Determine install location
+    local install_dir
+    if [[ -w /usr/local/bin ]]; then
+        install_dir="/usr/local/bin"
+    else
+        install_dir="$HOME/.local/bin"
+        mkdir -p "$install_dir"
+    fi
+
+    # Install binary
+    log_info "Installing to $install_dir..."
+    if [[ -w "$install_dir" ]]; then
+        mv bd "$install_dir/"
+    else
+        sudo mv bd "$install_dir/"
+    fi
+
+    log_success "bd installed to $install_dir/bd"
+
+    # Check if install_dir is in PATH
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        log_warning "$install_dir is not in your PATH"
+        echo ""
+        echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+        echo "  export PATH=\"\$PATH:$install_dir\""
+        echo ""
+    fi
+
+    cd - > /dev/null
+    rm -rf "$tmp_dir"
+    return 0
 }
 
 # Check if Go is installed and meets minimum version
@@ -89,7 +180,7 @@ check_go() {
     fi
 }
 
-# Install using go install
+# Install using go install (fallback)
 install_with_go() {
     log_info "Installing bd using 'go install'..."
 
@@ -113,7 +204,7 @@ install_with_go() {
     fi
 }
 
-# Build from source
+# Build from source (last resort)
 build_from_source() {
     log_info "Building bd from source..."
 
@@ -171,21 +262,6 @@ build_from_source() {
     fi
 }
 
-# Install Go if not present (optional)
-offer_go_installation() {
-    log_warning "Go is not installed"
-    echo ""
-        echo "bd requires Go 1.24 or later. You can:"
-    echo "  1. Install Go from https://go.dev/dl/"
-    echo "  2. Use your package manager:"
-    echo "     - macOS: brew install go"
-    echo "     - Ubuntu/Debian: sudo apt install golang"
-    echo "     - Other Linux: Check your distro's package manager"
-    echo ""
-    echo "After installing Go, run this script again."
-    exit 1
-}
-
 # Verify installation
 verify_installation() {
     if command -v bd &> /dev/null; then
@@ -216,7 +292,15 @@ main() {
     platform=$(detect_platform)
     log_info "Platform: $platform"
 
-    # Try go install first
+    # Try downloading from GitHub releases first
+    if install_from_release "$platform"; then
+        verify_installation
+        exit 0
+    fi
+
+    log_warning "Failed to install from releases, trying alternative methods..."
+
+    # Try go install as fallback
     if check_go; then
         if install_with_go; then
             verify_installation
@@ -224,11 +308,21 @@ main() {
         fi
     fi
 
-    # If go install failed or Go not present, try building from source
+    # Try building from source as last resort
     log_warning "Falling back to building from source..."
 
     if ! check_go; then
-        offer_go_installation
+        log_warning "Go is not installed"
+        echo ""
+        echo "bd requires Go 1.24 or later to build from source. You can:"
+        echo "  1. Install Go from https://go.dev/dl/"
+        echo "  2. Use your package manager:"
+        echo "     - macOS: brew install go"
+        echo "     - Ubuntu/Debian: sudo apt install golang"
+        echo "     - Other Linux: Check your distro's package manager"
+        echo ""
+        echo "After installing Go, run this script again."
+        exit 1
     fi
 
     if build_from_source; then
@@ -240,6 +334,10 @@ main() {
     log_error "Installation failed"
     echo ""
     echo "Manual installation:"
+    echo "  1. Download from https://github.com/steveyegge/beads/releases/latest"
+    echo "  2. Extract and move 'bd' to your PATH"
+    echo ""
+    echo "Or install from source:"
     echo "  1. Install Go from https://go.dev/dl/"
     echo "  2. Run: go install github.com/steveyegge/beads/cmd/bd@latest"
     echo ""

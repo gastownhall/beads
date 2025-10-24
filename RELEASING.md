@@ -110,14 +110,25 @@ brew install --build-from-source bd
 bd version  # Verify it shows new version
 ```
 
-### 4. Create GitHub Release
+### 4. GitHub Releases (Automated)
 
-1. Go to https://github.com/steveyegge/beads/releases/new
-2. Choose tag: `v0.9.X`
-3. Title: `v0.9.X`
-4. Description: Copy from CHANGELOG.md
-5. Attach binaries (optional - GitHub Actions can automate this)
-6. Publish release
+**GoReleaser automatically creates releases when you push tags!**
+
+The `.github/workflows/release.yml` workflow:
+- Triggers on `v*` tags
+- Builds cross-platform binaries (Linux, macOS, Windows for amd64/arm64)
+- Generates checksums
+- Creates GitHub release with binaries and changelog
+- Publishes release automatically
+
+Just push your tag and wait ~5 minutes:
+```bash
+git push origin v0.9.X
+```
+
+Monitor at: https://github.com/steveyegge/beads/actions
+
+The release will appear at: https://github.com/steveyegge/beads/releases
 
 ## Post-Release
 
@@ -150,13 +161,16 @@ Wait a few seconds after pushing tag for GitHub to make tarball available, then 
 ### Missing PyPI credentials
 Set up API token at https://pypi.org/manage/account/token/ and use `__token__` as username.
 
-## Automation Ideas (Future)
+## Automation Status
 
-Consider GitHub Actions to:
-- Run tests on tag push
-- Auto-build and publish to PyPI
+✅ **Automated:**
+- GitHub releases with binaries (GoReleaser + GitHub Actions)
+- Cross-platform builds (Linux, macOS, Windows)
+- Checksums and changelog generation
+
+🔄 **TODO:**
+- Auto-publish to PyPI
 - Auto-update Homebrew formula
-- Create GitHub release with binaries
 
 ## Related Documentation
 

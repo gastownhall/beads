@@ -1,0 +1,102 @@
+# GoReleaser configuration for beads
+# See https://goreleaser.com for documentation
+
+version: 2
+
+before:
+  hooks:
+    # Ensure dependencies are up to date
+    - go mod tidy
+    # Run tests before building
+    - go test ./...
+
+builds:
+  - id: bd
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Ignore combinations that don't make sense
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+
+archives:
+  - id: bd-archive
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "Features"
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: "Others"
+      order: 999
+
+release:
+  github:
+    owner: steveyegge
+    name: beads
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## beads v{{.Version}}
+    
+    Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and Windows.
+    
+    ### Installation
+    
+    **macOS/Linux:**
+    ```bash
+    curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+    ```
+    
+    **Windows (PowerShell):**
+    ```powershell
+    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+    ```
+    
+    **Manual Install:**
+    Download the appropriate binary for your platform below, extract it, and place it in your PATH.
+
+# Announce the release
+announce:
+  skip: false
