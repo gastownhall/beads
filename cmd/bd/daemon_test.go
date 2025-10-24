@@ -249,7 +249,7 @@ func TestDaemonLogFileCreation(t *testing.T) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	msg := "Test log message"
-	_, err = logF.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, msg))
+	_, err = fmt.Fprintf(logF, "[%s] %s\n", timestamp, msg)
 	if err != nil {
 		t.Fatalf("Failed to write to log file: %v", err)
 	}

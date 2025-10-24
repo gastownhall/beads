@@ -657,7 +657,7 @@ func replaceBoundaryAware(text, oldID, newID string) string {
 func isBoundary(c byte) bool {
 	// Issue IDs contain: lowercase letters, digits, and hyphens
 	// Boundaries are anything else (space, punctuation, etc.)
-	return !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-')
+	return (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-'
 }
 
 // isNumeric returns true if the string contains only digits

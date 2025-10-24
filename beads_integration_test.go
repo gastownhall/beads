@@ -63,7 +63,9 @@ func TestLibraryIntegration(t *testing.T) {
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
-		store.CreateIssue(ctx, issue, "test-actor")
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
 
 		// Get it back
 		retrieved, err := store.GetIssue(ctx, issue.ID)
@@ -89,7 +91,9 @@ func TestLibraryIntegration(t *testing.T) {
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
-		store.CreateIssue(ctx, issue, "test-actor")
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
 
 		// Update status
 		updates := map[string]interface{}{
@@ -131,8 +135,12 @@ func TestLibraryIntegration(t *testing.T) {
 			UpdatedAt: time.Now(),
 		}
 
-		store.CreateIssue(ctx, issue1, "test-actor")
-		store.CreateIssue(ctx, issue2, "test-actor")
+		if err := store.CreateIssue(ctx, issue1, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+		if err := store.CreateIssue(ctx, issue2, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
 
 		// Add dependency: issue2 blocks issue1
 		dep := &beads.Dependency{

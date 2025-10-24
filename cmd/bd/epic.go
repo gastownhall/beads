@@ -184,10 +184,10 @@ var closeEligibleEpicsCmd = &cobra.Command{
 					Reason: "All children completed",
 				})
 				if err != nil || !resp.Success {
-					errMsg := "unknown error"
+					errMsg := ""
 					if err != nil {
 						errMsg = err.Error()
-					} else {
+					} else if !resp.Success {
 						errMsg = resp.Error
 					}
 					fmt.Fprintf(os.Stderr, "Error closing %s: %s\n", epicStatus.Epic.ID, errMsg)

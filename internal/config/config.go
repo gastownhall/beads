@@ -145,8 +145,8 @@ func Set(key string, value interface{}) {
 // 	return v.BindPFlag(key, flag)
 // }
 
-// ConfigFileUsed returns the path to the config file being used
-func ConfigFileUsed() string {
+// FileUsed returns the path to the active configuration file.
+func FileUsed() string {
 	if v == nil {
 		return ""
 	}

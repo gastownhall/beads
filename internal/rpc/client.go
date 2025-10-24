@@ -218,7 +218,7 @@ func (c *Client) Update(args *UpdateArgs) (*Response, error) {
 	return c.Execute(OpUpdate, args)
 }
 
-// Close closes an issue via the daemon (operation, not connection)
+// CloseIssue marks an issue as closed via the daemon.
 func (c *Client) CloseIssue(args *CloseArgs) (*Response, error) {
 	return c.Execute(OpClose, args)
 }

@@ -13,18 +13,21 @@ const (
 	defaultConcurrency = 5
 )
 
+// CompactConfig holds configuration for the compaction process.
 type CompactConfig struct {
 	APIKey      string
 	Concurrency int
 	DryRun      bool
 }
 
+// Compactor handles issue compaction using AI summarization.
 type Compactor struct {
 	store  *sqlite.SQLiteStorage
 	haiku  *HaikuClient
 	config *CompactConfig
 }
 
+// New creates a new Compactor instance with the given configuration.
 func New(store *sqlite.SQLiteStorage, apiKey string, config *CompactConfig) (*Compactor, error) {
 	if config == nil {
 		config = &CompactConfig{
@@ -58,6 +61,7 @@ func New(store *sqlite.SQLiteStorage, apiKey string, config *CompactConfig) (*Co
 	}, nil
 }
 
+// CompactResult holds the outcome of a compaction operation.
 type CompactResult struct {
 	IssueID       string
 	OriginalSize  int
@@ -65,6 +69,7 @@ type CompactResult struct {
 	Err           error
 }
 
+// CompactTier1 performs tier-1 compaction on a single issue using AI summarization.
 func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -137,6 +142,7 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 	return nil
 }
 
+// CompactTier1Batch performs tier-1 compaction on multiple issues in a single batch.
 func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([]*CompactResult, error) {
 	if len(issueIDs) == 0 {
 		return nil, nil

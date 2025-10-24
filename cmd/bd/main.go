@@ -48,6 +48,9 @@ const (
 	FallbackFlagNoDaemon      = "flag_no_daemon"
 	FallbackConnectFailed     = "connect_failed"
 	FallbackHealthFailed      = "health_failed"
+	cmdDaemon                 = "daemon"
+	cmdImport                 = "import"
+	statusHealthy             = "healthy"
 	FallbackAutoStartDisabled = "auto_start_disabled"
 	FallbackAutoStartFailed   = "auto_start_failed"
 	FallbackDaemonUnsupported = "daemon_unsupported"
@@ -87,7 +90,7 @@ var rootCmd = &cobra.Command{
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults
 		// Do this BEFORE early-return so init/version/help respect config
-		
+
 		// If flag wasn't explicitly set, use viper value
 		if !cmd.Flags().Changed("json") {
 			jsonOutput = config.GetBool("json")
@@ -109,7 +112,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Skip database initialization for commands that don't need a database
-		if cmd.Name() == "init" || cmd.Name() == "daemon" || cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "quickstart" {
+		if cmd.Name() == "init" || cmd.Name() == cmdDaemon || cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "quickstart" {
 			return
 		}
 
@@ -133,14 +136,14 @@ var rootCmd = &cobra.Command{
 			if err == nil {
 				localBeadsDir = filepath.Join(cwd, ".beads")
 			}
-			
+
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
-				
+
 				// Special case for import: if we found a database but there's a local .beads/
 				// directory without a database, prefer creating a local database
-				if cmd.Name() == "import" && localBeadsDir != "" {
+				if cmd.Name() == cmdImport && localBeadsDir != "" {
 					if _, err := os.Stat(localBeadsDir); err == nil {
 						// Check if found database is NOT in the local .beads/ directory
 						if !strings.HasPrefix(dbPath, localBeadsDir+string(filepath.Separator)) {
@@ -151,13 +154,13 @@ var rootCmd = &cobra.Command{
 				}
 			} else {
 				// For import command, allow creating database if .beads/ directory exists
-				if cmd.Name() == "import" && localBeadsDir != "" {
+				if cmd.Name() == cmdImport && localBeadsDir != "" {
 					if _, err := os.Stat(localBeadsDir); err == nil {
 						// .beads/ directory exists - set dbPath for import to create
 						dbPath = filepath.Join(localBeadsDir, "vc.db")
 					}
 				}
-				
+
 				// If dbPath still not set, error out
 				if dbPath == "" {
 					// No database found - error out instead of falling back to ~/.beads
@@ -208,18 +211,18 @@ var rootCmd = &cobra.Command{
 					absDBPath, _ := filepath.Abs(dbPath)
 					client.SetDatabasePath(absDBPath)
 				}
-				
+
 				// Perform health check
 				health, healthErr := client.Health()
-				if healthErr == nil && health.Status == "healthy" {
+				if healthErr == nil && health.Status == statusHealthy {
 					// Check version compatibility
 					if !health.Compatible {
 						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: daemon version mismatch (daemon: %s, client: %s), restarting daemon\n", 
+							fmt.Fprintf(os.Stderr, "Debug: daemon version mismatch (daemon: %s, client: %s), restarting daemon\n",
 								health.Version, Version)
 						}
 						client.Close()
-						
+
 						// Kill old daemon and restart with new version
 						if restartDaemonForVersionMismatch() {
 							// Retry connection after restart
@@ -230,9 +233,9 @@ var rootCmd = &cobra.Command{
 									client.SetDatabasePath(absDBPath)
 								}
 								health, healthErr = client.Health()
-								if healthErr == nil && health.Status == "healthy" {
+								if healthErr == nil && health.Status == statusHealthy {
 									daemonClient = client
-									daemonStatus.Mode = "daemon"
+									daemonStatus.Mode = cmdDaemon
 									daemonStatus.Connected = true
 									daemonStatus.Degraded = false
 									daemonStatus.Health = health.Status
@@ -246,12 +249,12 @@ var rootCmd = &cobra.Command{
 						}
 						// If restart failed, fall through to direct mode
 						daemonStatus.FallbackReason = FallbackHealthFailed
-						daemonStatus.Detail = fmt.Sprintf("version mismatch (daemon: %s, client: %s) and restart failed", 
+						daemonStatus.Detail = fmt.Sprintf("version mismatch (daemon: %s, client: %s) and restart failed",
 							health.Version, Version)
 					} else {
 						// Daemon is healthy and compatible - use it
 						daemonClient = client
-						daemonStatus.Mode = "daemon"
+						daemonStatus.Mode = cmdDaemon
 						daemonStatus.Connected = true
 						daemonStatus.Degraded = false
 						daemonStatus.Health = health.Status
@@ -306,12 +309,12 @@ var rootCmd = &cobra.Command{
 							absDBPath, _ := filepath.Abs(dbPath)
 							client.SetDatabasePath(absDBPath)
 						}
-						
+
 						// Check health of auto-started daemon
 						health, healthErr := client.Health()
-						if healthErr == nil && health.Status == "healthy" {
+						if healthErr == nil && health.Status == statusHealthy {
 							daemonClient = client
-							daemonStatus.Mode = "daemon"
+							daemonStatus.Mode = cmdDaemon
 							daemonStatus.Connected = true
 							daemonStatus.Degraded = false
 							daemonStatus.AutoStartSucceeded = true
@@ -487,96 +490,9 @@ func shouldAutoStartDaemon() bool {
 func shouldUseGlobalDaemon() bool {
 	// Global daemon support is deprecated
 	// Always use local daemon (per-project .beads/ socket)
-	return false
-	
 	// Previously supported BEADS_PREFER_GLOBAL_DAEMON env var, but global
 	// daemon has issues with multi-workspace git workflows
-
-	// Heuristic: detect multiple beads repositories
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-
-	// Count .beads directories under home
-	repoCount := 0
-	maxDepth := 5 // Don't scan too deep
-
-	var countRepos func(string, int) error
-	countRepos = func(dir string, depth int) error {
-		if depth > maxDepth || repoCount > 1 {
-			return filepath.SkipDir
-		}
-
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return nil // Skip directories we can't read
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-
-			name := entry.Name()
-
-			// Skip hidden dirs except .beads
-			if strings.HasPrefix(name, ".") && name != ".beads" {
-				continue
-			}
-
-			// Skip common large directories
-			if name == "node_modules" || name == "vendor" || name == "target" || name == ".git" {
-				continue
-			}
-
-			path := filepath.Join(dir, name)
-
-			// Check if this is a .beads directory with a database
-			if name == ".beads" {
-				dbPath := filepath.Join(path, "db.sqlite")
-				if _, err := os.Stat(dbPath); err == nil {
-					repoCount++
-					if repoCount > 1 {
-						return filepath.SkipDir
-					}
-				}
-				continue
-			}
-
-			// Recurse into subdirectories
-			if depth < maxDepth {
-			_ = countRepos(path, depth+1)
-			}
-		}
-		return nil
-	}
-
-	// Scan common project directories
-	projectDirs := []string{
-		filepath.Join(home, "src"),
-		filepath.Join(home, "projects"),
-		filepath.Join(home, "code"),
-		filepath.Join(home, "workspace"),
-		filepath.Join(home, "dev"),
-	}
-
-	for _, dir := range projectDirs {
-		if _, err := os.Stat(dir); err == nil {
-			_ = countRepos(dir, 0)
-			if repoCount > 1 {
-				break
-			}
-		}
-	}
-
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: found %d beads repositories, prefer global: %v\n", repoCount, repoCount > 1)
-	}
-
-	// Use global daemon if we found more than 1 repository (multi-repo workflow)
-	// This prevents concurrency issues when multiple repos are being worked on
-	return repoCount > 1
+	return false
 }
 
 // restartDaemonForVersionMismatch stops the old daemon and starts a new one
@@ -599,7 +515,7 @@ func restartDaemonForVersionMismatch() bool {
 		if os.Getenv("BD_DEBUG") != "" {
 			fmt.Fprintf(os.Stderr, "Debug: stopping old daemon (PID %d)\n", pid)
 		}
-		
+
 		process, err := os.FindProcess(pid)
 		if err != nil {
 			if os.Getenv("BD_DEBUG") != "" {
@@ -629,11 +545,11 @@ func restartDaemonForVersionMismatch() bool {
 
 		// Force kill if still running
 		if isRunning, _ := isDaemonRunning(pidFile); isRunning {
-		if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: force killing old daemon\n")
-		}
-		_ = process.Kill()
-		forcedKill = true
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: force killing old daemon\n")
+			}
+			_ = process.Kill()
+			forcedKill = true
 		}
 	}
 
@@ -738,7 +654,7 @@ func tryAutoStartDaemon(socketPath string) bool {
 		if lockPID, err := readPIDFromFile(lockPath); err == nil {
 			if !isPIDAlive(lockPID) {
 				if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
+					fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
 				}
 				_ = os.Remove(lockPath)
 				// Retry once
@@ -778,11 +694,11 @@ func tryAutoStartDaemon(socketPath string) bool {
 
 		// Socket is stale (connect failed and PID dead/missing) - safe to remove
 		if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
+			fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
 		}
 		_ = os.Remove(socketPath)
 		if pidFile != "" {
-		_ = os.Remove(pidFile)
+			_ = os.Remove(pidFile)
 		}
 	}
 
@@ -943,7 +859,7 @@ func recordDaemonStartFailure() {
 func getSocketPath() string {
 	// Always use local socket (same directory as database: .beads/bd.sock)
 	localSocket := filepath.Join(filepath.Dir(dbPath), "bd.sock")
-	
+
 	// Warn if old global socket exists
 	if home, err := os.UserHomeDir(); err == nil {
 		globalSocket := filepath.Join(home, ".beads", "bd.sock")
@@ -953,7 +869,7 @@ func getSocketPath() string {
 			fmt.Fprintf(os.Stderr, "To migrate: Stop the global daemon and restart with 'bd daemon' in each project.\n")
 		}
 	}
-	
+
 	return localSocket
 }
 
@@ -1100,10 +1016,10 @@ func autoImportIfNewer() {
 
 	// Use shared import logic (bd-157)
 	opts := ImportOptions{
-		ResolveCollisions:  true, // Auto-import always resolves collisions
-		DryRun:             false,
-		SkipUpdate:         false,
-		Strict:             false,
+		ResolveCollisions:    true, // Auto-import always resolves collisions
+		DryRun:               false,
+		SkipUpdate:           false,
+		Strict:               false,
 		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
 	}
 
@@ -1928,100 +1844,100 @@ var showCmd = &cobra.Command{
 						fmt.Println("\n" + strings.Repeat("─", 60))
 					}
 
-				// Parse response and use existing formatting code
-				type IssueDetails struct {
-					types.Issue
-					Labels       []string       `json:"labels,omitempty"`
-					Dependencies []*types.Issue `json:"dependencies,omitempty"`
-					Dependents   []*types.Issue `json:"dependents,omitempty"`
-				}
-				var details IssueDetails
-				if err := json.Unmarshal(resp.Data, &details); err != nil {
-					fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-					os.Exit(1)
-				}
-				issue := &details.Issue
+					// Parse response and use existing formatting code
+					type IssueDetails struct {
+						types.Issue
+						Labels       []string       `json:"labels,omitempty"`
+						Dependencies []*types.Issue `json:"dependencies,omitempty"`
+						Dependents   []*types.Issue `json:"dependents,omitempty"`
+					}
+					var details IssueDetails
+					if err := json.Unmarshal(resp.Data, &details); err != nil {
+						fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+						os.Exit(1)
+					}
+					issue := &details.Issue
 
-				cyan := color.New(color.FgCyan).SprintFunc()
+					cyan := color.New(color.FgCyan).SprintFunc()
 
-				// Format output (same as direct mode below)
-				tierEmoji := ""
-				statusSuffix := ""
-				if issue.CompactionLevel == 1 {
-					tierEmoji = " 🗜️"
-				} else if issue.CompactionLevel == 2 {
-					tierEmoji = " 📦"
-				}
-				if issue.CompactionLevel > 0 {
-					statusSuffix = fmt.Sprintf(" (compacted L%d)", issue.CompactionLevel)
-				}
+					// Format output (same as direct mode below)
+					tierEmoji := ""
+					statusSuffix := ""
+					switch issue.CompactionLevel {
+					case 1:
+						tierEmoji = " 🗜️"
+						statusSuffix = " (compacted L1)"
+					case 2:
+						tierEmoji = " 📦"
+						statusSuffix = " (compacted L2)"
+					}
 
-				fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
-				fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
-				fmt.Printf("Priority: P%d\n", issue.Priority)
-				fmt.Printf("Type: %s\n", issue.IssueType)
-				if issue.Assignee != "" {
-					fmt.Printf("Assignee: %s\n", issue.Assignee)
-				}
-				if issue.EstimatedMinutes != nil {
-					fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
-				}
-				fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
-				fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
+					fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
+					fmt.Printf("Priority: P%d\n", issue.Priority)
+					fmt.Printf("Type: %s\n", issue.IssueType)
+					if issue.Assignee != "" {
+						fmt.Printf("Assignee: %s\n", issue.Assignee)
+					}
+					if issue.EstimatedMinutes != nil {
+						fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
+					}
+					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
-				// Show compaction status
-				if issue.CompactionLevel > 0 {
-					fmt.Println()
-					if issue.OriginalSize > 0 {
-						currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-						saved := issue.OriginalSize - currentSize
-						if saved > 0 {
-							reduction := float64(saved) / float64(issue.OriginalSize) * 100
-							fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
-								issue.OriginalSize, currentSize, reduction)
+					// Show compaction status
+					if issue.CompactionLevel > 0 {
+						fmt.Println()
+						if issue.OriginalSize > 0 {
+							currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+							saved := issue.OriginalSize - currentSize
+							if saved > 0 {
+								reduction := float64(saved) / float64(issue.OriginalSize) * 100
+								fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
+									issue.OriginalSize, currentSize, reduction)
+							}
+						}
+						tierEmoji2 := "🗜️"
+						if issue.CompactionLevel == 2 {
+							tierEmoji2 = "📦"
+						}
+						compactedDate := ""
+						if issue.CompactedAt != nil {
+							compactedDate = issue.CompactedAt.Format("2006-01-02")
+						}
+						fmt.Printf("%s Compacted: %s (Tier %d)\n", tierEmoji2, compactedDate, issue.CompactionLevel)
+					}
+
+					if issue.Description != "" {
+						fmt.Printf("\nDescription:\n%s\n", issue.Description)
+					}
+					if issue.Design != "" {
+						fmt.Printf("\nDesign:\n%s\n", issue.Design)
+					}
+					if issue.Notes != "" {
+						fmt.Printf("\nNotes:\n%s\n", issue.Notes)
+					}
+					if issue.AcceptanceCriteria != "" {
+						fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
+					}
+
+					if len(details.Labels) > 0 {
+						fmt.Printf("\nLabels: %v\n", details.Labels)
+					}
+
+					if len(details.Dependencies) > 0 {
+						fmt.Printf("\nDepends on (%d):\n", len(details.Dependencies))
+						for _, dep := range details.Dependencies {
+							fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 						}
 					}
-					tierEmoji2 := "🗜️"
-					if issue.CompactionLevel == 2 {
-						tierEmoji2 = "📦"
-					}
-					compactedDate := ""
-					if issue.CompactedAt != nil {
-						compactedDate = issue.CompactedAt.Format("2006-01-02")
-					}
-					fmt.Printf("%s Compacted: %s (Tier %d)\n", tierEmoji2, compactedDate, issue.CompactionLevel)
-				}
 
-				if issue.Description != "" {
-					fmt.Printf("\nDescription:\n%s\n", issue.Description)
-				}
-				if issue.Design != "" {
-					fmt.Printf("\nDesign:\n%s\n", issue.Design)
-				}
-				if issue.Notes != "" {
-					fmt.Printf("\nNotes:\n%s\n", issue.Notes)
-				}
-				if issue.AcceptanceCriteria != "" {
-					fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
-				}
-
-				if len(details.Labels) > 0 {
-					fmt.Printf("\nLabels: %v\n", details.Labels)
-				}
-
-				if len(details.Dependencies) > 0 {
-					fmt.Printf("\nDepends on (%d):\n", len(details.Dependencies))
-					for _, dep := range details.Dependencies {
-						fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+					if len(details.Dependents) > 0 {
+						fmt.Printf("\nBlocks (%d):\n", len(details.Dependents))
+						for _, dep := range details.Dependents {
+							fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
 					}
-				}
-
-				if len(details.Dependents) > 0 {
-					fmt.Printf("\nBlocks (%d):\n", len(details.Dependents))
-					for _, dep := range details.Dependents {
-						fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
-					}
-				}
 
 					fmt.Println()
 				}
@@ -2069,94 +1985,94 @@ var showCmd = &cobra.Command{
 				fmt.Println("\n" + strings.Repeat("─", 60))
 			}
 
-		cyan := color.New(color.FgCyan).SprintFunc()
+			cyan := color.New(color.FgCyan).SprintFunc()
 
-		// Add compaction emoji to title line
-		tierEmoji := ""
-		statusSuffix := ""
-		if issue.CompactionLevel == 1 {
-			tierEmoji = " 🗜️"
-		} else if issue.CompactionLevel == 2 {
-			tierEmoji = " 📦"
-		}
-		if issue.CompactionLevel > 0 {
-			statusSuffix = fmt.Sprintf(" (compacted L%d)", issue.CompactionLevel)
-		}
-
-		fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
-		fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
-		fmt.Printf("Priority: P%d\n", issue.Priority)
-		fmt.Printf("Type: %s\n", issue.IssueType)
-		if issue.Assignee != "" {
-			fmt.Printf("Assignee: %s\n", issue.Assignee)
-		}
-		if issue.EstimatedMinutes != nil {
-			fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
-		}
-		fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
-		fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
-
-		// Show compaction status footer
-		if issue.CompactionLevel > 0 {
-			tierEmoji := "🗜️"
-			if issue.CompactionLevel == 2 {
-				tierEmoji = "📦"
+			// Add compaction emoji to title line
+			tierEmoji := ""
+			statusSuffix := ""
+			switch issue.CompactionLevel {
+			case 1:
+				tierEmoji = " 🗜️"
+				statusSuffix = " (compacted L1)"
+			case 2:
+				tierEmoji = " 📦"
+				statusSuffix = " (compacted L2)"
 			}
-			tierName := fmt.Sprintf("Tier %d", issue.CompactionLevel)
 
-			fmt.Println()
-			if issue.OriginalSize > 0 {
-				currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-				saved := issue.OriginalSize - currentSize
-				if saved > 0 {
-					reduction := float64(saved) / float64(issue.OriginalSize) * 100
-					fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
-						issue.OriginalSize, currentSize, reduction)
+			fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
+			fmt.Printf("Priority: P%d\n", issue.Priority)
+			fmt.Printf("Type: %s\n", issue.IssueType)
+			if issue.Assignee != "" {
+				fmt.Printf("Assignee: %s\n", issue.Assignee)
+			}
+			if issue.EstimatedMinutes != nil {
+				fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
+			}
+			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
+
+			// Show compaction status footer
+			if issue.CompactionLevel > 0 {
+				tierEmoji := "🗜️"
+				if issue.CompactionLevel == 2 {
+					tierEmoji = "📦"
+				}
+				tierName := fmt.Sprintf("Tier %d", issue.CompactionLevel)
+
+				fmt.Println()
+				if issue.OriginalSize > 0 {
+					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+					saved := issue.OriginalSize - currentSize
+					if saved > 0 {
+						reduction := float64(saved) / float64(issue.OriginalSize) * 100
+						fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
+							issue.OriginalSize, currentSize, reduction)
+					}
+				}
+				compactedDate := ""
+				if issue.CompactedAt != nil {
+					compactedDate = issue.CompactedAt.Format("2006-01-02")
+				}
+				fmt.Printf("%s Compacted: %s (%s)\n", tierEmoji, compactedDate, tierName)
+			}
+
+			if issue.Description != "" {
+				fmt.Printf("\nDescription:\n%s\n", issue.Description)
+			}
+			if issue.Design != "" {
+				fmt.Printf("\nDesign:\n%s\n", issue.Design)
+			}
+			if issue.Notes != "" {
+				fmt.Printf("\nNotes:\n%s\n", issue.Notes)
+			}
+			if issue.AcceptanceCriteria != "" {
+				fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
+			}
+
+			// Show labels
+			labels, _ := store.GetLabels(ctx, issue.ID)
+			if len(labels) > 0 {
+				fmt.Printf("\nLabels: %v\n", labels)
+			}
+
+			// Show dependencies
+			deps, _ := store.GetDependencies(ctx, issue.ID)
+			if len(deps) > 0 {
+				fmt.Printf("\nDepends on (%d):\n", len(deps))
+				for _, dep := range deps {
+					fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 				}
 			}
-			compactedDate := ""
-			if issue.CompactedAt != nil {
-				compactedDate = issue.CompactedAt.Format("2006-01-02")
+
+			// Show dependents
+			dependents, _ := store.GetDependents(ctx, issue.ID)
+			if len(dependents) > 0 {
+				fmt.Printf("\nBlocks (%d):\n", len(dependents))
+				for _, dep := range dependents {
+					fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+				}
 			}
-			fmt.Printf("%s Compacted: %s (%s)\n", tierEmoji, compactedDate, tierName)
-		}
-
-		if issue.Description != "" {
-			fmt.Printf("\nDescription:\n%s\n", issue.Description)
-		}
-		if issue.Design != "" {
-			fmt.Printf("\nDesign:\n%s\n", issue.Design)
-		}
-		if issue.Notes != "" {
-			fmt.Printf("\nNotes:\n%s\n", issue.Notes)
-		}
-		if issue.AcceptanceCriteria != "" {
-			fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
-		}
-
-		// Show labels
-		labels, _ := store.GetLabels(ctx, issue.ID)
-		if len(labels) > 0 {
-			fmt.Printf("\nLabels: %v\n", labels)
-		}
-
-		// Show dependencies
-		deps, _ := store.GetDependencies(ctx, issue.ID)
-		if len(deps) > 0 {
-			fmt.Printf("\nDepends on (%d):\n", len(deps))
-			for _, dep := range deps {
-				fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
-			}
-		}
-
-		// Show dependents
-		dependents, _ := store.GetDependents(ctx, issue.ID)
-		if len(dependents) > 0 {
-			fmt.Printf("\nBlocks (%d):\n", len(dependents))
-			for _, dep := range dependents {
-				fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
-			}
-		}
 
 			// Show comments
 			comments, _ := store.GetIssueComments(ctx, issue.ID)
@@ -2200,30 +2116,30 @@ var updateCmd = &cobra.Command{
 			updates["title"] = title
 		}
 		if cmd.Flags().Changed("assignee") {
-		assignee, _ := cmd.Flags().GetString("assignee")
-		updates["assignee"] = assignee
+			assignee, _ := cmd.Flags().GetString("assignee")
+			updates["assignee"] = assignee
 		}
 		if cmd.Flags().Changed("description") {
-		description, _ := cmd.Flags().GetString("description")
-		updates["description"] = description
+			description, _ := cmd.Flags().GetString("description")
+			updates["description"] = description
 		}
-	if cmd.Flags().Changed("design") {
-		design, _ := cmd.Flags().GetString("design")
-		updates["design"] = design
-	}
+		if cmd.Flags().Changed("design") {
+			design, _ := cmd.Flags().GetString("design")
+			updates["design"] = design
+		}
 		if cmd.Flags().Changed("notes") {
 			notes, _ := cmd.Flags().GetString("notes")
 			updates["notes"] = notes
 		}
 		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
-		var acceptanceCriteria string
-		if cmd.Flags().Changed("acceptance") {
-		  acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
-		} else {
-			acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
+			var acceptanceCriteria string
+			if cmd.Flags().Changed("acceptance") {
+				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
+			} else {
+				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
+			}
+			updates["acceptance_criteria"] = acceptanceCriteria
 		}
-		updates["acceptance_criteria"] = acceptanceCriteria
-	}
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
@@ -2251,14 +2167,14 @@ var updateCmd = &cobra.Command{
 					updateArgs.Title = &title
 				}
 				if assignee, ok := updates["assignee"].(string); ok {
-				updateArgs.Assignee = &assignee
+					updateArgs.Assignee = &assignee
 				}
 				if description, ok := updates["description"].(string); ok {
-				updateArgs.Description = &description
+					updateArgs.Description = &description
 				}
-			if design, ok := updates["design"].(string); ok {
-				updateArgs.Design = &design
-			}
+				if design, ok := updates["design"].(string); ok {
+					updateArgs.Design = &design
+				}
 				if notes, ok := updates["notes"].(string); ok {
 					updateArgs.Notes = &notes
 				}

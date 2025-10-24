@@ -16,7 +16,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Core types for working with issues
+// Issue represents a tracked work item with metadata, dependencies, and status.
+// Status represents the current state of an issue (open, in progress, closed, blocked).
 type (
 	Issue          = types.Issue
 	Status         = types.Status

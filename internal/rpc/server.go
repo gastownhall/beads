@@ -28,6 +28,10 @@ import (
 // It's set as a var so it can be initialized from main
 var ServerVersion = "0.9.10"
 
+const (
+	statusUnhealthy = "unhealthy"
+)
+
 // normalizeLabels trims whitespace, removes empty strings, and deduplicates labels
 func normalizeLabels(ss []string) []string {
 	seen := make(map[string]struct{})
@@ -259,7 +263,7 @@ func (s *Server) Stop() error {
 			err = fmt.Errorf("failed to remove socket: %w", removeErr)
 		}
 	})
-	
+
 	// Wait for Start() goroutine to finish cleanup (with timeout)
 	select {
 	case <-s.doneChan:
@@ -267,7 +271,7 @@ func (s *Server) Stop() error {
 	case <-time.After(5 * time.Second):
 		// Timeout waiting for cleanup - continue anyway
 	}
-	
+
 	return err
 }
 
@@ -699,13 +703,6 @@ func strValue(p *string) string {
 	return *p
 }
 
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
 func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	u := map[string]interface{}{}
 	if a.Title != nil {
@@ -780,7 +777,7 @@ func (s *Server) handleHealth(req *Request) Response {
 	dbResponseMs := time.Since(start).Seconds() * 1000
 
 	if pingErr != nil {
-		status = "unhealthy"
+		status = statusUnhealthy
 		dbError = pingErr.Error()
 	} else if dbResponseMs > 500 {
 		status = "degraded"
@@ -1270,12 +1267,13 @@ func (s *Server) handleDepAdd(req *Request) Response {
 	return Response{Success: true}
 }
 
-func (s *Server) handleDepRemove(req *Request) Response {
-	var depArgs DepRemoveArgs
-	if err := json.Unmarshal(req.Args, &depArgs); err != nil {
+// Generic handler for simple store operations with standard error handling
+func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc string,
+	opFunc func(context.Context, storage.Storage, string) error) Response {
+	if err := json.Unmarshal(req.Args, argsPtr); err != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("invalid dep remove args: %v", err),
+			Error:   fmt.Sprintf("invalid %s args: %v", argDesc, err),
 		}
 	}
 
@@ -1288,70 +1286,35 @@ func (s *Server) handleDepRemove(req *Request) Response {
 	}
 
 	ctx := s.reqCtx(req)
-	if err := store.RemoveDependency(ctx, depArgs.FromID, depArgs.ToID, s.reqActor(req)); err != nil {
+	if err := opFunc(ctx, store, s.reqActor(req)); err != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("failed to remove dependency: %v", err),
+			Error:   fmt.Sprintf("failed to %s: %v", argDesc, err),
 		}
 	}
 
 	return Response{Success: true}
+}
+
+func (s *Server) handleDepRemove(req *Request) Response {
+	var depArgs DepRemoveArgs
+	return s.handleSimpleStoreOp(req, &depArgs, "dep remove", func(ctx context.Context, store storage.Storage, actor string) error {
+		return store.RemoveDependency(ctx, depArgs.FromID, depArgs.ToID, actor)
+	})
 }
 
 func (s *Server) handleLabelAdd(req *Request) Response {
 	var labelArgs LabelAddArgs
-	if err := json.Unmarshal(req.Args, &labelArgs); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid label add args: %v", err),
-		}
-	}
-
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
-
-	ctx := s.reqCtx(req)
-	if err := store.AddLabel(ctx, labelArgs.ID, labelArgs.Label, s.reqActor(req)); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to add label: %v", err),
-		}
-	}
-
-	return Response{Success: true}
+	return s.handleSimpleStoreOp(req, &labelArgs, "label add", func(ctx context.Context, store storage.Storage, actor string) error {
+		return store.AddLabel(ctx, labelArgs.ID, labelArgs.Label, actor)
+	})
 }
 
 func (s *Server) handleLabelRemove(req *Request) Response {
 	var labelArgs LabelRemoveArgs
-	if err := json.Unmarshal(req.Args, &labelArgs); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid label remove args: %v", err),
-		}
-	}
-
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
-
-	ctx := s.reqCtx(req)
-	if err := store.RemoveLabel(ctx, labelArgs.ID, labelArgs.Label, s.reqActor(req)); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to remove label: %v", err),
-		}
-	}
-
-	return Response{Success: true}
+	return s.handleSimpleStoreOp(req, &labelArgs, "label remove", func(ctx context.Context, store storage.Storage, actor string) error {
+		return store.RemoveLabel(ctx, labelArgs.ID, labelArgs.Label, actor)
+	})
 }
 
 func (s *Server) handleCommentList(req *Request) Response {
@@ -1443,11 +1406,7 @@ func (s *Server) handleBatch(req *Request) Response {
 
 		resp := s.handleRequest(subReq)
 
-		results = append(results, BatchResult{
-			Success: resp.Success,
-			Data:    resp.Data,
-			Error:   resp.Error,
-		})
+		results = append(results, BatchResult(resp))
 
 		if !resp.Success {
 			break
@@ -1537,7 +1496,7 @@ func (s *Server) getStorageForRequest(req *Request) (storage.Storage, error) {
 		// If we can't stat, still cache it but with zero mtime (will invalidate on next check)
 		info = nil
 	}
-	
+
 	mtime := time.Time{}
 	if info != nil {
 		mtime = info.ModTime()
@@ -1929,7 +1888,8 @@ func (s *Server) handleCompact(req *Request) Response {
 	if args.All {
 		var candidates []*sqlite.CompactionCandidate
 
-		if args.Tier == 1 {
+		switch args.Tier {
+		case 1:
 			tier1, err := sqliteStore.GetTier1Candidates(ctx)
 			if err != nil {
 				return Response{
@@ -1938,7 +1898,7 @@ func (s *Server) handleCompact(req *Request) Response {
 				}
 			}
 			candidates = tier1
-		} else if args.Tier == 2 {
+		case 2:
 			tier2, err := sqliteStore.GetTier2Candidates(ctx)
 			if err != nil {
 				return Response{
@@ -1947,7 +1907,7 @@ func (s *Server) handleCompact(req *Request) Response {
 				}
 			}
 			candidates = tier2
-		} else {
+		default:
 			return Response{
 				Success: false,
 				Error:   fmt.Sprintf("invalid tier: %d (must be 1 or 2)", args.Tier),
@@ -2201,7 +2161,7 @@ func (s *Server) handleExport(req *Request) Response {
 
 	result := map[string]interface{}{
 		"exported_count": len(exportedIDs),
-		"path":          exportArgs.JSONLPath,
+		"path":           exportArgs.JSONLPath,
 	}
 	data, _ := json.Marshal(result)
 	return Response{

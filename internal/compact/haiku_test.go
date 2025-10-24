@@ -193,7 +193,7 @@ func TestCallWithRetry_ContextCancellation(t *testing.T) {
 
 	_, err = client.callWithRetry(ctx, "test prompt")
 	if err == nil {
-		t.Fatal("expected error when context is cancelled")
+		t.Fatal("expected error when context is canceled")
 	}
 	if err != context.Canceled {
 		t.Errorf("expected context.Canceled error, got: %v", err)

@@ -298,11 +298,12 @@ func TestCompactTier1Batch_WithIneligible(t *testing.T) {
 	}
 
 	for _, result := range results {
-		if result.IssueID == openIssue.ID {
+		switch result.IssueID {
+		case openIssue.ID:
 			if result.Err == nil {
 				t.Error("expected error for ineligible issue")
 			}
-		} else if result.IssueID == closedIssue.ID {
+		case closedIssue.ID:
 			if result.Err != nil {
 				t.Errorf("unexpected error for eligible issue: %v", result.Err)
 			}

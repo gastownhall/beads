@@ -1038,7 +1038,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			}
 			return
 		case <-ctx.Done():
-			log("Context cancelled, shutting down")
+			log("Context canceled, shutting down")
 			if err := server.Stop(); err != nil {
 				log("Error stopping RPC server: %v", err)
 			}

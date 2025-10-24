@@ -7,7 +7,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
@@ -356,12 +355,6 @@ func renumberDependencies(ctx context.Context, idMapping map[string]string, allD
 	}
 
 	return nil
-}
-
-// Helper to extract numeric part from issue ID
-func extractNumber(issueID, prefix string) (int, error) {
-	numStr := strings.TrimPrefix(issueID, prefix+"-")
-	return strconv.Atoi(numStr)
 }
 
 func init() {

@@ -22,6 +22,7 @@ const (
 	initialBackoff = 1 * time.Second
 )
 
+// ErrAPIKeyRequired is returned when an API key is needed but not provided.
 var ErrAPIKeyRequired = errors.New("API key required")
 
 // HaikuClient wraps the Anthropic API for issue summarization.
