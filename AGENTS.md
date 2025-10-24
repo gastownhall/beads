@@ -42,7 +42,7 @@ See `integrations/beads-mcp/README.md` for complete documentation.
 
 ### Multi-Repo Configuration (MCP Server)
 
-**RECOMMENDED: Use a single MCP server with per-project local daemons** for all beads repositories.
+**RECOMMENDED: Use a single MCP server for all beads projects** - it automatically routes to per-project local daemons.
 
 **Setup (one-time):**
 ```bash
@@ -55,18 +55,27 @@ See `integrations/beads-mcp/README.md` for complete documentation.
 }
 ```
 
-**How it works:**
+**How it works (LSP model):**
 The single MCP server instance automatically:
-1. Checks for local daemon socket (`.beads/bd.sock`) in your current workspace (Windows note: this file stores the loopback TCP endpoint used by the daemon)
-2. Routes requests to the correct database based on your current working directory
-3. Auto-starts the local daemon if it's not running (with exponential backoff on failures)
-4. Each project gets its own isolated daemon serving only its database
+1. Checks for local daemon socket (`.beads/bd.sock`) in your current workspace
+2. Routes requests to the correct **per-project daemon** based on working directory
+3. Auto-starts the local daemon if not running (with exponential backoff)
+4. **Each project gets its own isolated daemon** serving only its database
 
-**Why this is better:**
-- ✅ One config entry works for all your beads projects
-- ✅ No risk of AI selecting wrong MCP server for workspace
-- ✅ Complete database isolation per project
-- ✅ Automatic workspace detection without BEADS_WORKING_DIR
+**Architecture:**
+```
+MCP Server (one instance)
+    ↓
+Per-Project Daemons (one per workspace)
+    ↓
+SQLite Databases (complete isolation)
+```
+
+**Why per-project daemons?**
+- ✅ Complete database isolation between projects
+- ✅ No cross-project pollution or git worktree conflicts
+- ✅ Simpler mental model: one project = one database = one daemon
+- ✅ Follows LSP (Language Server Protocol) architecture
 
 **Note:** The daemon **auto-starts automatically** when you run any `bd` command (v0.9.11+). To disable auto-start, set `BEADS_AUTO_START_DAEMON=false`.
 
@@ -76,8 +85,8 @@ The single MCP server instance automatically:
 - No manual `bd daemon --stop` required after upgrades
 - Works transparently with MCP server and CLI
 
-**Alternative (legacy): Multiple MCP Server Instances**
-If you must use separate MCP servers (not recommended):
+**Alternative (not recommended): Multiple MCP Server Instances**
+If you must use separate MCP servers:
 ```json
 {
   "beads-webapp": {

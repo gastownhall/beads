@@ -6,12 +6,11 @@ This guide covers advanced features for power users and specific use cases.
 
 - [Renaming Prefix](#renaming-prefix)
 - [Merging Duplicate Issues](#merging-duplicate-issues)
-- [Global Daemon for Multiple Projects](#global-daemon-for-multiple-projects)
-- [Multi-Repository Commands](#multi-repository-commands)
 - [Git Worktrees](#git-worktrees)
 - [Handling Import Collisions](#handling-import-collisions)
 - [Custom Git Hooks](#custom-git-hooks)
 - [Extensible Database](#extensible-database)
+- [Architecture: Daemon vs MCP vs Beads](#architecture-daemon-vs-mcp-vs-beads)
 
 ## Renaming Prefix
 
@@ -112,147 +111,6 @@ When agents discover duplicate issues, they should:
 2. Compare issue details: `bd show bd-41 bd-42 --json`
 3. Merge duplicates: `bd merge bd-42 --into bd-41`
 4. File a discovered-from issue if needed: `bd create "Found duplicates during bd-X" --deps discovered-from:bd-X`
-
-## Global Daemon for Multiple Projects
-
-**New in v0.9.11:** Use a single daemon process to serve all projects on your machine.
-
-### Starting the Global Daemon
-
-```bash
-# Start global daemon (one per machine)
-bd daemon --global
-
-# Verify it's running
-ps aux | grep "bd daemon"
-
-# Stop it
-pkill -f "bd daemon --global"
-```
-
-### Benefits
-
-- **Single process** serves all bd databases on your machine
-- **Automatic workspace detection** - no configuration needed
-- **Persistent background service** - survives terminal restarts
-- **Lower memory footprint** than per-project daemons
-
-### How It Works
-
-```bash
-# In any project directory
-cd ~/projects/webapp && bd ready         # Uses global daemon
-cd ~/projects/api && bd ready            # Uses global daemon
-```
-
-The global daemon:
-1. Checks for local daemon socket (`.beads/bd.sock`) in your current workspace
-2. Routes requests to the correct database based on your current working directory
-3. Auto-starts the local daemon if it's not running (with exponential backoff on failures)
-4. Each project gets its own isolated daemon serving only its database
-
-**Note:** Global daemon doesn't require git repos, making it suitable for non-git projects or multi-repo setups.
-
-## Multi-Repository Commands
-
-**New in v0.9.12:** When using a global daemon, use `bd repos` to view and manage work across all cached repositories.
-
-```bash
-# List all cached repositories
-bd repos list
-
-# View ready work across all repos
-bd repos ready
-
-# Group ready work by repository
-bd repos ready --group
-
-# Filter by priority
-bd repos ready --priority 1
-
-# Filter by assignee
-bd repos ready --assignee alice
-
-# View combined statistics
-bd repos stats
-
-# Clear repository cache (free resources)
-bd repos clear-cache
-```
-
-**Example output:**
-
-```bash
-$ bd repos list
-
-📁 Cached Repositories (3):
-
-/Users/alice/projects/webapp
-  Prefix:       webapp-
-  Issue Count:  45
-  Status:       active
-
-/Users/alice/projects/api
-  Prefix:       api-
-  Issue Count:  12
-  Status:       active
-
-/Users/alice/projects/docs
-  Prefix:       docs-
-  Issue Count:  8
-  Status:       active
-
-$ bd repos ready --group
-
-📋 Ready work across 3 repositories:
-
-/Users/alice/projects/webapp (4 issues):
-  1. [P1] webapp-23: Fix navigation bug
-     Estimate: 30 min
-  2. [P2] webapp-45: Add loading spinner
-     Estimate: 15 min
-  ...
-
-/Users/alice/projects/api (2 issues):
-  1. [P0] api-10: Fix critical auth bug
-     Estimate: 60 min
-  2. [P1] api-12: Add rate limiting
-     Estimate: 45 min
-
-$ bd repos stats
-
-📊 Combined Statistics Across All Repositories:
-
-Total Issues:      65
-Open:              23
-In Progress:       5
-Closed:            37
-Blocked:           3
-Ready:             15
-
-📁 Per-Repository Breakdown:
-
-/Users/alice/projects/webapp:
-  Total: 45  Ready: 10  Blocked: 2
-
-/Users/alice/projects/api:
-  Total: 12  Ready: 3  Blocked: 1
-
-/Users/alice/projects/docs:
-  Total: 8  Ready: 2  Blocked: 0
-```
-
-**Requirements:**
-- Global daemon must be running (`bd daemon --global`)
-- At least one command has been run in each repository (to cache it)
-- `--json` flag available for programmatic use
-
-**Use cases:**
-- Get an overview of all active projects
-- Find highest-priority work across all repos
-- Balance workload across multiple projects
-- Track overall progress and statistics
-- Identify which repos need attention
 
 ## Git Worktrees
 
@@ -415,6 +273,39 @@ FROM issues i
 LEFT JOIN time_entries t ON i.id = t.issue_id
 GROUP BY i.id;
 ```
+
+## Architecture: Daemon vs MCP vs Beads
+
+Understanding the role of each component:
+
+### Beads (Core)
+- **SQLite database** - The source of truth for all issues, dependencies, labels
+- **Storage layer** - CRUD operations, dependency resolution, collision detection
+- **Business logic** - Ready work calculation, merge operations, import/export
+- **CLI commands** - Direct database access via `bd` command
+
+### Local Daemon (Per-Project)
+- **Lightweight RPC server** - Runs at `.beads/bd.sock` in each project
+- **Auto-sync coordination** - Debounced export (5s), git integration, import detection
+- **Process isolation** - Each project gets its own daemon for database safety
+- **LSP model** - Similar to language servers, one daemon per workspace
+- **No global daemon** - Removed in v0.16.0 to prevent cross-project pollution
+
+### MCP Server (Optional)
+- **Protocol adapter** - Translates MCP calls to daemon RPC or direct CLI
+- **Workspace routing** - Finds correct `.beads/bd.sock` based on working directory
+- **Stateless** - Doesn't cache or store any issue data itself
+- **Editor integration** - Makes bd available to Claude, Cursor, and other MCP clients
+- **Single instance** - One MCP server can route to multiple project daemons
+
+**Key principle**: The daemon and MCP server are thin layers. All heavy lifting (dependency graphs, collision resolution, merge logic) happens in the core bd storage layer.
+
+**Why per-project daemons?**
+- Complete database isolation between projects
+- Git worktree safety (each worktree can disable daemon independently)
+- No risk of committing changes to wrong branch
+- Simpler mental model - one project, one database, one daemon
+- Follows LSP/language server architecture patterns
 
 ## Next Steps
 

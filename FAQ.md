@@ -117,7 +117,7 @@ Each project gets its own `.beads/` directory with its own database and JSONL fi
 - Multiple agents working on different projects simultaneously → No conflicts
 - Same machine, different repos → Each finds its own `.beads/*.db` automatically
 - Agents in subdirectories → bd walks up to find the project root (like git)
-- **Global daemon** → One daemon process serves all projects (v0.9.11+)
+- **Per-project daemons** → Each project gets its own daemon at `.beads/bd.sock` (LSP model)
 
 **Limitation:** Issues cannot reference issues in other projects. Each database is isolated by design. If you need cross-project tracking, initialize bd in a parent directory that contains both projects.
 
@@ -129,10 +129,10 @@ cd ~/work/webapp && bd ready --json    # Uses ~/work/webapp/.beads/webapp.db
 # Agent 2 working on API
 cd ~/work/api && bd ready --json       # Uses ~/work/api/.beads/api.db
 
-# No conflicts! Completely isolated databases.
+# No conflicts! Completely isolated databases and daemons.
 ```
 
-**Recommended for multi-project setups:** Use the global daemon (`bd daemon --global`) to serve all projects with a single daemon process. See [ADVANCED.md#global-daemon-for-multiple-projects](ADVANCED.md#global-daemon-for-multiple-projects).
+**Architecture:** bd uses per-project daemons (like LSP/language servers) for complete database isolation. See [ADVANCED.md#architecture-daemon-vs-mcp-vs-beads](ADVANCED.md#architecture-daemon-vs-mcp-vs-beads).
 
 ### What happens if two agents work on the same issue?
 

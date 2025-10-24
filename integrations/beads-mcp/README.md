@@ -66,24 +66,9 @@ Then use in Claude Desktop config:
 
 ## Multi-Repository Setup
 
-**New in v0.9.11:** Work across multiple beads projects seamlessly!
+**Recommended:** Use a single MCP server instance for all beads projects - it automatically routes to per-project local daemons.
 
-### Option 1: Global Daemon (Recommended)
-
-Start a single daemon to serve all your projects:
-
-```bash
-# Start global daemon (serves all repos)
-bd daemon --global
-```
-
-The MCP server automatically detects the global daemon and routes requests based on your working directory. No configuration changes needed!
-
-**How it works:**
-1. MCP server checks for local daemon socket (`.beads/bd.sock`) — on Windows this file contains the TCP endpoint metadata
-2. Falls back to global daemon socket (`~/.beads/bd.sock`)
-3. Routes requests to correct database based on working directory
-4. Each project keeps its own database at `.beads/*.db`
+### Single MCP Server (Recommended)
 
 **Simple config - works for all projects:**
 ```json
@@ -96,7 +81,31 @@ The MCP server automatically detects the global daemon and routes requests based
 }
 ```
 
-### Option 2: Per-Project MCP Instances
+**How it works (LSP model):**
+1. MCP server checks for local daemon socket (`.beads/bd.sock`) in your current workspace
+2. Routes requests to the **per-project daemon** based on working directory
+3. Auto-starts the local daemon if not running
+4. **Each project gets its own isolated daemon** serving only its database
+
+**Architecture:**
+```
+MCP Server (one instance)
+    ↓
+Per-Project Daemons (one per workspace)
+    ↓
+SQLite Databases (complete isolation)
+```
+
+**Why per-project daemons?**
+- ✅ Complete database isolation between projects
+- ✅ No cross-project pollution or git worktree conflicts
+- ✅ Simpler mental model: one project = one database = one daemon
+- ✅ Follows LSP (Language Server Protocol) architecture
+- ✅ One MCP config works for unlimited projects
+
+**Note:** Global daemon support was removed in v0.16.0 to prevent cross-project database pollution.
+
+### Alternative: Per-Project MCP Instances (Not Recommended)
 
 Configure separate MCP servers for specific projects using `BEADS_WORKING_DIR`:
 
@@ -119,12 +128,7 @@ Configure separate MCP servers for specific projects using `BEADS_WORKING_DIR`:
 }
 ```
 
-Each instance will discover and use the database in its `BEADS_WORKING_DIR` path.
-
-**Which should you use?**
-- ✅ **Global daemon**: 3+ projects, better resource usage, automatic routing
-- ✅ **Per-project instances**: 1-2 main projects, explicit control
-- ✅ **Hybrid**: Run global daemon for convenience + per-project for main projects
+⚠️ **Problem**: AI may select the wrong MCP server for your workspace, causing commands to operate on the wrong database. Use single MCP server instead.
 
 ## Features
 

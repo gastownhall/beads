@@ -1,25 +1,24 @@
 ---
-description: Manage work across multiple repositories
+description: DEPRECATED - Multi-repository management
 argument-hint: [command]
 ---
 
-Manage work across multiple repositories when using a global daemon.
+**DEPRECATED:** This command is no longer functional.
 
-**Requires**: Running global daemon (`bd daemon --global`)
+Global daemon support was removed in v0.16.0. bd now uses per-project local daemons (LSP model) for complete database isolation.
 
-## Available Commands
+## Why Was This Removed?
 
-- **list**: List all cached repositories
-- **ready**: Show ready work across all repositories
-  - `--group`: Group results by repository
-- **stats**: Show combined statistics across all repositories
-- **clear-cache**: Clear all cached repository connections
+- Cross-project database pollution risks
+- Git worktree conflicts
+- Complexity in multi-workspace scenarios
 
-## Usage
+## Multi-Repo Workflows Now
 
-- `bd repos list` - See all repositories connected to global daemon
-- `bd repos ready` - View all ready work across projects
-- `bd repos ready --group` - Group ready work by repository
-- `bd repos stats` - Combined statistics from all repos
+For working across multiple beads projects:
+- Use your editor/shell to switch between project directories
+- Each project has its own daemon at `.beads/bd.sock`
+- Run `bd ready` in each project individually
+- Use single MCP server instance that routes to per-project daemons
 
-Useful for managing multiple beads projects from a single global daemon.
+See [ADVANCED.md](../ADVANCED.md#architecture-daemon-vs-mcp-vs-beads) for architecture details.

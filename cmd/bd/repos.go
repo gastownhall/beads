@@ -11,14 +11,29 @@ import (
 )
 
 var reposCmd = &cobra.Command{
-	Use:   "repos",
-	Short: "Multi-repository management (requires global daemon)",
-	Long: `Manage work across multiple repositories when using a global daemon.
+	Use:    "repos",
+	Short:  "Multi-repository management (DEPRECATED)",
+	Hidden: true,
+	Long: `DEPRECATED: This command required global daemon support, which has been removed.
 
-This command requires a running global daemon (bd daemon --global).
-It allows you to view and aggregate work across all cached repositories.`,
+bd now uses per-project local daemons (LSP model) for complete database isolation.
+Each project has its own daemon at .beads/bd.sock.
+
+Global daemon was removed in v0.16.0 due to:
+- Cross-project database pollution risks
+- Git worktree conflicts
+- Complexity in multi-workspace scenarios
+
+For multi-repo workflows, use your editor/shell to switch between projects.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		_ = cmd.Help()
+		fmt.Fprintf(os.Stderr, "Error: 'bd repos' command is deprecated and no longer functional\n\n")
+		fmt.Fprintf(os.Stderr, "Global daemon support was removed in v0.16.0.\n")
+		fmt.Fprintf(os.Stderr, "bd now uses per-project local daemons for database isolation.\n\n")
+		fmt.Fprintf(os.Stderr, "For multi-repo workflows:\n")
+		fmt.Fprintf(os.Stderr, "  - Use your editor/shell to switch between project directories\n")
+		fmt.Fprintf(os.Stderr, "  - Each project has its own daemon at .beads/bd.sock\n")
+		fmt.Fprintf(os.Stderr, "  - Run 'bd ready' in each project individually\n\n")
+		os.Exit(1)
 	},
 }
 
