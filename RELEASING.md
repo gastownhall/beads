@@ -4,10 +4,24 @@ Quick guide for releasing a new version of beads.
 
 ## Pre-Release Checklist
 
-1. **Kill all running daemons**:
+1. **Kill all running daemons (CRITICAL)**:
    ```bash
+   # Kill by process name
    pkill -f "bd.*daemon"
+   
+   # Verify no daemons are running
+   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
+   
+   # Alternative: find and kill by socket
+   find ~/.config -name "bd.sock" -type f 2>/dev/null | while read sock; do
+     echo "Found daemon socket: $sock"
+   done
    ```
+   
+   **Why this matters**: Old daemon versions can cause:
+   - Auto-flush race conditions leaving working tree dirty after commits
+   - Version mismatches between client (new) and daemon (old)
+   - Confusing behavior where changes appear to sync incorrectly
 
 2. **Run tests and build**:
    ```bash
@@ -151,7 +165,14 @@ The release will appear at: https://github.com/steveyegge/beads/releases
 
 ## Post-Release
 
-1. **Verify installations**:
+1. **Kill old daemons again**:
+   ```bash
+   pkill -f "bd.*daemon"
+   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
+   ```
+   This ensures your local machine picks up the new version immediately.
+
+2. **Verify installations**:
    ```bash
    # Homebrew
    brew update && brew upgrade bd && bd version
@@ -159,9 +180,12 @@ The release will appear at: https://github.com/steveyegge/beads/releases
    # PyPI
    pip install --upgrade beads-mcp
    beads-mcp --help
+   
+   # Check daemon version matches client
+   bd version --daemon  # Should match client version after first command
    ```
 
-2. **Announce** (optional):
+3. **Announce** (optional):
    - Project Discord/Slack
    - Twitter/social media
    - README badges
