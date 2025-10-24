@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -146,6 +147,47 @@ func TestRemoveDependency(t *testing.T) {
 
 	if len(deps) != 0 {
 		t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
+	}
+}
+
+func TestAddDependencyPreservesProvidedMetadata(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	child := &types.Issue{Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	store.CreateIssue(ctx, parent, "test-user")
+	store.CreateIssue(ctx, child, "test-user")
+
+	customTime := time.Date(2024, 10, 24, 12, 0, 0, 0, time.UTC)
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepParentChild,
+		CreatedAt:   customTime,
+		CreatedBy:   "import",
+	}
+
+	if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	records, err := store.GetDependencyRecords(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 dependency record, got %d", len(records))
+	}
+	got := records[0]
+	if !got.CreatedAt.Equal(customTime) {
+		t.Fatalf("Expected CreatedAt %v, got %v", customTime, got.CreatedAt)
+	}
+	if got.CreatedBy != "import" {
+		t.Fatalf("Expected CreatedBy 'import', got %q", got.CreatedBy)
 	}
 }
 

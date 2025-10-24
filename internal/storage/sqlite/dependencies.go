@@ -61,8 +61,12 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		}
 	}
 
-	dep.CreatedAt = time.Now()
-	dep.CreatedBy = actor
+	if dep.CreatedAt.IsZero() {
+		dep.CreatedAt = time.Now()
+	}
+	if dep.CreatedBy == "" {
+		dep.CreatedBy = actor
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -191,8 +195,12 @@ func (s *SQLiteStorage) addDependencyUnchecked(ctx context.Context, dep *types.D
 	// NOTE: We skip parent-child direction validation here because during import/remap,
 	// we're just updating IDs on existing dependencies that were already validated.
 
-	dep.CreatedAt = time.Now()
-	dep.CreatedBy = actor
+	if dep.CreatedAt.IsZero() {
+		dep.CreatedAt = time.Now()
+	}
+	if dep.CreatedBy == "" {
+		dep.CreatedBy = actor
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
