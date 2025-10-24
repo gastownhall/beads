@@ -1831,6 +1831,12 @@ Examples:
 			// Use provided IDs
 			issueIDs = args
 		}
+
+		// Sort issue IDs for consistent ordering when showing multiple issues
+		if len(issueIDs) > 1 {
+			sort.Strings(issueIDs)
+		}
+
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			allDetails := []interface{}{}
