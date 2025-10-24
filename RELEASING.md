@@ -14,13 +14,13 @@ Quick guide for releasing a new version of beads.
    TMPDIR=/tmp go test ./...
    golangci-lint run ./...
    TMPDIR=/tmp go build -o bd ./cmd/bd
+   ./bd version  # Verify it shows new version
    ```
 
-3. **Update local Go install**:
-   ```bash
-   TMPDIR=/tmp go install ./cmd/bd
-   bd version  # Verify it shows new version
-   ```
+3. **Skip local install** (avoid go install vs brew conflicts):
+   - Use `./bd` directly from the repo for testing
+   - Your system bd will be updated via brew after Homebrew formula update
+   - Or temporarily: `alias bd="$PWD/bd"` if needed
 
 4. **Update CHANGELOG.md**:
    - Add version heading: `## [0.9.X] - YYYY-MM-DD`
@@ -61,7 +61,23 @@ git push origin main
 git push origin v0.9.X
 ```
 
-### 2. Publish to PyPI (MCP Server)
+**That's it!** GitHub Actions automatically handles the rest:
+- GoReleaser builds and publishes binaries to GitHub Releases
+- PyPI publish job uploads the MCP server package to PyPI
+
+### 2. GitHub Secrets Setup (One-Time)
+
+The automation requires this secret to be configured:
+
+**PYPI_API_TOKEN**: Your PyPI API token
+1. Generate token at https://pypi.org/manage/account/token/
+2. Add to GitHub at https://github.com/steveyegge/beads/settings/secrets/actions
+3. Name: `PYPI_API_TOKEN`
+4. Value: `pypi-...` (your full token)
+
+### 3. Manual PyPI Publish (If Needed)
+
+If the automated publish fails, you can manually upload:
 
 ```bash
 cd integrations/beads-mcp
@@ -71,9 +87,7 @@ rm -rf dist/ build/ src/*.egg-info
 uv build
 
 # Upload to PyPI
-python3 -m twine upload dist/*
-# Username: __token__
-# Password: <your PyPI API token>
+TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-... uv tool run twine upload dist/*
 ```
 
 See [integrations/beads-mcp/PYPI.md](integrations/beads-mcp/PYPI.md) for detailed PyPI instructions.
@@ -105,9 +119,14 @@ git push origin main
 Install/upgrade locally with:
 ```bash
 brew update
-brew uninstall bd
-brew install --build-from-source bd
+brew upgrade bd  # Or: brew reinstall bd
 bd version  # Verify it shows new version
+```
+
+**Note:** If you have `~/go/bin/bd` from `go install`, remove it to avoid conflicts:
+```bash
+rm ~/go/bin/bd  # Clear go install version
+which bd        # Should show /opt/homebrew/bin/bd
 ```
 
 ### 4. GitHub Releases (Automated)
@@ -165,11 +184,11 @@ Set up API token at https://pypi.org/manage/account/token/ and use `__token__` a
 
 ✅ **Automated:**
 - GitHub releases with binaries (GoReleaser + GitHub Actions)
+- PyPI publish (automated via GitHub Actions)
 - Cross-platform builds (Linux, macOS, Windows)
 - Checksums and changelog generation
 
 🔄 **TODO:**
-- Auto-publish to PyPI
 - Auto-update Homebrew formula
 
 ## Related Documentation

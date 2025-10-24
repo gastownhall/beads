@@ -1,0 +1,32 @@
+name: Test PyPI Publish
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build package
+        run: |
+          cd integrations/beads-mcp
+          uv build
+
+      - name: Publish to TestPyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          cd integrations/beads-mcp
+          uv tool run twine upload --repository testpypi dist/*
