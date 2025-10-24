@@ -307,3 +307,8 @@ func (c *Client) Export(args *ExportArgs) (*Response, error) {
 func (c *Client) Import(args *ImportArgs) (*Response, error) {
 	return c.Execute(OpImport, args)
 }
+
+// EpicStatus gets epic completion status via the daemon
+func (c *Client) EpicStatus(args *EpicStatusArgs) (*Response, error) {
+	return c.Execute(OpEpicStatus, args)
+}

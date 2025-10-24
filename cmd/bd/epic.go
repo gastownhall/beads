@@ -8,6 +8,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -23,29 +24,42 @@ var epicStatusCmd = &cobra.Command{
 		eligibleOnly, _ := cmd.Flags().GetBool("eligible-only")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
-		// TODO: Add RPC support when daemon is running
+		var epics []*types.EpicStatus
+		var err error
+
 		if daemonClient != nil {
-			fmt.Fprintf(os.Stderr, "Error: epic commands not yet supported in daemon mode\n")
-			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag for direct mode\n")
-			os.Exit(1)
-		}
-
-		ctx := context.Background()
-		epics, err := store.GetEpicsEligibleForClosure(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting epic status: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Filter if eligible-only flag is set
-		if eligibleOnly {
-			filtered := []*types.EpicStatus{}
-			for _, epic := range epics {
-				if epic.EligibleForClose {
-					filtered = append(filtered, epic)
-				}
+			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
+				EligibleOnly: eligibleOnly,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error communicating with daemon: %v\n", err)
+				os.Exit(1)
 			}
-			epics = filtered
+			if !resp.Success {
+				fmt.Fprintf(os.Stderr, "Error getting epic status: %s\n", resp.Error)
+				os.Exit(1)
+			}
+			if err := json.Unmarshal(resp.Data, &epics); err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			ctx := context.Background()
+			epics, err = store.GetEpicsEligibleForClosure(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting epic status: %v\n", err)
+				os.Exit(1)
+			}
+
+			if eligibleOnly {
+				filtered := []*types.EpicStatus{}
+				for _, epic := range epics {
+					if epic.EligibleForClose {
+						filtered = append(filtered, epic)
+					}
+				}
+				epics = filtered
+			}
 		}
 
 		if jsonOutput {
@@ -103,25 +117,35 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
-		// TODO: Add RPC support when daemon is running
+		var eligibleEpics []*types.EpicStatus
+
 		if daemonClient != nil {
-			fmt.Fprintf(os.Stderr, "Error: epic commands not yet supported in daemon mode\n")
-			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag for direct mode\n")
-			os.Exit(1)
-		}
-
-		ctx := context.Background()
-		epics, err := store.GetEpicsEligibleForClosure(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting eligible epics: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Filter to only eligible ones
-		eligibleEpics := []*types.EpicStatus{}
-		for _, epic := range epics {
-			if epic.EligibleForClose {
-				eligibleEpics = append(eligibleEpics, epic)
+			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
+				EligibleOnly: true,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error communicating with daemon: %v\n", err)
+				os.Exit(1)
+			}
+			if !resp.Success {
+				fmt.Fprintf(os.Stderr, "Error getting eligible epics: %s\n", resp.Error)
+				os.Exit(1)
+			}
+			if err := json.Unmarshal(resp.Data, &eligibleEpics); err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			ctx := context.Background()
+			epics, err := store.GetEpicsEligibleForClosure(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting eligible epics: %v\n", err)
+				os.Exit(1)
+			}
+			for _, epic := range epics {
+				if epic.EligibleForClose {
+					eligibleEpics = append(eligibleEpics, epic)
+				}
 			}
 		}
 
@@ -154,10 +178,28 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		// Actually close the epics
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
-			err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
-				continue
+			if daemonClient != nil {
+				resp, err := daemonClient.CloseIssue(&rpc.CloseArgs{
+					ID:     epicStatus.Epic.ID,
+					Reason: "All children completed",
+				})
+				if err != nil || !resp.Success {
+					errMsg := "unknown error"
+					if err != nil {
+						errMsg = err.Error()
+					} else {
+						errMsg = resp.Error
+					}
+					fmt.Fprintf(os.Stderr, "Error closing %s: %s\n", epicStatus.Epic.ID, errMsg)
+					continue
+				}
+			} else {
+				ctx := context.Background()
+				err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
+					continue
+				}
 			}
 			closedIDs = append(closedIDs, epicStatus.Epic.ID)
 		}

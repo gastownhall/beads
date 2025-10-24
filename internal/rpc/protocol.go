@@ -34,6 +34,7 @@ const (
 	OpCompactStats    = "compact_stats"
 	OpExport          = "export"
 	OpImport          = "import"
+	OpEpicStatus      = "epic_status"
 )
 
 // Request represents an RPC request from client to daemon
@@ -155,6 +156,11 @@ type CommentAddArgs struct {
 	ID     string `json:"id"`
 	Author string `json:"author"`
 	Text   string `json:"text"`
+}
+
+// EpicStatusArgs represents arguments for the epic status operation
+type EpicStatusArgs struct {
+	EligibleOnly bool `json:"eligible_only,omitempty"`
 }
 
 // PingResponse is the response for a ping operation

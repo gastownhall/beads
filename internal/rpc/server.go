@@ -648,6 +648,8 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleExport(req)
 	case OpImport:
 		resp = s.handleImport(req)
+	case OpEpicStatus:
+		resp = s.handleEpicStatus(req)
 	default:
 		s.metrics.RecordError(req.Operation)
 		return Response{
@@ -2210,5 +2212,55 @@ func (s *Server) handleImport(req *Request) Response {
 	return Response{
 		Success: false,
 		Error:   "import via daemon not yet implemented, use --no-daemon flag",
+	}
+}
+
+func (s *Server) handleEpicStatus(req *Request) Response {
+	var epicArgs EpicStatusArgs
+	if err := json.Unmarshal(req.Args, &epicArgs); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid epic status args: %v", err),
+		}
+	}
+
+	store, err := s.getStorageForRequest(req)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("storage error: %v", err),
+		}
+	}
+
+	ctx := s.reqCtx(req)
+	epics, err := store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get epic status: %v", err),
+		}
+	}
+
+	if epicArgs.EligibleOnly {
+		filtered := []*types.EpicStatus{}
+		for _, epic := range epics {
+			if epic.EligibleForClose {
+				filtered = append(filtered, epic)
+			}
+		}
+		epics = filtered
+	}
+
+	data, err := json.Marshal(epics)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to marshal epics: %v", err),
+		}
+	}
+
+	return Response{
+		Success: true,
+		Data:    data,
 	}
 }
