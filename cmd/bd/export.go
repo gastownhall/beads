@@ -146,10 +146,10 @@ Output to stdout by default, or use -o flag for file output.`,
 
 			// Ensure cleanup on failure
 			defer func() {
-				if tempFile != nil {
-					tempFile.Close()
-					os.Remove(tempPath) // Clean up temp file if we haven't renamed it
-				}
+			if tempFile != nil {
+			_ = tempFile.Close()
+			_ = os.Remove(tempPath) // Clean up temp file if we haven't renamed it
+			}
 			}()
 
 			out = tempFile
@@ -189,9 +189,9 @@ Output to stdout by default, or use -o flag for file output.`,
 
 			// Atomically replace the target file
 			if err := os.Rename(tempPath, finalPath); err != nil {
-				os.Remove(tempPath) // Clean up on failure
-				fmt.Fprintf(os.Stderr, "Error replacing output file: %v\n", err)
-				os.Exit(1)
+			_ = os.Remove(tempPath) // Clean up on failure
+			fmt.Fprintf(os.Stderr, "Error replacing output file: %v\n", err)
+			os.Exit(1)
 			}
 
 			// Set appropriate file permissions (0644: rw-r--r--)

@@ -294,35 +294,43 @@ func updateMergeTextReferences(ctx context.Context, sourceIDs []string, targetID
 
 			// Update description
 			if issue.Description != "" && re.MatchString(issue.Description) {
-				if _, exists := updates["description"]; !exists {
-					updates["description"] = issue.Description
-				}
-				updates["description"] = re.ReplaceAllString(updates["description"].(string), replacementText)
+			if _, exists := updates["description"]; !exists {
+			updates["description"] = issue.Description
 			}
+			if desc, ok := updates["description"].(string); ok {
+			  updates["description"] = re.ReplaceAllString(desc, replacementText)
+			}
+		}
 
 			// Update notes
 			if issue.Notes != "" && re.MatchString(issue.Notes) {
-				if _, exists := updates["notes"]; !exists {
-					updates["notes"] = issue.Notes
-				}
-				updates["notes"] = re.ReplaceAllString(updates["notes"].(string), replacementText)
+			if _, exists := updates["notes"]; !exists {
+			updates["notes"] = issue.Notes
+			}
+			if notes, ok := updates["notes"].(string); ok {
+			  updates["notes"] = re.ReplaceAllString(notes, replacementText)
+			}
 			}
 
 			// Update design
 			if issue.Design != "" && re.MatchString(issue.Design) {
-				if _, exists := updates["design"]; !exists {
-					updates["design"] = issue.Design
-				}
-				updates["design"] = re.ReplaceAllString(updates["design"].(string), replacementText)
+			if _, exists := updates["design"]; !exists {
+			 updates["design"] = issue.Design
+			 }
+			if design, ok := updates["design"].(string); ok {
+			  updates["design"] = re.ReplaceAllString(design, replacementText)
+			 }
 			}
 
 			// Update acceptance criteria
 			if issue.AcceptanceCriteria != "" && re.MatchString(issue.AcceptanceCriteria) {
-				if _, exists := updates["acceptance_criteria"]; !exists {
-					updates["acceptance_criteria"] = issue.AcceptanceCriteria
-				}
-				updates["acceptance_criteria"] = re.ReplaceAllString(updates["acceptance_criteria"].(string), replacementText)
+			 if _, exists := updates["acceptance_criteria"]; !exists {
+				updates["acceptance_criteria"] = issue.AcceptanceCriteria
 			}
+			if ac, ok := updates["acceptance_criteria"].(string); ok {
+				updates["acceptance_criteria"] = re.ReplaceAllString(ac, replacementText)
+			}
+		}
 		}
 
 		// Apply updates if any

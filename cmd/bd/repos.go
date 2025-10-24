@@ -18,7 +18,7 @@ var reposCmd = &cobra.Command{
 This command requires a running global daemon (bd daemon --global).
 It allows you to view and aggregate work across all cached repositories.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		cmd.Help()
+		_ = cmd.Help()
 	},
 }
 

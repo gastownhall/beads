@@ -2159,8 +2159,8 @@ func (s *Server) handleExport(req *Request) Response {
 	}
 	tempPath := tempFile.Name()
 	defer func() {
-		tempFile.Close()
-		os.Remove(tempPath)
+		_ = tempFile.Close()
+		_ = os.Remove(tempPath)
 	}()
 
 	// Write JSONL

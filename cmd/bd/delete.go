@@ -360,13 +360,13 @@ func removeIssueFromJSONL(issueID string) error {
 	}
 
 	if err := out.Close(); err != nil {
-		os.Remove(temp)
+		_ = os.Remove(temp)
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	// Atomic rename
 	if err := os.Rename(temp, path); err != nil {
-		os.Remove(temp)
+		_ = os.Remove(temp)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 

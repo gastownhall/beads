@@ -312,8 +312,8 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	}
 	tempPath := tempFile.Name()
 	defer func() {
-		tempFile.Close()
-		os.Remove(tempPath)
+		_ = tempFile.Close()
+		_ = os.Remove(tempPath)
 	}()
 
 	// Write JSONL

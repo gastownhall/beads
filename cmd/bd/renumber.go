@@ -294,7 +294,7 @@ func renumberIssuesInDB(ctx context.Context, prefix string, idMapping map[string
 	// After renumbering to bd-1..bd-N, set counter to N so next issue is bd-(N+1)
 	// We need to FORCE set it (not MAX) because counter may be higher from deleted issues
 	// Strategy: Reset (delete) the counter row, then SyncAllCounters recreates it from actual max ID
-	sqliteStore := store.(*sqlite.SQLiteStorage)
+	sqliteStore, _ := store.(*sqlite.SQLiteStorage)
 	if err := sqliteStore.ResetCounter(ctx, prefix); err != nil {
 		return fmt.Errorf("failed to reset counter: %w", err)
 	}

@@ -546,7 +546,7 @@ func shouldUseGlobalDaemon() bool {
 
 			// Recurse into subdirectories
 			if depth < maxDepth {
-				countRepos(path, depth+1)
+			_ = countRepos(path, depth+1)
 			}
 		}
 		return nil
@@ -563,7 +563,7 @@ func shouldUseGlobalDaemon() bool {
 
 	for _, dir := range projectDirs {
 		if _, err := os.Stat(dir); err == nil {
-			countRepos(dir, 0)
+			_ = countRepos(dir, 0)
 			if repoCount > 1 {
 				break
 			}
@@ -629,18 +629,18 @@ func restartDaemonForVersionMismatch() bool {
 
 		// Force kill if still running
 		if isRunning, _ := isDaemonRunning(pidFile); isRunning {
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: force killing old daemon\n")
-			}
-			process.Kill()
-			forcedKill = true
+		if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: force killing old daemon\n")
+		}
+		_ = process.Kill()
+		forcedKill = true
 		}
 	}
 
 	// Clean up stale socket and PID file after force kill or if not running
 	if forcedKill || !isDaemonRunningQuiet(pidFile) {
-		os.Remove(socketPath)
-		os.Remove(pidFile)
+		_ = os.Remove(socketPath)
+		_ = os.Remove(pidFile)
 	}
 
 	// Start new daemon with current binary version
@@ -679,7 +679,7 @@ func restartDaemonForVersionMismatch() bool {
 	}
 
 	// Reap the process to avoid zombies
-	go cmd.Wait()
+	go func() { _ = cmd.Wait() }()
 
 	// Wait for daemon to be ready using shared helper
 	if waitForSocketReadiness(socketPath, 5*time.Second) {
@@ -738,9 +738,9 @@ func tryAutoStartDaemon(socketPath string) bool {
 		if lockPID, err := readPIDFromFile(lockPath); err == nil {
 			if !isPIDAlive(lockPID) {
 				if os.Getenv("BD_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
+				fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
 				}
-				os.Remove(lockPath)
+				_ = os.Remove(lockPath)
 				// Retry once
 				return tryAutoStartDaemon(socketPath)
 			}
@@ -749,9 +749,9 @@ func tryAutoStartDaemon(socketPath string) bool {
 	}
 
 	// Write our PID to lockfile
-	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-	lockFile.Close()
-	defer os.Remove(lockPath)
+	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	_ = lockFile.Close()
+	defer func() { _ = os.Remove(lockPath) }()
 
 	// Under lock: check for stale socket and clean up if necessary
 	if _, err := os.Stat(socketPath); err == nil {
@@ -778,11 +778,11 @@ func tryAutoStartDaemon(socketPath string) bool {
 
 		// Socket is stale (connect failed and PID dead/missing) - safe to remove
 		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
+		fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
 		}
-		os.Remove(socketPath)
+		_ = os.Remove(socketPath)
 		if pidFile != "" {
-			os.Remove(pidFile)
+		_ = os.Remove(pidFile)
 		}
 	}
 
@@ -843,7 +843,7 @@ func tryAutoStartDaemon(socketPath string) bool {
 	}
 
 	// Reap the process to avoid zombies
-	go cmd.Wait()
+	go func() { _ = cmd.Wait() }()
 
 	// Wait for socket to be ready with actual connection test
 	if waitForSocketReadiness(socketPath, 5*time.Second) {
@@ -1483,22 +1483,22 @@ func flushToJSONL() {
 	encoder := json.NewEncoder(f)
 	for _, issue := range issues {
 		if err := encoder.Encode(issue); err != nil {
-			f.Close()
-			os.Remove(tempPath)
+			_ = f.Close()
+			_ = os.Remove(tempPath)
 			recordFailure(fmt.Errorf("failed to encode issue %s: %w", issue.ID, err))
 			return
 		}
 	}
 
 	if err := f.Close(); err != nil {
-		os.Remove(tempPath)
+		_ = os.Remove(tempPath)
 		recordFailure(fmt.Errorf("failed to close temp file: %w", err))
 		return
 	}
 
 	// Atomic rename
 	if err := os.Rename(tempPath, jsonlPath); err != nil {
-		os.Remove(tempPath)
+		_ = os.Remove(tempPath)
 		recordFailure(fmt.Errorf("failed to rename file: %w", err))
 		return
 	}
