@@ -1759,7 +1759,12 @@ func resolveIssueID(ctx context.Context, id string) (*types.Issue, string, error
 var showCmd = &cobra.Command{
 	Use:   "show [id...]",
 	Short: "Show issue details",
-	Args:  cobra.MinimumNArgs(1),
+	Long:  `Show detailed information for one or more issues.
+
+Examples:
+  bd show bd-42                  # Show single issue
+  bd show bd-1 bd-2 bd-3         # Show multiple issues`,
+	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// If daemon is running, use RPC
 		if daemonClient != nil {
