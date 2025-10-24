@@ -1764,27 +1764,31 @@ var showCmd = &cobra.Command{
 Examples:
   bd show bd-42                  # Show single issue
   bd show bd-1 bd-2 bd-3         # Show multiple issues
-  bd show --all-issues           # Show all issues (may be expensive)`,
+  bd show --all-issues           # Show all issues (may be expensive)
+  bd show --priority 0 --priority 1   # Show all P0 and P1 issues
+  bd show -p 0 -p 1              # Short form`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		allIssues, _ := cmd.Flags().GetBool("all-issues")
-		if !allIssues && len(args) == 0 {
-			return fmt.Errorf("requires at least 1 issue ID or --all-issues flag")
+		priorities, _ := cmd.Flags().GetIntSlice("priority")
+		if !allIssues && len(priorities) == 0 && len(args) == 0 {
+			return fmt.Errorf("requires at least 1 issue ID, or use --all-issues, or --priority flag")
 		}
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		allIssues, _ := cmd.Flags().GetBool("all-issues")
+		priorities, _ := cmd.Flags().GetIntSlice("priority")
 
 		// Build list of issue IDs to show
 		var issueIDs []string
 
-		// If --all-issues is used, fetch all issues
-		if allIssues {
+		// If --all-issues or --priority is used, fetch matching issues
+		if allIssues || len(priorities) > 0 {
 			ctx := context.Background()
 
 			if daemonClient != nil {
 				// Daemon mode - not yet supported
-				fmt.Fprintf(os.Stderr, "Error: --all-issues not yet supported in daemon mode\n")
+				fmt.Fprintf(os.Stderr, "Error: --all-issues and --priority not yet supported in daemon mode\n")
 				fmt.Fprintf(os.Stderr, "Use --no-daemon flag or specify issue IDs directly\n")
 				os.Exit(1)
 			} else {
@@ -1794,6 +1798,22 @@ Examples:
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error searching issues: %v\n", err)
 					os.Exit(1)
+				}
+
+				// Filter by priority if specified
+				if len(priorities) > 0 {
+					priorityMap := make(map[int]bool)
+					for _, p := range priorities {
+						priorityMap[p] = true
+					}
+
+					filtered := make([]*types.Issue, 0)
+					for _, issue := range issues {
+						if priorityMap[issue.Priority] {
+							filtered = append(filtered, issue)
+						}
+					}
+					issues = filtered
 				}
 
 				// Extract IDs
@@ -2093,6 +2113,7 @@ Examples:
 
 func init() {
 	showCmd.Flags().Bool("all-issues", false, "Show all issues (WARNING: may be expensive for large databases)")
+	showCmd.Flags().IntSliceP("priority", "p", []int{}, "Show issues with specified priority (can be used multiple times, e.g., -p 0 -p 1)")
 	rootCmd.AddCommand(showCmd)
 }
 
