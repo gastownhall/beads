@@ -1,5 +1,3 @@
-version: "2"
-
 run:
   timeout: 5m
   tests: true
@@ -16,44 +14,35 @@ linters:
     - misspell
     - unconvert
     - unparam
-  settings:
-    dupl:
-      threshold: 100
-    errcheck:
-      check-type-assertions: false
-      check-blank: false
-      exclude-files:
-        - ".*_test\\.go$"
-      exclude-functions:
-        - (*database/sql.DB).Close
-        - (*database/sql.Rows).Close
-        - (*database/sql.Tx).Rollback
-    goconst:
-      min-len: 3
-      min-occurrences: 3
-    gocyclo:
-      min-complexity: 15
-    misspell:
-      locale: US
-    revive:
-      rules:
-        - name: var-naming
-        - name: exported
+
+linters-settings:
+  dupl:
+    threshold: 100
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
+    exclude-functions:
+      - (*database/sql.DB).Close
+      - (*database/sql.Rows).Close
+      - (*database/sql.Tx).Rollback
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  gocyclo:
+    min-complexity: 15
+  misspell:
+    locale: US
+  revive:
+    rules:
+      - name: var-naming
+      - name: exported
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - revive
-    - text: "var-naming: avoid meaningless package names"
-    - text: "exported.*SQLiteStorage.*stutters"
-    - text: "G201: SQL string formatting"
-    - text: "G301: Expect directory permissions"
-    - text: "G204: Subprocess launched"
-    - text: "G115: integer overflow conversion"
-    - text: "G304.*file inclusion via variable"
-    - path: (export|sync|init)\.go
-      text: "G302|G306.*0644"
-    - path: server\.go
-      text: "G302"
+  exclude:
+    - "var-naming: avoid meaningless package names"
+    - "exported.*SQLiteStorage.*stutters"
+    - "G201: SQL string formatting"
+    - "G301: Expect directory permissions"
+    - "G204: Subprocess launched"
+    - "G115: integer overflow conversion"
+    - "G304.*file inclusion via variable"
