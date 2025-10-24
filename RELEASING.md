@@ -137,10 +137,19 @@ brew upgrade bd  # Or: brew reinstall bd
 bd version  # Verify it shows new version
 ```
 
-**Note:** If you have `~/go/bin/bd` from `go install`, remove it to avoid conflicts:
+**Note:** If you have an old bd binary from `go install` in your PATH, remove it to avoid conflicts:
 ```bash
-rm ~/go/bin/bd  # Clear go install version
-which bd        # Should show /opt/homebrew/bin/bd
+# Find where bd is installed
+which bd
+
+# If it's in a Go toolchain path (e.g., ~/go/bin/bd or mise-managed Go), remove it
+# Common locations:
+rm ~/go/bin/bd                                    # Standard go install location
+rm ~/.local/share/mise/installs/go/*/bin/bd      # mise-managed Go installs
+
+# Verify you're using the correct version
+which bd        # Should show /opt/homebrew/bin/bd or your package manager's path
+bd version      # Should show the latest version
 ```
 
 ### 4. GitHub Releases (Automated)
