@@ -165,6 +165,7 @@ type ImportOptions struct {
 type ImportResult struct {
 	Created         int               // New issues created
 	Updated         int               // Existing issues updated
+	Unchanged       int               // Existing issues that matched exactly (idempotent)
 	Skipped         int               // Issues skipped (duplicates, errors)
 	Collisions      int               // Collisions detected
 	IDMapping       map[string]string // Mapping of remapped IDs (old -> new)
@@ -317,7 +318,8 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 	} else if opts.DryRun {
 		// No collisions in dry-run mode
 		result.Created = len(collisionResult.NewIssues)
-		result.Updated = len(collisionResult.ExactMatches)
+		// bd-88: ExactMatches are unchanged issues (idempotent), not updates
+		result.Unchanged = len(collisionResult.ExactMatches)
 		return result, nil
 	}
 
@@ -362,15 +364,15 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 				updates["external_ref"] = nil
 			}
 
-			// bd-84: Only update if data actually changed (prevents timestamp churn)
+			// bd-88: Only update if data actually changed (prevents timestamp churn)
 			if issueDataChanged(existing, updates) {
 				if err := sqliteStore.UpdateIssue(ctx, issue.ID, updates, "import"); err != nil {
 					return nil, fmt.Errorf("error updating issue %s: %w", issue.ID, err)
 				}
 				result.Updated++
 			} else {
-				// Issue unchanged - count as skipped to avoid polluting JSONL with timestamp updates
-				result.Skipped++
+				// bd-88: Track unchanged issues separately for accurate reporting
+				result.Unchanged++
 			}
 		} else {
 			// New issue - check for duplicates in import batch

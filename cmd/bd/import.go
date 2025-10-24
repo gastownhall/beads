@@ -141,8 +141,11 @@ Behavior:
 			} else if !result.PrefixMismatch {
 				fmt.Fprintf(os.Stderr, "No collisions detected.\n")
 			}
-			fmt.Fprintf(os.Stderr, "Would create %d new issues, update %d existing issues\n",
-				result.Created, result.Updated)
+			msg := fmt.Sprintf("Would create %d new issues, update %d existing issues", result.Created, result.Updated)
+			if result.Unchanged > 0 {
+				msg += fmt.Sprintf(", %d unchanged", result.Unchanged)
+			}
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
 			fmt.Fprintf(os.Stderr, "\nDry-run mode: no changes made\n")
 			os.Exit(0)
 		}
@@ -177,6 +180,9 @@ Behavior:
 
 		// Print summary
 		fmt.Fprintf(os.Stderr, "Import complete: %d created, %d updated", result.Created, result.Updated)
+		if result.Unchanged > 0 {
+			fmt.Fprintf(os.Stderr, ", %d unchanged", result.Unchanged)
+		}
 		if result.Skipped > 0 {
 			fmt.Fprintf(os.Stderr, ", %d skipped", result.Skipped)
 		}
