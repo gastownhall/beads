@@ -1785,7 +1785,7 @@ func (s *Server) handleCompact(req *Request) Response {
 		}
 	}
 
-	config := &compact.CompactConfig{
+	config := &compact.Config{
 		APIKey:      args.APIKey,
 		Concurrency: args.Workers,
 		DryRun:      args.DryRun,
@@ -2147,8 +2147,8 @@ func (s *Server) handleExport(req *Request) Response {
 		}
 	}
 
-	// Set appropriate file permissions (0644: rw-r--r--)
-	if err := os.Chmod(exportArgs.JSONLPath, 0644); err != nil {
+	// Set appropriate file permissions (0600: rw-------)
+	if err := os.Chmod(exportArgs.JSONLPath, 0600); err != nil {
 		// Non-fatal, just log
 		fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 	}

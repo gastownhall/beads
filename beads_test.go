@@ -11,15 +11,15 @@ func TestFindDatabasePathEnvVar(t *testing.T) {
 	originalEnv := os.Getenv("BEADS_DB")
 	defer func() {
 		if originalEnv != "" {
-			os.Setenv("BEADS_DB", originalEnv)
+			_ = os.Setenv("BEADS_DB", originalEnv)
 		} else {
-			os.Unsetenv("BEADS_DB")
+			_ = os.Unsetenv("BEADS_DB")
 		}
 	}()
 
 	// Set env var to a test path
 	testPath := "/test/path/test.db"
-	os.Setenv("BEADS_DB", testPath)
+	_ = os.Setenv("BEADS_DB", testPath)
 
 	result := FindDatabasePath()
 	if result != testPath {

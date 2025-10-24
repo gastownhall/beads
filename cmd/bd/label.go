@@ -66,14 +66,19 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 	}
 }
 
+func parseLabelArgs(args []string) (issueIDs []string, label string) {
+	label = args[len(args)-1]
+	issueIDs = args[:len(args)-1]
+	return
+}
+
+//nolint:dupl // labelAddCmd and labelRemoveCmd are similar but serve different operations
 var labelAddCmd = &cobra.Command{
 	Use:   "add [issue-id...] [label]",
 	Short: "Add a label to one or more issues",
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		label := args[len(args)-1]
-		issueIDs := args[:len(args)-1]
-
+		issueIDs, label := parseLabelArgs(args)
 		processBatchLabelOperation(issueIDs, label, "added",
 			func(issueID, lbl string) error {
 				_, err := daemonClient.AddLabel(&rpc.LabelAddArgs{ID: issueID, Label: lbl})
@@ -85,14 +90,13 @@ var labelAddCmd = &cobra.Command{
 	},
 }
 
+//nolint:dupl // labelRemoveCmd and labelAddCmd are similar but serve different operations
 var labelRemoveCmd = &cobra.Command{
 	Use:   "remove [issue-id...] [label]",
 	Short: "Remove a label from one or more issues",
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		label := args[len(args)-1]
-		issueIDs := args[:len(args)-1]
-
+		issueIDs, label := parseLabelArgs(args)
 		processBatchLabelOperation(issueIDs, label, "removed",
 			func(issueID, lbl string) error {
 				_, err := daemonClient.RemoveLabel(&rpc.LabelRemoveArgs{ID: issueID, Label: lbl})

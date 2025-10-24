@@ -345,7 +345,7 @@ func removeIssueFromJSONL(issueID string) error {
 
 	// Write to temp file atomically
 	temp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	out, err := os.OpenFile(temp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(temp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}

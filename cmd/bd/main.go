@@ -813,6 +813,8 @@ func canDialSocket(socketPath string, timeout time.Duration) bool {
 }
 
 // waitForSocketReadiness waits for daemon socket to be ready by testing actual connections
+//
+//nolint:unparam // timeout is configurable even though current callers use 5s
 func waitForSocketReadiness(socketPath string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

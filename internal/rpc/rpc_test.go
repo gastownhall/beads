@@ -114,8 +114,10 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 
 // setupTestServerIsolated creates an isolated test server in a temp directory
 // with .beads structure, but allows the caller to customize server/client setup.
-// Returns tmpDir, beadsDir, dbPath, socketPath, and cleanup function.
+// Returns tmpDir, dbPath, socketPath, and cleanup function.
 // Caller must change to tmpDir if needed and set client.dbPath manually.
+//
+//nolint:unparam // beadsDir is not used by callers but part of test isolation setup
 func setupTestServerIsolated(t *testing.T) (tmpDir, beadsDir, dbPath, socketPath string, cleanup func()) {
 	tmpDir, err := os.MkdirTemp("", "bd-rpc-test-*")
 	if err != nil {
@@ -321,7 +323,7 @@ func TestConcurrentRequests(t *testing.T) {
 	errors := make(chan error, 5)
 
 	for i := 0; i < 5; i++ {
-		go func(n int) {
+		go func(_ int) {
 			client, err := TryConnect(server.socketPath)
 			if err != nil {
 				errors <- err

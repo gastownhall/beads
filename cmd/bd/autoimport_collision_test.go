@@ -42,7 +42,7 @@ func createTestDBWithIssues(t *testing.T, issues []*types.Issue) (string, *sqlit
 }
 
 // Helper function to write JSONL file
-func writeJSONLFile(t *testing.T, dir string, issues []*types.Issue) string {
+func writeJSONLFile(t *testing.T, dir string, issues []*types.Issue) {
 	t.Helper()
 	jsonlPath := filepath.Join(dir, "issues.jsonl")
 	f, err := os.Create(jsonlPath)
@@ -57,8 +57,6 @@ func writeJSONLFile(t *testing.T, dir string, issues []*types.Issue) string {
 			t.Fatalf("Failed to encode issue %s: %v", issue.ID, err)
 		}
 	}
-
-	return jsonlPath
 }
 
 // Helper function to capture stderr output

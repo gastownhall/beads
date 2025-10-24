@@ -30,7 +30,7 @@ func (l *DaemonLock) Close() error {
 
 // acquireDaemonLock attempts to acquire an exclusive lock on daemon.lock
 // Returns ErrDaemonLocked if another daemon is already running
-func acquireDaemonLock(beadsDir string, global bool) (*DaemonLock, error) {
+func acquireDaemonLock(beadsDir string, _ bool) (*DaemonLock, error) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
 
 	// Open or create the lock file
@@ -56,7 +56,7 @@ func acquireDaemonLock(beadsDir string, global bool) (*DaemonLock, error) {
 
 	// Also write PID file for Windows compatibility (can't read locked files on Windows)
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
-	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
+	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600)
 
 	return &DaemonLock{file: f, path: lockPath}, nil
 }

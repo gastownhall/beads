@@ -17,23 +17,36 @@ import (
 )
 
 // Issue represents a tracked work item with metadata, dependencies, and status.
-// Status represents the current state of an issue (open, in progress, closed, blocked).
 type (
-	Issue          = types.Issue
-	Status         = types.Status
-	IssueType      = types.IssueType
-	Dependency     = types.Dependency
+	Issue = types.Issue
+	// Status represents the current state of an issue (open, in progress, closed, blocked).
+	Status = types.Status
+	// IssueType represents the type of issue (bug, feature, task, epic, chore).
+	IssueType = types.IssueType
+	// Dependency represents a relationship between issues.
+	Dependency = types.Dependency
+	// DependencyType represents the type of dependency (blocks, related, parent-child, discovered-from).
 	DependencyType = types.DependencyType
-	Comment        = types.Comment
-	Event          = types.Event
-	EventType      = types.EventType
-	Label          = types.Label
-	BlockedIssue   = types.BlockedIssue
-	TreeNode       = types.TreeNode
-	Statistics     = types.Statistics
-	IssueFilter    = types.IssueFilter
-	WorkFilter     = types.WorkFilter
-	EpicStatus     = types.EpicStatus
+	// Comment represents a user comment on an issue.
+	Comment = types.Comment
+	// Event represents an audit log event.
+	Event = types.Event
+	// EventType represents the type of audit event.
+	EventType = types.EventType
+	// Label represents a tag attached to an issue.
+	Label = types.Label
+	// BlockedIssue represents an issue with blocking dependencies.
+	BlockedIssue = types.BlockedIssue
+	// TreeNode represents a node in a dependency tree.
+	TreeNode = types.TreeNode
+	// Statistics represents project-wide metrics.
+	Statistics = types.Statistics
+	// IssueFilter represents filtering criteria for issue queries.
+	IssueFilter = types.IssueFilter
+	// WorkFilter represents filtering criteria for work queries.
+	WorkFilter = types.WorkFilter
+	// EpicStatus represents the status of an epic issue.
+	EpicStatus = types.EpicStatus
 )
 
 // Status constants

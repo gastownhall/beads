@@ -227,6 +227,6 @@ func TestCounterSyncAfterDeleteAll(t *testing.T) {
 }
 
 // genID is a helper to generate issue IDs in tests
-func genID(prefix string, num int) string {
-	return fmt.Sprintf("%s-%d", prefix, num)
+func genID(_ string, num int) string {
+	return fmt.Sprintf("bd-%d", num)
 }

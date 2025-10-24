@@ -72,7 +72,7 @@ func TestEnvironmentBinding(t *testing.T) {
 		t.Run(tt.envVar, func(t *testing.T) {
 			// Set environment variable
 			oldValue := os.Getenv(tt.envVar)
-			os.Setenv(tt.envVar, tt.value)
+			_ = os.Setenv(tt.envVar, tt.value)
 			defer os.Setenv(tt.envVar, oldValue)
 			
 			// Re-initialize viper to pick up env var
@@ -101,7 +101,7 @@ actor: configuser
 flush-debounce: 15s
 `
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 	
@@ -164,7 +164,7 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 	
 	configPath := filepath.Join(beadsDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 	
@@ -190,8 +190,8 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 	
 	// Test 2: Environment variable overrides config file
-	os.Setenv("BD_JSON", "true")
-	defer os.Unsetenv("BD_JSON")
+	_ = os.Setenv("BD_JSON", "true")
+	defer func() { _ = os.Unsetenv("BD_JSON") }()
 	
 	err = Initialize()
 	if err != nil {

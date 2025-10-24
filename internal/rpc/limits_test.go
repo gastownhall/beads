@@ -72,7 +72,7 @@ func TestConnectionLimits(t *testing.T) {
 
 		// Send a long-running ping to keep connection busy
 		wg.Add(1)
-		go func(c net.Conn, idx int) {
+		go func(c net.Conn, _ int) {
 			defer wg.Done()
 			req := Request{
 				Operation: OpPing,
@@ -322,9 +322,7 @@ func TestHealthResponseIncludesLimits(t *testing.T) {
 		t.Errorf("expected ActiveConns>=0, got %d", health.ActiveConns)
 	}
 
-	if health.MemoryAllocMB < 0 {
-		t.Errorf("expected MemoryAllocMB>=0, got %d", health.MemoryAllocMB)
-	}
+	// No need to check MemoryAllocMB < 0 since it's uint64
 
 	t.Logf("Health: %d/%d connections, %d MB memory", health.ActiveConns, health.MaxConns, health.MemoryAllocMB)
 }

@@ -99,7 +99,7 @@ func TestNew(t *testing.T) {
 	defer store.Close()
 
 	t.Run("creates compactor with config", func(t *testing.T) {
-		config := &CompactConfig{
+		config := &Config{
 			Concurrency: 10,
 			DryRun:      true,
 		}
@@ -129,7 +129,7 @@ func TestCompactTier1_DryRun(t *testing.T) {
 
 	issue := createClosedIssue(t, store, "test-1")
 
-	config := &CompactConfig{DryRun: true}
+	config := &Config{DryRun: true}
 	c, err := New(store, "", config)
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
@@ -173,7 +173,7 @@ func TestCompactTier1_IneligibleIssue(t *testing.T) {
 		t.Fatalf("failed to create issue: %v", err)
 	}
 
-	config := &CompactConfig{DryRun: true}
+	config := &Config{DryRun: true}
 	c, err := New(store, "", config)
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
@@ -198,7 +198,7 @@ func TestCompactTier1_WithAPI(t *testing.T) {
 
 	issue := createClosedIssue(t, store, "test-api")
 
-	c, err := New(store, "", &CompactConfig{Concurrency: 1})
+	c, err := New(store, "", &Config{Concurrency: 1})
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestCompactTier1Batch_DryRun(t *testing.T) {
 	issue1 := createClosedIssue(t, store, "test-batch-1")
 	issue2 := createClosedIssue(t, store, "test-batch-2")
 
-	config := &CompactConfig{DryRun: true, Concurrency: 2}
+	config := &Config{DryRun: true, Concurrency: 2}
 	c, err := New(store, "", config)
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
@@ -282,7 +282,7 @@ func TestCompactTier1Batch_WithIneligible(t *testing.T) {
 		t.Fatalf("failed to create issue: %v", err)
 	}
 
-	config := &CompactConfig{DryRun: true, Concurrency: 2}
+	config := &Config{DryRun: true, Concurrency: 2}
 	c, err := New(store, "", config)
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
@@ -323,7 +323,7 @@ func TestCompactTier1Batch_WithAPI(t *testing.T) {
 	issue2 := createClosedIssue(t, store, "test-api-batch-2")
 	issue3 := createClosedIssue(t, store, "test-api-batch-3")
 
-	c, err := New(store, "", &CompactConfig{Concurrency: 2})
+	c, err := New(store, "", &Config{Concurrency: 2})
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestMockAPI_CompactTier1(t *testing.T) {
 
 	issue := createClosedIssue(t, store, "test-mock")
 
-	c, err := New(store, "", &CompactConfig{DryRun: true, Concurrency: 1})
+	c, err := New(store, "", &Config{DryRun: true, Concurrency: 1})
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestBatchOperations_ErrorHandling(t *testing.T) {
 		t.Fatalf("failed to create open issue: %v", err)
 	}
 
-	c, err := New(store, "", &CompactConfig{DryRun: true, Concurrency: 2})
+	c, err := New(store, "", &Config{DryRun: true, Concurrency: 2})
 	if err != nil {
 		t.Fatalf("failed to create compactor: %v", err)
 	}

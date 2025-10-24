@@ -13,8 +13,8 @@ const (
 	defaultConcurrency = 5
 )
 
-// CompactConfig holds configuration for the compaction process.
-type CompactConfig struct {
+// Config holds configuration for the compaction process.
+type Config struct {
 	APIKey      string
 	Concurrency int
 	DryRun      bool
@@ -24,13 +24,13 @@ type CompactConfig struct {
 type Compactor struct {
 	store  *sqlite.SQLiteStorage
 	haiku  *HaikuClient
-	config *CompactConfig
+	config *Config
 }
 
 // New creates a new Compactor instance with the given configuration.
-func New(store *sqlite.SQLiteStorage, apiKey string, config *CompactConfig) (*Compactor, error) {
+func New(store *sqlite.SQLiteStorage, apiKey string, config *Config) (*Compactor, error) {
 	if config == nil {
-		config = &CompactConfig{
+		config = &Config{
 			Concurrency: defaultConcurrency,
 		}
 	}
@@ -61,8 +61,8 @@ func New(store *sqlite.SQLiteStorage, apiKey string, config *CompactConfig) (*Co
 	}, nil
 }
 
-// CompactResult holds the outcome of a compaction operation.
-type CompactResult struct {
+// Result holds the outcome of a compaction operation.
+type Result struct {
 	IssueID       string
 	OriginalSize  int
 	CompactedSize int
@@ -143,25 +143,25 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 }
 
 // CompactTier1Batch performs tier-1 compaction on multiple issues in a single batch.
-func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([]*CompactResult, error) {
+func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([]*Result, error) {
 	if len(issueIDs) == 0 {
 		return nil, nil
 	}
 
 	eligibleIDs := make([]string, 0, len(issueIDs))
-	results := make([]*CompactResult, 0, len(issueIDs))
+	results := make([]*Result, 0, len(issueIDs))
 
 	for _, id := range issueIDs {
 		eligible, reason, err := c.store.CheckEligibility(ctx, id, 1)
 		if err != nil {
-			results = append(results, &CompactResult{
+			results = append(results, &Result{
 				IssueID: id,
 				Err:     fmt.Errorf("failed to verify eligibility: %w", err),
 			})
 			continue
 		}
 		if !eligible {
-			results = append(results, &CompactResult{
+			results = append(results, &Result{
 				IssueID: id,
 				Err:     fmt.Errorf("not eligible for Tier 1 compaction: %s", reason),
 			})
@@ -178,14 +178,14 @@ func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([
 		for _, id := range eligibleIDs {
 			issue, err := c.store.GetIssue(ctx, id)
 			if err != nil {
-				results = append(results, &CompactResult{
+				results = append(results, &Result{
 					IssueID: id,
 					Err:     fmt.Errorf("failed to get issue: %w", err),
 				})
 				continue
 			}
 			originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-			results = append(results, &CompactResult{
+			results = append(results, &Result{
 				IssueID:      id,
 				OriginalSize: originalSize,
 				Err:          nil,
@@ -195,7 +195,7 @@ func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([
 	}
 
 	workCh := make(chan string, len(eligibleIDs))
-	resultCh := make(chan *CompactResult, len(eligibleIDs))
+	resultCh := make(chan *Result, len(eligibleIDs))
 
 	var wg sync.WaitGroup
 	for i := 0; i < c.config.Concurrency; i++ {
@@ -203,7 +203,7 @@ func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([
 		go func() {
 			defer wg.Done()
 			for issueID := range workCh {
-				result := &CompactResult{IssueID: issueID}
+				result := &Result{IssueID: issueID}
 
 				if err := c.compactSingleWithResult(ctx, issueID, result); err != nil {
 					result.Err = err
@@ -231,7 +231,7 @@ func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([
 	return results, nil
 }
 
-func (c *Compactor) compactSingleWithResult(ctx context.Context, issueID string, result *CompactResult) error {
+func (c *Compactor) compactSingleWithResult(ctx context.Context, issueID string, result *Result) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

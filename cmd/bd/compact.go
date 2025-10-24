@@ -48,7 +48,7 @@ Examples:
 		// Handle compact stats first
 		if compactStats {
 			if daemonClient != nil {
-				runCompactStatsRPC(ctx)
+				runCompactStatsRPC()
 			} else {
 				sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 				if !ok {
@@ -94,7 +94,7 @@ Examples:
 			os.Exit(1)
 		}
 
-		config := &compact.CompactConfig{
+		config := &compact.Config{
 			APIKey:      apiKey,
 			Concurrency: compactWorkers,
 			DryRun:      compactDryRun,
@@ -512,7 +512,7 @@ func runCompactRPC(ctx context.Context) {
 	}
 }
 
-func runCompactStatsRPC(ctx context.Context) {
+func runCompactStatsRPC() {
 	args := map[string]interface{}{
 		"tier": compactTier,
 	}
