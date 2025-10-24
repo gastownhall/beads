@@ -15,88 +15,136 @@ import (
 // issueDataChanged checks if any fields in the updates map differ from the existing issue
 // Returns true if any field changed, false if all fields match
 func issueDataChanged(existing *types.Issue, updates map[string]interface{}) bool {
-	// Helper to safely compare string values (handles empty vs nil)
-	strMatch := func(existingVal string, newVal interface{}) bool {
-		if newVal == nil {
-			return existingVal == ""
+	// Helper to safely extract string from interface (handles string and *string)
+	strFrom := func(v interface{}) (string, bool) {
+		switch t := v.(type) {
+		case string:
+			return t, true
+		case *string:
+			if t == nil {
+				return "", true
+			}
+			return *t, true
+		case nil:
+			return "", true
+		default:
+			return "", false
 		}
-		valStr, ok := newVal.(string)
-		if !ok {
-			return false
-		}
-		return existingVal == valStr
 	}
 
-	// Helper to safely compare pointer string values
-	ptrStrMatch := func(ptr *string, val interface{}) bool {
-		if val == nil {
-			return ptr == nil || *ptr == ""
-		}
-		valStr, ok := val.(string)
+	// Helper to compare string field (treats empty and nil as equal)
+	equalStr := func(existingVal string, newVal interface{}) bool {
+		s, ok := strFrom(newVal)
 		if !ok {
-			return false
+			return false // Type mismatch means changed
 		}
-		if ptr == nil {
-			return valStr == ""
+		return existingVal == s
+	}
+
+	// Helper to compare *string field (treats empty and nil as equal)
+	equalPtrStr := func(existing *string, newVal interface{}) bool {
+		s, ok := strFrom(newVal)
+		if !ok {
+			return false // Type mismatch means changed
 		}
-		return *ptr == valStr
+		if existing == nil {
+			return s == ""
+		}
+		return *existing == s
+	}
+
+	// Helper to safely extract int from interface
+	intFrom := func(v interface{}) (int64, bool) {
+		switch t := v.(type) {
+		case int:
+			return int64(t), true
+		case int32:
+			return int64(t), true
+		case int64:
+			return t, true
+		case float64:
+			// Only accept whole numbers
+			if t == float64(int64(t)) {
+				return int64(t), true
+			}
+			return 0, false
+		default:
+			return 0, false
+		}
+	}
+
+	// Helper to compare Status field
+	equalStatus := func(existing types.Status, newVal interface{}) bool {
+		switch t := newVal.(type) {
+		case types.Status:
+			return existing == t
+		case string:
+			return string(existing) == t
+		default:
+			return false // Unknown type means changed
+		}
+	}
+
+	// Helper to compare IssueType field
+	equalIssueType := func(existing types.IssueType, newVal interface{}) bool {
+		switch t := newVal.(type) {
+		case types.IssueType:
+			return existing == t
+		case string:
+			return string(existing) == t
+		default:
+			return false // Unknown type means changed
+		}
 	}
 
 	// Check each field in updates map
 	for key, newVal := range updates {
 		switch key {
 		case "title":
-			if existing.Title != newVal.(string) {
+			if !equalStr(existing.Title, newVal) {
 				return true
 			}
 		case "description":
-			if existing.Description != newVal.(string) {
+			if !equalStr(existing.Description, newVal) {
 				return true
 			}
 		case "status":
-			if newStatus, ok := newVal.(types.Status); ok {
-				if existing.Status != newStatus {
-					return true
-				}
-			} else if newStatusStr, ok := newVal.(string); ok {
-				if string(existing.Status) != newStatusStr {
-					return true
-				}
+			if !equalStatus(existing.Status, newVal) {
+				return true
 			}
 		case "priority":
-			if existing.Priority != newVal.(int) {
+			p, ok := intFrom(newVal)
+			if !ok || existing.Priority != int(p) {
 				return true
 			}
 		case "issue_type":
-			if newType, ok := newVal.(types.IssueType); ok {
-				if existing.IssueType != newType {
-					return true
-				}
-			} else if newTypeStr, ok := newVal.(string); ok {
-				if string(existing.IssueType) != newTypeStr {
-					return true
-				}
+			if !equalIssueType(existing.IssueType, newVal) {
+				return true
 			}
 		case "design":
-			if !strMatch(existing.Design, newVal) {
+			if !equalStr(existing.Design, newVal) {
 				return true
 			}
 		case "acceptance_criteria":
-			if !strMatch(existing.AcceptanceCriteria, newVal) {
+			if !equalStr(existing.AcceptanceCriteria, newVal) {
 				return true
 			}
 		case "notes":
-			if !strMatch(existing.Notes, newVal) {
+			if !equalStr(existing.Notes, newVal) {
 				return true
 			}
 		case "assignee":
-			if !strMatch(existing.Assignee, newVal) {
+			if !equalStr(existing.Assignee, newVal) {
 				return true
 			}
 		case "external_ref":
-			if !ptrStrMatch(existing.ExternalRef, newVal) {
+			if !equalPtrStr(existing.ExternalRef, newVal) {
 				return true
 			}
+		default:
+			// Unknown field - treat as changed to be conservative
+			// This prevents skipping updates when new fields are added
+			return true
 		}
 	}
 
