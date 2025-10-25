@@ -110,6 +110,9 @@ If you must use separate MCP servers:
 If you're not using the MCP server, here are the CLI commands:
 
 ```bash
+# Check database path and daemon status
+bd info --json
+
 # Find ready work (no blockers)
 bd ready --json
 
