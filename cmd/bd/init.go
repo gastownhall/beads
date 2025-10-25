@@ -17,7 +17,9 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize bd in the current directory",
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
-and database file. Optionally specify a custom issue prefix.`,
+and database file. Optionally specify a custom issue prefix.
+
+With --no-db: creates .beads/ directory and nodb_prefix.txt file instead of SQLite database.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
@@ -79,6 +81,37 @@ and database file. Optionally specify a custom issue prefix.`,
 		if err := os.MkdirAll(localBeadsDir, 0750); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .beads directory: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Handle --no-db mode: create nodb_prefix.txt instead of database
+		if noDb {
+			prefixFile := filepath.Join(localBeadsDir, "nodb_prefix.txt")
+			if err := os.WriteFile(prefixFile, []byte(prefix+"\n"), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to write prefix file: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Create empty issues.jsonl file
+			jsonlPath := filepath.Join(localBeadsDir, "issues.jsonl")
+			if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+				if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to create issues.jsonl: %v\n", err)
+					os.Exit(1)
+				}
+			}
+
+			if !quiet {
+				green := color.New(color.FgGreen).SprintFunc()
+				cyan := color.New(color.FgCyan).SprintFunc()
+
+				fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", green("✓"))
+				fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
+				fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
+				fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
+				fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
+				fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
+			}
+			return
 		}
 
 		// Create .gitignore in .beads directory

@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"golang.org/x/mod/semver"
@@ -128,6 +129,28 @@ var rootCmd = &cobra.Command{
 
 		// Set auto-import based on flag (invert no-auto-import)
 		autoImportEnabled = !noAutoImport
+
+		// Handle --no-db mode: load from JSONL, use in-memory storage
+		if noDb {
+			if err := initializeNoDbMode(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing --no-db mode: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Set actor for audit trail
+			if actor == "" {
+				if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+					actor = bdActor
+				} else if user := os.Getenv("USER"); user != "" {
+					actor = user
+				} else {
+					actor = "unknown"
+				}
+			}
+
+			// Skip daemon and SQLite initialization - we're in memory mode
+			return
+		}
 
 		// Initialize database path
 		if dbPath == "" {
@@ -407,6 +430,26 @@ var rootCmd = &cobra.Command{
 		}
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		// Handle --no-db mode: write memory storage back to JSONL
+		if noDb {
+			if store != nil {
+				cwd, err := os.Getwd()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to get current directory: %v\n", err)
+					os.Exit(1)
+				}
+
+				beadsDir := filepath.Join(cwd, ".beads")
+				if memStore, ok := store.(*memory.MemoryStorage); ok {
+					if err := writeIssuesToJSONL(memStore, beadsDir); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to write JSONL: %v\n", err)
+						os.Exit(1)
+					}
+				}
+			}
+			return
+		}
+
 		// Close daemon client if we're using it
 		if daemonClient != nil {
 			_ = daemonClient.Close()
@@ -1238,6 +1281,71 @@ func clearAutoFlushState() {
 	lastFlushError = nil
 }
 
+// writeJSONLAtomic writes issues to a JSONL file atomically using temp file + rename.
+// This is the common implementation used by both flushToJSONL (SQLite mode) and
+// writeIssuesToJSONL (--no-db mode).
+//
+// Atomic write pattern:
+//  1. Create temp file with PID suffix: issues.jsonl.tmp.12345
+//  2. Write all issues as JSONL to temp file
+//  3. Close temp file
+//  4. Atomic rename: temp → target
+//  5. Set file permissions to 0644
+//
+// Error handling: Returns error on any failure. Cleanup is guaranteed via defer.
+// Thread-safe: No shared state access. Safe to call from multiple goroutines.
+func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) error {
+	// Sort issues by ID for consistent output
+	sort.Slice(issues, func(i, j int) bool {
+		return issues[i].ID < issues[j].ID
+	})
+
+	// Create temp file with PID suffix to avoid collisions (bd-306)
+	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	// Ensure cleanup on failure
+	defer func() {
+		if f != nil {
+			_ = f.Close()
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	// Write all issues as JSONL
+	encoder := json.NewEncoder(f)
+	for _, issue := range issues {
+		if err := encoder.Encode(issue); err != nil {
+			return fmt.Errorf("failed to encode issue %s: %w", issue.ID, err)
+		}
+	}
+
+	// Close temp file before renaming
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	f = nil // Prevent defer cleanup
+
+	// Atomic rename
+	if err := os.Rename(tempPath, jsonlPath); err != nil {
+		_ = os.Remove(tempPath) // Clean up on rename failure
+		return fmt.Errorf("failed to rename file: %w", err)
+	}
+
+	// Set appropriate file permissions (0644: rw-r--r--)
+	if err := os.Chmod(jsonlPath, 0644); err != nil {
+		// Non-fatal - file is already written
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: failed to set file permissions: %v\n", err)
+		}
+	}
+
+	return nil
+}
+
 // flushToJSONL exports dirty issues to JSONL using incremental updates
 // flushToJSONL exports dirty database changes to the JSONL file. Uses incremental
 // export by default (only exports modified issues), or full export for ID-changing
@@ -1398,44 +1506,15 @@ func flushToJSONL() {
 		issueMap[issueID] = issue
 	}
 
-	// Convert map to sorted slice
+	// Convert map to slice (will be sorted by writeJSONLAtomic)
 	issues := make([]*types.Issue, 0, len(issueMap))
 	for _, issue := range issueMap {
 		issues = append(issues, issue)
 	}
-	sort.Slice(issues, func(i, j int) bool {
-		return issues[i].ID < issues[j].ID
-	})
 
-	// Write to temp file first, then rename (atomic)
-	// Use PID in filename to avoid collisions between concurrent bd commands (bd-306)
-	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
-	f, err := os.Create(tempPath)
-	if err != nil {
-		recordFailure(fmt.Errorf("failed to create temp file: %w", err))
-		return
-	}
-
-	encoder := json.NewEncoder(f)
-	for _, issue := range issues {
-		if err := encoder.Encode(issue); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tempPath)
-			recordFailure(fmt.Errorf("failed to encode issue %s: %w", issue.ID, err))
-			return
-		}
-	}
-
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tempPath)
-		recordFailure(fmt.Errorf("failed to close temp file: %w", err))
-		return
-	}
-
-	// Atomic rename
-	if err := os.Rename(tempPath, jsonlPath); err != nil {
-		_ = os.Remove(tempPath)
-		recordFailure(fmt.Errorf("failed to rename file: %w", err))
+	// Write atomically using common helper
+	if err := writeJSONLAtomic(jsonlPath, issues); err != nil {
+		recordFailure(err)
 		return
 	}
 
@@ -1464,6 +1543,7 @@ var (
 	noAutoFlush  bool
 	noAutoImport bool
 	sandboxMode  bool
+	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
 )
 
 func init() {
@@ -1479,6 +1559,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
 	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables daemon and auto-sync (equivalent to --no-daemon --no-auto-flush --no-auto-import)")
+	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite, write back after each command")
 }
 
 // createIssuesFromMarkdown parses a markdown file and creates multiple issues
