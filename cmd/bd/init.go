@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -161,12 +162,36 @@ if quiet {
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
+	yellow := color.New(color.FgYellow).SprintFunc()
 
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
-		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+	
+	// Check if we're in a git repo and hooks aren't installed
+	if isGitRepo() && !hooksInstalled() {
+		fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
+		fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
+		fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+		
+		// Prompt to install
+		fmt.Printf("Install git hooks now? [Y/n] ")
+		var response string
+		fmt.Scanln(&response)
+		response = strings.ToLower(strings.TrimSpace(response))
+		
+		if response == "" || response == "y" || response == "yes" {
+			if err := installGitHooks(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
+				fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+			} else {
+				fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
+			}
+		}
+	}
+	
+	fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
 	},
 }
 
@@ -174,4 +199,49 @@ func init() {
 	initCmd.Flags().StringP("prefix", "p", "", "Issue prefix (default: current directory name)")
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	rootCmd.AddCommand(initCmd)
+}
+
+// hooksInstalled checks if bd git hooks are installed
+func hooksInstalled() bool {
+	preCommit := filepath.Join(".git", "hooks", "pre-commit")
+	postMerge := filepath.Join(".git", "hooks", "post-merge")
+	
+	// Check if both hooks exist
+	_, err1 := os.Stat(preCommit)
+	_, err2 := os.Stat(postMerge)
+	
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	
+	// Verify they're bd hooks by checking for signature comment
+	preCommitContent, err := os.ReadFile(preCommit)
+	if err != nil || !strings.Contains(string(preCommitContent), "bd (beads) pre-commit hook") {
+		return false
+	}
+	
+	postMergeContent, err := os.ReadFile(postMerge)
+	if err != nil || !strings.Contains(string(postMergeContent), "bd (beads) post-merge hook") {
+		return false
+	}
+	
+	return true
+}
+
+// installGitHooks runs the install script
+func installGitHooks() error {
+	// Find the install script
+	installScript := filepath.Join("examples", "git-hooks", "install.sh")
+	
+	// Check if script exists
+	if _, err := os.Stat(installScript); err != nil {
+		return fmt.Errorf("install script not found at %s", installScript)
+	}
+	
+	// Run the install script
+	cmd := exec.Command("/bin/bash", installScript)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	return cmd.Run()
 }
