@@ -1,200 +1,102 @@
-# Git Hooks for Beads
+# bd Git Hooks
 
-Optional git hooks for immediate export/import of beads issues.
+This directory contains git hooks that integrate bd (beads) with your git workflow, solving the race condition between daemon auto-flush and git commits.
 
-**NOTE**: As of bd v0.9+, **auto-sync is enabled by default!** These hooks are optional and provide:
-- **Immediate export** (no 5-second debounce wait)
-- **Guaranteed import** after every git operation
-- **Extra safety** for critical workflows
+## The Problem
 
-## What These Hooks Do
+When using bd in daemon mode, operations trigger a 5-second debounced auto-flush to JSONL. This creates a race condition:
 
-- **pre-commit**: Exports SQLite → JSONL before every commit (immediate, no debounce)
-- **post-merge**: Imports JSONL → SQLite after git pull/merge (guaranteed)
-- **post-checkout**: Imports JSONL → SQLite after branch switching (guaranteed)
+1. User closes issue via MCP → daemon schedules flush (5 sec delay)
+2. User commits code changes → JSONL appears clean
+3. Daemon flush fires → JSONL modified after commit
+4. Result: dirty working tree showing JSONL changes
 
-This keeps your `.beads/issues.jsonl` (committed to git) in sync with your local SQLite database (gitignored).
+## The Solution
 
-## Do You Need These Hooks?
+These git hooks ensure bd changes are always synchronized with your commits:
 
-**Most users don't need hooks anymore!** bd automatically:
-- Exports after CRUD operations (5-second debounce)
-- Imports when JSONL is newer than DB
-
-**Install hooks if you:**
-- Want immediate export (no waiting 5 seconds)
-- Want guaranteed import after every git operation
-- Need extra certainty for team workflows
-- Prefer explicit automation over automatic behavior
+- **pre-commit** - Flushes pending bd changes to JSONL before commit
+- **post-merge** - Imports updated JSONL after git pull/merge
 
 ## Installation
 
 ### Quick Install
 
+From your repository root:
+
 ```bash
-cd /path/to/your/project
 ./examples/git-hooks/install.sh
 ```
 
-The installer will prompt before overwriting existing hooks.
+This will:
+- Copy hooks to `.git/hooks/`
+- Make them executable
+- Back up any existing hooks
 
 ### Manual Install
 
 ```bash
-# Copy hooks to .git/hooks/
-cp examples/git-hooks/pre-commit .git/hooks/
-cp examples/git-hooks/post-merge .git/hooks/
-cp examples/git-hooks/post-checkout .git/hooks/
-
-# Make them executable
-chmod +x .git/hooks/pre-commit
-chmod +x .git/hooks/post-merge
-chmod +x .git/hooks/post-checkout
-```
-
-## Usage
-
-Once installed, the hooks run automatically:
-
-```bash
-# Creating/updating issues
-bd create "New feature" -p 1
-bd update bd-1 --status in_progress
-
-# Committing changes - hook exports automatically
-git add .
-git commit -m "Update feature"
-# 🔗 Exporting beads issues to JSONL...
-# ✓ Beads issues exported and staged
-
-# Pulling changes - hook imports automatically
-git pull
-# 🔗 Importing beads issues from JSONL...
-# ✓ Beads issues imported successfully
-
-# Switching branches - hook imports automatically
-git checkout feature-branch
-# 🔗 Importing beads issues from JSONL...
-# ✓ Beads issues imported successfully
+cp examples/git-hooks/pre-commit .git/hooks/pre-commit
+cp examples/git-hooks/post-merge .git/hooks/post-merge
+chmod +x .git/hooks/pre-commit .git/hooks/post-merge
 ```
 
 ## How It Works
 
-### The Workflow
+### pre-commit
 
-1. You work with bd commands (`create`, `update`, `close`)
-2. Changes are stored in SQLite (`.beads/*.db`) - fast local queries
-3. Before commit, hook exports to JSONL (`.beads/issues.jsonl`) - git-friendly
-4. JSONL is committed to git (source of truth)
-5. After pull/merge/checkout, hook imports JSONL back to SQLite
-6. Your local SQLite cache is now in sync with git
-
-### Why This Design?
-
-**SQLite for speed**:
-- Fast queries (dependency trees, ready work)
-- Rich SQL capabilities
-- Sub-100ms response times
-
-**JSONL for git**:
-- Clean diffs (one issue per line)
-- Mergeable (independent lines)
-- Human-readable
-- AI-resolvable conflicts
-
-Best of both worlds!
-
-## Troubleshooting
-
-### Hook not running
+Before each commit, the hook runs:
 
 ```bash
-# Check if hook is executable
-ls -l .git/hooks/pre-commit
-# Should show -rwxr-xr-x
-
-# Make it executable if needed
-chmod +x .git/hooks/pre-commit
+bd sync --flush-only
 ```
 
-### Export/import fails
+This:
+1. Exports any pending database changes to `.beads/issues.jsonl`
+2. Stages the JSONL file if modified
+3. Allows the commit to proceed with clean state
+
+The hook is silent on success, fast (no git operations), and safe (fails commit if flush fails).
+
+### post-merge
+
+After a git pull or merge, the hook runs:
 
 ```bash
-# Check if bd is in PATH
-which bd
-
-# Check if you're in a beads-initialized directory
-bd list
+bd import -i .beads/issues.jsonl --resolve-collisions
 ```
 
-### Merge conflicts in issues.jsonl
+This ensures your local database reflects the merged state. The hook:
+- Only runs if `.beads/issues.jsonl` exists
+- Automatically resolves ID collisions from branch merges
+- Warns on failure but doesn't block the merge
 
-If you get merge conflicts in `.beads/issues.jsonl`:
+## Compatibility
 
-1. Most conflicts are safe to resolve by keeping both sides
-2. Each line is an independent issue
-3. Look for `<<<<<<< HEAD` markers
-4. Keep all lines that don't conflict
-5. For actual conflicts on the same issue, choose the newest
+- **Auto-sync**: Works alongside bd's automatic 5-second debounce
+- **Direct mode**: Hooks work in both daemon and `--no-daemon` mode
+- **Worktrees**: Safe to use with git worktrees
 
-Example conflict:
+## Benefits
 
-```
-<<<<<<< HEAD
-{"id":"bd-3","title":"Updated title","status":"closed","updated_at":"2025-10-12T10:00:00Z"}
-=======
-{"id":"bd-3","title":"Updated title","status":"in_progress","updated_at":"2025-10-12T09:00:00Z"}
->>>>>>> feature-branch
-```
+✅ No more dirty working tree after commits  
+✅ Database always in sync with git  
+✅ Automatic collision resolution on merge  
+✅ Fast and silent operation  
+✅ Optional - manual `bd sync` still works  
 
-Resolution: Keep the HEAD version (newer timestamp).
+## Uninstall
 
-After resolving:
-```bash
-git add .beads/issues.jsonl
-git commit
-bd import -i .beads/issues.jsonl  # Sync to SQLite
-```
-
-## Uninstalling
+Remove the hooks:
 
 ```bash
-rm .git/hooks/pre-commit
-rm .git/hooks/post-merge
-rm .git/hooks/post-checkout
+rm .git/hooks/pre-commit .git/hooks/post-merge
 ```
 
-## Customization
+Your backed-up hooks (if any) are in `.git/hooks/*.backup-*`.
 
-### Skip hook for one commit
+## Related
 
-```bash
-git commit --no-verify -m "Skip hooks"
-```
-
-### Add to existing hooks
-
-If you already have git hooks, you can append to them:
-
-```bash
-# Append to existing pre-commit
-cat examples/git-hooks/pre-commit >> .git/hooks/pre-commit
-```
-
-### Filter exports
-
-Export only specific issues:
-
-```bash
-# Edit pre-commit hook, change:
-bd export --format=jsonl -o .beads/issues.jsonl
-
-# To:
-bd export --format=jsonl --status=open -o .beads/issues.jsonl
-```
-
-## See Also
-
-- [Git hooks documentation](https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks)
-- [../../TEXT_FORMATS.md](../../TEXT_FORMATS.md) - JSONL merge strategies
-- [../../GIT_WORKFLOW.md](../../GIT_WORKFLOW.md) - Design rationale
+- See [bd-51](../../.beads/bd-51) for the race condition bug report
+- See [AGENTS.md](../../AGENTS.md) for the full git workflow
+- See [examples/](../) for other integrations

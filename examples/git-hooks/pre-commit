@@ -1,33 +1,42 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
-# Beads pre-commit hook
-# Automatically exports SQLite database to JSONL before committing
+# bd (beads) pre-commit hook
 #
-# Install: cp examples/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# This hook ensures that any pending bd issue changes are flushed to
+# .beads/issues.jsonl before the commit is created, preventing the
+# race condition where daemon auto-flush fires after the commit.
+#
+# Installation:
+#   cp examples/git-hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Or use the install script:
+#   examples/git-hooks/install.sh
 
-set -e
-
-# Check if bd is installed
-if ! command -v bd &> /dev/null; then
-    echo "Warning: bd not found in PATH, skipping export"
+# Check if bd is available
+if ! command -v bd >/dev/null 2>&1; then
+    echo "Warning: bd command not found, skipping pre-commit flush" >&2
     exit 0
 fi
 
-# Check if .beads directory exists
-if [[ ! -d .beads ]]; then
-    # No beads database, nothing to do
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
+    # Not a bd workspace, nothing to do
     exit 0
 fi
 
-# Export issues to JSONL
-echo "🔗 Exporting beads issues to JSONL..."
+# Flush pending changes to JSONL
+# Use --flush-only to skip git operations (we're already in a git hook)
+# Suppress output unless there's an error
+if ! bd sync --flush-only >/dev/null 2>&1; then
+    echo "Error: Failed to flush bd changes to JSONL" >&2
+    echo "Run 'bd sync --flush-only' manually to diagnose" >&2
+    exit 1
+fi
 
-if bd export --format=jsonl -o .beads/issues.jsonl 2>/dev/null; then
-    # Add the JSONL file to the commit
-    git add .beads/issues.jsonl
-    echo "✓ Beads issues exported and staged"
-else
-    echo "Warning: bd export failed, continuing anyway"
+# If the JSONL file was modified, stage it
+if [ -f .beads/issues.jsonl ]; then
+    git add .beads/issues.jsonl 2>/dev/null || true
 fi
 
 exit 0

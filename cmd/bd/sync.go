@@ -26,7 +26,9 @@ var syncCmd = &cobra.Command{
 4. Import updated JSONL
 5. Push local commits to remote
 
-This command wraps the entire git-based sync workflow for multi-device use.`,
+This command wraps the entire git-based sync workflow for multi-device use.
+
+Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 
@@ -35,12 +37,26 @@ This command wraps the entire git-based sync workflow for multi-device use.`,
 		noPush, _ := cmd.Flags().GetBool("no-push")
 		noPull, _ := cmd.Flags().GetBool("no-pull")
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
+		flushOnly, _ := cmd.Flags().GetBool("flush-only")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a bd workspace (no .beads directory found)\n")
 			os.Exit(1)
+		}
+
+		// If flush-only mode, just export and exit
+		if flushOnly {
+			if dryRun {
+				fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
+			} else {
+				if err := exportToJSONL(ctx, jsonlPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+					os.Exit(1)
+				}
+			}
+			return
 		}
 
 		// Check if we're in a git repository
@@ -148,6 +164,7 @@ func init() {
 	syncCmd.Flags().Bool("no-push", false, "Skip pushing to remote")
 	syncCmd.Flags().Bool("no-pull", false, "Skip pulling from remote")
 	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
+	syncCmd.Flags().Bool("flush-only", false, "Only export pending changes to JSONL (skip git operations)")
 	rootCmd.AddCommand(syncCmd)
 }
 

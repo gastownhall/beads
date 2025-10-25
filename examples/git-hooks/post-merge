@@ -1,33 +1,41 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
-# Beads post-merge hook
-# Automatically imports JSONL to SQLite database after pulling/merging
+# bd (beads) post-merge hook
 #
-# Install: cp examples/git-hooks/post-merge .git/hooks/post-merge && chmod +x .git/hooks/post-merge
+# This hook imports updated issues from .beads/issues.jsonl after a
+# git pull or merge, ensuring the database stays in sync with git.
+#
+# Installation:
+#   cp examples/git-hooks/post-merge .git/hooks/post-merge
+#   chmod +x .git/hooks/post-merge
+#
+# Or use the install script:
+#   examples/git-hooks/install.sh
 
-set -e
-
-# Check if bd is installed
-if ! command -v bd &> /dev/null; then
-    echo "Warning: bd not found in PATH, skipping import"
+# Check if bd is available
+if ! command -v bd >/dev/null 2>&1; then
+    echo "Warning: bd command not found, skipping post-merge import" >&2
     exit 0
 fi
 
-# Check if issues.jsonl exists
-if [[ ! -f .beads/issues.jsonl ]]; then
-    # No JSONL file, nothing to import
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
+    # Not a bd workspace, nothing to do
     exit 0
 fi
 
-# Import issues from JSONL
-echo "🔗 Importing beads issues from JSONL..."
+# Check if issues.jsonl exists and was updated
+if [ ! -f .beads/issues.jsonl ]; then
+    exit 0
+fi
 
-if bd import -i .beads/issues.jsonl 2>/dev/null; then
-    echo "✓ Beads issues imported successfully"
-else
-    echo "Warning: bd import failed"
-    echo "You may need to resolve conflicts manually"
-    exit 1
+# Import the updated JSONL
+# The auto-import feature should handle this, but we force it here
+# to ensure immediate sync after merge
+if ! bd import -i .beads/issues.jsonl --resolve-collisions >/dev/null 2>&1; then
+    echo "Warning: Failed to import bd changes after merge" >&2
+    echo "Run 'bd import -i .beads/issues.jsonl --resolve-collisions' manually" >&2
+    # Don't fail the merge, just warn
 fi
 
 exit 0

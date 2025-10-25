@@ -344,7 +344,24 @@ git pull  # bd commands will auto-import the updated JSONL
 bd ready  # Fresh data from git!
 ```
 
-**Optional**: Use the git hooks in `examples/git-hooks/` for immediate export (no 5-second wait) and guaranteed import after git operations. Not required with auto-sync enabled.
+**Recommended**: Install git hooks to eliminate the race condition between auto-flush and commits:
+
+```bash
+# One-time setup
+./examples/git-hooks/install.sh
+```
+
+This installs:
+- **pre-commit** - Flushes pending changes immediately before commit (eliminates 5-second wait)
+- **post-merge** - Imports updated JSONL after pull/merge (guaranteed sync)
+
+Benefits:
+- ✅ No more dirty working tree after commits
+- ✅ Immediate flush (no 5-second debounce wait)
+- ✅ Automatic collision resolution on merge
+- ✅ Works alongside auto-sync
+
+See [examples/git-hooks/README.md](examples/git-hooks/README.md) for details.
 
 ### Git Worktrees
 

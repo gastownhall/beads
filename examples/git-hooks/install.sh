@@ -1,83 +1,64 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
-# Install Beads git hooks
+# Install bd git hooks
 #
-# This script copies the hooks to .git/hooks/ and makes them executable
+# This script copies the bd git hooks to your .git/hooks directory
+# and makes them executable.
+#
+# Usage:
+#   ./examples/git-hooks/install.sh
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOKS_DIR="$(git rev-parse --git-dir)/hooks"
-
 # Check if we're in a git repository
-if ! git rev-parse --git-dir &> /dev/null; then
-    echo "Error: Not in a git repository"
+if [ ! -d .git ]; then
+    echo "Error: Not in a git repository root" >&2
+    echo "Run this script from the root of your git repository" >&2
     exit 1
 fi
 
-echo "Installing Beads git hooks to $HOOKS_DIR"
-echo ""
-
-# Install pre-commit hook
-if [[ -f "$HOOKS_DIR/pre-commit" ]]; then
-    echo "⚠ $HOOKS_DIR/pre-commit already exists"
-    read -p "Overwrite? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Skipping pre-commit"
-    else
-        cp "$SCRIPT_DIR/pre-commit" "$HOOKS_DIR/pre-commit"
-        chmod +x "$HOOKS_DIR/pre-commit"
-        echo "✓ Installed pre-commit hook"
-    fi
-else
-    cp "$SCRIPT_DIR/pre-commit" "$HOOKS_DIR/pre-commit"
-    chmod +x "$HOOKS_DIR/pre-commit"
-    echo "✓ Installed pre-commit hook"
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
+    echo "Error: Not in a bd workspace" >&2
+    echo "Run 'bd init' first" >&2
+    exit 1
 fi
 
-# Install post-merge hook
-if [[ -f "$HOOKS_DIR/post-merge" ]]; then
-    echo "⚠ $HOOKS_DIR/post-merge already exists"
-    read -p "Overwrite? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Skipping post-merge"
-    else
-        cp "$SCRIPT_DIR/post-merge" "$HOOKS_DIR/post-merge"
-        chmod +x "$HOOKS_DIR/post-merge"
-        echo "✓ Installed post-merge hook"
-    fi
-else
-    cp "$SCRIPT_DIR/post-merge" "$HOOKS_DIR/post-merge"
-    chmod +x "$HOOKS_DIR/post-merge"
-    echo "✓ Installed post-merge hook"
-fi
+# Find the script directory (handles being called from anywhere)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Install post-checkout hook
-if [[ -f "$HOOKS_DIR/post-checkout" ]]; then
-    echo "⚠ $HOOKS_DIR/post-checkout already exists"
-    read -p "Overwrite? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Skipping post-checkout"
-    else
-        cp "$SCRIPT_DIR/post-checkout" "$HOOKS_DIR/post-checkout"
-        chmod +x "$HOOKS_DIR/post-checkout"
-        echo "✓ Installed post-checkout hook"
+# Hooks to install
+HOOKS="pre-commit post-merge"
+
+echo "Installing bd git hooks..."
+
+for hook in $HOOKS; do
+    src="$SCRIPT_DIR/$hook"
+    dst=".git/hooks/$hook"
+    
+    if [ ! -f "$src" ]; then
+        echo "Warning: Hook $hook not found at $src" >&2
+        continue
     fi
-else
-    cp "$SCRIPT_DIR/post-checkout" "$HOOKS_DIR/post-checkout"
-    chmod +x "$HOOKS_DIR/post-checkout"
-    echo "✓ Installed post-checkout hook"
-fi
+    
+    # Backup existing hook if present
+    if [ -f "$dst" ]; then
+        backup="$dst.backup-$(date +%Y%m%d-%H%M%S)"
+        echo "  Backing up existing $hook to $backup"
+        mv "$dst" "$backup"
+    fi
+    
+    # Copy and make executable
+    cp "$src" "$dst"
+    chmod +x "$dst"
+    echo "  Installed $hook"
+done
 
 echo ""
-echo "✓ Beads git hooks installed successfully!"
+echo "✓ Git hooks installed successfully"
 echo ""
-echo "These hooks will:"
-echo "  • Export issues to JSONL before every commit"
-echo "  • Import issues from JSONL after merges"
-echo "  • Import issues from JSONL after branch checkouts"
+echo "Hooks installed:"
+echo "  pre-commit  - Flushes pending bd changes to JSONL before commit"
+echo "  post-merge  - Imports updated JSONL after git pull/merge"
 echo ""
-echo "To uninstall, simply delete the hooks from $HOOKS_DIR"
+echo "To uninstall, remove .git/hooks/pre-commit and .git/hooks/post-merge"
