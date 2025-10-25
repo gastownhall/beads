@@ -623,110 +623,119 @@ func isDaemonRunningQuiet(pidFile string) bool {
 // tryAutoStartDaemon attempts to start the daemon in the background
 // Returns true if daemon was started successfully and socket is ready
 func tryAutoStartDaemon(socketPath string) bool {
-	// Check if we've failed recently (exponential backoff)
 	if !canRetryDaemonStart() {
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: skipping auto-start due to recent failures\n")
-		}
+		debugLog("skipping auto-start due to recent failures")
 		return false
 	}
 
-	// Fast path: check if daemon is already healthy
-	client, err := rpc.TryConnect(socketPath)
-	if err == nil && client != nil {
-		_ = client.Close()
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: daemon already running and healthy\n")
-		}
+	if isDaemonHealthy(socketPath) {
+		debugLog("daemon already running and healthy")
 		return true
 	}
 
-	// Use lockfile to prevent multiple processes from starting daemon simultaneously
 	lockPath := socketPath + ".startlock"
+	if !acquireStartLock(lockPath, socketPath) {
+		return false
+	}
+	defer os.Remove(lockPath)
+
+	if handleExistingSocket(socketPath) {
+		return true
+	}
+
+	socketPath, isGlobal := determineSocketMode(socketPath)
+	return startDaemonProcess(socketPath, isGlobal)
+}
+
+func debugLog(msg string, args ...interface{}) {
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: "+msg+"\n", args...)
+	}
+}
+
+func isDaemonHealthy(socketPath string) bool {
+	client, err := rpc.TryConnect(socketPath)
+	if err == nil && client != nil {
+		_ = client.Close()
+		return true
+	}
+	return false
+}
+
+func acquireStartLock(lockPath, socketPath string) bool {
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		// Someone else is starting daemon, wait for socket readiness
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: another process is starting daemon, waiting for readiness\n")
-		}
+		debugLog("another process is starting daemon, waiting for readiness")
 		if waitForSocketReadiness(socketPath, 5*time.Second) {
 			return true
 		}
+		return handleStaleLock(lockPath, socketPath)
+	}
 
-		// Socket still not ready - check if lock is stale
-		if lockPID, err := readPIDFromFile(lockPath); err == nil {
-			if !isPIDAlive(lockPID) {
-				if os.Getenv("BD_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
-				}
-				_ = os.Remove(lockPath)
-				// Retry once
-				return tryAutoStartDaemon(socketPath)
-			}
-		}
+	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	_ = lockFile.Close()
+	return true
+}
+
+func handleStaleLock(lockPath, socketPath string) bool {
+	lockPID, err := readPIDFromFile(lockPath)
+	if err == nil && !isPIDAlive(lockPID) {
+		debugLog("lock is stale (PID %d dead), removing and retrying", lockPID)
+		_ = os.Remove(lockPath)
+		return tryAutoStartDaemon(socketPath)
+	}
+	return false
+}
+
+func handleExistingSocket(socketPath string) bool {
+	if _, err := os.Stat(socketPath); err != nil {
 		return false
 	}
 
-	// Write our PID to lockfile
-	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-	_ = lockFile.Close()
-	defer func() { _ = os.Remove(lockPath) }()
+	if canDialSocket(socketPath, 200*time.Millisecond) {
+		debugLog("daemon started by another process")
+		return true
+	}
 
-	// Under lock: check for stale socket and clean up if necessary
-	if _, err := os.Stat(socketPath); err == nil {
-		// Socket exists - check if it's truly stale by trying a quick connect
-		if canDialSocket(socketPath, 200*time.Millisecond) {
-			// Another daemon is running - it must have started between our check and lock acquisition
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: daemon started by another process\n")
-			}
-			return true
-		}
-
-		// Socket exists but not responding - check if PID is alive before removing
-		pidFile := getPIDFileForSocket(socketPath)
-		if pidFile != "" {
-			if pid, err := readPIDFromFile(pidFile); err == nil && isPIDAlive(pid) {
-				// Daemon process is alive but socket not responding - wait for it
-				if os.Getenv("BD_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "Debug: daemon PID %d alive, waiting for socket\n", pid)
-				}
-				return waitForSocketReadiness(socketPath, 5*time.Second)
-			}
-		}
-
-		// Socket is stale (connect failed and PID dead/missing) - safe to remove
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
-		}
-		_ = os.Remove(socketPath)
-		if pidFile != "" {
-			_ = os.Remove(pidFile)
+	pidFile := getPIDFileForSocket(socketPath)
+	if pidFile != "" {
+		if pid, err := readPIDFromFile(pidFile); err == nil && isPIDAlive(pid) {
+			debugLog("daemon PID %d alive, waiting for socket", pid)
+			return waitForSocketReadiness(socketPath, 5*time.Second)
 		}
 	}
 
-	// Determine if we should start global or local daemon
-	// If requesting local socket, check if we should suggest global instead
-	isGlobal := false
-	if home, err := os.UserHomeDir(); err == nil {
-		globalSocket := filepath.Join(home, ".beads", "bd.sock")
-		if socketPath == globalSocket {
-			isGlobal = true
-		} else if shouldUseGlobalDaemon() {
-			// User has multiple repos, but requested local daemon
-			// Auto-start global daemon instead and log suggestion
-			isGlobal = true
-			socketPath = globalSocket
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: detected multiple repos, auto-starting global daemon\n")
-			}
-		}
+	debugLog("socket is stale, cleaning up")
+	_ = os.Remove(socketPath)
+	if pidFile != "" {
+		_ = os.Remove(pidFile)
+	}
+	return false
+}
+
+func determineSocketMode(socketPath string) (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return socketPath, false
 	}
 
-	// Build daemon command using absolute path for security
+	globalSocket := filepath.Join(home, ".beads", "bd.sock")
+	if socketPath == globalSocket {
+		return socketPath, true
+	}
+
+	if shouldUseGlobalDaemon() {
+		debugLog("detected multiple repos, auto-starting global daemon")
+		return globalSocket, true
+	}
+
+	return socketPath, false
+}
+
+func startDaemonProcess(socketPath string, isGlobal bool) bool {
 	binPath, err := os.Executable()
 	if err != nil {
-		binPath = os.Args[0] // Fallback
+		binPath = os.Args[0]
 	}
 
 	args := []string{"daemon"}
@@ -734,47 +743,43 @@ func tryAutoStartDaemon(socketPath string) bool {
 		args = append(args, "--global")
 	}
 
-	// Start daemon in background with proper I/O redirection
 	cmd := exec.Command(binPath, args...)
+	setupDaemonIO(cmd)
 
-	// Redirect stdio to /dev/null to prevent daemon output in foreground
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err == nil {
-		cmd.Stdout = devNull
-		cmd.Stderr = devNull
-		cmd.Stdin = devNull
-		defer devNull.Close()
-	}
-
-	// Set working directory to database directory for local daemon
 	if !isGlobal && dbPath != "" {
 		cmd.Dir = filepath.Dir(dbPath)
 	}
 
-	// Detach from parent process
 	configureDaemonProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		recordDaemonStartFailure()
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: failed to start daemon: %v\n", err)
-		}
+		debugLog("failed to start daemon: %v", err)
 		return false
 	}
 
-	// Reap the process to avoid zombies
 	go func() { _ = cmd.Wait() }()
 
-	// Wait for socket to be ready with actual connection test
 	if waitForSocketReadiness(socketPath, 5*time.Second) {
 		recordDaemonStartSuccess()
 		return true
 	}
 
 	recordDaemonStartFailure()
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: daemon socket not ready after 5 seconds\n")
-	}
+	debugLog("daemon socket not ready after 5 seconds")
 	return false
+}
+
+func setupDaemonIO(cmd *exec.Cmd) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		cmd.Stdin = devNull
+		go func() {
+			time.Sleep(1 * time.Second)
+			devNull.Close()
+		}()
+	}
 }
 
 // getPIDFileForSocket returns the PID file path for a given socket path
