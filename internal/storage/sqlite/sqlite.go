@@ -1474,196 +1474,210 @@ func (s *SQLiteStorage) DeleteIssues(ctx context.Context, ids []string, cascade 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	idSet := buildIDSet(ids)
 	result := &DeleteIssuesResult{}
 
-	// Build ID set for efficient lookup
+	expandedIDs, err := s.resolveDeleteSet(ctx, tx, ids, idSet, cascade, force, result)
+	if err != nil {
+		return nil, err
+	}
+
+	inClause, args := buildSQLInClause(expandedIDs)
+	if err := s.populateDeleteStats(ctx, tx, inClause, args, result); err != nil {
+		return nil, err
+	}
+
+	if dryRun {
+		return result, nil
+	}
+
+	if err := s.executeDelete(ctx, tx, inClause, args, result); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	if err := s.SyncAllCounters(ctx); err != nil {
+		return nil, fmt.Errorf("failed to sync counters after deletion: %w", err)
+	}
+
+	return result, nil
+}
+
+func buildIDSet(ids []string) map[string]bool {
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
 	}
+	return idSet
+}
 
-	// If cascade mode, find all dependent issues recursively
+func (s *SQLiteStorage) resolveDeleteSet(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, cascade bool, force bool, result *DeleteIssuesResult) ([]string, error) {
 	if cascade {
-		allToDelete, err := s.findAllDependentsRecursive(ctx, tx, ids)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find dependents: %w", err)
+		return s.expandWithDependents(ctx, tx, ids, idSet)
+	}
+	if !force {
+		return ids, s.validateNoDependents(ctx, tx, ids, idSet, result)
+	}
+	return ids, s.trackOrphanedIssues(ctx, tx, ids, idSet, result)
+}
+
+func (s *SQLiteStorage) expandWithDependents(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool) ([]string, error) {
+	allToDelete, err := s.findAllDependentsRecursive(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find dependents: %w", err)
+	}
+	expandedIDs := make([]string, 0, len(allToDelete))
+	for id := range allToDelete {
+		expandedIDs = append(expandedIDs, id)
+	}
+	return expandedIDs, nil
+}
+
+func (s *SQLiteStorage) validateNoDependents(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	for _, id := range ids {
+		if err := s.checkSingleIssueValidation(ctx, tx, id, idSet, result); err != nil {
+			return err
 		}
-		// Update ids to include all dependents
-		for id := range allToDelete {
-			idSet[id] = true
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) checkSingleIssueValidation(ctx context.Context, tx *sql.Tx, id string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	var depCount int
+	err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE depends_on_id = ?`, id).Scan(&depCount)
+	if err != nil {
+		return fmt.Errorf("failed to check dependents for %s: %w", id, err)
+	}
+	if depCount == 0 {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
+	}
+	defer rows.Close()
+
+	hasExternal := false
+	for rows.Next() {
+		var depID string
+		if err := rows.Scan(&depID); err != nil {
+			return fmt.Errorf("failed to scan dependent: %w", err)
 		}
-		ids = make([]string, 0, len(idSet))
-		for id := range idSet {
-			ids = append(ids, id)
-		}
-	} else if !force {
-		// Check if any issue has dependents not in the deletion set
-		for _, id := range ids {
-			var depCount int
-			err := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM dependencies WHERE depends_on_id = ?`, id).Scan(&depCount)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check dependents for %s: %w", id, err)
-			}
-			if depCount > 0 {
-				// Check if all dependents are in deletion set
-				rows, err := tx.QueryContext(ctx,
-					`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get dependents for %s: %w", id, err)
-				}
-				hasExternalDependents := false
-				for rows.Next() {
-					var depID string
-					if err := rows.Scan(&depID); err != nil {
-						_ = rows.Close()
-						return nil, fmt.Errorf("failed to scan dependent: %w", err)
-					}
-					if !idSet[depID] {
-						hasExternalDependents = true
-						result.OrphanedIssues = append(result.OrphanedIssues, depID)
-					}
-				}
-				_ = rows.Close()
-				if hasExternalDependents {
-					return nil, fmt.Errorf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", id)
-				}
-			}
-		}
-	} else {
-		// Force mode: track orphaned issues (deduplicate)
-		orphanSet := make(map[string]bool)
-		for _, id := range ids {
-			rows, err := tx.QueryContext(ctx,
-				`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get dependents for %s: %w", id, err)
-			}
-			for rows.Next() {
-				var depID string
-				if err := rows.Scan(&depID); err != nil {
-					_ = rows.Close()
-					return nil, fmt.Errorf("failed to scan dependent: %w", err)
-				}
-				if !idSet[depID] {
-					orphanSet[depID] = true
-				}
-			}
-			if err := rows.Err(); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("failed to iterate dependents: %w", err)
-			}
-			_ = rows.Close()
-		}
-		// Convert set to slice
-		for orphanID := range orphanSet {
-			result.OrphanedIssues = append(result.OrphanedIssues, orphanID)
+		if !idSet[depID] {
+			hasExternal = true
+			result.OrphanedIssues = append(result.OrphanedIssues, depID)
 		}
 	}
 
-	// Build placeholders for SQL IN clause
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate dependents for %s: %w", id, err)
+	}
+
+	if hasExternal {
+		return fmt.Errorf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", id)
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) trackOrphanedIssues(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	orphanSet := make(map[string]bool)
+	for _, id := range ids {
+		if err := s.collectOrphansForID(ctx, tx, id, idSet, orphanSet); err != nil {
+			return err
+		}
+	}
+	for orphanID := range orphanSet {
+		result.OrphanedIssues = append(result.OrphanedIssues, orphanID)
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) collectOrphansForID(ctx context.Context, tx *sql.Tx, id string, idSet map[string]bool, orphanSet map[string]bool) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var depID string
+		if err := rows.Scan(&depID); err != nil {
+			return fmt.Errorf("failed to scan dependent: %w", err)
+		}
+		if !idSet[depID] {
+			orphanSet[depID] = true
+		}
+	}
+	return rows.Err()
+}
+
+func buildSQLInClause(ids []string) (string, []interface{}) {
 	placeholders := make([]string, len(ids))
 	args := make([]interface{}, len(ids))
 	for i, id := range ids {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	inClause := strings.Join(placeholders, ",")
+	return strings.Join(placeholders, ","), args
+}
 
-	// Count dependencies
-	var depCount int
-	err = tx.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`,
-			inClause, inClause),
-		append(args, args...)...).Scan(&depCount)
-	if err != nil {
-		return nil, fmt.Errorf("failed to count dependencies: %w", err)
-	}
-	result.DependenciesCount = depCount
-
-	// Count labels
-	var labelCount int
-	err = tx.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM labels WHERE issue_id IN (%s)`, inClause),
-		args...).Scan(&labelCount)
-	if err != nil {
-		return nil, fmt.Errorf("failed to count labels: %w", err)
-	}
-	result.LabelsCount = labelCount
-
-	// Count events
-	var eventCount int
-	err = tx.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM events WHERE issue_id IN (%s)`, inClause),
-		args...).Scan(&eventCount)
-	if err != nil {
-		return nil, fmt.Errorf("failed to count events: %w", err)
-	}
-	result.EventsCount = eventCount
-	result.DeletedCount = len(ids)
-
-	// If dry-run, return statistics without deleting
-	if dryRun {
-		return result, nil
+func (s *SQLiteStorage) populateDeleteStats(ctx context.Context, tx *sql.Tx, inClause string, args []interface{}, result *DeleteIssuesResult) error {
+	counts := []struct {
+		query string
+		dest  *int
+	}{
+		{fmt.Sprintf(`SELECT COUNT(*) FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`, inClause, inClause), &result.DependenciesCount},
+		{fmt.Sprintf(`SELECT COUNT(*) FROM labels WHERE issue_id IN (%s)`, inClause), &result.LabelsCount},
+		{fmt.Sprintf(`SELECT COUNT(*) FROM events WHERE issue_id IN (%s)`, inClause), &result.EventsCount},
 	}
 
-	// Delete dependencies
-	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`,
-			inClause, inClause),
-		append(args, args...)...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete dependencies: %w", err)
+	for _, c := range counts {
+		queryArgs := args
+		if c.dest == &result.DependenciesCount {
+			queryArgs = append(args, args...)
+		}
+		if err := tx.QueryRowContext(ctx, c.query, queryArgs...).Scan(c.dest); err != nil {
+			return fmt.Errorf("failed to count: %w", err)
+		}
 	}
 
-	// Delete labels
-	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM labels WHERE issue_id IN (%s)`, inClause),
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete labels: %w", err)
+	result.DeletedCount = len(args)
+	return nil
+}
+
+func (s *SQLiteStorage) executeDelete(ctx context.Context, tx *sql.Tx, inClause string, args []interface{}, result *DeleteIssuesResult) error {
+	deletes := []struct {
+		query string
+		args  []interface{}
+	}{
+		{fmt.Sprintf(`DELETE FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`, inClause, inClause), append(args, args...)},
+		{fmt.Sprintf(`DELETE FROM labels WHERE issue_id IN (%s)`, inClause), args},
+		{fmt.Sprintf(`DELETE FROM events WHERE issue_id IN (%s)`, inClause), args},
+		{fmt.Sprintf(`DELETE FROM dirty_issues WHERE issue_id IN (%s)`, inClause), args},
+		{fmt.Sprintf(`DELETE FROM issues WHERE id IN (%s)`, inClause), args},
 	}
 
-	// Delete events
-	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM events WHERE issue_id IN (%s)`, inClause),
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete events: %w", err)
+	for i, d := range deletes {
+		execResult, err := tx.ExecContext(ctx, d.query, d.args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete: %w", err)
+		}
+		if i == len(deletes)-1 {
+			rowsAffected, err := execResult.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("failed to check rows affected: %w", err)
+			}
+			result.DeletedCount = int(rowsAffected)
+		}
 	}
-
-	// Delete from dirty_issues
-	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM dirty_issues WHERE issue_id IN (%s)`, inClause),
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete dirty markers: %w", err)
-	}
-
-	// Delete the issues themselves
-	deleteResult, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM issues WHERE id IN (%s)`, inClause),
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete issues: %w", err)
-	}
-
-	rowsAffected, err := deleteResult.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("failed to check rows affected: %w", err)
-	}
-	result.DeletedCount = int(rowsAffected)
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	// Sync counters after deletion to keep them accurate
-	if err := s.SyncAllCounters(ctx); err != nil {
-		return nil, fmt.Errorf("failed to sync counters after deletion: %w", err)
-	}
-
-	return result, nil
+	return nil
 }
 
 // findAllDependentsRecursive finds all issues that depend on the given issues, recursively
