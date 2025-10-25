@@ -350,7 +350,7 @@ Check out the **[examples/](examples/)** directory for:
 
 For advanced usage, see:
 
-- **[ADVANCED.md](ADVANCED.md)** - Prefix renaming, merging duplicates, global daemon, multi-repo commands
+- **[ADVANCED.md](ADVANCED.md)** - Prefix renaming, merging duplicates, daemon configuration
 - **[CONFIG.md](CONFIG.md)** - Configuration system for integrations
 - **[EXTENDING.md](EXTENDING.md)** - Database extension patterns
 - **[TEXT_FORMATS.md](TEXT_FORMATS.md)** - JSONL format and merge strategies

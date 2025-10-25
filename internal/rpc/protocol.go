@@ -2,8 +2,6 @@ package rpc
 
 import (
 	"encoding/json"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // Operation constants for all bd commands
@@ -26,10 +24,7 @@ const (
 	OpCommentList     = "comment_list"
 	OpCommentAdd      = "comment_add"
 	OpBatch           = "batch"
-	OpReposList       = "repos_list"
-	OpReposReady      = "repos_ready"
-	OpReposStats      = "repos_stats"
-	OpReposClearCache = "repos_clear_cache"
+
 	OpCompact         = "compact"
 	OpCompactStats    = "compact_stats"
 	OpExport          = "export"
@@ -207,41 +202,6 @@ type BatchResult struct {
 	Success bool            `json:"success"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Error   string          `json:"error,omitempty"`
-}
-
-// ReposReadyArgs represents arguments for repos ready operation
-type ReposReadyArgs struct {
-	Assignee    string `json:"assignee,omitempty"`
-	Priority    *int   `json:"priority,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
-	GroupByRepo bool   `json:"group_by_repo,omitempty"`
-}
-
-// RepoInfo represents information about a cached repository
-type RepoInfo struct {
-	Path       string `json:"path"`
-	Prefix     string `json:"prefix"`
-	IssueCount int    `json:"issue_count"`
-	LastAccess string `json:"last_access"`
-}
-
-// RepoReadyWork represents ready work for a single repository
-type RepoReadyWork struct {
-	RepoPath string         `json:"repo_path"`
-	Issues   []*types.Issue `json:"issues"`
-}
-
-// ReposReadyIssue represents an issue with repo context
-type ReposReadyIssue struct {
-	RepoPath string       `json:"repo_path"`
-	Issue    *types.Issue `json:"issue"`
-}
-
-// ReposStatsResponse contains combined statistics across repos
-type ReposStatsResponse struct {
-	Total   types.Statistics            `json:"total"`
-	PerRepo map[string]types.Statistics `json:"per_repo"`
-	Errors  map[string]string           `json:"errors,omitempty"`
 }
 
 // CompactArgs represents arguments for the compact operation
