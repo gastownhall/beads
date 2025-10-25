@@ -10,6 +10,147 @@ import (
 	"github.com/steveyegge/beads"
 )
 
+// integrationTestHelper provides common test setup and assertion methods
+type integrationTestHelper struct {
+	t     *testing.T
+	ctx   context.Context
+	store beads.Storage
+}
+
+func newIntegrationHelper(t *testing.T, store beads.Storage) *integrationTestHelper {
+	return &integrationTestHelper{t: t, ctx: context.Background(), store: store}
+}
+
+func (h *integrationTestHelper) createIssue(title string, issueType beads.IssueType, priority int) *beads.Issue {
+	issue := &beads.Issue{
+		Title:     title,
+		Status:    beads.StatusOpen,
+		Priority:  priority,
+		IssueType: issueType,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := h.store.CreateIssue(h.ctx, issue, "test-actor"); err != nil {
+		h.t.Fatalf("CreateIssue failed: %v", err)
+	}
+	return issue
+}
+
+func (h *integrationTestHelper) createFullIssue(desc, design, acceptance, notes, assignee string) *beads.Issue {
+	issue := &beads.Issue{
+		Title:              "Complete issue",
+		Description:        desc,
+		Design:             design,
+		AcceptanceCriteria: acceptance,
+		Notes:              notes,
+		Status:             beads.StatusOpen,
+		Priority:           1,
+		IssueType:          beads.TypeFeature,
+		Assignee:           assignee,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+	}
+	if err := h.store.CreateIssue(h.ctx, issue, "test-actor"); err != nil {
+		h.t.Fatalf("CreateIssue failed: %v", err)
+	}
+	return issue
+}
+
+func (h *integrationTestHelper) updateIssue(id string, updates map[string]interface{}) {
+	if err := h.store.UpdateIssue(h.ctx, id, updates, "test-actor"); err != nil {
+		h.t.Fatalf("UpdateIssue failed: %v", err)
+	}
+}
+
+func (h *integrationTestHelper) closeIssue(id string, reason string) {
+	if err := h.store.CloseIssue(h.ctx, id, reason, "test-actor"); err != nil {
+		h.t.Fatalf("CloseIssue failed: %v", err)
+	}
+}
+
+func (h *integrationTestHelper) addDependency(issue1ID, issue2ID string) {
+	dep := &beads.Dependency{
+		IssueID:     issue1ID,
+		DependsOnID: issue2ID,
+		Type:        beads.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test-actor",
+	}
+	if err := h.store.AddDependency(h.ctx, dep, "test-actor"); err != nil {
+		h.t.Fatalf("AddDependency failed: %v", err)
+	}
+}
+
+func (h *integrationTestHelper) addLabel(id, label string) {
+	if err := h.store.AddLabel(h.ctx, id, label, "test-actor"); err != nil {
+		h.t.Fatalf("AddLabel failed: %v", err)
+	}
+}
+
+func (h *integrationTestHelper) addComment(id, user, text string) *beads.Comment {
+	comment, err := h.store.AddIssueComment(h.ctx, id, user, text)
+	if err != nil {
+		h.t.Fatalf("AddIssueComment failed: %v", err)
+	}
+	return comment
+}
+
+func (h *integrationTestHelper) getIssue(id string) *beads.Issue {
+	issue, err := h.store.GetIssue(h.ctx, id)
+	if err != nil {
+		h.t.Fatalf("GetIssue failed: %v", err)
+	}
+	return issue
+}
+
+func (h *integrationTestHelper) getDependencies(id string) []*beads.Issue {
+	deps, err := h.store.GetDependencies(h.ctx, id)
+	if err != nil {
+		h.t.Fatalf("GetDependencies failed: %v", err)
+	}
+	return deps
+}
+
+func (h *integrationTestHelper) getLabels(id string) []string {
+	labels, err := h.store.GetLabels(h.ctx, id)
+	if err != nil {
+		h.t.Fatalf("GetLabels failed: %v", err)
+	}
+	return labels
+}
+
+func (h *integrationTestHelper) getComments(id string) []*beads.Comment {
+	comments, err := h.store.GetIssueComments(h.ctx, id)
+	if err != nil {
+		h.t.Fatalf("GetIssueComments failed: %v", err)
+	}
+	return comments
+}
+
+func (h *integrationTestHelper) assertID(id string) {
+	if id == "" {
+		h.t.Error("Issue ID should be auto-generated")
+	}
+}
+
+func (h *integrationTestHelper) assertEqual(expected, actual interface{}, field string) {
+	if expected != actual {
+		h.t.Errorf("Expected %s %v, got %v", field, expected, actual)
+	}
+}
+
+func (h *integrationTestHelper) assertNotNil(value interface{}, field string) {
+	if value == nil {
+		h.t.Errorf("Expected %s to be set", field)
+	}
+}
+
+func (h *integrationTestHelper) assertCount(count, expected int, item string) {
+	if count != expected {
+		h.t.Fatalf("Expected %d %s, got %d", expected, item, count)
+	}
+}
+
 // TestLibraryIntegration tests the full public API that external users will use
 func TestLibraryIntegration(t *testing.T) {
 	// Setup: Create a temporary database
@@ -26,268 +167,96 @@ func TestLibraryIntegration(t *testing.T) {
 	}
 	defer store.Close()
 
-	ctx := context.Background()
+	h := newIntegrationHelper(t, store)
 
 	// Test 1: Create issue
 	t.Run("CreateIssue", func(t *testing.T) {
-		issue := &beads.Issue{
-			Title:       "Test task",
-			Description: "Integration test",
-			Status:      beads.StatusOpen,
-			Priority:    2,
-			IssueType:   beads.TypeTask,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
-		}
-
-		err := store.CreateIssue(ctx, issue, "test-actor")
-		if err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
-		}
-
-		if issue.ID == "" {
-			t.Error("Issue ID should be auto-generated")
-		}
-
+		issue := h.createIssue("Test task", beads.TypeTask, 2)
+		h.assertID(issue.ID)
 		t.Logf("Created issue: %s", issue.ID)
 	})
 
 	// Test 2: Get issue
 	t.Run("GetIssue", func(t *testing.T) {
-		// Create an issue first
-		issue := &beads.Issue{
-			Title:     "Get test",
-			Status:    beads.StatusOpen,
-			Priority:  1,
-			IssueType: beads.TypeBug,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
-		}
-
-		// Get it back
-		retrieved, err := store.GetIssue(ctx, issue.ID)
-		if err != nil {
-			t.Fatalf("GetIssue failed: %v", err)
-		}
-
-		if retrieved.Title != issue.Title {
-			t.Errorf("Expected title %q, got %q", issue.Title, retrieved.Title)
-		}
-		if retrieved.IssueType != beads.TypeBug {
-			t.Errorf("Expected type bug, got %v", retrieved.IssueType)
-		}
+		issue := h.createIssue("Get test", beads.TypeBug, 1)
+		retrieved := h.getIssue(issue.ID)
+		h.assertEqual(issue.Title, retrieved.Title, "title")
+		h.assertEqual(beads.TypeBug, retrieved.IssueType, "type")
 	})
 
 	// Test 3: Update issue
 	t.Run("UpdateIssue", func(t *testing.T) {
-		issue := &beads.Issue{
-			Title:     "Update test",
-			Status:    beads.StatusOpen,
-			Priority:  2,
-			IssueType: beads.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
-		}
-
-		// Update status
-		updates := map[string]interface{}{
-			"status":   beads.StatusInProgress,
-			"assignee": "test-user",
-		}
-
-		err := store.UpdateIssue(ctx, issue.ID, updates, "test-actor")
-		if err != nil {
-			t.Fatalf("UpdateIssue failed: %v", err)
-		}
-
-		// Verify update
-		updated, _ := store.GetIssue(ctx, issue.ID)
-		if updated.Status != beads.StatusInProgress {
-			t.Errorf("Expected status in_progress, got %v", updated.Status)
-		}
-		if updated.Assignee != "test-user" {
-			t.Errorf("Expected assignee test-user, got %q", updated.Assignee)
-		}
+		issue := h.createIssue("Update test", beads.TypeTask, 2)
+		updates := map[string]interface{}{"status": beads.StatusInProgress, "assignee": "test-user"}
+		h.updateIssue(issue.ID, updates)
+		updated := h.getIssue(issue.ID)
+		h.assertEqual(beads.StatusInProgress, updated.Status, "status")
+		h.assertEqual("test-user", updated.Assignee, "assignee")
 	})
 
 	// Test 4: Add dependency
 	t.Run("AddDependency", func(t *testing.T) {
-		issue1 := &beads.Issue{
-			Title:     "Parent task",
-			Status:    beads.StatusOpen,
-			Priority:  1,
-			IssueType: beads.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		issue2 := &beads.Issue{
-			Title:     "Child task",
-			Status:    beads.StatusOpen,
-			Priority:  1,
-			IssueType: beads.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-
-		if err := store.CreateIssue(ctx, issue1, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
-		}
-		if err := store.CreateIssue(ctx, issue2, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
-		}
-
-		// Add dependency: issue2 blocks issue1
-		dep := &beads.Dependency{
-			IssueID:     issue1.ID,
-			DependsOnID: issue2.ID,
-			Type:        beads.DepBlocks,
-			CreatedAt:   time.Now(),
-			CreatedBy:   "test-actor",
-		}
-
-		err := store.AddDependency(ctx, dep, "test-actor")
-		if err != nil {
-			t.Fatalf("AddDependency failed: %v", err)
-		}
-
-		// Verify dependency
-		deps, _ := store.GetDependencies(ctx, issue1.ID)
-		if len(deps) != 1 {
-			t.Fatalf("Expected 1 dependency, got %d", len(deps))
-		}
-		if deps[0].ID != issue2.ID {
-			t.Errorf("Expected dependency on %s, got %s", issue2.ID, deps[0].ID)
-		}
+		issue1 := h.createIssue("Parent task", beads.TypeTask, 1)
+		issue2 := h.createIssue("Child task", beads.TypeTask, 1)
+		h.addDependency(issue1.ID, issue2.ID)
+		deps := h.getDependencies(issue1.ID)
+		h.assertCount(len(deps), 1, "dependencies")
+		h.assertEqual(issue2.ID, deps[0].ID, "dependency ID")
 	})
 
 	// Test 5: Add label
 	t.Run("AddLabel", func(t *testing.T) {
-		issue := &beads.Issue{
-			Title:     "Label test",
-			Status:    beads.StatusOpen,
-			Priority:  2,
-			IssueType: beads.TypeFeature,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		store.CreateIssue(ctx, issue, "test-actor")
-
-		err := store.AddLabel(ctx, issue.ID, "urgent", "test-actor")
-		if err != nil {
-			t.Fatalf("AddLabel failed: %v", err)
-		}
-
-		labels, _ := store.GetLabels(ctx, issue.ID)
-		if len(labels) != 1 {
-			t.Fatalf("Expected 1 label, got %d", len(labels))
-		}
-		if labels[0] != "urgent" {
-			t.Errorf("Expected label 'urgent', got %q", labels[0])
-		}
+		issue := h.createIssue("Label test", beads.TypeFeature, 2)
+		h.addLabel(issue.ID, "urgent")
+		labels := h.getLabels(issue.ID)
+		h.assertCount(len(labels), 1, "labels")
+		h.assertEqual("urgent", labels[0], "label")
 	})
 
 	// Test 6: Add comment
 	t.Run("AddComment", func(t *testing.T) {
-		issue := &beads.Issue{
-			Title:     "Comment test",
-			Status:    beads.StatusOpen,
-			Priority:  2,
-			IssueType: beads.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		store.CreateIssue(ctx, issue, "test-actor")
-
-		comment, err := store.AddIssueComment(ctx, issue.ID, "test-user", "Test comment")
-		if err != nil {
-			t.Fatalf("AddIssueComment failed: %v", err)
-		}
-
-		if comment.Text != "Test comment" {
-			t.Errorf("Expected comment text 'Test comment', got %q", comment.Text)
-		}
-
-		comments, _ := store.GetIssueComments(ctx, issue.ID)
-		if len(comments) != 1 {
-			t.Fatalf("Expected 1 comment, got %d", len(comments))
-		}
+		issue := h.createIssue("Comment test", beads.TypeTask, 2)
+		comment := h.addComment(issue.ID, "test-user", "Test comment")
+		h.assertEqual("Test comment", comment.Text, "comment text")
+		comments := h.getComments(issue.ID)
+		h.assertCount(len(comments), 1, "comments")
 	})
 
 	// Test 7: Get ready work
 	t.Run("GetReadyWork", func(t *testing.T) {
-		// Create some issues
 		for i := 0; i < 3; i++ {
-			issue := &beads.Issue{
-				Title:     "Ready work test",
-				Status:    beads.StatusOpen,
-				Priority:  i,
-				IssueType: beads.TypeTask,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-			store.CreateIssue(ctx, issue, "test-actor")
+			h.createIssue("Ready work test", beads.TypeTask, i)
 		}
-
-		ready, err := store.GetReadyWork(ctx, beads.WorkFilter{
-			Status: beads.StatusOpen,
-			Limit:  5,
-		})
+		ready, err := store.GetReadyWork(h.ctx, beads.WorkFilter{Status: beads.StatusOpen, Limit: 5})
 		if err != nil {
 			t.Fatalf("GetReadyWork failed: %v", err)
 		}
-
 		if len(ready) == 0 {
 			t.Error("Expected some ready work, got none")
 		}
-
 		t.Logf("Found %d ready issues", len(ready))
 	})
 
 	// Test 8: Get statistics
 	t.Run("GetStatistics", func(t *testing.T) {
-		stats, err := store.GetStatistics(ctx)
+		stats, err := store.GetStatistics(h.ctx)
 		if err != nil {
 			t.Fatalf("GetStatistics failed: %v", err)
 		}
-
 		if stats.TotalIssues == 0 {
 			t.Error("Expected some total issues, got 0")
 		}
-
 		t.Logf("Stats: Total=%d, Open=%d, InProgress=%d, Closed=%d",
 			stats.TotalIssues, stats.OpenIssues, stats.InProgressIssues, stats.ClosedIssues)
 	})
 
 	// Test 9: Close issue
 	t.Run("CloseIssue", func(t *testing.T) {
-		issue := &beads.Issue{
-			Title:     "Close test",
-			Status:    beads.StatusOpen,
-			Priority:  2,
-			IssueType: beads.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		store.CreateIssue(ctx, issue, "test-actor")
-
-		err := store.CloseIssue(ctx, issue.ID, "Completed", "test-actor")
-		if err != nil {
-			t.Fatalf("CloseIssue failed: %v", err)
-		}
-
-		closed, _ := store.GetIssue(ctx, issue.ID)
-		if closed.Status != beads.StatusClosed {
-			t.Errorf("Expected status closed, got %v", closed.Status)
-		}
-		if closed.ClosedAt == nil {
-			t.Error("Expected ClosedAt to be set")
-		}
+		issue := h.createIssue("Close test", beads.TypeTask, 2)
+		h.closeIssue(issue.ID, "Completed")
+		closed := h.getIssue(issue.ID)
+		h.assertEqual(beads.StatusClosed, closed.Status, "status")
+		h.assertNotNil(closed.ClosedAt, "ClosedAt")
 	})
 }
 
@@ -430,59 +399,18 @@ func TestRoundTripIssue(t *testing.T) {
 	}
 	defer store.Close()
 
-	ctx := context.Background()
-
-	// Create issue with all fields
-	original := &beads.Issue{
-		Title:              "Complete issue",
-		Description:        "Full description",
-		Design:             "Design notes",
-		AcceptanceCriteria: "Acceptance criteria",
-		Notes:              "Implementation notes",
-		Status:             beads.StatusOpen,
-		Priority:           1,
-		IssueType:          beads.TypeFeature,
-		Assignee:           "developer",
-		CreatedAt:          time.Now(),
-		UpdatedAt:          time.Now(),
-	}
-
-	err = store.CreateIssue(ctx, original, "test-actor")
-	if err != nil {
-		t.Fatalf("CreateIssue failed: %v", err)
-	}
+	h := newIntegrationHelper(t, store)
+	original := h.createFullIssue("Full description", "Design notes", "Acceptance criteria", "Implementation notes", "developer")
 
 	// Retrieve and verify all fields
-	retrieved, err := store.GetIssue(ctx, original.ID)
-	if err != nil {
-		t.Fatalf("GetIssue failed: %v", err)
-	}
-
-	if retrieved.Title != original.Title {
-		t.Errorf("Title mismatch: expected %q, got %q", original.Title, retrieved.Title)
-	}
-	if retrieved.Description != original.Description {
-		t.Errorf("Description mismatch")
-	}
-	if retrieved.Design != original.Design {
-		t.Errorf("Design mismatch")
-	}
-	if retrieved.AcceptanceCriteria != original.AcceptanceCriteria {
-		t.Errorf("AcceptanceCriteria mismatch")
-	}
-	if retrieved.Notes != original.Notes {
-		t.Errorf("Notes mismatch")
-	}
-	if retrieved.Status != original.Status {
-		t.Errorf("Status mismatch")
-	}
-	if retrieved.Priority != original.Priority {
-		t.Errorf("Priority mismatch")
-	}
-	if retrieved.IssueType != original.IssueType {
-		t.Errorf("IssueType mismatch")
-	}
-	if retrieved.Assignee != original.Assignee {
-		t.Errorf("Assignee mismatch")
-	}
+	retrieved := h.getIssue(original.ID)
+	h.assertEqual(original.Title, retrieved.Title, "Title")
+	h.assertEqual(original.Description, retrieved.Description, "Description")
+	h.assertEqual(original.Design, retrieved.Design, "Design")
+	h.assertEqual(original.AcceptanceCriteria, retrieved.AcceptanceCriteria, "AcceptanceCriteria")
+	h.assertEqual(original.Notes, retrieved.Notes, "Notes")
+	h.assertEqual(original.Status, retrieved.Status, "Status")
+	h.assertEqual(original.Priority, retrieved.Priority, "Priority")
+	h.assertEqual(original.IssueType, retrieved.IssueType, "IssueType")
+	h.assertEqual(original.Assignee, retrieved.Assignee, "Assignee")
 }

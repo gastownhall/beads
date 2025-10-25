@@ -14,6 +14,125 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// exportImportHelper provides test setup and assertion methods
+type exportImportHelper struct {
+	t     *testing.T
+	ctx   context.Context
+	store *sqlite.SQLiteStorage
+}
+
+func newExportImportHelper(t *testing.T, store *sqlite.SQLiteStorage) *exportImportHelper {
+	return &exportImportHelper{t: t, ctx: context.Background(), store: store}
+}
+
+func (h *exportImportHelper) createIssue(id, title, desc string, status types.Status, priority int, issueType types.IssueType, assignee string, closedAt *time.Time) *types.Issue {
+	now := time.Now()
+	issue := &types.Issue{
+		ID:          id,
+		Title:       title,
+		Description: desc,
+		Status:      status,
+		Priority:    priority,
+		IssueType:   issueType,
+		Assignee:    assignee,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		ClosedAt:    closedAt,
+	}
+	if err := h.store.CreateIssue(h.ctx, issue, "test"); err != nil {
+		h.t.Fatalf("Failed to create issue: %v", err)
+	}
+	return issue
+}
+
+func (h *exportImportHelper) createFullIssue(id string, estimatedMinutes int) *types.Issue {
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID:                 id,
+		Title:              "Full issue",
+		Description:        "Description",
+		Design:             "Design doc",
+		AcceptanceCriteria: "Criteria",
+		Notes:              "Notes",
+		Status:             types.StatusClosed,
+		Priority:           1,
+		IssueType:          types.TypeFeature,
+		Assignee:           "alice",
+		EstimatedMinutes:   &estimatedMinutes,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+		ClosedAt:           &closedAt,
+	}
+	if err := h.store.CreateIssue(h.ctx, issue, "test"); err != nil {
+		h.t.Fatalf("Failed to create issue: %v", err)
+	}
+	return issue
+}
+
+func (h *exportImportHelper) searchIssues(filter types.IssueFilter) []*types.Issue {
+	issues, err := h.store.SearchIssues(h.ctx, "", filter)
+	if err != nil {
+		h.t.Fatalf("SearchIssues failed: %v", err)
+	}
+	return issues
+}
+
+func (h *exportImportHelper) getIssue(id string) *types.Issue {
+	issue, err := h.store.GetIssue(h.ctx, id)
+	if err != nil {
+		h.t.Fatalf("GetIssue failed: %v", err)
+	}
+	return issue
+}
+
+func (h *exportImportHelper) updateIssue(id string, updates map[string]interface{}) {
+	if err := h.store.UpdateIssue(h.ctx, id, updates, "test"); err != nil {
+		h.t.Fatalf("UpdateIssue failed: %v", err)
+	}
+}
+
+func (h *exportImportHelper) assertCount(count, expected int, item string) {
+	if count != expected {
+		h.t.Errorf("Expected %d %s, got %d", expected, item, count)
+	}
+}
+
+func (h *exportImportHelper) assertEqual(expected, actual interface{}, field string) {
+	if expected != actual {
+		h.t.Errorf("%s = %v, want %v", field, actual, expected)
+	}
+}
+
+func (h *exportImportHelper) assertSorted(issues []*types.Issue) {
+	for i := 0; i < len(issues)-1; i++ {
+		if issues[i].ID > issues[i+1].ID {
+			h.t.Errorf("Issues not sorted by ID: %s > %s", issues[i].ID, issues[i+1].ID)
+		}
+	}
+}
+
+func (h *exportImportHelper) encodeJSONL(issues []*types.Issue) *bytes.Buffer {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	for _, issue := range issues {
+		if err := encoder.Encode(issue); err != nil {
+			h.t.Fatalf("Failed to encode issue: %v", err)
+		}
+	}
+	return &buf
+}
+
+func (h *exportImportHelper) validateJSONLines(buf *bytes.Buffer, expectedCount int) {
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	h.assertCount(len(lines), expectedCount, "JSONL lines")
+	for i, line := range lines {
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			h.t.Errorf("Line %d is not valid JSON: %v", i, err)
+		}
+	}
+}
+
 func TestExportImport(t *testing.T) {
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-*")
@@ -27,191 +146,67 @@ func TestExportImport(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-
-	// Create test database with sample issues
 	store, err := sqlite.New(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 
-	ctx := context.Background()
+	h := newExportImportHelper(t, store)
+	now := time.Now()
 
 	// Create test issues
-	now := time.Now()
-	issues := []*types.Issue{
-		{
-			ID:          "test-1",
-			Title:       "First issue",
-			Description: "Description 1",
-			Status:      types.StatusOpen,
-			Priority:    1,
-			IssueType:   types.TypeBug,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		},
-		{
-			ID:          "test-2",
-			Title:       "Second issue",
-			Description: "Description 2",
-			Status:      types.StatusInProgress,
-			Priority:    2,
-			IssueType:   types.TypeFeature,
-			Assignee:    "alice",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		},
-		{
-			ID:          "test-3",
-			Title:       "Third issue",
-			Description: "Description 3",
-			Status:      types.StatusClosed,
-			Priority:    3,
-			IssueType:   types.TypeTask,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-			ClosedAt:    &now,
-		},
-	}
-
-	for _, issue := range issues {
-		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-			t.Fatalf("Failed to create issue: %v", err)
-		}
-	}
+	h.createIssue("test-1", "First issue", "Description 1", types.StatusOpen, 1, types.TypeBug, "", nil)
+	h.createIssue("test-2", "Second issue", "Description 2", types.StatusInProgress, 2, types.TypeFeature, "alice", nil)
+	h.createIssue("test-3", "Third issue", "Description 3", types.StatusClosed, 3, types.TypeTask, "", &now)
 
 	// Test export
 	t.Run("Export", func(t *testing.T) {
-		exported, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-		if err != nil {
-			t.Fatalf("SearchIssues failed: %v", err)
-		}
-
-		if len(exported) != 3 {
-			t.Errorf("Expected 3 issues, got %d", len(exported))
-		}
-
-		// Verify issues are sorted by ID
-		for i := 0; i < len(exported)-1; i++ {
-			if exported[i].ID > exported[i+1].ID {
-				t.Errorf("Issues not sorted by ID: %s > %s", exported[i].ID, exported[i+1].ID)
-			}
-		}
+		exported := h.searchIssues(types.IssueFilter{})
+		h.assertCount(len(exported), 3, "issues")
+		h.assertSorted(exported)
 	})
 
 	// Test JSONL format
 	t.Run("JSONL Format", func(t *testing.T) {
-		exported, _ := store.SearchIssues(ctx, "", types.IssueFilter{})
-
-		var buf bytes.Buffer
-		encoder := json.NewEncoder(&buf)
-		for _, issue := range exported {
-			if err := encoder.Encode(issue); err != nil {
-				t.Fatalf("Failed to encode issue: %v", err)
-			}
-		}
-
-		// Verify each line is valid JSON
-		lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-		if len(lines) != 3 {
-			t.Errorf("Expected 3 JSONL lines, got %d", len(lines))
-		}
-
-		for i, line := range lines {
-			var issue types.Issue
-			if err := json.Unmarshal([]byte(line), &issue); err != nil {
-				t.Errorf("Line %d is not valid JSON: %v", i, err)
-			}
-		}
+		exported := h.searchIssues(types.IssueFilter{})
+		buf := h.encodeJSONL(exported)
+		h.validateJSONLines(buf, 3)
 	})
 
 	// Test import into new database
 	t.Run("Import", func(t *testing.T) {
-		// Export from original database
-		exported, _ := store.SearchIssues(ctx, "", types.IssueFilter{})
-
-		// Create new database
+		exported := h.searchIssues(types.IssueFilter{})
 		newDBPath := filepath.Join(tmpDir, "import-test.db")
 		newStore, err := sqlite.New(newDBPath)
 		if err != nil {
 			t.Fatalf("Failed to create new storage: %v", err)
 		}
-
-		// Import issues
+		newHelper := newExportImportHelper(t, newStore)
 		for _, issue := range exported {
-			if err := newStore.CreateIssue(ctx, issue, "import"); err != nil {
-				t.Fatalf("Failed to import issue: %v", err)
-			}
+			newHelper.createIssue(issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.ClosedAt)
 		}
-
-		// Verify imported issues
-		imported, err := newStore.SearchIssues(ctx, "", types.IssueFilter{})
-		if err != nil {
-			t.Fatalf("SearchIssues failed: %v", err)
-		}
-
-		if len(imported) != len(exported) {
-			t.Errorf("Expected %d issues, got %d", len(exported), len(imported))
-		}
-
-		// Verify issue data
+		imported := newHelper.searchIssues(types.IssueFilter{})
+		newHelper.assertCount(len(imported), len(exported), "issues")
 		for i := range imported {
-			if imported[i].ID != exported[i].ID {
-				t.Errorf("Issue %d: ID = %s, want %s", i, imported[i].ID, exported[i].ID)
-			}
-			if imported[i].Title != exported[i].Title {
-				t.Errorf("Issue %d: Title = %s, want %s", i, imported[i].Title, exported[i].Title)
-			}
+			newHelper.assertEqual(exported[i].ID, imported[i].ID, "ID")
+			newHelper.assertEqual(exported[i].Title, imported[i].Title, "Title")
 		}
 	})
 
 	// Test update on import
 	t.Run("Import Update", func(t *testing.T) {
-		// Get first issue
-		issue, err := store.GetIssue(ctx, "test-1")
-		if err != nil {
-			t.Fatalf("GetIssue failed: %v", err)
-		}
-
-		// Modify it
-		issue.Title = "Updated title"
-		issue.Status = types.StatusClosed
-
-		// Import as update
-		updates := map[string]interface{}{
-			"title":  issue.Title,
-			"status": string(issue.Status),
-		}
-		if err := store.UpdateIssue(ctx, issue.ID, updates, "test"); err != nil {
-			t.Fatalf("UpdateIssue failed: %v", err)
-		}
-
-		// Verify update
-		updated, err := store.GetIssue(ctx, "test-1")
-		if err != nil {
-			t.Fatalf("GetIssue failed: %v", err)
-		}
-
-		if updated.Title != "Updated title" {
-			t.Errorf("Title = %s, want 'Updated title'", updated.Title)
-		}
-		if updated.Status != types.StatusClosed {
-			t.Errorf("Status = %s, want %s", updated.Status, types.StatusClosed)
-		}
+		issue := h.getIssue("test-1")
+		updates := map[string]interface{}{"title": "Updated title", "status": string(types.StatusClosed)}
+		h.updateIssue(issue.ID, updates)
+		updated := h.getIssue("test-1")
+		h.assertEqual("Updated title", updated.Title, "Title")
+		h.assertEqual(types.StatusClosed, updated.Status, "Status")
 	})
 
 	// Test filtering on export
 	t.Run("Export with Filter", func(t *testing.T) {
 		status := types.StatusOpen
-		filter := types.IssueFilter{
-			Status: &status,
-		}
-
-		filtered, err := store.SearchIssues(ctx, "", filter)
-		if err != nil {
-			t.Fatalf("SearchIssues failed: %v", err)
-		}
-
-		// Should only get open issues (test-1 might be updated, so check count > 0)
+		filtered := h.searchIssues(types.IssueFilter{Status: &status})
 		for _, issue := range filtered {
 			if issue.Status != types.StatusOpen {
 				t.Errorf("Expected only open issues, got %s", issue.Status)
@@ -285,38 +280,11 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 
-	ctx := context.Background()
-
-	// Create issue with all fields populated
-	estimatedMinutes := 120
-	closedAt := time.Now()
-	original := &types.Issue{
-		ID:                 "test-1",
-		Title:              "Full issue",
-		Description:        "Description",
-		Design:             "Design doc",
-		AcceptanceCriteria: "Criteria",
-		Notes:              "Notes",
-		Status:             types.StatusClosed,
-		Priority:           1,
-		IssueType:          types.TypeFeature,
-		Assignee:           "alice",
-		EstimatedMinutes:   &estimatedMinutes,
-		CreatedAt:          time.Now(),
-		UpdatedAt:          time.Now(),
-		ClosedAt:           &closedAt,
-	}
-
-	if err := store.CreateIssue(ctx, original, "test"); err != nil {
-		t.Fatalf("Failed to create issue: %v", err)
-	}
+	h := newExportImportHelper(t, store)
+	original := h.createFullIssue("test-1", 120)
 
 	// Export to JSONL
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	if err := encoder.Encode(original); err != nil {
-		t.Fatalf("Failed to encode: %v", err)
-	}
+	buf := h.encodeJSONL([]*types.Issue{original})
 
 	// Import from JSONL
 	var decoded types.Issue
@@ -325,15 +293,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	// Verify all fields preserved
-	if decoded.ID != original.ID {
-		t.Errorf("ID = %s, want %s", decoded.ID, original.ID)
-	}
-	if decoded.Title != original.Title {
-		t.Errorf("Title = %s, want %s", decoded.Title, original.Title)
-	}
-	if decoded.Description != original.Description {
-		t.Errorf("Description = %s, want %s", decoded.Description, original.Description)
-	}
+	h.assertEqual(original.ID, decoded.ID, "ID")
+	h.assertEqual(original.Title, decoded.Title, "Title")
+	h.assertEqual(original.Description, decoded.Description, "Description")
 	if decoded.EstimatedMinutes == nil || *decoded.EstimatedMinutes != *original.EstimatedMinutes {
 		t.Errorf("EstimatedMinutes = %v, want %v", decoded.EstimatedMinutes, original.EstimatedMinutes)
 	}

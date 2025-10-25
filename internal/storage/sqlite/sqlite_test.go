@@ -192,313 +192,248 @@ func TestGetIssueNotFound(t *testing.T) {
 	}
 }
 
+// createIssuesTestHelper provides test setup and assertion methods
+type createIssuesTestHelper struct {
+	t     *testing.T
+	ctx   context.Context
+	store *SQLiteStorage
+}
+
+func newCreateIssuesHelper(t *testing.T, store *SQLiteStorage) *createIssuesTestHelper {
+	return &createIssuesTestHelper{t: t, ctx: context.Background(), store: store}
+}
+
+func (h *createIssuesTestHelper) newIssue(id, title string, status types.Status, priority int, issueType types.IssueType, closedAt *time.Time) *types.Issue {
+	return &types.Issue{
+		ID:        id,
+		Title:     title,
+		Status:    status,
+		Priority:  priority,
+		IssueType: issueType,
+		ClosedAt:  closedAt,
+	}
+}
+
+func (h *createIssuesTestHelper) createIssues(issues []*types.Issue) error {
+	return h.store.CreateIssues(h.ctx, issues, "test-user")
+}
+
+func (h *createIssuesTestHelper) assertNoError(err error) {
+	if err != nil {
+		h.t.Errorf("CreateIssues() unexpected error: %v", err)
+	}
+}
+
+func (h *createIssuesTestHelper) assertError(err error) {
+	if err == nil {
+		h.t.Error("CreateIssues() expected error, got nil")
+	}
+}
+
+func (h *createIssuesTestHelper) assertCount(issues []*types.Issue, expected int) {
+	if len(issues) != expected {
+		h.t.Errorf("expected %d issues, got %d", expected, len(issues))
+	}
+}
+
+func (h *createIssuesTestHelper) assertIDSet(issue *types.Issue, index int) {
+	if issue.ID == "" {
+		h.t.Errorf("issue %d: ID should be set", index)
+	}
+}
+
+func (h *createIssuesTestHelper) assertTimestampSet(ts time.Time, field string, index int) {
+	if !ts.After(time.Time{}) {
+		h.t.Errorf("issue %d: %s should be set", index, field)
+	}
+}
+
+func (h *createIssuesTestHelper) assertUniqueIDs(issues []*types.Issue) {
+	ids := make(map[string]bool)
+	for _, issue := range issues {
+		if ids[issue.ID] {
+			h.t.Errorf("duplicate ID found: %s", issue.ID)
+		}
+		ids[issue.ID] = true
+	}
+}
+
+func (h *createIssuesTestHelper) assertEqual(expected, actual interface{}, field string) {
+	if expected != actual {
+		h.t.Errorf("expected %s %v, got %v", field, expected, actual)
+	}
+}
+
+func (h *createIssuesTestHelper) assertNotNil(value interface{}, field string) {
+	if value == nil {
+		h.t.Errorf("%s should be set", field)
+	}
+}
+
+func (h *createIssuesTestHelper) assertNoAutoGenID(issues []*types.Issue, wantErr bool) {
+	if !wantErr {
+		return
+	}
+	for i, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		hasCustomID := issue.ID != "" && (issue.ID == "custom-1" || issue.ID == "custom-2" || 
+			issue.ID == "duplicate-id" || issue.ID == "existing-id")
+		if !hasCustomID && issue.ID != "" {
+			h.t.Errorf("issue %d: ID should not be auto-generated on error, got %s", i, issue.ID)
+		}
+	}
+}
+
 func TestCreateIssues(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	h := newCreateIssuesHelper(t, store)
 
 	tests := []struct {
 		name       string
 		issues     []*types.Issue
 		wantErr    bool
-		checkFunc  func(t *testing.T, issues []*types.Issue)
+		checkFunc  func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue)
 	}{
 		{
 			name:    "empty batch",
 			issues:  []*types.Issue{},
 			wantErr: false,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				if len(issues) != 0 {
-					t.Errorf("expected 0 issues, got %d", len(issues))
-				}
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 0)
 			},
 		},
 		{
 			name: "single issue",
 			issues: []*types.Issue{
-				{
-					Title:     "Single issue",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("", "Single issue", types.StatusOpen, 1, types.TypeTask, nil),
 			},
 			wantErr: false,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				if len(issues) != 1 {
-					t.Fatalf("expected 1 issue, got %d", len(issues))
-				}
-				if issues[0].ID == "" {
-					t.Error("issue ID should be set")
-				}
-				if !issues[0].CreatedAt.After(time.Time{}) {
-					t.Error("CreatedAt should be set")
-				}
-				if !issues[0].UpdatedAt.After(time.Time{}) {
-					t.Error("UpdatedAt should be set")
-				}
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 1)
+				h.assertIDSet(issues[0], 0)
+				h.assertTimestampSet(issues[0].CreatedAt, "CreatedAt", 0)
+				h.assertTimestampSet(issues[0].UpdatedAt, "UpdatedAt", 0)
 			},
 		},
 		{
 			name: "multiple issues",
 			issues: []*types.Issue{
-				{
-					Title:     "Issue 1",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-				{
-					Title:     "Issue 2",
-					Status:    types.StatusInProgress,
-					Priority:  2,
-					IssueType: types.TypeBug,
-				},
-				{
-					Title:     "Issue 3",
-					Status:    types.StatusOpen,
-					Priority:  3,
-					IssueType: types.TypeFeature,
-				},
+				h.newIssue("", "Issue 1", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("", "Issue 2", types.StatusInProgress, 2, types.TypeBug, nil),
+				h.newIssue("", "Issue 3", types.StatusOpen, 3, types.TypeFeature, nil),
 			},
 			wantErr: false,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				if len(issues) != 3 {
-					t.Fatalf("expected 3 issues, got %d", len(issues))
-				}
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 3)
 				for i, issue := range issues {
-					if issue.ID == "" {
-						t.Errorf("issue %d: ID should be set", i)
-					}
-					if !issue.CreatedAt.After(time.Time{}) {
-						t.Errorf("issue %d: CreatedAt should be set", i)
-					}
-					if !issue.UpdatedAt.After(time.Time{}) {
-						t.Errorf("issue %d: UpdatedAt should be set", i)
-					}
+					h.assertIDSet(issue, i)
+					h.assertTimestampSet(issue.CreatedAt, "CreatedAt", i)
+					h.assertTimestampSet(issue.UpdatedAt, "UpdatedAt", i)
 				}
-				// Verify IDs are unique
-				ids := make(map[string]bool)
-				for _, issue := range issues {
-					if ids[issue.ID] {
-						t.Errorf("duplicate ID found: %s", issue.ID)
-					}
-					ids[issue.ID] = true
-				}
+				h.assertUniqueIDs(issues)
 			},
 		},
 		{
 			name: "mixed ID assignment - explicit and auto-generated",
 			issues: []*types.Issue{
-				{
-					ID:        "custom-1",
-					Title:     "Custom ID 1",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-				{
-					Title:     "Auto ID",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-				{
-					ID:        "custom-2",
-					Title:     "Custom ID 2",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("custom-1", "Custom ID 1", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("", "Auto ID", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("custom-2", "Custom ID 2", types.StatusOpen, 1, types.TypeTask, nil),
 			},
 			wantErr: false,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				if len(issues) != 3 {
-					t.Fatalf("expected 3 issues, got %d", len(issues))
-				}
-				if issues[0].ID != "custom-1" {
-					t.Errorf("expected ID 'custom-1', got %s", issues[0].ID)
-				}
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 3)
+				h.assertEqual("custom-1", issues[0].ID, "ID")
 				if issues[1].ID == "" || issues[1].ID == "custom-1" || issues[1].ID == "custom-2" {
 					t.Errorf("expected auto-generated ID, got %s", issues[1].ID)
 				}
-				if issues[2].ID != "custom-2" {
-					t.Errorf("expected ID 'custom-2', got %s", issues[2].ID)
-				}
+				h.assertEqual("custom-2", issues[2].ID, "ID")
 			},
 		},
 		{
 			name: "validation error - missing title",
 			issues: []*types.Issue{
-				{
-					Title:     "Valid issue",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-				{
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("", "Valid issue", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("", "", types.StatusOpen, 1, types.TypeTask, nil),
 			},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
-			name: "validation error - invalid priority",
-			issues: []*types.Issue{
-				{
-					Title:     "Test",
-					Status:    types.StatusOpen,
-					Priority:  10,
-					IssueType: types.TypeTask,
-				},
-			},
+			name:    "validation error - invalid priority",
+			issues:  []*types.Issue{h.newIssue("", "Test", types.StatusOpen, 10, types.TypeTask, nil)},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
-			name: "validation error - invalid status",
-			issues: []*types.Issue{
-				{
-					Title:     "Test",
-					Status:    "invalid",
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-			},
+			name:    "validation error - invalid status",
+			issues:  []*types.Issue{h.newIssue("", "Test", "invalid", 1, types.TypeTask, nil)},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "duplicate ID error",
 			issues: []*types.Issue{
-				{
-					ID:        "duplicate-id",
-					Title:     "First issue",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
-				{
-					ID:        "duplicate-id",
-					Title:     "Second issue",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("duplicate-id", "First issue", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("duplicate-id", "Second issue", types.StatusOpen, 1, types.TypeTask, nil),
 			},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "closed_at invariant - open status with closed_at",
 			issues: []*types.Issue{
-				{
-					Title:     "Invalid closed_at",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-					ClosedAt:  &time.Time{},
-				},
+				h.newIssue("", "Invalid closed_at", types.StatusOpen, 1, types.TypeTask, &time.Time{}),
 			},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "closed_at invariant - closed status without closed_at",
 			issues: []*types.Issue{
-				{
-					Title:     "Missing closed_at",
-					Status:    types.StatusClosed,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("", "Missing closed_at", types.StatusClosed, 1, types.TypeTask, nil),
 			},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "nil item in batch",
 			issues: []*types.Issue{
-				{
-					Title:     "Valid issue",
-					Status:    types.StatusOpen,
-					Priority:  1,
-					IssueType: types.TypeTask,
-				},
+				h.newIssue("", "Valid issue", types.StatusOpen, 1, types.TypeTask, nil),
 				nil,
 			},
 			wantErr: true,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				// Should not be called on error
-			},
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "valid closed issue with closed_at",
 			issues: []*types.Issue{
-				{
-					Title:     "Properly closed",
-					Status:    types.StatusClosed,
-					Priority:  1,
-					IssueType: types.TypeTask,
-					ClosedAt:  func() *time.Time { t := time.Now(); return &t }(),
-				},
+				h.newIssue("", "Properly closed", types.StatusClosed, 1, types.TypeTask, func() *time.Time { t := time.Now(); return &t }()),
 			},
 			wantErr: false,
-			checkFunc: func(t *testing.T, issues []*types.Issue) {
-				if len(issues) != 1 {
-					t.Fatalf("expected 1 issue, got %d", len(issues))
-				}
-				if issues[0].Status != types.StatusClosed {
-					t.Errorf("expected closed status, got %s", issues[0].Status)
-				}
-				if issues[0].ClosedAt == nil {
-					t.Error("ClosedAt should be set for closed issue")
-				}
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 1)
+				h.assertEqual(types.StatusClosed, issues[0].Status, "status")
+				h.assertNotNil(issues[0].ClosedAt, "ClosedAt")
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := store.CreateIssues(ctx, tt.issues, "test-user")
-			if (err != nil) != tt.wantErr {
-				t.Errorf("CreateIssues() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
+			err := h.createIssues(tt.issues)
 			if tt.wantErr {
-				// Verify IDs weren't auto-generated on error (timestamps may be set)
-				for i, issue := range tt.issues {
-					if issue == nil {
-						continue
-					}
-					// Allow pre-set IDs (custom-1, existing-id, duplicate-id, etc.)
-					hasCustomID := issue.ID != "" && (issue.ID == "custom-1" || issue.ID == "custom-2" || 
-						issue.ID == "duplicate-id" || issue.ID == "existing-id")
-					if !hasCustomID && issue.ID != "" {
-						t.Errorf("issue %d: ID should not be auto-generated on error, got %s", i, issue.ID)
-					}
-				}
+				h.assertError(err)
+				h.assertNoAutoGenID(tt.issues, tt.wantErr)
+			} else {
+				h.assertNoError(err)
 			}
-
 			if !tt.wantErr && tt.checkFunc != nil {
-				tt.checkFunc(t, tt.issues)
+				tt.checkFunc(t, h, tt.issues)
 			}
 		})
 	}

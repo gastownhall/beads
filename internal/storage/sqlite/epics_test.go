@@ -7,208 +7,150 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestGetEpicsEligibleForClosure(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+// epicTestHelper provides test setup and assertion methods
+type epicTestHelper struct {
+	t     *testing.T
+	ctx   context.Context
+	store *SQLiteStorage
+}
 
-	ctx := context.Background()
+func newEpicTestHelper(t *testing.T, store *SQLiteStorage) *epicTestHelper {
+	return &epicTestHelper{t: t, ctx: context.Background(), store: store}
+}
 
-	// Create an epic
+func (h *epicTestHelper) createEpic(title string) *types.Issue {
 	epic := &types.Issue{
-		Title:       "Test Epic",
+		Title:       title,
 		Description: "Epic for testing",
 		Status:      types.StatusOpen,
 		Priority:    1,
 		IssueType:   types.TypeEpic,
 	}
-	err := store.CreateIssue(ctx, epic, "test-user")
-	if err != nil {
-		t.Fatalf("CreateIssue (epic) failed: %v", err)
+	if err := h.store.CreateIssue(h.ctx, epic, "test-user"); err != nil {
+		h.t.Fatalf("CreateIssue (epic) failed: %v", err)
 	}
+	return epic
+}
 
-	// Create two child tasks
-	task1 := &types.Issue{
-		Title:     "Task 1",
+func (h *epicTestHelper) createTask(title string) *types.Issue {
+	task := &types.Issue{
+		Title:     title,
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
 	}
-	err = store.CreateIssue(ctx, task1, "test-user")
-	if err != nil {
-		t.Fatalf("CreateIssue (task1) failed: %v", err)
+	if err := h.store.CreateIssue(h.ctx, task, "test-user"); err != nil {
+		h.t.Fatalf("CreateIssue (%s) failed: %v", title, err)
 	}
+	return task
+}
 
-	task2 := &types.Issue{
-		Title:     "Task 2",
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-	}
-	err = store.CreateIssue(ctx, task2, "test-user")
-	if err != nil {
-		t.Fatalf("CreateIssue (task2) failed: %v", err)
-	}
-
-	// Add parent-child dependencies
-	dep1 := &types.Dependency{
-		IssueID:     task1.ID,
-		DependsOnID: epic.ID,
+func (h *epicTestHelper) addParentChildDependency(childID, parentID string) {
+	dep := &types.Dependency{
+		IssueID:     childID,
+		DependsOnID: parentID,
 		Type:        types.DepParentChild,
 	}
-	err = store.AddDependency(ctx, dep1, "test-user")
-	if err != nil {
-		t.Fatalf("AddDependency (task1) failed: %v", err)
+	if err := h.store.AddDependency(h.ctx, dep, "test-user"); err != nil {
+		h.t.Fatalf("AddDependency failed: %v", err)
 	}
+}
 
-	dep2 := &types.Dependency{
-		IssueID:     task2.ID,
-		DependsOnID: epic.ID,
-		Type:        types.DepParentChild,
+func (h *epicTestHelper) closeIssue(id, reason string) {
+	if err := h.store.CloseIssue(h.ctx, id, reason, "test-user"); err != nil {
+		h.t.Fatalf("CloseIssue (%s) failed: %v", id, err)
 	}
-	err = store.AddDependency(ctx, dep2, "test-user")
-	if err != nil {
-		t.Fatalf("AddDependency (task2) failed: %v", err)
-	}
+}
 
-	// Test 1: Epic with open children should NOT be eligible for closure
-	epics, err := store.GetEpicsEligibleForClosure(ctx)
+func (h *epicTestHelper) getEligibleEpics() []*types.EpicStatus {
+	epics, err := h.store.GetEpicsEligibleForClosure(h.ctx)
 	if err != nil {
-		t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
+		h.t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
 	}
+	return epics
+}
 
+func (h *epicTestHelper) findEpic(epics []*types.EpicStatus, epicID string) (*types.EpicStatus, bool) {
+	for _, e := range epics {
+		if e.Epic.ID == epicID {
+			return e, true
+		}
+	}
+	return nil, false
+}
+
+func (h *epicTestHelper) assertEpicStats(epic *types.EpicStatus, totalChildren, closedChildren int, eligible bool, desc string) {
+	if epic.TotalChildren != totalChildren {
+		h.t.Errorf("%s: Expected %d total children, got %d", desc, totalChildren, epic.TotalChildren)
+	}
+	if epic.ClosedChildren != closedChildren {
+		h.t.Errorf("%s: Expected %d closed children, got %d", desc, closedChildren, epic.ClosedChildren)
+	}
+	if epic.EligibleForClose != eligible {
+		h.t.Errorf("%s: Expected eligible=%v, got %v", desc, eligible, epic.EligibleForClose)
+	}
+}
+
+func (h *epicTestHelper) assertEpicNotFound(epics []*types.EpicStatus, epicID string, desc string) {
+	if _, found := h.findEpic(epics, epicID); found {
+		h.t.Errorf("%s: Epic %s should not be in results", desc, epicID)
+	}
+}
+
+func (h *epicTestHelper) assertEpicFound(epics []*types.EpicStatus, epicID string, desc string) *types.EpicStatus {
+	epic, found := h.findEpic(epics, epicID)
+	if !found {
+		h.t.Fatalf("%s: Epic %s not found in results", desc, epicID)
+	}
+	return epic
+}
+
+func TestGetEpicsEligibleForClosure(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	h := newEpicTestHelper(t, store)
+	epic := h.createEpic("Test Epic")
+	task1 := h.createTask("Task 1")
+	task2 := h.createTask("Task 2")
+	h.addParentChildDependency(task1.ID, epic.ID)
+	h.addParentChildDependency(task2.ID, epic.ID)
+
+	// Test 1: Epic with open children should NOT be eligible
+	epics := h.getEligibleEpics()
 	if len(epics) == 0 {
 		t.Fatal("Expected at least one epic")
 	}
-
-	found := false
-	for _, e := range epics {
-		if e.Epic.ID == epic.ID {
-			found = true
-			if e.TotalChildren != 2 {
-				t.Errorf("Expected 2 total children, got %d", e.TotalChildren)
-			}
-			if e.ClosedChildren != 0 {
-				t.Errorf("Expected 0 closed children, got %d", e.ClosedChildren)
-			}
-			if e.EligibleForClose {
-				t.Error("Epic should NOT be eligible for closure with open children")
-			}
-		}
-	}
-	if !found {
-		t.Error("Epic not found in results")
-	}
+	e := h.assertEpicFound(epics, epic.ID, "All children open")
+	h.assertEpicStats(e, 2, 0, false, "All children open")
 
 	// Test 2: Close one task
-	err = store.CloseIssue(ctx, task1.ID, "Done", "test-user")
-	if err != nil {
-		t.Fatalf("CloseIssue (task1) failed: %v", err)
-	}
-
-	epics, err = store.GetEpicsEligibleForClosure(ctx)
-	if err != nil {
-		t.Fatalf("GetEpicsEligibleForClosure (after closing task1) failed: %v", err)
-	}
-
-	found = false
-	for _, e := range epics {
-		if e.Epic.ID == epic.ID {
-			found = true
-			if e.ClosedChildren != 1 {
-				t.Errorf("Expected 1 closed child, got %d", e.ClosedChildren)
-			}
-			if e.EligibleForClose {
-				t.Error("Epic should NOT be eligible with only 1/2 tasks closed")
-			}
-		}
-	}
-	if !found {
-		t.Error("Epic not found after closing one task")
-	}
+	h.closeIssue(task1.ID, "Done")
+	epics = h.getEligibleEpics()
+	e = h.assertEpicFound(epics, epic.ID, "One child closed")
+	h.assertEpicStats(e, 2, 1, false, "One child closed")
 
 	// Test 3: Close second task - epic should be eligible
-	err = store.CloseIssue(ctx, task2.ID, "Done", "test-user")
-	if err != nil {
-		t.Fatalf("CloseIssue (task2) failed: %v", err)
-	}
+	h.closeIssue(task2.ID, "Done")
+	epics = h.getEligibleEpics()
+	e = h.assertEpicFound(epics, epic.ID, "All children closed")
+	h.assertEpicStats(e, 2, 2, true, "All children closed")
 
-	epics, err = store.GetEpicsEligibleForClosure(ctx)
-	if err != nil {
-		t.Fatalf("GetEpicsEligibleForClosure (after closing task2) failed: %v", err)
-	}
-
-	found = false
-	for _, e := range epics {
-		if e.Epic.ID == epic.ID {
-			found = true
-			if e.ClosedChildren != 2 {
-				t.Errorf("Expected 2 closed children, got %d", e.ClosedChildren)
-			}
-			if !e.EligibleForClose {
-				t.Error("Epic SHOULD be eligible for closure with all children closed")
-			}
-		}
-	}
-	if !found {
-		t.Error("Epic not found after closing all tasks")
-	}
-
-	// Test 4: Close the epic - should no longer appear in results
-	err = store.CloseIssue(ctx, epic.ID, "All tasks complete", "test-user")
-	if err != nil {
-		t.Fatalf("CloseIssue (epic) failed: %v", err)
-	}
-
-	epics, err = store.GetEpicsEligibleForClosure(ctx)
-	if err != nil {
-		t.Fatalf("GetEpicsEligibleForClosure (after closing epic) failed: %v", err)
-	}
-
-	// Closed epics should not appear in results
-	for _, e := range epics {
-		if e.Epic.ID == epic.ID {
-			t.Error("Closed epic should not appear in eligible list")
-		}
-	}
+	// Test 4: Close the epic - should no longer appear
+	h.closeIssue(epic.ID, "All tasks complete")
+	epics = h.getEligibleEpics()
+	h.assertEpicNotFound(epics, epic.ID, "Closed epic")
 }
 
 func TestGetEpicsEligibleForClosureWithNoChildren(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	h := newEpicTestHelper(t, store)
+	epic := h.createEpic("Childless Epic")
+	epics := h.getEligibleEpics()
 
-	// Create an epic with no children
-	epic := &types.Issue{
-		Title:     "Childless Epic",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeEpic,
-	}
-	err := store.CreateIssue(ctx, epic, "test-user")
-	if err != nil {
-		t.Fatalf("CreateIssue failed: %v", err)
-	}
-
-	epics, err := store.GetEpicsEligibleForClosure(ctx)
-	if err != nil {
-		t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
-	}
-
-	// Should find the epic but it should NOT be eligible (no children = not eligible)
-	found := false
-	for _, e := range epics {
-		if e.Epic.ID == epic.ID {
-			found = true
-			if e.TotalChildren != 0 {
-				t.Errorf("Expected 0 total children, got %d", e.TotalChildren)
-			}
-			if e.EligibleForClose {
-				t.Error("Epic with no children should NOT be eligible for closure")
-			}
-		}
-	}
-	if !found {
-		t.Error("Epic not found in results")
-	}
+	// Should find the epic but it should NOT be eligible
+	e := h.assertEpicFound(epics, epic.ID, "No children")
+	h.assertEpicStats(e, 0, 0, false, "No children")
 }
