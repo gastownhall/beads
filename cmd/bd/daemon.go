@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -88,8 +86,11 @@ Use --health to check daemon health and metrics.`,
 			return
 		}
 
-		// Check if daemon is already running
-		if isRunning, pid := isDaemonRunning(pidFile); isRunning {
+		// Skip daemon-running check if we're the forked child (BD_DAEMON_FOREGROUND=1)
+		// because the check happens in the parent process before forking
+		if os.Getenv("BD_DAEMON_FOREGROUND") != "1" {
+			// Check if daemon is already running
+			if isRunning, pid := isDaemonRunning(pidFile); isRunning {
 			// Check if running daemon has compatible version
 			socketPath := getSocketPathForPID(pidFile, global)
 			if client, err := rpc.TryConnectWithTimeout(socketPath, 1*time.Second); err == nil && client != nil {
@@ -116,6 +117,7 @@ Use --health to check daemon health and metrics.`,
 				fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop%s' to stop it first\n", boolToFlag(global, " --global"))
 				os.Exit(1)
 			}
+		}
 		}
 
 		// Global daemon doesn't support auto-commit/auto-push (no sync loop)
@@ -814,35 +816,19 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 	defer func() { _ = lock.Close() }()
 
+	// PID file was already written by acquireDaemonLock, but verify it has our PID
 	myPID := os.Getpid()
-	pidFileCreated := false
-
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(pidFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d", myPID)
-			_ = f.Close()
-			pidFileCreated = true
-			break
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == myPID {
+			// PID file is correct, continue
+		} else {
+			log("PID file has wrong PID (expected %d, got %d), overwriting", myPID, pid)
+			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
 		}
-
-		if errors.Is(err, fs.ErrExist) {
-			if isRunning, pid := isDaemonRunning(pidFile); isRunning {
-				log("Daemon already running (PID %d), exiting", pid)
-				os.Exit(1)
-			}
-			log("Stale PID file detected, removing and retrying")
-			_ = os.Remove(pidFile)
-			continue
-		}
-
-		log("Error creating PID file: %v", err)
-		os.Exit(1)
-	}
-
-	if !pidFileCreated {
-		log("Failed to create PID file after retries")
-		os.Exit(1)
+	} else {
+		// PID file missing (shouldn't happen since acquireDaemonLock writes it), create it
+		log("PID file missing after lock acquisition, creating")
+		_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
 	}
 
 	defer func() { _ = os.Remove(pidFile) }()
@@ -1017,7 +1003,8 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		log("Sync cycle complete")
 	}
 
-	doSync()
+	// Run initial sync in background so daemon becomes responsive immediately
+	go doSync()
 
 	for {
 		select {
