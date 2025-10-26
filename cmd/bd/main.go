@@ -105,6 +105,9 @@ var rootCmd = &cobra.Command{
 		if !cmd.Flags().Changed("no-auto-import") {
 			noAutoImport = config.GetBool("no-auto-import")
 		}
+		if !cmd.Flags().Changed("no-db") {
+			noDb = config.GetBool("no-db")
+		}
 		if !cmd.Flags().Changed("db") && dbPath == "" {
 			dbPath = config.GetString("db")
 		}
