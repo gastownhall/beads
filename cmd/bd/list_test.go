@@ -84,9 +84,9 @@ func (h *listTestHelper) assertEqual(expected, actual interface{}, field string)
 	}
 }
 
-func (h *listTestHelper) assertAtMost(count, max int, desc string) {
-	if count > max {
-		h.t.Errorf("Expected at most %d %s, got %d", max, desc, count)
+func (h *listTestHelper) assertAtMost(count, maxCount int, desc string) {
+	if count > maxCount {
+		h.t.Errorf("Expected at most %d %s, got %d", maxCount, desc, count)
 	}
 }
 

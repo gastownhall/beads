@@ -1524,7 +1524,7 @@ func (s *SQLiteStorage) resolveDeleteSet(ctx context.Context, tx *sql.Tx, ids []
 	return ids, s.trackOrphanedIssues(ctx, tx, ids, idSet, result)
 }
 
-func (s *SQLiteStorage) expandWithDependents(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool) ([]string, error) {
+func (s *SQLiteStorage) expandWithDependents(ctx context.Context, tx *sql.Tx, ids []string, _ map[string]bool) ([]string, error) {
 	allToDelete, err := s.findAllDependentsRecursive(ctx, tx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find dependents: %w", err)

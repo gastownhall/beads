@@ -12,7 +12,7 @@ import (
 )
 
 // Phase 1: Get or create SQLite store for import
-func getOrCreateStore(ctx context.Context, dbPath string, store storage.Storage) (*sqlite.SQLiteStorage, bool, error) {
+func getOrCreateStore(_ context.Context, dbPath string, store storage.Storage) (*sqlite.SQLiteStorage, bool, error) {
 	var sqliteStore *sqlite.SQLiteStorage
 	var needCloseStore bool
 

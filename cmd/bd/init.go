@@ -18,7 +18,7 @@ var initCmd = &cobra.Command{
 	Short: "Initialize bd in the current directory",
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
 and database file. Optionally specify a custom issue prefix.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 

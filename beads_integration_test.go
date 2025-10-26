@@ -177,7 +177,7 @@ func TestLibraryIntegration(t *testing.T) {
 	})
 
 	// Test 2: Get issue
-	t.Run("GetIssue", func(t *testing.T) {
+	t.Run("GetIssue", func(_ *testing.T) {
 		issue := h.createIssue("Get test", beads.TypeBug, 1)
 		retrieved := h.getIssue(issue.ID)
 		h.assertEqual(issue.Title, retrieved.Title, "title")
@@ -185,7 +185,7 @@ func TestLibraryIntegration(t *testing.T) {
 	})
 
 	// Test 3: Update issue
-	t.Run("UpdateIssue", func(t *testing.T) {
+	t.Run("UpdateIssue", func(_ *testing.T) {
 		issue := h.createIssue("Update test", beads.TypeTask, 2)
 		updates := map[string]interface{}{"status": beads.StatusInProgress, "assignee": "test-user"}
 		h.updateIssue(issue.ID, updates)
@@ -195,7 +195,7 @@ func TestLibraryIntegration(t *testing.T) {
 	})
 
 	// Test 4: Add dependency
-	t.Run("AddDependency", func(t *testing.T) {
+	t.Run("AddDependency", func(_ *testing.T) {
 		issue1 := h.createIssue("Parent task", beads.TypeTask, 1)
 		issue2 := h.createIssue("Child task", beads.TypeTask, 1)
 		h.addDependency(issue1.ID, issue2.ID)

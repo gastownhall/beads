@@ -73,14 +73,14 @@ Example:
 
 		if jsonOutput {
 			output := map[string]interface{}{
-				"target_id":           targetID,
-				"source_ids":          sourceIDs,
-				"merged":              len(sourceIDs),
-				"dependencies_added":  result.depsAdded,
+				"target_id":            targetID,
+				"source_ids":           sourceIDs,
+				"merged":               len(sourceIDs),
+				"dependencies_added":   result.depsAdded,
 				"dependencies_skipped": result.depsSkipped,
-				"text_references":     result.textRefCount,
-				"issues_closed":       result.issuesClosed,
-				"issues_skipped":      result.issuesSkipped,
+				"text_references":      result.textRefCount,
+				"issues_closed":        result.issuesClosed,
+				"issues_skipped":       result.issuesSkipped,
 			}
 			outputJSON(output)
 		} else {
@@ -216,9 +216,8 @@ func performMerge(ctx context.Context, targetID string, sourceIDs []string) (*me
 							// Ignore if dependency already exists
 							if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
 								return nil, fmt.Errorf("failed to add dependency %s -> %s: %w", issueID, targetID, err)
-							} else {
-								result.depsSkipped++
 							}
+							result.depsSkipped++
 						} else {
 							result.depsAdded++
 						}
@@ -294,43 +293,43 @@ func updateMergeTextReferences(ctx context.Context, sourceIDs []string, targetID
 
 			// Update description
 			if issue.Description != "" && re.MatchString(issue.Description) {
-			if _, exists := updates["description"]; !exists {
-			updates["description"] = issue.Description
+				if _, exists := updates["description"]; !exists {
+					updates["description"] = issue.Description
+				}
+				if desc, ok := updates["description"].(string); ok {
+					updates["description"] = re.ReplaceAllString(desc, replacementText)
+				}
 			}
-			if desc, ok := updates["description"].(string); ok {
-			  updates["description"] = re.ReplaceAllString(desc, replacementText)
-			}
-		}
 
 			// Update notes
 			if issue.Notes != "" && re.MatchString(issue.Notes) {
-			if _, exists := updates["notes"]; !exists {
-			updates["notes"] = issue.Notes
-			}
-			if notes, ok := updates["notes"].(string); ok {
-			  updates["notes"] = re.ReplaceAllString(notes, replacementText)
-			}
+				if _, exists := updates["notes"]; !exists {
+					updates["notes"] = issue.Notes
+				}
+				if notes, ok := updates["notes"].(string); ok {
+					updates["notes"] = re.ReplaceAllString(notes, replacementText)
+				}
 			}
 
 			// Update design
 			if issue.Design != "" && re.MatchString(issue.Design) {
-			if _, exists := updates["design"]; !exists {
-			 updates["design"] = issue.Design
-			 }
-			if design, ok := updates["design"].(string); ok {
-			  updates["design"] = re.ReplaceAllString(design, replacementText)
-			 }
+				if _, exists := updates["design"]; !exists {
+					updates["design"] = issue.Design
+				}
+				if design, ok := updates["design"].(string); ok {
+					updates["design"] = re.ReplaceAllString(design, replacementText)
+				}
 			}
 
 			// Update acceptance criteria
 			if issue.AcceptanceCriteria != "" && re.MatchString(issue.AcceptanceCriteria) {
-			 if _, exists := updates["acceptance_criteria"]; !exists {
-				updates["acceptance_criteria"] = issue.AcceptanceCriteria
+				if _, exists := updates["acceptance_criteria"]; !exists {
+					updates["acceptance_criteria"] = issue.AcceptanceCriteria
+				}
+				if ac, ok := updates["acceptance_criteria"].(string); ok {
+					updates["acceptance_criteria"] = re.ReplaceAllString(ac, replacementText)
+				}
 			}
-			if ac, ok := updates["acceptance_criteria"].(string); ok {
-				updates["acceptance_criteria"] = re.ReplaceAllString(ac, replacementText)
-			}
-		}
 		}
 
 		// Apply updates if any

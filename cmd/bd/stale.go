@@ -282,13 +282,14 @@ func releaseStaleIssues(staleIssues []*StaleIssueInfo) (int, error) {
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.0f seconds", d.Seconds())
-	} else if d < time.Hour {
-		return fmt.Sprintf("%.0f minutes", d.Minutes())
-	} else if d < 24*time.Hour {
-		return fmt.Sprintf("%.1f hours", d.Hours())
-	} else {
-		return fmt.Sprintf("%.1f days", d.Hours()/24)
 	}
+	if d < time.Hour {
+		return fmt.Sprintf("%.0f minutes", d.Minutes())
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%.1f hours", d.Hours())
+	}
+	return fmt.Sprintf("%.1f days", d.Hours()/24)
 }
 
 func init() {

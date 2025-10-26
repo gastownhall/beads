@@ -225,9 +225,9 @@ func calculateLatencyStats(samples []time.Duration) LatencyStats {
 
 	n := len(sorted)
 	// Calculate percentiles with defensive clamping
-	p50Idx := min(n-1, n*50/100)
-	p95Idx := min(n-1, n*95/100)
-	p99Idx := min(n-1, n*99/100)
+	p50Idx := minInt(n-1, n*50/100)
+	p95Idx := minInt(n-1, n*95/100)
+	p99Idx := minInt(n-1, n*99/100)
 
 	// Calculate average
 	var sum time.Duration
@@ -251,7 +251,7 @@ func calculateLatencyStats(samples []time.Duration) LatencyStats {
 	}
 }
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}

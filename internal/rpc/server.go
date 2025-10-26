@@ -140,7 +140,7 @@ func NewServer(socketPath string, store storage.Storage) *Server {
 }
 
 // Start starts the RPC server and listens for connections
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) Start(_ context.Context) error {
 	if err := s.ensureSocketDir(); err != nil {
 		return fmt.Errorf("failed to ensure socket directory: %w", err)
 	}

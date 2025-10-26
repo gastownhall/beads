@@ -564,47 +564,48 @@ func migrateToGlobalDaemon() {
 }
 
 func stopDaemon(pidFile string) {
-	if isRunning, pid := isDaemonRunning(pidFile); !isRunning {
+	isRunning, pid := isDaemonRunning(pidFile)
+	if !isRunning {
 		fmt.Println("Daemon is not running")
 		return
-	} else {
-		fmt.Printf("Stopping daemon (PID %d)...\n", pid)
+	}
 
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error finding process: %v\n", err)
-			os.Exit(1)
-		}
+	fmt.Printf("Stopping daemon (PID %d)...\n", pid)
 
-		if err := sendStopSignal(process); err != nil {
-			fmt.Fprintf(os.Stderr, "Error signaling daemon: %v\n", err)
-			os.Exit(1)
-		}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding process: %v\n", err)
+		os.Exit(1)
+	}
 
-		for i := 0; i < 50; i++ {
-			time.Sleep(100 * time.Millisecond)
-			if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
-				fmt.Println("Daemon stopped")
-				return
-			}
-		}
+	if err := sendStopSignal(process); err != nil {
+		fmt.Fprintf(os.Stderr, "Error signaling daemon: %v\n", err)
+		os.Exit(1)
+	}
 
-		fmt.Fprintf(os.Stderr, "Warning: daemon did not stop after 5 seconds, forcing termination\n")
-
-		// Check one more time before killing the process to avoid a race.
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
 		if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
 			fmt.Println("Daemon stopped")
 			return
 		}
-		if err := process.Kill(); err != nil {
-			// Ignore "process already finished" errors
-			if !strings.Contains(err.Error(), "process already finished") {
-				fmt.Fprintf(os.Stderr, "Error killing process: %v\n", err)
-			}
-		}
-		_ = os.Remove(pidFile)
-		fmt.Println("Daemon killed")
 	}
+
+	fmt.Fprintf(os.Stderr, "Warning: daemon did not stop after 5 seconds, forcing termination\n")
+
+	// Check one more time before killing the process to avoid a race.
+	if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
+		fmt.Println("Daemon stopped")
+		return
+	}
+	if err := process.Kill(); err != nil {
+		// Ignore "process already finished" errors
+		if !strings.Contains(err.Error(), "process already finished") {
+			fmt.Fprintf(os.Stderr, "Error killing process: %v\n", err)
+		}
+	}
+	_ = os.Remove(pidFile)
+	fmt.Println("Daemon killed")
 }
 
 func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string, global bool) {

@@ -42,7 +42,7 @@ Examples:
   bd compact --id bd-42 --force         # Force compact (bypass checks)
   bd compact --stats                    # Show statistics
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		ctx := context.Background()
 
 		// Handle compact stats first
@@ -404,7 +404,7 @@ func progressBar(current, total int) string {
 }
 
 //nolint:unparam // ctx may be used in future for cancellation
-func runCompactRPC(ctx context.Context) {
+func runCompactRPC(_ context.Context) {
 	if compactID != "" && compactAll {
 		fmt.Fprintf(os.Stderr, "Error: cannot use --id and --all together\n")
 		os.Exit(1)

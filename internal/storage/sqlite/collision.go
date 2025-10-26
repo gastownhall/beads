@@ -294,7 +294,7 @@ func deduplicateIncomingIssues(issues []*types.Issue) []*types.Issue {
 // If an error occurs partway through, some issues may be created without their references
 // being updated. This is a known limitation that requires storage layer refactoring to fix.
 // See issue bd-25 for transaction support.
-func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, allIssues []*types.Issue) (map[string]string, error) {
+func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, _ []*types.Issue) (map[string]string, error) {
 	idMapping := make(map[string]string)
 
 	// Sync counters before remapping to avoid ID collisions

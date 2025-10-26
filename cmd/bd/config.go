@@ -34,7 +34,7 @@ var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a configuration value",
 	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		// Config operations work in direct mode only
 		if err := ensureDirectMode("config set requires direct database access"); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

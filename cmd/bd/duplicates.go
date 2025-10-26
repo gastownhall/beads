@@ -28,7 +28,7 @@ Example:
   bd duplicates                    # Show all duplicate groups
   bd duplicates --auto-merge       # Automatically merge all duplicates
   bd duplicates --dry-run          # Show what would be merged`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		// Check daemon mode - not supported yet (merge command limitation)
 		if daemonClient != nil {
 			fmt.Fprintf(os.Stderr, "Error: duplicates command not yet supported in daemon mode (see bd-190)\n")

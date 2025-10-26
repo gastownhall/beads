@@ -29,7 +29,7 @@ var syncCmd = &cobra.Command{
 This command wraps the entire git-based sync workflow for multi-device use.
 
 Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		ctx := context.Background()
 
 		message, _ := cmd.Flags().GetString("message")
