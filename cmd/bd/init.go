@@ -90,6 +90,7 @@ and database file. Optionally specify a custom issue prefix.`,
 *.db-shm
 
 # Daemon runtime files
+daemon.lock
 daemon.log
 daemon.pid
 bd.sock
