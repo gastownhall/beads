@@ -20,7 +20,7 @@ var initCmd = &cobra.Command{
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
 and database file. Optionally specify a custom issue prefix.
 
-With --no-db: creates .beads/ directory and nodb_prefix.txt file instead of SQLite database.`,
+With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
@@ -96,14 +96,8 @@ With --no-db: creates .beads/ directory and nodb_prefix.txt file instead of SQLi
 			os.Exit(1)
 		}
 
-		// Handle --no-db mode: create nodb_prefix.txt instead of database
+		// Handle --no-db mode: create issues.jsonl file instead of database
 		if noDb {
-			prefixFile := filepath.Join(localBeadsDir, "nodb_prefix.txt")
-			if err := os.WriteFile(prefixFile, []byte(prefix+"\n"), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to write prefix file: %v\n", err)
-				os.Exit(1)
-			}
-
 			// Create empty issues.jsonl file
 			jsonlPath := filepath.Join(localBeadsDir, "issues.jsonl")
 			if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
