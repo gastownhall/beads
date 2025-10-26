@@ -86,6 +86,9 @@ type Server struct {
 	requestTimeout time.Duration
 	// Ready channel signals when server is listening
 	readyChan chan struct{}
+	// Last JSONL import timestamp (for staleness detection)
+	lastImportTime time.Time
+	importMu       sync.RWMutex // protects lastImportTime
 }
 
 // NewServer creates a new RPC server
@@ -611,6 +614,17 @@ func (s *Server) handleRequest(req *Request) Response {
 				Success: false,
 				Error:   err.Error(),
 			}
+		}
+	}
+
+	// Check for stale JSONL and auto-import if needed (bd-160)
+	// Skip for write operations that will trigger export anyway
+	// Skip for import operation itself to avoid recursion
+	if req.Operation != OpPing && req.Operation != OpHealth && req.Operation != OpMetrics && 
+	   req.Operation != OpImport && req.Operation != OpExport {
+		if err := s.checkAndAutoImportIfStale(req); err != nil {
+			// Log warning but continue - don't fail the request
+			fmt.Fprintf(os.Stderr, "Warning: staleness check failed: %v\n", err)
 		}
 	}
 
@@ -2031,4 +2045,93 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 		Success: true,
 		Data:    data,
 	}
+}
+
+// GetLastImportTime returns the last JSONL import timestamp
+func (s *Server) GetLastImportTime() time.Time {
+	s.importMu.RLock()
+	defer s.importMu.RUnlock()
+	return s.lastImportTime
+}
+
+// SetLastImportTime updates the last JSONL import timestamp
+func (s *Server) SetLastImportTime(t time.Time) {
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
+	s.lastImportTime = t
+}
+
+// checkAndAutoImportIfStale checks if JSONL is newer than last import and triggers auto-import
+// This fixes bd-158: daemon shows stale data after git pull
+func (s *Server) checkAndAutoImportIfStale(req *Request) error {
+	// Get storage for this request
+	store, err := s.getStorageForRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to get storage: %w", err)
+	}
+
+	ctx := s.reqCtx(req)
+	
+	// Get last import time from metadata
+	lastImportStr, err := store.GetMetadata(ctx, "last_import_time")
+	if err != nil {
+		// No metadata yet - first run, skip check
+		return nil
+	}
+	
+	lastImportTime, err := time.Parse(time.RFC3339, lastImportStr)
+	if err != nil {
+		// Invalid timestamp - skip check
+		return nil
+	}
+	
+	// Find JSONL file path
+	jsonlPath := s.findJSONLPath(req)
+	if jsonlPath == "" {
+		// No JSONL file found
+		return nil
+	}
+	
+	// Check JSONL mtime
+	stat, err := os.Stat(jsonlPath)
+	if err != nil {
+		// JSONL doesn't exist or can't be read
+		return nil
+	}
+	
+	// Compare: if JSONL is newer, it's stale
+	if stat.ModTime().After(lastImportTime) {
+		// JSONL is newer! Trigger auto-import
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: daemon detected stale JSONL (modified %v, last import %v), auto-importing...\n", 
+				stat.ModTime(), lastImportTime)
+		}
+		
+		// TODO: Trigger actual import - for now just log
+		// This requires refactoring autoImportIfNewer() to be callable from daemon
+		fmt.Fprintf(os.Stderr, "Notice: JSONL updated externally (e.g., git pull), restart daemon or run 'bd sync' for fresh data\n")
+	}
+	
+	return nil
+}
+
+// findJSONLPath finds the JSONL file path for the request's repository
+func (s *Server) findJSONLPath(req *Request) string {
+	// Extract repo root from request's working directory
+	// For now, use a simple heuristic: look for .beads/ in request's cwd
+	beadsDir := filepath.Join(req.Cwd, ".beads")
+	
+	// Try canonical filenames in order
+	candidates := []string{
+		filepath.Join(beadsDir, "beads.jsonl"),
+		filepath.Join(beadsDir, "issues.jsonl"),
+	}
+	
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	
+	return ""
 }

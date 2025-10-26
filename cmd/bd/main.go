@@ -1099,6 +1099,12 @@ func autoImportIfNewer() {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after import: %v\n", err)
 		fmt.Fprintf(os.Stderr, "This may cause auto-import to retry the same import on next operation.\n")
 	}
+	
+	// Store import timestamp (bd-159: for staleness detection)
+	importTime := time.Now().Format(time.RFC3339)
+	if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time after import: %v\n", err)
+	}
 }
 
 // checkVersionMismatch checks if the binary version matches the database version
