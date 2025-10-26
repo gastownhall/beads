@@ -1718,6 +1718,44 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 }
 
+// resolveIssueID attempts to resolve an issue ID, with a fallback for bare numbers.
+// If the ID doesn't exist and is a bare number (no hyphen), it tries adding the
+// configured issue_prefix. Returns the issue and the resolved ID.
+func resolveIssueID(ctx context.Context, id string) (*types.Issue, string, error) {
+	// First try with the provided ID
+	issue, err := store.GetIssue(ctx, id)
+	if err != nil {
+		return nil, id, err
+	}
+
+	// If found, return it
+	if issue != nil {
+		return issue, id, nil
+	}
+
+	// If not found and ID contains a hyphen, it's already a full ID - don't try fallback
+	if strings.Contains(id, "-") {
+		return nil, id, nil
+	}
+
+	// ID is a bare number - try with prefix
+	prefix, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix == "" {
+		// No prefix configured, can't do fallback
+		return nil, id, nil
+	}
+
+	// Try with prefix-id
+	prefixedID := prefix + "-" + id
+	issue, err = store.GetIssue(ctx, prefixedID)
+	if err != nil {
+		return nil, prefixedID, err
+	}
+
+	// Return the issue with the resolved ID (which may be nil if still not found)
+	return issue, prefixedID, nil
+}
+
 var showCmd = &cobra.Command{
 	Use:   "show [id...]",
 	Short: "Show issue details",
@@ -1864,13 +1902,13 @@ var showCmd = &cobra.Command{
 		ctx := context.Background()
 		allDetails := []interface{}{}
 		for idx, id := range args {
-			issue, err := store.GetIssue(ctx, id)
+			issue, resolvedID, err := resolveIssueID(ctx, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 				continue
 			}
 			if issue == nil {
-				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				fmt.Fprintf(os.Stderr, "Issue %s not found\n", resolvedID)
 				continue
 			}
 
