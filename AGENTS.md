@@ -4,6 +4,23 @@
 
 This is **beads** (command: `bd`), an issue tracker designed for AI-supervised coding workflows. We dogfood our own tool!
 
+## Human Setup vs Agent Usage
+
+**IMPORTANT:** If you need to initialize bd, use the `--quiet` flag:
+
+```bash
+bd init --quiet  # Non-interactive, auto-installs git hooks, no prompts
+```
+
+**Why `--quiet`?** Regular `bd init` has interactive prompts (git hooks) that confuse agents. The `--quiet` flag makes it fully non-interactive:
+- Automatically installs git hooks
+- No prompts for user input
+- Safe for agent-driven repo setup
+
+**If the human already initialized:** Just use bd normally with `bd create`, `bd ready`, `bd update`, `bd close`, etc.
+
+**If you see "database not found":** Run `bd init --quiet` yourself, or ask the human to run `bd init`.
+
 ## Issue Tracking
 
 We use bd (beads) for issue tracking instead of Markdown TODOs or external tools.

@@ -83,13 +83,51 @@ Follow the repo for updates and the path to 1.0!
 
 ## Usage Questions
 
+### Should I run bd init or have my agent do it?
+
+**Either works!** But use the right flag:
+
+**Humans:**
+```bash
+bd init  # Interactive - prompts for git hooks
+```
+
+**Agents:**
+```bash
+bd init --quiet  # Non-interactive - auto-installs hooks, no prompts
+```
+
+**Workflow for humans:**
+```bash
+# Clone existing project with bd:
+git clone <repo>
+cd <repo>
+bd init  # Auto-imports from .beads/issues.jsonl
+
+# Or initialize new project:
+cd ~/my-project
+bd init  # Creates .beads/, sets up daemon
+git add .beads/
+git commit -m "Initialize beads"
+```
+
+**Workflow for agents setting up repos:**
+```bash
+git clone <repo>
+cd <repo>
+bd init --quiet  # No prompts, auto-installs hooks
+bd ready --json  # Start using bd normally
+```
+
 ### Do I need to run export/import manually?
 
 **No! Sync is automatic by default.**
 
 bd automatically:
 - **Exports** to JSONL after CRUD operations (5-second debounce)
-- **Imports** from JSONL when it's newer than DB (after `git pull`)
+- **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
+
+**How auto-import works:** The first bd command after `git pull` detects that `.beads/issues.jsonl` is newer than the database and automatically imports it. There's no background daemon watching for changes - the check happens when you run a bd command.
 
 **Optional**: For immediate export (no 5-second wait) and guaranteed import after git operations, install the git hooks:
 ```bash
@@ -99,8 +137,21 @@ cd examples/git-hooks && ./install.sh
 **Disable auto-sync** if needed:
 ```bash
 bd --no-auto-flush create "Issue"   # Disable auto-export
-bd --no-auto-import list            # Disable auto-import
+bd --no-auto-import list            # Disable auto-import check
 ```
+
+### What if my database feels stale after git pull?
+
+Just run any bd command - it will auto-import:
+
+```bash
+git pull
+bd ready     # Automatically imports fresh data from git
+bd list      # Also triggers auto-import if needed
+bd sync      # Explicit sync command for manual control
+```
+
+The auto-import check is fast (<5ms) and only imports when the JSONL file is newer than the database. If you want guaranteed immediate sync without waiting for the next command, use the git hooks (see `examples/git-hooks/`).
 
 ### Can I track issues for multiple projects?
 

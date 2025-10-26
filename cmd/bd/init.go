@@ -171,22 +171,28 @@ if quiet {
 	
 	// Check if we're in a git repo and hooks aren't installed
 	if isGitRepo() && !hooksInstalled() {
-		fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
-		fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
-		fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-		
-		// Prompt to install
-		fmt.Printf("Install git hooks now? [Y/n] ")
-		var response string
-		_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-		response = strings.ToLower(strings.TrimSpace(response))
-		
-		if response == "" || response == "y" || response == "yes" {
-			if err := installGitHooks(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
-				fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-			} else {
-				fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
+		if quiet {
+			// Auto-install hooks silently in quiet mode (best default for agents)
+			_ = installGitHooks() // Ignore errors in quiet mode
+		} else {
+			// Interactive prompt for humans
+			fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
+			fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
+			fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+			
+			// Prompt to install
+			fmt.Printf("Install git hooks now? [Y/n] ")
+			var response string
+			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
+			response = strings.ToLower(strings.TrimSpace(response))
+			
+			if response == "" || response == "y" || response == "yes" {
+				if err := installGitHooks(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
+					fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+				} else {
+					fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
+				}
 			}
 		}
 	}

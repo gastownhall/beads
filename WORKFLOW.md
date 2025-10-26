@@ -377,28 +377,39 @@ ls -lh project.db
 
 ## Git Workflow
 
-### Committing the Database
+### Auto-Sync Behavior
 
-**The database IS your project state.** Commit it!
+bd automatically keeps your database and git in sync:
 
+**Making changes:**
 ```bash
-# Add database to git
-git add project.db
+bd create "New task" -p 1
+bd update bd-5 --status in_progress
+# bd automatically exports to .beads/issues.jsonl after 5 seconds
 
-# Commit with meaningful message
-git commit -m "Updated tracker: completed auth (bd-3), ready for API work"
-
-# Push
+git add .beads/issues.jsonl
+git commit -m "Started working on bd-5"
 git push
+```
+
+**After git pull:**
+```bash
+git pull
+# bd automatically detects JSONL is newer on next command
+
+bd ready  # Auto-imports fresh data from git!
+bd list --status in_progress  # See what you were working on
 ```
 
 ### Multi-Machine Workflow
 
 **Machine 1:**
 ```bash
-beads create "New task" -p 1
-beads update bd-5 --status in_progress
-git add project.db
+bd create "New task" -p 1
+bd update bd-5 --status in_progress
+# Wait 5 seconds for auto-export, or run: bd sync
+
+git add .beads/issues.jsonl
 git commit -m "Started working on bd-5"
 git push
 ```
@@ -406,9 +417,17 @@ git push
 **Machine 2:**
 ```bash
 git pull
-beads ready  # Sees bd-5 is in progress
-beads list --status in_progress  # See what you were working on
+bd ready  # Auto-imports, sees bd-5 is in progress
 ```
+
+### Zero-Lag Sync (Optional)
+
+Install git hooks for immediate sync:
+```bash
+cd examples/git-hooks && ./install.sh
+```
+
+This eliminates the 5-second debounce and guarantees import after `git pull`.
 
 ### Team Workflow
 

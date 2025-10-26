@@ -76,21 +76,30 @@ brew install bd
 
 Beads is designed for **AI coding agents** to use on your behalf. Setup takes 30 seconds:
 
+**You run this once (humans only):**
 ```bash
-# 1. Initialize bd in your project
+# In your project root:
 bd init
 
-# 2. Tell your agent to configure itself
+# bd will:
+# - Create .beads/ directory with database
+# - Import existing issues from git (if any)
+# - Prompt to install git hooks (recommended: say yes)
+# - Auto-start daemon for sync
+
+# Then tell your agent about bd:
 echo "BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions" >> AGENTS.md
 ```
 
-That's it! Next time your agent starts, it will:
+**Your agent does the rest:** Next time your agent starts, it will:
 1. Run `bd onboard` and receive integration instructions
 2. Add bd workflow documentation to AGENTS.md
 3. Update CLAUDE.md with a note (if present)
 4. Remove the bootstrap instruction
 
-**Why this approach?** We leverage the agent's intelligence to naturally integrate bd into your project's documentation, rather than doing brittle string replacement.
+**For agents setting up repos:** Use `bd init --quiet` for non-interactive setup (auto-installs git hooks, no prompts).
+
+**For new repo clones:** Run `bd init` (or `bd init --quiet` for agents) to import existing issues from `.beads/issues.jsonl` automatically.
 
 Most tasks will be created and managed by agents during conversations. You can check on things with:
 
@@ -144,6 +153,50 @@ When you install bd on any machine with your project repo, you get:
 **The result:** Agents on your laptop, your desktop, and your coworker's machine all query and update what *feels* like a single shared database, but it's really just git doing what git does best - syncing text files across machines.
 
 No PostgreSQL instance. No MySQL server. No hosted service. Just install bd, clone the repo, and you're connected to the "database."
+
+### Git Workflow & Auto-Sync
+
+bd automatically syncs your local database with git:
+
+**Making changes (auto-export):**
+```bash
+bd create "Fix bug" -p 1
+bd update bd-42 --status in_progress
+# bd automatically exports to .beads/issues.jsonl after 5 seconds
+
+git add .beads/issues.jsonl
+git commit -m "Working on bd-42"
+git push
+```
+
+**Pulling changes (auto-import):**
+```bash
+git pull
+# bd automatically detects JSONL is newer and imports on next command
+
+bd ready  # Fresh data from git!
+bd list   # Shows issues from other machines
+```
+
+**Manual sync (optional):**
+```bash
+bd sync  # Immediately flush pending changes and import latest JSONL
+```
+
+**For zero-lag sync**, install the git hooks:
+```bash
+cd examples/git-hooks && ./install.sh
+```
+
+This adds:
+- **pre-commit** - Immediate flush before commit (no 5-second wait)
+- **post-merge** - Guaranteed import after `git pull` or `git merge`
+
+**Disable auto-sync** if needed:
+```bash
+bd --no-auto-flush create "Issue"   # Skip auto-export
+bd --no-auto-import list            # Skip auto-import check
+```
 
 ## Usage
 
