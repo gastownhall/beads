@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,6 +19,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/autoimport"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
@@ -927,183 +927,38 @@ func findJSONLPath() string {
 // Fixes bd-84: Hash-based comparison is git-proof (mtime comparison fails after git pull)
 // Fixes bd-228: Now uses collision detection to prevent silently overwriting local changes
 func autoImportIfNewer() {
-	// Find JSONL path
-	jsonlPath := findJSONLPath()
-
-	// Read JSONL file
-	jsonlData, err := os.ReadFile(jsonlPath)
-	if err != nil {
-		// JSONL doesn't exist or can't be accessed, skip import
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL not found: %v\n", err)
-		}
-		return
-	}
-
-	// Compute current JSONL hash
-	hasher := sha256.New()
-	hasher.Write(jsonlData)
-	currentHash := hex.EncodeToString(hasher.Sum(nil))
-
-	// Get last import hash from DB metadata
 	ctx := context.Background()
-	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
-	if err != nil {
-		// Metadata error - treat as first import rather than skipping (bd-663)
-		// This allows auto-import to recover from corrupt/missing metadata
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: metadata read failed (%v), treating as first import\n", err)
+	
+	notify := autoimport.NewStderrNotifier(os.Getenv("BD_DEBUG") != "")
+	
+	importFunc := func(ctx context.Context, issues []*types.Issue) (created, updated int, idMapping map[string]string, err error) {
+		opts := ImportOptions{
+			ResolveCollisions:    true,
+			DryRun:               false,
+			SkipUpdate:           false,
+			Strict:               false,
+			SkipPrefixValidation: true,
 		}
-		lastHash = ""
+		
+		result, err := importIssuesCore(ctx, dbPath, store, issues, opts)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		
+		return result.Created, result.Updated, result.IDMapping, nil
 	}
-
-	// Compare hashes
-	if currentHash == lastHash {
-		// Content unchanged, skip import
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL unchanged (hash match)\n")
-		}
-		return
-	}
-
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: auto-import triggered (hash changed)\n")
-	}
-
-	// Check for Git merge conflict markers (bd-270)
-	// Only match if they appear as standalone lines (not embedded in JSON strings)
-	lines := bytes.Split(jsonlData, []byte("\n"))
-	for _, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
-			bytes.Equal(trimmed, []byte("=======")) ||
-			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
-			fmt.Fprintf(os.Stderr, "\n❌ Git merge conflict detected in %s\n\n", jsonlPath)
-			fmt.Fprintf(os.Stderr, "The JSONL file contains unresolved merge conflict markers.\n")
-			fmt.Fprintf(os.Stderr, "This prevents auto-import from loading your issues.\n\n")
-			fmt.Fprintf(os.Stderr, "To resolve:\n")
-			fmt.Fprintf(os.Stderr, "  1. Resolve the merge conflict in your Git client, OR\n")
-			fmt.Fprintf(os.Stderr, "  2. Export from database to regenerate clean JSONL:\n")
-			fmt.Fprintf(os.Stderr, "     bd export -o %s\n\n", jsonlPath)
-			fmt.Fprintf(os.Stderr, "After resolving, commit the fixed JSONL file.\n")
-			return
-		}
-	}
-
-	// Content changed - parse all issues
-	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
-	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024) // 2MB buffer for large JSON lines
-	var allIssues []*types.Issue
-	lineNo := 0
-
-	for scanner.Scan() {
-		lineNo++
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var issue types.Issue
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			// Parse error, skip this import
-			snippet := line
-			if len(snippet) > 80 {
-				snippet = snippet[:80] + "..."
-			}
-			fmt.Fprintf(os.Stderr, "Auto-import skipped: parse error at line %d: %v\nSnippet: %s\n", lineNo, err, snippet)
-			return
-		}
-
-		// Fix closed_at invariant: closed issues must have closed_at timestamp
-		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
-			now := time.Now()
-			issue.ClosedAt = &now
-		}
-
-		allIssues = append(allIssues, &issue)
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Auto-import skipped: scanner error: %v\n", err)
-		return
-	}
-
-	// Use shared import logic (bd-157)
-	opts := ImportOptions{
-		ResolveCollisions:    true, // Auto-import always resolves collisions
-		DryRun:               false,
-		SkipUpdate:           false,
-		Strict:               false,
-		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
-	}
-
-	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Auto-import failed: %v\n", err)
-		return
-	}
-
-	// Show collision remapping notification if any occurred
-	if len(result.IDMapping) > 0 {
-		// Build title lookup map to avoid O(n^2) search
-		titleByID := make(map[string]string)
-		for _, issue := range allIssues {
-			titleByID[issue.ID] = issue.Title
-		}
-
-		// Sort remappings by old ID for consistent output
-		type mapping struct {
-			oldID string
-			newID string
-		}
-		mappings := make([]mapping, 0, len(result.IDMapping))
-		for oldID, newID := range result.IDMapping {
-			mappings = append(mappings, mapping{oldID, newID})
-		}
-		sort.Slice(mappings, func(i, j int) bool {
-			return mappings[i].oldID < mappings[j].oldID
-		})
-
-		maxShow := 10
-		numRemapped := len(mappings)
-		if numRemapped < maxShow {
-			maxShow = numRemapped
-		}
-
-		fmt.Fprintf(os.Stderr, "\nAuto-import: remapped %d colliding issue(s) to new IDs:\n", numRemapped)
-		for i := 0; i < maxShow; i++ {
-			m := mappings[i]
-			title := titleByID[m.oldID]
-			fmt.Fprintf(os.Stderr, "  %s → %s (%s)\n", m.oldID, m.newID, title)
-		}
-		if numRemapped > maxShow {
-			fmt.Fprintf(os.Stderr, "  ... and %d more\n", numRemapped-maxShow)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
-	}
-
-	// Schedule export to sync JSONL after successful import
-	changed := (result.Created + result.Updated + len(result.IDMapping)) > 0
-	if changed {
-		if len(result.IDMapping) > 0 {
-			// Remappings may affect many issues, do a full export
+	
+	onChanged := func(needsFullExport bool) {
+		if needsFullExport {
 			markDirtyAndScheduleFullExport()
 		} else {
-			// Regular import, incremental export is fine
 			markDirtyAndScheduleFlush()
 		}
 	}
-
-	// Store new hash after successful import
-	if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after import: %v\n", err)
-		fmt.Fprintf(os.Stderr, "This may cause auto-import to retry the same import on next operation.\n")
-	}
 	
-	// Store import timestamp (bd-159: for staleness detection)
-	importTime := time.Now().Format(time.RFC3339)
-	if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time after import: %v\n", err)
+	if err := autoimport.AutoImportIfNewer(ctx, store, dbPath, notify, importFunc, onChanged); err != nil {
+		// Error already logged by notifier
+		return
 	}
 }
 
