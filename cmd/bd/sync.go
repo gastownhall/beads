@@ -28,7 +28,8 @@ var syncCmd = &cobra.Command{
 
 This command wraps the entire git-based sync workflow for multi-device use.
 
-Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).`,
+Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).
+Use --import-only to just import from JSONL (useful after git pull).`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		ctx := context.Background()
 
@@ -38,12 +39,28 @@ Use --flush-only to just export pending changes to JSONL (useful for pre-commit 
 		noPull, _ := cmd.Flags().GetBool("no-pull")
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 		flushOnly, _ := cmd.Flags().GetBool("flush-only")
+		importOnly, _ := cmd.Flags().GetBool("import-only")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a bd workspace (no .beads directory found)\n")
 			os.Exit(1)
+		}
+
+		// If import-only mode, just import and exit
+		if importOnly {
+			if dryRun {
+				fmt.Println("→ [DRY RUN] Would import from JSONL")
+			} else {
+				fmt.Println("→ Importing from JSONL...")
+				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+					fmt.Fprintf(os.Stderr, "Error importing: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("✓ Import complete")
+			}
+			return
 		}
 
 		// If flush-only mode, just export and exit
@@ -165,6 +182,7 @@ func init() {
 	syncCmd.Flags().Bool("no-pull", false, "Skip pulling from remote")
 	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	syncCmd.Flags().Bool("flush-only", false, "Only export pending changes to JSONL (skip git operations)")
+	syncCmd.Flags().Bool("import-only", false, "Only import from JSONL (skip git operations, useful after git pull)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -412,6 +430,11 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool)
 	if err != nil {
 		return fmt.Errorf("import failed: %w\n%s", err, output)
 	}
-	// Suppress output unless there's an error
+	
+	// Show output (import command provides the summary)
+	if len(output) > 0 {
+		fmt.Print(string(output))
+	}
+	
 	return nil
 }
