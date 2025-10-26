@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2025-10-25
+
+### Added
+- **Configurable Sort Policy**: `bd ready --sort` flag for work queue ordering (bd-147)
+  - `hybrid` (default): Priority-weighted by staleness
+  - `priority`: Strict priority ordering for autonomous systems
+  - `oldest`: Pure FIFO for long-tail work
+- **Release Automation**: New scripts for streamlined releases
+  - `scripts/release.sh`: Full automated release (version bump, tests, tag, Homebrew, install)
+  - `scripts/update-homebrew.sh`: Automated Homebrew formula updates
+
+### Fixed
+- **Critical**: Database reinitialization test re-landed with CI fixes (bd-130)
+  - Windows: Fixed git path handling (forward slash normalization)
+  - Nix: Skip test when git unavailable
+  - JSON: Increased scanner buffer to 64MB for large issues
+- **Bug**: Stale daemon socket detection (bd-137)
+  - MCP server now health-checks cached connections before use
+  - Auto-reconnect with exponential backoff on stale sockets
+  - Handles daemon restarts/upgrades gracefully
+- **Linting**: Fixed all errcheck warnings in production code (bd-58)
+  - Proper error handling for database resources and transactions
+  - Graceful EOF handling in interactive input
+- **Linting**: Fixed revive style issues (bd-56)
+  - Removed unused parameters, renamed builtin shadowing
+- **Linting**: Fixed goconst warnings (bd-116)
+
 ## [0.17.0] - 2025-10-24
 
 ### Added
