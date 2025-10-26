@@ -44,7 +44,7 @@ func (s *SQLiteStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*type
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []*types.EpicStatus
 	for rows.Next() {

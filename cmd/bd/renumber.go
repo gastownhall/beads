@@ -55,13 +55,13 @@ Risks:
 			}
 			store, err = sqlite.New(dbPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
 			}
-			defer store.Close()
-		}
+			defer func() { _ = store.Close() }()
+			}
 
-		ctx := context.Background()
+			ctx := context.Background()
 
 		// Get prefix from config, or derive from first issue if not set
 		prefix, err := store.GetConfig(ctx, "issue_prefix")

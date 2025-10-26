@@ -212,7 +212,7 @@ func FindAllDatabases() []DatabaseInfo {
 					if issues, err := store.SearchIssues(ctx, "", types.IssueFilter{}); err == nil {
 						issueCount = len(issues)
 					}
-					store.Close()
+					_ = store.Close()
 				}
 				
 				databases = append(databases, DatabaseInfo{

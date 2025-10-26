@@ -153,7 +153,7 @@ func getStaleIssues(thresholdSeconds int) ([]*StaleIssueInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query stale issues: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var staleIssues []*StaleIssueInfo
 	for rows.Next() {
@@ -221,7 +221,7 @@ func releaseStaleIssues(staleIssues []*StaleIssueInfo) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	releaseCount := 0
 	now := time.Now()

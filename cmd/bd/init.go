@@ -178,7 +178,7 @@ if quiet {
 		// Prompt to install
 		fmt.Printf("Install git hooks now? [Y/n] ")
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response) // ignore EOF on empty input
 		response = strings.ToLower(strings.TrimSpace(response))
 		
 		if response == "" || response == "y" || response == "yes" {

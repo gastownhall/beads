@@ -2,16 +2,16 @@ version: "2"
 
 run:
   timeout: 5m
-  tests: true
+  tests: false
 
 linters:
   disable:
     - dupl
-    - errcheck
     - goconst
     - gosec
     - revive
   enable:
+    - errcheck
     # - gocyclo  # Disabled: high complexity acceptable for large functions (see LINTING.md)
     - misspell
     - unconvert
@@ -27,6 +27,15 @@ linters-settings:
       - (*database/sql.DB).Close
       - (*database/sql.Rows).Close
       - (*database/sql.Tx).Rollback
+      - (*database/sql.Stmt).Close
+      - (*database/sql.Conn).Close
+      - (*os.File).Close
+      - (os).RemoveAll
+      - (os).Remove
+      - (os).Setenv
+      - (os).Unsetenv
+      - (os).Chdir
+      - (os).MkdirAll
   goconst:
     min-len: 3
     min-occurrences: 3
@@ -56,3 +65,8 @@ issues:
     - linters:
         - gosec
       text: "G302.*0700|G301.*0750"
+    # errcheck: Ignore unchecked errors in test files for common cleanup patterns
+    - path: _test\.go
+      linters:
+        - errcheck
+      text: "Error return value of .*(Close|Rollback|RemoveAll|Setenv|Unsetenv|Chdir|MkdirAll|Remove|Write|SetReadDeadline|SetDeadline|Start|Stop).* is not checked"

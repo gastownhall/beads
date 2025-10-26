@@ -22,7 +22,7 @@ func (s *SQLiteStorage) executeLabelOperation(
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, labelSQL, labelSQLArgs...)
 	if err != nil {
@@ -82,7 +82,7 @@ func (s *SQLiteStorage) GetLabels(ctx context.Context, issueID string) ([]string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get labels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var labels []string
 	for rows.Next() {
@@ -110,7 +110,7 @@ func (s *SQLiteStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issues by label: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return s.scanIssues(ctx, rows)
 }

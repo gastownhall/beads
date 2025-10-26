@@ -148,13 +148,13 @@ var blockedCmd = &cobra.Command{
 			var err error
 			store, err = sqlite.New(dbPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
 			}
-			defer store.Close()
-		}
+			defer func() { _ = store.Close() }()
+			}
 
-		ctx := context.Background()
+			ctx := context.Background()
 		blocked, err := store.GetBlockedIssues(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

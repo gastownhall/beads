@@ -20,7 +20,11 @@ func countIssuesInJSONL(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close file: %v\n", err)
+		}
+	}()
 
 	count := 0
 	decoder := json.NewDecoder(file)
@@ -100,13 +104,13 @@ Output to stdout by default, or use -o flag for file output.`,
 			}
 			store, err = sqlite.New(dbPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
 			}
-			defer store.Close()
-		}
+			defer func() { _ = store.Close() }()
+			}
 
-		// Build filter
+			// Build filter
 		filter := types.IssueFilter{}
 		if statusFilter != "" {
 			status := types.Status(statusFilter)
@@ -153,7 +157,7 @@ Output to stdout by default, or use -o flag for file output.`,
 					fmt.Fprintf(os.Stderr, "Press Ctrl+C to abort, or Enter to continue: ")
 					// Read a line from stdin to wait for user confirmation
 					var response string
-					fmt.Scanln(&response)
+					_, _ = fmt.Scanln(&response) // ignore EOF on empty input
 				}
 			}
 		}

@@ -17,7 +17,7 @@ func (s *SQLiteStorage) AddComment(ctx context.Context, issueID, actor, comment 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, comment)
@@ -70,7 +70,7 @@ func (s *SQLiteStorage) GetEvents(ctx context.Context, issueID string, limit int
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []*types.Event
 	for rows.Next() {

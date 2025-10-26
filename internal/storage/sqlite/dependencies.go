@@ -72,7 +72,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Cycle Detection and Prevention
 	//
@@ -206,7 +206,7 @@ func (s *SQLiteStorage) addDependencyUnchecked(ctx context.Context, dep *types.D
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Cycle detection (same as AddDependency)
 	var cycleExists bool
@@ -277,7 +277,7 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
@@ -319,7 +319,7 @@ func (s *SQLiteStorage) removeDependencyIfExists(ctx context.Context, issueID, d
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
@@ -369,7 +369,7 @@ func (s *SQLiteStorage) GetDependencies(ctx context.Context, issueID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependencies: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return s.scanIssues(ctx, rows)
 }
@@ -388,7 +388,7 @@ func (s *SQLiteStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependents: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return s.scanIssues(ctx, rows)
 }
@@ -404,7 +404,7 @@ func (s *SQLiteStorage) GetDependencyRecords(ctx context.Context, issueID string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependency records: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var deps []*types.Dependency
 	for rows.Next() {
@@ -436,7 +436,7 @@ func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all dependency records: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Group dependencies by issue ID
 	depsMap := make(map[string][]*types.Dependency)
@@ -508,7 +508,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependency tree: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Use a map to track nodes we've seen and deduplicate
 	// Key: issue ID, Value: minimum depth where we saw it
@@ -606,7 +606,7 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect cycles: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var cycles [][]*types.Issue
 	seen := make(map[string]bool)

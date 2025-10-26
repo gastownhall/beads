@@ -232,7 +232,7 @@ func migrateExternalRefColumn(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("failed to check schema: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var cid int
@@ -554,7 +554,7 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Start IMMEDIATE transaction to acquire write lock early and prevent race conditions.
 	// IMMEDIATE acquires a RESERVED lock immediately, preventing other IMMEDIATE or EXCLUSIVE
@@ -767,7 +767,7 @@ func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, issue := range issues {
 		_, err = stmt.ExecContext(ctx,
@@ -793,7 +793,7 @@ func bulkRecordEvents(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	if err != nil {
 		return fmt.Errorf("failed to prepare event statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, issue := range issues {
 		eventData, err := json.Marshal(issue)
@@ -820,7 +820,7 @@ func bulkMarkDirty(ctx context.Context, conn *sql.Conn, issues []*types.Issue) e
 	if err != nil {
 		return fmt.Errorf("failed to prepare dirty statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	dirtyTime := time.Now()
 	for _, issue := range issues {
@@ -897,7 +897,7 @@ func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
@@ -1177,7 +1177,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Update issue
 	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", "))
@@ -1230,7 +1230,7 @@ func (s *SQLiteStorage) UpdateIssueID(ctx context.Context, oldID, newID string, 
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Disable foreign keys on this specific connection
 	_, err = conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`)
@@ -1242,7 +1242,7 @@ func (s *SQLiteStorage) UpdateIssueID(ctx context.Context, oldID, newID string, 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE issues
@@ -1326,7 +1326,7 @@ func (s *SQLiteStorage) RenameCounterPrefix(ctx context.Context, oldPrefix, newP
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var lastID int
 	err = tx.QueryRowContext(ctx, `SELECT last_id FROM issue_counters WHERE prefix = ?`, oldPrefix).Scan(&lastID)
@@ -1370,7 +1370,7 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?
@@ -1407,7 +1407,7 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Delete dependencies (both directions)
 	_, err = tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
@@ -1561,7 +1561,7 @@ func (s *SQLiteStorage) checkSingleIssueValidation(ctx context.Context, tx *sql.
 	if err != nil {
 		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	hasExternal := false
 	for rows.Next() {
@@ -1604,7 +1604,7 @@ func (s *SQLiteStorage) collectOrphansForID(ctx context.Context, tx *sql.Tx, id 
 	if err != nil {
 		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var depID string
@@ -1811,7 +1811,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return s.scanIssues(ctx, rows)
 }
@@ -1841,7 +1841,7 @@ func (s *SQLiteStorage) GetAllConfig(ctx context.Context) (map[string]string, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	config := make(map[string]string)
 	for rows.Next() {
@@ -1935,7 +1935,7 @@ func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to query comments: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var comments []*types.Comment
 	for rows.Next() {

@@ -30,7 +30,7 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now()
 	stmt, err := tx.PrepareContext(ctx, `
@@ -41,7 +41,7 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, issueID := range issueIDs {
 		if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {
@@ -61,7 +61,7 @@ func (s *SQLiteStorage) GetDirtyIssues(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dirty issues: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var issueIDs []string
 	for rows.Next() {
@@ -99,13 +99,13 @@ func (s *SQLiteStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, issueID := range issueIDs {
 		if _, err := stmt.ExecContext(ctx, issueID); err != nil {
@@ -142,7 +142,7 @@ func markIssuesDirtyTx(ctx context.Context, tx *sql.Tx, issueIDs []string) error
 	if err != nil {
 		return fmt.Errorf("failed to prepare dirty statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, issueID := range issueIDs {
 		if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {

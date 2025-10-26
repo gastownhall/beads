@@ -587,7 +587,7 @@ func restartDaemonForVersionMismatch() bool {
 		cmd.Stdin = devNull
 		cmd.Stdout = devNull
 		cmd.Stderr = devNull
-		defer devNull.Close()
+		defer func() { _ = devNull.Close() }()
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -637,7 +637,11 @@ func tryAutoStartDaemon(socketPath string) bool {
 	if !acquireStartLock(lockPath, socketPath) {
 		return false
 	}
-	defer os.Remove(lockPath)
+	defer func() {
+		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+			debugLog("failed to remove lock file: %v", err)
+		}
+	}()
 
 	if handleExistingSocket(socketPath) {
 		return true
@@ -777,7 +781,7 @@ func setupDaemonIO(cmd *exec.Cmd) {
 		cmd.Stdin = devNull
 		go func() {
 			time.Sleep(1 * time.Second)
-			devNull.Close()
+			_ = devNull.Close()
 		}()
 	}
 }

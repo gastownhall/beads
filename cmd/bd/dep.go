@@ -174,7 +174,7 @@ var depTreeCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 		}
 
 		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
@@ -245,7 +245,7 @@ var depCyclesCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 		}
 
 		ctx := context.Background()
