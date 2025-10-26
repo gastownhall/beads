@@ -10,6 +10,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
@@ -24,12 +25,24 @@ With --no-db: creates .beads/ directory and nodb_prefix.txt file instead of SQLi
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 
+		// Initialize config (PersistentPreRun doesn't run for init command)
+		if err := config.Initialize(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
+			// Non-fatal - continue with defaults
+		}
+
 		// Check BEADS_DB environment variable if --db flag not set
 		// (PersistentPreRun doesn't run for init command)
 		if dbPath == "" {
 			if envDB := os.Getenv("BEADS_DB"); envDB != "" {
 				dbPath = envDB
 			}
+		}
+
+		// Determine prefix with precedence: flag > config > auto-detect
+		if prefix == "" {
+			// Try to get from config file
+			prefix = config.GetString("issue-prefix")
 		}
 
 		if prefix == "" {

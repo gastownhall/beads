@@ -74,6 +74,7 @@ func Initialize() error {
 	v.SetDefault("no-db", false)
 	v.SetDefault("db", "")
 	v.SetDefault("actor", "")
+	v.SetDefault("issue-prefix", "")
 	
 	// Additional environment variables (not prefixed with BD_)
 	// These are bound explicitly for backward compatibility

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -111,8 +112,9 @@ func loadIssuesFromJSONL(path string) ([]*types.Issue, error) {
 // detectPrefix detects the issue prefix to use in --no-db mode
 // Priority:
 // 1. .beads/nodb_prefix.txt file (if exists)
-// 2. Common prefix from existing issues (if all share same prefix)
-// 3. Current directory name (fallback)
+// 2. issue-prefix from config.yaml (if set)
+// 3. Common prefix from existing issues (if all share same prefix)
+// 4. Current directory name (fallback)
 func detectPrefix(beadsDir string, memStore *memory.MemoryStorage) (string, error) {
 	// Check for nodb_prefix.txt
 	prefixFile := filepath.Join(beadsDir, "nodb_prefix.txt")
@@ -121,6 +123,12 @@ func detectPrefix(beadsDir string, memStore *memory.MemoryStorage) (string, erro
 		if prefix != "" {
 			return prefix, nil
 		}
+	}
+
+	// Check config.yaml for issue-prefix
+	configPrefix := config.GetString("issue-prefix")
+	if configPrefix != "" {
+		return configPrefix, nil
 	}
 
 	// Check existing issues for common prefix
