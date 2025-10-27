@@ -99,8 +99,10 @@ SQLite Databases (complete isolation)
 **Version Management:** bd automatically handles daemon version mismatches (v0.16.0+):
 - When you upgrade bd, old daemons are automatically detected and restarted
 - Version compatibility is checked on every connection
-- No manual `bd daemon --stop` required after upgrades
+- No manual intervention required after upgrades
 - Works transparently with MCP server and CLI
+- Use `bd daemons health` to check for version mismatches
+- Use `bd daemons killall` to force-restart all daemons if needed
 
 **Alternative (not recommended): Multiple MCP Server Instances**
 If you must use separate MCP servers:
@@ -197,6 +199,42 @@ bd duplicates --dry-run                                # Preview merge operation
 bd merge <source-id...> --into <target-id> --json      # Consolidate duplicates
 bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 ```
+
+### Managing Daemons
+
+bd runs a background daemon per workspace for auto-sync and RPC operations. Use `bd daemons` to manage multiple daemons:
+
+```bash
+# List all running daemons
+bd daemons list --json
+
+# Check health (version mismatches, stale sockets)
+bd daemons health --json
+
+# Stop a specific daemon
+bd daemons stop /path/to/workspace --json
+bd daemons stop 12345 --json  # By PID
+
+# View daemon logs
+bd daemons logs /path/to/workspace -n 100
+bd daemons logs 12345 -f  # Follow mode
+
+# Stop all daemons
+bd daemons killall --json
+bd daemons killall --force --json  # Force kill if graceful fails
+```
+
+**When to use:**
+- **After upgrading bd**: Run `bd daemons health` to check for version mismatches, then `bd daemons killall` to restart all daemons with the new version
+- **Debugging**: Use `bd daemons logs <workspace>` to view daemon logs
+- **Cleanup**: `bd daemons list` auto-removes stale sockets
+
+**Troubleshooting:**
+- **Stale sockets**: `bd daemons list` auto-cleans them
+- **Version mismatch**: `bd daemons killall` then let daemons auto-start on next command
+- **Daemon won't stop**: `bd daemons killall --force`
+
+See [commands/daemons.md](commands/daemons.md) for detailed documentation.
 
 ### Workflow
 

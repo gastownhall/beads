@@ -396,6 +396,37 @@ bd sync
 
 **Note:** Auto-sync is enabled by default. Manual export/import is rarely needed.
 
+### Managing Daemons
+
+bd runs a background daemon per workspace for auto-sync and RPC operations. Use `bd daemons` to manage multiple daemons:
+
+```bash
+# List all running daemons
+bd daemons list
+
+# Check health (version mismatches, stale sockets)
+bd daemons health
+
+# Stop a specific daemon
+bd daemons stop /path/to/workspace
+bd daemons stop 12345  # By PID
+
+# View daemon logs
+bd daemons logs /path/to/workspace -n 100
+bd daemons logs 12345 -f  # Follow mode
+
+# Stop all daemons
+bd daemons killall
+bd daemons killall --force  # Force kill if graceful fails
+```
+
+**Common use cases:**
+- **After upgrading bd**: Run `bd daemons health` to check for version mismatches, then `bd daemons killall` to restart all daemons with the new version
+- **Debugging**: Use `bd daemons logs <workspace>` to view daemon logs
+- **Cleanup**: `bd daemons list` auto-removes stale sockets
+
+See [commands/daemons.md](commands/daemons.md) for complete documentation.
+
 ## Examples
 
 Check out the **[examples/](examples/)** directory for:
