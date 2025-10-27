@@ -179,6 +179,7 @@ var depTreeCmd = &cobra.Command{
 
 		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
 		maxDepth, _ := cmd.Flags().GetInt("max-depth")
+		reverse, _ := cmd.Flags().GetBool("reverse")
 
 		if maxDepth < 1 {
 			fmt.Fprintf(os.Stderr, "Error: --max-depth must be >= 1\n")
@@ -186,7 +187,7 @@ var depTreeCmd = &cobra.Command{
 		}
 
 		ctx := context.Background()
-		tree, err := store.GetDependencyTree(ctx, args[0], maxDepth, showAllPaths)
+		tree, err := store.GetDependencyTree(ctx, args[0], maxDepth, showAllPaths, reverse)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -202,12 +203,20 @@ var depTreeCmd = &cobra.Command{
 		}
 
 		if len(tree) == 0 {
-			fmt.Printf("\n%s has no dependencies\n", args[0])
+			if reverse {
+				fmt.Printf("\n%s has no dependents\n", args[0])
+			} else {
+				fmt.Printf("\n%s has no dependencies\n", args[0])
+			}
 			return
 		}
 
 		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s Dependency tree for %s:\n\n", cyan("🌲"), args[0])
+		if reverse {
+			fmt.Printf("\n%s Dependent tree for %s:\n\n", cyan("🌲"), args[0])
+		} else {
+			fmt.Printf("\n%s Dependency tree for %s:\n\n", cyan("🌲"), args[0])
+		}
 
 		hasTruncation := false
 		for _, node := range tree {
@@ -286,6 +295,7 @@ func init() {
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|related|parent-child|discovered-from)")
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
+	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (what was discovered from this) instead of dependency tree (what blocks this)")
 	depCmd.AddCommand(depAddCmd)
 	depCmd.AddCommand(depRemoveCmd)
 	depCmd.AddCommand(depTreeCmd)

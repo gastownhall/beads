@@ -25,7 +25,7 @@ type Storage interface {
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
-	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error)
+	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 
 	// Labels
@@ -53,7 +53,7 @@ type Storage interface {
 	// Dirty tracking (for incremental JSONL export)
 	GetDirtyIssues(ctx context.Context) ([]string, error)
 	GetDirtyIssueHash(ctx context.Context, issueID string) (string, error) // For timestamp-only dedup (bd-164)
-	ClearDirtyIssues(ctx context.Context) error // WARNING: Race condition (bd-52), use ClearDirtyIssuesByID
+	ClearDirtyIssues(ctx context.Context) error                            // WARNING: Race condition (bd-52), use ClearDirtyIssuesByID
 	ClearDirtyIssuesByID(ctx context.Context, issueIDs []string) error
 
 	// Export hash tracking (for timestamp-only dedup, bd-164)

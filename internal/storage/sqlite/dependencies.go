@@ -462,52 +462,103 @@ func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string
 // When showAllPaths is false (default), nodes appearing via multiple paths (diamond dependencies)
 // appear only once at their shallowest depth in the tree.
 // When showAllPaths is true, all paths are shown with duplicate nodes at different depths.
-func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
+// When reverse is true, shows dependent tree (what was discovered from this) instead of dependency tree (what blocks this).
+func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	if maxDepth <= 0 {
 		maxDepth = 50
 	}
 
-	// First, build the complete tree with all paths using recursive CTE
-	// We need to track the full path to handle proper tree structure
-	rows, err := s.db.QueryContext(ctx, `
-		WITH RECURSIVE tree AS (
-			SELECT
-			i.id, i.title, i.status, i.priority, i.description, i.design,
-			i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-			i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
-			i.external_ref,
-			0 as depth,
-			i.id as path,
-			i.id as parent_id
-			FROM issues i
-			WHERE i.id = ?
+	// Build SQL query based on direction
+	// Normal mode: traverse dependencies (what blocks me) - goes UP
+	// Reverse mode: traverse dependents (what was discovered from me) - goes DOWN
+	var query string
+	if reverse {
+		// Reverse: show dependents (what depends on this issue)
+		query = `
+			WITH RECURSIVE tree AS (
+				SELECT
+				i.id, i.title, i.status, i.priority, i.description, i.design,
+				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
+				0 as depth,
+				i.id as path,
+				i.id as parent_id
+				FROM issues i
+				WHERE i.id = ?
 
-			UNION ALL
+				UNION ALL
 
-			SELECT
-			i.id, i.title, i.status, i.priority, i.description, i.design,
-			i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-			i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
-			i.external_ref,
-			t.depth + 1,
-			t.path || '→' || i.id,
-			t.id
-			FROM issues i
-			JOIN dependencies d ON i.id = d.depends_on_id
-			JOIN tree t ON d.issue_id = t.id
-			WHERE t.depth < ?
-			AND t.path != i.id
+				SELECT
+				i.id, i.title, i.status, i.priority, i.description, i.design,
+				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
+				t.depth + 1,
+				t.path || '→' || i.id,
+				t.id
+				FROM issues i
+				JOIN dependencies d ON i.id = d.issue_id
+				JOIN tree t ON d.depends_on_id = t.id
+				WHERE t.depth < ?
+				AND t.path != i.id
 			AND t.path NOT LIKE i.id || '→%'
 			AND t.path NOT LIKE '%→' || i.id || '→%'
 			AND t.path NOT LIKE '%→' || i.id
-			)
-			SELECT id, title, status, priority, description, design,
-			acceptance_criteria, notes, issue_type, assignee,
-			estimated_minutes, created_at, updated_at, closed_at,
-			external_ref, depth, parent_id
-			FROM tree
-			ORDER BY depth, priority, id
-	`, issueID, maxDepth)
+				)
+				SELECT id, title, status, priority, description, design,
+				acceptance_criteria, notes, issue_type, assignee,
+				estimated_minutes, created_at, updated_at, closed_at,
+				external_ref, depth, parent_id
+				FROM tree
+				ORDER BY depth, priority, id
+		`
+	} else {
+		// Normal: show dependencies (what this issue depends on)
+		query = `
+			WITH RECURSIVE tree AS (
+				SELECT
+				i.id, i.title, i.status, i.priority, i.description, i.design,
+				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
+				0 as depth,
+				i.id as path,
+				i.id as parent_id
+				FROM issues i
+				WHERE i.id = ?
+
+				UNION ALL
+
+				SELECT
+				i.id, i.title, i.status, i.priority, i.description, i.design,
+				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
+				i.external_ref,
+				t.depth + 1,
+				t.path || '→' || i.id,
+				t.id
+				FROM issues i
+				JOIN dependencies d ON i.id = d.depends_on_id
+				JOIN tree t ON d.issue_id = t.id
+				WHERE t.depth < ?
+				AND t.path != i.id
+			AND t.path NOT LIKE i.id || '→%'
+			AND t.path NOT LIKE '%→' || i.id || '→%'
+			AND t.path NOT LIKE '%→' || i.id
+				)
+				SELECT id, title, status, priority, description, design,
+				acceptance_criteria, notes, issue_type, assignee,
+				estimated_minutes, created_at, updated_at, closed_at,
+				external_ref, depth, parent_id
+				FROM tree
+				ORDER BY depth, priority, id
+		`
+	}
+
+	// First, build the complete tree with all paths using recursive CTE
+	// We need to track the full path to handle proper tree structure
+	rows, err := s.db.QueryContext(ctx, query, issueID, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dependency tree: %w", err)
 	}
