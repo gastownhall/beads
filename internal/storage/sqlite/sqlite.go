@@ -617,19 +617,19 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 	}()
 
+	// Get prefix from config (needed for both ID generation and validation)
+	var prefix string
+	err = conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
+	if err == sql.ErrNoRows || prefix == "" {
+		// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
+		// This prevents duplicate issues with wrong prefix
+		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
+	} else if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+
 	// Generate ID if not set (inside transaction to prevent race conditions)
 	if issue.ID == "" {
-		// Get prefix from config
-		var prefix string
-		err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
-		if err == sql.ErrNoRows || prefix == "" {
-			// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
-			// This prevents duplicate issues with wrong prefix
-			return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
-		} else if err != nil {
-			return fmt.Errorf("failed to get config: %w", err)
-		}
-
 		// Atomically initialize counter (if needed) and get next ID (within transaction)
 		// This ensures the counter starts from the max existing ID, not 1
 		// CRITICAL: We rely on BEGIN IMMEDIATE above to serialize this operation across processes
@@ -665,6 +665,13 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 
 		issue.ID = fmt.Sprintf("%s-%d", prefix, nextID)
+	} else {
+		// Validate that explicitly provided ID matches the configured prefix (bd-177)
+		// This prevents wrong-prefix bugs when IDs are manually specified
+		expectedPrefix := prefix + "-"
+		if !strings.HasPrefix(issue.ID, expectedPrefix) {
+			return fmt.Errorf("issue ID '%s' does not match configured prefix '%s'", issue.ID, prefix)
+		}
 	}
 
 	// Insert issue
@@ -743,19 +750,7 @@ func validateBatchIssues(issues []*types.Issue) error {
 
 // generateBatchIDs generates IDs for all issues that need them atomically
 func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue, dbPath string) error {
-	// Count how many issues need IDs
-	needIDCount := 0
-	for _, issue := range issues {
-		if issue.ID == "" {
-			needIDCount++
-		}
-	}
-
-	if needIDCount == 0 {
-		return nil
-	}
-
-	// Get prefix from config
+	// Get prefix from config (needed for both generation and validation)
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 	if err == sql.ErrNoRows || prefix == "" {
@@ -763,6 +758,24 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
+	}
+
+	// Count how many issues need IDs and validate explicitly provided IDs
+	needIDCount := 0
+	expectedPrefix := prefix + "-"
+	for _, issue := range issues {
+		if issue.ID == "" {
+			needIDCount++
+		} else {
+			// Validate that explicitly provided ID matches the configured prefix (bd-177)
+			if !strings.HasPrefix(issue.ID, expectedPrefix) {
+				return fmt.Errorf("issue ID '%s' does not match configured prefix '%s'", issue.ID, prefix)
+			}
+		}
+	}
+
+	if needIDCount == 0 {
+		return nil
 	}
 
 	// Atomically reserve ID range

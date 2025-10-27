@@ -209,6 +209,9 @@ func (m *MemoryStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 		prefix = "bd"
 	}
 
+	// Track IDs in this batch to detect duplicates within batch
+	batchIDs := make(map[string]bool)
+
 	// Generate IDs for issues that need them
 	for _, issue := range issues {
 		issue.CreatedAt = now
@@ -219,10 +222,16 @@ func (m *MemoryStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 			issue.ID = fmt.Sprintf("%s-%d", prefix, m.counters[prefix])
 		}
 
-		// Check for duplicates
+		// Check for duplicates in existing issues
 		if _, exists := m.issues[issue.ID]; exists {
 			return fmt.Errorf("issue %s already exists", issue.ID)
 		}
+
+		// Check for duplicates within this batch
+		if batchIDs[issue.ID] {
+			return fmt.Errorf("duplicate ID within batch: %s", issue.ID)
+		}
+		batchIDs[issue.ID] = true
 	}
 
 	// Store all issues
