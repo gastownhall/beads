@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.7] - 2025-10-26
+
+### Fixed
+- **Test Isolation**: Export test failures due to hash caching between subtests
+  - Added `ClearAllExportHashes()` method to SQLiteStorage for test isolation
+  - Export tests now properly reset state between subtests
+  - Fixes intermittent test failures when running full test suite
+
 ## [0.17.2] - 2025-10-25
 
 ### Added
