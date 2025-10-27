@@ -361,6 +361,37 @@ bd create "Fix bug" -p 1
 
 See [ADVANCED.md#git-worktrees](ADVANCED.md#git-worktrees) for details.
 
+### What's the difference between SQLite corruption and ID collisions?
+
+bd handles two distinct types of integrity issues:
+
+**1. Logical Consistency (Collision Resolution)**
+
+The hash/fingerprint/collision architecture prevents:
+- **ID collisions**: Same ID assigned to different issues (e.g., from parallel workers or branch merges)
+- **Wrong prefix bugs**: Issues created with incorrect prefix due to config mismatch
+- **Merge conflicts**: Branch divergence creating conflicting JSONL content
+
+**Solution**: `bd import --resolve-collisions` automatically remaps colliding IDs and updates all references.
+
+**2. Physical SQLite Corruption**
+
+SQLite database file corruption can occur from:
+- **Disk/hardware failures**: Power loss, disk errors, filesystem corruption
+- **Concurrent writes**: Multiple processes writing to the same database file simultaneously
+- **Container scenarios**: Shared database volumes with multiple containers
+
+**Solution**: Reimport from JSONL (which survives in git history):
+```bash
+mv .beads/*.db .beads/*.db.backup
+bd init
+bd import -i .beads/issues.jsonl
+```
+
+**Key Difference**: Collision resolution fixes logical issues in the data. Physical corruption requires restoring from the JSONL source of truth.
+
+**When to use in-memory mode (`--no-db`)**: For multi-process/container scenarios where SQLite's file locking isn't sufficient. The in-memory backend loads from JSONL at startup and writes back after each command, avoiding shared database state entirely.
+
 ## Getting Help
 
 ### Where can I get more help?

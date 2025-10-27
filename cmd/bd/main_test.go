@@ -560,6 +560,9 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 		t.Skip("chmod-based read-only directory behavior is not reliable on Windows")
 	}
 
+	// Note: We create issues.jsonl as a directory to force os.Create() to fail,
+	// which works even when running as root (unlike chmod-based approaches)
+
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-error-*")
 	if err != nil {
@@ -601,16 +604,34 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 		t.Fatalf("Failed to create issue: %v", err)
 	}
 
-	// Create a read-only directory to force flush failure
-	readOnlyDir := filepath.Join(tmpDir, "readonly")
-	if err := os.MkdirAll(readOnlyDir, 0555); err != nil {
-		t.Fatalf("Failed to create read-only dir: %v", err)
+	// Mark issue as dirty so flushToJSONL will try to export it
+	if err := testStore.MarkIssueDirty(ctx, issue.ID); err != nil {
+		t.Fatalf("Failed to mark issue dirty: %v", err)
 	}
-	defer os.Chmod(readOnlyDir, 0755) // Restore permissions for cleanup
 
-	// Set dbPath to point to read-only directory
+	// Create a directory where the JSONL file should be, to force write failure
+	// os.Create() will fail when trying to create a file with a path that's already a directory
+	failDir := filepath.Join(tmpDir, "faildir")
+	if err := os.MkdirAll(failDir, 0755); err != nil {
+		t.Fatalf("Failed to create fail dir: %v", err)
+	}
+
+	// Create issues.jsonl as a directory (not a file) to force Create() to fail
+	jsonlAsDir := filepath.Join(failDir, "issues.jsonl")
+	if err := os.MkdirAll(jsonlAsDir, 0755); err != nil {
+		t.Fatalf("Failed to create issues.jsonl as directory: %v", err)
+	}
+
+	// Set dbPath to point to faildir
 	originalDBPath := dbPath
-	dbPath = filepath.Join(readOnlyDir, "test.db")
+	dbPath = filepath.Join(failDir, "test.db")
+
+	// Verify issue is actually marked as dirty
+	dirtyIDs, err := testStore.GetDirtyIssues(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get dirty issues: %v", err)
+	}
+	t.Logf("Dirty issues before flush: %v", dirtyIDs)
 
 	// Reset failure counter
 	flushMutex.Lock()
@@ -618,6 +639,9 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 	lastFlushError = nil
 	isDirty = true
 	flushMutex.Unlock()
+
+	t.Logf("dbPath set to: %s", dbPath)
+	t.Logf("Expected JSONL path (which is a directory): %s", filepath.Join(failDir, "issues.jsonl"))
 
 	// Attempt flush (should fail)
 	flushToJSONL()

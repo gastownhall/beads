@@ -71,8 +71,10 @@ func Initialize() error {
 	v.SetDefault("no-daemon", false)
 	v.SetDefault("no-auto-flush", false)
 	v.SetDefault("no-auto-import", false)
+	v.SetDefault("no-db", false)
 	v.SetDefault("db", "")
 	v.SetDefault("actor", "")
+	v.SetDefault("issue-prefix", "")
 	
 	// Additional environment variables (not prefixed with BD_)
 	// These are bound explicitly for backward compatibility

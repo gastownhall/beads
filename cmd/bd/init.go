@@ -10,6 +10,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
@@ -18,10 +19,18 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize bd in the current directory",
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
-and database file. Optionally specify a custom issue prefix.`,
+and database file. Optionally specify a custom issue prefix.
+
+With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
+
+		// Initialize config (PersistentPreRun doesn't run for init command)
+		if err := config.Initialize(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
+			// Non-fatal - continue with defaults
+		}
 
 		// Check BEADS_DB environment variable if --db flag not set
 		// (PersistentPreRun doesn't run for init command)
@@ -29,6 +38,12 @@ and database file. Optionally specify a custom issue prefix.`,
 			if envDB := os.Getenv("BEADS_DB"); envDB != "" {
 				dbPath = envDB
 			}
+		}
+
+		// Determine prefix with precedence: flag > config > auto-detect
+		if prefix == "" {
+			// Try to get from config file
+			prefix = config.GetString("issue-prefix")
 		}
 
 		if prefix == "" {
@@ -86,6 +101,31 @@ and database file. Optionally specify a custom issue prefix.`,
 		if err := os.MkdirAll(localBeadsDir, 0750); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .beads directory: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Handle --no-db mode: create issues.jsonl file instead of database
+		if noDb {
+			// Create empty issues.jsonl file
+			jsonlPath := filepath.Join(localBeadsDir, "issues.jsonl")
+			if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+				if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to create issues.jsonl: %v\n", err)
+					os.Exit(1)
+				}
+			}
+
+			if !quiet {
+				green := color.New(color.FgGreen).SprintFunc()
+				cyan := color.New(color.FgCyan).SprintFunc()
+
+				fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", green("✓"))
+				fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
+				fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
+				fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
+				fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
+				fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
+			}
+			return
 		}
 
 		// Create .gitignore in .beads directory

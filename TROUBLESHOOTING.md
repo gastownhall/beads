@@ -92,17 +92,28 @@ bd import -i .beads/issues.jsonl
 
 ### Database corruption
 
-If you suspect database corruption:
+**Important**: Distinguish between **logical consistency issues** (ID collisions, wrong prefixes) and **physical SQLite corruption**.
+
+For **physical database corruption** (disk failures, power loss, filesystem errors):
 
 ```bash
 # Check database integrity
 sqlite3 .beads/*.db "PRAGMA integrity_check;"
 
-# If corrupted, reimport from JSONL
+# If corrupted, reimport from JSONL (source of truth in git)
 mv .beads/*.db .beads/*.db.backup
 bd init
 bd import -i .beads/issues.jsonl
 ```
+
+For **logical consistency issues** (ID collisions from branch merges, parallel workers):
+
+```bash
+# This is NOT corruption - use collision resolution instead
+bd import -i .beads/issues.jsonl --resolve-collisions
+```
+
+See [FAQ](FAQ.md#whats-the-difference-between-sqlite-corruption-and-id-collisions) for the distinction.
 
 ### Multiple databases detected warning
 

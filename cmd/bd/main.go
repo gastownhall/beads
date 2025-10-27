@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,10 +20,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/autoimport"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"golang.org/x/mod/semver"
@@ -104,6 +105,9 @@ var rootCmd = &cobra.Command{
 		if !cmd.Flags().Changed("no-auto-import") {
 			noAutoImport = config.GetBool("no-auto-import")
 		}
+		if !cmd.Flags().Changed("no-db") {
+			noDb = config.GetBool("no-db")
+		}
 		if !cmd.Flags().Changed("db") && dbPath == "" {
 			dbPath = config.GetString("db")
 		}
@@ -123,14 +127,33 @@ var rootCmd = &cobra.Command{
 			noAutoImport = true
 		}
 
-		// Sync RPC client version with CLI version
-		rpc.ClientVersion = Version
-
 		// Set auto-flush based on flag (invert no-auto-flush)
 		autoFlushEnabled = !noAutoFlush
 
 		// Set auto-import based on flag (invert no-auto-import)
 		autoImportEnabled = !noAutoImport
+
+		// Handle --no-db mode: load from JSONL, use in-memory storage
+		if noDb {
+			if err := initializeNoDbMode(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing --no-db mode: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Set actor for audit trail
+			if actor == "" {
+				if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+					actor = bdActor
+				} else if user := os.Getenv("USER"); user != "" {
+					actor = user
+				} else {
+					actor = "unknown"
+				}
+			}
+
+			// Skip daemon and SQLite initialization - we're in memory mode
+			return
+		}
 
 		// Initialize database path
 		if dbPath == "" {
@@ -147,36 +170,22 @@ var rootCmd = &cobra.Command{
 				// Special case for import: if we found a database but there's a local .beads/
 				// directory without a database, prefer creating a local database
 				if cmd.Name() == cmdImport && localBeadsDir != "" {
-				if _, err := os.Stat(localBeadsDir); err == nil {
-				// Check if found database is NOT in the local .beads/ directory
-				if !strings.HasPrefix(dbPath, localBeadsDir+string(filepath.Separator)) {
-				// Look for existing .db file in local .beads/ directory
-				matches, _ := filepath.Glob(filepath.Join(localBeadsDir, "*.db"))
-				 if len(matches) > 0 {
-				   dbPath = matches[0]
-				   } else {
-							// No database exists yet - will be created by import
-							// Use generic name that will be renamed after prefix detection
-							dbPath = filepath.Join(localBeadsDir, "bd.db")
+					if _, err := os.Stat(localBeadsDir); err == nil {
+						// Check if found database is NOT in the local .beads/ directory
+						if !strings.HasPrefix(dbPath, localBeadsDir+string(filepath.Separator)) {
+							// Use local .beads/vc.db instead for import
+							dbPath = filepath.Join(localBeadsDir, "vc.db")
 						}
 					}
 				}
-			}
 			} else {
-			// For import command, allow creating database if .beads/ directory exists
-			if cmd.Name() == cmdImport && localBeadsDir != "" {
-			if _, err := os.Stat(localBeadsDir); err == nil {
-			// Look for existing .db file in local .beads/ directory
-			matches, _ := filepath.Glob(filepath.Join(localBeadsDir, "*.db"))
-			 if len(matches) > 0 {
-			   dbPath = matches[0]
-					} else {
+				// For import command, allow creating database if .beads/ directory exists
+				if cmd.Name() == cmdImport && localBeadsDir != "" {
+					if _, err := os.Stat(localBeadsDir); err == nil {
 						// .beads/ directory exists - set dbPath for import to create
-						// Use generic name that will be renamed after prefix detection
-						dbPath = filepath.Join(localBeadsDir, "bd.db")
+						dbPath = filepath.Join(localBeadsDir, "vc.db")
 					}
 				}
-			}
 
 				// If dbPath still not set, error out
 				if dbPath == "" {
@@ -269,30 +278,18 @@ var rootCmd = &cobra.Command{
 						daemonStatus.Detail = fmt.Sprintf("version mismatch (daemon: %s, client: %s) and restart failed",
 							health.Version, Version)
 					} else {
-						// Daemon is healthy and compatible - validate database path
-						beadsDir := filepath.Dir(dbPath)
-						if err := validateDaemonLock(beadsDir, dbPath); err != nil {
-							_ = client.Close()
-							daemonStatus.FallbackReason = FallbackHealthFailed
-							daemonStatus.Detail = fmt.Sprintf("daemon lock validation failed: %v", err)
-							if os.Getenv("BD_DEBUG") != "" {
-								fmt.Fprintf(os.Stderr, "Debug: daemon lock validation failed: %v\n", err)
-							}
-							// Fall through to direct mode
-						} else {
-							// Daemon is healthy, compatible, and validated - use it
-							daemonClient = client
-							daemonStatus.Mode = cmdDaemon
-							daemonStatus.Connected = true
-							daemonStatus.Degraded = false
-							daemonStatus.Health = health.Status
-							if os.Getenv("BD_DEBUG") != "" {
-								fmt.Fprintf(os.Stderr, "Debug: connected to daemon at %s (health: %s)\n", socketPath, health.Status)
-							}
-							// Warn if using daemon with git worktrees
-							warnWorktreeDaemon(dbPath)
-							return // Skip direct storage initialization
+						// Daemon is healthy and compatible - use it
+						daemonClient = client
+						daemonStatus.Mode = cmdDaemon
+						daemonStatus.Connected = true
+						daemonStatus.Degraded = false
+						daemonStatus.Health = health.Status
+						if os.Getenv("BD_DEBUG") != "" {
+							fmt.Fprintf(os.Stderr, "Debug: connected to daemon at %s (health: %s)\n", socketPath, health.Status)
 						}
+						// Warn if using daemon with git worktrees
+						warnWorktreeDaemon(dbPath)
+						return // Skip direct storage initialization
 					}
 				} else {
 					// Health check failed or daemon unhealthy
@@ -436,6 +433,26 @@ var rootCmd = &cobra.Command{
 		}
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		// Handle --no-db mode: write memory storage back to JSONL
+		if noDb {
+			if store != nil {
+				cwd, err := os.Getwd()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to get current directory: %v\n", err)
+					os.Exit(1)
+				}
+
+				beadsDir := filepath.Join(cwd, ".beads")
+				if memStore, ok := store.(*memory.MemoryStorage); ok {
+					if err := writeIssuesToJSONL(memStore, beadsDir); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to write JSONL: %v\n", err)
+						os.Exit(1)
+					}
+				}
+			}
+			return
+		}
+
 		// Close daemon client if we're using it
 		if daemonClient != nil {
 			_ = daemonClient.Close()
@@ -474,12 +491,12 @@ var rootCmd = &cobra.Command{
 
 // getDebounceDuration returns the auto-flush debounce duration
 // Configurable via config file or BEADS_FLUSH_DEBOUNCE env var (e.g., "500ms", "10s")
-// Defaults to 30 seconds if not set or invalid (provides batching window)
+// Defaults to 5 seconds if not set or invalid
 func getDebounceDuration() time.Duration {
 	duration := config.GetDuration("flush-debounce")
 	if duration == 0 {
 		// If parsing failed, use default
-		return 30 * time.Second
+		return 5 * time.Second
 	}
 	return duration
 }
@@ -601,7 +618,7 @@ func restartDaemonForVersionMismatch() bool {
 	}
 
 	args := []string{"daemon"}
-	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary
+	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
 
 	// Set working directory to database directory so daemon finds correct DB
@@ -696,7 +713,6 @@ func isDaemonHealthy(socketPath string) bool {
 }
 
 func acquireStartLock(lockPath, socketPath string) bool {
-	// #nosec G304 - controlled path from config
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		debugLog("another process is starting daemon, waiting for readiness")
@@ -777,7 +793,7 @@ func startDaemonProcess(socketPath string, isGlobal bool) bool {
 		args = append(args, "--global")
 	}
 
-	cmd := exec.Command(binPath, args...) // #nosec G204 - bd daemon command from trusted binary
+	cmd := exec.Command(binPath, args...)
 	setupDaemonIO(cmd)
 
 	if !isGlobal && dbPath != "" {
@@ -825,7 +841,6 @@ func getPIDFileForSocket(socketPath string) string {
 
 // readPIDFromFile reads a PID from a file
 func readPIDFromFile(path string) (int, error) {
-	// #nosec G304 - controlled path from config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
@@ -881,7 +896,7 @@ func canRetryDaemonStart() bool {
 	}
 
 	// Exponential backoff: 5s, 10s, 20s, 40s, 80s, 120s (capped at 120s)
-	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second // #nosec G115 - controlled value, no overflow risk
+	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second
 	if backoff > 120*time.Second {
 		backoff = 120 * time.Second
 	}
@@ -945,7 +960,7 @@ func findJSONLPath() string {
 	// Ensure the directory exists (important for new databases)
 	// This is the only difference from the public API - we create the directory
 	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0750); err != nil {
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		// If we can't create the directory, return discovered path anyway
 		// (the subsequent write will fail with a clearer error)
 		return jsonlPath
@@ -958,38 +973,183 @@ func findJSONLPath() string {
 // Fixes bd-84: Hash-based comparison is git-proof (mtime comparison fails after git pull)
 // Fixes bd-228: Now uses collision detection to prevent silently overwriting local changes
 func autoImportIfNewer() {
-	ctx := context.Background()
-	
-	notify := autoimport.NewStderrNotifier(os.Getenv("BD_DEBUG") != "")
-	
-	importFunc := func(ctx context.Context, issues []*types.Issue) (created, updated int, idMapping map[string]string, err error) {
-		opts := ImportOptions{
-			ResolveCollisions:    true,
-			DryRun:               false,
-			SkipUpdate:           false,
-			Strict:               false,
-			SkipPrefixValidation: true,
+	// Find JSONL path
+	jsonlPath := findJSONLPath()
+
+	// Read JSONL file
+	jsonlData, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		// JSONL doesn't exist or can't be accessed, skip import
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL not found: %v\n", err)
 		}
-		
-		result, err := importIssuesCore(ctx, dbPath, store, issues, opts)
-		if err != nil {
-			return 0, 0, nil, err
-		}
-		
-		return result.Created, result.Updated, result.IDMapping, nil
+		return
 	}
-	
-	onChanged := func(needsFullExport bool) {
-		if needsFullExport {
+
+	// Compute current JSONL hash
+	hasher := sha256.New()
+	hasher.Write(jsonlData)
+	currentHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// Get last import hash from DB metadata
+	ctx := context.Background()
+	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
+	if err != nil {
+		// Metadata error - treat as first import rather than skipping (bd-663)
+		// This allows auto-import to recover from corrupt/missing metadata
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: metadata read failed (%v), treating as first import\n", err)
+		}
+		lastHash = ""
+	}
+
+	// Compare hashes
+	if currentHash == lastHash {
+		// Content unchanged, skip import
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL unchanged (hash match)\n")
+		}
+		return
+	}
+
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: auto-import triggered (hash changed)\n")
+	}
+
+	// Check for Git merge conflict markers (bd-270)
+	// Only match if they appear as standalone lines (not embedded in JSON strings)
+	lines := bytes.Split(jsonlData, []byte("\n"))
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
+			bytes.Equal(trimmed, []byte("=======")) ||
+			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
+			fmt.Fprintf(os.Stderr, "\n❌ Git merge conflict detected in %s\n\n", jsonlPath)
+			fmt.Fprintf(os.Stderr, "The JSONL file contains unresolved merge conflict markers.\n")
+			fmt.Fprintf(os.Stderr, "This prevents auto-import from loading your issues.\n\n")
+			fmt.Fprintf(os.Stderr, "To resolve:\n")
+			fmt.Fprintf(os.Stderr, "  1. Resolve the merge conflict in your Git client, OR\n")
+			fmt.Fprintf(os.Stderr, "  2. Export from database to regenerate clean JSONL:\n")
+			fmt.Fprintf(os.Stderr, "     bd export -o %s\n\n", jsonlPath)
+			fmt.Fprintf(os.Stderr, "After resolving, commit the fixed JSONL file.\n")
+			return
+		}
+	}
+
+	// Content changed - parse all issues
+	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
+	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024) // 2MB buffer for large JSON lines
+	var allIssues []*types.Issue
+	lineNo := 0
+
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			// Parse error, skip this import
+			snippet := line
+			if len(snippet) > 80 {
+				snippet = snippet[:80] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "Auto-import skipped: parse error at line %d: %v\nSnippet: %s\n", lineNo, err, snippet)
+			return
+		}
+
+		// Fix closed_at invariant: closed issues must have closed_at timestamp
+		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+			now := time.Now()
+			issue.ClosedAt = &now
+		}
+
+		allIssues = append(allIssues, &issue)
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Auto-import skipped: scanner error: %v\n", err)
+		return
+	}
+
+	// Use shared import logic (bd-157)
+	opts := ImportOptions{
+		ResolveCollisions:    true, // Auto-import always resolves collisions
+		DryRun:               false,
+		SkipUpdate:           false,
+		Strict:               false,
+		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
+	}
+
+	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Auto-import failed: %v\n", err)
+		return
+	}
+
+	// Show collision remapping notification if any occurred
+	if len(result.IDMapping) > 0 {
+		// Build title lookup map to avoid O(n^2) search
+		titleByID := make(map[string]string)
+		for _, issue := range allIssues {
+			titleByID[issue.ID] = issue.Title
+		}
+
+		// Sort remappings by old ID for consistent output
+		type mapping struct {
+			oldID string
+			newID string
+		}
+		mappings := make([]mapping, 0, len(result.IDMapping))
+		for oldID, newID := range result.IDMapping {
+			mappings = append(mappings, mapping{oldID, newID})
+		}
+		sort.Slice(mappings, func(i, j int) bool {
+			return mappings[i].oldID < mappings[j].oldID
+		})
+
+		maxShow := 10
+		numRemapped := len(mappings)
+		if numRemapped < maxShow {
+			maxShow = numRemapped
+		}
+
+		fmt.Fprintf(os.Stderr, "\nAuto-import: remapped %d colliding issue(s) to new IDs:\n", numRemapped)
+		for i := 0; i < maxShow; i++ {
+			m := mappings[i]
+			title := titleByID[m.oldID]
+			fmt.Fprintf(os.Stderr, "  %s → %s (%s)\n", m.oldID, m.newID, title)
+		}
+		if numRemapped > maxShow {
+			fmt.Fprintf(os.Stderr, "  ... and %d more\n", numRemapped-maxShow)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+
+	// Schedule export to sync JSONL after successful import
+	changed := (result.Created + result.Updated + len(result.IDMapping)) > 0
+	if changed {
+		if len(result.IDMapping) > 0 {
+			// Remappings may affect many issues, do a full export
 			markDirtyAndScheduleFullExport()
 		} else {
+			// Regular import, incremental export is fine
 			markDirtyAndScheduleFlush()
 		}
 	}
+
+	// Store new hash after successful import
+	if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after import: %v\n", err)
+		fmt.Fprintf(os.Stderr, "This may cause auto-import to retry the same import on next operation.\n")
+	}
 	
-	if err := autoimport.AutoImportIfNewer(ctx, store, dbPath, notify, importFunc, onChanged); err != nil {
-		// Error already logged by notifier
-		return
+	// Store import timestamp (bd-159: for staleness detection)
+	importTime := time.Now().Format(time.RFC3339)
+	if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time after import: %v\n", err)
 	}
 }
 
@@ -1034,8 +1194,7 @@ func checkVersionMismatch() {
 		} else if cmp > 0 {
 			// Binary is newer than database
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears NEWER than the database."))
-			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Run 'bd migrate' to check for and migrate old database files."))
-			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  The current database version will be updated automatically."))
+			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  The database will be upgraded automatically."))
 			// Update stored version to current
 			_ = store.SetMetadata(ctx, "bd_version", Version)
 		}
@@ -1123,6 +1282,71 @@ func clearAutoFlushState() {
 	// Reset failure counter (manual export succeeded)
 	flushFailureCount = 0
 	lastFlushError = nil
+}
+
+// writeJSONLAtomic writes issues to a JSONL file atomically using temp file + rename.
+// This is the common implementation used by both flushToJSONL (SQLite mode) and
+// writeIssuesToJSONL (--no-db mode).
+//
+// Atomic write pattern:
+//  1. Create temp file with PID suffix: issues.jsonl.tmp.12345
+//  2. Write all issues as JSONL to temp file
+//  3. Close temp file
+//  4. Atomic rename: temp → target
+//  5. Set file permissions to 0644
+//
+// Error handling: Returns error on any failure. Cleanup is guaranteed via defer.
+// Thread-safe: No shared state access. Safe to call from multiple goroutines.
+func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) error {
+	// Sort issues by ID for consistent output
+	sort.Slice(issues, func(i, j int) bool {
+		return issues[i].ID < issues[j].ID
+	})
+
+	// Create temp file with PID suffix to avoid collisions (bd-306)
+	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	// Ensure cleanup on failure
+	defer func() {
+		if f != nil {
+			_ = f.Close()
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	// Write all issues as JSONL
+	encoder := json.NewEncoder(f)
+	for _, issue := range issues {
+		if err := encoder.Encode(issue); err != nil {
+			return fmt.Errorf("failed to encode issue %s: %w", issue.ID, err)
+		}
+	}
+
+	// Close temp file before renaming
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	f = nil // Prevent defer cleanup
+
+	// Atomic rename
+	if err := os.Rename(tempPath, jsonlPath); err != nil {
+		_ = os.Remove(tempPath) // Clean up on rename failure
+		return fmt.Errorf("failed to rename file: %w", err)
+	}
+
+	// Set appropriate file permissions (0644: rw-r--r--)
+	if err := os.Chmod(jsonlPath, 0644); err != nil {
+		// Non-fatal - file is already written
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: failed to set file permissions: %v\n", err)
+		}
+	}
+
+	return nil
 }
 
 // flushToJSONL exports dirty issues to JSONL using incremental updates
@@ -1239,7 +1463,6 @@ func flushToJSONL() {
 	// Read existing JSONL into a map (skip for full export - we'll rebuild from scratch)
 	issueMap := make(map[string]*types.Issue)
 	if !fullExport {
-		// #nosec G304 - controlled path from config
 		if existingFile, err := os.Open(jsonlPath); err == nil {
 			scanner := bufio.NewScanner(existingFile)
 			lineNum := 0
@@ -1286,45 +1509,15 @@ func flushToJSONL() {
 		issueMap[issueID] = issue
 	}
 
-	// Convert map to sorted slice
+	// Convert map to slice (will be sorted by writeJSONLAtomic)
 	issues := make([]*types.Issue, 0, len(issueMap))
 	for _, issue := range issueMap {
 		issues = append(issues, issue)
 	}
-	sort.Slice(issues, func(i, j int) bool {
-		return issues[i].ID < issues[j].ID
-	})
 
-	// Write to temp file first, then rename (atomic)
-	// Use PID in filename to avoid collisions between concurrent bd commands (bd-306)
-	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
-	// #nosec G304 - controlled path from config
-	f, err := os.Create(tempPath)
-	if err != nil {
-		recordFailure(fmt.Errorf("failed to create temp file: %w", err))
-		return
-	}
-
-	encoder := json.NewEncoder(f)
-	for _, issue := range issues {
-		if err := encoder.Encode(issue); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tempPath)
-			recordFailure(fmt.Errorf("failed to encode issue %s: %w", issue.ID, err))
-			return
-		}
-	}
-
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tempPath)
-		recordFailure(fmt.Errorf("failed to close temp file: %w", err))
-		return
-	}
-
-	// Atomic rename
-	if err := os.Rename(tempPath, jsonlPath); err != nil {
-		_ = os.Remove(tempPath)
-		recordFailure(fmt.Errorf("failed to rename file: %w", err))
+	// Write atomically using common helper
+	if err := writeJSONLAtomic(jsonlPath, issues); err != nil {
+		recordFailure(err)
 		return
 	}
 
@@ -1335,7 +1528,6 @@ func flushToJSONL() {
 	}
 
 	// Store hash of exported JSONL (fixes bd-84: enables hash-based auto-import)
-	// #nosec G304 - controlled path from config
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err == nil {
 		hasher := sha256.New()
@@ -1354,6 +1546,7 @@ var (
 	noAutoFlush  bool
 	noAutoImport bool
 	sandboxMode  bool
+	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
 )
 
 func init() {
@@ -1369,6 +1562,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
 	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables daemon and auto-sync (equivalent to --no-daemon --no-auto-flush --no-auto-import)")
+	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite, write back after each command")
 }
 
 // createIssuesFromMarkdown parses a markdown file and creates multiple issues
@@ -1718,129 +1912,15 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 }
 
-// resolveIssueID attempts to resolve an issue ID, with a fallback for bare numbers.
-// If the ID doesn't exist and is a bare number (no hyphen), it tries adding the
-// configured issue_prefix. Returns the issue and the resolved ID.
-func resolveIssueID(ctx context.Context, id string) (*types.Issue, string, error) {
-	// First try with the provided ID
-	issue, err := store.GetIssue(ctx, id)
-	if err != nil {
-		return nil, id, err
-	}
-
-	// If found, return it
-	if issue != nil {
-		return issue, id, nil
-	}
-
-	// If not found and ID contains a hyphen, it's already a full ID - don't try fallback
-	if strings.Contains(id, "-") {
-		return nil, id, nil
-	}
-
-	// ID is a bare number - try with prefix
-	prefix, err := store.GetConfig(ctx, "issue_prefix")
-	if err != nil || prefix == "" {
-		// No prefix configured, can't do fallback
-		return nil, id, nil
-	}
-
-	// Try with prefix-id
-	prefixedID := prefix + "-" + id
-	issue, err = store.GetIssue(ctx, prefixedID)
-	if err != nil {
-		return nil, prefixedID, err
-	}
-
-	// Return the issue with the resolved ID (which may be nil if still not found)
-	return issue, prefixedID, nil
-}
-
 var showCmd = &cobra.Command{
 	Use:   "show [id...]",
 	Short: "Show issue details",
-	Long:  `Show detailed information for one or more issues.
-
-Examples:
-  bd show bd-42                  # Show single issue
-  bd show bd-1 bd-2 bd-3         # Show multiple issues
-  bd show --all-issues           # Show all issues (may be expensive)
-  bd show --priority 0 --priority 1   # Show all P0 and P1 issues
-  bd show -p 0 -p 1              # Short form`,
-	Args: func(cmd *cobra.Command, args []string) error {
-		allIssues, _ := cmd.Flags().GetBool("all-issues")
-		priorities, _ := cmd.Flags().GetIntSlice("priority")
-		if !allIssues && len(priorities) == 0 && len(args) == 0 {
-			return fmt.Errorf("requires at least 1 issue ID, or use --all-issues, or --priority flag")
-		}
-		return nil
-	},
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		allIssues, _ := cmd.Flags().GetBool("all-issues")
-		priorities, _ := cmd.Flags().GetIntSlice("priority")
-
-		// Build list of issue IDs to show
-		var issueIDs []string
-
-		// If --all-issues or --priority is used, fetch matching issues
-		if allIssues || len(priorities) > 0 {
-			ctx := context.Background()
-
-			if daemonClient != nil {
-				// Daemon mode - not yet supported
-				fmt.Fprintf(os.Stderr, "Error: --all-issues and --priority not yet supported in daemon mode\n")
-				fmt.Fprintf(os.Stderr, "Use --no-daemon flag or specify issue IDs directly\n")
-				os.Exit(1)
-			} else {
-				// Direct mode - fetch all issues
-				filter := types.IssueFilter{}
-				issues, err := store.SearchIssues(ctx, "", filter)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error searching issues: %v\n", err)
-					os.Exit(1)
-				}
-
-				// Filter by priority if specified
-				if len(priorities) > 0 {
-					priorityMap := make(map[int]bool)
-					for _, p := range priorities {
-						priorityMap[p] = true
-					}
-
-					filtered := make([]*types.Issue, 0)
-					for _, issue := range issues {
-						if priorityMap[issue.Priority] {
-							filtered = append(filtered, issue)
-						}
-					}
-					issues = filtered
-				}
-
-				// Extract IDs
-				for _, issue := range issues {
-					issueIDs = append(issueIDs, issue.ID)
-				}
-
-				// Warn if showing many issues
-				if len(issueIDs) > 20 && !jsonOutput {
-					yellow := color.New(color.FgYellow).SprintFunc()
-					fmt.Fprintf(os.Stderr, "%s Showing %d issues (this may take a while)\n\n", yellow("⚠"), len(issueIDs))
-				}
-			}
-		} else {
-			// Use provided IDs
-			issueIDs = args
-		}
-
-		// Sort issue IDs for consistent ordering when showing multiple issues
-		if len(issueIDs) > 1 {
-			sort.Strings(issueIDs)
-		}
-
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			allDetails := []interface{}{}
-			for idx, id := range issueIDs {
+			for idx, id := range args {
 				showArgs := &rpc.ShowArgs{ID: id}
 				resp, err := daemonClient.Show(showArgs)
 				if err != nil {
@@ -1977,16 +2057,16 @@ Examples:
 		// Direct mode
 		ctx := context.Background()
 		allDetails := []interface{}{}
-	for idx, id := range issueIDs {
-		 issue, resolvedID, err := resolveIssueID(ctx, id)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
-		  continue
-		}
-		if issue == nil {
-		 fmt.Fprintf(os.Stderr, "Issue %s not found\n", resolvedID)
-		continue
-		}
+		for idx, id := range args {
+			issue, err := store.GetIssue(ctx, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				continue
+			}
+			if issue == nil {
+				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				continue
+			}
 
 			if jsonOutput {
 				// Include labels, dependencies, and comments in JSON output
@@ -2118,8 +2198,6 @@ Examples:
 }
 
 func init() {
-	showCmd.Flags().Bool("all-issues", false, "Show all issues (WARNING: may be expensive for large databases)")
-	showCmd.Flags().IntSliceP("priority", "p", []int{}, "Show issues with specified priority (can be used multiple times, e.g., -p 0 -p 1)")
 	rootCmd.AddCommand(showCmd)
 }
 
@@ -2278,202 +2356,6 @@ func init() {
 	rootCmd.AddCommand(updateCmd)
 }
 
-var editCmd = &cobra.Command{
-	Use:   "edit [id]",
-	Short: "Edit an issue field in $EDITOR",
-	Long: `Edit an issue field using your configured $EDITOR.
-
-By default, edits the description. Use flags to edit other fields.
-
-Examples:
-  bd edit bd-42                    # Edit description
-  bd edit bd-42 --title            # Edit title
-  bd edit bd-42 --design           # Edit design notes
-  bd edit bd-42 --notes            # Edit notes
-  bd edit bd-42 --acceptance       # Edit acceptance criteria`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		id := args[0]
-		ctx := context.Background()
-
-		// Determine which field to edit
-		fieldToEdit := "description"
-		if cmd.Flags().Changed("title") {
-			fieldToEdit = "title"
-		} else if cmd.Flags().Changed("design") {
-			fieldToEdit = "design"
-		} else if cmd.Flags().Changed("notes") {
-			fieldToEdit = "notes"
-		} else if cmd.Flags().Changed("acceptance") {
-			fieldToEdit = "acceptance_criteria"
-		}
-
-		// Get the editor from environment
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = os.Getenv("VISUAL")
-		}
-		if editor == "" {
-			// Try common defaults
-			for _, defaultEditor := range []string{"vim", "vi", "nano", "emacs"} {
-				if _, err := exec.LookPath(defaultEditor); err == nil {
-					editor = defaultEditor
-					break
-				}
-			}
-		}
-		if editor == "" {
-			fmt.Fprintf(os.Stderr, "Error: No editor found. Set $EDITOR or $VISUAL environment variable.\n")
-			os.Exit(1)
-		}
-
-		// Get the current issue
-		var issue *types.Issue
-		var err error
-
-		if daemonClient != nil {
-			// Daemon mode
-			showArgs := &rpc.ShowArgs{ID: id}
-			resp, err := daemonClient.Show(showArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching issue %s: %v\n", id, err)
-				os.Exit(1)
-			}
-
-			issue = &types.Issue{}
-			if err := json.Unmarshal(resp.Data, issue); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing issue data: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			// Direct mode
-			issue, err = store.GetIssue(ctx, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching issue %s: %v\n", id, err)
-				os.Exit(1)
-			}
-			if issue == nil {
-				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				os.Exit(1)
-			}
-		}
-
-		// Get the current field value
-		var currentValue string
-		switch fieldToEdit {
-		case "title":
-			currentValue = issue.Title
-		case "description":
-			currentValue = issue.Description
-		case "design":
-			currentValue = issue.Design
-		case "notes":
-			currentValue = issue.Notes
-		case "acceptance_criteria":
-			currentValue = issue.AcceptanceCriteria
-		}
-
-		// Create a temporary file with the current value
-		tmpFile, err := os.CreateTemp("", fmt.Sprintf("bd-edit-%s-*.txt", fieldToEdit))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		tmpPath := tmpFile.Name()
-		defer os.Remove(tmpPath)
-
-		// Write current value to temp file
-		if _, err := tmpFile.WriteString(currentValue); err != nil {
-			tmpFile.Close()
-			fmt.Fprintf(os.Stderr, "Error writing to temp file: %v\n", err)
-			os.Exit(1)
-		}
-		tmpFile.Close()
-
-		// Open the editor
-		editorCmd := exec.Command(editor, tmpPath) // #nosec G204 - user-provided editor command is intentional
-		editorCmd.Stdin = os.Stdin
-		editorCmd.Stdout = os.Stdout
-		editorCmd.Stderr = os.Stderr
-
-		if err := editorCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Read the edited content
-		// #nosec G304 - controlled temp file path
-		editedContent, err := os.ReadFile(tmpPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading edited file: %v\n", err)
-			os.Exit(1)
-		}
-
-		newValue := string(editedContent)
-
-		// Check if the value changed
-		if newValue == currentValue {
-			fmt.Println("No changes made")
-			return
-		}
-
-		// Validate title if editing title
-		if fieldToEdit == "title" && strings.TrimSpace(newValue) == "" {
-			fmt.Fprintf(os.Stderr, "Error: title cannot be empty\n")
-			os.Exit(1)
-		}
-
-		// Update the issue
-		updates := map[string]interface{}{
-			fieldToEdit: newValue,
-		}
-
-		if daemonClient != nil {
-			// Daemon mode
-			updateArgs := &rpc.UpdateArgs{ID: id}
-
-			switch fieldToEdit {
-			case "title":
-				updateArgs.Title = &newValue
-			case "description":
-				updateArgs.Description = &newValue
-			case "design":
-				updateArgs.Design = &newValue
-			case "notes":
-				updateArgs.Notes = &newValue
-			case "acceptance_criteria":
-				updateArgs.AcceptanceCriteria = &newValue
-			}
-
-			_, err := daemonClient.Update(updateArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating issue: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			// Direct mode
-			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating issue: %v\n", err)
-				os.Exit(1)
-			}
-			markDirtyAndScheduleFlush()
-		}
-
-		green := color.New(color.FgGreen).SprintFunc()
-		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
-		fmt.Printf("%s Updated %s for issue: %s\n", green("✓"), fieldName, id)
-	},
-}
-
-func init() {
-	editCmd.Flags().Bool("title", false, "Edit the title")
-	editCmd.Flags().Bool("description", false, "Edit the description (default)")
-	editCmd.Flags().Bool("design", false, "Edit the design notes")
-	editCmd.Flags().Bool("notes", false, "Edit the notes")
-	editCmd.Flags().Bool("acceptance", false, "Edit the acceptance criteria")
-	rootCmd.AddCommand(editCmd)
-}
-
 var closeCmd = &cobra.Command{
 	Use:   "close [id...]",
 	Short: "Close one or more issues",
@@ -2551,14 +2433,6 @@ func init() {
 }
 
 func main() {
-	// Handle --version flag (in addition to 'version' subcommand)
-	for _, arg := range os.Args[1:] {
-		if arg == "--version" || arg == "-v" {
-			fmt.Printf("bd version %s (%s)\n", Version, Build)
-			return
-		}
-	}
-
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
