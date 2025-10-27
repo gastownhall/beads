@@ -167,6 +167,12 @@ func TestLibraryIntegration(t *testing.T) {
 	}
 	defer store.Close()
 
+	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
 	h := newIntegrationHelper(t, store)
 
 	// Test 1: Create issue
@@ -326,6 +332,11 @@ func TestBatchCreateIssues(t *testing.T) {
 
 	ctx := context.Background()
 
+	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
 	// Create multiple issues
 	issues := make([]*beads.Issue, 5)
 	for i := 0; i < 5; i++ {
@@ -398,6 +409,12 @@ func TestRoundTripIssue(t *testing.T) {
 		t.Fatalf("NewSQLiteStorage failed: %v", err)
 	}
 	defer store.Close()
+
+	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
 
 	h := newIntegrationHelper(t, store)
 	original := h.createFullIssue("Full description", "Design notes", "Acceptance criteria", "Implementation notes", "developer")

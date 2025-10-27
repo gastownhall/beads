@@ -27,6 +27,14 @@ func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
+	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
 	cleanup := func() {
 		store.Close()
 		os.RemoveAll(tmpDir)

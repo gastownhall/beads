@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -167,7 +168,24 @@ func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage
 		return fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
+	// CRITICAL (bd-166): Set issue_prefix from first imported issue if missing
+	// This prevents derivePrefixFromPath fallback which caused duplicate issues
+	if len(issues) > 0 {
+		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
+		if err == nil && strings.TrimSpace(configuredPrefix) == "" {
+			// Database has no prefix configured - derive from first issue
+			firstPrefix := extractPrefix(issues[0].ID)
+			if firstPrefix != "" {
+				if err := store.SetConfig(ctx, "issue_prefix", firstPrefix); err != nil {
+					return fmt.Errorf("failed to set issue_prefix from imported issues: %w", err)
+				}
+			}
+		}
+	}
+
 	// Use existing import logic with auto-resolve collisions
+	// Note: SkipPrefixValidation allows mixed prefixes during auto-import
+	// (but now we set the prefix first, so CreateIssue won't use filename fallback)
 	opts := ImportOptions{
 		ResolveCollisions:  true,
 		DryRun:             false,

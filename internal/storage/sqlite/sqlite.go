@@ -572,21 +572,9 @@ func (s *SQLiteStorage) SyncAllCounters(ctx context.Context) error {
 	return nil
 }
 
-// derivePrefixFromPath derives the issue prefix from the database file path
-// Database file is named like ".beads/wy-.db" -> prefix should be "wy"
-func derivePrefixFromPath(dbPath string) string {
-	dbFileName := filepath.Base(dbPath)
-	// Strip ".db" extension
-	dbFileName = strings.TrimSuffix(dbFileName, ".db")
-	// Strip trailing hyphen (if any)
-	prefix := strings.TrimSuffix(dbFileName, "-")
-	
-	// Fallback if filename is weird
-	if prefix == "" {
-		prefix = "bd"
-	}
-	return prefix
-}
+// REMOVED (bd-166): derivePrefixFromPath was causing duplicate issues with wrong prefix
+// The database should ALWAYS have issue_prefix config set explicitly (by 'bd init' or auto-import)
+// Never derive prefix from filename - it leads to silent data corruption
 
 // CreateIssue creates a new issue
 func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
@@ -635,8 +623,9 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		var prefix string
 		err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 		if err == sql.ErrNoRows || prefix == "" {
-			// Config not set - derive prefix from database filename
-			prefix = derivePrefixFromPath(s.dbPath)
+			// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
+			// This prevents duplicate issues with wrong prefix
+			return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 		} else if err != nil {
 			return fmt.Errorf("failed to get config: %w", err)
 		}
@@ -770,8 +759,8 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 	if err == sql.ErrNoRows || prefix == "" {
-		// Config not set - derive prefix from database filename
-		prefix = derivePrefixFromPath(dbPath)
+		// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
+		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
 	}

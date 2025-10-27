@@ -161,10 +161,7 @@ func TestDaemonIntegration(t *testing.T) {
 	}
 
 	testDBPath := filepath.Join(dbDir, "test.db")
-	testStore, err := sqlite.New(testDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	testStore := newTestStore(t, testDBPath)
 
 	oldStore := store
 	oldDBPath := dbPath
@@ -305,10 +302,7 @@ func TestDaemonRPCServerIntegration(t *testing.T) {
 	}
 
 	testDBPath := filepath.Join(dbDir, "test.db")
-	testStore, err := sqlite.New(testDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	testStore := newTestStore(t, testDBPath)
 	defer testStore.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -342,10 +336,7 @@ func TestDaemonConcurrentOperations(t *testing.T) {
 	}
 
 	testDBPath := filepath.Join(dbDir, "test.db")
-	testStore, err := sqlite.New(testDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	testStore := newTestStore(t, testDBPath)
 	defer testStore.Close()
 
 	ctx := context.Background()
@@ -410,10 +401,7 @@ func TestDaemonSocketCleanupOnShutdown(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "test.sock")
 	testDBPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(testDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	testStore := newTestStore(t, testDBPath)
 
 	server := newMockDaemonServer(socketPath, testStore)
 
@@ -543,10 +531,7 @@ func TestDaemonGracefulShutdown(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "test.sock")
 	testDBPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(testDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	testStore := newTestStore(t, testDBPath)
 
 	server := newMockDaemonServer(socketPath, testStore)
 

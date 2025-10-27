@@ -38,6 +38,14 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		t.Fatalf("Failed to create store: %v", err)
 	}
 
+	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
 	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
