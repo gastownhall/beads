@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -789,11 +790,53 @@ func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 // Note: This cannot use the import command approach since we're in the daemon
 // We need to implement direct import logic here
 func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
-	// TODO Phase 4: Implement direct import for daemon
-	// Currently a no-op - daemon doesn't import git changes into DB
-	// This means git pulls won't update the database until this is implemented
-	// For now, users must restart daemon after git pulls to see changes
-	return nil
+	// Read JSONL file
+	file, err := os.Open(jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to open JSONL: %w", err)
+	}
+	defer file.Close()
+	
+	// Parse all issues
+	var issues []*types.Issue
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		// Skip empty lines
+		if line == "" {
+			continue
+		}
+		
+		// Parse JSON
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			// Log error but continue - don't fail entire import
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse JSONL line %d: %v\n", lineNum, err)
+			continue
+		}
+		
+		issues = append(issues, &issue)
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to read JSONL: %w", err)
+	}
+	
+	// Use existing import logic with auto-conflict resolution
+	opts := ImportOptions{
+		ResolveCollisions:    true,  // Auto-resolve ID conflicts
+		DryRun:              false,
+		SkipUpdate:          false,
+		Strict:              false,
+		SkipPrefixValidation: true,  // Skip prefix validation for auto-import
+	}
+	
+	_, err = importIssuesCore(ctx, "", store, issues, opts)
+	return err
 }
 
 type daemonLogger struct {
