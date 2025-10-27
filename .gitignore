@@ -50,3 +50,6 @@ Thumbs.db
 
 # Ignore nix result
 result
+
+# GoReleaser build artifacts
+dist/
