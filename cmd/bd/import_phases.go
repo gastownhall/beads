@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // Phase 1: Get or create SQLite store for import
@@ -58,7 +59,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 
 	// Analyze prefixes in imported issues
 	for _, issue := range issues {
-		prefix := extractPrefix(issue.ID)
+		prefix := utils.ExtractIssuePrefix(issue.ID)
 		if prefix != configuredPrefix {
 			result.PrefixMismatch = true
 			result.MismatchPrefixes[prefix]++
@@ -349,14 +350,6 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 }
 
 // Helper functions
-
-func extractPrefix(issueID string) string {
-	parts := strings.SplitN(issueID, "-", 2)
-	if len(parts) < 2 {
-		return "" // No prefix found
-	}
-	return parts[0]
-}
 
 func getPrefixList(prefixes map[string]int) []string {
 	var result []string

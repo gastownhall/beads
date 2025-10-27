@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // checkAndAutoImport checks if the database is empty but git has issues.
@@ -174,7 +175,7 @@ func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage
 		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
 		if err == nil && strings.TrimSpace(configuredPrefix) == "" {
 			// Database has no prefix configured - derive from first issue
-			firstPrefix := extractPrefix(issues[0].ID)
+			firstPrefix := utils.ExtractIssuePrefix(issues[0].ID)
 			if firstPrefix != "" {
 				if err := store.SetConfig(ctx, "issue_prefix", firstPrefix); err != nil {
 					return fmt.Errorf("failed to set issue_prefix from imported issues: %w", err)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestIsBoundary(t *testing.T) {
@@ -82,9 +84,9 @@ func TestExtractPrefix(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := extractPrefix(tt.input)
+		result := utils.ExtractIssuePrefix(tt.input)
 		if result != tt.expected {
-			t.Errorf("extractPrefix(%q) = %q, want %q", tt.input, result, tt.expected)
+			t.Errorf("ExtractIssuePrefix(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // fieldComparator handles comparison logic for a specific field type
@@ -259,13 +260,13 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 func renameImportedIssuePrefixes(issues []*types.Issue, targetPrefix string) error {
 	// Build a mapping of old IDs to new IDs
 	idMapping := make(map[string]string)
-	
+
 	for _, issue := range issues {
-		oldPrefix := extractPrefix(issue.ID)
+		oldPrefix := utils.ExtractIssuePrefix(issue.ID)
 		if oldPrefix == "" {
 			return fmt.Errorf("cannot rename issue %s: malformed ID (no hyphen found)", issue.ID)
 		}
-		
+
 		if oldPrefix != targetPrefix {
 			// Extract the numeric part
 			numPart := strings.TrimPrefix(issue.ID, oldPrefix+"-")
