@@ -179,6 +179,21 @@ func (c *Client) Ping() error {
 	return nil
 }
 
+// Status retrieves daemon status metadata
+func (c *Client) Status() (*StatusResponse, error) {
+	resp, err := c.Execute(OpStatus, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var status StatusResponse
+	if err := json.Unmarshal(resp.Data, &status); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal status response: %w", err)
+	}
+
+	return &status, nil
+}
+
 // Health sends a health check request to verify the daemon is healthy
 func (c *Client) Health() (*HealthResponse, error) {
 	resp, err := c.Execute(OpHealth, nil)

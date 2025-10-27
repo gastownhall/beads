@@ -285,7 +285,7 @@ func setupBenchServer(b *testing.B) (*Server, *Client, func(), string) {
 		b.Fatalf("Failed to create store: %v", err)
 	}
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

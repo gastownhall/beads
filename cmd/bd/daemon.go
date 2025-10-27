@@ -857,11 +857,11 @@ func setupDaemonLock(pidFile string, global bool, log daemonLogger) (io.Closer, 
 	return lock, nil
 }
 
-func startRPCServer(ctx context.Context, socketPath string, store storage.Storage, log daemonLogger) (*rpc.Server, chan error, error) {
+func startRPCServer(ctx context.Context, socketPath string, store storage.Storage, workspacePath string, dbPath string, log daemonLogger) (*rpc.Server, chan error, error) {
 	// Sync daemon version with CLI version
 	rpc.ServerVersion = Version
 	
-	server := rpc.NewServer(socketPath, store)
+	server := rpc.NewServer(socketPath, store, workspacePath, dbPath)
 	serverErrChan := make(chan error, 1)
 
 	go func() {
@@ -896,7 +896,7 @@ func runGlobalDaemon(log daemonLogger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server, _, err := startRPCServer(ctx, socketPath, nil, log)
+	server, _, err := startRPCServer(ctx, socketPath, nil, globalDir, "", log)
 	if err != nil {
 		return
 	}
@@ -1079,11 +1079,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	defer func() { _ = store.Close() }()
 	log.log("Database opened: %s", daemonDBPath)
 
-	socketPath := filepath.Join(filepath.Dir(daemonDBPath), "bd.sock")
+	workspacePath := filepath.Dir(daemonDBPath)
+	socketPath := filepath.Join(workspacePath, "bd.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server, serverErrChan, err := startRPCServer(ctx, socketPath, store, log)
+	server, serverErrChan, err := startRPCServer(ctx, socketPath, store, workspacePath, daemonDBPath, log)
 	if err != nil {
 		return
 	}

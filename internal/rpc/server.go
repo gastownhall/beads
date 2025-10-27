@@ -60,14 +60,16 @@ type StorageCacheEntry struct {
 
 // Server represents the RPC server that runs in the daemon
 type Server struct {
-	socketPath   string
-	storage      storage.Storage // Default storage (for backward compat)
-	listener     net.Listener
-	mu           sync.RWMutex
-	shutdown     bool
-	shutdownChan chan struct{}
-	stopOnce     sync.Once
-	doneChan     chan struct{} // closed when Start() cleanup is complete
+	socketPath    string
+	workspacePath string          // Absolute path to workspace root
+	dbPath        string          // Absolute path to database file
+	storage       storage.Storage // Default storage (for backward compat)
+	listener      net.Listener
+	mu            sync.RWMutex
+	shutdown      bool
+	shutdownChan  chan struct{}
+	stopOnce      sync.Once
+	doneChan      chan struct{} // closed when Start() cleanup is complete
 	// Per-request storage routing with eviction support
 	storageCache  map[string]*StorageCacheEntry // repoRoot -> entry
 	cacheMu       sync.RWMutex
@@ -75,10 +77,11 @@ type Server struct {
 	cacheTTL      time.Duration
 	cleanupTicker *time.Ticker
 	// Health and metrics
-	startTime   time.Time
-	cacheHits   int64
-	cacheMisses int64
-	metrics     *Metrics
+	startTime        time.Time
+	lastActivityTime atomic.Value // time.Time - last request timestamp
+	cacheHits        int64
+	cacheMisses      int64
+	metrics          *Metrics
 	// Connection limiting
 	maxConns      int
 	activeConns   int32 // atomic counter
@@ -93,7 +96,7 @@ type Server struct {
 }
 
 // NewServer creates a new RPC server
-func NewServer(socketPath string, store storage.Storage) *Server {
+func NewServer(socketPath string, store storage.Storage, workspacePath string, dbPath string) *Server {
 	// Parse config from env vars
 	maxCacheSize := 50 // default
 	if env := os.Getenv("BEADS_DAEMON_MAX_CACHE_SIZE"); env != "" {
@@ -126,8 +129,10 @@ func NewServer(socketPath string, store storage.Storage) *Server {
 		}
 	}
 
-	return &Server{
+	s := &Server{
 		socketPath:     socketPath,
+		workspacePath:  workspacePath,
+		dbPath:         dbPath,
 		storage:        store,
 		storageCache:   make(map[string]*StorageCacheEntry),
 		maxCacheSize:   maxCacheSize,
@@ -141,6 +146,8 @@ func NewServer(socketPath string, store storage.Storage) *Server {
 		requestTimeout: requestTimeout,
 		readyChan:      make(chan struct{}),
 	}
+	s.lastActivityTime.Store(time.Now())
+	return s
 }
 
 // Start starts the RPC server and listens for connections
@@ -629,10 +636,15 @@ func (s *Server) handleRequest(req *Request) Response {
 		}
 	}
 
+	// Update last activity timestamp
+	s.lastActivityTime.Store(time.Now())
+
 	var resp Response
 	switch req.Operation {
 	case OpPing:
 		resp = s.handlePing(req)
+	case OpStatus:
+		resp = s.handleStatus(req)
 	case OpHealth:
 		resp = s.handleHealth(req)
 	case OpMetrics:
@@ -747,6 +759,39 @@ func (s *Server) handlePing(_ *Request) Response {
 		Message: "pong",
 		Version: ServerVersion,
 	})
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleStatus(_ *Request) Response {
+	// Get last activity timestamp
+	lastActivity := s.lastActivityTime.Load().(time.Time)
+	
+	// Check for exclusive lock
+	lockActive := false
+	lockHolder := ""
+	if s.workspacePath != "" {
+		if skip, holder, _ := types.ShouldSkipDatabase(s.workspacePath); skip {
+			lockActive = true
+			lockHolder = holder
+		}
+	}
+	
+	statusResp := StatusResponse{
+		Version:             ServerVersion,
+		WorkspacePath:       s.workspacePath,
+		DatabasePath:        s.dbPath,
+		SocketPath:          s.socketPath,
+		PID:                 os.Getpid(),
+		UptimeSeconds:       time.Since(s.startTime).Seconds(),
+		LastActivityTime:    lastActivity.Format(time.RFC3339),
+		ExclusiveLockActive: lockActive,
+		ExclusiveLockHolder: lockHolder,
+	}
+	
+	data, _ := json.Marshal(statusResp)
 	return Response{
 		Success: true,
 		Data:    data,

@@ -7,6 +7,7 @@ import (
 // Operation constants for all bd commands
 const (
 	OpPing            = "ping"
+	OpStatus          = "status"
 	OpHealth          = "health"
 	OpMetrics         = "metrics"
 	OpCreate          = "create"
@@ -163,6 +164,19 @@ type EpicStatusArgs struct {
 type PingResponse struct {
 	Message string `json:"message"`
 	Version string `json:"version"`
+}
+
+// StatusResponse represents the daemon status metadata
+type StatusResponse struct {
+	Version              string  `json:"version"`                  // Server/daemon version
+	WorkspacePath        string  `json:"workspace_path"`           // Absolute path to workspace root
+	DatabasePath         string  `json:"database_path"`            // Absolute path to database file
+	SocketPath           string  `json:"socket_path"`              // Path to Unix socket
+	PID                  int     `json:"pid"`                      // Process ID
+	UptimeSeconds        float64 `json:"uptime_seconds"`           // Time since daemon started
+	LastActivityTime     string  `json:"last_activity_time"`       // ISO 8601 timestamp of last request
+	ExclusiveLockActive  bool    `json:"exclusive_lock_active"`    // Whether an exclusive lock is held
+	ExclusiveLockHolder  string  `json:"exclusive_lock_holder,omitempty"` // Lock holder name if active
 }
 
 // HealthResponse is the response for a health check operation

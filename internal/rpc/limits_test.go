@@ -44,7 +44,7 @@ func TestConnectionLimits(t *testing.T) {
 	os.Setenv("BEADS_DAEMON_MAX_CONNS", "5")
 	defer os.Unsetenv("BEADS_DAEMON_MAX_CONNS")
 
-	srv := NewServer(socketPath, store)
+	srv := NewServer(socketPath, store, tmpDir, dbPath)
 	if srv.maxConns != 5 {
 		t.Fatalf("expected maxConns=5, got %d", srv.maxConns)
 	}
@@ -166,7 +166,7 @@ func TestRequestTimeout(t *testing.T) {
 	os.Setenv("BEADS_DAEMON_REQUEST_TIMEOUT", "100ms")
 	defer os.Unsetenv("BEADS_DAEMON_REQUEST_TIMEOUT")
 
-	srv := NewServer(socketPath, store)
+	srv := NewServer(socketPath, store, tmpDir, dbPath)
 	if srv.requestTimeout != 100*time.Millisecond {
 		t.Fatalf("expected timeout=100ms, got %v", srv.requestTimeout)
 	}
@@ -219,7 +219,7 @@ func TestMemoryPressureDetection(t *testing.T) {
 
 	socketPath := filepath.Join(tmpDir, "test.sock")
 
-	srv := NewServer(socketPath, store)
+	srv := NewServer(socketPath, store, tmpDir, dbPath)
 
 	// Add some entries to cache
 	srv.cacheMu.Lock()
@@ -272,7 +272,7 @@ func TestHealthResponseIncludesLimits(t *testing.T) {
 	os.Setenv("BEADS_DAEMON_MAX_CONNS", "50")
 	defer os.Unsetenv("BEADS_DAEMON_MAX_CONNS")
 
-	srv := NewServer(socketPath, store)
+	srv := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

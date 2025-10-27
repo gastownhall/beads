@@ -96,7 +96,7 @@ func TestVersionCompatibility(t *testing.T) {
 			ServerVersion = tt.serverVersion
 			defer func() { ServerVersion = originalServerVersion }()
 
-			server := NewServer(socketPath, store)
+			server := NewServer(socketPath, store, tmpDir, dbPath)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -187,7 +187,7 @@ func TestHealthCheckIncludesVersionInfo(t *testing.T) {
 	ServerVersion = testVersion100
 	ClientVersion = testVersion100
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,7 +251,7 @@ func TestIncompatibleVersionInHealth(t *testing.T) {
 	ServerVersion = testVersion100
 	ClientVersion = "2.0.0"
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -371,7 +371,7 @@ func TestPingAndHealthBypassVersionCheck(t *testing.T) {
 	ServerVersion = testVersion100
 	ClientVersion = "2.0.0"
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -445,7 +445,7 @@ func TestMetricsOperation(t *testing.T) {
 	ServerVersion = testVersion100
 	ClientVersion = testVersion100
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

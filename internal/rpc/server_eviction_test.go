@@ -23,7 +23,7 @@ func TestStorageCacheEviction_TTL(t *testing.T) {
 
 	// Create server with short TTL for testing
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	server.cacheTTL = 100 * time.Millisecond // Short TTL for testing
 	defer server.Stop()
 
@@ -93,7 +93,7 @@ func TestStorageCacheEviction_LRU(t *testing.T) {
 
 	// Create server with small cache size
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	server.maxCacheSize = 2         // Only keep 2 entries
 	server.cacheTTL = 1 * time.Hour // Long TTL so we test LRU
 	defer server.Stop()
@@ -178,7 +178,7 @@ func TestStorageCacheEviction_LastAccessUpdate(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	defer server.Stop()
 
 	// Create test database
@@ -242,7 +242,7 @@ func TestStorageCacheEviction_EnvVars(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	defer server.Stop()
 
 	// Verify config was parsed
@@ -268,7 +268,7 @@ func TestStorageCacheEviction_CleanupOnStop(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 
 	// Create test database and populate cache
 	dbPath := filepath.Join(tmpDir, "repo1", ".beads", "issues.db")
@@ -320,7 +320,7 @@ func TestStorageCacheEviction_CanonicalKey(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	defer server.Stop()
 
 	// Create test database
@@ -373,7 +373,7 @@ func TestStorageCacheEviction_ImmediateLRU(t *testing.T) {
 
 	// Create server with max cache size of 2
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	server.maxCacheSize = 2
 	server.cacheTTL = 1 * time.Hour // Long TTL
 	defer server.Stop()
@@ -425,7 +425,7 @@ func TestStorageCacheEviction_InvalidTTL(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	defer server.Stop()
 
 	// Should fall back to default (30 minutes)
@@ -448,7 +448,7 @@ func TestStorageCacheEviction_ReopenAfterEviction(t *testing.T) {
 
 	// Create server with short TTL
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 	server.cacheTTL = 50 * time.Millisecond
 	defer server.Stop()
 
@@ -510,7 +510,7 @@ func TestStorageCacheEviction_StopIdempotent(t *testing.T) {
 
 	// Create server
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	server := NewServer(socketPath, mainStore)
+	server := NewServer(socketPath, mainStore, tmpDir, mainDB)
 
 	// Stop multiple times - should not panic
 	if err := server.Stop(); err != nil {

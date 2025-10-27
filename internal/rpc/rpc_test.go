@@ -38,7 +38,7 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		t.Fatalf("Failed to create store: %v", err)
 	}
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -321,7 +321,7 @@ func TestSocketCleanup(t *testing.T) {
 	}
 	defer store.Close()
 
-	server := NewServer(socketPath, store)
+	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -433,7 +433,7 @@ func TestDatabaseHandshake(t *testing.T) {
 	}
 	defer store1.Close()
 
-	server1 := NewServer(socketPath1, store1)
+	server1 := NewServer(socketPath1, store1, tmpDir1, dbPath1)
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
 	go server1.Start(ctx1)
@@ -451,7 +451,7 @@ func TestDatabaseHandshake(t *testing.T) {
 	}
 	defer store2.Close()
 
-	server2 := NewServer(socketPath2, store2)
+	server2 := NewServer(socketPath2, store2, tmpDir2, dbPath2)
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	go server2.Start(ctx2)
