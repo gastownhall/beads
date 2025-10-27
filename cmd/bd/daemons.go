@@ -124,14 +124,143 @@ func formatDaemonRelativeTime(t time.Time) string {
 	return fmt.Sprintf("%.1fd ago", d.Hours()/24)
 }
 
+var daemonsHealthCmd = &cobra.Command{
+	Use:   "health",
+	Short: "Check health of all bd daemons",
+	Long: `Check health of all running bd daemons and report any issues including
+stale sockets, version mismatches, and unresponsive daemons.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		searchRoots, _ := cmd.Flags().GetStringSlice("search")
+		jsonOutput, _ := cmd.Flags().GetBool("json")
+
+		// Discover daemons
+		daemons, err := daemon.DiscoverDaemons(searchRoots)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error discovering daemons: %v\n", err)
+			os.Exit(1)
+		}
+
+		type healthReport struct {
+			Workspace        string `json:"workspace"`
+			SocketPath       string `json:"socket_path"`
+			PID              int    `json:"pid,omitempty"`
+			Version          string `json:"version,omitempty"`
+			Status           string `json:"status"`
+			Issue            string `json:"issue,omitempty"`
+			VersionMismatch  bool   `json:"version_mismatch,omitempty"`
+		}
+
+		var reports []healthReport
+		healthyCount := 0
+		staleCount := 0
+		mismatchCount := 0
+		unresponsiveCount := 0
+
+		currentVersion := Version
+
+		for _, d := range daemons {
+			report := healthReport{
+				Workspace:  d.WorkspacePath,
+				SocketPath: d.SocketPath,
+				PID:        d.PID,
+				Version:    d.Version,
+			}
+
+			if !d.Alive {
+				report.Status = "stale"
+				report.Issue = d.Error
+				staleCount++
+			} else if d.Version != currentVersion {
+				report.Status = "version_mismatch"
+				report.Issue = fmt.Sprintf("daemon version %s != client version %s", d.Version, currentVersion)
+				report.VersionMismatch = true
+				mismatchCount++
+			} else {
+				report.Status = "healthy"
+				healthyCount++
+			}
+
+			reports = append(reports, report)
+		}
+
+		if jsonOutput {
+			output := map[string]interface{}{
+				"total":        len(reports),
+				"healthy":      healthyCount,
+				"stale":        staleCount,
+				"mismatched":   mismatchCount,
+				"unresponsive": unresponsiveCount,
+				"daemons":      reports,
+			}
+			data, _ := json.MarshalIndent(output, "", "  ")
+			fmt.Println(string(data))
+			return
+		}
+
+		// Human-readable output
+		if len(reports) == 0 {
+			fmt.Println("No daemons found")
+			return
+		}
+
+		fmt.Printf("Health Check Summary:\n")
+		fmt.Printf("  Total:        %d\n", len(reports))
+		fmt.Printf("  Healthy:      %d\n", healthyCount)
+		fmt.Printf("  Stale:        %d\n", staleCount)
+		fmt.Printf("  Mismatched:   %d\n", mismatchCount)
+		fmt.Printf("  Unresponsive: %d\n\n", unresponsiveCount)
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "WORKSPACE\tPID\tVERSION\tSTATUS\tISSUE")
+
+		for _, r := range reports {
+			workspace := r.Workspace
+			if workspace == "" {
+				workspace = "(unknown)"
+			}
+
+			pidStr := "-"
+			if r.PID != 0 {
+				pidStr = fmt.Sprintf("%d", r.PID)
+			}
+
+			version := r.Version
+			if version == "" {
+				version = "-"
+			}
+
+			status := r.Status
+			issue := r.Issue
+			if issue == "" {
+				issue = "-"
+			}
+
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				workspace, pidStr, version, status, issue)
+		}
+
+		w.Flush()
+
+		// Exit with error if there are any issues
+		if staleCount > 0 || mismatchCount > 0 || unresponsiveCount > 0 {
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(daemonsCmd)
 	
 	// Add subcommands
 	daemonsCmd.AddCommand(daemonsListCmd)
+	daemonsCmd.AddCommand(daemonsHealthCmd)
 	
 	// Flags for list command
 	daemonsListCmd.Flags().StringSlice("search", nil, "Directories to search for daemons (default: home, /tmp, cwd)")
 	daemonsListCmd.Flags().Bool("json", false, "Output in JSON format")
 	daemonsListCmd.Flags().Bool("no-cleanup", false, "Skip auto-cleanup of stale sockets")
+
+	// Flags for health command
+	daemonsHealthCmd.Flags().StringSlice("search", nil, "Directories to search for daemons (default: home, /tmp, cwd)")
+	daemonsHealthCmd.Flags().Bool("json", false, "Output in JSON format")
 }
