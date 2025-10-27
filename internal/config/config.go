@@ -80,7 +80,7 @@ func Initialize() error {
 	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")
 	
 	// Set defaults for additional settings
-	v.SetDefault("flush-debounce", "1s")
+	v.SetDefault("flush-debounce", "30s")
 	v.SetDefault("auto-start-daemon", true)
 
 	// Read config file if it exists (don't error if not found)

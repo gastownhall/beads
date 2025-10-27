@@ -29,7 +29,7 @@ var daemonCmd = &cobra.Command{
 	Long: `Run a background daemon that automatically syncs issues with git remote.
 
 The daemon will:
-- Poll for changes at configurable intervals (default: 2 seconds)
+- Poll for changes at configurable intervals (default: 5 seconds)
 - Export pending database changes to JSONL
 - Auto-commit changes if --auto-commit flag set
 - Auto-push commits if --auto-push flag set
@@ -172,7 +172,7 @@ Use --health to check daemon health and metrics.`,
 }
 
 func init() {
-	daemonCmd.Flags().Duration("interval", 2*time.Second, "Sync check interval")
+	daemonCmd.Flags().Duration("interval", 5*time.Second, "Sync check interval")
 	daemonCmd.Flags().Bool("auto-commit", false, "Automatically commit changes")
 	daemonCmd.Flags().Bool("auto-push", false, "Automatically push commits")
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
