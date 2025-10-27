@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
-	"strings"
 )
 
 func killProcess(pid int) error {
