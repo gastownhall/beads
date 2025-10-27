@@ -496,7 +496,10 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 			JOIN dependencies d ON i.id = d.depends_on_id
 			JOIN tree t ON d.issue_id = t.id
 			WHERE t.depth < ?
-			AND t.path NOT LIKE '%' || i.id || '%'
+			AND t.path != i.id
+			AND t.path NOT LIKE i.id || '→%'
+			AND t.path NOT LIKE '%→' || i.id || '→%'
+			AND t.path NOT LIKE '%→' || i.id
 			)
 			SELECT id, title, status, priority, description, design,
 			acceptance_criteria, notes, issue_type, assignee,

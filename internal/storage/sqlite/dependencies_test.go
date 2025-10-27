@@ -725,3 +725,106 @@ func TestCrossTypeCyclePreventionThreeIssues(t *testing.T) {
 		t.Errorf("Expected no cycles after prevention, but found %d", len(cycles))
 	}
 }
+
+func TestGetDependencyTree_SubstringBug(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create 10 issues so we have both bd-1 and bd-10 (substring issue)
+	// The bug: when traversing from bd-10, bd-1 gets incorrectly excluded
+	// because "bd-10" contains "bd-1" as a substring
+	issues := make([]*types.Issue, 10)
+	for i := 0; i < 10; i++ {
+		issues[i] = &types.Issue{
+			Title:     fmt.Sprintf("Issue %d", i+1),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, issues[i], "test-user")
+		if err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+	}
+
+	// Create chain: bd-10 → bd-9 → bd-8 → bd-2 → bd-1
+	// This tests the substring bug where bd-1 should appear but won't due to substring matching
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issues[9].ID, // bd-10
+		DependsOnID: issues[8].ID, // bd-9
+		Type:        types.DepBlocks,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("AddDependency bd-10→bd-9 failed: %v", err)
+	}
+
+	err = store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issues[8].ID, // bd-9
+		DependsOnID: issues[7].ID, // bd-8
+		Type:        types.DepBlocks,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("AddDependency bd-9→bd-8 failed: %v", err)
+	}
+
+	err = store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issues[7].ID, // bd-8
+		DependsOnID: issues[1].ID, // bd-2
+		Type:        types.DepBlocks,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("AddDependency bd-8→bd-2 failed: %v", err)
+	}
+
+	err = store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issues[1].ID, // bd-2
+		DependsOnID: issues[0].ID, // bd-1
+		Type:        types.DepBlocks,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("AddDependency bd-2→bd-1 failed: %v", err)
+	}
+
+	// Get tree starting from bd-10
+	tree, err := store.GetDependencyTree(ctx, issues[9].ID, 10, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTree failed: %v", err)
+	}
+
+	// Create map of issue IDs in tree for easy checking
+	treeIDs := make(map[string]bool)
+	for _, node := range tree {
+		treeIDs[node.ID] = true
+	}
+
+	// Verify all issues in the chain appear in the tree
+	// This is the KEY test: bd-1 should be in the tree
+	// With the substring bug, bd-1 will be missing because "bd-10" contains "bd-1"
+	expectedIssues := []int{9, 8, 7, 1, 0} // bd-10, bd-9, bd-8, bd-2, bd-1
+	for _, idx := range expectedIssues {
+		if !treeIDs[issues[idx].ID] {
+			t.Errorf("Expected %s in dependency tree, but it was missing (substring bug)", issues[idx].ID)
+		}
+	}
+
+	// Verify we have the correct number of nodes
+	if len(tree) != 5 {
+		t.Errorf("Expected 5 nodes in tree, got %d. Missing nodes indicate substring bug.", len(tree))
+	}
+
+	// Verify depths are correct
+	depthMap := make(map[string]int)
+	for _, node := range tree {
+		depthMap[node.ID] = node.Depth
+	}
+
+	// Check depths: bd-10(0) → bd-9(1) → bd-8(2) → bd-2(3) → bd-1(4)
+	if depthMap[issues[9].ID] != 0 {
+		t.Errorf("Expected bd-10 at depth 0, got %d", depthMap[issues[9].ID])
+	}
+	if depthMap[issues[0].ID] != 4 {
+		t.Errorf("Expected bd-1 at depth 4, got %d", depthMap[issues[0].ID])
+	}
+}
