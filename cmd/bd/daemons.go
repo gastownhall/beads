@@ -257,6 +257,7 @@ Supports tail mode (last N lines) and follow mode (like tail -f).`,
 
 		if jsonOutput {
 			// JSON mode: read entire file
+			// #nosec G304 - controlled path from daemon discovery
 			content, err := os.ReadFile(logPath)
 			if err != nil {
 				outputJSON(map[string]string{"error": err.Error()})
@@ -283,6 +284,7 @@ Supports tail mode (last N lines) and follow mode (like tail -f).`,
 }
 
 func tailLines(filePath string, n int) error {
+	// #nosec G304 - controlled path from daemon discovery
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -312,6 +314,7 @@ func tailLines(filePath string, n int) error {
 }
 
 func tailFollow(filePath string) {
+	// #nosec G304 - controlled path from daemon discovery
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)

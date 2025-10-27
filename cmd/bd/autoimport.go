@@ -88,7 +88,7 @@ func checkGitForIssues() (int, string) {
 	for _, relPath := range candidates {
 		// Use ToSlash for git path compatibility on Windows
 		gitPath := filepath.ToSlash(relPath)
-		cmd := exec.Command("git", "show", fmt.Sprintf("HEAD:%s", gitPath))
+		cmd := exec.Command("git", "show", fmt.Sprintf("HEAD:%s", gitPath)) // #nosec G204 - git command with safe args
 		output, err := cmd.Output()
 		if err == nil && len(output) > 0 {
 			lines := bytes.Count(output, []byte("\n"))
@@ -139,7 +139,7 @@ func findGitRoot() string {
 func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage, jsonlPath string) error {
 	// Get content from git (use ToSlash for Windows compatibility)
 	gitPath := filepath.ToSlash(jsonlPath)
-	cmd := exec.Command("git", "show", fmt.Sprintf("HEAD:%s", gitPath))
+	cmd := exec.Command("git", "show", fmt.Sprintf("HEAD:%s", gitPath)) // #nosec G204 - git command with safe args
 	jsonlData, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to read from git: %w", err)

@@ -45,6 +45,7 @@ func acquireDaemonLock(beadsDir string, dbPath string) (*DaemonLock, error) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
 
 	// Open or create the lock file
+	// #nosec G304 - controlled path from config
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open lock file: %w", err)
@@ -88,6 +89,7 @@ func tryDaemonLock(beadsDir string) (running bool, pid int) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
 
 	// Open lock file with read-write access (required for LockFileEx on Windows)
+	// #nosec G304 - controlled path from config
 	f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
 	if err != nil {
 		// No lock file - could be old daemon without lock support
@@ -134,6 +136,7 @@ func tryDaemonLock(beadsDir string) (running bool, pid int) {
 func readDaemonLockInfo(beadsDir string) (*DaemonLockInfo, error) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
 	
+	// #nosec G304 - controlled path from config
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		return nil, err
@@ -182,6 +185,7 @@ func validateDaemonLock(beadsDir string, expectedDB string) error {
 // This is used for backward compatibility with pre-lock daemons.
 func checkPIDFile(beadsDir string) (running bool, pid int) {
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
+	// #nosec G304 - controlled path from config
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return false, 0

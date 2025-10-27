@@ -69,6 +69,7 @@ func shouldSkipExport(ctx context.Context, store storage.Storage, issue *types.I
 
 // countIssuesInJSONL counts the number of issues in a JSONL file
 func countIssuesInJSONL(path string) (int, error) {
+	// #nosec G304 - controlled path from config
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err

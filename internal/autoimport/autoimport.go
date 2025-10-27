@@ -79,7 +79,7 @@ func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string
 		return nil
 	}
 
-	jsonlData, err := os.ReadFile(jsonlPath)
+	jsonlData, err := os.ReadFile(jsonlPath) // #nosec G304 - controlled path from config
 	if err != nil {
 		notify.Debugf("auto-import skipped, JSONL not readable: %v", err)
 		return nil

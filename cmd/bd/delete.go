@@ -310,6 +310,7 @@ func removeIssueFromJSONL(issueID string) error {
 	}
 
 	// Read all issues except the deleted one
+	// #nosec G304 - controlled path from config
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -345,6 +346,7 @@ func removeIssueFromJSONL(issueID string) error {
 
 	// Write to temp file atomically
 	temp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	// #nosec G304 - controlled path from config
 	out, err := os.OpenFile(temp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -602,6 +604,7 @@ func updateTextReferencesInIssues(ctx context.Context, deletedIDs []string, conn
 
 // readIssueIDsFromFile reads issue IDs from a file (one per line)
 func readIssueIDsFromFile(filename string) ([]string, error) {
+	// #nosec G304 - user-provided file path is intentional
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err

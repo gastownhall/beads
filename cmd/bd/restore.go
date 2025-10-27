@@ -154,6 +154,7 @@ func gitCheckout(ref string) error {
 
 // readIssueFromJSONL reads a specific issue from JSONL file
 func readIssueFromJSONL(jsonlPath, issueID string) (*types.Issue, error) {
+	// #nosec G304 - controlled path from config
 	file, err := os.Open(jsonlPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open JSONL: %w", err)

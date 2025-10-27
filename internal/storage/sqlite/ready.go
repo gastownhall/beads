@@ -56,6 +56,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	// 1. Find issues directly blocked by 'blocks' dependencies
 	// 2. Recursively propagate blockage to all descendants via 'parent-child' links
 	// 3. Exclude all blocked issues (both direct and transitive) from ready work
+	// #nosec G201 - safe SQL with controlled formatting
 	query := fmt.Sprintf(`
 		WITH RECURSIVE
 		  -- Step 1: Find issues blocked directly by dependencies

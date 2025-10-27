@@ -37,7 +37,7 @@ func New(path string) (*SQLiteStorage, error) {
 	// Ensure directory exists (skip for memory databases)
 	if !strings.Contains(dbPath, ":memory:") {
 		dir := filepath.Dir(dbPath)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
@@ -1223,7 +1223,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	defer func() { _ = tx.Rollback() }()
 
 	// Update issue
-	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", "))
+	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", ")) // #nosec G201 - safe SQL with controlled column names
 	_, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update issue: %w", err)
@@ -1840,6 +1840,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		args = append(args, filter.Limit)
 	}
 
+	// #nosec G201 - safe SQL with controlled formatting
 	querySQL := fmt.Sprintf(`
 		SELECT id, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,

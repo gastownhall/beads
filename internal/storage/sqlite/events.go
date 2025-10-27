@@ -58,6 +58,7 @@ func (s *SQLiteStorage) GetEvents(ctx context.Context, issueID string, limit int
 		args = append(args, limit)
 	}
 
+	// #nosec G201 - safe SQL with controlled formatting
 	query := fmt.Sprintf(`
 		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
 		FROM events

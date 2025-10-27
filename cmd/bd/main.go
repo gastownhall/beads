@@ -601,7 +601,7 @@ func restartDaemonForVersionMismatch() bool {
 	}
 
 	args := []string{"daemon"}
-	cmd := exec.Command(exe, args...)
+	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
 
 	// Set working directory to database directory so daemon finds correct DB
@@ -696,6 +696,7 @@ func isDaemonHealthy(socketPath string) bool {
 }
 
 func acquireStartLock(lockPath, socketPath string) bool {
+	// #nosec G304 - controlled path from config
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		debugLog("another process is starting daemon, waiting for readiness")
@@ -776,7 +777,7 @@ func startDaemonProcess(socketPath string, isGlobal bool) bool {
 		args = append(args, "--global")
 	}
 
-	cmd := exec.Command(binPath, args...)
+	cmd := exec.Command(binPath, args...) // #nosec G204 - bd daemon command from trusted binary
 	setupDaemonIO(cmd)
 
 	if !isGlobal && dbPath != "" {
@@ -824,6 +825,7 @@ func getPIDFileForSocket(socketPath string) string {
 
 // readPIDFromFile reads a PID from a file
 func readPIDFromFile(path string) (int, error) {
+	// #nosec G304 - controlled path from config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
@@ -879,7 +881,7 @@ func canRetryDaemonStart() bool {
 	}
 
 	// Exponential backoff: 5s, 10s, 20s, 40s, 80s, 120s (capped at 120s)
-	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second
+	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second // #nosec G115 - controlled value, no overflow risk
 	if backoff > 120*time.Second {
 		backoff = 120 * time.Second
 	}
@@ -943,7 +945,7 @@ func findJSONLPath() string {
 	// Ensure the directory exists (important for new databases)
 	// This is the only difference from the public API - we create the directory
 	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
+	if err := os.MkdirAll(dbDir, 0750); err != nil {
 		// If we can't create the directory, return discovered path anyway
 		// (the subsequent write will fail with a clearer error)
 		return jsonlPath
@@ -1237,6 +1239,7 @@ func flushToJSONL() {
 	// Read existing JSONL into a map (skip for full export - we'll rebuild from scratch)
 	issueMap := make(map[string]*types.Issue)
 	if !fullExport {
+		// #nosec G304 - controlled path from config
 		if existingFile, err := os.Open(jsonlPath); err == nil {
 			scanner := bufio.NewScanner(existingFile)
 			lineNum := 0
@@ -1295,6 +1298,7 @@ func flushToJSONL() {
 	// Write to temp file first, then rename (atomic)
 	// Use PID in filename to avoid collisions between concurrent bd commands (bd-306)
 	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
+	// #nosec G304 - controlled path from config
 	f, err := os.Create(tempPath)
 	if err != nil {
 		recordFailure(fmt.Errorf("failed to create temp file: %w", err))
@@ -1331,6 +1335,7 @@ func flushToJSONL() {
 	}
 
 	// Store hash of exported JSONL (fixes bd-84: enables hash-based auto-import)
+	// #nosec G304 - controlled path from config
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err == nil {
 		hasher := sha256.New()
@@ -2270,7 +2275,7 @@ Examples:
 		tmpFile.Close()
 
 		// Open the editor
-		editorCmd := exec.Command(editor, tmpPath)
+		editorCmd := exec.Command(editor, tmpPath) // #nosec G204 - user-provided editor command is intentional
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = os.Stdout
 		editorCmd.Stderr = os.Stderr
@@ -2281,6 +2286,7 @@ Examples:
 		}
 
 		// Read the edited content
+		// #nosec G304 - controlled temp file path
 		editedContent, err := os.ReadFile(tmpPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading edited file: %v\n", err)

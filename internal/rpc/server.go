@@ -292,7 +292,7 @@ func (s *Server) ensureSocketDir() error {
 		return err
 	}
 	// Best-effort tighten permissions if directory already existed
-	_ = os.Chmod(dir, 0700)
+	_ = os.Chmod(dir, 0700) // #nosec G302 - 0700 is secure (user-only access)
 	return nil
 }
 
@@ -354,6 +354,7 @@ func (s *Server) checkMemoryPressure() {
 	}
 
 	allocMB := m.Alloc / 1024 / 1024
+	// #nosec G115 - safe conversion of positive value
 	if allocMB > uint64(thresholdMB) {
 		fmt.Fprintf(os.Stderr, "Warning: High memory usage detected (%d MB), triggering aggressive cache eviction\n", allocMB)
 		s.aggressiveEviction()

@@ -39,6 +39,7 @@ Behavior:
 		// Open input
 		in := os.Stdin
 		if input != "" {
+			// #nosec G304 - user-provided file path is intentional
 			f, err := os.Open(input)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error opening input file: %v\n", err)

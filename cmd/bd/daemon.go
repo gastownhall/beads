@@ -533,7 +533,7 @@ func migrateToGlobalDaemon() {
 		binPath = os.Args[0]
 	}
 
-	cmd := exec.Command(binPath, "daemon", "--global")
+	cmd := exec.Command(binPath, "daemon", "--global") // #nosec G204 - bd daemon command from trusted binary
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err == nil {
 		cmd.Stdout = devNull
@@ -643,7 +643,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 		args = append(args, "--global")
 	}
 
-	cmd := exec.Command(exe, args...)
+	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
 	configureDaemonProcess(cmd)
 
@@ -671,6 +671,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 
 	for i := 0; i < 20; i++ {
 		time.Sleep(100 * time.Millisecond)
+		// #nosec G304 - controlled path from config
 		if data, err := os.ReadFile(pidFile); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == expectedPID {
 				fmt.Printf("Daemon started (PID %d)\n", expectedPID)
@@ -791,7 +792,7 @@ func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 // We need to implement direct import logic here
 func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
 	// Read JSONL file
-	file, err := os.Open(jsonlPath)
+	file, err := os.Open(jsonlPath) // #nosec G304 - controlled path from config
 	if err != nil {
 		return fmt.Errorf("failed to open JSONL: %w", err)
 	}
@@ -950,6 +951,7 @@ func setupDaemonLock(pidFile string, dbPath string, log daemonLogger) (io.Closer
 	}
 
 	myPID := os.Getpid()
+	// #nosec G304 - controlled path from config
 	if data, err := os.ReadFile(pidFile); err == nil {
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == myPID {
 			// PID file is correct, continue

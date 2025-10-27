@@ -466,7 +466,7 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool)
 	}
 
 	// Run import command with --resolve-collisions to automatically handle conflicts
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := exec.CommandContext(ctx, exe, args...) // #nosec G204 - bd import command from trusted binary
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("import failed: %w\n%s", err, output)

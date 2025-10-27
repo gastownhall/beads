@@ -114,7 +114,7 @@ Examples:
 		commentText, _ := cmd.Flags().GetString("file")
 		if commentText != "" {
 			// Read from file
-			data, err := os.ReadFile(commentText)
+			data, err := os.ReadFile(commentText) // #nosec G304 - user-provided file path is intentional
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 				os.Exit(1)

@@ -30,7 +30,7 @@ func ConfigPath(beadsDir string) string {
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 	
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -54,7 +54,7 @@ func (c *Config) Save(beadsDir string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 	
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 	

@@ -20,7 +20,7 @@ func ShouldSkipDatabase(beadsDir string) (skip bool, holder string, err error) {
 	lockPath := filepath.Join(beadsDir, ".exclusive-lock")
 
 	// Check if lock file exists
-	data, err := os.ReadFile(lockPath)
+	data, err := os.ReadFile(lockPath) // #nosec G304 - controlled path from config
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No lock file, proceed with database

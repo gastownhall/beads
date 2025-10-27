@@ -272,11 +272,13 @@ func hooksInstalled() bool {
 	}
 	
 	// Verify they're bd hooks by checking for signature comment
+	// #nosec G304 - controlled path from git directory
 	preCommitContent, err := os.ReadFile(preCommit)
 	if err != nil || !strings.Contains(string(preCommitContent), "bd (beads) pre-commit hook") {
 		return false
 	}
 	
+	// #nosec G304 - controlled path from git directory
 	postMergeContent, err := os.ReadFile(postMerge)
 	if err != nil || !strings.Contains(string(postMergeContent), "bd (beads) post-merge hook") {
 		return false
@@ -290,7 +292,7 @@ func installGitHooks() error {
 	hooksDir := filepath.Join(".git", "hooks")
 	
 	// Ensure hooks directory exists
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0750); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 	
@@ -375,6 +377,7 @@ exit 0
 	for _, hookPath := range []string{preCommitPath, postMergePath} {
 		if _, err := os.Stat(hookPath); err == nil {
 			// Read existing hook to check if it's already a bd hook
+			// #nosec G304 - controlled path from git directory
 			content, err := os.ReadFile(hookPath)
 			if err == nil && strings.Contains(string(content), "bd (beads)") {
 				// Already a bd hook, skip backup
@@ -389,13 +392,15 @@ exit 0
 		}
 	}
 	
-	// Write pre-commit hook
-	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0755); err != nil {
+	// Write pre-commit hook (executable scripts need 0700)
+	// #nosec G306 - git hooks must be executable
+	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0700); err != nil {
 		return fmt.Errorf("failed to write pre-commit hook: %w", err)
 	}
 	
-	// Write post-merge hook
-	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0755); err != nil {
+	// Write post-merge hook (executable scripts need 0700)
+	// #nosec G306 - git hooks must be executable
+	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0700); err != nil {
 		return fmt.Errorf("failed to write post-merge hook: %w", err)
 	}
 	
