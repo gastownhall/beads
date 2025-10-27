@@ -30,6 +30,13 @@ This command:
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		cleanup, _ := cmd.Flags().GetBool("cleanup")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
+
+		// Handle --update-repo-id first
+		if updateRepoID {
+			handleUpdateRepoID(dryRun, autoYes)
+			return
+		}
 
 		// Find .beads directory
 		beadsDir := findBeadsDir()
@@ -364,9 +371,131 @@ func formatDBList(dbs []*dbInfo) []map[string]string {
 	return result
 }
 
+func handleUpdateRepoID(dryRun bool, autoYes bool) {
+	// Find database
+	foundDB := beads.FindDatabasePath()
+	if foundDB == "" {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "no_database",
+				"message": "No beads database found. Run 'bd init' first.",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
+			fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
+		}
+		os.Exit(1)
+	}
+
+	// Compute new repo ID
+	newRepoID, err := beads.ComputeRepoID()
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "compute_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to compute repository ID: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// Open database
+	store, err := sqlite.New(foundDB)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "open_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Get old repo ID
+	ctx := context.Background()
+	oldRepoID, err := store.GetMetadata(ctx, "repo_id")
+	if err != nil && err.Error() != "metadata key not found: repo_id" {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "read_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to read repo_id: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	oldDisplay := "none"
+	if len(oldRepoID) >= 8 {
+		oldDisplay = oldRepoID[:8]
+	}
+
+	if dryRun {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"dry_run":     true,
+				"old_repo_id": oldDisplay,
+				"new_repo_id": newRepoID[:8],
+			})
+		} else {
+			fmt.Println("Dry run mode - no changes will be made")
+			fmt.Printf("Would update repository ID:\n")
+			fmt.Printf("  Old: %s\n", oldDisplay)
+			fmt.Printf("  New: %s\n", newRepoID[:8])
+		}
+		return
+	}
+
+	// Prompt for confirmation if repo_id exists and differs
+	if oldRepoID != "" && oldRepoID != newRepoID && !autoYes && !jsonOutput {
+		fmt.Printf("WARNING: Changing repository ID can break sync if other clones exist.\n\n")
+		fmt.Printf("Current repo ID: %s\n", oldDisplay)
+		fmt.Printf("New repo ID:     %s\n\n", newRepoID[:8])
+		fmt.Printf("Continue? [y/N] ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled")
+			return
+		}
+	}
+
+	// Update repo ID
+	if err := store.SetMetadata(ctx, "repo_id", newRepoID); err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "update_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to update repo_id: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":      "success",
+			"old_repo_id": oldDisplay,
+			"new_repo_id": newRepoID[:8],
+		})
+	} else {
+		color.Green("✓ Repository ID updated\n\n")
+		fmt.Printf("  Old: %s\n", oldDisplay)
+		fmt.Printf("  New: %s\n", newRepoID[:8])
+	}
+}
+
 func init() {
 	migrateCmd.Flags().Bool("yes", false, "Auto-confirm cleanup prompts")
 	migrateCmd.Flags().Bool("cleanup", false, "Remove old database files after migration")
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	rootCmd.AddCommand(migrateCmd)
 }

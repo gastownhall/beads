@@ -131,9 +131,9 @@ bd.db
 		// Set the issue prefix in config
 		ctx := context.Background()
 		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
-			_ = store.Close()
-			os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
+		_ = store.Close()
+		os.Exit(1)
 		}
 
 		// Store the bd version in metadata (for version mismatch detection)
@@ -141,6 +141,34 @@ bd.db
 		fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
 		// Non-fatal - continue anyway
 		}
+
+	// Compute and store repository fingerprint
+	repoID, err := beads.ComputeRepoID()
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
+		}
+	} else {
+		if err := store.SetMetadata(ctx, "repo_id", repoID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set repo_id: %v\n", err)
+		} else if !quiet {
+			fmt.Printf("  Repository ID: %s\n", repoID[:8])
+		}
+	}
+
+	// Store clone-specific ID
+	cloneID, err := beads.GetCloneID()
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
+		}
+	} else {
+		if err := store.SetMetadata(ctx, "clone_id", cloneID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set clone_id: %v\n", err)
+		} else if !quiet {
+			fmt.Printf("  Clone ID: %s\n", cloneID)
+		}
+	}
 
 		// Create config.json for explicit configuration
 		if useLocalBeads {

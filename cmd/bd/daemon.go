@@ -847,6 +847,71 @@ func (d *daemonLogger) log(format string, args ...interface{}) {
 	d.logFunc(format, args...)
 }
 
+// validateDatabaseFingerprint checks that the database belongs to this repository
+func validateDatabaseFingerprint(store storage.Storage, log *daemonLogger) error {
+	ctx := context.Background()
+
+	// Get stored repo ID
+	storedRepoID, err := store.GetMetadata(ctx, "repo_id")
+	if err != nil && err.Error() != "metadata key not found: repo_id" {
+		return fmt.Errorf("failed to read repo_id: %w", err)
+	}
+
+	// If no repo_id, this is a legacy database - require explicit migration
+	if storedRepoID == "" {
+		return fmt.Errorf(`
+LEGACY DATABASE DETECTED!
+
+This database was created before version 0.17.5 and lacks a repository fingerprint.
+To continue using this database, you must explicitly set its repository ID:
+
+  bd migrate --update-repo-id
+
+This ensures the database is bound to this repository and prevents accidental
+database sharing between different repositories.
+
+If this is a fresh clone, run:
+  rm -rf .beads && bd init
+
+Note: Auto-claiming legacy databases is intentionally disabled to prevent
+silent corruption when databases are copied between repositories.
+`)
+	}
+
+	// Validate repo ID matches current repository
+	currentRepoID, err := beads.ComputeRepoID()
+	if err != nil {
+		log.log("Warning: could not compute current repository ID: %v", err)
+		return nil
+	}
+
+	if storedRepoID != currentRepoID {
+		return fmt.Errorf(`
+DATABASE MISMATCH DETECTED!
+
+This database belongs to a different repository:
+  Database repo ID:  %s
+  Current repo ID:   %s
+
+This usually means:
+  1. You copied a .beads directory from another repo (don't do this!)
+  2. Git remote URL changed (run 'bd migrate --update-repo-id')
+  3. Database corruption
+  4. bd was upgraded and URL canonicalization changed
+
+Solutions:
+  - If remote URL changed: bd migrate --update-repo-id
+  - If bd was upgraded: bd migrate --update-repo-id
+  - If wrong database: rm -rf .beads && bd init
+  - If correct database: BEADS_IGNORE_REPO_MISMATCH=1 bd daemon
+    (Warning: This can cause data corruption across clones!)
+`, storedRepoID[:8], currentRepoID[:8])
+	}
+
+	log.log("Repository fingerprint validated: %s", currentRepoID[:8])
+	return nil
+}
+
 func setupDaemonLogger(logPath string) (*lumberjack.Logger, daemonLogger) {
 	maxSizeMB := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 10)
 	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 3)
@@ -1188,6 +1253,15 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 	defer func() { _ = store.Close() }()
 	log.log("Database opened: %s", daemonDBPath)
+
+	// Validate database fingerprint
+	if err := validateDatabaseFingerprint(store, &log); err != nil {
+		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
+			log.log("Error: %v", err)
+			os.Exit(1)
+		}
+		log.log("Warning: repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")
+	}
 
 	// Validate schema version matches daemon version
 	versionCtx := context.Background()
