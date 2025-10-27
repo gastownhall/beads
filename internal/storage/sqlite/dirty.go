@@ -11,11 +11,22 @@ import (
 // MarkIssueDirty marks an issue as dirty (needs to be exported to JSONL)
 // This should be called whenever an issue is created, updated, or has dependencies changed
 func (s *SQLiteStorage) MarkIssueDirty(ctx context.Context, issueID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`, issueID, time.Now())
+	// Fetch the issue to compute its content hash
+	issue, err := s.GetIssue(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	
+	hash, err := computeIssueContentHash(issue)
+	if err != nil {
+		return err
+	}
+	
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at, content_hash)
+		VALUES (?, ?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at, content_hash = excluded.content_hash
+	`, issueID, time.Now(), hash)
 	return err
 }
 
@@ -34,9 +45,9 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 
 	now := time.Now()
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+		INSERT INTO dirty_issues (issue_id, marked_at, content_hash)
+		VALUES (?, ?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at, content_hash = excluded.content_hash
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -44,7 +55,18 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 	defer func() { _ = stmt.Close() }()
 
 	for _, issueID := range issueIDs {
-		if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {
+		// Fetch issue to compute content hash
+		issue, err := s.GetIssue(ctx, issueID)
+		if err != nil {
+			return fmt.Errorf("failed to get issue %s: %w", issueID, err)
+		}
+		
+		hash, err := computeIssueContentHash(issue)
+		if err != nil {
+			return fmt.Errorf("failed to compute hash for issue %s: %w", issueID, err)
+		}
+		
+		if _, err := stmt.ExecContext(ctx, issueID, now, hash); err != nil {
 			return fmt.Errorf("failed to mark issue %s dirty: %w", issueID, err)
 		}
 	}
@@ -73,6 +95,27 @@ func (s *SQLiteStorage) GetDirtyIssues(ctx context.Context) ([]string, error) {
 	}
 
 	return issueIDs, rows.Err()
+}
+
+// GetDirtyIssueHash returns the stored content hash for a dirty issue, if it exists
+func (s *SQLiteStorage) GetDirtyIssueHash(ctx context.Context, issueID string) (string, error) {
+	var hash sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT content_hash FROM dirty_issues WHERE issue_id = ?
+	`, issueID).Scan(&hash)
+	
+	if err == sql.ErrNoRows {
+		return "", nil // Issue not dirty
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get dirty issue hash: %w", err)
+	}
+	
+	if !hash.Valid {
+		return "", nil // No hash stored yet
+	}
+	
+	return hash.String, nil
 }
 
 // ClearDirtyIssues removes all entries from the dirty_issues table
@@ -128,16 +171,16 @@ func (s *SQLiteStorage) GetDirtyIssueCount(ctx context.Context) (int, error) {
 
 // markIssuesDirtyTx marks multiple issues as dirty within an existing transaction
 // This is a helper for operations that need to mark issues dirty as part of a larger transaction
-func markIssuesDirtyTx(ctx context.Context, tx *sql.Tx, issueIDs []string) error {
+func markIssuesDirtyTx(ctx context.Context, tx *sql.Tx, store *SQLiteStorage, issueIDs []string) error {
 	if len(issueIDs) == 0 {
 		return nil
 	}
 
 	now := time.Now()
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+		INSERT INTO dirty_issues (issue_id, marked_at, content_hash)
+		VALUES (?, ?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at, content_hash = excluded.content_hash
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare dirty statement: %w", err)
@@ -145,7 +188,18 @@ func markIssuesDirtyTx(ctx context.Context, tx *sql.Tx, issueIDs []string) error
 	defer func() { _ = stmt.Close() }()
 
 	for _, issueID := range issueIDs {
-		if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {
+		// Fetch issue to compute content hash
+		issue, err := store.GetIssue(ctx, issueID)
+		if err != nil {
+			return fmt.Errorf("failed to get issue %s: %w", issueID, err)
+		}
+		
+		hash, err := computeIssueContentHash(issue)
+		if err != nil {
+			return fmt.Errorf("failed to compute hash for issue %s: %w", issueID, err)
+		}
+		
+		if _, err := stmt.ExecContext(ctx, issueID, now, hash); err != nil {
 			return fmt.Errorf("failed to mark issue %s dirty: %w", issueID, err)
 		}
 	}

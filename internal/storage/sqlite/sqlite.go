@@ -144,6 +144,7 @@ func migrateDirtyIssuesTable(db *sql.DB) error {
 			CREATE TABLE dirty_issues (
 				issue_id TEXT PRIMARY KEY,
 				marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				content_hash TEXT,
 				FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 			);
 			CREATE INDEX idx_dirty_issues_marked_at ON dirty_issues(marked_at);
@@ -159,7 +160,25 @@ func migrateDirtyIssuesTable(db *sql.DB) error {
 		return fmt.Errorf("failed to check for dirty_issues table: %w", err)
 	}
 
-	// Table exists, no migration needed
+	// Table exists, check if content_hash column exists (migration for bd-164)
+	var hasContentHash bool
+	err = db.QueryRow(`
+		SELECT COUNT(*) > 0 FROM pragma_table_info('dirty_issues')
+		WHERE name = 'content_hash'
+	`).Scan(&hasContentHash)
+	
+	if err != nil {
+		return fmt.Errorf("failed to check for content_hash column: %w", err)
+	}
+	
+	if !hasContentHash {
+		// Add content_hash column to existing table
+		_, err = db.Exec(`ALTER TABLE dirty_issues ADD COLUMN content_hash TEXT`)
+		if err != nil {
+			return fmt.Errorf("failed to add content_hash column: %w", err)
+		}
+	}
+
 	return nil
 }
 

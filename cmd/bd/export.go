@@ -2,17 +2,70 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// computeIssueContentHash computes a SHA256 hash of an issue's content, excluding timestamps.
+// This is used for detecting timestamp-only changes during export deduplication.
+func computeIssueContentHash(issue *types.Issue) (string, error) {
+	// Clone issue and zero out timestamps to exclude them from hash
+	normalized := *issue
+	normalized.CreatedAt = time.Time{}
+	normalized.UpdatedAt = time.Time{}
+	
+	// Also zero out ClosedAt if present
+	if normalized.ClosedAt != nil {
+		zeroTime := time.Time{}
+		normalized.ClosedAt = &zeroTime
+	}
+	
+	// Serialize to JSON
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	
+	// SHA256 hash
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// shouldSkipExport checks if an issue should be skipped during export because
+// it only has timestamp changes (no actual content changes).
+func shouldSkipExport(ctx context.Context, store storage.Storage, issue *types.Issue) (bool, error) {
+	// Get the stored hash from dirty_issues table
+	storedHash, err := store.GetDirtyIssueHash(ctx, issue.ID)
+	if err != nil {
+		return false, err
+	}
+	
+	// If no hash stored, we must export (first export or old data)
+	if storedHash == "" {
+		return false, nil
+	}
+	
+	// Compute current hash
+	currentHash, err := computeIssueContentHash(issue)
+	if err != nil {
+		return false, err
+	}
+	
+	// If hashes match, only timestamps changed - skip export
+	return currentHash == storedHash, nil
+}
 
 // countIssuesInJSONL counts the number of issues in a JSONL file
 func countIssuesInJSONL(path string) (int, error) {
@@ -221,15 +274,34 @@ Output to stdout by default, or use -o flag for file output.`,
 			out = tempFile
 		}
 
-		// Write JSONL
+		// Write JSONL (with timestamp-only deduplication for bd-164)
 		encoder := json.NewEncoder(out)
 		exportedIDs := make([]string, 0, len(issues))
+		skippedCount := 0
 		for _, issue := range issues {
+			// Check if this is only a timestamp change (bd-164)
+			skip, err := shouldSkipExport(ctx, store, issue)
+			if err != nil {
+				// Log warning but continue - don't fail export on hash check errors
+				fmt.Fprintf(os.Stderr, "Warning: failed to check if %s should skip: %v\n", issue.ID, err)
+				skip = false
+			}
+			
+			if skip {
+				skippedCount++
+				continue
+			}
+			
 			if err := encoder.Encode(issue); err != nil {
 				fmt.Fprintf(os.Stderr, "Error encoding issue %s: %v\n", issue.ID, err)
 				os.Exit(1)
 			}
 			exportedIDs = append(exportedIDs, issue.ID)
+		}
+		
+		// Report skipped issues if any (helps debugging bd-159)
+		if skippedCount > 0 && (output == "" || output == findJSONLPath()) {
+			fmt.Fprintf(os.Stderr, "Skipped %d issue(s) with timestamp-only changes\n", skippedCount)
 		}
 
 		// Only clear dirty issues and auto-flush state if exporting to the default JSONL path

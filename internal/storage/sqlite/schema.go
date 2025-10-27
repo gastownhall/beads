@@ -120,6 +120,14 @@ CREATE TABLE IF NOT EXISTS dirty_issues (
 
 CREATE INDEX IF NOT EXISTS idx_dirty_issues_marked_at ON dirty_issues(marked_at);
 
+-- Tracks content hash of last export for each issue (for timestamp-only dedup, bd-164)
+CREATE TABLE IF NOT EXISTS export_hashes (
+    issue_id TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    exported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+
 -- Issue counters table (for atomic ID generation)
 CREATE TABLE IF NOT EXISTS issue_counters (
     prefix TEXT PRIMARY KEY,
