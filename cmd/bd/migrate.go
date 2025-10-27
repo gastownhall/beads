@@ -10,6 +10,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	_ "modernc.org/sqlite"
 )
@@ -73,7 +74,7 @@ This command:
 		}
 
 		// Check if beads.db exists and is current
-		targetPath := filepath.Join(beadsDir, "beads.db")
+		targetPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 		var currentDB *dbInfo
 		var oldDBs []*dbInfo
 
@@ -271,7 +272,7 @@ This command:
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":           "success",
-				"current_database": "beads.db",
+				"current_database": beads.CanonicalDatabaseName,
 				"version":          Version,
 				"migrated":         needsMigration,
 				"version_updated":  needsVersionUpdate,

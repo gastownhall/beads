@@ -9,6 +9,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
@@ -48,7 +49,7 @@ and database file. Optionally specify a custom issue prefix.`,
 		// Use global dbPath if set via --db flag or BEADS_DB env var, otherwise default to .beads/beads.db
 		initDBPath := dbPath
 		if initDBPath == "" {
-		initDBPath = filepath.Join(".beads", "beads.db")
+		initDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 		}
 
 		// Migrate old database files if they exist

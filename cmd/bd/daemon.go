@@ -1162,9 +1162,21 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			for _, db := range validDBs {
 				log.log("  - %s", filepath.Base(db))
 			}
-			log.log("Run 'bd init' to migrate to beads.db or manually remove old databases")
+			log.log("")
+			log.log("Beads requires a single canonical database: %s", beads.CanonicalDatabaseName)
+			log.log("Run 'bd init' to migrate legacy databases")
 			os.Exit(1)
 		}
+	}
+
+	// Validate using canonical name
+	dbBaseName := filepath.Base(daemonDBPath)
+	if dbBaseName != beads.CanonicalDatabaseName {
+		log.log("Error: Non-canonical database name: %s", dbBaseName)
+		log.log("Expected: %s", beads.CanonicalDatabaseName)
+		log.log("")
+		log.log("Run 'bd init' to migrate to canonical name")
+		os.Exit(1)
 	}
 
 	log.log("Using database: %s", daemonDBPath)
