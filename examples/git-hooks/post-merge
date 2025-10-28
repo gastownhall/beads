@@ -2,8 +2,9 @@
 #
 # bd (beads) post-merge hook
 #
-# This hook imports updated issues from .beads/issues.jsonl after a
-# git pull or merge, ensuring the database stays in sync with git.
+# This hook syncs the bd database after a git pull or merge:
+# 1. Checks if any .beads/*.jsonl file was updated
+# 2. Runs 'bd sync --import-only' to import changes
 #
 # Installation:
 #   cp examples/git-hooks/post-merge .git/hooks/post-merge
@@ -14,7 +15,7 @@
 
 # Check if bd is available
 if ! command -v bd >/dev/null 2>&1; then
-    echo "Warning: bd command not found, skipping post-merge import" >&2
+    echo "Warning: bd command not found, skipping post-merge sync" >&2
     exit 0
 fi
 
@@ -24,17 +25,16 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
-# Check if issues.jsonl exists and was updated
-if [ ! -f .beads/issues.jsonl ]; then
+# Check if any JSONL file exists in .beads/
+if ! ls .beads/*.jsonl >/dev/null 2>&1; then
     exit 0
 fi
 
-# Import the updated JSONL
-# The auto-import feature should handle this, but we force it here
-# to ensure immediate sync after merge
-if ! bd import -i .beads/issues.jsonl --resolve-collisions >/dev/null 2>&1; then
-    echo "Warning: Failed to import bd changes after merge" >&2
-    echo "Run 'bd import -i .beads/issues.jsonl --resolve-collisions' manually" >&2
+# Run bd sync --import-only to import the updated JSONL
+# This is more robust than direct import as it handles all edge cases
+if ! bd sync --import-only >/dev/null 2>&1; then
+    echo "Warning: Failed to sync bd changes after merge" >&2
+    echo "Run 'bd sync --import-only' manually" >&2
     # Don't fail the merge, just warn
 fi
 
