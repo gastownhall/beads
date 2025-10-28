@@ -428,8 +428,21 @@ var rootCmd = &cobra.Command{
 
 		// Auto-import if JSONL is newer than DB (e.g., after git pull)
 		// Skip for import command itself to avoid recursion
+		// Skip if sync --dry-run to avoid modifying DB in dry-run mode (bd-191)
 		if cmd.Name() != "import" && autoImportEnabled {
-			autoImportIfNewer()
+			// Check if this is sync command with --dry-run flag
+			if cmd.Name() == "sync" {
+				if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
+					// Skip auto-import in dry-run mode
+					if os.Getenv("BD_DEBUG") != "" {
+						fmt.Fprintf(os.Stderr, "Debug: auto-import skipped for sync --dry-run\n")
+					}
+				} else {
+					autoImportIfNewer()
+				}
+			} else {
+				autoImportIfNewer()
+			}
 		}
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
