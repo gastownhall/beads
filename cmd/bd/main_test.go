@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -103,11 +102,7 @@ func TestAutoFlushDebounce(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -232,10 +227,7 @@ func TestAutoFlushOnExit(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -411,10 +403,7 @@ func TestAutoFlushStoreInactive(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 
@@ -457,11 +446,7 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -577,11 +562,7 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 	dbPath = filepath.Join(tmpDir, "test.db")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -686,11 +667,7 @@ func TestAutoImportIfNewer(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -786,11 +763,7 @@ func TestAutoImportDisabled(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -863,11 +836,7 @@ func TestAutoImportWithCollision(t *testing.T) {
 	dbPath = filepath.Join(tmpDir, "test.db")
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -942,11 +911,7 @@ func TestAutoImportNoCollision(t *testing.T) {
 	dbPath = filepath.Join(tmpDir, "test.db")
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -1020,11 +985,7 @@ func TestAutoImportMergeConflict(t *testing.T) {
 	dbPath = filepath.Join(tmpDir, "test.db")
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -1104,11 +1065,7 @@ func TestAutoImportClosedAtInvariant(t *testing.T) {
 	dbPath = filepath.Join(tmpDir, "test.db")
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	store = testStore
 	storeMutex.Lock()
@@ -1167,18 +1124,9 @@ func TestImportOpenToClosedTransition(t *testing.T) {
 
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
-
-	// Initialize database with prefix
-	if err := testStore.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
 
 	// Step 1: Create an open issue in the database
 	openIssue := &types.Issue{
@@ -1233,18 +1181,9 @@ func TestImportClosedToOpenTransition(t *testing.T) {
 
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
-
-	// Initialize database with prefix
-	if err := testStore.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
 
 	// Step 1: Create a closed issue in the database
 	closedTime := time.Now()

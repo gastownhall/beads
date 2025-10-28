@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 func TestInitCommand(t *testing.T) {
@@ -150,14 +148,15 @@ func TestInitCommand(t *testing.T) {
 			}
 
 			// Verify database has correct prefix
-			store, err := sqlite.New(dbPath)
+			// Note: This database was already created by init command, just open it
+		store, err := openExistingTestDB(t, dbPath)
 			if err != nil {
-				t.Fatalf("Failed to open created database: %v", err)
-			}
-			defer store.Close()
+			 t.Fatalf("Failed to open database: %v", err)
+		}
+		defer store.Close()
 
-			ctx := context.Background()
-			prefix, err := store.GetConfig(ctx, "issue_prefix")
+		ctx := context.Background()
+		prefix, err := store.GetConfig(ctx, "issue_prefix")
 			if err != nil {
 				t.Fatalf("Failed to get issue prefix from database: %v", err)
 			}
@@ -221,9 +220,9 @@ func TestInitAlreadyInitialized(t *testing.T) {
 
 	// Verify database still works (always beads.db now)
 	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	store, err := sqlite.New(dbPath)
+	store, err := openExistingTestDB(t, dbPath)
 	if err != nil {
-		t.Fatalf("Failed to open database after re-init: %v", err)
+		t.Fatalf("Failed to open database: %v", err)
 	}
 	defer store.Close()
 
@@ -279,7 +278,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		}
 
 		// Verify database works
-		store, err := sqlite.New(customDBPath)
+		store, err := openExistingTestDB(t, customDBPath)
 		if err != nil {
 			t.Fatalf("Failed to open database: %v", err)
 		}
@@ -320,7 +319,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		}
 
 		// Verify database works
-		store, err := sqlite.New(envDBPath)
+		store, err := openExistingTestDB(t, envDBPath)
 		if err != nil {
 			t.Fatalf("Failed to open database: %v", err)
 		}

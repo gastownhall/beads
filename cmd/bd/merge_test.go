@@ -2,27 +2,17 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestValidateMerge(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbFile := filepath.Join(tmpDir, ".beads", "issues.db")
-	if err := os.MkdirAll(filepath.Dir(dbFile), 0755); err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
-
-	testStore, err := sqlite.New(dbFile)
-	if err != nil {
-		t.Fatalf("Failed to create test storage: %v", err)
-	}
-	defer testStore.Close()
-
+	
+	testStore := newTestStoreWithPrefix(t, dbFile, "bd")
 	store = testStore
 	ctx := context.Background()
 
@@ -52,13 +42,13 @@ func TestValidateMerge(t *testing.T) {
 		Status:      types.StatusOpen,
 	}
 
-	if err := testStore.CreateIssue(ctx, issue1, "test"); err != nil {
+	if err := testStore.CreateIssue(ctx, issue1, "bd"); err != nil {
 		t.Fatalf("Failed to create issue1: %v", err)
 	}
-	if err := testStore.CreateIssue(ctx, issue2, "test"); err != nil {
+	if err := testStore.CreateIssue(ctx, issue2, "bd"); err != nil {
 		t.Fatalf("Failed to create issue2: %v", err)
 	}
-	if err := testStore.CreateIssue(ctx, issue3, "test"); err != nil {
+	if err := testStore.CreateIssue(ctx, issue3, "bd"); err != nil {
 		t.Fatalf("Failed to create issue3: %v", err)
 	}
 
@@ -132,16 +122,8 @@ func TestValidateMerge(t *testing.T) {
 func TestValidateMergeMultipleSelfReferences(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbFile := filepath.Join(tmpDir, ".beads", "issues.db")
-	if err := os.MkdirAll(filepath.Dir(dbFile), 0755); err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
-
-	testStore, err := sqlite.New(dbFile)
-	if err != nil {
-		t.Fatalf("Failed to create test storage: %v", err)
-	}
-	defer testStore.Close()
-
+	
+	testStore := newTestStoreWithPrefix(t, dbFile, "bd")
 	store = testStore
 	ctx := context.Background()
 
@@ -154,12 +136,12 @@ func TestValidateMergeMultipleSelfReferences(t *testing.T) {
 		Status:      types.StatusOpen,
 	}
 
-	if err := testStore.CreateIssue(ctx, issue1, "test"); err != nil {
+	if err := testStore.CreateIssue(ctx, issue1, "bd"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
 	}
 
 	// Test merging multiple instances of same ID (should catch first one)
-	err = validateMerge("bd-10", []string{"bd-10", "bd-10"})
+	err := validateMerge("bd-10", []string{"bd-10", "bd-10"})
 	if err == nil {
 		t.Error("validateMerge() expected error for duplicate self-merge, got nil")
 	}
@@ -185,16 +167,8 @@ func containsSubstring(s, substr string) bool {
 func TestPerformMergeIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbFile := filepath.Join(tmpDir, ".beads", "issues.db")
-	if err := os.MkdirAll(filepath.Dir(dbFile), 0755); err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
-
-	testStore, err := sqlite.New(dbFile)
-	if err != nil {
-		t.Fatalf("Failed to create test storage: %v", err)
-	}
-	defer testStore.Close()
-
+	
+	testStore := newTestStoreWithPrefix(t, dbFile, "bd")
 	store = testStore
 	ctx := context.Background()
 
@@ -225,7 +199,7 @@ func TestPerformMergeIdempotent(t *testing.T) {
 	}
 
 	for _, issue := range []*types.Issue{issue1, issue2, issue3} {
-		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := testStore.CreateIssue(ctx, issue, "bd"); err != nil {
 			t.Fatalf("Failed to create issue %s: %v", issue.ID, err)
 		}
 	}
@@ -239,7 +213,7 @@ func TestPerformMergeIdempotent(t *testing.T) {
 		IssueType:   types.TypeTask,
 		Status:      types.StatusOpen,
 	}
-	if err := testStore.CreateIssue(ctx, issue4, "test"); err != nil {
+	if err := testStore.CreateIssue(ctx, issue4, "bd"); err != nil {
 		t.Fatalf("Failed to create issue4: %v", err)
 	}
 
@@ -305,16 +279,8 @@ func TestPerformMergeIdempotent(t *testing.T) {
 func TestPerformMergePartialRetry(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbFile := filepath.Join(tmpDir, ".beads", "issues.db")
-	if err := os.MkdirAll(filepath.Dir(dbFile), 0755); err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
-
-	testStore, err := sqlite.New(dbFile)
-	if err != nil {
-		t.Fatalf("Failed to create test storage: %v", err)
-	}
-	defer testStore.Close()
-
+	
+	testStore := newTestStoreWithPrefix(t, dbFile, "bd")
 	store = testStore
 	ctx := context.Background()
 
@@ -345,13 +311,13 @@ func TestPerformMergePartialRetry(t *testing.T) {
 	}
 
 	for _, issue := range []*types.Issue{issue1, issue2, issue3} {
-		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := testStore.CreateIssue(ctx, issue, "bd"); err != nil {
 			t.Fatalf("Failed to create issue %s: %v", issue.ID, err)
 		}
 	}
 
 	// Simulate partial failure: manually close one source issue
-	if err := testStore.CloseIssue(ctx, "bd-201", "Manually closed", "test"); err != nil {
+	if err := testStore.CloseIssue(ctx, "bd-201", "Manually closed", "bd"); err != nil {
 		t.Fatalf("Failed to manually close bd-201: %v", err)
 	}
 

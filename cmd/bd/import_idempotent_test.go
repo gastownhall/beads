@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -230,11 +229,7 @@ func TestIdempotentImportNoTimestampChurn(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	store = testStore
 	storeMutex.Lock()
@@ -316,11 +311,7 @@ func TestImportMultipleUnchangedIssues(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	store = testStore
 	storeMutex.Lock()

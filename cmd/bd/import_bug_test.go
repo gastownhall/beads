@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -22,16 +21,8 @@ func TestImportReturnsCorrectCounts(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, ".beads", "issues.db")
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-
 	// Initialize database
-	store, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-	defer store.Close()
+	store := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 

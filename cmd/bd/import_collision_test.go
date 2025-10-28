@@ -27,15 +27,7 @@ func TestImportSimpleCollision(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -139,15 +131,7 @@ func TestImportMultipleCollisions(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -253,15 +237,7 @@ func TestImportDependencyUpdates(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -399,15 +375,7 @@ func TestImportTextReferenceUpdates(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -546,15 +514,7 @@ func TestImportChainDependencies(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -648,15 +608,7 @@ func TestImportPartialIDMatch(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -771,15 +723,7 @@ func TestImportExactMatch(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -836,15 +780,7 @@ func TestImportMixedScenario(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -922,15 +858,7 @@ func TestImportWithDependenciesInJSONL(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 
@@ -989,15 +917,7 @@ func TestImportCounterSyncAfterHighID(t *testing.T) {
 	}()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer func() {
-		if err := testStore.Close(); err != nil {
-			t.Logf("Warning: failed to close store: %v", err)
-		}
-	}()
+	testStore := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	ctx := context.Background()
 

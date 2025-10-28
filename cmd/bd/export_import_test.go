@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,22 +133,9 @@ func (h *exportImportHelper) validateJSONLines(buf *bytes.Buffer, expectedCount 
 }
 
 func TestExportImport(t *testing.T) {
-	// Create temp directory for test database
-	tmpDir, err := os.MkdirTemp("", "bd-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			t.Logf("Warning: cleanup failed: %v", err)
-		}
-	}()
-
+	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
+	store := newTestStoreWithPrefix(t, dbPath, "test")
 
 	h := newExportImportHelper(t, store)
 	now := time.Now()
@@ -177,10 +163,7 @@ func TestExportImport(t *testing.T) {
 	t.Run("Import", func(t *testing.T) {
 		exported := h.searchIssues(types.IssueFilter{})
 		newDBPath := filepath.Join(tmpDir, "import-test.db")
-		newStore, err := sqlite.New(newDBPath)
-		if err != nil {
-			t.Fatalf("Failed to create new storage: %v", err)
-		}
+		newStore := newTestStoreWithPrefix(t, newDBPath, "test")
 		newHelper := newExportImportHelper(t, newStore)
 		for _, issue := range exported {
 			newHelper.createIssue(issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.ClosedAt)
@@ -216,22 +199,9 @@ func TestExportImport(t *testing.T) {
 }
 
 func TestExportEmpty(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			t.Logf("Warning: cleanup failed: %v", err)
-		}
-	}()
-
+	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "empty.db")
-	store, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-
+	store := newTestStore(t, dbPath)
 	ctx := context.Background()
 
 	// Export from empty database
@@ -263,23 +233,9 @@ func TestImportInvalidJSON(t *testing.T) {
 }
 
 func TestRoundTrip(t *testing.T) {
-	// Create original database
-	tmpDir, err := os.MkdirTemp("", "bd-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			t.Logf("Warning: cleanup failed: %v", err)
-		}
-	}()
-
+	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "original.db")
-	store, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-
+	store := newTestStoreWithPrefix(t, dbPath, "test")
 	h := newExportImportHelper(t, store)
 	original := h.createFullIssue("test-1", 120)
 
