@@ -52,7 +52,6 @@ async def test_daemon_client_health_success():
             "status": "healthy",
             "version": "0.9.10",
             "uptime": 123.45,
-            "cache_size": 5,
             "db_response_time_ms": 2.5,
             "active_connections": 3,
             "memory_bytes": 104857600,

@@ -214,7 +214,6 @@ class BdDaemonClient(BdClientBase):
             - status: "healthy" | "degraded" | "unhealthy"
             - version: daemon version string
             - uptime: uptime in seconds
-            - cache_size: number of cached databases
             - db_response_time_ms: database ping time
             - active_connections: number of active connections
             - memory_bytes: memory usage
