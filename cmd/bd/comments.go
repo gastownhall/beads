@@ -130,17 +130,17 @@ Examples:
 		// Get author from author flag, BD_ACTOR var, or system USER var
 		author, _ := cmd.Flags().GetString("author")
 		if author == "" {
-            author := os.Getenv("BD_ACTOR")
-            if author == "" {
-                author = os.Getenv("USER")
-            }
-            if author == "" {
-                if u, err := user.Current(); err == nil {
-                    author = u.Username
-                } else {
-                    author = "unknown"
-                }
-            }
+			author = os.Getenv("BD_ACTOR")
+			if author == "" {
+				author = os.Getenv("USER")
+			}
+			if author == "" {
+				if u, err := user.Current(); err == nil {
+					author = u.Username
+				} else {
+					author = "unknown"
+				}
+			}
 		}
 
 		var comment *types.Comment
