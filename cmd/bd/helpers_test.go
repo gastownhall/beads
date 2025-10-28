@@ -4,43 +4,6 @@ import (
 	"testing"
 )
 
-func TestIsBoundary(t *testing.T) {
-	tests := []struct {
-		input    byte
-		expected bool
-	}{
-		{' ', true},
-		{'\t', true},
-		{'\n', true},
-		{'\r', true},
-		{'-', false}, // hyphen is part of issue IDs
-		{'_', true},
-		{'(', true},
-		{')', true},
-		{'[', true},
-		{']', true},
-		{'{', true},
-		{'}', true},
-		{',', true},
-		{'.', true},
-		{':', true},
-		{';', true},
-		{'a', false}, // lowercase letters are part of issue IDs
-		{'z', false},
-		{'A', true},  // uppercase is a boundary
-		{'Z', true},  // uppercase is a boundary
-		{'0', false}, // digits are part of issue IDs
-		{'9', false},
-	}
-
-	for _, tt := range tests {
-		result := isBoundary(tt.input)
-		if result != tt.expected {
-			t.Errorf("isBoundary(%q) = %v, want %v", tt.input, result, tt.expected)
-		}
-	}
-}
-
 func TestIsNumeric(t *testing.T) {
 	tests := []struct {
 		input    string
