@@ -49,7 +49,6 @@ func (s *Server) Start(_ context.Context) error {
 	close(s.readyChan)
 
 	go s.handleSignals()
-	go s.runCleanupLoop()
 
 	// Ensure cleanup is signaled when this function returns
 	defer close(s.doneChan)
@@ -107,23 +106,7 @@ func (s *Server) Stop() error {
 		// Signal cleanup goroutine to stop
 		close(s.shutdownChan)
 
-		// Close all cached storage connections outside lock
-		s.cacheMu.Lock()
-		stores := make([]storage.Storage, 0, len(s.storageCache))
-		for _, entry := range s.storageCache {
-			stores = append(stores, entry.store)
-		}
-		s.storageCache = make(map[string]*StorageCacheEntry)
-		s.cacheMu.Unlock()
-
-		// Close stores without holding lock
-		for _, store := range stores {
-			if closeErr := store.Close(); closeErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to close storage: %v\n", closeErr)
-			}
-		}
-
-		// Close default storage
+		// Close storage
 		if s.storage != nil {
 			if closeErr := s.storage.Close(); closeErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to close default storage: %v\n", closeErr)

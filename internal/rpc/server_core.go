@@ -32,17 +32,9 @@ type Server struct {
 	shutdownChan  chan struct{}
 	stopOnce      sync.Once
 	doneChan      chan struct{} // closed when Start() cleanup is complete
-	// Per-request storage routing with eviction support
-	storageCache  map[string]*StorageCacheEntry // repoRoot -> entry
-	cacheMu       sync.RWMutex
-	maxCacheSize  int
-	cacheTTL      time.Duration
-	cleanupTicker *time.Ticker
 	// Health and metrics
 	startTime        time.Time
 	lastActivityTime atomic.Value // time.Time - last request timestamp
-	cacheHits        int64
-	cacheMisses      int64
 	metrics          *Metrics
 	// Connection limiting
 	maxConns      int
@@ -59,22 +51,6 @@ type Server struct {
 // NewServer creates a new RPC server
 func NewServer(socketPath string, store storage.Storage, workspacePath string, dbPath string) *Server {
 	// Parse config from env vars
-	maxCacheSize := 50 // default
-	if env := os.Getenv("BEADS_DAEMON_MAX_CACHE_SIZE"); env != "" {
-		// Parse as integer
-		var size int
-		if _, err := fmt.Sscanf(env, "%d", &size); err == nil && size > 0 {
-			maxCacheSize = size
-		}
-	}
-
-	cacheTTL := 30 * time.Minute // default
-	if env := os.Getenv("BEADS_DAEMON_CACHE_TTL"); env != "" {
-		if ttl, err := time.ParseDuration(env); err == nil && ttl > 0 {
-			cacheTTL = ttl
-		}
-	}
-
 	maxConns := 100 // default
 	if env := os.Getenv("BEADS_DAEMON_MAX_CONNS"); env != "" {
 		var conns int
@@ -95,9 +71,6 @@ func NewServer(socketPath string, store storage.Storage, workspacePath string, d
 		workspacePath:  workspacePath,
 		dbPath:         dbPath,
 		storage:        store,
-		storageCache:   make(map[string]*StorageCacheEntry),
-		maxCacheSize:   maxCacheSize,
-		cacheTTL:       cacheTTL,
 		shutdownChan:   make(chan struct{}),
 		doneChan:       make(chan struct{}),
 		startTime:      time.Now(),
