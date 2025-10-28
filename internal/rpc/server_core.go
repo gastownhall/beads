@@ -46,6 +46,15 @@ type Server struct {
 	readyChan chan struct{}
 	// Auto-import single-flight guard
 	importInProgress atomic.Bool
+	// Mutation events for event-driven daemon
+	mutationChan chan MutationEvent
+}
+
+// MutationEvent represents a database mutation for event-driven sync
+type MutationEvent struct {
+	Type      string    // "create", "update", "delete", "comment"
+	IssueID   string    // e.g., "bd-42"
+	Timestamp time.Time
 }
 
 // NewServer creates a new RPC server
@@ -79,7 +88,28 @@ func NewServer(socketPath string, store storage.Storage, workspacePath string, d
 		connSemaphore:  make(chan struct{}, maxConns),
 		requestTimeout: requestTimeout,
 		readyChan:      make(chan struct{}),
+		mutationChan:   make(chan MutationEvent, 100), // Buffered to avoid blocking
 	}
 	s.lastActivityTime.Store(time.Now())
 	return s
+}
+
+// emitMutation sends a mutation event to the daemon's event-driven loop.
+// Non-blocking: drops event if channel is full (sync will happen eventually).
+func (s *Server) emitMutation(eventType, issueID string) {
+	select {
+	case s.mutationChan <- MutationEvent{
+		Type:      eventType,
+		IssueID:   issueID,
+		Timestamp: time.Now(),
+	}:
+		// Event sent successfully
+	default:
+		// Channel full, event dropped (not critical - sync will happen eventually)
+	}
+}
+
+// MutationChan returns the mutation event channel for the daemon to consume
+func (s *Server) MutationChan() <-chan MutationEvent {
+	return s.mutationChan
 }

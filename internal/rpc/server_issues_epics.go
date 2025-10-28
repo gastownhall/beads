@@ -159,6 +159,9 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
+	// Emit mutation event for event-driven daemon
+	s.emitMutation("create", issue.ID)
+
 	data, _ := json.Marshal(issue)
 	return Response{
 		Success: true,
@@ -189,6 +192,9 @@ func (s *Server) handleUpdate(req *Request) Response {
 			Error:   fmt.Sprintf("failed to update issue: %v", err),
 		}
 	}
+
+	// Emit mutation event for event-driven daemon
+	s.emitMutation("update", updateArgs.ID)
 
 	issue, err := store.GetIssue(ctx, updateArgs.ID)
 	if err != nil {
@@ -223,6 +229,9 @@ func (s *Server) handleClose(req *Request) Response {
 			Error:   fmt.Sprintf("failed to close issue: %v", err),
 		}
 	}
+
+	// Emit mutation event for event-driven daemon
+	s.emitMutation("update", closeArgs.ID)
 
 	issue, _ := store.GetIssue(ctx, closeArgs.ID)
 	data, _ := json.Marshal(issue)
