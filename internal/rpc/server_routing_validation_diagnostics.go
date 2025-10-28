@@ -294,20 +294,7 @@ func (s *Server) handleHealth(req *Request) Response {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		data, _ := json.Marshal(HealthResponse{
-			Status:  "unhealthy",
-			Version: ServerVersion,
-			Uptime:  time.Since(s.startTime).Seconds(),
-			Error:   fmt.Sprintf("storage error: %v", err),
-		})
-		return Response{
-			Success: false,
-			Data:    data,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	healthCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

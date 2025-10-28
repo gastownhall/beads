@@ -18,13 +18,7 @@ func (s *Server) handleCompact(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get storage: %v", err),
-		}
-	}
+	store := s.storage
 
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 	if !ok {
@@ -233,13 +227,7 @@ func (s *Server) handleCompactStats(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get storage: %v", err),
-		}
-	}
+	store := s.storage
 
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 	if !ok {

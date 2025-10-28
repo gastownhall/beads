@@ -18,13 +18,7 @@ func (s *Server) handleDepAdd(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	dep := &types.Dependency{
 		IssueID:     depArgs.FromID,
@@ -53,13 +47,7 @@ func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc 
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	if err := opFunc(ctx, store, s.reqActor(req)); err != nil {
@@ -102,13 +90,7 @@ func (s *Server) handleCommentList(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	comments, err := store.GetIssueComments(ctx, commentArgs.ID)
@@ -135,13 +117,7 @@ func (s *Server) handleCommentAdd(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	comment, err := store.AddIssueComment(ctx, commentArgs.ID, commentArgs.Author, commentArgs.Text)

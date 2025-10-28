@@ -25,13 +25,7 @@ func (s *Server) handleExport(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get storage: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 
@@ -171,10 +165,7 @@ func (s *Server) handleImport(req *Request) Response {
 // This fixes bd-132: daemon shows stale data after git pull
 func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	// Get storage for this request
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return fmt.Errorf("failed to get storage: %w", err)
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	

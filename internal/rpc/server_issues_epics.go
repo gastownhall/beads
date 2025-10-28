@@ -71,13 +71,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	var design, acceptance, assignee *string
 	if createArgs.Design != "" {
@@ -181,13 +175,7 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	updates := updatesFromArgs(updateArgs)
@@ -226,13 +214,7 @@ func (s *Server) handleClose(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	if err := store.CloseIssue(ctx, closeArgs.ID, closeArgs.Reason, s.reqActor(req)); err != nil {
@@ -259,13 +241,7 @@ func (s *Server) handleList(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	filter := types.IssueFilter{
 		Limit: listArgs.Limit,
@@ -343,13 +319,7 @@ func (s *Server) handleShow(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	issue, err := store.GetIssue(ctx, showArgs.ID)
@@ -396,13 +366,7 @@ func (s *Server) handleReady(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	wf := types.WorkFilter{
 		Status:     types.StatusOpen,
@@ -431,13 +395,7 @@ func (s *Server) handleReady(req *Request) Response {
 }
 
 func (s *Server) handleStats(req *Request) Response {
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	stats, err := store.GetStatistics(ctx)
@@ -464,13 +422,7 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 		}
 	}
 
-	store, err := s.getStorageForRequest(req)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("storage error: %v", err),
-		}
-	}
+	store := s.storage
 
 	ctx := s.reqCtx(req)
 	epics, err := store.GetEpicsEligibleForClosure(ctx)
