@@ -401,3 +401,28 @@ func isNumeric(s string) bool {
 	}
 	return true
 }
+
+// extractPrefix extracts the prefix from an issue ID (e.g., "bd-123" -> "bd")
+func extractPrefix(issueID string) string {
+	parts := strings.SplitN(issueID, "-", 2)
+	if len(parts) < 2 {
+		return "" // No prefix found
+	}
+	return parts[0]
+}
+
+// getPrefixList formats a map of prefix counts into a sorted list of strings
+func getPrefixList(prefixes map[string]int) []string {
+	var result []string
+	keys := make([]string, 0, len(prefixes))
+	for k := range prefixes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, prefix := range keys {
+		count := prefixes[prefix]
+		result = append(result, fmt.Sprintf("%s- (%d issues)", prefix, count))
+	}
+	return result
+}
