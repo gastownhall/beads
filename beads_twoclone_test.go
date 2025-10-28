@@ -73,8 +73,9 @@ func TestTwoCloneCollision(t *testing.T) {
 		stopAllDaemons(t, cloneB)
 	})
 
-	// Give daemons time to start
-	time.Sleep(2 * time.Second)
+	// Wait for daemons to be ready (short timeout)
+	waitForDaemon(t, cloneA, 1*time.Second)
+	waitForDaemon(t, cloneB, 1*time.Second)
 
 	// Clone A creates an issue
 	t.Log("Clone A creating issue")
@@ -88,8 +89,8 @@ func TestTwoCloneCollision(t *testing.T) {
 	t.Log("Clone A syncing")
 	runCmd(t, cloneA, "./bd", "sync")
 
-	//Give time for push
-	time.Sleep(2 * time.Second)
+	// Wait for push to complete by polling git log
+	waitForPush(t, cloneA, 2*time.Second)
 
 	// Clone B will conflict when syncing
 	t.Log("Clone B syncing (will conflict)")
@@ -219,12 +220,26 @@ func stopAllDaemons(t *testing.T, repoDir string) {
 	t.Helper()
 	cmd := exec.Command("./bd", "daemons", "killall", "--force")
 	cmd.Dir = repoDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("Warning: daemon killall failed (may not be running): %v\nOutput: %s", err, string(out))
+	
+	// Run with timeout to avoid hanging
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Warning: daemon killall failed (may not be running): %v\nOutput: %s", err, string(out))
+		}
+	}()
+	
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Logf("Warning: daemon killall timed out, continuing")
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
 	}
-	// Give daemons time to shut down
-	time.Sleep(1 * time.Second)
 }
 
 func runCmd(t *testing.T, dir string, name string, args ...string) {
@@ -276,4 +291,50 @@ func runCmdOutputAllowError(t *testing.T, dir string, name string, args ...strin
 	cmd.Dir = dir
 	out, _ := cmd.CombinedOutput()
 	return string(out)
+}
+
+func waitForDaemon(t *testing.T, repoDir string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		// Just check if we can list issues - daemon doesn't have to be running
+		cmd := exec.Command("./bd", "list", "--json")
+		cmd.Dir = repoDir
+		_, err := cmd.CombinedOutput()
+		if err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Don't fail - test can continue without daemon
+	t.Logf("Warning: daemon not ready within %v, continuing anyway", timeout)
+}
+
+func waitForPush(t *testing.T, repoDir string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastCommit string
+	
+	// Get initial commit
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoDir
+	if out, err := cmd.Output(); err == nil {
+		lastCommit = strings.TrimSpace(string(out))
+	}
+	
+	for time.Now().Before(deadline) {
+		// First fetch to update remote tracking
+		exec.Command("git", "fetch", "origin").Run()
+		
+		// Check if remote has our commit
+		cmd := exec.Command("git", "log", "origin/master", "--oneline", "-1")
+		cmd.Dir = repoDir
+		out, err := cmd.Output()
+		if err == nil && strings.Contains(string(out), lastCommit) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Don't fail, just warn - push might complete async
+	t.Logf("Warning: push not detected within %v", timeout)
 }
