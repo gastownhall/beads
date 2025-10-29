@@ -116,11 +116,6 @@ func (s *Server) MutationChan() <-chan MutationEvent {
 	return s.mutationChan
 }
 
-// DroppedEventsCount returns the number of dropped mutation events
-func (s *Server) DroppedEventsCount() int64 {
-	return s.droppedEvents.Load()
-}
-
 // ResetDroppedEventsCount resets the dropped events counter and returns the previous value
 func (s *Server) ResetDroppedEventsCount() int64 {
 	return s.droppedEvents.Swap(0)
