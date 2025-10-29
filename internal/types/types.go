@@ -2,6 +2,7 @@
 package types
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"time"
 )
@@ -9,6 +10,7 @@ import (
 // Issue represents a trackable work item
 type Issue struct {
 	ID                 string         `json:"id"`
+	ContentHash        string         `json:"content_hash,omitempty"` // SHA256 hash of canonical content (excludes ID, timestamps)
 	Title              string         `json:"title"`
 	Description        string         `json:"description"`
 	Design             string         `json:"design,omitempty"`
@@ -30,6 +32,39 @@ type Issue struct {
 	Labels             []string       `json:"labels,omitempty"` // Populated only for export/import
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import
+}
+
+// ComputeContentHash creates a deterministic hash of the issue's content.
+// Uses all substantive fields (excluding ID, timestamps, and compaction metadata)
+// to ensure that identical content produces identical hashes across all clones.
+func (i *Issue) ComputeContentHash() string {
+	h := sha256.New()
+	
+	// Hash all substantive fields in a stable order
+	h.Write([]byte(i.Title))
+	h.Write([]byte{0}) // separator
+	h.Write([]byte(i.Description))
+	h.Write([]byte{0})
+	h.Write([]byte(i.Design))
+	h.Write([]byte{0})
+	h.Write([]byte(i.AcceptanceCriteria))
+	h.Write([]byte{0})
+	h.Write([]byte(i.Notes))
+	h.Write([]byte{0})
+	h.Write([]byte(i.Status))
+	h.Write([]byte{0})
+	h.Write([]byte(fmt.Sprintf("%d", i.Priority)))
+	h.Write([]byte{0})
+	h.Write([]byte(i.IssueType))
+	h.Write([]byte{0})
+	h.Write([]byte(i.Assignee))
+	h.Write([]byte{0})
+	
+	if i.ExternalRef != nil {
+		h.Write([]byte(*i.ExternalRef))
+	}
+	
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // Validate checks if the issue has valid field values

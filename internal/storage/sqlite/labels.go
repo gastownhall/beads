@@ -99,7 +99,7 @@ func (s *SQLiteStorage) GetLabels(ctx context.Context, issueID string) ([]string
 // GetIssuesByLabel returns issues with a specific label
 func (s *SQLiteStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i

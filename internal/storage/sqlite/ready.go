@@ -85,7 +85,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		  )
 
 		-- Step 3: Select ready issues (excluding all blocked)
-		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i

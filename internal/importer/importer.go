@@ -61,6 +61,13 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		MismatchPrefixes: make(map[string]int),
 	}
 
+	// Compute content hashes for all incoming issues (bd-95)
+	for _, issue := range issues {
+		if issue.ContentHash == "" {
+			issue.ContentHash = issue.ComputeContentHash()
+		}
+	}
+
 	// Get or create SQLite store
 	sqliteStore, needCloseStore, err := getOrCreateStore(ctx, dbPath, store)
 	if err != nil {

@@ -4,6 +4,7 @@ const schema = `
 -- Issues table
 CREATE TABLE IF NOT EXISTS issues (
     id TEXT PRIMARY KEY,
+    content_hash TEXT,
     title TEXT NOT NULL CHECK(length(title) <= 500),
     description TEXT NOT NULL DEFAULT '',
     design TEXT NOT NULL DEFAULT '',

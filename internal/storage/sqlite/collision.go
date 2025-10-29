@@ -375,6 +375,14 @@ func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*Collis
 
 	// Process each collision based on which version should be remapped
 	for _, collision := range collisions {
+		// Skip collisions with nil issues (shouldn't happen but be defensive)
+		if collision.IncomingIssue == nil {
+			return nil, fmt.Errorf("collision %s has nil IncomingIssue", collision.ID)
+		}
+		if collision.ExistingIssue == nil {
+			return nil, fmt.Errorf("collision %s has nil ExistingIssue", collision.ID)
+		}
+
 		oldID := collision.ID
 
 		// Allocate new ID using atomic counter

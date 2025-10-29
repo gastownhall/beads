@@ -358,7 +358,7 @@ func (s *SQLiteStorage) removeDependencyIfExists(ctx context.Context, issueID, d
 // GetDependencies returns issues that this issue depends on
 func (s *SQLiteStorage) GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
@@ -377,7 +377,7 @@ func (s *SQLiteStorage) GetDependencies(ctx context.Context, issueID string) ([]
 // GetDependents returns issues that depend on this issue
 func (s *SQLiteStorage) GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
@@ -710,13 +710,14 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 	var issues []*types.Issue
 	for rows.Next() {
 		var issue types.Issue
+		var contentHash sql.NullString
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
 		var externalRef sql.NullString
 
 		err := rows.Scan(
-			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
+			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
@@ -725,6 +726,9 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
 		}
 
+		if contentHash.Valid {
+			issue.ContentHash = contentHash.String
+		}
 		if closedAt.Valid {
 			issue.ClosedAt = &closedAt.Time
 		}

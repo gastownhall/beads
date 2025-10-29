@@ -121,6 +121,11 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to migrate export_hashes table: %w", err)
 	}
 
+	// Migrate existing databases to add content_hash column (bd-95)
+	if err := migrateContentHashColumn(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate content_hash column: %w", err)
+	}
+
 	// Convert to absolute path for consistency
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -518,6 +523,102 @@ func migrateExportHashesTable(db *sql.DB) error {
 	return nil
 }
 
+// migrateContentHashColumn adds the content_hash column to the issues table if missing (bd-95).
+// This enables global N-way collision resolution by providing content-addressable identity.
+func migrateContentHashColumn(db *sql.DB) error {
+	// Check if content_hash column exists
+	var colName string
+	err := db.QueryRow(`
+		SELECT name FROM pragma_table_info('issues')
+		WHERE name = 'content_hash'
+	`).Scan(&colName)
+
+	if err == sql.ErrNoRows {
+		// Column doesn't exist, add it
+		_, err := db.Exec(`ALTER TABLE issues ADD COLUMN content_hash TEXT`)
+		if err != nil {
+			return fmt.Errorf("failed to add content_hash column: %w", err)
+		}
+
+		// Create index on content_hash for fast lookups
+		_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_content_hash ON issues(content_hash)`)
+		if err != nil {
+			return fmt.Errorf("failed to create content_hash index: %w", err)
+		}
+
+		// Populate content_hash for all existing issues
+		rows, err := db.Query(`
+			SELECT id, title, description, design, acceptance_criteria, notes,
+			       status, priority, issue_type, assignee, external_ref
+			FROM issues
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to query existing issues: %w", err)
+		}
+		defer rows.Close()
+
+		// Collect issues and compute hashes
+		updates := make(map[string]string) // id -> content_hash
+		for rows.Next() {
+			var issue types.Issue
+			var assignee sql.NullString
+			var externalRef sql.NullString
+			err := rows.Scan(
+				&issue.ID, &issue.Title, &issue.Description, &issue.Design,
+				&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
+				&issue.Priority, &issue.IssueType, &assignee, &externalRef,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to scan issue: %w", err)
+			}
+			if assignee.Valid {
+				issue.Assignee = assignee.String
+			}
+			if externalRef.Valid {
+				issue.ExternalRef = &externalRef.String
+			}
+
+			// Compute and store hash
+			updates[issue.ID] = issue.ComputeContentHash()
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("error iterating issues: %w", err)
+		}
+
+		// Apply hash updates in batch
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		stmt, err := tx.Prepare(`UPDATE issues SET content_hash = ? WHERE id = ?`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare update statement: %w", err)
+		}
+		defer stmt.Close()
+
+		for id, hash := range updates {
+			if _, err := stmt.Exec(hash, id); err != nil {
+				return fmt.Errorf("failed to update content_hash for issue %s: %w", id, err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to check content_hash column: %w", err)
+	}
+
+	// Column already exists
+	return nil
+}
+
 // getNextIDForPrefix atomically generates the next ID for a given prefix
 // Uses the issue_counters table for atomic, cross-process ID generation
 func (s *SQLiteStorage) getNextIDForPrefix(ctx context.Context, prefix string) (int, error) {
@@ -587,6 +688,11 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	now := time.Now()
 	issue.CreatedAt = now
 	issue.UpdatedAt = now
+
+	// Compute content hash (bd-95)
+	if issue.ContentHash == "" {
+		issue.ContentHash = issue.ComputeContentHash()
+	}
 
 	// Acquire a dedicated connection for the transaction.
 	// This is necessary because we need to execute raw SQL ("BEGIN IMMEDIATE", "COMMIT")
@@ -677,12 +783,12 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	// Insert issue
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO issues (
-			id, title, description, design, acceptance_criteria, notes,
+			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		issue.ID, issue.Title, issue.Description, issue.Design,
+		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
 		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
@@ -800,12 +906,16 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 		return fmt.Errorf("failed to generate ID range: %w", err)
 	}
 
-	// Assign IDs sequentially from the reserved range
+	// Assign IDs sequentially from the reserved range and compute content hashes
 	currentID := nextID - needIDCount + 1
 	for i := range issues {
 		if issues[i].ID == "" {
 			issues[i].ID = fmt.Sprintf("%s-%d", prefix, currentID)
 			currentID++
+		}
+		// Compute content hash if not already set (bd-95)
+		if issues[i].ContentHash == "" {
+			issues[i].ContentHash = issues[i].ComputeContentHash()
 		}
 	}
 	return nil
@@ -815,10 +925,10 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
 	stmt, err := conn.PrepareContext(ctx, `
 		INSERT INTO issues (
-			id, title, description, design, acceptance_criteria, notes,
+			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -827,7 +937,7 @@ func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 
 	for _, issue := range issues {
 		_, err = stmt.ExecContext(ctx,
-			issue.ID, issue.Title, issue.Description, issue.Design,
+			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 			issue.AcceptanceCriteria, issue.Notes, issue.Status,
 			issue.Priority, issue.IssueType, issue.Assignee,
 			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
@@ -1004,16 +1114,17 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var compactedAt sql.NullTime
 	var originalSize sql.NullInt64
 
+	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, title, description, design, acceptance_criteria, notes,
+		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
-		&issue.ID, &issue.Title, &issue.Description, &issue.Design,
+		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
@@ -1027,6 +1138,9 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		return nil, fmt.Errorf("failed to get issue: %w", err)
 	}
 
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
 	if closedAt.Valid {
 		issue.ClosedAt = &closedAt.Time
 	}
@@ -1231,6 +1345,66 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 
 	// Auto-manage closed_at when status changes (enforce invariant)
 	setClauses, args = manageClosedAt(oldIssue, updates, setClauses, args)
+
+	// Recompute content_hash if any content fields changed (bd-95)
+	contentChanged := false
+	contentFields := []string{"title", "description", "design", "acceptance_criteria", "notes", "status", "priority", "issue_type", "assignee", "external_ref"}
+	for _, field := range contentFields {
+		if _, exists := updates[field]; exists {
+			contentChanged = true
+			break
+		}
+	}
+	if contentChanged {
+		// Get updated issue to compute hash
+		updatedIssue := *oldIssue
+		for key, value := range updates {
+			switch key {
+			case "title":
+				updatedIssue.Title = value.(string)
+			case "description":
+				updatedIssue.Description = value.(string)
+			case "design":
+				updatedIssue.Design = value.(string)
+			case "acceptance_criteria":
+				updatedIssue.AcceptanceCriteria = value.(string)
+			case "notes":
+				updatedIssue.Notes = value.(string)
+			case "status":
+				// Handle both string and types.Status
+				if s, ok := value.(types.Status); ok {
+					updatedIssue.Status = s
+				} else {
+					updatedIssue.Status = types.Status(value.(string))
+				}
+			case "priority":
+				updatedIssue.Priority = value.(int)
+			case "issue_type":
+				// Handle both string and types.IssueType
+				if t, ok := value.(types.IssueType); ok {
+					updatedIssue.IssueType = t
+				} else {
+					updatedIssue.IssueType = types.IssueType(value.(string))
+				}
+			case "assignee":
+				if value == nil {
+					updatedIssue.Assignee = ""
+				} else {
+					updatedIssue.Assignee = value.(string)
+				}
+			case "external_ref":
+				if value == nil {
+					updatedIssue.ExternalRef = nil
+				} else {
+					str := value.(string)
+					updatedIssue.ExternalRef = &str
+				}
+			}
+		}
+		newHash := updatedIssue.ComputeContentHash()
+		setClauses = append(setClauses, "content_hash = ?")
+		args = append(args, newHash)
+	}
 
 	args = append(args, id)
 
@@ -1861,7 +2035,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 
 	// #nosec G201 - safe SQL with controlled formatting
 	querySQL := fmt.Sprintf(`
-		SELECT id, title, description, design, acceptance_criteria, notes,
+		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref
 		FROM issues

@@ -640,34 +640,18 @@ func TestScoreCollisions(t *testing.T) {
 		t.Fatalf("ScoreCollisions failed: %v", err)
 	}
 
-	// Verify scores were calculated
-	// bd-4: 0 references (no mentions, no deps)
-	// bd-1: 1 reference (bd-1 → bd-2 dependency)
-	// bd-3: 1 reference (bd-3 → bd-2 dependency)
-	// bd-2: high references (mentioned in bd-1, bd-3 multiple times + 2 deps as target)
-	//       bd-1 desc (1) + bd-3 desc (3: "bd-2 multiple", "bd-2 and", "bd-2") + bd-3 notes (1) + 2 deps = 7
-
-	if collisions[0].ID != "bd-4" {
-		t.Errorf("expected first collision to be bd-4 (lowest score), got %s", collisions[0].ID)
-	}
-	if collisions[0].ReferenceScore != 0 {
-		t.Errorf("expected bd-4 to have score 0, got %d", collisions[0].ReferenceScore)
-	}
-
-	// bd-2 should be last (highest score)
-	lastIdx := len(collisions) - 1
-	if collisions[lastIdx].ID != "bd-2" {
-		t.Errorf("expected last collision to be bd-2 (highest score), got %s", collisions[lastIdx].ID)
-	}
-	if collisions[lastIdx].ReferenceScore != 7 {
-		t.Errorf("expected bd-2 to have score 7, got %d", collisions[lastIdx].ReferenceScore)
-	}
-
-	// Verify sorting (ascending order)
-	for i := 1; i < len(collisions); i++ {
-		if collisions[i].ReferenceScore < collisions[i-1].ReferenceScore {
-			t.Errorf("collisions not sorted: collision[%d] score %d < collision[%d] score %d",
-				i, collisions[i].ReferenceScore, i-1, collisions[i-1].ReferenceScore)
+	// Verify RemapIncoming was set based on content hashes (bd-95)
+	// ScoreCollisions now uses content-based hashing instead of reference counting
+	// Each collision should have RemapIncoming set based on hash comparison
+	for _, collision := range collisions {
+		existingHash := hashIssueContent(collision.ExistingIssue)
+		incomingHash := hashIssueContent(collision.IncomingIssue)
+		expectedRemapIncoming := existingHash < incomingHash
+		
+		if collision.RemapIncoming != expectedRemapIncoming {
+			t.Errorf("collision %s: RemapIncoming=%v but expected %v (existingHash=%s, incomingHash=%s)",
+				collision.ID, collision.RemapIncoming, expectedRemapIncoming,
+				existingHash[:8], incomingHash[:8])
 		}
 	}
 }
@@ -832,9 +816,35 @@ func TestRemapCollisions(t *testing.T) {
 		t.Fatalf("failed to create existing issue: %v", err)
 	}
 
+	// Create existing issues in DB that will collide with incoming issues
+	dbIssue2 := &types.Issue{
+		ID:          "bd-2",
+		Title:       "Existing issue bd-2",
+		Description: "Original content for bd-2",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, dbIssue2, "test"); err != nil {
+		t.Fatalf("failed to create dbIssue2: %v", err)
+	}
+
+	dbIssue3 := &types.Issue{
+		ID:          "bd-3",
+		Title:       "Existing issue bd-3",
+		Description: "Original content for bd-3",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, dbIssue3, "test"); err != nil {
+		t.Fatalf("failed to create dbIssue3: %v", err)
+	}
+
 	// Create collisions (incoming issues with same IDs as DB but different content)
 	collision1 := &CollisionDetail{
 		ID: "bd-2",
+		ExistingIssue: dbIssue2,
 		IncomingIssue: &types.Issue{
 			ID:          "bd-2",
 			Title:       "Collision 2 (has fewer references)",
@@ -843,11 +853,13 @@ func TestRemapCollisions(t *testing.T) {
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		},
+		RemapIncoming: true,  // Incoming will be remapped
 		ReferenceScore: 2, // Fewer references
 	}
 
 	collision2 := &CollisionDetail{
 		ID: "bd-3",
+		ExistingIssue: dbIssue3,
 		IncomingIssue: &types.Issue{
 			ID:          "bd-3",
 			Title:       "Collision 3 (has more references)",
@@ -856,11 +868,12 @@ func TestRemapCollisions(t *testing.T) {
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		},
+		RemapIncoming: true,  // Incoming will be remapped
 		ReferenceScore: 5, // More references
 	}
 
 	collisions := []*CollisionDetail{collision1, collision2}
-	allIssues := []*types.Issue{existingIssue, collision1.IncomingIssue, collision2.IncomingIssue}
+	allIssues := []*types.Issue{existingIssue, dbIssue2, dbIssue3, collision1.IncomingIssue, collision2.IncomingIssue}
 
 	// Remap collisions
 	idMapping, err := RemapCollisions(ctx, store, collisions, allIssues)
