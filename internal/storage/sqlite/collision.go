@@ -32,6 +32,7 @@ type CollisionDetail struct {
 //  1. Exact match (idempotent) - ID and content are identical
 //  2. ID match but different content (collision) - same ID, different fields
 //  3. New issue - ID doesn't exist in DB
+//  4. Rename detected - Different ID but same content (from prior remap)
 //
 // Returns a CollisionResult categorizing all incoming issues.
 func DetectCollisions(ctx context.Context, s *SQLiteStorage, incomingIssues []*types.Issue) (*CollisionResult, error) {
@@ -45,20 +46,52 @@ func DetectCollisions(ctx context.Context, s *SQLiteStorage, incomingIssues []*t
 	// Group by content hash to find duplicates with different IDs
 	deduped := deduplicateIncomingIssues(incomingIssues)
 
+	// Phase 2: Build content hash map of all DB issues
+	// This allows us to detect renames (different ID, same content)
+	dbIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all DB issues: %w", err)
+	}
+	
+	contentToDBIssue := make(map[string]*types.Issue)
+	for _, dbIssue := range dbIssues {
+		hash := hashIssueContent(dbIssue)
+		contentToDBIssue[hash] = dbIssue
+	}
+
+	// Phase 3: Process each incoming issue
 	for _, incoming := range deduped {
-		// Check if issue exists in database
+		incomingHash := hashIssueContent(incoming)
+		
+		// Check if issue exists in database by ID
 		existing, err := s.GetIssue(ctx, incoming.ID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check issue %s: %w", incoming.ID, err)
 		}
 
 		if existing == nil {
-			// Issue doesn't exist in DB - it's new
-			result.NewIssues = append(result.NewIssues, incoming.ID)
+			// Issue doesn't exist by ID - check for rename by content
+			if dbMatch, found := contentToDBIssue[incomingHash]; found {
+				// Same content, different ID - this is a rename/remap
+				// The incoming ID is the NEW canonical ID, existing DB ID is OLD
+				// We should DELETE the old ID and ACCEPT the new one
+				// Mark this as new issue (it will be created later)
+				// and we'll handle deletion of old ID separately
+				result.NewIssues = append(result.NewIssues, incoming.ID)
+				
+				// Delete the old DB issue (content match with different ID)
+				if err := s.DeleteIssue(ctx, dbMatch.ID); err != nil {
+					return nil, fmt.Errorf("failed to delete renamed issue %s (renamed to %s): %w", 
+						dbMatch.ID, incoming.ID, err)
+				}
+			} else {
+				// Truly new issue
+				result.NewIssues = append(result.NewIssues, incoming.ID)
+			}
 			continue
 		}
 
-		// Issue exists - compare content
+		// Issue exists by ID - compare content
 		conflicts := compareIssues(existing, incoming)
 		if len(conflicts) == 0 {
 			// No differences - exact match (idempotent)

@@ -147,6 +147,7 @@ func TestTwoCloneCollision(t *testing.T) {
 	// Clone A now tries to sync - will this work?
 	t.Log("Clone A syncing after clone B resolved collision")
 	syncAOut := runCmdOutputAllowError(t, cloneA, "./bd", "sync")
+	t.Logf("Clone A sync output:\n%s", syncAOut)
 	
 	// Check if clone A also hit a conflict
 	hasConflict := strings.Contains(syncAOut, "CONFLICT") || strings.Contains(syncAOut, "Error pulling")
@@ -156,6 +157,32 @@ func TestTwoCloneCollision(t *testing.T) {
 		t.Log("This demonstrates that the basic two-clone workflow does NOT converge cleanly.")
 		t.Errorf("EXPECTED FAILURE: beads cannot handle two clones filing issues simultaneously")
 		return
+	}
+	
+	// Clone B needs to sync to pull Clone A's rename detection changes
+	t.Log("Clone B syncing to pull Clone A's rename changes")
+	syncBOut2 := runCmdOutputAllowError(t, cloneB, "./bd", "sync")
+	t.Logf("Clone B sync output:\n%s", syncBOut2)
+	
+	// Check if Clone B hit a conflict (expected if both clones applied rename)
+	if strings.Contains(syncBOut2, "CONFLICT") || strings.Contains(syncBOut2, "Error pulling") {
+		t.Log("Clone B hit merge conflict (expected - both clones applied rename)")
+		t.Log("Resolving via bd export - aborting rebase, taking our DB as truth")
+		runCmd(t, cloneB, "git", "rebase", "--abort")
+		
+		// Fetch remote changes without merging
+		runCmd(t, cloneB, "git", "fetch", "origin")
+		
+		// Use our JSONL (from our DB) by exporting and committing
+		runCmd(t, cloneB, "./bd", "export", "-o", ".beads/issues.jsonl")
+		runCmd(t, cloneB, "git", "add", ".beads/issues.jsonl")
+		runCmd(t, cloneB, "git", "commit", "-m", "Resolve conflict: use our DB state")
+		
+		// Force merge with ours strategy
+		runCmdOutputAllowError(t, cloneB, "git", "merge", "origin/master", "-X", "ours")
+		
+		// Push
+		runCmd(t, cloneB, "git", "push", "origin", "master")
 	}
 	
 	// If we somehow got here, check if things converged

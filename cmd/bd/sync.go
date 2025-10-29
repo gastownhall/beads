@@ -191,6 +191,29 @@ Use --import-only to just import from JSONL (useful after git pull).`,
 						}
 					}
 				}
+				
+				// Step 4.5: Export back to JSONL if import made changes (e.g., rename detection)
+				// This ensures JSONL stays in sync with DB after rename detection
+				fmt.Println("→ Re-exporting after import to sync rename changes...")
+				if err := exportToJSONL(ctx, jsonlPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Error re-exporting after import: %v\n", err)
+					os.Exit(1)
+				}
+				
+				// Step 4.6: Commit the re-export if it created changes
+				hasPostImportChanges, err := gitHasChanges(ctx, jsonlPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error checking git status after re-export: %v\n", err)
+					os.Exit(1)
+				}
+				if hasPostImportChanges {
+					fmt.Println("→ Committing rename detection changes...")
+					if err := gitCommit(ctx, jsonlPath, "bd sync: apply rename detection from import"); err != nil {
+						fmt.Fprintf(os.Stderr, "Error committing post-import changes: %v\n", err)
+						os.Exit(1)
+					}
+					hasChanges = true // Mark that we have changes to push
+				}
 			}
 		}
 
