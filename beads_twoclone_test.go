@@ -499,9 +499,15 @@ func testThreeCloneCollisionWithSyncOrder(t *testing.T, first, second, third str
 		t.Fatalf("bd binary not found at %s - run 'go build -o bd ./cmd/bd' first", bdPath)
 	}
 
-	// Create a bare git repo to act as the remote
+	// Create a bare git repo to act as the remote with initial commit
 	remoteDir := filepath.Join(tmpDir, "remote.git")
 	runCmd(t, tmpDir, "git", "init", "--bare", remoteDir)
+	
+	// Create temporary clone to add initial commit
+	tempClone := filepath.Join(tmpDir, "temp-init")
+	runCmd(t, tmpDir, "git", "clone", remoteDir, tempClone)
+	runCmd(t, tempClone, "git", "commit", "--allow-empty", "-m", "Initial commit")
+	runCmd(t, tempClone, "git", "push", "origin", "master")
 
 	// Create three clones
 	cloneA := filepath.Join(tmpDir, "clone-a")
