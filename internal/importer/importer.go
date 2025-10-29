@@ -285,6 +285,38 @@ func buildIDMap(issues []*types.Issue) map[string]*types.Issue {
 
 // handleRename handles content match with different IDs (rename detected)
 func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.Issue, incoming *types.Issue) error {
+	// Check if target ID already exists with the same content (race condition)
+	// This can happen when multiple clones import the same rename simultaneously
+	targetIssue, err := s.GetIssue(ctx, incoming.ID)
+	if err == nil && targetIssue != nil {
+		// Target ID exists - check if it has the same content
+		if targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
+			// Same content - check if old ID still exists and delete it
+			existingCheck, checkErr := s.GetIssue(ctx, existing.ID)
+			if checkErr == nil && existingCheck != nil {
+				if err := s.DeleteIssue(ctx, existing.ID); err != nil {
+					return fmt.Errorf("failed to delete old ID %s: %w", existing.ID, err)
+				}
+			}
+			// The rename is already complete in the database
+			return nil
+		}
+		// Different content - this is an unexpected collision
+		return fmt.Errorf("target ID %s already exists with different content", incoming.ID)
+	}
+
+	// Check if old ID still exists (it might have been deleted by another clone)
+	existingCheck, checkErr := s.GetIssue(ctx, existing.ID)
+	if checkErr != nil || existingCheck == nil {
+		// Old ID doesn't exist - the rename must have been completed by another clone
+		// Verify that target exists with correct content
+		targetCheck, targetErr := s.GetIssue(ctx, incoming.ID)
+		if targetErr == nil && targetCheck != nil && targetCheck.ComputeContentHash() == incoming.ComputeContentHash() {
+			return nil
+		}
+		return fmt.Errorf("old ID %s doesn't exist and target ID %s is not as expected", existing.ID, incoming.ID)
+	}
+
 	// Delete old ID
 	if err := s.DeleteIssue(ctx, existing.ID); err != nil {
 		return fmt.Errorf("failed to delete old ID %s: %w", existing.ID, err)
@@ -292,6 +324,15 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 
 	// Create with new ID
 	if err := s.CreateIssue(ctx, incoming, "import-rename"); err != nil {
+		// If UNIQUE constraint error, it's likely another clone created it concurrently
+		if sqlite.IsUniqueConstraintError(err) {
+			// Check if target exists with same content
+			targetIssue, getErr := s.GetIssue(ctx, incoming.ID)
+			if getErr == nil && targetIssue != nil && targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
+				// Same content - rename already complete, this is OK
+				return nil
+			}
+		}
 		return fmt.Errorf("failed to create renamed issue %s: %w", incoming.ID, err)
 	}
 

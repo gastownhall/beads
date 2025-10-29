@@ -335,11 +335,37 @@ func deduplicateIncomingIssues(issues []*types.Issue) []*types.Issue {
 //
 // This ensures deterministic, symmetric collision resolution across all clones.
 //
-// NOTE: This function is not atomic - it performs multiple separate database operations.
-// If an error occurs partway through, some issues may be created without their references
-// being updated. This is a known limitation that requires storage layer refactoring to fix.
-// See issue bd-25 for transaction support.
-func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, _ []*types.Issue) (map[string]string, error) {
+// The function automatically retries up to 3 times on UNIQUE constraint failures,
+// syncing counters between retries to handle concurrent ID allocation.
+func RemapCollisions(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, incomingIssues []*types.Issue) (map[string]string, error) {
+	const maxRetries = 3
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		idMapping, err := remapCollisionsOnce(ctx, s, collisions, incomingIssues)
+		if err == nil {
+			return idMapping, nil
+		}
+
+		lastErr = err
+
+		if !isUniqueConstraintError(err) {
+			return nil, err
+		}
+
+		if attempt < maxRetries-1 {
+			if syncErr := s.SyncAllCounters(ctx); syncErr != nil {
+				return nil, fmt.Errorf("retry %d: UNIQUE constraint error, counter sync failed: %w (original error: %v)", attempt+1, syncErr, err)
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d retries due to UNIQUE constraint violations: %w", maxRetries, lastErr)
+}
+
+// remapCollisionsOnce performs a single attempt at collision resolution.
+// This is the actual implementation that RemapCollisions wraps with retry logic.
+func remapCollisionsOnce(ctx context.Context, s *SQLiteStorage, collisions []*CollisionDetail, _ []*types.Issue) (map[string]string, error) {
 	idMapping := make(map[string]string)
 
 	// Sync counters before remapping to avoid ID collisions

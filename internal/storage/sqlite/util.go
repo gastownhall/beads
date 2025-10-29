@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 )
 
 // QueryContext exposes the underlying database QueryContext method for advanced queries
@@ -15,4 +17,38 @@ func (s *SQLiteStorage) QueryContext(ctx context.Context, query string, args ...
 // This is used by commands that need to perform multiple operations atomically
 func (s *SQLiteStorage) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return s.db.BeginTx(ctx, nil)
+}
+
+// ExecInTransaction executes a function within a database transaction.
+// If the function returns an error, the transaction is rolled back.
+// Otherwise, the transaction is committed.
+func (s *SQLiteStorage) ExecInTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// IsUniqueConstraintError checks if an error is a UNIQUE constraint violation
+func IsUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// isUniqueConstraintError is an alias for IsUniqueConstraintError for internal use
+func isUniqueConstraintError(err error) bool {
+	return IsUniqueConstraintError(err)
 }
