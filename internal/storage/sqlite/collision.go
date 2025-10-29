@@ -31,7 +31,6 @@ type CollisionDetail struct {
 	IncomingIssue     *types.Issue  // The issue from the import file
 	ExistingIssue     *types.Issue  // The issue currently in the database
 	ConflictingFields []string      // List of field names that differ
-	ReferenceScore    int           // Number of references to this issue (for scoring) - DEPRECATED
 	RemapIncoming     bool          // If true, remap incoming; if false, remap existing
 }
 
@@ -269,62 +268,6 @@ func ScoreCollisions(ctx context.Context, s *SQLiteStorage, collisions []*Collis
 	}
 
 	return nil
-}
-
-// countReferences counts how many times an issue ID is referenced
-// Returns: text mentions + dependency references
-func countReferences(issueID string, allIssues []*types.Issue, allDeps map[string][]*types.Dependency) (int, error) {
-	count := 0
-
-	// Count text mentions in all issues' text fields
-	// Use word boundary regex to match exact IDs (e.g., "bd-10" but not "bd-100")
-	pattern := fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(issueID))
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return 0, fmt.Errorf("failed to compile regex for %s: %w", issueID, err)
-	}
-
-	for _, issue := range allIssues {
-		// Skip counting references in the issue itself
-		if issue.ID == issueID {
-			continue
-		}
-
-		// Count mentions in description
-		count += len(re.FindAllString(issue.Description, -1))
-
-		// Count mentions in design
-		count += len(re.FindAllString(issue.Design, -1))
-
-		// Count mentions in notes
-		count += len(re.FindAllString(issue.Notes, -1))
-
-		// Count mentions in acceptance criteria
-		count += len(re.FindAllString(issue.AcceptanceCriteria, -1))
-	}
-
-	// Count dependency references
-	// An issue can be referenced as either IssueID or DependsOnID
-	for _, deps := range allDeps {
-		for _, dep := range deps {
-			// Skip self-references
-			if dep.IssueID == issueID && dep.DependsOnID == issueID {
-				continue
-			}
-
-			// Count if this issue is the source (IssueID)
-			if dep.IssueID == issueID {
-				count++
-			}
-
-			// Count if this issue is the target (DependsOnID)
-			if dep.DependsOnID == issueID {
-				count++
-			}
-		}
-	}
-
-	return count, nil
 }
 
 // deduplicateIncomingIssues removes content-duplicate issues within the incoming batch

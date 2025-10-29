@@ -435,90 +435,6 @@ func intPtr(i int) *int {
 	return &i
 }
 
-func TestCountReferences(t *testing.T) {
-	allIssues := []*types.Issue{
-		{
-			ID:          "bd-1",
-			Title:       "Issue 1",
-			Description: "This mentions bd-2 and bd-3",
-			Design:      "Design mentions bd-2 twice: bd-2 and bd-2",
-			Notes:       "Notes mention bd-3",
-		},
-		{
-			ID:          "bd-2",
-			Title:       "Issue 2",
-			Description: "This mentions bd-1",
-		},
-		{
-			ID:          "bd-3",
-			Title:       "Issue 3",
-			Description: "No mentions here",
-		},
-		{
-			ID:          "bd-10",
-			Title:       "Issue 10",
-			Description: "This has bd-100 but not bd-10 itself",
-		},
-	}
-
-	allDeps := map[string][]*types.Dependency{
-		"bd-1": {
-			{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
-		},
-		"bd-2": {
-			{IssueID: "bd-2", DependsOnID: "bd-3", Type: types.DepBlocks},
-		},
-	}
-
-	tests := []struct {
-		name          string
-		issueID       string
-		expectedCount int
-	}{
-		{
-			name:    "bd-1 - one text mention, one dependency",
-			issueID: "bd-1",
-			// Text: bd-2's description mentions bd-1 (1)
-			// Deps: bd-1 → bd-2 (1)
-			expectedCount: 2,
-		},
-		{
-			name:    "bd-2 - multiple text mentions, two dependencies",
-			issueID: "bd-2",
-			// Text: bd-1's description mentions bd-2 (1) + bd-1's design mentions bd-2 three times (3) = 4
-			//       (design has: "mentions bd-2" + "bd-2 and" + "bd-2")
-			// Deps: bd-1 → bd-2 (1) + bd-2 → bd-3 (1) = 2
-			expectedCount: 6,
-		},
-		{
-			name:    "bd-3 - some text mentions, one dependency",
-			issueID: "bd-3",
-			// Text: bd-1's description (1) + bd-1's notes (1) = 2
-			// Deps: bd-2 → bd-3 (1)
-			expectedCount: 3,
-		},
-		{
-			name:    "bd-10 - no mentions (bd-100 doesn't count)",
-			issueID: "bd-10",
-			// Text: bd-100 in bd-10's description doesn't match \bbd-10\b = 0
-			// Deps: none = 0
-			expectedCount: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			count, err := countReferences(tt.issueID, allIssues, allDeps)
-			if err != nil {
-				t.Fatalf("countReferences failed: %v", err)
-			}
-			if count != tt.expectedCount {
-				t.Errorf("expected count %d, got %d", tt.expectedCount, count)
-			}
-		})
-	}
-}
-
 func TestScoreCollisions(t *testing.T) {
 	// Create temporary database
 	tmpDir, err := os.MkdirTemp("", "score-collision-test-*")
@@ -607,28 +523,24 @@ func TestScoreCollisions(t *testing.T) {
 	// Create collision details (simulated)
 	collisions := []*CollisionDetail{
 		{
-			ID:             "bd-1",
-			IncomingIssue:  issue1,
-			ExistingIssue:  issue1,
-			ReferenceScore: 0, // Will be calculated
+			ID:            "bd-1",
+			IncomingIssue: issue1,
+			ExistingIssue: issue1,
 		},
 		{
-			ID:             "bd-2",
-			IncomingIssue:  issue2,
-			ExistingIssue:  issue2,
-			ReferenceScore: 0, // Will be calculated
+			ID:            "bd-2",
+			IncomingIssue: issue2,
+			ExistingIssue: issue2,
 		},
 		{
-			ID:             "bd-3",
-			IncomingIssue:  issue3,
-			ExistingIssue:  issue3,
-			ReferenceScore: 0, // Will be calculated
+			ID:            "bd-3",
+			IncomingIssue: issue3,
+			ExistingIssue: issue3,
 		},
 		{
-			ID:             "bd-4",
-			IncomingIssue:  issue4,
-			ExistingIssue:  issue4,
-			ReferenceScore: 0, // Will be calculated
+			ID:            "bd-4",
+			IncomingIssue: issue4,
+			ExistingIssue: issue4,
 		},
 	}
 
@@ -653,67 +565,6 @@ func TestScoreCollisions(t *testing.T) {
 				collision.ID, collision.RemapIncoming, expectedRemapIncoming,
 				existingHash[:8], incomingHash[:8])
 		}
-	}
-}
-
-func TestCountReferencesWordBoundary(t *testing.T) {
-	// Test that word boundaries work correctly
-	allIssues := []*types.Issue{
-		{
-			ID:          "bd-1",
-			Description: "bd-10 and bd-100 and bd-1 and bd-11",
-		},
-		{
-			ID:          "bd-10",
-			Description: "bd-1 and bd-100",
-		},
-	}
-
-	allDeps := map[string][]*types.Dependency{}
-
-	tests := []struct {
-		name          string
-		issueID       string
-		expectedCount int
-		description   string
-	}{
-		{
-			name:          "bd-1 exact match",
-			issueID:       "bd-1",
-			expectedCount: 2, // bd-10's desc mentions bd-1 (1) + bd-1's desc mentions bd-1 (1) = 2
-			// Wait, bd-1's desc shouldn't count itself
-			// So: bd-10's desc mentions bd-1 (1)
-		},
-		{
-			name:          "bd-10 exact match",
-			issueID:       "bd-10",
-			expectedCount: 1, // bd-1's desc mentions bd-10 (1)
-		},
-		{
-			name:          "bd-100 exact match",
-			issueID:       "bd-100",
-			expectedCount: 2, // bd-1's desc (1) + bd-10's desc (1)
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			count, err := countReferences(tt.issueID, allIssues, allDeps)
-			if err != nil {
-				t.Fatalf("countReferences failed: %v", err)
-			}
-
-			// Adjust expected based on actual counting logic
-			// countReferences skips the issue itself
-			expected := tt.expectedCount
-			if tt.issueID == testIssueBD1 {
-				expected = 1 // only bd-10's description
-			}
-
-			if count != expected {
-				t.Errorf("expected count %d, got %d", expected, count)
-			}
-		})
 	}
 }
 
@@ -843,33 +694,31 @@ func TestRemapCollisions(t *testing.T) {
 
 	// Create collisions (incoming issues with same IDs as DB but different content)
 	collision1 := &CollisionDetail{
-		ID: "bd-2",
+		ID:            "bd-2",
 		ExistingIssue: dbIssue2,
 		IncomingIssue: &types.Issue{
 			ID:          "bd-2",
-			Title:       "Collision 2 (has fewer references)",
+			Title:       "Collision 2",
 			Description: "This is different content",
 			Status:      types.StatusOpen,
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		},
-		RemapIncoming: true,  // Incoming will be remapped
-		ReferenceScore: 2, // Fewer references
+		RemapIncoming: true, // Incoming will be remapped
 	}
 
 	collision2 := &CollisionDetail{
-		ID: "bd-3",
+		ID:            "bd-3",
 		ExistingIssue: dbIssue3,
 		IncomingIssue: &types.Issue{
 			ID:          "bd-3",
-			Title:       "Collision 3 (has more references)",
+			Title:       "Collision 3",
 			Description: "Different content for bd-3",
 			Status:      types.StatusOpen,
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		},
-		RemapIncoming: true,  // Incoming will be remapped
-		ReferenceScore: 5, // More references
+		RemapIncoming: true, // Incoming will be remapped
 	}
 
 	collisions := []*CollisionDetail{collision1, collision2}
@@ -903,7 +752,7 @@ func TestRemapCollisions(t *testing.T) {
 	if remappedIssue2 == nil {
 		t.Fatalf("remapped issue %s not found", newID2)
 	}
-	if remappedIssue2.Title != "Collision 2 (has fewer references)" {
+	if remappedIssue2.Title != "Collision 2" {
 		t.Errorf("unexpected title for remapped issue: %s", remappedIssue2.Title)
 	}
 

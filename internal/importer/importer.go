@@ -111,8 +111,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		return nil, err
 	}
 
-	// Checkpoint WAL to update main .db file timestamp
-	// This ensures staleness detection sees the database as fresh
+	// Checkpoint WAL to ensure data persistence and reduce WAL file size
 	if err := sqliteStore.CheckpointWAL(ctx); err != nil {
 		// Non-fatal - just log warning
 		fmt.Fprintf(os.Stderr, "Warning: failed to checkpoint WAL: %v\n", err)
