@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -273,6 +275,17 @@ Output to stdout by default, or use -o flag for file output.`,
 			// Clear auto-flush state since we just manually exported
 			// This cancels any pending auto-flush timer and marks DB as clean
 			clearAutoFlushState()
+			
+			// Store JSONL file hash for integrity validation (bd-160)
+			jsonlData, err := os.ReadFile(finalPath)
+			if err == nil {
+				hasher := sha256.New()
+				hasher.Write(jsonlData)
+				fileHash := hex.EncodeToString(hasher.Sum(nil))
+				if err := store.SetJSONLFileHash(ctx, fileHash); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_file_hash: %v\n", err)
+				}
+			}
 		}
 
 		// If writing to file, atomically replace the target file

@@ -160,6 +160,12 @@ func autoImportIfNewer() {
 		return
 	}
 
+	// Clear export_hashes before import to prevent staleness (bd-160)
+	// Import operations may add/update issues, so export_hashes entries become invalid
+	if err := store.ClearAllExportHashes(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
+	}
+	
 	// Use shared import logic (bd-157)
 	opts := ImportOptions{
 		ResolveCollisions:    true, // Auto-import always resolves collisions
@@ -433,6 +439,54 @@ func shouldSkipExport(ctx context.Context, issue *types.Issue) (bool, error) {
 	return currentHash == storedHash, nil
 }
 
+// validateJSONLIntegrity checks if JSONL file hash matches stored hash.
+// If mismatch detected, clears export_hashes and logs warning (bd-160).
+func validateJSONLIntegrity(ctx context.Context, jsonlPath string) error {
+	// Get stored JSONL file hash
+	storedHash, err := store.GetJSONLFileHash(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get stored JSONL hash: %w", err)
+	}
+	
+	// If no hash stored, this is first export - skip validation
+	if storedHash == "" {
+		return nil
+	}
+	
+	// Read current JSONL file
+	jsonlData, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// JSONL doesn't exist but we have a stored hash - clear export_hashes
+			fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file missing but export_hashes exist. Clearing export_hashes.\n")
+			if err := store.ClearAllExportHashes(ctx); err != nil {
+				return fmt.Errorf("failed to clear export_hashes: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to read JSONL file: %w", err)
+	}
+	
+	// Compute current JSONL hash
+	hasher := sha256.New()
+	hasher.Write(jsonlData)
+	currentHash := hex.EncodeToString(hasher.Sum(nil))
+	
+	// Compare hashes
+	if currentHash != storedHash {
+		fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file hash mismatch detected (bd-160)\n")
+		fmt.Fprintf(os.Stderr, "  This indicates JSONL and export_hashes are out of sync.\n")
+		fmt.Fprintf(os.Stderr, "  Clearing export_hashes to force full re-export.\n")
+		
+		// Clear export_hashes to force full re-export
+		if err := store.ClearAllExportHashes(ctx); err != nil {
+			return fmt.Errorf("failed to clear export_hashes: %w", err)
+		}
+	}
+	
+	return nil
+}
+
 func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error) {
 	// Sort issues by ID for consistent output
 	sort.Slice(issues, func(i, j int) bool {
@@ -600,6 +654,13 @@ func flushToJSONL() {
 	}
 
 	ctx := context.Background()
+	
+	// Validate JSONL integrity before export (bd-160)
+	// This detects if JSONL and export_hashes are out of sync (e.g., after git operations)
+	if err := validateJSONLIntegrity(ctx, jsonlPath); err != nil {
+		recordFailure(fmt.Errorf("JSONL integrity check failed: %w", err))
+		return
+	}
 
 	// Determine which issues to export
 	var dirtyIDs []string
@@ -710,6 +771,11 @@ func flushToJSONL() {
 		exportedHash := hex.EncodeToString(hasher.Sum(nil))
 		if err := store.SetMetadata(ctx, "last_import_hash", exportedHash); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after export: %v\n", err)
+		}
+		
+		// Store JSONL file hash for integrity validation (bd-160)
+		if err := store.SetJSONLFileHash(ctx, exportedHash); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_file_hash after export: %v\n", err)
 		}
 	}
 

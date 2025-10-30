@@ -76,6 +76,14 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	if needCloseStore {
 		defer func() { _ = sqliteStore.Close() }()
 	}
+	
+	// Clear export_hashes before import to prevent staleness (bd-160)
+	// Import operations may add/update issues, so export_hashes entries become invalid
+	if !opts.DryRun {
+		if err := sqliteStore.ClearAllExportHashes(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
+		}
+	}
 
 	// Check and handle prefix mismatches
 	if err := handlePrefixMismatch(ctx, sqliteStore, issues, opts, result); err != nil {

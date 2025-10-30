@@ -595,6 +595,24 @@ func (m *MemoryStorage) SetExportHash(ctx context.Context, issueID, hash string)
 	return nil
 }
 
+// ClearAllExportHashes clears all export hashes
+func (m *MemoryStorage) ClearAllExportHashes(ctx context.Context) error {
+	// Memory storage doesn't track export hashes, no-op
+	return nil
+}
+
+// GetJSONLFileHash gets the JSONL file hash
+func (m *MemoryStorage) GetJSONLFileHash(ctx context.Context) (string, error) {
+	// Memory storage doesn't track JSONL file hashes, return empty string
+	return "", nil
+}
+
+// SetJSONLFileHash sets the JSONL file hash
+func (m *MemoryStorage) SetJSONLFileHash(ctx context.Context, fileHash string) error {
+	// Memory storage doesn't track JSONL file hashes, no-op
+	return nil
+}
+
 // GetDependencyTree gets the dependency tree for an issue
 func (m *MemoryStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	// Simplified implementation - just return direct dependencies
