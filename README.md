@@ -9,6 +9,19 @@
 
 **Give your coding agent a memory upgrade**
 
+> ## 🚨 **CRITICAL: SOLO WORKFLOWS ONLY UNTIL 1.0.0** 🚨
+>
+> **DO NOT USE BEADS FOR MULTI-REPO OR MULTI-CLONE WORKFLOWS.**
+>
+> Beads has critical bugs when used across multiple clones or repositories. The import collision resolution system incorrectly treats normal updates as conflicts, creating duplicate issues and database corruption.
+>
+> **What works:** ✅ Single developer, single clone, solo agent workflows  
+> **What's broken:** ❌ Multiple clones, multiple agents, team workflows
+>
+> While AI agents can resolve collisions, it's painful and error-prone. We're working on a complete rearchitecture using hash-based IDs to eliminate these issues.
+>
+> **Use Beads for solo projects only.** Multi-repo support will be available in 1.0.0.
+
 > **⚠️ Alpha Status**: This project is in active development. The core features work well, but expect API changes before 1.0. Use for development/internal projects first.
 
 Beads is a lightweight memory system for coding agents, using a graph-based issue tracker. Four kinds of dependencies work to chain your issues together like beads, making them easy for agents to follow for long distances, and reliably perform complex task streams in the right order.
