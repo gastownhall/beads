@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/types"
 	_ "modernc.org/sqlite"
 )
 
@@ -25,12 +27,14 @@ This command:
 - Checks schema versions
 - Migrates old databases to beads.db
 - Updates schema version metadata
+- Migrates sequential IDs to hash-based IDs (with --to-hash-ids)
 - Removes stale databases (with confirmation)`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		cleanup, _ := cmd.Flags().GetBool("cleanup")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
+		toHashIDs, _ := cmd.Flags().GetBool("to-hash-ids")
 
 		// Handle --update-repo-id first
 		if updateRepoID {
@@ -275,6 +279,91 @@ This command:
 			}
 		}
 
+		// Migrate to hash IDs if requested
+		if toHashIDs {
+			if !jsonOutput {
+				fmt.Println("\n→ Migrating to hash-based IDs...")
+			}
+			
+			store, err := sqlite.New(targetPath)
+			if err != nil {
+				if jsonOutput {
+					outputJSON(map[string]interface{}{
+						"error":   "hash_migration_failed",
+						"message": err.Error(),
+					})
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				}
+				os.Exit(1)
+			}
+			
+			ctx := context.Background()
+			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+			if err != nil {
+				store.Close()
+				if jsonOutput {
+					outputJSON(map[string]interface{}{
+						"error":   "hash_migration_failed",
+						"message": err.Error(),
+					})
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: failed to list issues: %v\n", err)
+				}
+				os.Exit(1)
+			}
+			
+			if len(issues) > 0 && !isHashID(issues[0].ID) {
+				// Create backup
+				if !dryRun {
+					backupPath := strings.TrimSuffix(targetPath, ".db") + ".backup-pre-hash-" + time.Now().Format("20060102-150405") + ".db"
+					if err := copyFile(targetPath, backupPath); err != nil {
+						store.Close()
+						if jsonOutput {
+							outputJSON(map[string]interface{}{
+								"error":   "backup_failed",
+								"message": err.Error(),
+							})
+						} else {
+							fmt.Fprintf(os.Stderr, "Error: failed to create backup: %v\n", err)
+						}
+						os.Exit(1)
+					}
+					if !jsonOutput {
+						color.Green("✓ Created backup: %s\n", filepath.Base(backupPath))
+					}
+				}
+				
+				mapping, err := migrateToHashIDs(ctx, store, issues, dryRun)
+				store.Close()
+				
+				if err != nil {
+					if jsonOutput {
+						outputJSON(map[string]interface{}{
+							"error":   "hash_migration_failed",
+							"message": err.Error(),
+						})
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: hash ID migration failed: %v\n", err)
+					}
+					os.Exit(1)
+				}
+				
+				if !jsonOutput {
+					if dryRun {
+						fmt.Printf("\nWould migrate %d issues to hash-based IDs\n", len(mapping))
+					} else {
+						color.Green("✓ Migrated %d issues to hash-based IDs\n", len(mapping))
+					}
+				}
+			} else {
+				store.Close()
+				if !jsonOutput {
+					fmt.Println("Database already uses hash-based IDs")
+				}
+			}
+		}
+		
 		// Final status
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -497,5 +586,6 @@ func init() {
 	migrateCmd.Flags().Bool("cleanup", false, "Remove old database files after migration")
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
+	migrateCmd.Flags().Bool("to-hash-ids", false, "Migrate sequential IDs to hash-based IDs")
 	rootCmd.AddCommand(migrateCmd)
 }

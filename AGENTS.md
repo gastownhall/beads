@@ -210,6 +210,8 @@ bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 bd migrate                                             # Detect and migrate old databases
 bd migrate --dry-run                                   # Preview migration
 bd migrate --cleanup --yes                             # Migrate and remove old files
+bd migrate --to-hash-ids                               # Migrate sequential IDs to hash-based IDs
+bd migrate --to-hash-ids --dry-run                     # Preview hash ID migration
 ```
 
 ### Managing Daemons
