@@ -12,6 +12,7 @@ type Debouncer struct {
 	timer    *time.Timer
 	duration time.Duration
 	action   func()
+	seq      uint64 // Sequence number to prevent stale timer fires
 }
 
 // NewDebouncer creates a new debouncer with the given duration and action.
@@ -34,11 +35,21 @@ func (d *Debouncer) Trigger() {
 		d.timer.Stop()
 	}
 
+	// Increment sequence number to invalidate any pending timers
+	d.seq++
+	currentSeq := d.seq
+
 	d.timer = time.AfterFunc(d.duration, func() {
-		d.action()
 		d.mu.Lock()
-		d.timer = nil
-		d.mu.Unlock()
+		defer d.mu.Unlock()
+
+		// Only fire if this is still the latest trigger
+		if d.seq == currentSeq {
+			d.timer = nil
+			d.mu.Unlock() // Unlock before calling action to avoid holding lock during callback
+			d.action()
+			d.mu.Lock() // Re-lock for defer
+		}
 	})
 }
 
