@@ -616,6 +616,7 @@ func (m *MemoryStorage) SetJSONLFileHash(ctx context.Context, fileHash string) e
 // GetDependencyTree gets the dependency tree for an issue
 func (m *MemoryStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	// Simplified implementation - just return direct dependencies
+	// Note: reverse parameter is accepted for interface compatibility but not fully implemented in memory storage
 	deps, err := m.GetDependencies(ctx, issueID)
 	if err != nil {
 		return nil, err

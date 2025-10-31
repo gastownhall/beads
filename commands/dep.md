@@ -23,6 +23,7 @@ Manage dependencies between beads issues.
   - $2: Issue ID
   - Flags:
     - `--reverse`: Show dependent tree (what was discovered from this) instead of dependency tree (what blocks this)
+    - `--format mermaid`: Output as Mermaid.js flowchart (renders in GitHub/GitLab markdown)
     - `--json`: Output as JSON
     - `--max-depth N`: Limit tree depth (default: 50)
     - `--show-all-paths`: Show all paths (no deduplication for diamond dependencies)
@@ -36,12 +37,45 @@ Manage dependencies between beads issues.
 - **parent-child**: Epic/subtask relationship
 - **discovered-from**: Track issues found during work
 
+## Mermaid Format
+
+The `--format mermaid` option outputs the dependency tree as a Mermaid.js flowchart:
+
+**Example:**
+```bash
+bd dep tree bd-1 --format mermaid
+```
+
+Output can be embedded in markdown:
+
+````markdown
+```mermaid
+flowchart TD
+  bd-1["◧ bd-1: Main task"]
+  bd-2["☑ bd-2: Subtask"]
+
+  bd-1 --> bd-2
+```
+````
+
+**Status Indicators:**
+
+Each node includes a symbol indicator for quick visual status identification:
+
+- ☐ **Open** - Not started yet (empty checkbox)
+- ◧ **In Progress** - Currently being worked on (half-filled box)
+- ⚠ **Blocked** - Waiting on something (warning sign)
+- ☑ **Closed** - Completed! (checked checkbox)
+
+The diagram colors are determined by your Mermaid theme (default, dark, forest, neutral, or base). Mermaid diagrams render natively in GitHub, GitLab, VSCode markdown preview, and can be imported to Miro.
+
 ## Examples
 
 - `bd dep add bd-10 bd-20 --type blocks`: bd-10 blocks bd-20
 - `bd dep tree bd-20`: Show what blocks bd-20 (dependency tree going UP)
 - `bd dep tree bd-1 --reverse`: Show what was discovered from bd-1 (dependent tree going DOWN)
 - `bd dep tree bd-1 --reverse --max-depth 3`: Show discovery tree with depth limit
+- `bd dep tree bd-20 --format mermaid > tree.md`: Generate Mermaid diagram for documentation
 - `bd dep cycles`: Check for circular dependencies
 
 ## Reverse Mode: Discovery Trees
