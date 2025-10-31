@@ -42,7 +42,7 @@ func TestImportReturnsCorrectCounts(t *testing.T) {
 
 	// Import with default options
 	opts := ImportOptions{
-		ResolveCollisions: false,
+
 		DryRun:            false,
 		SkipUpdate:        false,
 		Strict:            false,

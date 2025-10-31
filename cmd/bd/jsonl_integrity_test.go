@@ -214,7 +214,7 @@ func TestImportClearsExportHashes(t *testing.T) {
 	}
 	
 	opts := ImportOptions{
-		ResolveCollisions:    false,
+
 		DryRun:               false,
 		SkipUpdate:           false,
 		Strict:               false,

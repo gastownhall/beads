@@ -209,8 +209,7 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	importFunc := func(ctx context.Context, issues []*types.Issue) (created, updated int, idMapping map[string]string, err error) {
 		// Use the importer package to perform the actual import
 		result, err := importer.ImportIssues(ctx, dbPath, store, issues, importer.Options{
-			ResolveCollisions: false, // Do NOT resolve collisions - update existing issues by ID
-			RenameOnImport:    true,  // Auto-rename prefix mismatches
+			RenameOnImport: true, // Auto-rename prefix mismatches
 			// Note: SkipPrefixValidation is false by default, so we validate and rename
 		})
 		if err != nil {

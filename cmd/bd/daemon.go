@@ -810,7 +810,7 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 	
 	// Use existing import logic with auto-conflict resolution
 	opts := ImportOptions{
-		ResolveCollisions:    true,  // Auto-resolve ID conflicts
+
 		DryRun:              false,
 		SkipUpdate:          false,
 		Strict:              false,

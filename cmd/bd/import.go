@@ -23,15 +23,13 @@ Reads from stdin by default, or use -i flag for file input.
 Behavior:
   - Existing issues (same ID) are updated
   - New issues are created
-  - Collisions (same ID, different content) are detected
-  - Use --resolve-collisions to automatically remap colliding issues
+  - Collisions (same ID, different content) are detected and reported
   - Use --dedupe-after to find and merge content duplicates after import
   - Use --dry-run to preview changes without applying them`,
 	Run: func(cmd *cobra.Command, args []string) {
 		input, _ := cmd.Flags().GetString("input")
 		skipUpdate, _ := cmd.Flags().GetBool("skip-existing")
 		strict, _ := cmd.Flags().GetBool("strict")
-		resolveCollisions, _ := cmd.Flags().GetBool("resolve-collisions")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 		dedupeAfter, _ := cmd.Flags().GetBool("dedupe-after")
@@ -86,11 +84,10 @@ Behavior:
 
 		// Phase 2: Use shared import logic
 		opts := ImportOptions{
-			ResolveCollisions: resolveCollisions,
-			DryRun:            dryRun,
-			SkipUpdate:        skipUpdate,
-			Strict:            strict,
-			RenameOnImport:    renameOnImport,
+			DryRun:         dryRun,
+			SkipUpdate:     skipUpdate,
+			Strict:         strict,
+			RenameOnImport: renameOnImport,
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -112,14 +109,14 @@ Behavior:
 				os.Exit(1)
 			}
 			
-			// Check if it's a collision error when not resolving
-			if !resolveCollisions && result != nil && len(result.CollisionIDs) > 0 {
+			// Check if it's a collision error
+			if result != nil && len(result.CollisionIDs) > 0 {
 				// Print collision report before exiting
 				fmt.Fprintf(os.Stderr, "\n=== Collision Detection Report ===\n")
 				fmt.Fprintf(os.Stderr, "COLLISIONS DETECTED: %d\n\n", result.Collisions)
 				fmt.Fprintf(os.Stderr, "Colliding issue IDs: %v\n", result.CollisionIDs)
-				fmt.Fprintf(os.Stderr, "\nCollision detected! Use --resolve-collisions to automatically remap colliding issues.\n")
-				fmt.Fprintf(os.Stderr, "Or use --dry-run to preview without making changes.\n")
+				fmt.Fprintf(os.Stderr, "\nWith hash-based IDs, collisions should not occur.\n")
+				fmt.Fprintf(os.Stderr, "This may indicate manual ID manipulation or a bug.\n")
 				os.Exit(1)
 			}
 			fmt.Fprintf(os.Stderr, "Import failed: %v\n", err)
@@ -249,7 +246,6 @@ func init() {
 	importCmd.Flags().StringP("input", "i", "", "Input file (default: stdin)")
 	importCmd.Flags().BoolP("skip-existing", "s", false, "Skip existing issues instead of updating them")
 	importCmd.Flags().Bool("strict", false, "Fail on dependency errors instead of treating them as warnings")
-	importCmd.Flags().Bool("resolve-collisions", false, "Automatically resolve ID collisions by remapping")
 	importCmd.Flags().Bool("dedupe-after", false, "Detect and report content duplicates after import")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")

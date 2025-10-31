@@ -158,7 +158,6 @@ func issueDataChanged(existing *types.Issue, updates map[string]interface{}) boo
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	ResolveCollisions  bool // Auto-resolve collisions by remapping to new IDs
 	DryRun             bool // Preview changes without applying them
 	SkipUpdate         bool // Skip updating existing issues (create-only mode)
 	Strict             bool // Fail on any error (dependencies, labels, etc.)
@@ -194,7 +193,6 @@ type ImportResult struct {
 func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
 	// Convert ImportOptions to importer.Options
 	importerOpts := importer.Options{
-		ResolveCollisions:    opts.ResolveCollisions,
 		DryRun:               opts.DryRun,
 		SkipUpdate:           opts.SkipUpdate,
 		Strict:               opts.Strict,

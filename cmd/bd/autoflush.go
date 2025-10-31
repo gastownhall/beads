@@ -168,7 +168,7 @@ func autoImportIfNewer() {
 	
 	// Use shared import logic (bd-157)
 	opts := ImportOptions{
-		ResolveCollisions:    true, // Auto-import always resolves collisions
+
 		DryRun:               false,
 		SkipUpdate:           false,
 		Strict:               false,

@@ -15,7 +15,6 @@ import (
 
 // Options contains import configuration
 type Options struct {
-	ResolveCollisions    bool // Auto-resolve collisions by remapping to new IDs
 	DryRun               bool // Preview changes without applying them
 	SkipUpdate           bool // Skip updating existing issues (create-only mode)
 	Strict               bool // Fail on any error (dependencies, labels, etc.)

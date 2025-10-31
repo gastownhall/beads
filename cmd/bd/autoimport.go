@@ -188,7 +188,7 @@ func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage
 	// Note: SkipPrefixValidation allows mixed prefixes during auto-import
 	// (but now we set the prefix first, so CreateIssue won't use filename fallback)
 	opts := ImportOptions{
-		ResolveCollisions:  true,
+
 		DryRun:             false,
 		SkipUpdate:         false,
 		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
