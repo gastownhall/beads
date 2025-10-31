@@ -483,12 +483,12 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool)
 	}
 
 	// Build args for import command
-	args := []string{"import", "-i", jsonlPath, "--resolve-collisions"}
+	args := []string{"import", "-i", jsonlPath}
 	if renameOnImport {
 		args = append(args, "--rename-on-import")
 	}
 
-	// Run import command with --resolve-collisions to automatically handle conflicts
+	// Run import command
 	cmd := exec.CommandContext(ctx, exe, args...) // #nosec G204 - bd import command from trusted binary
 	output, err := cmd.CombinedOutput()
 	if err != nil {

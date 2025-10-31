@@ -551,7 +551,7 @@ func testThreeCloneCollisionWithSyncOrder(t *testing.T, first, second, third str
 		}
 		
 		// Import with collision resolution
-		runCmd(t, secondDir, "./bd", "import", "-i", ".beads/issues.jsonl", "--resolve-collisions")
+		runCmd(t, secondDir, "./bd", "import", "-i", ".beads/issues.jsonl")
 		runCmd(t, secondDir, "git", "push", "origin", "master")
 		_ = pullOut
 	}
@@ -590,7 +590,7 @@ func testThreeCloneCollisionWithSyncOrder(t *testing.T, first, second, third str
 		}
 		
 		// Import with collision resolution
-		runCmd(t, thirdDir, "./bd", "import", "-i", ".beads/issues.jsonl", "--resolve-collisions")
+		runCmd(t, thirdDir, "./bd", "import", "-i", ".beads/issues.jsonl")
 		runCmd(t, thirdDir, "git", "push", "origin", "master")
 		_ = pullOut
 	}
@@ -623,7 +623,7 @@ func testThreeCloneCollisionWithSyncOrder(t *testing.T, first, second, third str
 			}
 		}
 		
-		// Import JSONL to update database (but don't use --resolve-collisions to avoid creating duplicates)
+		// Import JSONL to update database
 		runCmdOutputAllowError(t, clone, "./bd", "import", "-i", ".beads/issues.jsonl")
 	}
 

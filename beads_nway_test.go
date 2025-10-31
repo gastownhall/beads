@@ -191,8 +191,8 @@ func syncCloneWithConflictResolution(t *testing.T, cloneDir, name string, isFirs
 			runCmd(t, cloneDir, "git", "commit", "-m", "Resolve merge conflict")
 		}
 		
-		// Import with collision resolution
-		runCmdWithEnv(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, "./bd", "import", "-i", ".beads/issues.jsonl", "--resolve-collisions")
+		// Import (no collision resolution needed with hash IDs)
+		runCmdWithEnv(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, "./bd", "import", "-i", ".beads/issues.jsonl")
 		runCmd(t, cloneDir, "git", "push", "origin", "master")
 	}
 }
@@ -216,8 +216,7 @@ func finalPullForClone(t *testing.T, cloneDir, name string) {
 	}
 	
 	// Import JSONL to update database
-	// Use --resolve-collisions to handle any remaining ID conflicts
-	runCmdOutputWithEnvAllowError(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "import", "-i", ".beads/issues.jsonl", "--resolve-collisions")
+	runCmdOutputWithEnvAllowError(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "import", "-i", ".beads/issues.jsonl")
 }
 
 // getTitlesFromClone extracts all issue titles from a clone's database
