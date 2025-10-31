@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var reopenCmd = &cobra.Command{
@@ -73,24 +74,30 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		}
 		
 		for _, id := range args {
+			fullID, err := utils.ResolvePartialID(ctx, store, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				continue
+			}
+			
 			// UpdateIssue automatically clears closed_at when status changes from closed
 			updates := map[string]interface{}{
 				"status": string(types.StatusOpen),
 			}
-			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", id, err)
+			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
 				continue
 			}
 
 			// Add reason as a comment if provided
 			if reason != "" {
-				if err := store.AddComment(ctx, id, actor, reason); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to add comment to %s: %v\n", id, err)
+				if err := store.AddComment(ctx, fullID, actor, reason); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to add comment to %s: %v\n", fullID, err)
 				}
 			}
 
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, id)
+				issue, _ := store.GetIssue(ctx, fullID)
 				if issue != nil {
 					reopenedIssues = append(reopenedIssues, issue)
 				}
@@ -100,7 +107,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				if reason != "" {
 					reasonMsg = ": " + reason
 				}
-				fmt.Printf("%s Reopened %s%s\n", blue("↻"), id, reasonMsg)
+				fmt.Printf("%s Reopened %s%s\n", blue("↻"), fullID, reasonMsg)
 			}
 		}
 

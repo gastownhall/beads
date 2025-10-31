@@ -60,28 +60,54 @@ var createCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		explicitID, _ := cmd.Flags().GetString("id")
+		parentID, _ := cmd.Flags().GetString("parent")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
-		// Validate explicit ID format if provided (prefix-number)
-		if explicitID != "" {
-			// Check format: must contain hyphen and have numeric suffix
-			parts := strings.Split(explicitID, "-")
-			if len(parts) != 2 {
-				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (expected format: prefix-number, e.g., 'bd-42')\n", explicitID)
+		// Check for conflicting flags
+		if explicitID != "" && parentID != "" {
+			fmt.Fprintf(os.Stderr, "Error: cannot specify both --id and --parent flags\n")
+			os.Exit(1)
+		}
+
+		// If parent is specified, generate child ID
+		if parentID != "" {
+			ctx := context.Background()
+			var childID string
+			var err error
+
+			if daemonClient != nil {
+				// TODO: Add RPC support for GetNextChildID (bd-171)
+				fmt.Fprintf(os.Stderr, "Error: --parent flag not yet supported in daemon mode\n")
 				os.Exit(1)
+			} else {
+				// Direct mode - use storage
+				childID, err = store.GetNextChildID(ctx, parentID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 			}
-			// Validate numeric suffix
-			if _, err := fmt.Sscanf(parts[1], "%d", new(int)); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (numeric suffix required, e.g., 'bd-42')\n", explicitID)
+			explicitID = childID // Set as explicit ID for the rest of the flow
+		}
+
+		// Validate explicit ID format if provided
+		// Supports: prefix-number (bd-42), prefix-hash (bd-a3f8e9), or hierarchical (bd-a3f8e9.1)
+		if explicitID != "" {
+			// Must contain hyphen
+			if !strings.Contains(explicitID, "-") {
+				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (expected format: prefix-hash or prefix-hash.number, e.g., 'bd-a3f8e9' or 'bd-a3f8e9.1')\n", explicitID)
 				os.Exit(1)
 			}
 
+			// Extract prefix (before the first hyphen)
+			hyphenIdx := strings.Index(explicitID, "-")
+			requestedPrefix := explicitID[:hyphenIdx]
+
 			// Validate prefix matches database prefix (unless --force is used)
 			if !forceCreate {
-				requestedPrefix := parts[0]
 				ctx := context.Background()
 
 				// Get database prefix from config
@@ -96,8 +122,7 @@ var createCmd = &cobra.Command{
 
 				if dbPrefix != "" && dbPrefix != requestedPrefix {
 					fmt.Fprintf(os.Stderr, "Error: prefix mismatch detected\n")
-					fmt.Fprintf(os.Stderr, "  This database uses prefix '%s-', but you specified '%s-'\n", dbPrefix, requestedPrefix)
-					fmt.Fprintf(os.Stderr, "  Did you mean to create '%s-%s'?\n", dbPrefix, parts[1])
+					fmt.Fprintf(os.Stderr, "  This database uses prefix '%s', but you specified '%s'\n", dbPrefix, requestedPrefix)
 					fmt.Fprintf(os.Stderr, "  Use --force to create with mismatched prefix anyway\n")
 					os.Exit(1)
 				}
@@ -243,6 +268,7 @@ func init() {
 	createCmd.Flags().StringP("assignee", "a", "", "Assignee")
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
+	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var commentsCmd = &cobra.Command{
@@ -63,6 +64,13 @@ Examples:
 				os.Exit(1)
 			}
 			ctx := context.Background()
+			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
+				os.Exit(1)
+			}
+			issueID = fullID
+			
 			result, err := store.GetIssueComments(ctx, issueID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
@@ -176,7 +184,14 @@ Examples:
 				os.Exit(1)
 			}
 			ctx := context.Background()
-			var err error
+			
+			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
+				os.Exit(1)
+			}
+			issueID = fullID
+			
 			comment, err = store.AddIssueComment(ctx, issueID, author, commentText)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)

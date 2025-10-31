@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var showCmd = &cobra.Command{
@@ -160,13 +161,19 @@ var showCmd = &cobra.Command{
 		ctx := context.Background()
 		allDetails := []interface{}{}
 		for idx, id := range args {
-			issue, err := store.GetIssue(ctx, id)
+			fullID, err := utils.ResolvePartialID(ctx, store, id)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				continue
+			}
+			
+			issue, err := store.GetIssue(ctx, fullID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", fullID, err)
 				continue
 			}
 			if issue == nil {
-				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				fmt.Fprintf(os.Stderr, "Issue %s not found\n", fullID)
 				continue
 			}
 
@@ -412,19 +419,25 @@ var updateCmd = &cobra.Command{
 		ctx := context.Background()
 		updatedIssues := []*types.Issue{}
 		for _, id := range args {
-			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+			fullID, err := utils.ResolvePartialID(ctx, store, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				continue
+			}
+			
+			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", fullID, err)
 				continue
 			}
 
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, id)
+				issue, _ := store.GetIssue(ctx, fullID)
 				if issue != nil {
 					updatedIssues = append(updatedIssues, issue)
 				}
 			} else {
 				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+				fmt.Printf("%s Updated issue: %s\n", green("✓"), fullID)
 			}
 		}
 
@@ -456,6 +469,16 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		id := args[0]
 		ctx := context.Background()
+		
+		// Resolve partial ID if in direct mode
+		if daemonClient == nil {
+			fullID, err := utils.ResolvePartialID(ctx, store, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				os.Exit(1)
+			}
+			id = fullID
+		}
 
 		// Determine which field to edit
 		fieldToEdit := "description"
@@ -670,18 +693,24 @@ var closeCmd = &cobra.Command{
 		ctx := context.Background()
 		closedIssues := []*types.Issue{}
 		for _, id := range args {
-			if err := store.CloseIssue(ctx, id, reason, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+			fullID, err := utils.ResolvePartialID(ctx, store, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				continue
+			}
+			
+			if err := store.CloseIssue(ctx, fullID, reason, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", fullID, err)
 				continue
 			}
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, id)
+				issue, _ := store.GetIssue(ctx, fullID)
 				if issue != nil {
 					closedIssues = append(closedIssues, issue)
 				}
 			} else {
 				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
+				fmt.Printf("%s Closed %s: %s\n", green("✓"), fullID, reason)
 			}
 		}
 

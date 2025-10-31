@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var depCmd = &cobra.Command{
@@ -51,13 +52,26 @@ var depAddCmd = &cobra.Command{
 		}
 
 		// Direct mode
+		ctx := context.Background()
+		
+		fullFromID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
+			os.Exit(1)
+		}
+		
+		fullToID, err := utils.ResolvePartialID(ctx, store, args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
+			os.Exit(1)
+		}
+		
 		dep := &types.Dependency{
-			IssueID:     args[0],
-			DependsOnID: args[1],
+			IssueID:     fullFromID,
+			DependsOnID: fullToID,
 			Type:        types.DependencyType(depType),
 		}
 
-		ctx := context.Background()
 		if err := store.AddDependency(ctx, dep, actor); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -94,8 +108,8 @@ var depAddCmd = &cobra.Command{
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":        "added",
-				"issue_id":      args[0],
-				"depends_on_id": args[1],
+				"issue_id":      fullFromID,
+				"depends_on_id": fullToID,
 				"type":          depType,
 			})
 			return
@@ -103,7 +117,7 @@ var depAddCmd = &cobra.Command{
 
 		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			green("✓"), args[0], args[1], depType)
+			green("✓"), fullFromID, fullToID, depType)
 	},
 }
 
@@ -138,7 +152,20 @@ var depRemoveCmd = &cobra.Command{
 
 		// Direct mode
 		ctx := context.Background()
-		if err := store.RemoveDependency(ctx, args[0], args[1], actor); err != nil {
+		
+		fullFromID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
+			os.Exit(1)
+		}
+		
+		fullToID, err := utils.ResolvePartialID(ctx, store, args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
+			os.Exit(1)
+		}
+		
+		if err := store.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -149,15 +176,15 @@ var depRemoveCmd = &cobra.Command{
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":        "removed",
-				"issue_id":      args[0],
-				"depends_on_id": args[1],
+				"issue_id":      fullFromID,
+				"depends_on_id": fullToID,
 			})
 			return
 		}
 
 		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-			green("✓"), args[0], args[1])
+			green("✓"), fullFromID, fullToID)
 	},
 }
 
@@ -187,7 +214,14 @@ var depTreeCmd = &cobra.Command{
 		}
 
 		ctx := context.Background()
-		tree, err := store.GetDependencyTree(ctx, args[0], maxDepth, showAllPaths, reverse)
+		
+		fullID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", args[0], err)
+			os.Exit(1)
+		}
+		
+		tree, err := store.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, reverse)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -204,18 +238,18 @@ var depTreeCmd = &cobra.Command{
 
 		if len(tree) == 0 {
 			if reverse {
-				fmt.Printf("\n%s has no dependents\n", args[0])
+				fmt.Printf("\n%s has no dependents\n", fullID)
 			} else {
-				fmt.Printf("\n%s has no dependencies\n", args[0])
+				fmt.Printf("\n%s has no dependencies\n", fullID)
 			}
 			return
 		}
 
 		cyan := color.New(color.FgCyan).SprintFunc()
 		if reverse {
-			fmt.Printf("\n%s Dependent tree for %s:\n\n", cyan("🌲"), args[0])
+			fmt.Printf("\n%s Dependent tree for %s:\n\n", cyan("🌲"), fullID)
 		} else {
-			fmt.Printf("\n%s Dependency tree for %s:\n\n", cyan("🌲"), args[0])
+			fmt.Printf("\n%s Dependency tree for %s:\n\n", cyan("🌲"), fullID)
 		}
 
 		hasTruncation := false

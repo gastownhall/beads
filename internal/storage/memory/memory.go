@@ -827,6 +827,32 @@ func (m *MemoryStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 	return nil
 }
 
+// ID Generation
+func (m *MemoryStorage) GetNextChildID(ctx context.Context, parentID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Validate parent exists
+	if _, exists := m.issues[parentID]; !exists {
+		return "", fmt.Errorf("parent issue %s does not exist", parentID)
+	}
+
+	// Calculate depth (count dots)
+	depth := strings.Count(parentID, ".")
+	if depth >= 3 {
+		return "", fmt.Errorf("maximum hierarchy depth (3) exceeded for parent %s", parentID)
+	}
+
+	// Get or initialize counter for this parent
+	counter := m.counters[parentID]
+	counter++
+	m.counters[parentID] = counter
+
+	// Format as parentID.counter
+	childID := fmt.Sprintf("%s.%d", parentID, counter)
+	return childID, nil
+}
+
 // Config
 func (m *MemoryStorage) SetConfig(ctx context.Context, key, value string) error {
 	m.mu.Lock()

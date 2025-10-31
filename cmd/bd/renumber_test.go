@@ -44,6 +44,7 @@ func TestRenumberWithGaps(t *testing.T) {
 
 	for _, tc := range testIssues {
 		issue := &types.Issue{
+			ID:          tc.id, // Set explicit ID to simulate gaps
 			Title:       tc.title,
 			Description: "Test issue for renumbering",
 			Priority:    1,
@@ -52,10 +53,6 @@ func TestRenumberWithGaps(t *testing.T) {
 		}
 		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("failed to create issue: %v", err)
-		}
-		// Manually update ID to simulate gaps
-		if err := testStore.UpdateIssueID(ctx, issue.ID, tc.id, issue, "test"); err != nil {
-			t.Fatalf("failed to set issue ID to %s: %v", tc.id, err)
 		}
 	}
 

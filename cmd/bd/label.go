@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var labelCmd = &cobra.Command{
@@ -79,6 +80,22 @@ var labelAddCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		issueIDs, label := parseLabelArgs(args)
+		
+		// Resolve partial IDs if in direct mode
+		if daemonClient == nil {
+			ctx := context.Background()
+			resolvedIDs := make([]string, 0, len(issueIDs))
+			for _, id := range issueIDs {
+				fullID, err := utils.ResolvePartialID(ctx, store, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+					continue
+				}
+				resolvedIDs = append(resolvedIDs, fullID)
+			}
+			issueIDs = resolvedIDs
+		}
+		
 		processBatchLabelOperation(issueIDs, label, "added",
 			func(issueID, lbl string) error {
 				_, err := daemonClient.AddLabel(&rpc.LabelAddArgs{ID: issueID, Label: lbl})
@@ -97,6 +114,22 @@ var labelRemoveCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		issueIDs, label := parseLabelArgs(args)
+		
+		// Resolve partial IDs if in direct mode
+		if daemonClient == nil {
+			ctx := context.Background()
+			resolvedIDs := make([]string, 0, len(issueIDs))
+			for _, id := range issueIDs {
+				fullID, err := utils.ResolvePartialID(ctx, store, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+					continue
+				}
+				resolvedIDs = append(resolvedIDs, fullID)
+			}
+			issueIDs = resolvedIDs
+		}
+		
 		processBatchLabelOperation(issueIDs, label, "removed",
 			func(issueID, lbl string) error {
 				_, err := daemonClient.RemoveLabel(&rpc.LabelRemoveArgs{ID: issueID, Label: lbl})
@@ -117,6 +150,16 @@ var labelListCmd = &cobra.Command{
 
 		ctx := context.Background()
 		var labels []string
+		
+		// Resolve partial ID if in direct mode
+		if daemonClient == nil {
+			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
+				os.Exit(1)
+			}
+			issueID = fullID
+		}
 
 		// Use daemon if available
 		if daemonClient != nil {

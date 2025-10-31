@@ -65,6 +65,9 @@ type Storage interface {
 	GetJSONLFileHash(ctx context.Context) (string, error)
 	SetJSONLFileHash(ctx context.Context, fileHash string) error
 
+	// ID Generation
+	GetNextChildID(ctx context.Context, parentID string) (string, error)
+
 	// Config
 	SetConfig(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
