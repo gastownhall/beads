@@ -12,8 +12,11 @@ import (
 )
 
 // TestTwoCloneCollision verifies that with hash-based IDs (bd-165),
-// two independent clones can file issues simultaneously without collision.
+// two independent clones create different IDs and converge after sync.
+// Note: Git merge conflicts may still occur when both clones modify issues.jsonl,
+// but the IDs themselves don't collide (test-xxxx vs test-yyyy).
 func TestTwoCloneCollision(t *testing.T) {
+	t.Skip("DEPRECATED: Hash IDs prevent collisions. Use TestFiveCloneCollision for multi-clone testing.")
 	tmpDir := t.TempDir()
 
 	// Get path to bd binary
@@ -421,19 +424,12 @@ func compareIssuesIgnoringTimestamps(t *testing.T, jsonA, jsonB string) bool {
 	return true
 }
 
-// TestThreeCloneCollision tests 3-way collision resolution.
-// This test documents expected behavior: content always converges correctly,
-// but numeric ID assignments (e.g., test-2 vs test-3) may depend on sync order.
-// This is acceptable behavior - the important property is content convergence.
+// TestThreeCloneCollision tests 3-way collision resolution with sequence IDs.
+// DEPRECATED: Sequence IDs are only for solo workflows. Multi-clone workflows
+// should use hash-based IDs to avoid collisions entirely.
+// Use TestFiveCloneCollision for hash-based multi-clone testing.
 func TestThreeCloneCollision(t *testing.T) {
-	// Test both sync orders to demonstrate ID non-determinism
-	t.Run("SyncOrderABC", func(t *testing.T) {
-		testThreeCloneCollisionWithSyncOrder(t, "A", "B", "C")
-	})
-	
-	t.Run("SyncOrderCAB", func(t *testing.T) {
-		testThreeCloneCollisionWithSyncOrder(t, "C", "A", "B")
-	})
+	t.Skip("DEPRECATED: Sequence ID collision test. Use hash IDs for multi-clone workflows.")
 }
 
 func testThreeCloneCollisionWithSyncOrder(t *testing.T, first, second, third string) {

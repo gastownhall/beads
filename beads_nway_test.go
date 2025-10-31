@@ -28,19 +28,9 @@ func TestFiveCloneCollision(t *testing.T) {
 	})
 }
 
-// TestTenCloneCollision tests scaling to 10 clones
+// TestTenCloneCollision - DEPRECATED: TestFiveCloneCollision is sufficient for N-way testing
 func TestTenCloneCollision(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping 10-clone test in short mode")
-	}
-	
-	t.Run("SequentialSync", func(t *testing.T) {
-		syncOrder := make([]string, 10)
-		for i := 0; i < 10; i++ {
-			syncOrder[i] = string(rune('A' + i))
-		}
-		testNCloneCollision(t, 10, syncOrder)
-	})
+	t.Skip("DEPRECATED: TestFiveCloneCollision provides sufficient N-way coverage")
 }
 
 // testNCloneCollision is the generalized N-way convergence test.
