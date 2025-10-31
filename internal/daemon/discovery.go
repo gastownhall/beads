@@ -68,9 +68,28 @@ type DaemonInfo struct {
 	Error               string
 }
 
-// DiscoverDaemons scans the filesystem for running bd daemons
-// It searches common locations and uses the Status RPC endpoint to gather metadata
+// DiscoverDaemons discovers running bd daemons using the registry
+// Falls back to filesystem scanning if searchRoots is explicitly provided (for compatibility)
 func DiscoverDaemons(searchRoots []string) ([]DaemonInfo, error) {
+	// If searchRoots is explicitly provided, use legacy filesystem scan
+	// This maintains compatibility for any callers that explicitly specify paths
+	if len(searchRoots) > 0 {
+		return discoverDaemonsLegacy(searchRoots)
+	}
+
+	// Use registry-based discovery (instant, no filesystem scanning)
+	registry, err := NewRegistry()
+	if err != nil {
+		// Fall back to legacy discovery if registry unavailable
+		return discoverDaemonsLegacy(nil)
+	}
+
+	return registry.List()
+}
+
+// discoverDaemonsLegacy scans the filesystem for running bd daemons (legacy method)
+// It searches common locations and uses the Status RPC endpoint to gather metadata
+func discoverDaemonsLegacy(searchRoots []string) ([]DaemonInfo, error) {
 	var daemons []DaemonInfo
 	seen := make(map[string]bool)
 

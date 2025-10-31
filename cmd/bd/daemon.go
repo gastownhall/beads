@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -1432,6 +1433,32 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	server, serverErrChan, err := startRPCServer(ctx, socketPath, store, workspacePath, daemonDBPath, log)
 	if err != nil {
 		return
+	}
+
+	// Register daemon in global registry
+	registry, err := daemon.NewRegistry()
+	if err != nil {
+		log.log("Warning: failed to create registry: %v", err)
+	} else {
+		entry := daemon.RegistryEntry{
+			WorkspacePath: workspacePath,
+			SocketPath:    socketPath,
+			DatabasePath:  daemonDBPath,
+			PID:           os.Getpid(),
+			Version:       Version,
+			StartedAt:     time.Now(),
+		}
+		if err := registry.Register(entry); err != nil {
+			log.log("Warning: failed to register daemon: %v", err)
+		} else {
+			log.log("Registered in global registry")
+		}
+		// Ensure we unregister on exit
+		defer func() {
+			if err := registry.Unregister(workspacePath, os.Getpid()); err != nil {
+				log.log("Warning: failed to unregister daemon: %v", err)
+			}
+		}()
 	}
 
 	ticker := time.NewTicker(interval)
