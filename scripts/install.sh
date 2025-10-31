@@ -196,13 +196,23 @@ install_with_go() {
     if go install github.com/steveyegge/beads/cmd/bd@latest; then
         log_success "bd installed successfully via go install"
 
-        # Check if GOPATH/bin is in PATH
-        local gopath_bin="$(go env GOPATH)/bin"
-        if [[ ":$PATH:" != *":$gopath_bin:"* ]]; then
-            log_warning "GOPATH/bin is not in your PATH"
+        # Record where we expect the binary to have been installed
+        # Prefer GOBIN if set, otherwise GOPATH/bin
+        local gobin
+        gobin=$(go env GOBIN 2>/dev/null || true)
+        if [ -n "$gobin" ]; then
+            bin_dir="$gobin"
+        else
+            bin_dir="$(go env GOPATH)/bin"
+        fi
+        LAST_INSTALL_PATH="$bin_dir/bd"
+
+        # Check if GOPATH/bin (or GOBIN) is in PATH
+        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+            log_warning "$bin_dir is not in your PATH"
             echo ""
             echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$gopath_bin\""
+            echo "  export PATH=\"\$PATH:$bin_dir\""
             echo ""
         fi
 
@@ -246,6 +256,9 @@ build_from_source() {
 
             log_success "bd installed to $install_dir/bd"
 
+            # Record where we installed the binary when building from source
+            LAST_INSTALL_PATH="$install_dir/bd"
+
             # Check if install_dir is in PATH
             if [[ ":$PATH:" != *":$install_dir:"* ]]; then
                 log_warning "$install_dir is not in your PATH"
@@ -276,6 +289,9 @@ build_from_source() {
 
 # Verify installation
 verify_installation() {
+    # If multiple 'bd' binaries exist on PATH, warn the user before verification
+    warn_if_multiple_bd || true
+
     if command -v bd &> /dev/null; then
         log_success "bd is installed and ready!"
         echo ""
@@ -290,6 +306,75 @@ verify_installation() {
     else
         log_error "bd was installed but is not in PATH"
         return 1
+    fi
+}
+
+# Returns a list of full paths to 'bd' found in PATH (earlier entries first)
+get_bd_paths_in_path() {
+    local IFS=':'
+    local -a entries
+    read -ra entries <<< "$PATH"
+    local -a found
+    local p
+    for p in "${entries[@]}"; do
+        [ -z "$p" ] && continue
+        if [ -x "$p/bd" ]; then
+            # Resolve symlink if possible
+            if command -v readlink >/dev/null 2>&1; then
+                resolved=$(readlink -f "$p/bd" 2>/dev/null || printf '%s' "$p/bd")
+            else
+                resolved="$p/bd"
+            fi
+            # avoid duplicates
+            skip=0
+            for existing in "${found[@]:-}"; do
+                if [ "$existing" = "$resolved" ]; then skip=1; break; fi
+            done
+            if [ $skip -eq 0 ]; then
+                found+=("$resolved")
+            fi
+        fi
+    done
+    # print results, one per line
+    for item in "${found[@]:-}"; do
+        printf '%s\n' "$item"
+    done
+}
+
+warn_if_multiple_bd() {
+    mapfile -t bd_paths < <(get_bd_paths_in_path)
+    if [ "${#bd_paths[@]}" -le 1 ]; then
+        return 0
+    fi
+
+    log_warning "Multiple 'bd' executables found on your PATH. An older copy may be executed instead of the one we installed."
+    echo "Found the following 'bd' executables (entries earlier in PATH take precedence):"
+    local i=1
+    for p in "${bd_paths[@]}"; do
+        local ver
+        if [ -x "$p" ]; then
+            ver=$("$p" version 2>/dev/null || true)
+        fi
+        if [ -z "$ver" ]; then ver="<unknown version>"; fi
+        echo "  $i. $p  -> $ver"
+        i=$((i+1))
+    done
+
+    if [ -n "$LAST_INSTALL_PATH" ]; then
+        echo ""
+        echo "We installed to: $LAST_INSTALL_PATH"
+        # Compare first PATH entry vs installed path
+        first="${bd_paths[0]}"
+        if [ "$first" != "$LAST_INSTALL_PATH" ]; then
+            log_warning "The 'bd' executable that appears first in your PATH is different from the one we installed. To make the newly installed 'bd' the one you get when running 'bd', either:"
+            echo "  - Remove or rename the older $first from your PATH, or"
+            echo "  - Reorder your PATH so that $(dirname "$LAST_INSTALL_PATH") appears before $(dirname "$first")"
+            echo "After updating PATH, restart your shell and run 'bd version' to confirm."
+        else
+            echo "The installed 'bd' is first in your PATH.";
+        fi
+    else
+        log_warning "We couldn't determine where we installed 'bd' during this run.";
     fi
 }
 

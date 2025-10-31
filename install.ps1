@@ -70,14 +70,22 @@ function Install-WithGo {
         Write-WarningMsg "go install failed: $_"
         return $false
     }
-
-    $gopath = (& go env GOPATH)
-    if (-not $gopath) {
-        return $true
+    # Prefer GOBIN if set, otherwise GOPATH/bin
+    $gobin = (& go env GOBIN) 2>$null
+    if ($gobin -and $gobin.Trim() -ne "") {
+        $binDir = $gobin.Trim()
+    } else {
+        $gopath = (& go env GOPATH)
+        if (-not $gopath) {
+            return $true
+        }
+        $binDir = Join-Path $gopath "bin"
     }
 
-    $binDir = Join-Path $gopath "bin"
     $bdPath = Join-Path $binDir "bd.exe"
+    # Record where we expect the binary to have been installed in this run
+    $Script:LastInstallPath = $bdPath
+
     if (-not (Test-Path $bdPath)) {
         Write-WarningMsg "bd.exe not found in $binDir after install"
     }
@@ -142,6 +150,9 @@ function Install-FromSource {
         Copy-Item -Path (Join-Path $repoPath "bd.exe") -Destination (Join-Path $installDir "bd.exe") -Force
         Write-Success "bd installed to $installDir\bd.exe"
 
+            # Record where we installed the binary when building from source
+            $Script:LastInstallPath = Join-Path $installDir "bd.exe"
+
         $pathEntries = [Environment]::GetEnvironmentVariable("PATH", "Process").Split([IO.Path]::PathSeparator) | ForEach-Object { $_.Trim() }
         if (-not ($pathEntries -contains $installDir)) {
             Write-WarningMsg "$installDir is not in your PATH. Add it with:`n  setx PATH `"$Env:PATH;$installDir`""
@@ -153,8 +164,65 @@ function Install-FromSource {
     return $true
 }
 
+function Get-BdPathsInPath {
+    $pathEntries = [Environment]::GetEnvironmentVariable("PATH", "Process").Split([IO.Path]::PathSeparator) | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    $found = @()
+    foreach ($entry in $pathEntries) {
+        try {
+            $candidate = Join-Path $entry "bd.exe"
+        } catch {
+            continue
+        }
+        if (Test-Path $candidate) {
+            try {
+                $resolved = (Resolve-Path $candidate -ErrorAction SilentlyContinue).ProviderPath
+            } catch {
+                $resolved = $candidate
+            }
+            if (-not ($found -contains $resolved)) { $found += $resolved }
+        }
+    }
+    return $found
+}
+
+function Warn-IfMultipleBd {
+    $paths = Get-BdPathsInPath
+    if ($paths.Count -le 1) { return }
+
+    Write-WarningMsg "Multiple 'bd' executables found on your PATH. This can cause an older version to be executed instead of the one we installed."
+    Write-Host "Found the following 'bd' executables (entries earlier in PATH take precedence):" -ForegroundColor Yellow
+    $i = 0
+    foreach ($p in $paths) {
+        $i++
+        $ver = $null
+        try {
+            $ver = & "$p" version 2>$null
+            if ($LASTEXITCODE -ne 0) { $ver = $null }
+        } catch { $ver = $null }
+        if (-not $ver) { $ver = "<unknown version>" }
+        Write-Host ("  {0}. {1}  -> {2}" -f $i, $p, $ver)
+    }
+
+    if ($Script:LastInstallPath) {
+        Write-Host "`nWe installed to: $($Script:LastInstallPath)" -ForegroundColor Cyan
+        $first = $paths[0]
+        if ($first -ne $Script:LastInstallPath) {
+            Write-WarningMsg "The 'bd' executable that appears first in your PATH is different from the one we installed. To make the newly installed 'bd' the one you get when running 'bd', either:"
+            Write-Host "  - Remove the older $first from your PATH, or" -ForegroundColor Yellow
+            Write-Host "  - Reorder your PATH so that $([System.IO.Path]::GetDirectoryName($Script:LastInstallPath)) appears before $([System.IO.Path]::GetDirectoryName($first))" -ForegroundColor Yellow
+            Write-Host "After updating PATH, restart your shell and run 'bd version' to confirm." -ForegroundColor Yellow
+        } else {
+            Write-Host "The installed 'bd' is first in your PATH." -ForegroundColor Green
+        }
+    } else {
+        Write-WarningMsg "We couldn't determine where we installed 'bd' during this run."
+    }
+}
+
 function Verify-Install {
     Write-Info "Verifying installation..."
+    # If there are multiple bd binaries on PATH, warn the user before running the verification
+    try { Warn-IfMultipleBd } catch { }
     try {
         $versionOutput = & bd version 2>$null
         if ($LASTEXITCODE -ne 0) {
