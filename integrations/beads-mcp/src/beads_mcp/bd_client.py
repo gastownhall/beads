@@ -185,8 +185,8 @@ class BdCliClient(BdClientBase):
             List of global flag arguments
         """
         flags = []
-        if self.beads_db:
-            flags.extend(["--db", self.beads_db])
+        # NOTE: --db flag removed in v0.20.1, bd now auto-discovers database via cwd
+        # We pass cwd via _run_command instead
         if self.actor:
             flags.extend(["--actor", self.actor])
         if self.no_auto_flush:
