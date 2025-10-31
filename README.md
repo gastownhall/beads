@@ -273,6 +273,10 @@ bd info
 
 ## Usage
 
+### Health Check
+
+Check installation health: `bd doctor` validates your `.beads/` setup, database version, ID format, and CLI version. Provides actionable fixes for any issues found.
+
 ### Creating Issues
 
 ```bash

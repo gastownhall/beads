@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,8 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Skip database initialization for commands that don't need a database
-		if cmd.Name() == "init" || cmd.Name() == cmdDaemon || cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "quickstart" {
+		noDbCommands := []string{"init", cmdDaemon, "help", "version", "quickstart", "doctor"}
+		if slices.Contains(noDbCommands, cmd.Name()) {
 			return
 		}
 
