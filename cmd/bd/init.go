@@ -404,9 +404,9 @@ fi
 # Import the updated JSONL
 # The auto-import feature should handle this, but we force it here
 # to ensure immediate sync after merge
-if ! bd import -i .beads/issues.jsonl --resolve-collisions >/dev/null 2>&1; then
+if ! bd import -i .beads/issues.jsonl >/dev/null 2>&1; then
     echo "Warning: Failed to import bd changes after merge" >&2
-    echo "Run 'bd import -i .beads/issues.jsonl --resolve-collisions' manually" >&2
+    echo "Run 'bd import -i .beads/issues.jsonl' manually" >&2
     # Don't fail the merge, just warn
 fi
 
