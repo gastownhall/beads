@@ -22,6 +22,36 @@ go build -o bd ./cmd/bd
 ./bd list
 ```
 
+**Note:** Issue IDs are hash-based (e.g., `bd-a1b2`, `bd-f14c`) to prevent collisions when multiple agents/branches work concurrently.
+
+## Hierarchical Issues (Epics)
+
+For large features, use hierarchical IDs to organize work:
+
+```bash
+# Create epic (generates parent hash ID)
+./bd create "Auth System" -t epic -p 1
+# Returns: bd-a3f8e9
+
+# Create child tasks (automatically get .1, .2, .3 suffixes)
+./bd create "Design login UI" -p 1       # bd-a3f8e9.1
+./bd create "Backend validation" -p 1    # bd-a3f8e9.2
+./bd create "Integration tests" -p 1     # bd-a3f8e9.3
+
+# View hierarchy
+./bd dep tree bd-a3f8e9
+```
+
+Output:
+```
+🌲 Dependency tree for bd-a3f8e9:
+
+→ bd-a3f8e9: Auth System [epic] [P1] (open)
+  → bd-a3f8e9.1: Design login UI [P1] (open)
+  → bd-a3f8e9.2: Backend validation [P1] (open)
+  → bd-a3f8e9.3: Integration tests [P1] (open)
+```
+
 ## Add Dependencies
 
 ```bash

@@ -83,6 +83,74 @@ Follow the repo for updates and the path to 1.0!
 
 ## Usage Questions
 
+### Why hash-based IDs? Why not sequential?
+
+**Hash IDs eliminate collisions** when multiple agents or branches create issues concurrently.
+
+**The problem with sequential IDs:**
+```bash
+# Branch A creates bd-10
+git checkout -b feature-auth
+bd create "Add OAuth"  # Sequential ID: bd-10
+
+# Branch B also creates bd-10
+git checkout -b feature-payments
+bd create "Add Stripe"  # Collision! Same sequential ID: bd-10
+
+# Merge conflict!
+git merge feature-auth   # Two different issues, same ID
+```
+
+**Hash IDs solve this:**
+```bash
+# Branch A
+bd create "Add OAuth"  # Hash ID: bd-a1b2 (from random UUID)
+
+# Branch B
+bd create "Add Stripe"  # Hash ID: bd-f14c (different UUID, different hash)
+
+# Clean merge!
+git merge feature-auth   # No collision, different IDs
+```
+
+**Progressive length scaling:**
+- 4 chars (0-500 issues): `bd-a1b2`
+- 5 chars (500-1,500 issues): `bd-f14c3`
+- 6 chars (1,500+ issues): `bd-3e7a5b`
+
+bd automatically extends hash length as your database grows to maintain low collision probability.
+
+### What are hierarchical child IDs?
+
+**Hierarchical IDs** (e.g., `bd-a3f8e9.1`, `bd-a3f8e9.2`) provide human-readable structure for epics and their subtasks.
+
+**Example:**
+```bash
+# Create epic (generates parent hash)
+bd create "Auth System" -t epic -p 1
+# Returns: bd-a3f8e9
+
+# Create children (auto-numbered .1, .2, .3)
+bd create "Login UI" -p 1       # bd-a3f8e9.1
+bd create "Validation" -p 1     # bd-a3f8e9.2
+bd create "Tests" -p 1          # bd-a3f8e9.3
+```
+
+**Benefits:**
+- Parent hash ensures unique namespace (no cross-epic collisions)
+- Sequential child IDs are human-friendly
+- Up to 3 levels of nesting supported
+- Clear visual grouping in issue lists
+
+**When to use:**
+- Epics with multiple related tasks
+- Large features with sub-features
+- Work breakdown structures
+
+**When NOT to use:**
+- Simple one-off tasks (use regular hash IDs)
+- Cross-cutting dependencies (use `bd dep add` instead)
+
 ### Should I run bd init or have my agent do it?
 
 **Either works!** But use the right flag:

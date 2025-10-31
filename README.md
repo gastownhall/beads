@@ -271,6 +271,47 @@ bd info
 
 **Note:** Hash IDs require schema version 9+. The `bd migrate` command detects old schemas and upgrades automatically.
 
+### Hierarchical Child IDs
+
+Hash IDs support **hierarchical children** for natural work breakdown structures. Child IDs use dot notation:
+
+```
+bd-a3f8e9      [epic] Auth System
+bd-a3f8e9.1    [task] Design login UI
+bd-a3f8e9.2    [task] Backend validation
+bd-a3f8e9.3    [epic] Password Reset
+bd-a3f8e9.3.1  [task] Email templates
+bd-a3f8e9.3.2  [task] Reset flow tests
+```
+
+**Benefits:**
+- **Collision-free**: Parent hash ensures unique namespace
+- **Human-readable**: Clear parent-child relationships
+- **Flexible depth**: Up to 3 levels of nesting
+- **No coordination needed**: Each epic owns its child ID space
+
+**Common patterns:**
+- 1 level: Epic → tasks (most projects)
+- 2 levels: Epic → features → tasks (large projects)
+- 3 levels: Epic → features → stories → tasks (complex projects)
+
+**Example workflow:**
+```bash
+# Create parent epic (generates hash ID automatically)
+bd create "Auth System" -t epic -p 1
+# Returns: bd-a3f8e9
+
+# Create child tasks
+bd create "Design login UI" -p 1       # Auto-assigned: bd-a3f8e9.1
+bd create "Backend validation" -p 1    # Auto-assigned: bd-a3f8e9.2
+
+# Create nested epic with its own children
+bd create "Password Reset" -t epic -p 1  # Auto-assigned: bd-a3f8e9.3
+bd create "Email templates" -p 1          # Auto-assigned: bd-a3f8e9.3.1
+```
+
+**Note:** Child IDs are automatically assigned sequentially within each parent's namespace. No need to specify parent manually - bd tracks context from git branch/working directory.
+
 ## Usage
 
 ### Health Check

@@ -147,6 +147,12 @@ bd create "Issue title" -t bug -p 1 -l bug,critical --json
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
 
+# Create epic with hierarchical child tasks
+bd create "Auth System" -t epic -p 1 --json         # Returns: bd-a3f8e9
+bd create "Login UI" -p 1 --json                     # Auto-assigned: bd-a3f8e9.1
+bd create "Backend validation" -p 1 --json           # Auto-assigned: bd-a3f8e9.2
+bd create "Tests" -p 1 --json                        # Auto-assigned: bd-a3f8e9.3
+
 # Update one or more issues
 bd update <id> [<id>...] --status in_progress --json
 bd update <id> [<id>...] --priority 1 --json
@@ -335,8 +341,10 @@ bd daemons killall  # Restart with default (poll) mode
 - `bug` - Something broken that needs fixing
 - `feature` - New functionality
 - `task` - Work item (tests, docs, refactoring)
-- `epic` - Large feature composed of multiple issues
+- `epic` - Large feature composed of multiple issues (supports hierarchical children)
 - `chore` - Maintenance work (dependencies, tooling)
+
+**Hierarchical children:** Epics can have child issues with dotted IDs (e.g., `bd-a3f8e9.1`, `bd-a3f8e9.2`). Children are auto-numbered sequentially. Up to 3 levels of nesting supported. The parent hash ensures unique namespace - no coordination needed between agents working on different epics.
 
 ### Priorities
 
