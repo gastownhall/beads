@@ -48,7 +48,4 @@ func IsUniqueConstraintError(err error) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// isUniqueConstraintError is an alias for IsUniqueConstraintError for internal use
-func isUniqueConstraintError(err error) bool {
-	return IsUniqueConstraintError(err)
-}
+

@@ -390,55 +390,6 @@ func clearAutoFlushState() {
 //
 // Error handling: Returns error on any failure. Cleanup is guaranteed via defer.
 // Thread-safe: No shared state access. Safe to call from multiple goroutines.
-// computeIssueContentHash computes a SHA256 hash of an issue's content, excluding timestamps.
-// This is used for detecting timestamp-only changes during export deduplication (bd-159).
-func computeIssueContentHash(issue *types.Issue) (string, error) {
-	// Clone issue and zero out timestamps to exclude them from hash
-	normalized := *issue
-	normalized.CreatedAt = time.Time{}
-	normalized.UpdatedAt = time.Time{}
-	
-	// Also zero out ClosedAt if present
-	if normalized.ClosedAt != nil {
-		zeroTime := time.Time{}
-		normalized.ClosedAt = &zeroTime
-	}
-	
-	// Serialize to JSON
-	data, err := json.Marshal(normalized)
-	if err != nil {
-		return "", err
-	}
-	
-	// SHA256 hash
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:]), nil
-}
-
-// shouldSkipExport checks if an issue should be skipped during export because
-// it only has timestamp changes (no actual content changes) (bd-159).
-func shouldSkipExport(ctx context.Context, issue *types.Issue) (bool, error) {
-	// Get the stored hash from export_hashes table (last exported state)
-	storedHash, err := store.GetExportHash(ctx, issue.ID)
-	if err != nil {
-		return false, err
-	}
-	
-	// If no hash stored, we must export (first export)
-	if storedHash == "" {
-		return false, nil
-	}
-	
-	// Compute current hash
-	currentHash, err := computeIssueContentHash(issue)
-	if err != nil {
-		return false, err
-	}
-	
-	// If hashes match, only timestamps changed - skip export
-	return currentHash == storedHash, nil
-}
-
 // validateJSONLIntegrity checks if JSONL file hash matches stored hash.
 // If mismatch detected, clears export_hashes and logs warning (bd-160).
 func validateJSONLIntegrity(ctx context.Context, jsonlPath string) error {
