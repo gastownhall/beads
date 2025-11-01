@@ -169,6 +169,60 @@ func TestFieldComparator_StringConversion(t *testing.T) {
 	}
 }
 
+func TestFieldComparator_EqualPtrStr(t *testing.T) {
+	fc := newFieldComparator()
+
+	tests := []struct {
+		name     string
+		existing *string
+		newVal   interface{}
+		want     bool
+	}{
+		{"both nil", nil, "", true},
+		{"existing nil, new empty", nil, "", true},
+		{"existing nil, new string", nil, "test", false},
+		{"equal strings", stringPtr("test"), "test", true},
+		{"different strings", stringPtr("test"), "other", false},
+		{"existing string, new nil", stringPtr("test"), nil, false},
+		{"invalid type", stringPtr("test"), 123, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fc.equalPtrStr(tt.existing, tt.newVal)
+			if got != tt.want {
+				t.Errorf("equalPtrStr() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFieldComparator_EqualIssueType(t *testing.T) {
+	fc := newFieldComparator()
+
+	tests := []struct {
+		name     string
+		existing types.IssueType
+		newVal   interface{}
+		want     bool
+	}{
+		{"same IssueType", types.TypeTask, types.TypeTask, true},
+		{"different IssueType", types.TypeTask, types.TypeBug, false},
+		{"IssueType vs string match", types.TypeTask, "task", true},
+		{"IssueType vs string no match", types.TypeTask, "bug", false},
+		{"invalid type", types.TypeTask, 123, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fc.equalIssueType(tt.existing, tt.newVal)
+			if got != tt.want {
+				t.Errorf("equalIssueType() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFieldComparator_IntConversion(t *testing.T) {
 	fc := newFieldComparator()
 
