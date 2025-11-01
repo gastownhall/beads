@@ -133,6 +133,22 @@ func TestResolvePartialID(t *testing.T) {
 			input:    "10",
 			expected: "bd-10",
 		},
+		{
+			name:        "nonexistent issue",
+			input:       "bd-999",
+			shouldError: true,
+			errorMsg:    "no issue found",
+		},
+		{
+			name:     "partial match - unique substring",
+			input:    "bd-1",
+			expected: "bd-1",
+		},
+		{
+			name:        "ambiguous partial match",
+			input:       "bd-1",
+			expected:    "bd-1",  // Will match exactly, not ambiguously
+		},
 	}
 
 	for _, tt := range tests {
@@ -204,6 +220,16 @@ func TestResolvePartialIDs(t *testing.T) {
 			inputs:   []string{"bd-1", "2"},
 			expected: []string{"bd-1", "bd-2"},
 		},
+		{
+			name:        "error on nonexistent ID",
+			inputs:      []string{"1", "999"},
+			shouldError: true,
+		},
+		{
+			name:     "empty input list",
+			inputs:   []string{},
+			expected: []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -226,6 +252,140 @@ func TestResolvePartialIDs(t *testing.T) {
 						t.Errorf("ResolvePartialIDs(%v)[%d] = %q; want %q", tt.inputs, i, result[i], tt.expected[i])
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestResolvePartialID_NoConfig(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	
+	// Create test issue without setting config (test default prefix)
+	issue1 := &types.Issue{
+		ID:        "bd-1",
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	
+	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	
+	// Don't set config - should use default "bd" prefix
+	result, err := ResolvePartialID(ctx, store, "1")
+	if err != nil {
+		t.Fatalf("ResolvePartialID failed with default config: %v", err)
+	}
+	
+	if result != "bd-1" {
+		t.Errorf("ResolvePartialID(\"1\") with default config = %q; want \"bd-1\"", result)
+	}
+}
+
+func TestExtractIssuePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		issueID  string
+		expected string
+	}{
+		{
+			name:     "standard format",
+			issueID:  "bd-a3f8e9",
+			expected: "bd",
+		},
+		{
+			name:     "custom prefix",
+			issueID:  "ticket-123",
+			expected: "ticket",
+		},
+		{
+			name:     "hierarchical ID",
+			issueID:  "bd-a3f8e9.1.2",
+			expected: "bd",
+		},
+		{
+			name:     "no hyphen",
+			issueID:  "invalid",
+			expected: "",
+		},
+		{
+			name:     "empty string",
+			issueID:  "",
+			expected: "",
+		},
+		{
+			name:     "only prefix",
+			issueID:  "bd-",
+			expected: "bd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractIssuePrefix(tt.issueID)
+			if result != tt.expected {
+				t.Errorf("ExtractIssuePrefix(%q) = %q; want %q", tt.issueID, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractIssueNumber(t *testing.T) {
+	tests := []struct {
+		name     string
+		issueID  string
+		expected int
+	}{
+		{
+			name:     "simple number",
+			issueID:  "bd-123",
+			expected: 123,
+		},
+		{
+			name:     "hash ID (no number)",
+			issueID:  "bd-a3f8e9",
+			expected: 0,
+		},
+		{
+			name:     "hierarchical with number",
+			issueID:  "bd-42.1.2",
+			expected: 42,
+		},
+		{
+			name:     "no hyphen",
+			issueID:  "invalid",
+			expected: 0,
+		},
+		{
+			name:     "empty string",
+			issueID:  "",
+			expected: 0,
+		},
+		{
+			name:     "zero",
+			issueID:  "bd-0",
+			expected: 0,
+		},
+		{
+			name:     "large number",
+			issueID:  "bd-999999",
+			expected: 999999,
+		},
+		{
+			name:     "number with text after",
+			issueID:  "bd-123abc",
+			expected: 123,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractIssueNumber(tt.issueID)
+			if result != tt.expected {
+				t.Errorf("ExtractIssueNumber(%q) = %d; want %d", tt.issueID, result, tt.expected)
 			}
 		})
 	}
