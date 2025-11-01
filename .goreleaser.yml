@@ -103,8 +103,7 @@ brews:
       owner: steveyegge
       name: beads
       branch: main
-      # Formula will be in Formula/bd.rb
-    folder: Formula
+    directory: Formula
     homepage: https://github.com/steveyegge/beads
     description: "AI-supervised issue tracker for coding workflows"
     license: MIT
