@@ -1371,13 +1371,22 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			}
 		}
 		if len(validDBs) > 1 {
-			log.log("Error: Multiple database files found in %s:", beadsDir)
+			errMsg := fmt.Sprintf("Error: Multiple database files found in %s:\n", beadsDir)
 			for _, db := range validDBs {
-				log.log("  - %s", filepath.Base(db))
+				errMsg += fmt.Sprintf("  - %s\n", filepath.Base(db))
 			}
-			log.log("")
-			log.log("Beads requires a single canonical database: %s", beads.CanonicalDatabaseName)
-			log.log("Run 'bd init' to migrate legacy databases or manually remove old databases")
+			errMsg += fmt.Sprintf("\nBeads requires a single canonical database: %s\n", beads.CanonicalDatabaseName)
+			errMsg += "Run 'bd init' to migrate legacy databases or manually remove old databases\n"
+			errMsg += "Or run 'bd doctor' for more diagnostics"
+			
+			log.log(errMsg)
+			
+			// Write error to file so user can see it without checking logs
+			errFile := filepath.Join(beadsDir, "daemon-error")
+			if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
+				log.log("Warning: could not write daemon-error file: %v", err)
+			}
+			
 			os.Exit(1)
 		}
 	}
@@ -1393,6 +1402,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 
 	log.log("Using database: %s", daemonDBPath)
+
+	// Clear any previous daemon-error file on successful startup
+	errFile := filepath.Join(beadsDir, "daemon-error")
+	if err := os.Remove(errFile); err != nil && !os.IsNotExist(err) {
+		log.log("Warning: could not remove daemon-error file: %v", err)
+	}
 
 	store, err := sqlite.New(daemonDBPath)
 	if err != nil {

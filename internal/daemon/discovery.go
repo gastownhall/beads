@@ -149,10 +149,18 @@ func discoverDaemon(socketPath string) DaemonInfo {
 	client, err := rpc.TryConnectWithTimeout(socketPath, 500*time.Millisecond)
 	if err != nil {
 		daemon.Error = fmt.Sprintf("failed to connect: %v", err)
+		// Check for daemon-error file
+		if errMsg := checkDaemonErrorFile(socketPath); errMsg != "" {
+			daemon.Error = errMsg
+		}
 		return daemon
 	}
 	if client == nil {
 		daemon.Error = "daemon not responding or unhealthy"
+		// Check for daemon-error file
+		if errMsg := checkDaemonErrorFile(socketPath); errMsg != "" {
+			daemon.Error = errMsg
+		}
 		return daemon
 	}
 	defer client.Close()
@@ -202,6 +210,20 @@ func FindDaemonByWorkspace(workspacePath string) (*DaemonInfo, error) {
 	}
 
 	return nil, fmt.Errorf("no daemon found for workspace: %s", workspacePath)
+}
+
+// checkDaemonErrorFile checks for a daemon-error file in the .beads directory
+func checkDaemonErrorFile(socketPath string) string {
+	// Socket path is typically .beads/bd.sock, so get the parent dir
+	beadsDir := filepath.Dir(socketPath)
+	errFile := filepath.Join(beadsDir, "daemon-error")
+	
+	data, err := os.ReadFile(errFile)
+	if err != nil {
+		return ""
+	}
+	
+	return string(data)
 }
 
 // CleanupStaleSockets removes socket files and PID files for dead daemons

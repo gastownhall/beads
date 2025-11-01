@@ -370,6 +370,14 @@ var rootCmd = &cobra.Command{
 						if err != nil {
 							daemonStatus.Detail = err.Error()
 						}
+						// Check for daemon-error file to provide better error message
+						if beadsDir := filepath.Dir(socketPath); beadsDir != "" {
+							errFile := filepath.Join(beadsDir, "daemon-error")
+							if errMsg, readErr := os.ReadFile(errFile); readErr == nil && len(errMsg) > 0 {
+								fmt.Fprintf(os.Stderr, "\n%s\n", string(errMsg))
+								daemonStatus.Detail = string(errMsg)
+							}
+						}
 						if os.Getenv("BD_DEBUG") != "" {
 							fmt.Fprintf(os.Stderr, "Debug: auto-start did not yield a running daemon; falling back to direct mode\n")
 						}
