@@ -174,4 +174,59 @@ func TestListCommand(t *testing.T) {
 			seen[label] = true
 		}
 	})
+
+	t.Run("output dot format", func(t *testing.T) {
+		// Add a dependency to make the graph more interesting
+		dep := &types.Dependency{
+			IssueID:     h.issues[0].ID,
+			DependsOnID: h.issues[1].ID,
+			Type:        types.DepBlocks,
+		}
+		if err := h.store.AddDependency(h.ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency: %v", err)
+		}
+
+		err := outputDotFormat(h.ctx, h.store, h.issues)
+		if err != nil {
+			t.Errorf("outputDotFormat failed: %v", err)
+		}
+	})
+
+	t.Run("output formatted list dot", func(t *testing.T) {
+		err := outputFormattedList(h.ctx, h.store, h.issues, "dot")
+		if err != nil {
+			t.Errorf("outputFormattedList with dot format failed: %v", err)
+		}
+	})
+
+	t.Run("output formatted list digraph preset", func(t *testing.T) {
+		// Add a dependency first
+		dep := &types.Dependency{
+			IssueID:     h.issues[0].ID,
+			DependsOnID: h.issues[1].ID,
+			Type:        types.DepBlocks,
+		}
+		if err := h.store.AddDependency(h.ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency: %v", err)
+		}
+
+		err := outputFormattedList(h.ctx, h.store, h.issues, "digraph")
+		if err != nil {
+			t.Errorf("outputFormattedList with digraph format failed: %v", err)
+		}
+	})
+
+	t.Run("output formatted list custom template", func(t *testing.T) {
+		err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID}} {{.Title}}")
+		if err != nil {
+			t.Errorf("outputFormattedList with custom template failed: %v", err)
+		}
+	})
+
+	t.Run("output formatted list invalid template", func(t *testing.T) {
+		err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID")
+		if err == nil {
+			t.Error("Expected error for invalid template")
+		}
+	})
 }
