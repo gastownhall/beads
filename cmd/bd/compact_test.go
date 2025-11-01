@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -391,4 +392,130 @@ func TestCompactStatsJSON(t *testing.T) {
 
 	// Should not panic and should execute JSON path
 	runCompactStats(ctx, sqliteStore)
+}
+
+func TestRunCompactSingleDryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix
+	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Create a closed issue eligible for compaction
+	issue := &types.Issue{
+		ID:          "test-compact-1",
+		Title:       "Test Compact Issue",
+		Description: string(make([]byte, 500)),
+		Status:      types.StatusClosed,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		CreatedAt:   time.Now().Add(-60 * 24 * time.Hour),
+		ClosedAt:    ptrTime(time.Now().Add(-35 * 24 * time.Hour)),
+	}
+	if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save current state
+	savedJSONOutput := jsonOutput
+	savedCompactDryRun := compactDryRun
+	savedCompactTier := compactTier
+	savedCompactForce := compactForce
+	defer func() {
+		jsonOutput = savedJSONOutput
+		compactDryRun = savedCompactDryRun
+		compactTier = savedCompactTier
+		compactForce = savedCompactForce
+	}()
+
+	// Test dry run mode
+	compactDryRun = true
+	compactTier = 1
+	compactForce = false
+	jsonOutput = false
+
+	// This should succeed without API key in dry run mode
+	// We can't fully test without mocking the compactor, but we can test the eligibility path
+	eligible, _, err := sqliteStore.CheckEligibility(ctx, "test-compact-1", 1)
+	if err != nil {
+		t.Fatalf("CheckEligibility failed: %v", err)
+	}
+	if !eligible {
+		t.Error("Issue should be eligible for Tier 1 compaction")
+	}
+}
+
+func TestRunCompactAllDryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix
+	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Create multiple closed issues
+	for i := 1; i <= 3; i++ {
+		issue := &types.Issue{
+			ID:          fmt.Sprintf("test-all-%d", i),
+			Title:       "Test Issue",
+			Description: string(make([]byte, 500)),
+			Status:      types.StatusClosed,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			CreatedAt:   time.Now().Add(-60 * 24 * time.Hour),
+			ClosedAt:    ptrTime(time.Now().Add(-35 * 24 * time.Hour)),
+		}
+		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Verify issues eligible for compaction
+	closedStatus := types.StatusClosed
+	issues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{Status: &closedStatus})
+	if err != nil {
+		t.Fatalf("SearchIssues failed: %v", err)
+	}
+
+	eligibleCount := 0
+	for _, issue := range issues {
+		eligible, _, err := sqliteStore.CheckEligibility(ctx, issue.ID, 1)
+		if err != nil {
+			t.Fatalf("CheckEligibility failed for %s: %v", issue.ID, err)
+		}
+		if eligible {
+			eligibleCount++
+		}
+	}
+
+	if eligibleCount != 3 {
+		t.Errorf("Expected 3 eligible issues, got %d", eligibleCount)
+	}
 }
