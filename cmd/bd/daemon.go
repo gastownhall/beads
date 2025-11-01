@@ -1361,10 +1361,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	beadsDir := filepath.Dir(daemonDBPath)
 	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
 	if err == nil && len(matches) > 1 {
-		// Filter out backup files
+		// Filter out backup files (*.backup-*.db, *.backup.db)
 		var validDBs []string
 		for _, match := range matches {
-			if filepath.Ext(filepath.Base(match)) != ".backup" {
+			baseName := filepath.Base(match)
+			// Skip if it's a backup file (contains ".backup" in name)
+			if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
 				validDBs = append(validDBs, match)
 			}
 		}
@@ -1375,7 +1377,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			}
 			log.log("")
 			log.log("Beads requires a single canonical database: %s", beads.CanonicalDatabaseName)
-			log.log("Run 'bd init' to migrate legacy databases")
+			log.log("Run 'bd init' to migrate legacy databases or manually remove old databases")
 			os.Exit(1)
 		}
 	}

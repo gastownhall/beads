@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
@@ -198,12 +199,12 @@ func findDatabaseInTree() string {
 			// Found .beads/ directory, look for *.db files
 			matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
 			if err == nil && len(matches) > 0 {
-			// Filter out backup files
+			// Filter out backup files and vc.db
 			var validDBs []string
 			for _, match := range matches {
 			baseName := filepath.Base(match)
-			// Skip backup files (e.g., beads.db.backup, bd.db.backup)
-			if filepath.Ext(baseName) != ".backup" {
+			// Skip backup files (contains ".backup" in name) and vc.db
+			if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
 			validDBs = append(validDBs, match)
 			}
 			}
