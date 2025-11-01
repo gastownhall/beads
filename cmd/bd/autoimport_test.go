@@ -67,6 +67,41 @@ func TestCheckAndAutoImport_DatabaseHasIssues(t *testing.T) {
 	}
 }
 
+func TestCheckAndAutoImport_EmptyDatabaseNoGit(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	tmpDB := filepath.Join(tmpDir, "test.db")
+	store, err := sqlite.New(tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set prefix
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	oldNoAutoImport := noAutoImport
+	oldJsonOutput := jsonOutput
+	noAutoImport = false
+	jsonOutput = true // Suppress output
+	defer func() { 
+		noAutoImport = oldNoAutoImport 
+		jsonOutput = oldJsonOutput
+	}()
+
+	// Change to temp dir (no git repo)
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+
+	result := checkAndAutoImport(ctx, store)
+	if result {
+		t.Error("Expected auto-import to skip when no git repo")
+	}
+}
+
 func TestFindBeadsDir(t *testing.T) {
 	// Create temp directory with .beads
 	tmpDir := t.TempDir()

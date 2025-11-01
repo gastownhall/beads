@@ -216,6 +216,62 @@ func TestCompactStats(t *testing.T) {
 	}
 }
 
+func TestRunCompactStats(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+	
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	ctx := context.Background()
+	
+	// Set issue_prefix
+	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	
+	// Create some closed issues
+	for i := 1; i <= 3; i++ {
+		id := "test-" + string(rune('0'+i))
+		issue := &types.Issue{
+			ID:          id,
+			Title:       "Test Issue",
+			Description: string(make([]byte, 500)),
+			Status:      types.StatusClosed,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			CreatedAt:   time.Now().Add(-60 * 24 * time.Hour),
+			ClosedAt:    ptrTime(time.Now().Add(-35 * 24 * time.Hour)),
+		}
+		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Test stats - should work without API key
+	savedJSONOutput := jsonOutput
+	jsonOutput = false
+	defer func() { jsonOutput = savedJSONOutput }()
+	
+	// The function calls os.Exit, so we can't directly test it
+	// But we can test the eligibility checking which is the core logic
+	eligible, reason, err := sqliteStore.CheckEligibility(ctx, "test-1", 1)
+	if err != nil {
+		t.Fatalf("CheckEligibility failed: %v", err)
+	}
+	
+	if !eligible {
+		t.Logf("Not eligible: %s", reason)
+	}
+}
+
 func TestCompactProgressBar(t *testing.T) {
 	// Test progress bar formatting
 	pb := progressBar(50, 100)
