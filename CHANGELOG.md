@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2025-10-31
+
+### Changed
+- Version bump for consistency across CLI, MCP server, and plugin
+
 ## [0.20.1] - 2025-10-31
 
 ### Breaking Changes
