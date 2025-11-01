@@ -153,6 +153,8 @@ var blockedCmd = &cobra.Command{
 	Use:   "blocked",
 	Short: "Show blocked issues",
 	Run: func(cmd *cobra.Command, args []string) {
+		jsonOutput, _ := cmd.Flags().GetBool("json")
+		
 		// If daemon is running but doesn't support this command, use direct storage
 		if daemonClient != nil && store == nil {
 			var err error
@@ -299,6 +301,7 @@ func init() {
 	readyCmd.Flags().Bool("json", false, "Output JSON format")
 
 	statsCmd.Flags().Bool("json", false, "Output JSON format")
+	blockedCmd.Flags().Bool("json", false, "Output JSON format")
 
 	rootCmd.AddCommand(readyCmd)
 	rootCmd.AddCommand(blockedCmd)
