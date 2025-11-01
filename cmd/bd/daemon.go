@@ -184,6 +184,7 @@ func init() {
 	daemonCmd.Flags().Bool("migrate-to-global", false, "Migrate from local to global daemon")
 	daemonCmd.Flags().String("log", "", "Log file path (default: .beads/daemon.log)")
 	daemonCmd.Flags().Bool("global", false, "Run as global daemon (socket at ~/.beads/bd.sock)")
+	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
 
@@ -324,19 +325,47 @@ func showDaemonStatus(pidFile string, global bool) {
 		if global {
 			scope = "global"
 		}
-		fmt.Printf("Daemon is running (PID %d, %s)\n", pid, scope)
-
+		
+		var started string
 		if info, err := os.Stat(pidFile); err == nil {
-			fmt.Printf("  Started: %s\n", info.ModTime().Format("2006-01-02 15:04:05"))
+			started = info.ModTime().Format("2006-01-02 15:04:05")
 		}
 
-		logPath, err := getLogFilePath("", global)
-		if err == nil {
-			if _, err := os.Stat(logPath); err == nil {
-				fmt.Printf("  Log: %s\n", logPath)
+		var logPath string
+		if lp, err := getLogFilePath("", global); err == nil {
+			if _, err := os.Stat(lp); err == nil {
+				logPath = lp
 			}
 		}
+
+		if jsonOutput {
+			status := map[string]interface{}{
+				"running": true,
+				"pid":     pid,
+				"scope":   scope,
+			}
+			if started != "" {
+				status["started"] = started
+			}
+			if logPath != "" {
+				status["log_path"] = logPath
+			}
+			outputJSON(status)
+			return
+		}
+
+		fmt.Printf("Daemon is running (PID %d, %s)\n", pid, scope)
+		if started != "" {
+			fmt.Printf("  Started: %s\n", started)
+		}
+		if logPath != "" {
+			fmt.Printf("  Log: %s\n", logPath)
+		}
 	} else {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{"running": false})
+			return
+		}
 		fmt.Println("Daemon is not running")
 	}
 }

@@ -571,6 +571,7 @@ func init() {
 	compactCmd.Flags().IntVar(&compactBatch, "batch-size", 10, "Issues per batch")
 	compactCmd.Flags().IntVar(&compactWorkers, "workers", 5, "Parallel workers")
 	compactCmd.Flags().BoolVar(&compactStats, "stats", false, "Show compaction statistics")
+	compactCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 
 	rootCmd.AddCommand(compactCmd)
 }

@@ -588,5 +588,6 @@ func init() {
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("to-hash-ids", false, "Migrate sequential IDs to hash-based IDs")
+	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	rootCmd.AddCommand(migrateCmd)
 }

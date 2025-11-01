@@ -340,4 +340,55 @@ func TestCompactInitCommand(t *testing.T) {
 	if len(compactCmd.Long) == 0 {
 		t.Error("compactCmd should have Long description")
 	}
+	
+	// Verify --json flag exists
+	jsonFlag := compactCmd.Flags().Lookup("json")
+	if jsonFlag == nil {
+		t.Error("compact command should have --json flag")
+	}
+}
+
+func TestCompactStatsJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix
+	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Create a closed issue eligible for Tier 1
+	issue := &types.Issue{
+		ID:          "test-1",
+		Title:       "Test Issue",
+		Description: string(make([]byte, 500)),
+		Status:      types.StatusClosed,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		CreatedAt:   time.Now().Add(-60 * 24 * time.Hour),
+		ClosedAt:    ptrTime(time.Now().Add(-35 * 24 * time.Hour)),
+	}
+	if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test with JSON output
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = savedJSONOutput }()
+
+	// Should not panic and should execute JSON path
+	runCompactStats(ctx, sqliteStore)
 }

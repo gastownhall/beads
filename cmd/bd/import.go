@@ -249,5 +249,6 @@ func init() {
 	importCmd.Flags().Bool("dedupe-after", false, "Detect and report content duplicates after import")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
+	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }

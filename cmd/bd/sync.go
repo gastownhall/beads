@@ -247,6 +247,7 @@ func init() {
 	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	syncCmd.Flags().Bool("flush-only", false, "Only export pending changes to JSONL (skip git operations)")
 	syncCmd.Flags().Bool("import-only", false, "Only import from JSONL (skip git operations, useful after git pull)")
+	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
 	rootCmd.AddCommand(syncCmd)
 }
 

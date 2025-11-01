@@ -171,5 +171,6 @@ Interactive mode with --interactive prompts for each orphan.`,
 func init() {
 	repairDepsCmd.Flags().Bool("fix", false, "Automatically remove orphaned dependencies")
 	repairDepsCmd.Flags().Bool("interactive", false, "Interactively review each orphaned dependency")
+	repairDepsCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output repair results in JSON format")
 	rootCmd.AddCommand(repairDepsCmd)
 }

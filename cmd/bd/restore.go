@@ -112,6 +112,7 @@ This is read-only and does not modify the database or git state.`,
 }
 
 func init() {
+	restoreCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output restore results in JSON format")
 	rootCmd.AddCommand(restoreCmd)
 }
 

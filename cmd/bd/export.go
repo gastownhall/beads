@@ -308,6 +308,21 @@ Output to stdout by default, or use -o flag for file output.`,
 				fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 			}
 		}
+
+		// Output statistics if JSON format requested
+		if jsonOutput {
+			stats := map[string]interface{}{
+				"success":       true,
+				"exported":      len(exportedIDs),
+				"skipped":       skippedCount,
+				"total_issues":  len(issues),
+			}
+			if output != "" {
+				stats["output_file"] = output
+			}
+			data, _ := json.MarshalIndent(stats, "", "  ")
+			fmt.Fprintln(os.Stderr, string(data))
+		}
 	},
 }
 
@@ -316,5 +331,6 @@ func init() {
 	exportCmd.Flags().StringP("output", "o", "", "Output file (default: stdout)")
 	exportCmd.Flags().StringP("status", "s", "", "Filter by status")
 	exportCmd.Flags().Bool("force", false, "Force export even if database is empty")
+	exportCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output export statistics in JSON format")
 	rootCmd.AddCommand(exportCmd)
 }
