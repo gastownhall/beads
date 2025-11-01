@@ -156,7 +156,7 @@ content into AGENTS.md and update CLAUDE.md if present.`,
 		fmt.Printf("   • Check %s before asking \"what should I work on?\"\n", cyan("bd ready"))
 		fmt.Println()
 
-		fmt.Printf("%s\n\n", green("When done, confirm by saying: \"bd onboarding complete\""))
+		fmt.Printf("%s\n\n", green("When done, tell your AI assistant: \"bd onboarding complete\""))
 	},
 }
 
