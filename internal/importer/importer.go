@@ -209,10 +209,9 @@ func detectUpdates(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issue
 	// With hash IDs, "collisions" (same ID, different content) are actually UPDATES
 	// Hash IDs are based on creation content and remain stable across updates
 	// So same ID + different fields = normal update operation, not a collision
-	// The collisionResult.Collisions list represents issues that will be updated
-	if len(collisionResult.Collisions) > 0 {
-		result.Updated = len(collisionResult.Collisions)
-	}
+	// The collisionResult.Collisions list represents issues that *may* be updated
+	// Note: We don't pre-count updates here - upsertIssues will count them after
+	// checking timestamps to ensure we only update when incoming is newer (bd-e55c)
 
 	// Phase 4: Renames removed - obsolete with hash IDs (bd-8e05)
 	// Hash-based IDs are content-addressed, so renames don't occur
@@ -426,6 +425,13 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			// The update should have been detected earlier by detectUpdates
 			// If we reach here, it means collision wasn't resolved - treat as update
 			if !opts.SkipUpdate {
+				// Check timestamps - only update if incoming is newer (bd-e55c)
+				if !incoming.UpdatedAt.After(existingWithID.UpdatedAt) {
+					// Local version is newer or same - skip update
+					result.Unchanged++
+					continue
+				}
+				
 				// Build updates map
 				updates := make(map[string]interface{})
 				updates["title"] = incoming.Title
