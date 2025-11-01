@@ -54,6 +54,7 @@ Force: Delete and orphan dependents
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		cascade, _ := cmd.Flags().GetBool("cascade")
+		jsonOutput, _ := cmd.Flags().GetBool("json")
 
 		// Collect issue IDs from args and/or file
 		issueIDs := make([]string, 0, len(args))
@@ -79,7 +80,7 @@ Force: Delete and orphan dependents
 
 		// Handle batch deletion
 		if len(issueIDs) > 1 {
-			deleteBatch(cmd, issueIDs, force, dryRun, cascade)
+			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput)
 			return
 		}
 
@@ -377,7 +378,7 @@ func removeIssueFromJSONL(issueID string) error {
 
 // deleteBatch handles deletion of multiple issues
 //nolint:unparam // cmd parameter required for potential future use
-func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool) {
+func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool) {
 	// Ensure we have a direct store when daemon lacks delete support
 	if daemonClient != nil {
 		if err := ensureDirectMode("daemon does not support delete command"); err != nil {
@@ -647,5 +648,6 @@ func init() {
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
 	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	deleteCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(deleteCmd)
 }
