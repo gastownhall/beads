@@ -1492,7 +1492,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	// Choose event loop based on BEADS_DAEMON_MODE
 	daemonMode := os.Getenv("BEADS_DAEMON_MODE")
 	if daemonMode == "" {
-		daemonMode = "poll" // Default to polling for Phase 1
+		daemonMode = "events" // Default to event-driven mode (production-ready as of v0.21.0)
 	}
 
 	switch daemonMode {

@@ -56,3 +56,4 @@ dist/
 
 # Git worktrees
 .worktrees/
+.beads/pollution-backup.jsonl
