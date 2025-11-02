@@ -560,17 +560,17 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 			UNION ALL
 
 			SELECT
-				d.issue_id,
-				d.depends_on_id,
-				p.start_id,
-				p.path || '→' || d.depends_on_id,
-				p.depth + 1
+			d.issue_id,
+			d.depends_on_id,
+			p.start_id,
+			p.path || '→' || d.depends_on_id,
+			p.depth + 1
 			FROM dependencies d
 			JOIN paths p ON d.issue_id = p.depends_on_id
 			WHERE p.depth < ?
-			  AND p.path NOT LIKE '%' || d.depends_on_id || '→%'
+			AND (d.depends_on_id = p.start_id OR p.path NOT LIKE '%' || d.depends_on_id || '→%')
 		)
-		SELECT DISTINCT path || '→' || start_id as cycle_path
+		SELECT DISTINCT path as cycle_path
 		FROM paths
 		WHERE depends_on_id = start_id
 		ORDER BY cycle_path
