@@ -233,11 +233,16 @@ async def set_context(workspace_root: str) -> str:
     try:
         resolved_root = await asyncio.wait_for(
             asyncio.to_thread(_resolve_workspace_root, workspace_root),
-            timeout=2.0,
+            timeout=5.0,  # Longer timeout to handle slow git operations
         )
     except asyncio.TimeoutError:
-        logger.warning(f"Git detection timed out, using provided path: {workspace_root}")
-        resolved_root = os.path.abspath(workspace_root)
+        logger.error(f"Git detection timed out after 5s for: {workspace_root}")
+        return (
+            f"Error: Git repository detection timed out.\n"
+            f"  Provided path: {workspace_root}\n"
+            f"  This may indicate a slow filesystem or git configuration issue.\n"
+            f"  Please ensure the path is correct and git is responsive."
+        )
     
     # Always set working directory and context flag
     os.environ["BEADS_WORKING_DIR"] = resolved_root
