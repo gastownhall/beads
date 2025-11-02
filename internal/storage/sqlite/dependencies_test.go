@@ -903,3 +903,108 @@ func TestGetDependencyTree_SubstringBug(t *testing.T) {
 		t.Errorf("Expected bd-1 at depth 4, got %d", depthMap[issues[0].ID])
 	}
 }
+
+func TestGetDependencyCounts(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a network of issues with dependencies
+	//   A (depends on B, C)
+	//   B (depends on C)
+	//   C (no dependencies)
+	//   D (depends on A)
+	//   E (no dependencies, no dependents)
+	issueA := &types.Issue{Title: "Task A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{Title: "Task B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueC := &types.Issue{Title: "Task C", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueD := &types.Issue{Title: "Task D", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueE := &types.Issue{Title: "Task E", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+
+	store.CreateIssue(ctx, issueA, "test-user")
+	store.CreateIssue(ctx, issueB, "test-user")
+	store.CreateIssue(ctx, issueC, "test-user")
+	store.CreateIssue(ctx, issueD, "test-user")
+	store.CreateIssue(ctx, issueE, "test-user")
+
+	// Add dependencies
+	store.AddDependency(ctx, &types.Dependency{IssueID: issueA.ID, DependsOnID: issueB.ID, Type: types.DepBlocks}, "test-user")
+	store.AddDependency(ctx, &types.Dependency{IssueID: issueA.ID, DependsOnID: issueC.ID, Type: types.DepBlocks}, "test-user")
+	store.AddDependency(ctx, &types.Dependency{IssueID: issueB.ID, DependsOnID: issueC.ID, Type: types.DepBlocks}, "test-user")
+	store.AddDependency(ctx, &types.Dependency{IssueID: issueD.ID, DependsOnID: issueA.ID, Type: types.DepBlocks}, "test-user")
+
+	// Get counts for all issues
+	issueIDs := []string{issueA.ID, issueB.ID, issueC.ID, issueD.ID, issueE.ID}
+	counts, err := store.GetDependencyCounts(ctx, issueIDs)
+	if err != nil {
+		t.Fatalf("GetDependencyCounts failed: %v", err)
+	}
+
+	// Verify counts
+	testCases := []struct {
+		issueID         string
+		name            string
+		expectedDeps    int
+		expectedDepents int
+	}{
+		{issueA.ID, "A", 2, 1}, // depends on B and C, D depends on A
+		{issueB.ID, "B", 1, 1}, // depends on C, A depends on B
+		{issueC.ID, "C", 0, 2}, // no dependencies, A and B depend on C
+		{issueD.ID, "D", 1, 0}, // depends on A, nothing depends on D
+		{issueE.ID, "E", 0, 0}, // isolated issue
+	}
+
+	for _, tc := range testCases {
+		count := counts[tc.issueID]
+		if count == nil {
+			t.Errorf("Issue %s (%s): no counts returned", tc.name, tc.issueID)
+			continue
+		}
+		if count.DependencyCount != tc.expectedDeps {
+			t.Errorf("Issue %s (%s): expected %d dependencies, got %d",
+				tc.name, tc.issueID, tc.expectedDeps, count.DependencyCount)
+		}
+		if count.DependentCount != tc.expectedDepents {
+			t.Errorf("Issue %s (%s): expected %d dependents, got %d",
+				tc.name, tc.issueID, tc.expectedDepents, count.DependentCount)
+		}
+	}
+}
+
+func TestGetDependencyCountsEmpty(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Test with empty list
+	counts, err := store.GetDependencyCounts(ctx, []string{})
+	if err != nil {
+		t.Fatalf("GetDependencyCounts failed on empty list: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Errorf("Expected empty map for empty input, got %d entries", len(counts))
+	}
+}
+
+func TestGetDependencyCountsNonexistent(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Test with non-existent issue IDs
+	counts, err := store.GetDependencyCounts(ctx, []string{"fake-1", "fake-2"})
+	if err != nil {
+		t.Fatalf("GetDependencyCounts failed on nonexistent IDs: %v", err)
+	}
+
+	// Should return zero counts for non-existent issues
+	for id, count := range counts {
+		if count.DependencyCount != 0 || count.DependentCount != 0 {
+			t.Errorf("Expected zero counts for nonexistent issue %s, got deps=%d, dependents=%d",
+				id, count.DependencyCount, count.DependentCount)
+		}
+	}
+}

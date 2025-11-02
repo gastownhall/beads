@@ -313,7 +313,28 @@ func (s *Server) handleList(req *Request) Response {
 		issue.Labels = labels
 	}
 
-	data, _ := json.Marshal(issues)
+	// Get dependency counts in bulk (single query instead of N queries)
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+
+	// Build response with counts
+	issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
+	for i, issue := range issues {
+		counts := depCounts[issue.ID]
+		if counts == nil {
+			counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
+		}
+		issuesWithCounts[i] = &types.IssueWithCounts{
+			Issue:           issue,
+			DependencyCount: counts.DependencyCount,
+			DependentCount:  counts.DependentCount,
+		}
+	}
+
+	data, _ := json.Marshal(issuesWithCounts)
 	return Response{
 		Success: true,
 		Data:    data,

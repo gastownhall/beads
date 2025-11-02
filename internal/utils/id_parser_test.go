@@ -321,6 +321,11 @@ func TestExtractIssuePrefix(t *testing.T) {
 			issueID:  "bd-",
 			expected: "bd",
 		},
+		{
+			name:     "hyphenated prefix",
+			issueID:  "alpha-beta-1",
+			expected: "alpha-beta",
+		},
 	}
 
 	for _, tt := range tests {
@@ -378,6 +383,11 @@ func TestExtractIssueNumber(t *testing.T) {
 			name:     "number with text after",
 			issueID:  "bd-123abc",
 			expected: 123,
+		},
+		{
+			name:     "hyphenated prefix with number",
+			issueID:  "alpha-beta-7",
+			expected: 7,
 		},
 	}
 

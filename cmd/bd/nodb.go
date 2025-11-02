@@ -173,11 +173,11 @@ func detectPrefix(beadsDir string, memStore *memory.MemoryStorage) (string, erro
 
 // extractIssuePrefix extracts the prefix from an issue ID like "bd-123" -> "bd"
 func extractIssuePrefix(issueID string) string {
-	parts := strings.SplitN(issueID, "-", 2)
-	if len(parts) < 2 {
+	idx := strings.LastIndex(issueID, "-")
+	if idx <= 0 {
 		return ""
 	}
-	return parts[0]
+	return issueID[:idx]
 }
 
 // writeIssuesToJSONL writes all issues from memory storage to JSONL file atomically

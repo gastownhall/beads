@@ -237,6 +237,80 @@ func (s *SQLiteStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	return s.scanIssues(ctx, rows)
 }
 
+// GetDependencyCounts returns dependency and dependent counts for multiple issues in a single query
+func (s *SQLiteStorage) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string]*types.DependencyCounts), nil
+	}
+
+	// Build placeholders for the IN clause
+	placeholders := make([]string, len(issueIDs))
+	args := make([]interface{}, len(issueIDs)*2)
+	for i, id := range issueIDs {
+		placeholders[i] = "?"
+		args[i] = id
+		args[len(issueIDs)+i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Single query that counts both dependencies and dependents
+	// Uses UNION ALL to combine results from both directions
+	query := fmt.Sprintf(`
+		SELECT
+			issue_id,
+			SUM(CASE WHEN type = 'dependency' THEN count ELSE 0 END) as dependency_count,
+			SUM(CASE WHEN type = 'dependent' THEN count ELSE 0 END) as dependent_count
+		FROM (
+			-- Count dependencies (issues this issue depends on)
+			SELECT issue_id, 'dependency' as type, COUNT(*) as count
+			FROM dependencies
+			WHERE issue_id IN (%s)
+			GROUP BY issue_id
+
+			UNION ALL
+
+			-- Count dependents (issues that depend on this issue)
+			SELECT depends_on_id as issue_id, 'dependent' as type, COUNT(*) as count
+			FROM dependencies
+			WHERE depends_on_id IN (%s)
+			GROUP BY depends_on_id
+		)
+		GROUP BY issue_id
+	`, inClause, inClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dependency counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string]*types.DependencyCounts)
+	for rows.Next() {
+		var issueID string
+		var counts types.DependencyCounts
+		if err := rows.Scan(&issueID, &counts.DependencyCount, &counts.DependentCount); err != nil {
+			return nil, fmt.Errorf("failed to scan dependency counts: %w", err)
+		}
+		result[issueID] = &counts
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating dependency counts: %w", err)
+	}
+
+	// Fill in zero counts for issues with no dependencies or dependents
+	for _, id := range issueIDs {
+		if _, exists := result[id]; !exists {
+			result[id] = &types.DependencyCounts{
+				DependencyCount: 0,
+				DependentCount:  0,
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // GetDependencyRecords returns raw dependency records for an issue
 func (s *SQLiteStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	rows, err := s.db.QueryContext(ctx, `
