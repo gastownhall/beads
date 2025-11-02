@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -136,7 +135,7 @@ func (d *Daemon) runGlobalDaemon() error {
 		d.log.log("Error: cannot get global beads directory: %v", err)
 		return err
 	}
-	d.cfg.SocketPath = filepath.Join(globalDir, "bd.sock")
+	d.cfg.SocketPath = getSocketPath(globalDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
@@ -193,18 +192,8 @@ func (d *Daemon) setupLock() (io.Closer, error) {
 		return nil, err
 	}
 
-	myPID := os.Getpid()
-	// #nosec G304 - controlled path from config
-	if data, err := os.ReadFile(d.cfg.PIDFile); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == myPID {
-			// PID file is correct, continue
-		} else {
-			d.log.log("PID file has wrong PID (expected %d, got %d), overwriting", myPID, pid)
-			_ = os.WriteFile(d.cfg.PIDFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
-		}
-	} else {
-		d.log.log("PID file missing after lock acquisition, creating")
-		_ = os.WriteFile(d.cfg.PIDFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
+	if err := ensurePIDFileCorrect(d.cfg.PIDFile); err != nil {
+		d.log.log("Warning: failed to verify PID file: %v", err)
 	}
 
 	return lock, nil
@@ -237,7 +226,7 @@ func (d *Daemon) determineDatabasePath() error {
 	d.cfg.DBPath = foundDB
 	d.cfg.BeadsDir = filepath.Dir(foundDB)
 	d.cfg.WorkspacePath = filepath.Dir(d.cfg.BeadsDir)
-	d.cfg.SocketPath = filepath.Join(d.cfg.BeadsDir, "bd.sock")
+	d.cfg.SocketPath = getSocketPath(d.cfg.BeadsDir)
 	return nil
 }
 
@@ -293,7 +282,9 @@ func (d *Daemon) validateSchemaVersion() error {
 		return fmt.Errorf("failed to read database version: %w", err)
 	}
 
-	if dbVersion != "" && dbVersion != d.Version {
+	mismatch, missing := checkVersionMismatch(dbVersion, d.Version)
+	
+	if mismatch {
 		d.log.log("Error: Database schema version mismatch")
 		d.log.log("  Database version: %s", dbVersion)
 		d.log.log("  Daemon version: %s", d.Version)
@@ -311,8 +302,7 @@ func (d *Daemon) validateSchemaVersion() error {
 			return fmt.Errorf("database version mismatch")
 		}
 		d.log.log("Warning: Proceeding despite version mismatch (BEADS_IGNORE_VERSION_MISMATCH=1)")
-	} else if dbVersion == "" {
-		// Old database without version metadata - set it now
+	} else if missing {
 		d.log.log("Warning: Database missing version metadata, setting to %s", d.Version)
 		if err := d.store.SetMetadata(ctx, "bd_version", d.Version); err != nil {
 			d.log.log("Error: failed to set database version: %v", err)

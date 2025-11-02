@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,55 @@ func (l *DaemonLock) Close() error {
 	err := l.file.Close()
 	l.file = nil
 	return err
+}
+
+// getPIDFilePath returns the path to daemon.pid in the given beads directory
+func getPIDFilePath(beadsDir string) string {
+	return filepath.Join(beadsDir, "daemon.pid")
+}
+
+// getSocketPath returns the path to bd.sock in the given beads directory
+func getSocketPath(beadsDir string) string {
+	return filepath.Join(beadsDir, "bd.sock")
+}
+
+// readPIDFile reads the PID from daemon.pid
+func readPIDFile(pidFile string) (int, error) {
+	// #nosec G304 - controlled path from config
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("invalid PID in file: %w", err)
+	}
+	return pid, nil
+}
+
+// writePIDFile writes the current process PID to daemon.pid
+func writePIDFile(pidFile string) error {
+	return os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600)
+}
+
+// ensurePIDFileCorrect verifies PID file has correct PID, fixes if wrong
+func ensurePIDFileCorrect(pidFile string) error {
+	myPID := os.Getpid()
+	if pid, err := readPIDFile(pidFile); err == nil && pid == myPID {
+		return nil
+	}
+	return writePIDFile(pidFile)
+}
+
+// checkVersionMismatch checks if database version matches daemon version
+func checkVersionMismatch(dbVersion, daemonVersion string) (mismatch bool, missing bool) {
+	if dbVersion == "" {
+		return false, true
+	}
+	if dbVersion != daemonVersion {
+		return true, false
+	}
+	return false, false
 }
 
 // acquireDaemonLock attempts to acquire an exclusive lock on daemon.lock
@@ -71,8 +122,8 @@ func acquireDaemonLock(beadsDir string, dbPath string, version string) (*DaemonL
 	_ = f.Sync()
 
 	// Also write PID file for Windows compatibility
-	pidFile := filepath.Join(beadsDir, "daemon.pid")
-	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600)
+	pidFile := getPIDFilePath(beadsDir)
+	_ = writePIDFile(pidFile)
 
 	return &DaemonLock{file: f, path: lockPath}, nil
 }
