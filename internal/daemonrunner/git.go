@@ -8,6 +8,48 @@ import (
 	"time"
 )
 
+// GitClient provides an interface for git operations to enable testing
+type GitClient interface {
+	HasUpstream() bool
+	HasChanges(ctx context.Context, filePath string) (bool, error)
+	Commit(ctx context.Context, filePath string, message string) error
+	Push(ctx context.Context) error
+	Pull(ctx context.Context) error
+}
+
+// DefaultGitClient implements GitClient using os/exec
+type DefaultGitClient struct{}
+
+// NewGitClient creates a new default git client
+func NewGitClient() GitClient {
+	return &DefaultGitClient{}
+}
+
+// HasUpstream checks if the current branch has an upstream configured
+func (g *DefaultGitClient) HasUpstream() bool {
+	return gitHasUpstream()
+}
+
+// HasChanges checks if the specified file has uncommitted changes
+func (g *DefaultGitClient) HasChanges(ctx context.Context, filePath string) (bool, error) {
+	return gitHasChanges(ctx, filePath)
+}
+
+// Commit commits the specified file
+func (g *DefaultGitClient) Commit(ctx context.Context, filePath string, message string) error {
+	return gitCommit(ctx, filePath, message)
+}
+
+// Push pushes to the current branch's upstream
+func (g *DefaultGitClient) Push(ctx context.Context) error {
+	return gitPush(ctx)
+}
+
+// Pull pulls from the current branch's upstream
+func (g *DefaultGitClient) Pull(ctx context.Context) error {
+	return gitPull(ctx)
+}
+
 // isGitRepo checks if we're in a git repository
 func isGitRepo() bool {
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
