@@ -125,3 +125,53 @@ func TestFormatDBList(t *testing.T) {
 		t.Errorf("Expected version 0.16.0, got %s", result[1]["version"])
 	}
 }
+
+func TestMigrateRespectsConfigJSON(t *testing.T) {
+	// Test that migrate respects custom database name from config.json
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("Failed to create .beads directory: %v", err)
+	}
+
+	// Create config.json with custom database name
+	configPath := filepath.Join(beadsDir, "config.json")
+	configData := `{"database": "beady.db", "version": "0.21.1", "jsonl_export": "beady.jsonl"}`
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatalf("Failed to create config.json: %v", err)
+	}
+
+	// Create old database with custom name
+	oldDBPath := filepath.Join(beadsDir, "beady.db")
+	store, err := sqlite.New(oldDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.SetMetadata(ctx, "bd_version", "0.21.1"); err != nil {
+		t.Fatalf("Failed to set version: %v", err)
+	}
+	_ = store.Close()
+
+	// Load config
+	cfg, err := loadOrCreateConfig(beadsDir)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Verify config respects custom database name
+	if cfg.Database != "beady.db" {
+		t.Errorf("Expected database name 'beady.db', got %s", cfg.Database)
+	}
+
+	expectedPath := filepath.Join(beadsDir, "beady.db")
+	actualPath := cfg.DatabasePath(beadsDir)
+	if actualPath != expectedPath {
+		t.Errorf("Expected path %s, got %s", expectedPath, actualPath)
+	}
+
+	// Verify database exists at custom path
+	if _, err := os.Stat(actualPath); os.IsNotExist(err) {
+		t.Errorf("Database does not exist at custom path: %s", actualPath)
+	}
+}

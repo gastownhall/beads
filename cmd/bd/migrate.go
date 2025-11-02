@@ -12,6 +12,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	_ "modernc.org/sqlite"
@@ -45,19 +46,33 @@ This command:
 		// Find .beads directory
 		beadsDir := findBeadsDir()
 		if beadsDir == "" {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"error":   "no_beads_directory",
-					"message": "No .beads directory found. Run 'bd init' first.",
-				})
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
-				fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
-			}
-			os.Exit(1)
+		if jsonOutput {
+		outputJSON(map[string]interface{}{
+		"error":   "no_beads_directory",
+		"message": "No .beads directory found. Run 'bd init' first.",
+		})
+		} else {
+		fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
+		fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
+		}
+		os.Exit(1)
 		}
 
-		// Detect all database files
+		// Load config to get target database name (respects user's config.json)
+	cfg, err := loadOrCreateConfig(beadsDir)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "config_load_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// Detect all database files
 		databases, err := detectDatabases(beadsDir)
 		if err != nil {
 			if jsonOutput {
@@ -84,8 +99,8 @@ This command:
 			return
 		}
 
-		// Check if beads.db exists and is current
-		targetPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+		// Check if target database exists and is current (use config.json name)
+		targetPath := cfg.DatabasePath(beadsDir)
 		var currentDB *dbInfo
 		var oldDBs []*dbInfo
 
@@ -109,7 +124,7 @@ This command:
 					color.Green("  ✓ Version matches\n")
 				}
 			} else {
-				color.Yellow("  No beads.db found\n")
+				color.Yellow("  No %s found\n", cfg.Database)
 			}
 
 			if len(oldDBs) > 0 {
@@ -141,7 +156,7 @@ This command:
 				for _, db := range oldDBs {
 					fmt.Fprintf(os.Stderr, "  - %s (version: %s)\n", filepath.Base(db.path), db.version)
 				}
-				fmt.Fprintf(os.Stderr, "\nPlease manually rename the correct database to beads.db and remove others.\n")
+				fmt.Fprintf(os.Stderr, "\nPlease manually rename the correct database to %s and remove others.\n", cfg.Database)
 			}
 			os.Exit(1)
 		} else if currentDB != nil && currentDB.version != Version {
@@ -161,7 +176,7 @@ This command:
 			} else {
 				fmt.Println("Dry run mode - no changes will be made")
 				if needsMigration {
-					fmt.Printf("Would migrate: %s → beads.db\n", filepath.Base(oldDBs[0].path))
+				fmt.Printf("Would migrate: %s → %s\n", filepath.Base(oldDBs[0].path), cfg.Database)
 				}
 				if needsVersionUpdate {
 					fmt.Printf("Would update version: %s → %s\n", currentDB.version, Version)
@@ -173,11 +188,30 @@ This command:
 			return
 		}
 
-		// Migrate old database to beads.db
+		// Migrate old database to target name (from config.json)
 		if needsMigration {
 			oldDB := oldDBs[0]
 			if !jsonOutput {
-				fmt.Printf("Migrating database: %s → beads.db\n", filepath.Base(oldDB.path))
+				fmt.Printf("Migrating database: %s → %s\n", filepath.Base(oldDB.path), cfg.Database)
+			}
+
+			// Create backup before migration
+			if !dryRun {
+				backupPath := strings.TrimSuffix(oldDB.path, ".db") + ".backup-pre-migrate-" + time.Now().Format("20060102-150405") + ".db"
+				if err := copyFile(oldDB.path, backupPath); err != nil {
+					if jsonOutput {
+						outputJSON(map[string]interface{}{
+							"error":   "backup_failed",
+							"message": err.Error(),
+						})
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: failed to create backup: %v\n", err)
+					}
+					os.Exit(1)
+				}
+				if !jsonOutput {
+					color.Green("✓ Created backup: %s\n", filepath.Base(backupPath))
+				}
 			}
 
 			if err := os.Rename(oldDB.path, targetPath); err != nil {
@@ -191,6 +225,9 @@ This command:
 				}
 				os.Exit(1)
 			}
+
+			// Clean up orphaned WAL files from old database
+			_ = cleanupWALFiles(oldDB.path)
 
 			// Update current DB reference
 			currentDB = oldDB
@@ -207,6 +244,9 @@ This command:
 			if !jsonOutput {
 				fmt.Printf("Updating schema version: %s → %s\n", currentDB.version, Version)
 			}
+
+			// Clean up WAL files before opening to avoid "disk I/O error"
+			_ = cleanupWALFiles(currentDB.path)
 
 			store, err := sqlite.New(currentDB.path)
 			if err != nil {
@@ -234,7 +274,13 @@ This command:
 				}
 				os.Exit(1)
 			}
-			_ = store.Close()
+			
+			// Close and checkpoint to finalize the WAL
+			if err := store.Close(); err != nil {
+				if !jsonOutput {
+					color.Yellow("Warning: error closing database: %v\n", err)
+				}
+			}
 
 			if !jsonOutput {
 				color.Green("✓ Version updated\n\n")
@@ -369,7 +415,7 @@ This command:
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":           "success",
-				"current_database": beads.CanonicalDatabaseName,
+				"current_database": cfg.Database,
 				"version":          Version,
 				"migrated":         needsMigration,
 				"version_updated":  needsVersionUpdate,
@@ -377,7 +423,7 @@ This command:
 			})
 		} else {
 			fmt.Println("\nMigration complete!")
-			fmt.Printf("Current database: beads.db (version %s)\n", Version)
+			fmt.Printf("Current database: %s (version %s)\n", cfg.Database, Version)
 		}
 	},
 }
@@ -580,6 +626,33 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		fmt.Printf("  Old: %s\n", oldDisplay)
 		fmt.Printf("  New: %s\n", newRepoID[:8])
 	}
+}
+
+// loadOrCreateConfig loads config.json or creates default if not found
+func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Create default if no config exists
+	if cfg == nil {
+		cfg = configfile.DefaultConfig(Version)
+	}
+	
+	return cfg, nil
+}
+
+// cleanupWALFiles removes orphaned WAL and SHM files for a given database path
+func cleanupWALFiles(dbPath string) error {
+	walPath := dbPath + "-wal"
+	shmPath := dbPath + "-shm"
+	
+	// Best effort - don't fail if these don't exist
+	_ = os.Remove(walPath)
+	_ = os.Remove(shmPath)
+	
+	return nil
 }
 
 func init() {
