@@ -524,16 +524,20 @@ bd sync
 - User might think you pushed but JSONL is still dirty
 - `bd sync` forces immediate flush/commit/push
 
-**Alternative**: Install git hooks for automatic flush on commit:
+**STRONGLY RECOMMENDED: Install git hooks for automatic sync** (prevents stale JSONL problems):
 
 ```bash
-# One-time setup
+# One-time setup - run this in each beads workspace
 ./examples/git-hooks/install.sh
 ```
 
 This installs:
 - **pre-commit** - Flushes pending changes immediately before commit (bypasses 30s debounce)
 - **post-merge** - Imports updated JSONL after pull/merge (guaranteed sync)
+- **pre-push** - Exports database to JSONL before push (prevents stale JSONL from reaching remote)
+
+**Why git hooks matter:**
+Without the pre-push hook, you can have database changes committed locally but stale JSONL pushed to remote, causing multi-workspace divergence. The hooks guarantee DB ↔ JSONL consistency.
 
 See [examples/git-hooks/README.md](examples/git-hooks/README.md) for details.
 
