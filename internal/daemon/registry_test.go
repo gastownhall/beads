@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,10 +13,14 @@ func TestRegistryBasics(t *testing.T) {
 	tmpDir := t.TempDir()
 	registryPath := filepath.Join(tmpDir, ".beads", "registry.json")
 
-	// Override the registry path for testing
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	// Override the registry path for testing (platform-specific)
+	homeEnv := "HOME"
+	if runtime.GOOS == "windows" {
+		homeEnv = "USERPROFILE"
+	}
+	oldHome := os.Getenv(homeEnv)
+	os.Setenv(homeEnv, tmpDir)
+	defer os.Setenv(homeEnv, oldHome)
 
 	registry, err := NewRegistry()
 	if err != nil {
@@ -182,9 +187,15 @@ func TestRegistryStaleCleanup(t *testing.T) {
 func TestRegistryEmptyArrayNotNull(t *testing.T) {
 	tmpDir := t.TempDir()
 	registryPath := filepath.Join(tmpDir, ".beads", "registry.json")
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	
+	// Override the registry path for testing (platform-specific)
+	homeEnv := "HOME"
+	if runtime.GOOS == "windows" {
+		homeEnv = "USERPROFILE"
+	}
+	oldHome := os.Getenv(homeEnv)
+	os.Setenv(homeEnv, tmpDir)
+	defer os.Setenv(homeEnv, oldHome)
 
 	registry, err := NewRegistry()
 	if err != nil {

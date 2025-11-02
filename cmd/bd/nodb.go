@@ -115,7 +115,7 @@ func loadIssuesFromJSONL(path string) ([]*types.Issue, error) {
 // 1. issue-prefix from config.yaml (if set)
 // 2. Common prefix from existing issues (if all share same prefix)
 // 3. Current directory name (fallback)
-func detectPrefix(beadsDir string, memStore *memory.MemoryStorage) (string, error) {
+func detectPrefix(_ string, memStore *memory.MemoryStorage) (string, error) {
 	// Check config.yaml for issue-prefix
 	configPrefix := config.GetString("issue-prefix")
 	if configPrefix != "" {

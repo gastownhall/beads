@@ -210,7 +210,7 @@ func checkForMergeConflicts(jsonlData []byte, jsonlPath string) error {
 	return nil
 }
 
-func parseJSONL(jsonlData []byte, notify Notifier) ([]*types.Issue, error) {
+func parseJSONL(jsonlData []byte, _ Notifier) ([]*types.Issue, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
 	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024)
 	var allIssues []*types.Issue

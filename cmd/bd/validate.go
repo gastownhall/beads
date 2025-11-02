@@ -208,7 +208,7 @@ func (r *validationResults) toJSON() map[string]interface{} {
 	return output
 }
 
-func (r *validationResults) print(fixAll bool) {
+func (r *validationResults) print(_ bool) {
 	green := color.New(color.FgGreen).SprintFunc()
 	yellow := color.New(color.FgYellow).SprintFunc()
 	red := color.New(color.FgRed).SprintFunc()
@@ -326,7 +326,7 @@ func validateOrphanedDeps(ctx context.Context, allIssues []*types.Issue, fix boo
 	return result
 }
 
-func validateDuplicates(ctx context.Context, allIssues []*types.Issue, fix bool) checkResult {
+func validateDuplicates(_ context.Context, allIssues []*types.Issue, fix bool) checkResult {
 	result := checkResult{name: "duplicates"}
 
 	// Find duplicates
@@ -350,7 +350,7 @@ func validateDuplicates(ctx context.Context, allIssues []*types.Issue, fix bool)
 	return result
 }
 
-func validatePollution(ctx context.Context, allIssues []*types.Issue, fix bool) checkResult {
+func validatePollution(_ context.Context, allIssues []*types.Issue, fix bool) checkResult {
 	result := checkResult{name: "test pollution"}
 
 	// Detect pollution
@@ -369,7 +369,7 @@ func validatePollution(ctx context.Context, allIssues []*types.Issue, fix bool) 
 	return result
 }
 
-func validateGitConflicts(ctx context.Context, fix bool) checkResult {
+func validateGitConflicts(_ context.Context, fix bool) checkResult {
 	result := checkResult{name: "git conflicts"}
 
 	// Check JSONL file for conflict markers

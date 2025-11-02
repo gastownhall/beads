@@ -45,18 +45,18 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 	
 	// Sync in sequence: A -> B -> C
 	t.Log("Clone A syncing")
-	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, "./bd", "sync")
+	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, bdPath, "sync")
 	
 	t.Log("Clone B syncing")
-	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "sync")
+	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	
 	t.Log("Clone C syncing")
-	runCmdOutputWithEnvAllowError(t, cloneC, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "sync")
+	runCmdOutputWithEnvAllowError(t, cloneC, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	
 	// Do multiple sync rounds to ensure convergence (issues propagate step-by-step)
 	for round := 0; round < 3; round++ {
 		for _, clone := range []string{cloneA, cloneB, cloneC} {
-			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "sync")
+			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 		}
 	}
 	
@@ -107,15 +107,15 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 	
 	// Sync both
 	t.Log("Clone A syncing")
-	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, "./bd", "sync")
+	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, bdPath, "sync")
 	
 	t.Log("Clone B syncing")
-	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "sync")
+	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	
 	// Do multiple sync rounds to ensure convergence
 	for round := 0; round < 2; round++ {
 		for _, clone := range []string{cloneA, cloneB} {
-			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, "./bd", "sync")
+			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 		}
 	}
 	

@@ -330,7 +330,7 @@ func parseMarkdownFile(path string) ([]*IssueTemplate, error) {
 }
 
 // createIssuesFromMarkdown parses a markdown file and creates multiple issues from it
-func createIssuesFromMarkdown(cmd *cobra.Command, filepath string) {
+func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	// Parse markdown file
 	templates, err := parseMarkdownFile(filepath)
 	if err != nil {

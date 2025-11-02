@@ -4,10 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestDaemonLockBasics(t *testing.T) {
+	// Skip on Windows - file locking prevents reading lock file while locked
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file locking prevents reading locked files")
+	}
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "beads.db")
 
