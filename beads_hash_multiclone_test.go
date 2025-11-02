@@ -20,9 +20,10 @@ func getBDPath() string {
 }
 
 // getBDCommand returns the platform-specific command to run bd from current dir
+// Always uses forward slashes for sh script compatibility (Git for Windows uses sh)
 func getBDCommand() string {
 	if runtime.GOOS == "windows" {
-		return ".\\bd.exe"
+		return "./bd.exe"
 	}
 	return "./bd"
 }
@@ -236,7 +237,8 @@ func resolveConflictMarkersIfPresent(t *testing.T, cloneDir string) {
 func installGitHooks(t *testing.T, repoDir string) {
 	t.Helper()
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
-	bdCmd := getBDCommand()
+	// Ensure POSIX-style path for sh scripts (even on Windows)
+	bdCmd := strings.ReplaceAll(getBDCommand(), "\\", "/")
 	
 	preCommit := fmt.Sprintf(`#!/bin/sh
 %s --no-daemon export -o .beads/issues.jsonl >/dev/null 2>&1 || true
