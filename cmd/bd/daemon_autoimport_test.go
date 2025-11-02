@@ -131,6 +131,9 @@ func TestDaemonAutoImportAfterGitPull(t *testing.T) {
 		// Agent B does git pull (updates JSONL on disk)
 		runGitCmd(t, clone2Dir, "pull")
 		
+		// Wait for filesystem to settle after git operations
+		time.Sleep(50 * time.Millisecond)
+		
 		// Start daemon server in clone2
 		socketPath := filepath.Join(clone2BeadsDir, "bd.sock")
 		os.Remove(socketPath) // Ensure clean state
@@ -329,6 +332,9 @@ func TestDaemonAutoImportDataCorruption(t *testing.T) {
 	// 2. Agent B does git pull (JSONL updated on disk)
 	runGitCmd(t, clone2Dir, "pull")
 	
+	// Wait for filesystem to settle after git operations
+	time.Sleep(50 * time.Millisecond)
+	
 	// 3. Agent B daemon exports STALE data (if auto-import doesn't work)
 	// This would overwrite Agent A's closure with old "open" status
 	
@@ -364,7 +370,7 @@ func TestDaemonAutoImportDataCorruption(t *testing.T) {
 	
 	client.SetDatabasePath(clone2DBPath)
 	
-	resp, err := client.Execute("get_issue", map[string]string{"id": issueID})
+	resp, err := client.Execute("show", map[string]string{"id": issueID})
 	if err != nil {
 		t.Fatalf("Failed to get issue: %v", err)
 	}

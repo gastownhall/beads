@@ -135,8 +135,10 @@ func TestMetricsSnapshot(t *testing.T) {
 	})
 
 	t.Run("uptime", func(t *testing.T) {
-		if snapshot.UptimeSeconds <= 0 {
-			t.Error("Expected positive uptime")
+		// The uptime calculation uses math.Ceil and ensures minimum 1 second
+		// if any time has passed. This should always be >= 1.
+		if snapshot.UptimeSeconds < 1 {
+			t.Errorf("Expected uptime >= 1, got %f", snapshot.UptimeSeconds)
 		}
 	})
 

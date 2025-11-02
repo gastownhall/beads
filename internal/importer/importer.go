@@ -61,10 +61,9 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	}
 
 	// Compute content hashes for all incoming issues (bd-95)
+	// Always recompute to avoid stale/incorrect JSONL hashes (bd-1231)
 	for _, issue := range issues {
-		if issue.ContentHash == "" {
-			issue.ContentHash = issue.ComputeContentHash()
-		}
+		issue.ContentHash = issue.ComputeContentHash()
 	}
 
 	// Get or create SQLite store

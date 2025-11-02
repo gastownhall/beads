@@ -17,13 +17,15 @@ func TestFindDatabasePathEnvVar(t *testing.T) {
 		}
 	}()
 
-	// Set env var to a test path
-	testPath := "/test/path/test.db"
+	// Set env var to a test path (platform-agnostic)
+	testPath := filepath.Join("test", "path", "test.db")
 	_ = os.Setenv("BEADS_DB", testPath)
 
 	result := FindDatabasePath()
-	if result != testPath {
-		t.Errorf("Expected '%s', got '%s'", testPath, result)
+	// FindDatabasePath canonicalizes to absolute path
+	expectedPath, _ := filepath.Abs(testPath)
+	if result != expectedPath {
+		t.Errorf("Expected '%s', got '%s'", expectedPath, result)
 	}
 }
 

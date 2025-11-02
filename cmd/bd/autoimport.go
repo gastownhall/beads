@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -75,6 +76,10 @@ func checkGitForIssues() (int, string) {
 		return 0, ""
 	}
 
+	// Clean paths to ensure consistent separators
+	beadsDir = filepath.Clean(beadsDir)
+	gitRoot = filepath.Clean(gitRoot)
+	
 	relBeads, err := filepath.Rel(gitRoot, beadsDir)
 	if err != nil {
 		return 0, ""
@@ -133,7 +138,21 @@ func findGitRoot() string {
 	if err != nil {
 		return ""
 	}
-	return string(bytes.TrimSpace(output))
+	root := string(bytes.TrimSpace(output))
+	
+	// Normalize path for the current OS
+	// Git on Windows may return paths with forward slashes (C:/Users/...)
+	// or Unix-style paths (/c/Users/...), convert to native format
+	if runtime.GOOS == "windows" {
+		if len(root) > 0 && root[0] == '/' && len(root) >= 3 && root[2] == '/' {
+			// Convert /c/Users/... to C:\Users\...
+			root = strings.ToUpper(string(root[1])) + ":" + filepath.FromSlash(root[2:])
+		} else {
+			// Convert C:/Users/... to C:\Users\...
+			root = filepath.FromSlash(root)
+		}
+	}
+	return root
 }
 
 // importFromGit imports issues from git HEAD

@@ -227,7 +227,7 @@ This command:
 			}
 
 			// Clean up orphaned WAL files from old database
-			_ = cleanupWALFiles(oldDB.path)
+			cleanupWALFiles(oldDB.path)
 
 			// Update current DB reference
 			currentDB = oldDB
@@ -246,7 +246,7 @@ This command:
 			}
 
 			// Clean up WAL files before opening to avoid "disk I/O error"
-			_ = cleanupWALFiles(currentDB.path)
+			cleanupWALFiles(currentDB.path)
 
 			store, err := sqlite.New(currentDB.path)
 			if err != nil {
@@ -644,15 +644,13 @@ func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
 }
 
 // cleanupWALFiles removes orphaned WAL and SHM files for a given database path
-func cleanupWALFiles(dbPath string) error {
+func cleanupWALFiles(dbPath string) {
 	walPath := dbPath + "-wal"
 	shmPath := dbPath + "-shm"
 	
 	// Best effort - don't fail if these don't exist
 	_ = os.Remove(walPath)
 	_ = os.Remove(shmPath)
-	
-	return nil
 }
 
 func init() {

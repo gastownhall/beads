@@ -2,6 +2,7 @@ package beads_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,14 @@ import (
 func getBDPath() string {
 	if runtime.GOOS == "windows" {
 		return "./bd.exe"
+	}
+	return "./bd"
+}
+
+// getBDCommand returns the platform-specific command to run bd from current dir
+func getBDCommand() string {
+	if runtime.GOOS == "windows" {
+		return ".\\bd.exe"
 	}
 	return "./bd"
 }
@@ -152,16 +161,17 @@ func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 	t.Helper()
 	cloneDir := filepath.Join(tmpDir, "clone-"+strings.ToLower(name))
 	runCmd(t, tmpDir, "git", "clone", remoteDir, cloneDir)
-	copyFile(t, bdPath, filepath.Join(cloneDir, "bd"))
+	bdCmd := getBDCommand()
+	copyFile(t, bdPath, filepath.Join(cloneDir, filepath.Base(bdCmd)))
 	
 	if name == "A" {
-		runCmd(t, cloneDir, "./bd", "init", "--quiet", "--prefix", "test")
+		runCmd(t, cloneDir, bdCmd, "init", "--quiet", "--prefix", "test")
 		runCmd(t, cloneDir, "git", "add", ".beads")
 		runCmd(t, cloneDir, "git", "commit", "-m", "Initialize beads")
 		runCmd(t, cloneDir, "git", "push", "origin", "master")
 	} else {
 		runCmd(t, cloneDir, "git", "pull", "origin", "master")
-		runCmd(t, cloneDir, "./bd", "init", "--quiet", "--prefix", "test")
+		runCmd(t, cloneDir, bdCmd, "init", "--quiet", "--prefix", "test")
 	}
 	
 	installGitHooks(t, cloneDir)
@@ -170,7 +180,7 @@ func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 
 func createIssueInClone(t *testing.T, cloneDir, title string) {
 	t.Helper()
-	runCmdWithEnv(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, "./bd", "create", title, "-t", "task", "-p", "1", "--json")
+	runCmdWithEnv(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, getBDCommand(), "create", title, "-t", "task", "-p", "1", "--json")
 }
 
 func getTitlesFromClone(t *testing.T, cloneDir string) map[string]bool {
@@ -178,7 +188,7 @@ func getTitlesFromClone(t *testing.T, cloneDir string) map[string]bool {
 	listJSON := runCmdOutputWithEnv(t, cloneDir, map[string]string{
 		"BEADS_NO_DAEMON":   "1",
 		"BD_NO_AUTO_IMPORT": "1",
-	}, "./bd", "list", "--json")
+	}, getBDCommand(), "list", "--json")
 	
 	jsonStart := strings.Index(listJSON, "[")
 	if jsonStart == -1 {
@@ -226,16 +236,17 @@ func resolveConflictMarkersIfPresent(t *testing.T, cloneDir string) {
 func installGitHooks(t *testing.T, repoDir string) {
 	t.Helper()
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	bdCmd := getBDCommand()
 	
-	preCommit := `#!/bin/sh
-./bd --no-daemon export -o .beads/issues.jsonl >/dev/null 2>&1 || true
+	preCommit := fmt.Sprintf(`#!/bin/sh
+%s --no-daemon export -o .beads/issues.jsonl >/dev/null 2>&1 || true
 git add .beads/issues.jsonl >/dev/null 2>&1 || true
 exit 0
-`
-	postMerge := `#!/bin/sh
-./bd --no-daemon import -i .beads/issues.jsonl >/dev/null 2>&1 || true
+`, bdCmd)
+	postMerge := fmt.Sprintf(`#!/bin/sh
+%s --no-daemon import -i .beads/issues.jsonl >/dev/null 2>&1 || true
 exit 0
-`
+`, bdCmd)
 	os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(preCommit), 0755)
 	os.WriteFile(filepath.Join(hooksDir, "post-merge"), []byte(postMerge), 0755)
 }

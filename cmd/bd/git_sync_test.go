@@ -211,6 +211,18 @@ func configureGit(t *testing.T, dir string) {
 	runGitCmd(t, dir, "config", "user.email", "test@example.com")
 	runGitCmd(t, dir, "config", "user.name", "Test User")
 	runGitCmd(t, dir, "config", "pull.rebase", "false")
+	
+	// Create .gitignore to prevent test database files from being tracked
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	gitignoreContent := `# Test database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+`
+	if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		t.Fatalf("Failed to create .gitignore: %v", err)
+	}
 }
 
 func exportIssuesToJSONL(ctx context.Context, store *sqlite.SQLiteStorage, jsonlPath string) error {
@@ -282,6 +294,11 @@ func importJSONLToStore(ctx context.Context, store *sqlite.SQLiteStorage, dbPath
 				return err
 			}
 		}
+	}
+	
+	// Set last_import_time metadata so staleness check works
+	if err := store.SetMetadata(ctx, "last_import_time", time.Now().Format(time.RFC3339)); err != nil {
+		return err
 	}
 	
 	return nil
