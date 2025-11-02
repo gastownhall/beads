@@ -38,7 +38,7 @@ Example:
 
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		ctx := context.Background()
 

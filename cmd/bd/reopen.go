@@ -22,7 +22,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		reason, _ := cmd.Flags().GetString("reason")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		ctx := context.Background()
 		

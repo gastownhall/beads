@@ -64,7 +64,7 @@ var createCmd = &cobra.Command{
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
 		forceCreate, _ := cmd.Flags().GetBool("force")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Check for conflicting flags
 		if explicitID != "" && parentID != "" {

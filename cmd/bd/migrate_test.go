@@ -127,18 +127,18 @@ func TestFormatDBList(t *testing.T) {
 }
 
 func TestMigrateRespectsConfigJSON(t *testing.T) {
-	// Test that migrate respects custom database name from config.json
+	// Test that migrate respects custom database name from metadata.json
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		t.Fatalf("Failed to create .beads directory: %v", err)
 	}
 
-	// Create config.json with custom database name
-	configPath := filepath.Join(beadsDir, "config.json")
+	// Create metadata.json with custom database name
+	configPath := filepath.Join(beadsDir, "metadata.json")
 	configData := `{"database": "beady.db", "version": "0.21.1", "jsonl_export": "beady.jsonl"}`
 	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
-		t.Fatalf("Failed to create config.json: %v", err)
+		t.Fatalf("Failed to create metadata.json: %v", err)
 	}
 
 	// Create old database with custom name

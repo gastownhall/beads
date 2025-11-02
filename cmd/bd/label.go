@@ -79,7 +79,7 @@ var labelAddCmd = &cobra.Command{
 	Short: "Add a label to one or more issues",
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		issueIDs, label := parseLabelArgs(args)
 		
 		// Resolve partial IDs
@@ -125,7 +125,7 @@ var labelRemoveCmd = &cobra.Command{
 	Short: "Remove a label from one or more issues",
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		issueIDs, label := parseLabelArgs(args)
 		
 		// Resolve partial IDs
@@ -170,7 +170,7 @@ var labelListCmd = &cobra.Command{
 	Short: "List labels for an issue",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		ctx := context.Background()
 		
 		// Resolve partial ID first
@@ -245,7 +245,7 @@ var labelListAllCmd = &cobra.Command{
 	Use:   "list-all",
 	Short: "List all unique labels in the database",
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		ctx := context.Background()
 
 		var issues []*types.Issue

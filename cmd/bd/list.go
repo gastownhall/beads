@@ -46,7 +46,7 @@ var listCmd = &cobra.Command{
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		titleSearch, _ := cmd.Flags().GetString("title")
 	idFilter, _ := cmd.Flags().GetString("id")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Normalize labels: trim, dedupe, remove empty
 		labels = normalizeLabels(labels)

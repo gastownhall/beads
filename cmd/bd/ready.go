@@ -20,7 +20,7 @@ var readyCmd = &cobra.Command{
 		limit, _ := cmd.Flags().GetInt("limit")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		sortPolicy, _ := cmd.Flags().GetString("sort")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 
 		filter := types.WorkFilter{
 			// Leave Status empty to get both 'open' and 'in_progress' (bd-165)
@@ -153,7 +153,7 @@ var blockedCmd = &cobra.Command{
 	Use:   "blocked",
 	Short: "Show blocked issues",
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		
 		// If daemon is running but doesn't support this command, use direct storage
 		if daemonClient != nil && store == nil {
@@ -208,7 +208,7 @@ var statsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Show statistics",
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 
 		// If daemon is running, use RPC
 		if daemonClient != nil {

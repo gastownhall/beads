@@ -26,7 +26,7 @@ This helps identify:
 		days, _ := cmd.Flags().GetInt("days")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Validate status if provided
 		if status != "" && status != "open" && status != "in_progress" && status != "blocked" {

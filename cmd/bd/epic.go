@@ -22,7 +22,7 @@ var epicStatusCmd = &cobra.Command{
 	Short: "Show epic completion status",
 	Run: func(cmd *cobra.Command, args []string) {
 		eligibleOnly, _ := cmd.Flags().GetBool("eligible-only")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		var epics []*types.EpicStatus
 		var err error
@@ -115,7 +115,7 @@ var closeEligibleEpicsCmd = &cobra.Command{
 	Short: "Close epics where all children are complete",
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		var eligibleEpics []*types.EpicStatus
 

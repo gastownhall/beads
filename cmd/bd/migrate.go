@@ -100,7 +100,7 @@ This command:
 			return
 		}
 
-		// Check if target database exists and is current (use config.json name)
+		// Check if target database exists and is current (use metadata.json name)
 		targetPath := cfg.DatabasePath(beadsDir)
 		var currentDB *dbInfo
 		var oldDBs []*dbInfo
@@ -444,7 +444,7 @@ This command:
 		if !dryRun {
 			if err := cfg.Save(beadsDir); err != nil {
 				if !jsonOutput {
-					color.Yellow("Warning: failed to update config.json version: %v\n", err)
+					color.Yellow("Warning: failed to update metadata.json version: %v\n", err)
 				}
 				// Don't fail migration if config save fails
 			}
@@ -667,7 +667,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 	}
 }
 
-// loadOrCreateConfig loads config.json or creates default if not found
+// loadOrCreateConfig loads metadata.json or creates default if not found
 func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

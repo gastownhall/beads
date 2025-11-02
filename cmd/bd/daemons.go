@@ -36,7 +36,7 @@ var daemonsListCmd = &cobra.Command{
 uptime, last activity, and exclusive lock status.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		searchRoots, _ := cmd.Flags().GetStringSlice("search")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Discover daemons
 		daemons, err := daemon.DiscoverDaemons(searchRoots)
@@ -139,7 +139,7 @@ Sends shutdown command via RPC, with SIGTERM fallback if RPC fails.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		target := args[0]
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Discover all daemons
 		daemons, err := daemon.DiscoverDaemons(nil)
@@ -209,7 +209,7 @@ Supports tail mode (last N lines) and follow mode (like tail -f).`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		target := args[0]
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		follow, _ := cmd.Flags().GetBool("follow")
 		lines, _ := cmd.Flags().GetInt("lines")
 
@@ -348,7 +348,7 @@ var daemonsKillallCmd = &cobra.Command{
 Uses escalating shutdown strategy: RPC (2s) → SIGTERM (3s) → SIGKILL (1s).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		searchRoots, _ := cmd.Flags().GetStringSlice("search")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		force, _ := cmd.Flags().GetBool("force")
 
 		// Discover all daemons
@@ -411,7 +411,7 @@ var daemonsHealthCmd = &cobra.Command{
 stale sockets, version mismatches, and unresponsive daemons.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		searchRoots, _ := cmd.Flags().GetStringSlice("search")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Discover daemons
 		daemons, err := daemon.DiscoverDaemons(searchRoots)

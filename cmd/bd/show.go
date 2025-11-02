@@ -21,7 +21,7 @@ var showCmd = &cobra.Command{
 	Short: "Show issue details",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		ctx := context.Background()
 
 		// Resolve partial IDs first
@@ -346,7 +346,7 @@ var updateCmd = &cobra.Command{
 	Short: "Update one or more issues",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 		updates := make(map[string]interface{})
 
 		if cmd.Flags().Changed("status") {
@@ -710,7 +710,7 @@ var closeCmd = &cobra.Command{
 		if reason == "" {
 			reason = "Closed"
 		}
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		ctx := context.Background()
 

@@ -125,6 +125,8 @@ func TestShowCommand(t *testing.T) {
 		os.Stdout = w
 
 		// Reset command state
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
 		rootCmd.SetArgs([]string{"show", issue1.ID, "--json"})
 
 		err := rootCmd.Execute()
@@ -171,6 +173,8 @@ func TestShowCommand(t *testing.T) {
 		os.Stdout = w
 
 		// Reset command state
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
 		rootCmd.SetArgs([]string{"show", issue1.ID, issue2.ID, "--json"})
 
 		err := rootCmd.Execute()
@@ -204,6 +208,8 @@ func TestShowCommand(t *testing.T) {
 		os.Stdout = w
 
 		// Reset command state
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
 		rootCmd.SetArgs([]string{"show", issue2.ID, "--json"})
 
 		err := rootCmd.Execute()
@@ -490,6 +496,8 @@ func TestUpdateCommand(t *testing.T) {
 		os.Stdout = w
 
 		// Reset command state
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
 		rootCmd.SetArgs([]string{"update", issue.ID, "--priority", "3", "--json"})
 
 		err := rootCmd.Execute()
@@ -779,6 +787,8 @@ func TestCloseCommand(t *testing.T) {
 		os.Stdout = w
 
 		// Reset command state
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
 		rootCmd.SetArgs([]string{"close", issue.ID, "--reason", "Fixed", "--json"})
 
 		err := rootCmd.Execute()

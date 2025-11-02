@@ -54,7 +54,7 @@ Force: Delete and orphan dependents
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		cascade, _ := cmd.Flags().GetBool("cascade")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Collect issue IDs from args and/or file
 		issueIDs := make([]string, 0, len(args))

@@ -43,7 +43,7 @@ Example:
 
 		sourceIDs := args
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Validate merge operation
 		if err := validateMerge(targetID, sourceIDs); err != nil {

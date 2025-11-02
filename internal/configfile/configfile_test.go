@@ -120,7 +120,7 @@ func TestJSONLPath(t *testing.T) {
 func TestConfigPath(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
 	got := ConfigPath(beadsDir)
-	want := filepath.Join(beadsDir, "config.json")
+	want := filepath.Join(beadsDir, "metadata.json")
 	
 	if got != want {
 		t.Errorf("ConfigPath() = %q, want %q", got, want)

@@ -149,6 +149,7 @@ bd.db
 
 # Keep JSONL exports and config (source of truth for git)
 !*.jsonl
+!metadata.json
 !config.json
 `
 			if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0600); err != nil {
@@ -211,36 +212,93 @@ bd.db
 		}
 	}
 
-		// Create config.json for explicit configuration
-		if useLocalBeads {
-			cfg := configfile.DefaultConfig(Version)
-			if err := cfg.Save(localBeadsDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create config.json: %v\n", err)
+	// Create metadata.json for database metadata
+	if useLocalBeads {
+		cfg := configfile.DefaultConfig(Version)
+		if err := cfg.Save(localBeadsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+			// Non-fatal - continue anyway
+		}
+		
+		// Create config.yaml template for user preferences
+		configYamlPath := filepath.Join(localBeadsDir, "config.yaml")
+		if _, err := os.Stat(configYamlPath); os.IsNotExist(err) {
+			configYamlTemplate := `# Beads Configuration File
+# This file configures default behavior for all bd commands in this repository
+# All settings can also be set via environment variables (BD_* prefix)
+# or overridden with command-line flags
+
+# Issue prefix for this repository (used by bd init)
+# If not set, bd init will auto-detect from directory name
+# Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
+# issue-prefix: ""
+
+# Use no-db mode: load from JSONL, no SQLite, write back after each command
+# When true, bd will use .beads/issues.jsonl as the source of truth
+# instead of SQLite database
+# no-db: false
+
+# Disable daemon for RPC communication (forces direct database access)
+# no-daemon: false
+
+# Disable auto-flush of database to JSONL after mutations
+# no-auto-flush: false
+
+# Disable auto-import from JSONL when it's newer than database
+# no-auto-import: false
+
+# Enable JSON output by default
+# json: false
+
+# Default actor for audit trails (overridden by BD_ACTOR or --actor)
+# actor: ""
+
+# Path to database (overridden by BEADS_DB or --db)
+# db: ""
+
+# Auto-start daemon if not running (can also use BEADS_AUTO_START_DAEMON)
+# auto-start-daemon: true
+
+# Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
+# flush-debounce: "5s"
+
+# Integration settings (access with 'bd config get/set')
+# These are stored in the database, not in this file:
+# - jira.url
+# - jira.project
+# - linear.url
+# - linear.api-key
+# - github.org
+# - github.repo
+`
+			if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
 				// Non-fatal - continue anyway
 			}
 		}
+	}
 
-		// Check if git has existing issues to import (fresh clone scenario)
-		issueCount, jsonlPath := checkGitForIssues()
-		if issueCount > 0 {
+	// Check if git has existing issues to import (fresh clone scenario)
+	issueCount, jsonlPath := checkGitForIssues()
+	if issueCount > 0 {
 		if !quiet {
-		fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
+			fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
 		}
 		
 		if err := importFromGit(ctx, initDBPath, store, jsonlPath); err != nil {
-		if !quiet {
-		fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
-		}
-		// Non-fatal - continue with empty database
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
+			}
+			// Non-fatal - continue with empty database
 		} else if !quiet {
-		fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+			fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
 		}
-}
+	}
 
-if err := store.Close(); err != nil {
+	if err := store.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
-}
+	}
 
 // Check if we're in a git repo and hooks aren't installed
 // Do this BEFORE quiet mode return so hooks get installed for agents

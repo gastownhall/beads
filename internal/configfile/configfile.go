@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-const ConfigFileName = "config.json"
+const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database     string `json:"database"`
@@ -32,7 +32,31 @@ func Load(beadsDir string) (*Config, error) {
 	
 	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
-		return nil, nil
+		// Try legacy config.json location (migration path)
+		legacyPath := filepath.Join(beadsDir, "config.json")
+		data, err = os.ReadFile(legacyPath) // #nosec G304 - controlled path from config
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading legacy config: %w", err)
+		}
+		
+		// Migrate: parse legacy config, save as metadata.json, remove old file
+		var cfg Config
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parsing legacy config: %w", err)
+		}
+		
+		// Save to new location
+		if err := cfg.Save(beadsDir); err != nil {
+			return nil, fmt.Errorf("migrating config to metadata.json: %w", err)
+		}
+		
+		// Remove legacy file (best effort)
+		_ = os.Remove(legacyPath)
+		
+		return &cfg, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

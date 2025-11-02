@@ -78,6 +78,23 @@ var (
 	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
 )
 
+func init() {
+	// Initialize viper configuration
+	if err := config.Initialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
+	}
+
+	// Register persistent flags
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
+	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BD_ACTOR or $USER)")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	rootCmd.PersistentFlags().BoolVar(&noDaemon, "no-daemon", false, "Force direct storage mode, bypass daemon if running")
+	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
+	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
+	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables daemon and auto-sync")
+	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "bd",
 	Short: "bd - Dependency-aware issue tracker",

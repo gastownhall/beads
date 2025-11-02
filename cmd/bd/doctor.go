@@ -63,8 +63,7 @@ Examples:
   bd doctor /path/to/repo # Check specific repository
   bd doctor --json       # Machine-readable output`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Get json flag from command
-		jsonOutput, _ := cmd.Flags().GetBool("json")
+		// Use global jsonOutput set by PersistentPreRun
 
 		// Determine path to check
 		checkPath := "."
@@ -201,7 +200,7 @@ func checkInstallation(path string) doctorCheck {
 func checkDatabaseVersion(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
 	
-	// Check config.json first for custom database name
+	// Check metadata.json first for custom database name
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
 		dbPath = cfg.DatabasePath(beadsDir)
@@ -275,7 +274,7 @@ func checkDatabaseVersion(path string) doctorCheck {
 func checkIDFormat(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
 	
-	// Check config.json first for custom database name
+	// Check metadata.json first for custom database name
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
 		dbPath = cfg.DatabasePath(beadsDir)
