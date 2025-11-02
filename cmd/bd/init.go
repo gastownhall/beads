@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 var initCmd = &cobra.Command{
@@ -25,6 +26,7 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
+		branch, _ := cmd.Flags().GetString("branch")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -178,6 +180,18 @@ bd.db
 		os.Exit(1)
 		}
 
+	// Set sync.branch if specified
+	if branch != "" {
+		if err := syncbranch.Set(ctx, store, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
+			_ = store.Close()
+			os.Exit(1)
+		}
+		if !quiet {
+			fmt.Printf("  Sync branch: %s\n", branch)
+		}
+	}
+
 		// Store the bd version in metadata (for version mismatch detection)
 		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
@@ -270,6 +284,7 @@ bd.db
 # - linear.api-key
 # - github.org
 # - github.repo
+# - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)
 `
 			if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
@@ -354,6 +369,7 @@ if quiet {
 func init() {
 	initCmd.Flags().StringP("prefix", "p", "", "Issue prefix (default: current directory name)")
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
+	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
 	rootCmd.AddCommand(initCmd)
 }
 

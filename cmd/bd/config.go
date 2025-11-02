@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 var configCmd = &cobra.Command{
@@ -45,9 +47,18 @@ var configSetCmd = &cobra.Command{
 		value := args[1]
 
 		ctx := context.Background()
-		if err := store.SetConfig(ctx, key, value); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
-			os.Exit(1)
+		
+		// Special handling for sync.branch to apply validation
+		if strings.TrimSpace(key) == syncbranch.ConfigKey {
+			if err := syncbranch.Set(ctx, store, value); err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := store.SetConfig(ctx, key, value); err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		if jsonOutput {
@@ -75,7 +86,16 @@ var configGetCmd = &cobra.Command{
 		key := args[0]
 
 		ctx := context.Background()
-		value, err := store.GetConfig(ctx, key)
+		var value string
+		var err error
+		
+		// Special handling for sync.branch to support env var override
+		if strings.TrimSpace(key) == syncbranch.ConfigKey {
+			value, err = syncbranch.Get(ctx, store)
+		} else {
+			value, err = store.GetConfig(ctx, key)
+		}
+		
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting config: %v\n", err)
 			os.Exit(1)
