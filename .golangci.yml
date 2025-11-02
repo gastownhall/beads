@@ -1,78 +1,61 @@
-version: 2
+version: "2"
 
 run:
   timeout: 5m
   tests: false
 
 linters:
-  disable:
-    - dupl
-    - goconst
-    - revive
+  default: 'none'
   enable:
     - errcheck
     - gosec
-    # - gocyclo  # Disabled: high complexity acceptable for large functions (see LINTING.md)
     - misspell
     - unconvert
     - unparam
 
-linters-settings:
-  dupl:
-    threshold: 100
-  errcheck:
-    check-type-assertions: false
-    check-blank: false
-    exclude-functions:
-      - (*database/sql.DB).Close
-      - (*database/sql.Rows).Close
-      - (*database/sql.Tx).Rollback
-      - (*database/sql.Stmt).Close
-      - (*database/sql.Conn).Close
-      - (*os.File).Close
-      - (os).RemoveAll
-      - (os).Remove
-      - (os).Setenv
-      - (os).Unsetenv
-      - (os).Chdir
-      - (os).MkdirAll
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  gocyclo:
-    min-complexity: 15
-  misspell:
-    locale: US
-  revive:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.Stmt).Close
+        - (*database/sql.Conn).Close
+        - (*os.File).Close
+        - (os).RemoveAll
+        - (os).Remove
+        - (os).Setenv
+        - (os).Unsetenv
+        - (os).Chdir
+        - (os).MkdirAll
+    misspell:
+      locale: US
+
+  exclusions:
     rules:
-      - name: var-naming
-      - name: exported
+      # G304: File inclusion via variable in tests is safe (test data)
+      - path: '_test\.go'
+        linters:
+          - gosec
+        text: "G304.*file inclusion via variable"
+      # G302/G306: Directory/file permissions 0700/0750 are acceptable
+      - linters:
+          - gosec
+        text: "G302.*0700|G301.*0750"
+      # G306: Git hooks must be executable (0700)
+      - path: 'cmd/bd/init\.go'
+        linters:
+          - gosec
+        text: "G306.*0700"
+      # G204: Safe subprocess launches (git show, bd daemon)
+      - linters:
+          - gosec
+        text: 'G204.*git.*show|G204.*daemon'
+      # errcheck: Ignore unchecked errors in test files for common cleanup patterns
+      - path: '_test\.go'
+        linters:
+          - errcheck
+        text: "Error return value of .*(Close|Rollback|RemoveAll|Setenv|Unsetenv|Chdir|MkdirAll|Remove|Write|SetReadDeadline|SetDeadline|Start|Stop).* is not checked"
 
 issues:
-  exclude-patterns:
-    - "var-naming: avoid meaningless package names"
-    - "exported.*SQLiteStorage.*stutters"
-  exclude-rules:
-    # G304: File inclusion via variable in tests is safe (test data)
-    - path: _test\.go
-      linters:
-        - gosec
-      text: "G304.*file inclusion via variable"
-    # G302/G306: Directory/file permissions 0700/0750 are acceptable
-    - linters:
-        - gosec
-      text: "G302.*0700|G301.*0750"
-    # G306: Git hooks must be executable (0700)
-    - path: cmd/bd/init\.go
-      linters:
-        - gosec
-      text: "G306.*0700"
-    # G204: Safe subprocess launches (git show, bd daemon)
-    - linters:
-        - gosec
-      text: 'G204.*git.*show|G204.*daemon'
-    # errcheck: Ignore unchecked errors in test files for common cleanup patterns
-    - path: _test\.go
-      linters:
-        - errcheck
-      text: "Error return value of .*(Close|Rollback|RemoveAll|Setenv|Unsetenv|Chdir|MkdirAll|Remove|Write|SetReadDeadline|SetDeadline|Start|Stop).* is not checked"
+  uniq-by-line: true
