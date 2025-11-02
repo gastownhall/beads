@@ -717,6 +717,36 @@ rm .beads/.exclusive-lock
 - Hash IDs eliminate collisions - same ID with different content is a normal update
 - Use `--id` flag with `bd create` to partition ID space for parallel workers (e.g., `worker1-100`, `worker2-500`)
 
+### Checking GitHub Issues and PRs
+
+**IMPORTANT**: When asked to check GitHub issues or PRs, use command-line tools like `gh` instead of browser/playwright tools.
+
+**Preferred approach:**
+```bash
+# List open issues with details
+gh issue list --limit 30
+
+# List open PRs
+gh pr list --limit 30
+
+# View specific issue
+gh issue view 201
+```
+
+**Then provide an in-conversation summary** highlighting:
+- Urgent/critical issues (regressions, bugs, broken builds)
+- Common themes or patterns
+- Feature requests with high engagement
+- Items that need immediate attention
+
+**Why this matters:**
+- Browser tools consume more tokens and are slower
+- CLI summaries are easier to scan and discuss
+- Keeps the conversation focused and efficient
+- Better for quick triage and prioritization
+
+**Do NOT use:** `browser_navigate`, `browser_snapshot`, or other playwright tools for GitHub PR/issue reviews unless specifically requested by the user.
+
 ## Building and Testing
 
 ```bash
