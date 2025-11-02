@@ -34,7 +34,7 @@ func NewRegistry() (*Registry, error) {
 	}
 
 	beadsDir := filepath.Join(home, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create .beads directory: %w", err)
 	}
 

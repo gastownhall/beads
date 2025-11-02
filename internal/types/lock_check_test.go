@@ -36,7 +36,7 @@ func TestShouldSkipDatabase(t *testing.T) {
 			Version:   "1.0.0",
 		}
 		data, _ := json.Marshal(lock)
-		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		if err := os.WriteFile(lockPath, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		defer os.Remove(lockPath)
@@ -69,7 +69,7 @@ func TestShouldSkipDatabase(t *testing.T) {
 			Version:   "1.0.0",
 		}
 		data, _ := json.Marshal(lock)
-		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		if err := os.WriteFile(lockPath, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		defer os.Remove(lockPath)
@@ -115,7 +115,7 @@ func TestShouldSkipDatabase(t *testing.T) {
 			Version:   "1.0.0",
 		}
 		data, _ := json.Marshal(lock)
-		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		if err := os.WriteFile(lockPath, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		defer os.Remove(lockPath)
@@ -142,7 +142,7 @@ func TestShouldSkipDatabase(t *testing.T) {
 			Version:   "1.0.0",
 		}
 		data, _ := json.Marshal(lock)
-		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		if err := os.WriteFile(lockPath, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		defer os.Remove(lockPath)

@@ -44,10 +44,10 @@ func TestDetermineDatabasePath(t *testing.T) {
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	dbPath := filepath.Join(beadsDir, "beads.db")
 
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		t.Fatalf("Failed to create beads dir: %v", err)
 	}
-	if err := os.WriteFile(dbPath, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(dbPath, []byte("test"), 0600); err != nil {
 		t.Fatalf("Failed to create db file: %v", err)
 	}
 

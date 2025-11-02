@@ -38,6 +38,11 @@ linters:
         linters:
           - gosec
         text: "G304"
+      # G306: File permissions 0644 in tests are acceptable (test fixtures)
+      - path: '_test\.go'
+        linters:
+          - gosec
+        text: "G306"
       # G304: Safe file reads from known JSONL and error paths
       - path: 'cmd/bd/autoflush\.go|internal/daemon/discovery\.go|internal/daemonrunner/sync\.go'
         linters:
