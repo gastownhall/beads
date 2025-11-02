@@ -637,8 +637,15 @@ func checkMultipleJSONLFiles(path string) doctorCheck {
 }
 
 func checkDaemonStatus(path string) doctorCheck {
-	// Import daemon discovery from internal package
-	daemons, err := daemon.DiscoverDaemons([]string{path})
+	// Normalize path for reliable comparison (handles symlinks)
+	wsNorm, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		// Fallback to absolute path if EvalSymlinks fails
+		wsNorm, _ = filepath.Abs(path)
+	}
+
+	// Use global daemon discovery (registry-based)
+	daemons, err := daemon.DiscoverDaemons(nil)
 	if err != nil {
 		return doctorCheck{
 			Name:    "Daemon Health",
@@ -648,11 +655,32 @@ func checkDaemonStatus(path string) doctorCheck {
 		}
 	}
 
-	// Filter to this workspace
+	// Filter to this workspace using normalized paths
 	var workspaceDaemons []daemon.DaemonInfo
 	for _, d := range daemons {
-		if d.WorkspacePath == path {
+		dPath, err := filepath.EvalSymlinks(d.WorkspacePath)
+		if err != nil {
+			dPath, _ = filepath.Abs(d.WorkspacePath)
+		}
+		if dPath == wsNorm {
 			workspaceDaemons = append(workspaceDaemons, d)
+		}
+	}
+
+	// Check for stale socket directly (catches cases where RPC failed so WorkspacePath is empty)
+	beadsDir := filepath.Join(path, ".beads")
+	socketPath := filepath.Join(beadsDir, "bd.sock")
+	if _, err := os.Stat(socketPath); err == nil {
+		// Socket exists - try to connect
+		if len(workspaceDaemons) == 0 {
+			// Socket exists but no daemon found in registry - likely stale
+			return doctorCheck{
+				Name:    "Daemon Health",
+				Status:  statusWarning,
+				Message: "Stale daemon socket detected",
+				Detail:  fmt.Sprintf("Socket exists at %s but daemon is not responding", socketPath),
+				Fix:     "Run 'bd daemons killall' to clean up stale sockets",
+			}
 		}
 	}
 
@@ -664,13 +692,24 @@ func checkDaemonStatus(path string) doctorCheck {
 		}
 	}
 
-	// Check for version mismatches
+	// Warn if multiple daemons for same workspace
+	if len(workspaceDaemons) > 1 {
+		return doctorCheck{
+			Name:    "Daemon Health",
+			Status:  statusWarning,
+			Message: fmt.Sprintf("Multiple daemons detected for this workspace (%d)", len(workspaceDaemons)),
+			Fix:     "Run 'bd daemons killall' to clean up duplicate daemons",
+		}
+	}
+
+	// Check for stale or version mismatched daemons
 	for _, d := range workspaceDaemons {
 		if !d.Alive {
 			return doctorCheck{
 				Name:    "Daemon Health",
 				Status:  statusWarning,
 				Message: "Stale daemon detected",
+				Detail:  fmt.Sprintf("PID %d is not alive", d.PID),
 				Fix:     "Run 'bd daemons killall' to clean up stale daemons",
 			}
 		}
