@@ -11,6 +11,9 @@ pkgs.buildGoModule {
   # Go module dependencies hash (computed via nix build)
   vendorHash = "sha256-DJqTiLGLZNGhHXag50gHFXTVXCBdj8ytbYbPL3QAq8M=";
 
+  # Git is required for tests
+  nativeBuildInputs = [ pkgs.git ];
+
   meta = with pkgs.lib; {
     description = "beads (bd) - An issue tracker designed for AI-supervised coding workflows";
     homepage = "https://github.com/steveyegge/beads";
