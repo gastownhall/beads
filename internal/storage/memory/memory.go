@@ -278,6 +278,35 @@ func (m *MemoryStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	return &issueCopy, nil
 }
 
+// GetIssueByExternalRef retrieves an issue by external reference
+func (m *MemoryStorage) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Linear search through all issues to find match by external_ref
+	for _, issue := range m.issues {
+		if issue.ExternalRef != nil && *issue.ExternalRef == externalRef {
+			// Return a copy to avoid mutations
+			issueCopy := *issue
+
+			// Attach dependencies
+			if deps, ok := m.dependencies[issue.ID]; ok {
+				issueCopy.Dependencies = deps
+			}
+
+			// Attach labels
+			if labels, ok := m.labels[issue.ID]; ok {
+				issueCopy.Labels = labels
+			}
+
+			return &issueCopy, nil
+		}
+	}
+
+	// Not found
+	return nil, nil
+}
+
 // UpdateIssue updates fields on an issue
 func (m *MemoryStorage) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	m.mu.Lock()

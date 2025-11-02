@@ -286,6 +286,76 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	return &issue, nil
 }
 
+// GetIssueByExternalRef retrieves an issue by external reference
+func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
+	var issue types.Issue
+	var closedAt sql.NullTime
+	var estimatedMinutes sql.NullInt64
+	var assignee sql.NullString
+	var externalRefCol sql.NullString
+	var compactedAt sql.NullTime
+	var originalSize sql.NullInt64
+	var contentHash sql.NullString
+	var compactedAtCommit sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
+		       status, priority, issue_type, assignee, estimated_minutes,
+		       created_at, updated_at, closed_at, external_ref,
+		       compaction_level, compacted_at, compacted_at_commit, original_size
+		FROM issues
+		WHERE external_ref = ?
+	`, externalRef).Scan(
+		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
+		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
+		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
+		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issue by external_ref: %w", err)
+	}
+
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
+	if closedAt.Valid {
+		issue.ClosedAt = &closedAt.Time
+	}
+	if estimatedMinutes.Valid {
+		mins := int(estimatedMinutes.Int64)
+		issue.EstimatedMinutes = &mins
+	}
+	if assignee.Valid {
+		issue.Assignee = assignee.String
+	}
+	if externalRefCol.Valid {
+		issue.ExternalRef = &externalRefCol.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if compactedAtCommit.Valid {
+		issue.CompactedAtCommit = &compactedAtCommit.String
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
+	}
+
+	// Fetch labels for this issue
+	labels, err := s.GetLabels(ctx, issue.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get labels: %w", err)
+	}
+	issue.Labels = labels
+
+	return &issue, nil
+}
+
 // Allowed fields for update to prevent SQL injection
 var allowedUpdateFields = map[string]bool{
 	"status":              true,

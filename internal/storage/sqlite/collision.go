@@ -35,9 +35,12 @@ type CollisionDetail struct {
 // DetectCollisions compares incoming JSONL issues against DB state
 // It distinguishes between:
 //  1. Exact match (idempotent) - ID and content are identical
-//  2. ID match but different content (collision) - same ID, different fields
+//  2. ID match but different content (collision/update) - same ID, different fields
 //  3. New issue - ID doesn't exist in DB
-//  4. Rename detected - Different ID but same content (from prior remap)
+//  4. External ref match - Different ID but same external_ref (update from external system)
+//
+// When an incoming issue has an external_ref, we match by external_ref first,
+// then by ID. This enables re-syncing from external systems (Jira, GitHub, Linear).
 //
 // Returns a CollisionResult categorizing all incoming issues.
 func DetectCollisions(ctx context.Context, s *SQLiteStorage, incomingIssues []*types.Issue) (*CollisionResult, error) {
@@ -56,21 +59,38 @@ func DetectCollisions(ctx context.Context, s *SQLiteStorage, incomingIssues []*t
 
 	// Check each incoming issue
 	for _, incoming := range incomingIssues {
-		existing, err := s.GetIssue(ctx, incoming.ID)
-		if err != nil || existing == nil {
-			// Issue doesn't exist in DB - it's new
+		var existing *types.Issue
+		var err error
+
+		// If incoming issue has external_ref, try matching by external_ref first
+		if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+			existing, err = s.GetIssueByExternalRef(ctx, *incoming.ExternalRef)
+			if err != nil {
+				return nil, fmt.Errorf("failed to lookup by external_ref: %w", err)
+			}
+		}
+
+		// If no external_ref match, try matching by ID
+		if existing == nil {
+			existing, err = s.GetIssue(ctx, incoming.ID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to lookup by ID: %w", err)
+			}
+		}
+
+		// No match found - it's a new issue
+		if existing == nil {
 			result.NewIssues = append(result.NewIssues, incoming.ID)
 			continue
 		}
 
-		// Issue ID exists - check if content matches
+		// Found a match - check if content matches
 		conflictingFields := compareIssues(existing, incoming)
 		if len(conflictingFields) == 0 {
 			// Exact match - idempotent import
 			result.ExactMatches = append(result.ExactMatches, incoming.ID)
 		} else {
-			// Same ID, different content - collision
-			// With hash IDs, this shouldn't happen unless manually edited
+			// Same ID/external_ref, different content - collision (needs update)
 			result.Collisions = append(result.Collisions, &CollisionDetail{
 				ID:                incoming.ID,
 				IncomingIssue:     incoming,

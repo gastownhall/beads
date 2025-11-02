@@ -373,6 +373,14 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 	
 	dbByHash := buildHashMap(dbIssues)
 	dbByID := buildIDMap(dbIssues)
+	
+	// Build external_ref map for O(1) lookup
+	dbByExternalRef := make(map[string]*types.Issue)
+	for _, issue := range dbIssues {
+		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+			dbByExternalRef[*issue.ExternalRef] = issue
+		}
+	}
 
 	// Track what we need to create
 	var newIssues []*types.Issue
@@ -392,8 +400,60 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			continue
 		}
 		seenHashes[hash] = true
+		
+		// Phase 0: Match by external_ref first (if present)
+		// This enables re-syncing from external systems (Jira, GitHub, Linear)
+		if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+			if existing, found := dbByExternalRef[*incoming.ExternalRef]; found {
+				// Found match by external_ref - update the existing issue
+				if !opts.SkipUpdate {
+					// Check timestamps - only update if incoming is newer (bd-e55c)
+					if !incoming.UpdatedAt.After(existing.UpdatedAt) {
+						// Local version is newer or same - skip update
+						result.Unchanged++
+						continue
+					}
+					
+					// Build updates map
+					updates := make(map[string]interface{})
+					updates["title"] = incoming.Title
+					updates["description"] = incoming.Description
+					updates["status"] = incoming.Status
+					updates["priority"] = incoming.Priority
+					updates["issue_type"] = incoming.IssueType
+					updates["design"] = incoming.Design
+					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
+					updates["notes"] = incoming.Notes
+					
+					if incoming.Assignee != "" {
+						updates["assignee"] = incoming.Assignee
+					} else {
+						updates["assignee"] = nil
+					}
+					
+					if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+						updates["external_ref"] = *incoming.ExternalRef
+					} else {
+						updates["external_ref"] = nil
+					}
+					
+					// Only update if data actually changed
+					if IssueDataChanged(existing, updates) {
+						if err := sqliteStore.UpdateIssue(ctx, existing.ID, updates, "import"); err != nil {
+							return fmt.Errorf("error updating issue %s (matched by external_ref): %w", existing.ID, err)
+						}
+						result.Updated++
+					} else {
+						result.Unchanged++
+					}
+				} else {
+					result.Skipped++
+				}
+				continue
+			}
+		}
 
-		// Phase 1: Match by content hash first
+		// Phase 1: Match by content hash
 		if existing, found := dbByHash[hash]; found {
 			// Same content exists
 			if existing.ID == incoming.ID {

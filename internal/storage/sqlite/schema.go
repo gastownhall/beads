@@ -30,6 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority);
 CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee);
 CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
+CREATE INDEX IF NOT EXISTS idx_issues_external_ref ON issues(external_ref);
 
 -- Dependencies table
 CREATE TABLE IF NOT EXISTS dependencies (
