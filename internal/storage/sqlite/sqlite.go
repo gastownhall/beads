@@ -159,59 +159,18 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
-	// Generate ID if not set (inside transaction to prevent race conditions)
+	// Generate or validate ID
 	if issue.ID == "" {
 		// Generate hash-based ID with adaptive length based on database size (bd-ea2a13)
-		// Start with length determined by database size, expand on collision
-		var err error
-		
-		// Get adaptive base length based on current database size
-		baseLength, err := GetAdaptiveIDLength(ctx, conn, prefix)
+		generatedID, err := GenerateIssueID(ctx, conn, prefix, issue, actor)
 		if err != nil {
-			// Fallback to 6 on error
-			baseLength = 6
+			return err
 		}
-		
-		// Try baseLength, baseLength+1, baseLength+2, up to max of 8
-		maxLength := 8
-		if baseLength > maxLength {
-			baseLength = maxLength
-		}
-		
-		for length := baseLength; length <= maxLength; length++ {
-			// Try up to 10 nonces at each length
-			for nonce := 0; nonce < 10; nonce++ {
-				candidate := generateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-				
-				// Check if this ID already exists
-				var count int
-				err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, candidate).Scan(&count)
-				if err != nil {
-					return fmt.Errorf("failed to check for ID collision: %w", err)
-				}
-				
-				if count == 0 {
-					issue.ID = candidate
-					break
-				}
-			}
-			
-			// If we found a unique ID, stop trying longer lengths
-			if issue.ID != "" {
-				break
-			}
-		}
-		
-		if issue.ID == "" {
-			return fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
-		}
+		issue.ID = generatedID
 	} else {
 		// Validate that explicitly provided ID matches the configured prefix (bd-177)
-		// This prevents wrong-prefix bugs when IDs are manually specified
-		// Support both top-level (bd-a3f8e9) and hierarchical (bd-a3f8e9.1) IDs
-		expectedPrefix := prefix + "-"
-		if !strings.HasPrefix(issue.ID, expectedPrefix) {
-			return fmt.Errorf("issue ID '%s' does not match configured prefix '%s'", issue.ID, prefix)
+		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
+			return err
 		}
 		
 		// For hierarchical IDs (bd-a3f8e9.1), validate parent exists
@@ -232,46 +191,18 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	}
 
 	// Insert issue
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO issues (
-			id, content_hash, title, description, design, acceptance_criteria, notes,
-			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at, closed_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
-		issue.AcceptanceCriteria, issue.Notes, issue.Status,
-		issue.Priority, issue.IssueType, issue.Assignee,
-		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
-		issue.ClosedAt, issue.ExternalRef,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to insert issue: %w", err)
+	if err := insertIssue(ctx, conn, issue); err != nil {
+		return err
 	}
 
 	// Record creation event
-	eventData, err := json.Marshal(issue)
-	if err != nil {
-		// Fall back to minimal description if marshaling fails
-		eventData = []byte(fmt.Sprintf(`{"id":"%s","title":"%s"}`, issue.ID, issue.Title))
-	}
-	eventDataStr := string(eventData)
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, new_value)
-		VALUES (?, ?, ?, ?)
-	`, issue.ID, types.EventCreated, actor, eventDataStr)
-	if err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
+	if err := recordCreatedEvent(ctx, conn, issue, actor); err != nil {
+		return err
 	}
 
 	// Mark issue as dirty for incremental export
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`, issue.ID, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
+	if err := markDirty(ctx, conn, issue.ID); err != nil {
+		return err
 	}
 
 	// Commit the transaction

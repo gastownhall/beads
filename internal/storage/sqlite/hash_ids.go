@@ -2,11 +2,8 @@ package sqlite
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // getNextChildNumber atomically increments and returns the next child counter for a parent issue.
@@ -57,37 +54,4 @@ func (s *SQLiteStorage) GetNextChildID(ctx context.Context, parentID string) (st
 	return childID, nil
 }
 
-// generateHashID creates a hash-based ID for a top-level issue.
-// For child issues, use the parent ID with a numeric suffix (e.g., "bd-a3f8e9.1").
-// Supports adaptive length from 4-8 chars based on database size (bd-ea2a13).
-// Includes a nonce parameter to handle same-length collisions.
-func generateHashID(prefix, title, description, creator string, timestamp time.Time, length, nonce int) string {
-	// Combine inputs into a stable content string
-	// Include nonce to handle hash collisions
-	content := fmt.Sprintf("%s|%s|%s|%d|%d", title, description, creator, timestamp.UnixNano(), nonce)
-	
-	// Hash the content
-	hash := sha256.Sum256([]byte(content))
-	
-	// Use variable length (4-8 hex chars)
-	// length determines how many bytes to use (2, 2.5, 3, 3.5, or 4)
-	var shortHash string
-	switch length {
-	case 4:
-		shortHash = hex.EncodeToString(hash[:2])
-	case 5:
-		// 2.5 bytes: use 3 bytes but take only first 5 chars
-		shortHash = hex.EncodeToString(hash[:3])[:5]
-	case 6:
-		shortHash = hex.EncodeToString(hash[:3])
-	case 7:
-		// 3.5 bytes: use 4 bytes but take only first 7 chars
-		shortHash = hex.EncodeToString(hash[:4])[:7]
-	case 8:
-		shortHash = hex.EncodeToString(hash[:4])
-	default:
-		shortHash = hex.EncodeToString(hash[:3]) // default to 6
-	}
-	
-	return fmt.Sprintf("%s-%s", prefix, shortHash)
-}
+// generateHashID moved to ids.go (bd-0702)

@@ -3,9 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -46,68 +44,9 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
-	// Validate explicitly provided IDs and generate IDs for those that need them
-	expectedPrefix := prefix + "-"
-	usedIDs := make(map[string]bool)
-	
-	// First pass: record explicitly provided IDs
-	for i := range issues {
-		if issues[i].ID != "" {
-			// Validate that explicitly provided ID matches the configured prefix (bd-177)
-			if !strings.HasPrefix(issues[i].ID, expectedPrefix) {
-				return fmt.Errorf("issue ID '%s' does not match configured prefix '%s'", issues[i].ID, prefix)
-			}
-			usedIDs[issues[i].ID] = true
-		}
-	}
-	
-	// Second pass: generate IDs for issues that need them
-	// Hash mode: generate with adaptive length based on database size (bd-ea2a13)
-	// Get adaptive base length based on current database size
-	baseLength, err := GetAdaptiveIDLength(ctx, conn, prefix)
-	if err != nil {
-		// Fallback to 6 on error
-		baseLength = 6
-	}
-	
-	// Try baseLength, baseLength+1, baseLength+2, up to max of 8
-	maxLength := 8
-	if baseLength > maxLength {
-		baseLength = maxLength
-	}
-	
-	for i := range issues {
-		if issues[i].ID == "" {
-			var generated bool
-			// Try lengths from baseLength to maxLength with progressive fallback
-			for length := baseLength; length <= maxLength && !generated; length++ {
-				for nonce := 0; nonce < 10; nonce++ {
-					candidate := generateHashID(prefix, issues[i].Title, issues[i].Description, actor, issues[i].CreatedAt, length, nonce)
-					
-					// Check if this ID is already used in this batch or in the database
-					if usedIDs[candidate] {
-						continue
-					}
-					
-					var count int
-					err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, candidate).Scan(&count)
-					if err != nil {
-						return fmt.Errorf("failed to check for ID collision: %w", err)
-					}
-					
-					if count == 0 {
-						issues[i].ID = candidate
-						usedIDs[candidate] = true
-						generated = true
-						break
-					}
-				}
-			}
-			
-			if !generated {
-				return fmt.Errorf("failed to generate unique ID for issue %d after trying lengths 6-8 with 10 nonces each", i)
-			}
-		}
+	// Generate or validate IDs for all issues
+	if err := EnsureIDs(ctx, conn, prefix, issues, actor); err != nil {
+		return err
 	}
 	
 	// Compute content hashes
@@ -119,81 +58,19 @@ func generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	return nil
 }
 
-// bulkInsertIssues inserts all issues using a prepared statement
+// bulkInsertIssues delegates to insertIssues helper
 func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
-	stmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO issues (
-			id, content_hash, title, description, design, acceptance_criteria, notes,
-			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at, closed_at, external_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, issue := range issues {
-		_, err = stmt.ExecContext(ctx,
-			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
-			issue.AcceptanceCriteria, issue.Notes, issue.Status,
-			issue.Priority, issue.IssueType, issue.Assignee,
-			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
-			issue.ClosedAt, issue.ExternalRef,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
-		}
-	}
-	return nil
+	return insertIssues(ctx, conn, issues)
 }
 
-// bulkRecordEvents records creation events for all issues
+// bulkRecordEvents delegates to recordCreatedEvents helper
 func bulkRecordEvents(ctx context.Context, conn *sql.Conn, issues []*types.Issue, actor string) error {
-	stmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, new_value)
-		VALUES (?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare event statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, issue := range issues {
-		eventData, err := json.Marshal(issue)
-		if err != nil {
-			// Fall back to minimal description if marshaling fails
-			eventData = []byte(fmt.Sprintf(`{"id":"%s","title":"%s"}`, issue.ID, issue.Title))
-		}
-
-		_, err = stmt.ExecContext(ctx, issue.ID, types.EventCreated, actor, string(eventData))
-		if err != nil {
-			return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
-		}
-	}
-	return nil
+	return recordCreatedEvents(ctx, conn, issues, actor)
 }
 
-// bulkMarkDirty marks all issues as dirty for incremental export
+// bulkMarkDirty delegates to markDirtyBatch helper
 func bulkMarkDirty(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
-	stmt, err := conn.PrepareContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare dirty statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	dirtyTime := time.Now()
-	for _, issue := range issues {
-		_, err = stmt.ExecContext(ctx, issue.ID, dirtyTime)
-		if err != nil {
-			return fmt.Errorf("failed to mark dirty %s: %w", issue.ID, err)
-		}
-	}
-	return nil
+	return markDirtyBatch(ctx, conn, issues)
 }
 
 // CreateIssues creates multiple issues atomically in a single transaction.
