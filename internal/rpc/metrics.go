@@ -105,10 +105,10 @@ func (m *Metrics) Snapshot(activeConns int) MetricsSnapshot {
 
 	// Compute statistics outside the lock
 	uptime := time.Since(m.startTime)
-	// Round up uptime and enforce minimum of 1 second if any time has passed
+	// Round up uptime and enforce minimum of 1 second
 	// This prevents flaky tests on fast systems (especially Windows VMs)
 	uptimeSeconds := math.Ceil(uptime.Seconds())
-	if uptime > 0 && uptimeSeconds == 0 {
+	if uptimeSeconds == 0 {
 		uptimeSeconds = 1
 	}
 
