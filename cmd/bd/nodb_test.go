@@ -18,6 +18,7 @@ func TestExtractIssuePrefix(t *testing.T) {
 		{"standard ID", "bd-123", "bd"},
 		{"custom prefix", "myproject-456", "myproject"},
 		{"hash ID", "bd-abc123def", "bd"},
+		{"hyphenated prefix", "alpha-beta-1", "alpha-beta"},
 		{"no hyphen", "nohyphen", ""},
 		{"empty", "", ""},
 	}
