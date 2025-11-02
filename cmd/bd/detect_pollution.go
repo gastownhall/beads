@@ -130,9 +130,9 @@ Example:
 		if !yes {
 			fmt.Printf("\nDelete %d test issues? [y/N] ", len(polluted))
 			var response string
-			fmt.Scanln(&response)
+			_, _ = fmt.Scanln(&response)
 			if strings.ToLower(response) != "y" {
-				fmt.Println("Cancelled.")
+				fmt.Println("Canceled.")
 				return
 			}
 		}

@@ -126,17 +126,17 @@ func compareIssues(existing, incoming *types.Issue) []string {
 // hashIssueContent creates a deterministic hash of issue content (excluding ID and timestamps)
 func hashIssueContent(issue *types.Issue) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "title:%s\n", issue.Title)
-	fmt.Fprintf(h, "description:%s\n", issue.Description)
-	fmt.Fprintf(h, "status:%s\n", issue.Status)
-	fmt.Fprintf(h, "priority:%d\n", issue.Priority)
-	fmt.Fprintf(h, "type:%s\n", issue.IssueType)
-	fmt.Fprintf(h, "assignee:%s\n", issue.Assignee)
-	fmt.Fprintf(h, "design:%s\n", issue.Design)
-	fmt.Fprintf(h, "acceptance:%s\n", issue.AcceptanceCriteria)
-	fmt.Fprintf(h, "notes:%s\n", issue.Notes)
+	_, _ = fmt.Fprintf(h, "title:%s\n", issue.Title)
+	_, _ = fmt.Fprintf(h, "description:%s\n", issue.Description)
+	_, _ = fmt.Fprintf(h, "status:%s\n", issue.Status)
+	_, _ = fmt.Fprintf(h, "priority:%d\n", issue.Priority)
+	_, _ = fmt.Fprintf(h, "type:%s\n", issue.IssueType)
+	_, _ = fmt.Fprintf(h, "assignee:%s\n", issue.Assignee)
+	_, _ = fmt.Fprintf(h, "design:%s\n", issue.Design)
+	_, _ = fmt.Fprintf(h, "acceptance:%s\n", issue.AcceptanceCriteria)
+	_, _ = fmt.Fprintf(h, "notes:%s\n", issue.Notes)
 	if issue.ExternalRef != nil {
-		fmt.Fprintf(h, "external_ref:%s\n", *issue.ExternalRef)
+		_, _ = fmt.Fprintf(h, "external_ref:%s\n", *issue.ExternalRef)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

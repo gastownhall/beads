@@ -77,7 +77,7 @@ uptime, last activity, and exclusive lock status.`,
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "WORKSPACE\tPID\tVERSION\tUPTIME\tLAST ACTIVITY\tLOCK")
+		_, _ = fmt.Fprintln(w, "WORKSPACE\tPID\tVERSION\tUPTIME\tLAST ACTIVITY\tLOCK")
 
 		for _, d := range aliveDaemons {
 			workspace := d.WorkspacePath
@@ -99,11 +99,11 @@ uptime, last activity, and exclusive lock status.`,
 				lock = fmt.Sprintf("🔒 %s", d.ExclusiveLockHolder)
 			}
 
-			fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n",
-				workspace, d.PID, d.Version, uptime, lastActivity, lock)
-		}
+			_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n",
+			workspace, d.PID, d.Version, uptime, lastActivity, lock)
+			}
 
-		w.Flush()
+			_ = w.Flush()
 	},
 }
 
@@ -323,7 +323,7 @@ func tailFollow(filePath string) {
 	defer file.Close()
 
 	// Seek to end
-	file.Seek(0, io.SeekEnd)
+	_, _ = file.Seek(0, io.SeekEnd)
 
 	reader := bufio.NewReader(file)
 	for {
@@ -491,7 +491,7 @@ stale sockets, version mismatches, and unresponsive daemons.`,
 		fmt.Printf("  Unresponsive: %d\n\n", unresponsiveCount)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "WORKSPACE\tPID\tVERSION\tSTATUS\tISSUE")
+		_, _ = fmt.Fprintln(w, "WORKSPACE\tPID\tVERSION\tSTATUS\tISSUE")
 
 		for _, r := range reports {
 			workspace := r.Workspace
@@ -515,11 +515,11 @@ stale sockets, version mismatches, and unresponsive daemons.`,
 				issue = "-"
 			}
 
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				workspace, pidStr, version, status, issue)
-		}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			workspace, pidStr, version, status, issue)
+			}
 
-		w.Flush()
+			_ = w.Flush()
 
 		// Exit with error if there are any issues
 		if staleCount > 0 || mismatchCount > 0 || unresponsiveCount > 0 {

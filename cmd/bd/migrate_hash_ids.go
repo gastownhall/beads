@@ -85,7 +85,7 @@ Use --dry-run to preview changes before applying.`,
 			}
 			os.Exit(1)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		
 		// Get all issues using SearchIssues with empty query and no filters
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})

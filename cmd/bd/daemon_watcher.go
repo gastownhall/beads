@@ -87,7 +87,7 @@ func NewFileWatcher(jsonlPath string, onChanged func()) (*FileWatcher, error) {
 			// File doesn't exist yet - rely on parent dir watch
 			fmt.Fprintf(os.Stderr, "Info: JSONL file %s doesn't exist yet, watching parent directory\n", jsonlPath)
 		} else {
-			watcher.Close()
+			_ = watcher.Close()
 			if fallbackDisabled {
 				return nil, fmt.Errorf("failed to watch JSONL and BEADS_WATCHER_FALLBACK is disabled: %w", err)
 			}
@@ -148,8 +148,8 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle JSONL removal/rename (e.g., git checkout)
 				if event.Name == fw.jsonlPath && (event.Op&fsnotify.Remove != 0 || event.Op&fsnotify.Rename != 0) {
-					log.log("JSONL removed/renamed, re-establishing watch")
-					fw.watcher.Remove(fw.jsonlPath)
+				log.log("JSONL removed/renamed, re-establishing watch")
+				_ = fw.watcher.Remove(fw.jsonlPath)
 					// Retry with exponential backoff
 					fw.reEstablishWatch(ctx, log)
 					continue

@@ -600,7 +600,7 @@ Examples:
 			os.Exit(1)
 		}
 		tmpPath := tmpFile.Name()
-		defer os.Remove(tmpPath)
+		defer func() { _ = os.Remove(tmpPath) }()
 
 		// Write current value to temp file
 		if _, err := tmpFile.WriteString(currentValue); err != nil {

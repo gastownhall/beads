@@ -256,9 +256,9 @@ This command:
 					}
 					fmt.Print("\nRemove these files? [y/N] ")
 					var response string
-					fmt.Scanln(&response)
+					_, _ = fmt.Scanln(&response)
 					if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-						fmt.Println("Cleanup cancelled")
+						fmt.Println("Cleanup canceled")
 						return
 					}
 				}
@@ -302,8 +302,8 @@ This command:
 			ctx := context.Background()
 			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 			if err != nil {
-				store.Close()
-				if jsonOutput {
+			_ = store.Close()
+			if jsonOutput {
 					outputJSON(map[string]interface{}{
 						"error":   "hash_migration_failed",
 						"message": err.Error(),
@@ -319,7 +319,7 @@ This command:
 				if !dryRun {
 					backupPath := strings.TrimSuffix(targetPath, ".db") + ".backup-pre-hash-" + time.Now().Format("20060102-150405") + ".db"
 					if err := copyFile(targetPath, backupPath); err != nil {
-						store.Close()
+						_ = store.Close()
 						if jsonOutput {
 							outputJSON(map[string]interface{}{
 								"error":   "backup_failed",
@@ -333,10 +333,10 @@ This command:
 					if !jsonOutput {
 						color.Green("✓ Created backup: %s\n", filepath.Base(backupPath))
 					}
-				}
-				
-				mapping, err := migrateToHashIDs(ctx, store, issues, dryRun)
-				store.Close()
+					}
+					
+					mapping, err := migrateToHashIDs(ctx, store, issues, dryRun)
+					_ = store.Close()
 				
 				if err != nil {
 					if jsonOutput {
@@ -355,10 +355,10 @@ This command:
 						fmt.Printf("\nWould migrate %d issues to hash-based IDs\n", len(mapping))
 					} else {
 						color.Green("✓ Migrated %d issues to hash-based IDs\n", len(mapping))
-					}
-				}
-			} else {
-				store.Close()
+						}
+						}
+						} else {
+						_ = store.Close()
 				if !jsonOutput {
 					fmt.Println("Database already uses hash-based IDs")
 				}
@@ -504,7 +504,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		}
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Get old repo ID
 	ctx := context.Background()
@@ -549,9 +549,9 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		fmt.Printf("New repo ID:     %s\n\n", newRepoID[:8])
 		fmt.Printf("Continue? [y/N] ")
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-			fmt.Println("Cancelled")
+			fmt.Println("Canceled")
 			return
 		}
 	}

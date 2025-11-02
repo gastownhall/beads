@@ -438,10 +438,10 @@ func compareVersions(v1, v2 string) int {
 
 		// Get part value or default to 0 if part doesn't exist
 		if i < len(parts1) {
-			fmt.Sscanf(parts1[i], "%d", &p1)
+			_, _ = fmt.Sscanf(parts1[i], "%d", &p1)
 		}
 		if i < len(parts2) {
-			fmt.Sscanf(parts2[i], "%d", &p2)
+			_, _ = fmt.Sscanf(parts2[i], "%d", &p2)
 		}
 
 		if p1 < p2 {
@@ -474,7 +474,7 @@ func fetchLatestGitHubRelease() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("github api returned status %d", resp.StatusCode)

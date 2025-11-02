@@ -18,7 +18,7 @@ func newTestStore(t *testing.T, dbPath string) *SQLiteStorage {
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
 	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 	
