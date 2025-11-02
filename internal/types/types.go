@@ -147,6 +147,19 @@ type Dependency struct {
 	CreatedBy   string         `json:"created_by"`
 }
 
+// DependencyCounts holds counts for dependencies and dependents
+type DependencyCounts struct {
+	DependencyCount int `json:"dependency_count"` // Number of issues this issue depends on
+	DependentCount  int `json:"dependent_count"`  // Number of issues that depend on this issue
+}
+
+// IssueWithCounts extends Issue with dependency relationship counts
+type IssueWithCounts struct {
+	*Issue
+	DependencyCount int `json:"dependency_count"`
+	DependentCount  int `json:"dependent_count"`
+}
+
 // DependencyType categorizes the relationship
 type DependencyType string
 

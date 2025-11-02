@@ -119,27 +119,34 @@ var listCmd = &cobra.Command{
 				os.Exit(1)
 			}
 
+			if jsonOutput {
+				// For JSON output, preserve the full response with counts
+				var issuesWithCounts []*types.IssueWithCounts
+				if err := json.Unmarshal(resp.Data, &issuesWithCounts); err != nil {
+					fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+					os.Exit(1)
+				}
+				outputJSON(issuesWithCounts)
+				return
+			}
+
 			var issues []*types.Issue
 			if err := json.Unmarshal(resp.Data, &issues); err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 				os.Exit(1)
 			}
 
-			if jsonOutput {
-				outputJSON(issues)
-			} else {
-				fmt.Printf("\nFound %d issues:\n\n", len(issues))
-				for _, issue := range issues {
-					fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
-					fmt.Printf("  %s\n", issue.Title)
-					if issue.Assignee != "" {
-						fmt.Printf("  Assignee: %s\n", issue.Assignee)
-					}
-					if len(issue.Labels) > 0 {
-						fmt.Printf("  Labels: %v\n", issue.Labels)
-					}
-					fmt.Println()
+			fmt.Printf("\nFound %d issues:\n\n", len(issues))
+			for _, issue := range issues {
+				fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
+				fmt.Printf("  %s\n", issue.Title)
+				if issue.Assignee != "" {
+					fmt.Printf("  Assignee: %s\n", issue.Assignee)
 				}
+				if len(issue.Labels) > 0 {
+					fmt.Printf("  Labels: %v\n", issue.Labels)
+				}
+				fmt.Println()
 			}
 			return
 		}
@@ -178,7 +185,28 @@ var listCmd = &cobra.Command{
 			for _, issue := range issues {
 				issue.Labels, _ = store.GetLabels(ctx, issue.ID)
 			}
-			outputJSON(issues)
+
+			// Get dependency counts in bulk (single query instead of N queries)
+			issueIDs := make([]string, len(issues))
+			for i, issue := range issues {
+				issueIDs[i] = issue.ID
+			}
+			depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+
+			// Build response with counts
+			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
+			for i, issue := range issues {
+				counts := depCounts[issue.ID]
+				if counts == nil {
+					counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
+				}
+				issuesWithCounts[i] = &types.IssueWithCounts{
+					Issue:           issue,
+					DependencyCount: counts.DependencyCount,
+					DependentCount:  counts.DependentCount,
+				}
+			}
+			outputJSON(issuesWithCounts)
 			return
 		}
 

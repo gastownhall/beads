@@ -555,6 +555,46 @@ func (m *MemoryStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	return results, nil
 }
 
+// GetDependencyCounts returns dependency and dependent counts for multiple issues
+func (m *MemoryStorage) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]*types.DependencyCounts)
+
+	// Initialize all requested IDs with zero counts
+	for _, id := range issueIDs {
+		result[id] = &types.DependencyCounts{
+			DependencyCount: 0,
+			DependentCount:  0,
+		}
+	}
+
+	// Build a set for quick lookup
+	idSet := make(map[string]bool)
+	for _, id := range issueIDs {
+		idSet[id] = true
+	}
+
+	// Count dependencies (issues that this issue depends on)
+	for _, id := range issueIDs {
+		if deps, exists := m.dependencies[id]; exists {
+			result[id].DependencyCount = len(deps)
+		}
+	}
+
+	// Count dependents (issues that depend on this issue)
+	for _, deps := range m.dependencies {
+		for _, dep := range deps {
+			if idSet[dep.DependsOnID] {
+				result[dep.DependsOnID].DependentCount++
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // GetDependencyRecords gets dependency records for an issue
 func (m *MemoryStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	m.mu.RLock()

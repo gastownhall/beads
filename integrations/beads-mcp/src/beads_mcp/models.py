@@ -31,6 +31,8 @@ class Issue(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependencies: list["Issue"] = Field(default_factory=list)
     dependents: list["Issue"] = Field(default_factory=list)
+    dependency_count: int = 0
+    dependent_count: int = 0
 
     @field_validator("priority")
     @classmethod
