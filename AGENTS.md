@@ -226,6 +226,10 @@ bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 bd migrate                                             # Detect and migrate old databases
 bd migrate --dry-run                                   # Preview migration
 bd migrate --cleanup --yes                             # Migrate and remove old files
+bd migrate --inspect --json                            # Show migration plan for AI agents
+
+# Inspect database schema and state (for AI agent analysis)
+bd info --schema --json                                # Get schema, tables, config, sample IDs
 ```
 
 ### Managing Daemons

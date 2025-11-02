@@ -37,10 +37,17 @@ This command:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
 		toHashIDs, _ := cmd.Flags().GetBool("to-hash-ids")
+		inspect, _ := cmd.Flags().GetBool("inspect")
 
 		// Handle --update-repo-id first
 		if updateRepoID {
 			handleUpdateRepoID(dryRun, autoYes)
+			return
+		}
+
+		// Handle --inspect flag (show migration plan for AI agents)
+		if inspect {
+			handleInspect()
 			return
 		}
 
@@ -695,12 +702,196 @@ func cleanupWALFiles(dbPath string) {
 	_ = os.Remove(shmPath)
 }
 
+// handleInspect shows migration plan and database state for AI agent analysis
+func handleInspect() {
+	// Find .beads directory
+	beadsDir := findBeadsDir()
+	if beadsDir == "" {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "no_beads_directory",
+				"message": "No .beads directory found. Run 'bd init' first.",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
+			fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
+		}
+		os.Exit(1)
+	}
+
+	// Load config
+	cfg, err := loadOrCreateConfig(beadsDir)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "config_load_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// Check if database exists (don't create it)
+	targetPath := cfg.DatabasePath(beadsDir)
+	dbExists := false
+	if _, err := os.Stat(targetPath); err == nil {
+		dbExists = true
+	} else if !os.IsNotExist(err) {
+		// Stat error (not just "doesn't exist")
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "database_stat_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to check database: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	
+	// If database doesn't exist, return inspection with defaults
+	if !dbExists {
+		result := map[string]interface{}{
+			"registered_migrations": sqlite.ListMigrations(),
+			"current_state": map[string]interface{}{
+				"schema_version": "missing",
+				"issue_count":    0,
+				"config":         map[string]string{},
+				"missing_config": []string{},
+				"db_exists":      false,
+			},
+			"warnings":            []string{"Database does not exist - run 'bd init' first"},
+			"invariants_to_check": sqlite.GetInvariantNames(),
+		}
+		
+		if jsonOutput {
+			outputJSON(result)
+		} else {
+			fmt.Println("\nMigration Inspection")
+			fmt.Println("====================")
+			fmt.Println("Database: missing")
+			fmt.Println("\n⚠ Database does not exist - run 'bd init' first")
+		}
+		return
+	}
+
+	// Open database in read-only mode for inspection
+	store, err := sqlite.New(targetPath)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "database_open_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	// Get current schema version
+	schemaVersion, err := store.GetMetadata(ctx, "bd_version")
+	if err != nil {
+		schemaVersion = "unknown"
+	}
+
+	// Get issue count (use efficient COUNT query)
+	issueCount := 0
+	if stats, err := store.GetStatistics(ctx); err == nil {
+		issueCount = stats.TotalIssues
+	}
+
+	// Get config
+	configMap := make(map[string]string)
+	prefix, _ := store.GetConfig(ctx, "issue_prefix")
+	if prefix != "" {
+		configMap["issue_prefix"] = prefix
+	}
+
+	// Detect missing config
+	missingConfig := []string{}
+	if issueCount > 0 && prefix == "" {
+		missingConfig = append(missingConfig, "issue_prefix")
+	}
+
+	// Get registered migrations (all migrations are idempotent and run on every open)
+	registeredMigrations := sqlite.ListMigrations()
+	
+	// Build invariants list
+	invariantNames := sqlite.GetInvariantNames()
+
+	// Generate warnings
+	warnings := []string{}
+	if issueCount > 0 && prefix == "" {
+		// Detect prefix from first issue (efficient query for just 1 issue)
+		detectedPrefix := ""
+		if issues, err := store.SearchIssues(ctx, "", types.IssueFilter{}); err == nil && len(issues) > 0 {
+			detectedPrefix = utils.ExtractIssuePrefix(issues[0].ID)
+		}
+		warnings = append(warnings, fmt.Sprintf("issue_prefix config not set - may break commands after migration (detected: %s)", detectedPrefix))
+	}
+	if schemaVersion != Version {
+		warnings = append(warnings, fmt.Sprintf("schema version mismatch (current: %s, expected: %s)", schemaVersion, Version))
+	}
+
+	// Output result
+	result := map[string]interface{}{
+		"registered_migrations": registeredMigrations,
+		"current_state": map[string]interface{}{
+			"schema_version": schemaVersion,
+			"issue_count":    issueCount,
+			"config":         configMap,
+			"missing_config": missingConfig,
+			"db_exists":      true,
+		},
+		"warnings":            warnings,
+		"invariants_to_check": invariantNames,
+	}
+
+	if jsonOutput {
+		outputJSON(result)
+	} else {
+		// Human-readable output
+		fmt.Println("\nMigration Inspection")
+		fmt.Println("====================")
+		fmt.Printf("Schema Version: %s\n", schemaVersion)
+		fmt.Printf("Issue Count: %d\n", issueCount)
+		fmt.Printf("Registered Migrations: %d\n", len(registeredMigrations))
+		
+		if len(warnings) > 0 {
+			fmt.Println("\nWarnings:")
+			for _, w := range warnings {
+				fmt.Printf("  ⚠ %s\n", w)
+			}
+		}
+		
+		if len(missingConfig) > 0 {
+			fmt.Println("\nMissing Config:")
+			for _, k := range missingConfig {
+				fmt.Printf("  - %s\n", k)
+			}
+		}
+		
+		fmt.Printf("\nInvariants to Check: %d\n", len(invariantNames))
+		for _, inv := range invariantNames {
+			fmt.Printf("  ✓ %s\n", inv)
+		}
+		fmt.Println()
+	}
+}
+
 func init() {
 	migrateCmd.Flags().Bool("yes", false, "Auto-confirm cleanup prompts")
 	migrateCmd.Flags().Bool("cleanup", false, "Remove old database files after migration")
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("to-hash-ids", false, "Migrate sequential IDs to hash-based IDs")
+	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	rootCmd.AddCommand(migrateCmd)
 }
