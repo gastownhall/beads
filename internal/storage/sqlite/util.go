@@ -18,10 +18,10 @@ func (s *SQLiteStorage) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return s.db.BeginTx(ctx, nil)
 }
 
-// ExecInTransaction executes a function within a database transaction.
+// withTx executes a function within a database transaction.
 // If the function returns an error, the transaction is rolled back.
 // Otherwise, the transaction is committed.
-func (s *SQLiteStorage) ExecInTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
+func (s *SQLiteStorage) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -37,6 +37,11 @@ func (s *SQLiteStorage) ExecInTransaction(ctx context.Context, fn func(*sql.Tx) 
 	}
 
 	return nil
+}
+
+// ExecInTransaction is deprecated. Use withTx instead.
+func (s *SQLiteStorage) ExecInTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
+	return s.withTx(ctx, fn)
 }
 
 // IsUniqueConstraintError checks if an error is a UNIQUE constraint violation

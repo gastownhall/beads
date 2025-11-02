@@ -26,30 +26,26 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	now := time.Now()
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, issueID := range issueIDs {
-		if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {
-			return fmt.Errorf("failed to mark issue %s dirty: %w", issueID, err)
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		now := time.Now()
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO dirty_issues (issue_id, marked_at)
+			VALUES (?, ?)
+			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
-	}
+		defer func() { _ = stmt.Close() }()
 
-	return tx.Commit()
+		for _, issueID := range issueIDs {
+			if _, err := stmt.ExecContext(ctx, issueID, now); err != nil {
+				return fmt.Errorf("failed to mark issue %s dirty: %w", issueID, err)
+			}
+		}
+
+		return nil
+	})
 }
 
 // GetDirtyIssues returns the list of issue IDs that need to be exported
@@ -116,25 +112,21 @@ func (s *SQLiteStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, issueID := range issueIDs {
-		if _, err := stmt.ExecContext(ctx, issueID); err != nil {
-			return fmt.Errorf("failed to clear dirty issue %s: %w", issueID, err)
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
-	}
+		defer func() { _ = stmt.Close() }()
 
-	return tx.Commit()
+		for _, issueID := range issueIDs {
+			if _, err := stmt.ExecContext(ctx, issueID); err != nil {
+				return fmt.Errorf("failed to clear dirty issue %s: %w", issueID, err)
+			}
+		}
+
+		return nil
+	})
 }
 
 // GetDirtyIssueCount returns the count of dirty issues (for monitoring/debugging)

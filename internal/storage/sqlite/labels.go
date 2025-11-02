@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -18,36 +19,32 @@ func (s *SQLiteStorage) executeLabelOperation(
 	eventComment string,
 	operationError string,
 ) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, labelSQL, labelSQLArgs...)
+		if err != nil {
+			return fmt.Errorf("%s: %w", operationError, err)
+		}
 
-	_, err = tx.ExecContext(ctx, labelSQL, labelSQLArgs...)
-	if err != nil {
-		return fmt.Errorf("%s: %w", operationError, err)
-	}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO events (issue_id, event_type, actor, comment)
+			VALUES (?, ?, ?, ?)
+		`, issueID, eventType, actor, eventComment)
+		if err != nil {
+			return fmt.Errorf("failed to record event: %w", err)
+		}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, issueID, eventType, actor, eventComment)
-	if err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
+		// Mark issue as dirty for incremental export
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO dirty_issues (issue_id, marked_at)
+			VALUES (?, ?)
+			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+		`, issueID, time.Now())
+		if err != nil {
+			return fmt.Errorf("failed to mark issue dirty: %w", err)
+		}
 
-	// Mark issue as dirty for incremental export
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`, issueID, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
-	return tx.Commit()
+		return nil
+	})
 }
 
 // AddLabel adds a label to an issue

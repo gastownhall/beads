@@ -267,51 +267,43 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int, compressedSize int, commitHash string) error {
 	now := time.Now().UTC()
 	
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	
-	var commitHashPtr *string
-	if commitHash != "" {
-		commitHashPtr = &commitHash
-	}
-	
-	_, err = tx.ExecContext(ctx, `
-		UPDATE issues
-		SET compaction_level = ?,
-		    compacted_at = ?,
-		    compacted_at_commit = ?,
-		    original_size = ?,
-		    updated_at = ?
-		WHERE id = ?
-	`, level, now, commitHashPtr, originalSize, now, issueID)
-	
-	if err != nil {
-		return fmt.Errorf("failed to apply compaction metadata: %w", err)
-	}
-	
-	reductionPct := 0.0
-	if originalSize > 0 {
-		reductionPct = (1.0 - float64(compressedSize)/float64(originalSize)) * 100
-	}
-	
-	eventData := fmt.Sprintf(`{"tier":%d,"original_size":%d,"compressed_size":%d,"reduction_pct":%.1f}`,
-		level, originalSize, compressedSize, reductionPct)
-	
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, 'compactor', ?)
-	`, issueID, types.EventCompacted, eventData)
-	
-	if err != nil {
-		return fmt.Errorf("failed to record compaction event: %w", err)
-	}
-	
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	
-	return nil
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var commitHashPtr *string
+		if commitHash != "" {
+			commitHashPtr = &commitHash
+		}
+		
+		_, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET compaction_level = ?,
+			    compacted_at = ?,
+			    compacted_at_commit = ?,
+			    original_size = ?,
+			    updated_at = ?
+			WHERE id = ?
+		`, level, now, commitHashPtr, originalSize, now, issueID)
+		
+		if err != nil {
+			return fmt.Errorf("failed to apply compaction metadata: %w", err)
+		}
+		
+		reductionPct := 0.0
+		if originalSize > 0 {
+			reductionPct = (1.0 - float64(compressedSize)/float64(originalSize)) * 100
+		}
+		
+		eventData := fmt.Sprintf(`{"tier":%d,"original_size":%d,"compressed_size":%d,"reduction_pct":%.1f}`,
+			level, originalSize, compressedSize, reductionPct)
+		
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO events (issue_id, event_type, actor, comment)
+			VALUES (?, ?, 'compactor', ?)
+		`, issueID, types.EventCompacted, eventData)
+		
+		if err != nil {
+			return fmt.Errorf("failed to record compaction event: %w", err)
+		}
+		
+		return nil
+	})
 }

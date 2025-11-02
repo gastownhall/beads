@@ -68,13 +68,8 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		dep.CreatedBy = actor
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Cycle Detection and Prevention
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		// Cycle Detection and Prevention
 	//
 	// We prevent cycles across ALL dependency types (blocks, related, parent-child, discovered-from)
 	// to maintain a directed acyclic graph (DAG). This is critical for:
@@ -149,54 +144,51 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark both issues as dirty for incremental export
-	// (dependencies are exported with each issue, so both need updating)
-	if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
-		return err
-	}
+		// Mark both issues as dirty for incremental export
+		// (dependencies are exported with each issue, so both need updating)
+		if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
+			return err
+		}
 
-	return tx.Commit()
+		return nil
+	})
 }
 
 // RemoveDependency removes a dependency
 func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
+		`, issueID, dependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to remove dependency: %w", err)
+		}
 
-	result, err := tx.ExecContext(ctx, `
-		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
-	`, issueID, dependsOnID)
-	if err != nil {
-		return fmt.Errorf("failed to remove dependency: %w", err)
-	}
+		// Check if dependency existed
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to check rows affected: %w", err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("dependency from %s to %s does not exist", issueID, dependsOnID)
+		}
 
-	// Check if dependency existed
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("dependency from %s to %s does not exist", issueID, dependsOnID)
-	}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO events (issue_id, event_type, actor, comment)
+			VALUES (?, ?, ?, ?)
+		`, issueID, types.EventDependencyRemoved, actor,
+			fmt.Sprintf("Removed dependency on %s", dependsOnID))
+		if err != nil {
+			return fmt.Errorf("failed to record event: %w", err)
+		}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, issueID, types.EventDependencyRemoved, actor,
-		fmt.Sprintf("Removed dependency on %s", dependsOnID))
-	if err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
+		// Mark both issues as dirty for incremental export
+		if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
+			return err
+		}
 
-	// Mark both issues as dirty for incremental export
-	if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+		return nil
+	})
 }
 
 // GetDependenciesWithMetadata returns issues that this issue depends on, including dependency type
