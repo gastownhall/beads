@@ -71,54 +71,9 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
-	// Migrate existing databases to add dirty_issues table if missing
-	if err := migrateDirtyIssuesTable(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate dirty_issues table: %w", err)
-	}
-
-	// Migrate existing databases to add external_ref column if missing
-	if err := migrateExternalRefColumn(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate external_ref column: %w", err)
-	}
-
-	// Migrate existing databases to add composite index on dependencies
-	if err := migrateCompositeIndexes(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate composite indexes: %w", err)
-	}
-
-	// Migrate existing databases to add status/closed_at CHECK constraint
-	if err := migrateClosedAtConstraint(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate closed_at constraint: %w", err)
-	}
-
-	// Migrate existing databases to add compaction columns
-	if err := migrateCompactionColumns(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate compaction columns: %w", err)
-	}
-
-	// Migrate existing databases to add issue_snapshots table
-	if err := migrateSnapshotsTable(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate snapshots table: %w", err)
-	}
-
-	// Migrate existing databases to add compaction config defaults
-	if err := migrateCompactionConfig(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate compaction config: %w", err)
-	}
-
-	// Migrate existing databases to add compacted_at_commit column
-	if err := migrateCompactedAtCommitColumn(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate compacted_at_commit column: %w", err)
-	}
-
-	// Migrate existing databases to add export_hashes table (bd-164)
-	if err := migrateExportHashesTable(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate export_hashes table: %w", err)
-	}
-
-	// Migrate existing databases to add content_hash column (bd-95)
-	if err := migrateContentHashColumn(db); err != nil {
-		return nil, fmt.Errorf("failed to migrate content_hash column: %w", err)
+	// Run all migrations
+	if err := RunMigrations(db); err != nil {
+		return nil, err
 	}
 
 	// Convert to absolute path for consistency
@@ -133,11 +88,9 @@ func New(path string) (*SQLiteStorage, error) {
 	}, nil
 }
 
-// migrateDirtyIssuesTable checks if the dirty_issues table exists and creates it if missing.
-// This ensures existing databases created before the incremental export feature get migrated automatically.
 // REMOVED (bd-8e05): getNextIDForPrefix and AllocateNextID - sequential ID generation
 // no longer needed with hash-based IDs
-// Migration functions moved to migrations.go (bd-fc2d)
+// Migration functions moved to migrations.go (bd-fc2d, bd-b245)
 
 // getNextChildNumber atomically generates the next child number for a parent ID
 // Uses the child_counters table for atomic, cross-process child ID generation

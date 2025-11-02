@@ -8,6 +8,37 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// Migration represents a single database migration
+type Migration struct {
+	Name string
+	Func func(*sql.DB) error
+}
+
+// migrations is the ordered list of all migrations to run
+// Migrations are run in order during database initialization
+var migrations = []Migration{
+	{"dirty_issues_table", migrateDirtyIssuesTable},
+	{"external_ref_column", migrateExternalRefColumn},
+	{"composite_indexes", migrateCompositeIndexes},
+	{"closed_at_constraint", migrateClosedAtConstraint},
+	{"compaction_columns", migrateCompactionColumns},
+	{"snapshots_table", migrateSnapshotsTable},
+	{"compaction_config", migrateCompactionConfig},
+	{"compacted_at_commit_column", migrateCompactedAtCommitColumn},
+	{"export_hashes_table", migrateExportHashesTable},
+	{"content_hash_column", migrateContentHashColumn},
+}
+
+// RunMigrations executes all registered migrations in order
+func RunMigrations(db *sql.DB) error {
+	for _, migration := range migrations {
+		if err := migration.Func(db); err != nil {
+			return fmt.Errorf("migration %s failed: %w", migration.Name, err)
+		}
+	}
+	return nil
+}
+
 func migrateDirtyIssuesTable(db *sql.DB) error {
 	// Check if dirty_issues table exists
 	var tableName string
