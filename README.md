@@ -259,6 +259,12 @@ Hash IDs use **birthday paradox probability** to determine length:
 **Existing databases continue to work** - no forced migration. Run `bd migrate` when ready:
 
 ```bash
+# Inspect migration plan (for AI agents)
+bd migrate --inspect --json
+
+# Check schema and config state
+bd info --schema --json
+
 # Preview migration
 bd migrate --dry-run
 
@@ -268,6 +274,8 @@ bd migrate
 # Show current database info
 bd info
 ```
+
+**AI-supervised migrations:** The `--inspect` flag provides migration plan analysis for AI agents. The system verifies data integrity invariants (required config keys, foreign key constraints, issue counts) before committing migrations.
 
 **Note:** Hash IDs require schema version 9+. The `bd migrate` command detects old schemas and upgrades automatically.
 

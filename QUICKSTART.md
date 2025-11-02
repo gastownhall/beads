@@ -129,7 +129,13 @@ You can use project-specific databases:
 After upgrading bd, use `bd migrate` to check for and migrate old database files:
 
 ```bash
-# Check for migration opportunities
+# Inspect migration plan (AI agents)
+./bd migrate --inspect --json
+
+# Check schema and config
+./bd info --schema --json
+
+# Preview migration changes
 ./bd migrate --dry-run
 
 # Migrate old databases to beads.db
@@ -138,6 +144,8 @@ After upgrading bd, use `bd migrate` to check for and migrate old database files
 # Migrate and clean up old files
 ./bd migrate --cleanup --yes
 ```
+
+**AI agents:** Use `--inspect` to analyze migration safety before running. The system verifies required config keys and data integrity invariants.
 
 ## Next Steps
 

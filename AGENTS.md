@@ -226,11 +226,25 @@ bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 bd migrate                                             # Detect and migrate old databases
 bd migrate --dry-run                                   # Preview migration
 bd migrate --cleanup --yes                             # Migrate and remove old files
-bd migrate --inspect --json                            # Show migration plan for AI agents
 
-# Inspect database schema and state (for AI agent analysis)
+# AI-supervised migration (check before running bd migrate)
+bd migrate --inspect --json                            # Show migration plan for AI agents
 bd info --schema --json                                # Get schema, tables, config, sample IDs
+
+# Workflow: AI agents should inspect first, then migrate
+# 1. Run --inspect to see pending migrations and warnings
+# 2. Check for missing_config (like issue_prefix)
+# 3. Review invariants_to_check for safety guarantees
+# 4. If warnings exist, fix config issues first
+# 5. Then run bd migrate safely
 ```
+
+**Migration safety:** The system verifies data integrity invariants after migrations:
+- **required_config_present**: Ensures issue_prefix and schema_version are set
+- **foreign_keys_valid**: No orphaned dependencies or labels
+- **issue_count_stable**: Issue count doesn't decrease unexpectedly
+
+These invariants prevent data loss and would have caught issues like GH #201 (missing issue_prefix after migration).
 
 ### Managing Daemons
 
