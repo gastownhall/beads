@@ -76,6 +76,10 @@ func checkGitForIssues() (int, string) {
 		return 0, ""
 	}
 
+	// Clean paths to ensure consistent separators
+	beadsDir = filepath.Clean(beadsDir)
+	gitRoot = filepath.Clean(gitRoot)
+	
 	relBeads, err := filepath.Rel(gitRoot, beadsDir)
 	if err != nil {
 		return 0, ""
@@ -135,12 +139,17 @@ func findGitRoot() string {
 		return ""
 	}
 	root := string(bytes.TrimSpace(output))
-	// On Windows, git returns Unix-style paths (/c/Users/...) but we need
-	// Windows-style paths (C:\Users\...) for filepath.Rel to work correctly
-	if runtime.GOOS == "windows" && len(root) > 0 && root[0] == '/' {
-		// Convert /c/Users/... to C:\Users\...
-		if len(root) >= 3 && root[2] == '/' {
-			root = string(root[1]) + ":" + filepath.FromSlash(root[2:])
+	
+	// Normalize path for the current OS
+	// Git on Windows may return paths with forward slashes (C:/Users/...)
+	// or Unix-style paths (/c/Users/...), convert to native format
+	if runtime.GOOS == "windows" {
+		if len(root) > 0 && root[0] == '/' && len(root) >= 3 && root[2] == '/' {
+			// Convert /c/Users/... to C:\Users\...
+			root = strings.ToUpper(string(root[1])) + ":" + filepath.FromSlash(root[2:])
+		} else {
+			// Convert C:/Users/... to C:\Users\...
+			root = filepath.FromSlash(root)
 		}
 	}
 	return root
