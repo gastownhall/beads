@@ -56,6 +56,7 @@ This command checks:
   - Daemon health (version mismatches, stale processes)
   - Database-JSONL sync status
   - File permissions
+  - Circular dependencies
 
 Examples:
   bd doctor              # Check current directory
@@ -162,6 +163,13 @@ func runDiagnostics(path string) doctorResult {
 	permCheck := checkPermissions(path)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 10: Dependency cycles
+	cycleCheck := checkDependencyCycles(path)
+	result.Checks = append(result.Checks, cycleCheck)
+	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 
@@ -852,6 +860,100 @@ func checkPermissions(path string) doctorCheck {
 		Name:    "Permissions",
 		Status:  statusOK,
 		Message: "All permissions OK",
+	}
+}
+
+func checkDependencyCycles(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+
+	// If no database, skip this check
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  statusOK,
+			Message: "N/A (no database)",
+		}
+	}
+
+	// Open database to check for cycles
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  statusWarning,
+			Message: "Unable to open database",
+			Detail:  err.Error(),
+		}
+	}
+	defer db.Close()
+
+	// Query for cycles using simplified SQL
+	query := `
+		WITH RECURSIVE paths AS (
+			SELECT
+				issue_id,
+				depends_on_id,
+				issue_id as start_id,
+				issue_id || '→' || depends_on_id as path,
+				0 as depth
+			FROM dependencies
+
+			UNION ALL
+
+			SELECT
+				d.issue_id,
+				d.depends_on_id,
+				p.start_id,
+				p.path || '→' || d.depends_on_id,
+				p.depth + 1
+			FROM dependencies d
+			JOIN paths p ON d.issue_id = p.depends_on_id
+			WHERE p.depth < 100
+			  AND p.path NOT LIKE '%' || d.depends_on_id || '→%'
+		)
+		SELECT DISTINCT start_id
+		FROM paths
+		WHERE depends_on_id = start_id`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  statusWarning,
+			Message: "Unable to check for cycles",
+			Detail:  err.Error(),
+		}
+	}
+	defer rows.Close()
+
+	cycleCount := 0
+	var firstCycle string
+	for rows.Next() {
+		var startID string
+		if err := rows.Scan(&startID); err != nil {
+			continue
+		}
+		cycleCount++
+		if cycleCount == 1 {
+			firstCycle = startID
+		}
+	}
+
+	if cycleCount == 0 {
+		return doctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  statusOK,
+			Message: "No circular dependencies detected",
+		}
+	}
+
+	return doctorCheck{
+		Name:    "Dependency Cycles",
+		Status:  statusError,
+		Message: fmt.Sprintf("Found %d circular dependency cycle(s)", cycleCount),
+		Detail:  fmt.Sprintf("First cycle involves: %s", firstCycle),
+		Fix:     "Run 'bd dep cycles' to see full cycle paths, then 'bd dep remove' to break cycles",
 	}
 }
 
