@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,35 +33,6 @@ func (l *DaemonLock) Close() error {
 	err := l.file.Close()
 	l.file = nil
 	return err
-}
-
-func (d *Daemon) setupLock() (io.Closer, error) {
-	lock, err := acquireDaemonLock(d.cfg.BeadsDir, d.cfg.DBPath, d.Version)
-	if err != nil {
-		if err == ErrDaemonLocked {
-			d.log.log("Daemon already running (lock held), exiting")
-		} else {
-			d.log.log("Error acquiring daemon lock: %v", err)
-		}
-		return nil, err
-	}
-
-	// Ensure PID file matches our PID
-	myPID := os.Getpid()
-	pidFile := d.cfg.PIDFile
-	// #nosec G304 - controlled path from config
-	if data, err := os.ReadFile(pidFile); err == nil {
-		var filePID int
-		if _, err := fmt.Sscanf(string(data), "%d", &filePID); err == nil && filePID != myPID {
-			d.log.log("PID file has wrong PID (expected %d, got %d), overwriting", myPID, filePID)
-			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
-		}
-	} else {
-		d.log.log("PID file missing after lock acquisition, creating")
-		_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
-	}
-
-	return lock, nil
 }
 
 // acquireDaemonLock attempts to acquire an exclusive lock on daemon.lock

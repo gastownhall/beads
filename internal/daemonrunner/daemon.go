@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,20 +130,84 @@ func (d *Daemon) Start() error {
 	return d.runSyncLoop(ctx, serverErrChan)
 }
 
-// TODO: Implement these methods by extracting from cmd/bd/daemon.go
 func (d *Daemon) runGlobalDaemon() error {
-	// TODO: Extract from runGlobalDaemon in cmd/bd/daemon.go
+	globalDir, err := getGlobalBeadsDir()
+	if err != nil {
+		d.log.log("Error: cannot get global beads directory: %v", err)
+		return err
+	}
+	d.cfg.SocketPath = filepath.Join(globalDir, "bd.sock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.cancel = cancel
+	defer cancel()
+
+	server, _, err := d.startRPCServer(ctx)
+	if err != nil {
+		return err
+	}
+	d.server = server
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, daemonSignals...)
+	defer signal.Stop(sigChan)
+
+	sig := <-sigChan
+	d.log.log("Received signal: %v", sig)
+	d.log.log("Shutting down global daemon...")
+
+	cancel()
+	if err := d.server.Stop(); err != nil {
+		d.log.log("Error stopping server: %v", err)
+	}
+
+	d.log.log("Global daemon stopped")
 	return nil
 }
 
-func (d *Daemon) startRPCServer(ctx context.Context) (*rpc.Server, chan error, error) {
-	// TODO: Extract from startRPCServer in cmd/bd/daemon.go
-	return nil, nil, nil
+func getGlobalBeadsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot get home directory: %w", err)
+	}
+
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		return "", fmt.Errorf("cannot create global beads directory: %w", err)
+	}
+
+	return beadsDir, nil
 }
 
-func (d *Daemon) runSyncLoop(ctx context.Context, serverErrChan chan error) error {
-	// TODO: Extract from runDaemonLoop in cmd/bd/daemon.go
-	return nil
+
+
+func (d *Daemon) setupLock() (io.Closer, error) {
+	beadsDir := filepath.Dir(d.cfg.PIDFile)
+	lock, err := acquireDaemonLock(beadsDir, d.cfg.DBPath, d.Version)
+	if err != nil {
+		if err == ErrDaemonLocked {
+			d.log.log("Daemon already running (lock held), exiting")
+		} else {
+			d.log.log("Error acquiring daemon lock: %v", err)
+		}
+		return nil, err
+	}
+
+	myPID := os.Getpid()
+	// #nosec G304 - controlled path from config
+	if data, err := os.ReadFile(d.cfg.PIDFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == myPID {
+			// PID file is correct, continue
+		} else {
+			d.log.log("PID file has wrong PID (expected %d, got %d), overwriting", myPID, pid)
+			_ = os.WriteFile(d.cfg.PIDFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
+		}
+	} else {
+		d.log.log("PID file missing after lock acquisition, creating")
+		_ = os.WriteFile(d.cfg.PIDFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
+	}
+
+	return lock, nil
 }
 
 // Stop gracefully shuts down the daemon

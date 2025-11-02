@@ -3,12 +3,12 @@ package daemonrunner
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// logger provides simple logging with timestamp
 type logger struct {
 	logFunc func(string, ...interface{})
 }
@@ -17,6 +17,7 @@ func (l *logger) log(format string, args ...interface{}) {
 	l.logFunc(format, args...)
 }
 
+// setupLogger configures the rotating log file
 func (d *Daemon) setupLogger() (*lumberjack.Logger, *logger) {
 	maxSizeMB := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 10)
 	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 3)
@@ -42,15 +43,18 @@ func (d *Daemon) setupLogger() (*lumberjack.Logger, *logger) {
 	return logF, log
 }
 
+// getEnvInt reads an integer from environment variable with a default value
 func getEnvInt(key string, defaultValue int) int {
 	if val := os.Getenv(key); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil {
+		var parsed int
+		if _, err := fmt.Sscanf(val, "%d", &parsed); err == nil {
 			return parsed
 		}
 	}
 	return defaultValue
 }
 
+// getEnvBool reads a boolean from environment variable with a default value
 func getEnvBool(key string, defaultValue bool) bool {
 	if val := os.Getenv(key); val != "" {
 		return val == "true" || val == "1"

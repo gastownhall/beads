@@ -977,6 +977,7 @@ func setupDaemonLock(pidFile string, dbPath string, log daemonLogger) (io.Closer
 	return lock, nil
 }
 
+// startRPCServer initializes and starts the RPC server (temporary wrapper for old code)
 func startRPCServer(ctx context.Context, socketPath string, store storage.Storage, workspacePath string, dbPath string, log daemonLogger) (*rpc.Server, chan error, error) {
 	// Sync daemon version with CLI version
 	rpc.ServerVersion = Version
@@ -1005,6 +1006,7 @@ func startRPCServer(ctx context.Context, socketPath string, store storage.Storag
 	return server, serverErrChan, nil
 }
 
+// runGlobalDaemon runs the global routing daemon (temporary wrapper for old code)
 func runGlobalDaemon(log daemonLogger) {
 	globalDir, err := getGlobalBeadsDir()
 	if err != nil {
