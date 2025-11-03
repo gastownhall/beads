@@ -1,0 +1,2 @@
+Error: daemon already running (PID 27867)
+Use 'bd daemon --stop' to stop it first

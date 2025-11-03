@@ -196,7 +196,15 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 		}
 		return nil
 	}
-	defer s.importInProgress.Store(false)
+
+	// Track whether we should release the lock via defer
+	// Set to false if we manually release early to avoid double-release bug
+	shouldDeferRelease := true
+	defer func() {
+		if shouldDeferRelease {
+			s.importInProgress.Store(false)
+		}
+	}()
 
 	// Check if git has uncommitted changes that include beads files (bd-8931)
 	// If JSONL files are uncommitted, skip auto-import to avoid conflicts
@@ -204,8 +212,9 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	dbDir := filepath.Dir(dbPath)
 	workspaceRoot := filepath.Dir(dbDir) // Go up from .beads to workspace root
 	if hasUncommittedBeadsFiles(workspaceRoot) {
-		// CRITICAL: Must release lock before returning to avoid race condition
+		// CRITICAL: Release lock and disable defer to avoid double-release race
 		s.importInProgress.Store(false)
+		shouldDeferRelease = false
 
 		if os.Getenv("BD_DEBUG") != "" {
 			fmt.Fprintf(os.Stderr, "Debug: skipping auto-import, .beads files have uncommitted changes\n")
