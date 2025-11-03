@@ -8,7 +8,9 @@
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "test": "node scripts/test.js"
+    "test": "node scripts/test.js",
+    "test:integration": "node test/integration.test.js",
+    "test:all": "npm test && npm run test:integration"
   },
   "keywords": [
     "issue-tracker",
