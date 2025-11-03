@@ -100,5 +100,6 @@ func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
 	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked)")
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
+	staleCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(staleCmd)
 }
