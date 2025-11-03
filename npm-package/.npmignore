@@ -1,0 +1,13 @@
+# Don't include these in the published package
+*.log
+*.tar.gz
+node_modules/
+.DS_Store
+.git/
+.github/
+test/
+tests/
+*.test.js
+coverage/
+
+# Include only the necessary files (see package.json "files" field)

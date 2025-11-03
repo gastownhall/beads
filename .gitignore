@@ -57,3 +57,13 @@ dist/
 # Git worktrees
 .worktrees/
 .beads/pollution-backup.jsonl
+
+# npm package - exclude downloaded binaries and archives
+npm-package/bin/bd
+npm-package/bin/*.tar.gz
+npm-package/bin/*.zip
+npm-package/bin/CHANGELOG.md
+npm-package/bin/LICENSE
+npm-package/bin/README.md
+npm-package/node_modules/
+npm-package/package-lock.json
