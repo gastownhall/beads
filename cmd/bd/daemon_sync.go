@@ -126,21 +126,21 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 		return fmt.Errorf("failed to open JSONL: %w", err)
 	}
 	defer file.Close()
-	
+
 	// Parse all issues
 	var issues []*types.Issue
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
-	
+
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
-		
+
 		// Skip empty lines
 		if line == "" {
 			continue
 		}
-		
+
 		// Parse JSON
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
@@ -148,22 +148,22 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse JSONL line %d: %v\n", lineNum, err)
 			continue
 		}
-		
+
 		issues = append(issues, &issue)
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("failed to read JSONL: %w", err)
 	}
-	
+
 	// Use existing import logic with auto-conflict resolution
 	opts := ImportOptions{
-		DryRun:              false,
-		SkipUpdate:          false,
-		Strict:              false,
-		SkipPrefixValidation: true,  // Skip prefix validation for auto-import
+		DryRun:               false,
+		SkipUpdate:           false,
+		Strict:               false,
+		SkipPrefixValidation: true, // Skip prefix validation for auto-import
 	}
-	
+
 	_, err = importIssuesCore(ctx, "", store, issues, opts)
 	return err
 }
@@ -278,27 +278,37 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 
 		// Auto-commit if enabled
 		if autoCommit {
-			hasChanges, err := gitHasChanges(exportCtx, jsonlPath)
+			// Try sync branch commit first
+			committed, err := syncBranchCommitAndPush(exportCtx, store, jsonlPath, autoPush, log)
 			if err != nil {
-				log.log("Error checking git status: %v", err)
+				log.log("Sync branch commit failed: %v", err)
 				return
 			}
 
-			if hasChanges {
-				message := fmt.Sprintf("bd daemon export: %s", time.Now().Format("2006-01-02 15:04:05"))
-				if err := gitCommit(exportCtx, jsonlPath, message); err != nil {
-					log.log("Commit failed: %v", err)
+			// If sync branch not configured, use regular commit
+			if !committed {
+				hasChanges, err := gitHasChanges(exportCtx, jsonlPath)
+				if err != nil {
+					log.log("Error checking git status: %v", err)
 					return
 				}
-				log.log("Committed changes")
 
-				// Auto-push if enabled
-				if autoPush {
-					if err := gitPush(exportCtx); err != nil {
-						log.log("Push failed: %v", err)
+				if hasChanges {
+					message := fmt.Sprintf("bd daemon export: %s", time.Now().Format("2006-01-02 15:04:05"))
+					if err := gitCommit(exportCtx, jsonlPath, message); err != nil {
+						log.log("Commit failed: %v", err)
 						return
 					}
-					log.log("Pushed to remote")
+					log.log("Committed changes")
+
+					// Auto-push if enabled
+					if autoPush {
+						if err := gitPush(exportCtx); err != nil {
+							log.log("Push failed: %v", err)
+							return
+						}
+						log.log("Pushed to remote")
+					}
 				}
 			}
 		}
@@ -340,32 +350,41 @@ func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemon
 		// Check JSONL modification time to avoid redundant imports
 		jsonlInfo, err := os.Stat(jsonlPath)
 		if err != nil {
-		 log.log("Failed to stat JSONL: %v", err)
-		 return
-	}
+			log.log("Failed to stat JSONL: %v", err)
+			return
+		}
 
-	// Get database modification time
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	dbInfo, err := os.Stat(dbPath)
-	if err != nil {
-		log.log("Failed to stat database: %v", err)
-		return
-	}
+		// Get database modification time
+		dbPath := filepath.Join(beadsDir, "beads.db")
+		dbInfo, err := os.Stat(dbPath)
+		if err != nil {
+			log.log("Failed to stat database: %v", err)
+			return
+		}
 
-	// Skip if JSONL is older than database (nothing new to import)
-	if !jsonlInfo.ModTime().After(dbInfo.ModTime()) {
-		log.log("Skipping import: JSONL not newer than database")
-		return
-	}
+		// Skip if JSONL is older than database (nothing new to import)
+		if !jsonlInfo.ModTime().After(dbInfo.ModTime()) {
+			log.log("Skipping import: JSONL not newer than database")
+			return
+		}
 
-	// Pull from git
-	if err := gitPull(importCtx); err != nil {
-		log.log("Pull failed: %v", err)
-		return
-	}
-	log.log("Pulled from remote")
+		// Pull from git (try sync branch first)
+		pulled, err := syncBranchPull(importCtx, store, log)
+		if err != nil {
+			log.log("Sync branch pull failed: %v", err)
+			return
+		}
 
-	// Count issues before import
+		// If sync branch not configured, use regular pull
+		if !pulled {
+			if err := gitPull(importCtx); err != nil {
+				log.log("Pull failed: %v", err)
+				return
+			}
+			log.log("Pulled from remote")
+		}
+
+		// Count issues before import
 		beforeCount, err := countDBIssues(importCtx, store)
 		if err != nil {
 			log.log("Failed to count issues before import: %v", err)
@@ -450,52 +469,72 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		log.log("Exported to JSONL")
 
 		if autoCommit {
-			hasChanges, err := gitHasChanges(syncCtx, jsonlPath)
+			// Try sync branch commit first
+			committed, err := syncBranchCommitAndPush(syncCtx, store, jsonlPath, autoPush, log)
 			if err != nil {
-				log.log("Error checking git status: %v", err)
+				log.log("Sync branch commit failed: %v", err)
 				return
 			}
 
-			if hasChanges {
-				message := fmt.Sprintf("bd daemon sync: %s", time.Now().Format("2006-01-02 15:04:05"))
-				if err := gitCommit(syncCtx, jsonlPath, message); err != nil {
-					log.log("Commit failed: %v", err)
+			// If sync branch not configured, use regular commit
+			if !committed {
+				hasChanges, err := gitHasChanges(syncCtx, jsonlPath)
+				if err != nil {
+					log.log("Error checking git status: %v", err)
 					return
 				}
-				log.log("Committed changes")
+
+				if hasChanges {
+					message := fmt.Sprintf("bd daemon sync: %s", time.Now().Format("2006-01-02 15:04:05"))
+					if err := gitCommit(syncCtx, jsonlPath, message); err != nil {
+						log.log("Commit failed: %v", err)
+						return
+					}
+					log.log("Committed changes")
+				}
 			}
 		}
 
-		if err := gitPull(syncCtx); err != nil {
-		log.log("Pull failed: %v", err)
-		return
+		// Pull (try sync branch first)
+		pulled, err := syncBranchPull(syncCtx, store, log)
+		if err != nil {
+			log.log("Sync branch pull failed: %v", err)
+			return
 		}
-		log.log("Pulled from remote")
+
+		// If sync branch not configured, use regular pull
+		if !pulled {
+			if err := gitPull(syncCtx); err != nil {
+				log.log("Pull failed: %v", err)
+				return
+			}
+			log.log("Pulled from remote")
+		}
 
 		// Count issues before import for validation
-	beforeCount, err := countDBIssues(syncCtx, store)
-	if err != nil {
-		log.log("Failed to count issues before import: %v", err)
-		return
-	}
+		beforeCount, err := countDBIssues(syncCtx, store)
+		if err != nil {
+			log.log("Failed to count issues before import: %v", err)
+			return
+		}
 
-	if err := importToJSONLWithStore(syncCtx, store, jsonlPath); err != nil {
-		log.log("Import failed: %v", err)
-		return
-	}
-	log.log("Imported from JSONL")
+		if err := importToJSONLWithStore(syncCtx, store, jsonlPath); err != nil {
+			log.log("Import failed: %v", err)
+			return
+		}
+		log.log("Imported from JSONL")
 
-	// Validate import didn't cause data loss
-	afterCount, err := countDBIssues(syncCtx, store)
-	if err != nil {
-		log.log("Failed to count issues after import: %v", err)
-		return
-	}
+		// Validate import didn't cause data loss
+		afterCount, err := countDBIssues(syncCtx, store)
+		if err != nil {
+			log.log("Failed to count issues after import: %v", err)
+			return
+		}
 
-	if err := validatePostImport(beforeCount, afterCount); err != nil {
-		log.log("Post-import validation failed: %v", err)
-		return
-	}
+		if err := validatePostImport(beforeCount, afterCount); err != nil {
+			log.log("Post-import validation failed: %v", err)
+			return
+		}
 
 		if autoPush && autoCommit {
 			if err := gitPush(syncCtx); err != nil {
