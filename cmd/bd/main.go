@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // DaemonStatus captures daemon connection state for the current command
@@ -443,15 +444,7 @@ var rootCmd = &cobra.Command{
 				var beadsDir string
 				if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
 					// Canonicalize the path
-					if absDir, err := filepath.Abs(envDir); err == nil {
-						if canonical, err := filepath.EvalSymlinks(absDir); err == nil {
-							beadsDir = canonical
-						} else {
-							beadsDir = absDir
-						}
-					} else {
-						beadsDir = envDir
-					}
+					beadsDir = utils.CanonicalizePath(envDir)
 				} else {
 					// Fall back to current directory
 					cwd, err := os.Getwd()

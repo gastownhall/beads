@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // initializeNoDbMode sets up in-memory storage from JSONL file
@@ -23,15 +24,7 @@ func initializeNoDbMode() error {
 	// Check BEADS_DIR environment variable first
 	if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
 		// Canonicalize the path
-		if absDir, err := filepath.Abs(envDir); err == nil {
-			if canonical, err := filepath.EvalSymlinks(absDir); err == nil {
-				beadsDir = canonical
-			} else {
-				beadsDir = absDir
-			}
-		} else {
-			beadsDir = envDir
-		}
+		beadsDir = utils.CanonicalizePath(envDir)
 	} else {
 		// Fall back to current directory
 		cwd, err := os.Getwd()

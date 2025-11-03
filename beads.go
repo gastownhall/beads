@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // CanonicalDatabaseName is the required database filename for all beads repositories
@@ -127,16 +128,7 @@ func FindDatabasePath() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		// Canonicalize the path to prevent nested .beads directories
-		var absBeadsDir string
-		if absPath, err := filepath.Abs(beadsDir); err == nil {
-			if canonical, err := filepath.EvalSymlinks(absPath); err == nil {
-				absBeadsDir = canonical
-			} else {
-				absBeadsDir = absPath
-			}
-		} else {
-			absBeadsDir = beadsDir
-		}
+		absBeadsDir := utils.CanonicalizePath(beadsDir)
 
 		// Check for config.json first (single source of truth)
 		if cfg, err := configfile.Load(absBeadsDir); err == nil && cfg != nil {
