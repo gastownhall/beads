@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.5] - 2025-11-02
+
+### Fixed
+
+- **Daemon Crash Fix**: Fixed panic in daemon when registry file becomes corrupted with duplicate JSON entries. The daemon now gracefully handles malformed registry files and provides better error messages.
+
 ## [0.21.4] - 2025-11-02
 
 ### Added
