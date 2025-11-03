@@ -444,17 +444,17 @@ func getStatusEmoji(status types.Status) string {
 
 func init() {
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|related|parent-child|discovered-from)")
-	depAddCmd.Flags().Bool("json", false, "Output JSON format")
+	// Note: --json flag is defined as a persistent flag in main.go, not here
 
-	depRemoveCmd.Flags().Bool("json", false, "Output JSON format")
+	// Note: --json flag is defined as a persistent flag in main.go, not here
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (what was discovered from this) instead of dependency tree (what blocks this)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
-	depTreeCmd.Flags().Bool("json", false, "Output JSON format")
+	// Note: --json flag is defined as a persistent flag in main.go, not here
 
-	depCyclesCmd.Flags().Bool("json", false, "Output JSON format")
+	// Note: --json flag is defined as a persistent flag in main.go, not here
 
 	depCmd.AddCommand(depAddCmd)
 	depCmd.AddCommand(depRemoveCmd)

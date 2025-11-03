@@ -1,29 +1,23 @@
 package main
-
 import (
 	"context"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 )
-
 var duplicatesCmd = &cobra.Command{
 	Use:   "duplicates",
 	Short: "Find and optionally merge duplicate issues",
 	Long: `Find issues with identical content (title, description, design, acceptance criteria).
-
 Groups issues by content hash and reports duplicates with suggested merge targets.
 The merge target is chosen by:
 1. Reference count (most referenced issue wins)
 2. Lexicographically smallest ID if reference counts are equal
-
 Only groups issues with matching status (open with open, closed with closed).
-
 Example:
   bd duplicates                    # Show all duplicate groups
   bd duplicates --auto-merge       # Automatically merge all duplicates
@@ -35,20 +29,16 @@ Example:
 			fmt.Fprintf(os.Stderr, "Use: bd --no-daemon duplicates\n")
 			os.Exit(1)
 		}
-
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		// Use global jsonOutput set by PersistentPreRun
-
 		ctx := context.Background()
-
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching issues: %v\n", err)
 		os.Exit(1)
 		}
-
 		// Filter out closed issues - they're done, no point detecting duplicates
 		openIssues := make([]*types.Issue, 0, len(allIssues))
 	for _, issue := range allIssues {
@@ -56,10 +46,8 @@ Example:
 			openIssues = append(openIssues, issue)
 		}
 	}
-
 	// Find duplicates (only among open issues)
 	duplicateGroups := findDuplicateGroups(openIssues)
-
 		if len(duplicateGroups) == 0 {
 			if !jsonOutput {
 				fmt.Println("No duplicates found!")
@@ -71,14 +59,11 @@ Example:
 			}
 			return
 		}
-
 		// Count references for each issue
 		refCounts := countReferences(allIssues)
-
 		// Prepare output
 		var mergeCommands []string
 		var mergeResults []map[string]interface{}
-
 		for _, group := range duplicateGroups {
 			target := chooseMergeTarget(group, refCounts)
 			sources := make([]string, 0, len(group)-1)
@@ -87,7 +72,6 @@ Example:
 					sources = append(sources, issue.ID)
 				}
 			}
-
 			if autoMerge || dryRun {
 				// Perform merge (unless dry-run)
 				if !dryRun {
@@ -96,7 +80,6 @@ Example:
 						fmt.Fprintf(os.Stderr, "Error merging %s into %s: %v\n", strings.Join(sources, ", "), target.ID, err)
 						continue
 					}
-
 					if jsonOutput {
 						mergeResults = append(mergeResults, map[string]interface{}{
 							"target_id":            target.ID,
@@ -109,7 +92,6 @@ Example:
 						})
 					}
 				}
-
 				cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
 				mergeCommands = append(mergeCommands, cmd)
 			} else {
@@ -117,12 +99,10 @@ Example:
 				mergeCommands = append(mergeCommands, cmd)
 			}
 		}
-
 		// Mark dirty if we performed merges
 		if autoMerge && !dryRun && len(mergeCommands) > 0 {
 			markDirtyAndScheduleFlush()
 		}
-
 		// Output results
 		if jsonOutput {
 			output := map[string]interface{}{
@@ -140,13 +120,10 @@ Example:
 			yellow := color.New(color.FgYellow).SprintFunc()
 			cyan := color.New(color.FgCyan).SprintFunc()
 			green := color.New(color.FgGreen).SprintFunc()
-
 			fmt.Printf("%s Found %d duplicate group(s):\n\n", yellow("🔍"), len(duplicateGroups))
-
 			for i, group := range duplicateGroups {
 				target := chooseMergeTarget(group, refCounts)
 				fmt.Printf("%s Group %d: %s\n", cyan("━━"), i+1, group[0].Title)
-
 				for _, issue := range group {
 					refs := refCounts[issue.ID]
 					marker := "  "
@@ -156,7 +133,6 @@ Example:
 					fmt.Printf("%s%s (%s, P%d, %d references)\n",
 						marker, issue.ID, issue.Status, issue.Priority, refs)
 				}
-
 				sources := make([]string, 0, len(group)-1)
 				for _, issue := range group {
 					if issue.ID != target.ID {
@@ -166,7 +142,6 @@ Example:
 				fmt.Printf("  %s bd merge %s --into %s\n\n",
 					cyan("Suggested:"), strings.Join(sources, " "), target.ID)
 			}
-
 			if autoMerge {
 				if dryRun {
 					fmt.Printf("%s Dry run - would execute %d merge(s)\n", yellow("⚠"), len(mergeCommands))
@@ -179,14 +154,11 @@ Example:
 		}
 	},
 }
-
 func init() {
 	duplicatesCmd.Flags().Bool("auto-merge", false, "Automatically merge all duplicates")
 	duplicatesCmd.Flags().Bool("dry-run", false, "Show what would be merged without making changes")
-	duplicatesCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(duplicatesCmd)
 }
-
 // contentKey represents the fields we use to identify duplicate issues
 type contentKey struct {
 	title              string
@@ -195,11 +167,9 @@ type contentKey struct {
 	acceptanceCriteria string
 	status             string // Only group issues with same status
 }
-
 // findDuplicateGroups groups issues by content hash
 func findDuplicateGroups(issues []*types.Issue) [][]*types.Issue {
 	groups := make(map[contentKey][]*types.Issue)
-
 	for _, issue := range issues {
 		key := contentKey{
 			title:              issue.Title,
@@ -208,10 +178,8 @@ func findDuplicateGroups(issues []*types.Issue) [][]*types.Issue {
 			acceptanceCriteria: issue.AcceptanceCriteria,
 			status:             string(issue.Status),
 		}
-
 		groups[key] = append(groups[key], issue)
 	}
-
 	// Filter to only groups with duplicates
 	var duplicates [][]*types.Issue
 	for _, group := range groups {
@@ -219,15 +187,12 @@ func findDuplicateGroups(issues []*types.Issue) [][]*types.Issue {
 			duplicates = append(duplicates, group)
 		}
 	}
-
 	return duplicates
 }
-
 // countReferences counts how many times each issue is referenced in text fields
 func countReferences(issues []*types.Issue) map[string]int {
 	counts := make(map[string]int)
 	idPattern := regexp.MustCompile(`\b[a-zA-Z][-a-zA-Z0-9]*-\d+\b`)
-
 	for _, issue := range issues {
 		// Search in all text fields
 		textFields := []string{
@@ -236,7 +201,6 @@ func countReferences(issues []*types.Issue) map[string]int {
 			issue.AcceptanceCriteria,
 			issue.Notes,
 		}
-
 		for _, text := range textFields {
 			matches := idPattern.FindAllString(text, -1)
 			for _, match := range matches {
@@ -244,20 +208,16 @@ func countReferences(issues []*types.Issue) map[string]int {
 			}
 		}
 	}
-
 	return counts
 }
-
 // chooseMergeTarget selects the best issue to merge into
 // Priority: highest reference count, then lexicographically smallest ID
 func chooseMergeTarget(group []*types.Issue, refCounts map[string]int) *types.Issue {
 	if len(group) == 0 {
 		return nil
 	}
-
 	target := group[0]
 	targetRefs := refCounts[target.ID]
-
 	for _, issue := range group[1:] {
 		issueRefs := refCounts[issue.ID]
 		if issueRefs > targetRefs || (issueRefs == targetRefs && issue.ID < target.ID) {
@@ -265,18 +225,14 @@ func chooseMergeTarget(group []*types.Issue, refCounts map[string]int) *types.Is
 			targetRefs = issueRefs
 		}
 	}
-
 	return target
 }
-
 // formatDuplicateGroupsJSON formats duplicate groups for JSON output
 func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int) []map[string]interface{} {
 	var result []map[string]interface{}
-
 	for _, group := range groups {
 		target := chooseMergeTarget(group, refCounts)
 		issues := make([]map[string]interface{}, len(group))
-
 		for i, issue := range group {
 			issues[i] = map[string]interface{}{
 				"id":              issue.ID,
@@ -287,14 +243,12 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 				"is_merge_target": issue.ID == target.ID,
 			}
 		}
-
 		sources := make([]string, 0, len(group)-1)
 		for _, issue := range group {
 			if issue.ID != target.ID {
 				sources = append(sources, issue.ID)
 			}
 		}
-
 		result = append(result, map[string]interface{}{
 			"title":               group[0].Title,
 			"issues":              issues,
@@ -303,6 +257,5 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 			"suggested_merge_cmd": fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID),
 		})
 	}
-
 	return result
 }

@@ -1,32 +1,26 @@
 package main
-
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 )
-
 var epicCmd = &cobra.Command{
 	Use:   "epic",
 	Short: "Epic management commands",
 }
-
 var epicStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show epic completion status",
 	Run: func(cmd *cobra.Command, args []string) {
 		eligibleOnly, _ := cmd.Flags().GetBool("eligible-only")
 		// Use global jsonOutput set by PersistentPreRun
-
 		var epics []*types.EpicStatus
 		var err error
-
 		if daemonClient != nil {
 			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
 				EligibleOnly: eligibleOnly,
@@ -50,7 +44,6 @@ var epicStatusCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error getting epic status: %v\n", err)
 				os.Exit(1)
 			}
-
 			if eligibleOnly {
 				filtered := []*types.EpicStatus{}
 				for _, epic := range epics {
@@ -61,7 +54,6 @@ var epicStatusCmd = &cobra.Command{
 				epics = filtered
 			}
 		}
-
 		if jsonOutput {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -71,25 +63,21 @@ var epicStatusCmd = &cobra.Command{
 			}
 			return
 		}
-
 		// Human-readable output
 		if len(epics) == 0 {
 			fmt.Println("No open epics found")
 			return
 		}
-
 		cyan := color.New(color.FgCyan).SprintFunc()
 		yellow := color.New(color.FgYellow).SprintFunc()
 		green := color.New(color.FgGreen).SprintFunc()
 		bold := color.New(color.Bold).SprintFunc()
-
 		for _, epicStatus := range epics {
 			epic := epicStatus.Epic
 			percentage := 0
 			if epicStatus.TotalChildren > 0 {
 				percentage = (epicStatus.ClosedChildren * 100) / epicStatus.TotalChildren
 			}
-
 			statusIcon := ""
 			if epicStatus.EligibleForClose {
 				statusIcon = green("✓")
@@ -98,7 +86,6 @@ var epicStatusCmd = &cobra.Command{
 			} else {
 				statusIcon = "○"
 			}
-
 			fmt.Printf("%s %s %s\n", statusIcon, cyan(epic.ID), bold(epic.Title))
 			fmt.Printf("   Progress: %d/%d children closed (%d%%)\n",
 				epicStatus.ClosedChildren, epicStatus.TotalChildren, percentage)
@@ -109,16 +96,13 @@ var epicStatusCmd = &cobra.Command{
 		}
 	},
 }
-
 var closeEligibleEpicsCmd = &cobra.Command{
 	Use:   "close-eligible",
 	Short: "Close epics where all children are complete",
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		// Use global jsonOutput set by PersistentPreRun
-
 		var eligibleEpics []*types.EpicStatus
-
 		if daemonClient != nil {
 			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
 				EligibleOnly: true,
@@ -148,7 +132,6 @@ var closeEligibleEpicsCmd = &cobra.Command{
 				}
 			}
 		}
-
 		if len(eligibleEpics) == 0 {
 			if !jsonOutput {
 				fmt.Println("No epics eligible for closure")
@@ -157,7 +140,6 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			}
 			return
 		}
-
 		if dryRun {
 			if jsonOutput {
 				enc := json.NewEncoder(os.Stdout)
@@ -174,7 +156,6 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			}
 			return
 		}
-
 		// Actually close the epics
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
@@ -203,7 +184,6 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			}
 			closedIDs = append(closedIDs, epicStatus.Epic.ID)
 		}
-
 		if jsonOutput {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -222,16 +202,10 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 	},
 }
-
 func init() {
 	epicCmd.AddCommand(epicStatusCmd)
 	epicCmd.AddCommand(closeEligibleEpicsCmd)
-
 	epicStatusCmd.Flags().Bool("eligible-only", false, "Show only epics eligible for closure")
-	epicStatusCmd.Flags().Bool("json", false, "Output in JSON format")
-
 	closeEligibleEpicsCmd.Flags().Bool("dry-run", false, "Preview what would be closed without making changes")
-	closeEligibleEpicsCmd.Flags().Bool("json", false, "Output in JSON format")
-
 	rootCmd.AddCommand(epicCmd)
 }

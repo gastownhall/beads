@@ -1,5 +1,4 @@
 package main
-
 import (
 	"context"
 	"encoding/json"
@@ -7,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -15,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
-
 var showCmd = &cobra.Command{
 	Use:   "show [id...]",
 	Short: "Show issue details",
@@ -23,7 +20,6 @@ var showCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := context.Background()
-
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -46,7 +42,6 @@ var showCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			allDetails := []interface{}{}
@@ -57,7 +52,6 @@ var showCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 					continue
 				}
-
 				if jsonOutput {
 					type IssueDetails struct {
 						types.Issue
@@ -78,7 +72,6 @@ var showCmd = &cobra.Command{
 					if idx > 0 {
 						fmt.Println("\n" + strings.Repeat("─", 60))
 					}
-
 					// Parse response and use existing formatting code
 					type IssueDetails struct {
 						types.Issue
@@ -92,9 +85,7 @@ var showCmd = &cobra.Command{
 						os.Exit(1)
 					}
 					issue := &details.Issue
-
 					cyan := color.New(color.FgCyan).SprintFunc()
-
 					// Format output (same as direct mode below)
 					tierEmoji := ""
 					statusSuffix := ""
@@ -106,7 +97,6 @@ var showCmd = &cobra.Command{
 						tierEmoji = " 📦"
 						statusSuffix = " (compacted L2)"
 					}
-
 					fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
 					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 					fmt.Printf("Priority: P%d\n", issue.Priority)
@@ -119,7 +109,6 @@ var showCmd = &cobra.Command{
 					}
 					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
-
 					// Show compaction status
 					if issue.CompactionLevel > 0 {
 						fmt.Println()
@@ -142,7 +131,6 @@ var showCmd = &cobra.Command{
 						}
 						fmt.Printf("%s Compacted: %s (Tier %d)\n", tierEmoji2, compactedDate, issue.CompactionLevel)
 					}
-
 					if issue.Description != "" {
 						fmt.Printf("\nDescription:\n%s\n", issue.Description)
 					}
@@ -155,35 +143,29 @@ var showCmd = &cobra.Command{
 					if issue.AcceptanceCriteria != "" {
 						fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
 					}
-
 					if len(details.Labels) > 0 {
 						fmt.Printf("\nLabels: %v\n", details.Labels)
 					}
-
 					if len(details.Dependencies) > 0 {
 						fmt.Printf("\nDepends on (%d):\n", len(details.Dependencies))
 						for _, dep := range details.Dependencies {
 							fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 						}
 					}
-
 					if len(details.Dependents) > 0 {
 						fmt.Printf("\nBlocks (%d):\n", len(details.Dependents))
 						for _, dep := range details.Dependents {
 							fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 						}
 					}
-
 					fmt.Println()
 				}
 			}
-
 			if jsonOutput && len(allDetails) > 0 {
 				outputJSON(allDetails)
 			}
 			return
 		}
-
 		// Direct mode
 		allDetails := []interface{}{}
 		for idx, id := range resolvedIDs {
@@ -196,7 +178,6 @@ var showCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 				continue
 			}
-
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
 				type IssueDetails struct {
@@ -208,7 +189,6 @@ var showCmd = &cobra.Command{
 				}
 				details := &IssueDetails{Issue: issue}
 				details.Labels, _ = store.GetLabels(ctx, issue.ID)
-
 				// Get dependencies with metadata (type, created_at, created_by)
 				if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
 					details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
@@ -224,18 +204,14 @@ var showCmd = &cobra.Command{
 						details.Dependents = append(details.Dependents, &types.IssueWithDependencyMetadata{Issue: *dependent})
 					}
 				}
-
 				details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
 				allDetails = append(allDetails, details)
 				continue
 			}
-
 			if idx > 0 {
 				fmt.Println("\n" + strings.Repeat("─", 60))
 			}
-
 			cyan := color.New(color.FgCyan).SprintFunc()
-
 			// Add compaction emoji to title line
 			tierEmoji := ""
 			statusSuffix := ""
@@ -247,7 +223,6 @@ var showCmd = &cobra.Command{
 				tierEmoji = " 📦"
 				statusSuffix = " (compacted L2)"
 			}
-
 			fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
 			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 			fmt.Printf("Priority: P%d\n", issue.Priority)
@@ -260,7 +235,6 @@ var showCmd = &cobra.Command{
 			}
 			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
-
 			// Show compaction status footer
 			if issue.CompactionLevel > 0 {
 				tierEmoji := "🗜️"
@@ -268,7 +242,6 @@ var showCmd = &cobra.Command{
 					tierEmoji = "📦"
 				}
 				tierName := fmt.Sprintf("Tier %d", issue.CompactionLevel)
-
 				fmt.Println()
 				if issue.OriginalSize > 0 {
 					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
@@ -285,7 +258,6 @@ var showCmd = &cobra.Command{
 				}
 				fmt.Printf("%s Compacted: %s (%s)\n", tierEmoji, compactedDate, tierName)
 			}
-
 			if issue.Description != "" {
 				fmt.Printf("\nDescription:\n%s\n", issue.Description)
 			}
@@ -298,13 +270,11 @@ var showCmd = &cobra.Command{
 			if issue.AcceptanceCriteria != "" {
 				fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
 			}
-
 			// Show labels
 			labels, _ := store.GetLabels(ctx, issue.ID)
 			if len(labels) > 0 {
 				fmt.Printf("\nLabels: %v\n", labels)
 			}
-
 			// Show dependencies
 			deps, _ := store.GetDependencies(ctx, issue.ID)
 			if len(deps) > 0 {
@@ -313,7 +283,6 @@ var showCmd = &cobra.Command{
 					fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 				}
 			}
-
 			// Show dependents
 			dependents, _ := store.GetDependents(ctx, issue.ID)
 			if len(dependents) > 0 {
@@ -322,7 +291,6 @@ var showCmd = &cobra.Command{
 					fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
 				}
 			}
-
 			// Show comments
 			comments, _ := store.GetIssueComments(ctx, issue.ID)
 			if len(comments) > 0 {
@@ -331,16 +299,13 @@ var showCmd = &cobra.Command{
 					fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
 				}
 			}
-
 			fmt.Println()
 		}
-
 		if jsonOutput && len(allDetails) > 0 {
 			outputJSON(allDetails)
 		}
 	},
 }
-
 var updateCmd = &cobra.Command{
 	Use:   "update [id...]",
 	Short: "Update one or more issues",
@@ -348,7 +313,6 @@ var updateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 		updates := make(map[string]interface{})
-
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
 			updates["status"] = status
@@ -390,14 +354,11 @@ var updateCmd = &cobra.Command{
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
 		}
-
 		if len(updates) == 0 {
 			fmt.Println("No updates specified")
 			return
 		}
-
 		ctx := context.Background()
-
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -418,13 +379,11 @@ var updateCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			updatedIssues := []*types.Issue{}
 			for _, id := range resolvedIDs {
 				updateArgs := &rpc.UpdateArgs{ID: id}
-
 				// Map updates to RPC args
 				if status, ok := updates["status"].(string); ok {
 					updateArgs.Status = &status
@@ -450,13 +409,11 @@ var updateCmd = &cobra.Command{
 				if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
 					updateArgs.AcceptanceCriteria = &acceptanceCriteria
 				}
-
 				resp, err := daemonClient.Update(updateArgs)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 					continue
 				}
-
 				if jsonOutput {
 					var issue types.Issue
 					if err := json.Unmarshal(resp.Data, &issue); err == nil {
@@ -467,13 +424,11 @@ var updateCmd = &cobra.Command{
 					fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
 				}
 			}
-
 			if jsonOutput && len(updatedIssues) > 0 {
 				outputJSON(updatedIssues)
 			}
 			return
 		}
-
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
@@ -481,7 +436,6 @@ var updateCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 				continue
 			}
-
 			if jsonOutput {
 				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil {
@@ -492,25 +446,20 @@ var updateCmd = &cobra.Command{
 				fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
 			}
 		}
-
 		// Schedule auto-flush if any issues were updated
 		if len(args) > 0 {
 			markDirtyAndScheduleFlush()
 		}
-
 		if jsonOutput && len(updatedIssues) > 0 {
 			outputJSON(updatedIssues)
 		}
 	},
 }
-
 var editCmd = &cobra.Command{
 	Use:   "edit [id]",
 	Short: "Edit an issue field in $EDITOR",
 	Long: `Edit an issue field using your configured $EDITOR.
-
 By default, edits the description. Use flags to edit other fields.
-
 Examples:
   bd edit bd-42                    # Edit description
   bd edit bd-42 --title            # Edit title
@@ -521,7 +470,6 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		id := args[0]
 		ctx := context.Background()
-
 		// Resolve partial ID if in direct mode
 		if daemonClient == nil {
 			fullID, err := utils.ResolvePartialID(ctx, store, id)
@@ -531,7 +479,6 @@ Examples:
 			}
 			id = fullID
 		}
-
 		// Determine which field to edit
 		fieldToEdit := "description"
 		if cmd.Flags().Changed("title") {
@@ -543,7 +490,6 @@ Examples:
 		} else if cmd.Flags().Changed("acceptance") {
 			fieldToEdit = "acceptance_criteria"
 		}
-
 		// Get the editor from environment
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
@@ -562,11 +508,9 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Error: No editor found. Set $EDITOR or $VISUAL environment variable.\n")
 			os.Exit(1)
 		}
-
 		// Get the current issue
 		var issue *types.Issue
 		var err error
-
 		if daemonClient != nil {
 			// Daemon mode
 			showArgs := &rpc.ShowArgs{ID: id}
@@ -575,7 +519,6 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error fetching issue %s: %v\n", id, err)
 				os.Exit(1)
 			}
-
 			issue = &types.Issue{}
 			if err := json.Unmarshal(resp.Data, issue); err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing issue data: %v\n", err)
@@ -593,7 +536,6 @@ Examples:
 				os.Exit(1)
 			}
 		}
-
 		// Get the current field value
 		var currentValue string
 		switch fieldToEdit {
@@ -608,7 +550,6 @@ Examples:
 		case "acceptance_criteria":
 			currentValue = issue.AcceptanceCriteria
 		}
-
 		// Create a temporary file with the current value
 		tmpFile, err := os.CreateTemp("", fmt.Sprintf("bd-edit-%s-*.txt", fieldToEdit))
 		if err != nil {
@@ -617,7 +558,6 @@ Examples:
 		}
 		tmpPath := tmpFile.Name()
 		defer func() { _ = os.Remove(tmpPath) }()
-
 		// Write current value to temp file
 		if _, err := tmpFile.WriteString(currentValue); err != nil {
 			_ = tmpFile.Close() // nolint:gosec // G104: Error already handled above
@@ -625,18 +565,15 @@ Examples:
 			os.Exit(1)
 		}
 		_ = tmpFile.Close() // nolint:gosec // G104: Defer close errors are non-critical
-
 		// Open the editor
 		editorCmd := exec.Command(editor, tmpPath)
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = os.Stdout
 		editorCmd.Stderr = os.Stderr
-
 		if err := editorCmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
 			os.Exit(1)
 		}
-
 		// Read the edited content
 		// nolint:gosec // G304: tmpPath is securely created temp file
 		editedContent, err := os.ReadFile(tmpPath)
@@ -644,30 +581,24 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Error reading edited file: %v\n", err)
 			os.Exit(1)
 		}
-
 		newValue := string(editedContent)
-
 		// Check if the value changed
 		if newValue == currentValue {
 			fmt.Println("No changes made")
 			return
 		}
-
 		// Validate title if editing title
 		if fieldToEdit == "title" && strings.TrimSpace(newValue) == "" {
 			fmt.Fprintf(os.Stderr, "Error: title cannot be empty\n")
 			os.Exit(1)
 		}
-
 		// Update the issue
 		updates := map[string]interface{}{
 			fieldToEdit: newValue,
 		}
-
 		if daemonClient != nil {
 			// Daemon mode
 			updateArgs := &rpc.UpdateArgs{ID: id}
-
 			switch fieldToEdit {
 			case "title":
 				updateArgs.Title = &newValue
@@ -680,7 +611,6 @@ Examples:
 			case "acceptance_criteria":
 				updateArgs.AcceptanceCriteria = &newValue
 			}
-
 			_, err := daemonClient.Update(updateArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error updating issue: %v\n", err)
@@ -694,13 +624,11 @@ Examples:
 			}
 			markDirtyAndScheduleFlush()
 		}
-
 		green := color.New(color.FgGreen).SprintFunc()
 		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
 		fmt.Printf("%s Updated %s for issue: %s\n", green("✓"), fieldName, id)
 	},
 }
-
 var closeCmd = &cobra.Command{
 	Use:   "close [id...]",
 	Short: "Close one or more issues",
@@ -711,9 +639,7 @@ var closeCmd = &cobra.Command{
 			reason = "Closed"
 		}
 		// Use global jsonOutput set by PersistentPreRun
-
 		ctx := context.Background()
-
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -734,7 +660,6 @@ var closeCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			closedIssues := []*types.Issue{}
@@ -748,7 +673,6 @@ var closeCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 					continue
 				}
-
 				if jsonOutput {
 					var issue types.Issue
 					if err := json.Unmarshal(resp.Data, &issue); err == nil {
@@ -759,13 +683,11 @@ var closeCmd = &cobra.Command{
 					fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
 				}
 			}
-
 			if jsonOutput && len(closedIssues) > 0 {
 				outputJSON(closedIssues)
 			}
 			return
 		}
-
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
@@ -783,22 +705,17 @@ var closeCmd = &cobra.Command{
 				fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
 			}
 		}
-
 		// Schedule auto-flush if any issues were closed
 		if len(args) > 0 {
 			markDirtyAndScheduleFlush()
 		}
-
 		if jsonOutput && len(closedIssues) > 0 {
 			outputJSON(closedIssues)
 		}
 	},
 }
-
 func init() {
-	showCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(showCmd)
-
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	updateCmd.Flags().IntP("priority", "p", 0, "New priority")
 	updateCmd.Flags().String("title", "", "New title")
@@ -810,17 +727,13 @@ func init() {
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
 	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
-	updateCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(updateCmd)
-
 	editCmd.Flags().Bool("title", false, "Edit the title")
 	editCmd.Flags().Bool("description", false, "Edit the description (default)")
 	editCmd.Flags().Bool("design", false, "Edit the design notes")
 	editCmd.Flags().Bool("notes", false, "Edit the notes")
 	editCmd.Flags().Bool("acceptance", false, "Edit the acceptance criteria")
 	rootCmd.AddCommand(editCmd)
-
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
-	closeCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(closeCmd)
 }

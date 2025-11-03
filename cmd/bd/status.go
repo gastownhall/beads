@@ -259,6 +259,6 @@ func getAssignedStatus(assignee string) *StatusSummary {
 func init() {
 	statusCmd.Flags().Bool("all", false, "Show all issues (default behavior)")
 	statusCmd.Flags().Bool("assigned", false, "Show issues assigned to current user")
-	statusCmd.Flags().Bool("json", false, "Output in JSON format")
+	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(statusCmd)
 }

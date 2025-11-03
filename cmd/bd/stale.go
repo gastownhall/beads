@@ -1,23 +1,19 @@
 package main
-
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"time"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 )
-
 var staleCmd = &cobra.Command{
 	Use:   "stale",
 	Short: "Show stale issues (not updated recently)",
 	Long: `Show issues that haven't been updated recently and may need attention.
-
 This helps identify:
 - In-progress issues with no recent activity (may be abandoned)
 - Open issues that have been forgotten
@@ -27,19 +23,16 @@ This helps identify:
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
 		// Use global jsonOutput set by PersistentPreRun
-
 		// Validate status if provided
 		if status != "" && status != "open" && status != "in_progress" && status != "blocked" {
 			fmt.Fprintf(os.Stderr, "Error: invalid status '%s'. Valid values: open, in_progress, blocked\n", status)
 			os.Exit(1)
 		}
-
 		filter := types.StaleFilter{
 			Days:   days,
 			Status: status,
 			Limit:  limit,
 		}
-
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			staleArgs := &rpc.StaleArgs{
@@ -47,19 +40,16 @@ This helps identify:
 				Status: status,
 				Limit:  limit,
 			}
-
 			resp, err := daemonClient.Stale(staleArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-
 			var issues []*types.Issue
 			if err := json.Unmarshal(resp.Data, &issues); err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 				os.Exit(1)
 			}
-
 			if jsonOutput {
 				if issues == nil {
 					issues = []*types.Issue{}
@@ -67,11 +57,9 @@ This helps identify:
 				outputJSON(issues)
 				return
 			}
-
 			displayStaleIssues(issues, days)
 			return
 		}
-
 		// Direct mode
 		ctx := context.Background()
 		issues, err := store.GetStaleIssues(ctx, filter)
@@ -79,7 +67,6 @@ This helps identify:
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-
 		if jsonOutput {
 			if issues == nil {
 				issues = []*types.Issue{}
@@ -87,21 +74,17 @@ This helps identify:
 			outputJSON(issues)
 			return
 		}
-
 		displayStaleIssues(issues, days)
 	},
 }
-
 func displayStaleIssues(issues []*types.Issue, days int) {
 	if len(issues) == 0 {
 		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("\n%s No stale issues found (all active)\n\n", green("✨"))
 		return
 	}
-
 	yellow := color.New(color.FgYellow).SprintFunc()
 	fmt.Printf("\n%s Stale issues (%d not updated in %d+ days):\n\n", yellow("⏰"), len(issues), days)
-
 	now := time.Now()
 	for i, issue := range issues {
 		daysStale := int(now.Sub(issue.UpdatedAt).Hours() / 24)
@@ -113,12 +96,9 @@ func displayStaleIssues(issues []*types.Issue, days int) {
 		fmt.Println()
 	}
 }
-
 func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
 	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked)")
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
-	staleCmd.Flags().Bool("json", false, "Output JSON format")
-
 	rootCmd.AddCommand(staleCmd)
 }
