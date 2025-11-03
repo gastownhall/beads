@@ -74,7 +74,7 @@ func TestSyncBranchCommitAndPush_NotConfigured(t *testing.T) {
 	// Test with no sync.branch configured
 	log, logMsgs := newTestSyncBranchLogger()
 	_ = logMsgs // unused in this test
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 
 	// Should return false (not committed), no error
 	if err != nil {
@@ -153,7 +153,7 @@ func TestSyncBranchCommitAndPush_Success(t *testing.T) {
 	// Test sync branch commit (without push)
 	log, logMsgs := newTestSyncBranchLogger()
 	_ = logMsgs // unused in this test
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 
 	if err != nil {
 		t.Fatalf("syncBranchCommitAndPush failed: %v", err)
@@ -258,7 +258,7 @@ func TestSyncBranchCommitAndPush_NoChanges(t *testing.T) {
 	log, logMsgs := newTestSyncBranchLogger()
 
 	// First commit should succeed
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("First commit failed: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestSyncBranchCommitAndPush_NoChanges(t *testing.T) {
 	}
 
 	// Second commit with no changes should return false
-	committed, err = syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err = syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("Second commit failed: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestSyncBranchCommitAndPush_WorktreeHealthCheck(t *testing.T) {
 	log, logMsgs := newTestSyncBranchLogger()
 
 	// First commit to create worktree
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("First commit failed: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestSyncBranchCommitAndPush_WorktreeHealthCheck(t *testing.T) {
 	*logMsgs = "" // Reset log
 
 	// Should detect corruption and repair (CreateBeadsWorktree handles this silently)
-	committed, err = syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err = syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("Commit after corruption failed: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 	// Push to sync branch using syncBranchCommitAndPush
 	log, logMsgs := newTestSyncBranchLogger()
 	_ = logMsgs // unused in this test
-	committed, err := syncBranchCommitAndPush(ctx, store1, clone1JSONLPath, true, log)
+	committed, err := syncBranchCommitAndPush(ctx, store1, true, log)
 	if err != nil {
 		t.Fatalf("syncBranchCommitAndPush failed: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	// Agent A commits to sync branch
 	log, logMsgs := newTestSyncBranchLogger()
 	_ = logMsgs // unused in this test
-	committed, err := syncBranchCommitAndPush(ctx, store1, clone1JSONLPath, true, log)
+	committed, err := syncBranchCommitAndPush(ctx, store1, true, log)
 	if err != nil {
 		t.Fatalf("syncBranchCommitAndPush failed: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	exportToJSONLWithStore(ctx, store2, clone2JSONLPath)
 
 	// Agent B commits to sync branch
-	committed, err = syncBranchCommitAndPush(ctx, store2, clone2JSONLPath, true, log2)
+	committed, err = syncBranchCommitAndPush(ctx, store2, true, log2)
 	if err != nil {
 		t.Fatalf("syncBranchCommitAndPush failed for clone2: %v", err)
 	}
@@ -800,7 +800,7 @@ func TestSyncBranchConfigChange(t *testing.T) {
 	log, _ := newTestSyncBranchLogger()
 
 	// First commit to v1 branch
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("First commit failed: %v", err)
 	}
@@ -832,7 +832,7 @@ func TestSyncBranchConfigChange(t *testing.T) {
 	}
 
 	// Commit to v2 branch (should create new worktree)
-	committed, err = syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err = syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("Second commit failed: %v", err)
 	}
@@ -934,7 +934,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	exportToJSONLWithStore(ctx, store1, jsonlPath1)
 
 	log1, _ := newTestSyncBranchLogger()
-	committed, err := syncBranchCommitAndPush(ctx, store1, jsonlPath1, true, log1)
+	committed, err := syncBranchCommitAndPush(ctx, store1, true, log1)
 	if err != nil || !committed {
 		t.Fatalf("Clone1 commit failed: err=%v, committed=%v", err, committed)
 	}
@@ -957,7 +957,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	}
 	store2.CreateIssue(ctx, issueB, "agent2")
 	exportToJSONLWithStore(ctx, store2, jsonlPath2)
-	committed, err = syncBranchCommitAndPush(ctx, store2, jsonlPath2, true, log2)
+	committed, err = syncBranchCommitAndPush(ctx, store2, true, log2)
 	if err != nil || !committed {
 		t.Fatalf("Clone2 commit failed: err=%v, committed=%v", err, committed)
 	}
@@ -980,7 +980,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	}
 	store3.CreateIssue(ctx, issueC, "agent3")
 	exportToJSONLWithStore(ctx, store3, jsonlPath3)
-	committed, err = syncBranchCommitAndPush(ctx, store3, jsonlPath3, true, log3)
+	committed, err = syncBranchCommitAndPush(ctx, store3, true, log3)
 	if err != nil || !committed {
 		t.Fatalf("Clone3 commit failed: err=%v, committed=%v", err, committed)
 	}
@@ -1068,7 +1068,7 @@ func TestSyncBranchPerformance(t *testing.T) {
 
 	// First commit (creates worktree - expected to be slower)
 	start := time.Now()
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 	firstDuration := time.Since(start)
 	if err != nil || !committed {
 		t.Fatalf("First commit failed: err=%v, committed=%v", err, committed)
@@ -1088,7 +1088,7 @@ func TestSyncBranchPerformance(t *testing.T) {
 		exportToJSONLWithStore(ctx, store, jsonlPath)
 
 		start = time.Now()
-		committed, err = syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+		committed, err = syncBranchCommitAndPush(ctx, store, false, log)
 		duration := time.Since(start)
 		totalDuration += duration
 
@@ -1154,7 +1154,7 @@ func TestSyncBranchNetworkFailure(t *testing.T) {
 	log, logMsgs := newTestSyncBranchLogger()
 
 	// Commit locally (without push to simulate offline mode)
-	committed, err := syncBranchCommitAndPush(ctx, store, jsonlPath, false, log)
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
 	if err != nil {
 		t.Fatalf("Local commit failed: %v", err)
 	}
@@ -1173,7 +1173,7 @@ func TestSyncBranchNetworkFailure(t *testing.T) {
 	exportToJSONLWithStore(ctx, store, jsonlPath)
 
 	// Try commit with push - should handle network error gracefully
-	committed, err = syncBranchCommitAndPush(ctx, store, jsonlPath, true, log)
+	committed, err = syncBranchCommitAndPush(ctx, store, true, log)
 
 	// The commit should succeed locally even if push fails
 	// (Current implementation may vary - this documents expected behavior)

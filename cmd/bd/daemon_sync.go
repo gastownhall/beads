@@ -279,7 +279,7 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 		// Auto-commit if enabled
 		if autoCommit {
 			// Try sync branch commit first
-			committed, err := syncBranchCommitAndPush(exportCtx, store, jsonlPath, autoPush, log)
+			committed, err := syncBranchCommitAndPush(exportCtx, store, autoPush, log)
 			if err != nil {
 				log.log("Sync branch commit failed: %v", err)
 				return
@@ -470,7 +470,7 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 
 		if autoCommit {
 			// Try sync branch commit first
-			committed, err := syncBranchCommitAndPush(syncCtx, store, jsonlPath, autoPush, log)
+			committed, err := syncBranchCommitAndPush(syncCtx, store, autoPush, log)
 			if err != nil {
 				log.log("Sync branch commit failed: %v", err)
 				return

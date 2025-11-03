@@ -260,7 +260,7 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 			// But capture store reference before goroutine to ensure it's not closed
 			go func(s *Server, store storage.Storage, dbPath string) {
 				// Create independent context with timeout
-				// Don't derive from importCtx as that may be cancelled already
+				// Don't derive from importCtx as that may be canceled already
 				exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer exportCancel()
 

@@ -46,10 +46,7 @@ func (wm *WorktreeManager) CreateBeadsWorktree(branch, worktreePath string) erro
 	}
 
 	// Check if branch exists remotely or locally
-	branchExists, err := wm.branchExists(branch)
-	if err != nil {
-		return fmt.Errorf("failed to check if branch exists: %w", err)
-	}
+	branchExists := wm.branchExists(branch)
 
 	// Create worktree without checking out files initially
 	var cmd *exec.Cmd
@@ -214,22 +211,22 @@ func (wm *WorktreeManager) isValidWorktree(worktreePath string) (bool, error) {
 }
 
 // branchExists checks if a branch exists locally or remotely
-func (wm *WorktreeManager) branchExists(branch string) (bool, error) {
+func (wm *WorktreeManager) branchExists(branch string) bool {
 	// Check local branches
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch) // #nosec G204 - branch name from config
 	cmd.Dir = wm.repoPath
 	if err := cmd.Run(); err == nil {
-		return true, nil
+		return true
 	}
 
 	// Check remote branches
-	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch) // #nosec G204 - branch name from config
 	cmd.Dir = wm.repoPath
 	if err := cmd.Run(); err == nil {
-		return true, nil
+		return true
 	}
 
-	return false, nil
+	return false
 }
 
 // configureSparseCheckout sets up sparse checkout to only include .beads/
@@ -265,7 +262,7 @@ func (wm *WorktreeManager) configureSparseCheckout(worktreePath string) error {
 	// Write sparse-checkout file to include only .beads/
 	sparseFile := filepath.Join(infoDir, "sparse-checkout")
 	sparseContent := ".beads/*\n"
-	if err := os.WriteFile(sparseFile, []byte(sparseContent), 0644); err != nil {
+	if err := os.WriteFile(sparseFile, []byte(sparseContent), 0644); err != nil { // #nosec G306 - sparse-checkout config file needs standard permissions
 		return fmt.Errorf("failed to write sparse-checkout file: %w", err)
 	}
 

@@ -120,7 +120,7 @@ history/
 - ✅ Clean repository root
 - ✅ Clear separation between ephemeral and permanent documentation
 - ✅ Easy to exclude from version control if desired
-- ✅ Preserves planning history for archaeological research
+- ✅ Preserves planning history for archeological research
 - ✅ Reduces noise when browsing the project
 
 ### Important Rules

@@ -15,7 +15,7 @@ import (
 
 // syncBranchCommitAndPush commits JSONL to the sync branch using a worktree
 // Returns true if changes were committed, false if no changes or sync.branch not configured
-func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, jsonlPath string, autoPush bool, log daemonLogger) (bool, error) {
+func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPush bool, log daemonLogger) (bool, error) {
 	// Get sync.branch config
 	syncBranch, err := store.GetConfig(ctx, "sync.branch")
 	if err != nil {
@@ -113,7 +113,7 @@ func gitHasChangesInWorktree(ctx context.Context, worktreePath, filePath string)
 		return false, fmt.Errorf("failed to make path relative: %w", err)
 	}
 	
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain", relPath)
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain", relPath) // #nosec G204 - worktreePath and relPath are derived from trusted git operations
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git status failed in worktree: %w", err)
@@ -130,7 +130,7 @@ func gitCommitInWorktree(ctx context.Context, worktreePath, filePath, message st
 	}
 	
 	// Stage the file
-	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", relPath)
+	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", relPath) // #nosec G204 - worktreePath and relPath are derived from trusted git operations
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed in worktree: %w", err)
 	}
@@ -148,7 +148,7 @@ func gitCommitInWorktree(ctx context.Context, worktreePath, filePath, message st
 // gitPushFromWorktree pushes the sync branch from the worktree
 func gitPushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 	// Get remote name (usually "origin")
-	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", branch))
+	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", branch)) // #nosec G204 - worktreePath and branch are from config
 	remoteOutput, err := remoteCmd.Output()
 	if err != nil {
 		// If no remote configured, default to "origin" and set up tracking
@@ -157,7 +157,7 @@ func gitPushFromWorktree(ctx context.Context, worktreePath, branch string) error
 	remote := strings.TrimSpace(string(remoteOutput))
 	
 	// Push with explicit remote and branch, set upstream if not set
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--set-upstream", remote, branch)
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--set-upstream", remote, branch) // #nosec G204 - worktreePath, remote, and branch are from config
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push failed from worktree: %w\n%s", err, output)
@@ -226,12 +226,12 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	}
 	
 	// Copy JSONL from worktree to main repo
-	data, err := os.ReadFile(worktreeJSONLPath)
+	data, err := os.ReadFile(worktreeJSONLPath) // #nosec G304 - path is derived from trusted git worktree
 	if err != nil {
 		return false, fmt.Errorf("failed to read worktree JSONL: %w", err)
 	}
-	
-	if err := os.WriteFile(mainJSONLPath, data, 0644); err != nil {
+
+	if err := os.WriteFile(mainJSONLPath, data, 0644); err != nil { // #nosec G306 - JSONL needs to be readable
 		return false, fmt.Errorf("failed to write main JSONL: %w", err)
 	}
 	
