@@ -233,6 +233,12 @@ func findDatabaseInTree() string {
 		return ""
 	}
 
+	// Resolve symlinks in working directory to ensure consistent path handling
+	// This prevents issues when repos are accessed via symlinks (e.g. /Users/user/Code -> /Users/user/Documents/Code)
+	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolvedDir
+	}
+
 	// Walk up directory tree
 	for {
 		beadsDir := filepath.Join(dir, ".beads")
