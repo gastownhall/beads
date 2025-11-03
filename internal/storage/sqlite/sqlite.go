@@ -14,7 +14,8 @@ import (
 
 	// Import SQLite driver
 	"github.com/steveyegge/beads/internal/types"
-	_ "modernc.org/sqlite"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // SQLiteStorage implements the Storage interface using SQLite
@@ -56,7 +57,7 @@ func New(path string) (*SQLiteStorage, error) {
 		connStr += "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
 	}
 
-	db, err := sql.Open("sqlite", connStr)
+	db, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

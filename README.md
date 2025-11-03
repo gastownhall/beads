@@ -2,6 +2,7 @@
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/steveyegge/beads)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/steveyegge/beads)](https://github.com/steveyegge/beads/releases)
+[![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
 [![CI](https://img.shields.io/github/actions/workflow/status/steveyegge/beads/ci.yml?branch=main&label=tests)](https://github.com/steveyegge/beads/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/steveyegge/beads)](https://goreportcard.com/report/github.com/steveyegge/beads)
 [![License](https://img.shields.io/github/license/steveyegge/beads)](LICENSE)
@@ -68,6 +69,11 @@ Agents report that they enjoy working with Beads, and they will use it spontaneo
 
 ## Installation
 
+**npm (Node.js environments, Claude Code for Web):**
+```bash
+npm install -g @beads/bd
+```
+
 **Quick install (all platforms):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
@@ -82,6 +88,8 @@ brew install bd
 **Other platforms and methods:** See [INSTALLING.md](INSTALLING.md) for Windows, Arch Linux, and manual installation.
 
 **IDE Integration:** See [INSTALLING.md](INSTALLING.md) for Claude Code plugin and MCP server setup.
+
+**Claude Code for Web:** See [npm-package/CLAUDE_CODE_WEB.md](npm-package/CLAUDE_CODE_WEB.md) for SessionStart hook setup.
 
 ## Quick Start
 

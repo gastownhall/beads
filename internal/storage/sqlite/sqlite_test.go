@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
-	_ "modernc.org/sqlite"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
