@@ -385,6 +385,12 @@ func (s *Server) handleShow(req *Request) Response {
 			Error:   fmt.Sprintf("failed to get issue: %v", err),
 		}
 	}
+	if issue == nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("issue not found: %s", showArgs.ID),
+		}
+	}
 
 	// Populate labels, dependencies, and dependents
 	labels, _ := store.GetLabels(ctx, issue.ID)

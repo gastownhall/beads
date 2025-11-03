@@ -191,10 +191,8 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	// If import is already running, skip and let the request proceed (bd-8931)
 	// This prevents blocking RPC requests when import is in progress
 	if !s.importInProgress.CompareAndSwap(false, true) {
-		fmt.Fprintf(os.Stderr, "Debug: auto-import already in progress, skipping (bd-1048)\n")
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "Debug: acquired import lock, proceeding with auto-import (bd-1048)\n")
 
 	// Track whether we should release the lock via defer
 	// Set to false if we manually release early to avoid double-release bug
@@ -215,22 +213,15 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 		s.importInProgress.Store(false)
 		shouldDeferRelease = false
 
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: skipping auto-import, .beads files have uncommitted changes\n")
-		}
 		fmt.Fprintf(os.Stderr, "Warning: auto-import skipped - .beads files have uncommitted changes. Run 'bd import' manually after committing.\n")
 		return nil
 	}
 
 	// Double-check staleness after acquiring lock (another goroutine may have imported)
-	fmt.Fprintf(os.Stderr, "Debug: checking staleness after lock acquisition (bd-1048)\n")
 	isStale, err = autoimport.CheckStaleness(ctx, store, dbPath)
 	if err != nil || !isStale {
-		fmt.Fprintf(os.Stderr, "Debug: staleness check returned: stale=%v err=%v (bd-1048)\n", isStale, err)
 		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "Debug: daemon detected stale JSONL, auto-importing with timeout... (bd-1048)\n")
 
 	// Create timeout context for import operation (bd-8931, bd-1048)
 	// This prevents daemon from hanging if import gets stuck

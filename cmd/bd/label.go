@@ -83,7 +83,10 @@ var labelAddCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 					continue
 				}
-				fullID = string(resp.Data)
+				if err := json.Unmarshal(resp.Data, &fullID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					continue
+				}
 			} else {
 				fullID, err = utils.ResolvePartialID(ctx, store, id)
 				if err != nil {
@@ -125,7 +128,10 @@ var labelRemoveCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 					continue
 				}
-				fullID = string(resp.Data)
+				if err := json.Unmarshal(resp.Data, &fullID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					continue
+				}
 			} else {
 				fullID, err = utils.ResolvePartialID(ctx, store, id)
 				if err != nil {
@@ -162,7 +168,10 @@ var labelListCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
 				os.Exit(1)
 			}
-			issueID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &issueID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
 			var err error
 			issueID, err = utils.ResolvePartialID(ctx, store, args[0])

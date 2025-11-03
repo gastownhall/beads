@@ -30,7 +30,12 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
 					os.Exit(1)
 				}
-				resolvedIDs = append(resolvedIDs, string(resp.Data))
+				var resolvedID string
+				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					os.Exit(1)
+				}
+				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
 		} else {
 			var err error

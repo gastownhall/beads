@@ -103,8 +103,6 @@ func (s *Server) validateDatabaseBinding(req *Request) error {
 }
 
 func (s *Server) handleRequest(req *Request) Response {
-	fmt.Fprintf(os.Stderr, "Debug: handleRequest called for operation: %s (bd-1048)\n", req.Operation)
-	
 	// Track request timing
 	start := time.Now()
 
@@ -112,7 +110,6 @@ func (s *Server) handleRequest(req *Request) Response {
 	defer func() {
 		latency := time.Since(start)
 		s.metrics.RecordRequest(req.Operation, latency)
-		fmt.Fprintf(os.Stderr, "Debug: handleRequest completed for operation: %s in %v (bd-1048)\n", req.Operation, latency)
 	}()
 
 	// Validate database binding (skip for health/metrics to allow diagnostics)

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -38,7 +39,10 @@ var depAddCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
 				os.Exit(1)
 			}
-			fromID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &fromID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 			
 			resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
 			resp, err = daemonClient.ResolveID(resolveArgs)
@@ -46,7 +50,10 @@ var depAddCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
 				os.Exit(1)
 			}
-			toID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &toID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
 			var err error
 			fromID, err = utils.ResolvePartialID(ctx, store, args[0])
@@ -159,7 +166,10 @@ var depRemoveCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
 				os.Exit(1)
 			}
-			fromID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &fromID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 			
 			resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
 			resp, err = daemonClient.ResolveID(resolveArgs)
@@ -167,7 +177,10 @@ var depRemoveCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
 				os.Exit(1)
 			}
-			toID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &toID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
 			var err error
 			fromID, err = utils.ResolvePartialID(ctx, store, args[0])
@@ -250,7 +263,10 @@ var depTreeCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
 				os.Exit(1)
 			}
-			fullID = string(resp.Data)
+			if err := json.Unmarshal(resp.Data, &fullID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
 			var err error
 			fullID, err = utils.ResolvePartialID(ctx, store, args[0])

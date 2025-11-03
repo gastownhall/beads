@@ -178,9 +178,7 @@ func (s *Server) handleSignals() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	fmt.Fprintf(os.Stderr, "Debug: handleConnection started (bd-1048)\n")
 	defer func() { 
-		fmt.Fprintf(os.Stderr, "Debug: handleConnection closing (bd-1048)\n")
 		_ = conn.Close() 
 	}()
 
@@ -196,19 +194,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 	writer := bufio.NewWriter(conn)
 
 	for {
-		fmt.Fprintf(os.Stderr, "Debug: waiting for request (bd-1048)\n")
 		// Set read deadline for the next request
 		if err := conn.SetReadDeadline(time.Now().Add(s.requestTimeout)); err != nil {
-			fmt.Fprintf(os.Stderr, "Debug: SetReadDeadline error: %v (bd-1048)\n", err)
 			return
 		}
 
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Debug: ReadBytes error: %v (bd-1048)\n", err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "Debug: received request line (bd-1048)\n")
 
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
@@ -219,18 +213,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 			s.writeResponse(writer, resp)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "Debug: parsed request operation: %s (bd-1048)\n", req.Operation)
 
 		// Set write deadline for the response
 		if err := conn.SetWriteDeadline(time.Now().Add(s.requestTimeout)); err != nil {
-			fmt.Fprintf(os.Stderr, "Debug: SetWriteDeadline error: %v (bd-1048)\n", err)
 			return
 		}
 
 		resp := s.handleRequest(&req)
-		fmt.Fprintf(os.Stderr, "Debug: handleRequest returned, writing response (bd-1048)\n")
 		s.writeResponse(writer, resp)
-		fmt.Fprintf(os.Stderr, "Debug: response written (bd-1048)\n")
 	}
 }
 
