@@ -373,3 +373,85 @@ func TestCheckDatabaseJSONLSync(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckGitHooks(t *testing.T) {
+	tests := []struct {
+		name           string
+		hasGitDir      bool
+		installedHooks []string
+		expectedStatus string
+		expectWarning  bool
+	}{
+		{
+			name:           "not a git repository",
+			hasGitDir:      false,
+			installedHooks: []string{},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name:           "all hooks installed",
+			hasGitDir:      true,
+			installedHooks: []string{"pre-commit", "post-merge", "pre-push"},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name:           "no hooks installed",
+			hasGitDir:      true,
+			installedHooks: []string{},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+		{
+			name:           "some hooks installed",
+			hasGitDir:      true,
+			installedHooks: []string{"pre-commit"},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+		{
+			name:           "partial hooks installed",
+			hasGitDir:      true,
+			installedHooks: []string{"pre-commit", "post-merge"},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			if tc.hasGitDir {
+				gitDir := filepath.Join(tmpDir, ".git")
+				hooksDir := filepath.Join(gitDir, "hooks")
+				if err := os.MkdirAll(hooksDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+
+				// Create installed hooks
+				for _, hookName := range tc.installedHooks {
+					hookPath := filepath.Join(hooksDir, hookName)
+					if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n"), 0755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			check := checkGitHooks(tmpDir)
+
+			if check.Status != tc.expectedStatus {
+				t.Errorf("Expected status %s, got %s", tc.expectedStatus, check.Status)
+			}
+
+			if tc.expectWarning && check.Fix == "" {
+				t.Error("Expected fix message for warning status")
+			}
+
+			if !tc.expectWarning && check.Fix != "" && tc.hasGitDir {
+				t.Error("Expected no fix message for non-warning status")
+			}
+		})
+	}
+}

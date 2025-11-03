@@ -57,6 +57,7 @@ This command checks:
   - Database-JSONL sync status
   - File permissions
   - Circular dependencies
+  - Git hooks (pre-commit, post-merge, pre-push)
 
 Examples:
   bd doctor              # Check current directory
@@ -107,7 +108,15 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, installCheck)
 	if installCheck.Status != statusOK {
 		result.OverallOK = false
-		// If no .beads/, skip other checks
+	}
+
+	// Check Git Hooks early (even if .beads/ doesn't exist yet)
+	hooksCheck := checkGitHooks(path)
+	result.Checks = append(result.Checks, hooksCheck)
+	// Don't fail overall check for missing hooks, just warn
+
+	// If no .beads/, skip remaining checks
+	if installCheck.Status != statusOK {
 		return result
 	}
 
@@ -953,6 +962,65 @@ func checkDependencyCycles(path string) doctorCheck {
 		Message: fmt.Sprintf("Found %d circular dependency cycle(s)", cycleCount),
 		Detail:  fmt.Sprintf("First cycle involves: %s", firstCycle),
 		Fix:     "Run 'bd dep cycles' to see full cycle paths, then 'bd dep remove' to break cycles",
+	}
+}
+
+func checkGitHooks(path string) doctorCheck {
+	// Check if we're in a git repository
+	gitDir := filepath.Join(path, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Git Hooks",
+			Status:  statusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	// Recommended hooks and their purposes
+	recommendedHooks := map[string]string{
+		"pre-commit":  "Flushes pending bd changes to JSONL before commit",
+		"post-merge":  "Imports updated JSONL after git pull/merge",
+		"pre-push":    "Exports database to JSONL before push",
+	}
+
+	hooksDir := filepath.Join(gitDir, "hooks")
+	var missingHooks []string
+	var installedHooks []string
+
+	for hookName := range recommendedHooks {
+		hookPath := filepath.Join(hooksDir, hookName)
+		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+			missingHooks = append(missingHooks, hookName)
+		} else {
+			installedHooks = append(installedHooks, hookName)
+		}
+	}
+
+	if len(missingHooks) == 0 {
+		return doctorCheck{
+			Name:    "Git Hooks",
+			Status:  statusOK,
+			Message: "All recommended hooks installed",
+			Detail:  fmt.Sprintf("Installed: %s", strings.Join(installedHooks, ", ")),
+		}
+	}
+
+	if len(installedHooks) > 0 {
+		return doctorCheck{
+			Name:    "Git Hooks",
+			Status:  statusWarning,
+			Message: fmt.Sprintf("Missing %d recommended hook(s)", len(missingHooks)),
+			Detail:  fmt.Sprintf("Missing: %s", strings.Join(missingHooks, ", ")),
+			Fix:     "Run './examples/git-hooks/install.sh' to install recommended git hooks",
+		}
+	}
+
+	return doctorCheck{
+		Name:    "Git Hooks",
+		Status:  statusWarning,
+		Message: "No recommended git hooks installed",
+		Detail:  fmt.Sprintf("Recommended: %s", strings.Join([]string{"pre-commit", "post-merge", "pre-push"}, ", ")),
+		Fix:     "Run './examples/git-hooks/install.sh' to install recommended git hooks",
 	}
 }
 

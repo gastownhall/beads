@@ -29,7 +29,9 @@ var syncCmd = &cobra.Command{
 This command wraps the entire git-based sync workflow for multi-device use.
 
 Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).
-Use --import-only to just import from JSONL (useful after git pull).`,
+Use --import-only to just import from JSONL (useful after git pull).
+Use --status to show diff between sync branch and main branch.
+Use --merge to merge the sync branch back to main branch.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		ctx := context.Background()
 
@@ -40,12 +42,32 @@ Use --import-only to just import from JSONL (useful after git pull).`,
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 		flushOnly, _ := cmd.Flags().GetBool("flush-only")
 		importOnly, _ := cmd.Flags().GetBool("import-only")
+		status, _ := cmd.Flags().GetBool("status")
+		merge, _ := cmd.Flags().GetBool("merge")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a bd workspace (no .beads directory found)\n")
 			os.Exit(1)
+		}
+
+		// If status mode, show diff between sync branch and main
+		if status {
+			if err := showSyncStatus(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		// If merge mode, merge sync branch to main
+		if merge {
+			if err := mergeSyncBranch(ctx, dryRun); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 
 		// If import-only mode, just import and exit
@@ -247,6 +269,8 @@ func init() {
 	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	syncCmd.Flags().Bool("flush-only", false, "Only export pending changes to JSONL (skip git operations)")
 	syncCmd.Flags().Bool("import-only", false, "Only import from JSONL (skip git operations, useful after git pull)")
+	syncCmd.Flags().Bool("status", false, "Show diff between sync branch and main branch")
+	syncCmd.Flags().Bool("merge", false, "Merge sync branch back to main branch")
 	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
 	rootCmd.AddCommand(syncCmd)
 }
@@ -489,6 +513,197 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 
 	// Clear auto-flush state
 	clearAutoFlushState()
+
+	return nil
+}
+
+// getCurrentBranch returns the name of the current git branch
+func getCurrentBranch(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current branch: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// getSyncBranch returns the configured sync branch name
+func getSyncBranch(ctx context.Context) (string, error) {
+	// Ensure store is initialized
+	if err := ensureStoreActive(); err != nil {
+		return "", fmt.Errorf("failed to initialize store: %w", err)
+	}
+
+	syncBranch, err := store.GetConfig(ctx, "sync.branch")
+	if err != nil {
+		return "", fmt.Errorf("failed to get sync.branch config: %w", err)
+	}
+
+	if syncBranch == "" {
+		return "", fmt.Errorf("sync.branch not configured (run 'bd config set sync.branch <branch-name>')")
+	}
+
+	return syncBranch, nil
+}
+
+// showSyncStatus shows the diff between sync branch and main branch
+func showSyncStatus(ctx context.Context) error {
+	if !isGitRepo() {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	currentBranch, err := getCurrentBranch(ctx)
+	if err != nil {
+		return err
+	}
+
+	syncBranch, err := getSyncBranch(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Check if sync branch exists
+	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	if err := checkCmd.Run(); err != nil {
+		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
+	}
+
+	fmt.Printf("Current branch: %s\n", currentBranch)
+	fmt.Printf("Sync branch: %s\n\n", syncBranch)
+
+	// Show commit diff
+	fmt.Println("Commits in sync branch not in main:")
+	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch)
+	logOutput, err := logCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
+	}
+
+	if len(strings.TrimSpace(string(logOutput))) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		fmt.Print(string(logOutput))
+	}
+
+	fmt.Println("\nCommits in main not in sync branch:")
+	logCmd = exec.CommandContext(ctx, "git", "log", "--oneline", syncBranch+".."+currentBranch)
+	logOutput, err = logCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
+	}
+
+	if len(strings.TrimSpace(string(logOutput))) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		fmt.Print(string(logOutput))
+	}
+
+	// Show file diff for .beads/beads.jsonl
+	fmt.Println("\nFile differences in .beads/beads.jsonl:")
+	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/beads.jsonl")
+	diffOutput, err := diffCmd.CombinedOutput()
+	if err != nil {
+		// diff returns non-zero when there are differences, which is fine
+		if len(diffOutput) == 0 {
+			return fmt.Errorf("failed to get diff: %w", err)
+		}
+	}
+
+	if len(strings.TrimSpace(string(diffOutput))) == 0 {
+		fmt.Println("  (no differences)")
+	} else {
+		fmt.Print(string(diffOutput))
+	}
+
+	return nil
+}
+
+// mergeSyncBranch merges the sync branch back to main
+func mergeSyncBranch(ctx context.Context, dryRun bool) error {
+	if !isGitRepo() {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	currentBranch, err := getCurrentBranch(ctx)
+	if err != nil {
+		return err
+	}
+
+	syncBranch, err := getSyncBranch(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Check if sync branch exists
+	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	if err := checkCmd.Run(); err != nil {
+		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
+	}
+
+	// Verify we're on the main branch (not the sync branch)
+	if currentBranch == syncBranch {
+		return fmt.Errorf("cannot merge while on sync branch '%s' (checkout main branch first)", syncBranch)
+	}
+
+	// Check if main branch is clean
+	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check git status: %w", err)
+	}
+
+	if len(strings.TrimSpace(string(statusOutput))) > 0 {
+		return fmt.Errorf("main branch has uncommitted changes, please commit or stash them first")
+	}
+
+	if dryRun {
+		fmt.Printf("[DRY RUN] Would merge branch '%s' into '%s'\n", syncBranch, currentBranch)
+
+		// Show what would be merged
+		logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch)
+		logOutput, err := logCmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to preview commits: %w", err)
+		}
+
+		if len(strings.TrimSpace(string(logOutput))) > 0 {
+			fmt.Println("\nCommits that would be merged:")
+			fmt.Print(string(logOutput))
+		} else {
+			fmt.Println("\nNo commits to merge (already up to date)")
+		}
+
+		return nil
+	}
+
+	// Perform the merge
+	fmt.Printf("Merging branch '%s' into '%s'...\n", syncBranch, currentBranch)
+
+	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", syncBranch, "-m",
+		fmt.Sprintf("Merge %s into %s", syncBranch, currentBranch))
+	mergeOutput, err := mergeCmd.CombinedOutput()
+	if err != nil {
+		// Check if it's a merge conflict
+		if strings.Contains(string(mergeOutput), "CONFLICT") || strings.Contains(string(mergeOutput), "conflict") {
+			fmt.Fprintf(os.Stderr, "Merge conflict detected:\n%s\n", mergeOutput)
+			fmt.Fprintf(os.Stderr, "\nTo resolve:\n")
+			fmt.Fprintf(os.Stderr, "1. Resolve conflicts in the affected files\n")
+			fmt.Fprintf(os.Stderr, "2. Stage resolved files: git add <files>\n")
+			fmt.Fprintf(os.Stderr, "3. Complete merge: git commit\n")
+			fmt.Fprintf(os.Stderr, "4. After merge commit, run 'bd import' to sync database\n")
+			return fmt.Errorf("merge conflict - see above for resolution steps")
+		}
+		return fmt.Errorf("merge failed: %w\n%s", err, mergeOutput)
+	}
+
+	fmt.Print(string(mergeOutput))
+	fmt.Println("\n✓ Merge complete")
+
+	// Suggest next steps
+	fmt.Println("\nNext steps:")
+	fmt.Println("1. Review the merged changes")
+	fmt.Println("2. Run 'bd import' to sync the database with merged JSONL")
+	fmt.Println("3. Run 'bd sync' to push changes to remote")
 
 	return nil
 }
