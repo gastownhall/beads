@@ -117,6 +117,19 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 				}
 			}
 
+			// Create metadata.json for --no-db mode
+			cfg := configfile.DefaultConfig(Version)
+			if err := cfg.Save(localBeadsDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+				// Non-fatal - continue anyway
+			}
+
+			// Create config.yaml template
+			if err := createConfigYaml(localBeadsDir, quiet); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
+				// Non-fatal - continue anyway
+			}
+
 			if !quiet {
 				green := color.New(color.FgGreen).SprintFunc()
 				cyan := color.New(color.FgCyan).SprintFunc()
@@ -234,62 +247,10 @@ bd.db
 			// Non-fatal - continue anyway
 		}
 		
-		// Create config.yaml template for user preferences
-		configYamlPath := filepath.Join(localBeadsDir, "config.yaml")
-		if _, err := os.Stat(configYamlPath); os.IsNotExist(err) {
-			configYamlTemplate := `# Beads Configuration File
-# This file configures default behavior for all bd commands in this repository
-# All settings can also be set via environment variables (BD_* prefix)
-# or overridden with command-line flags
-
-# Issue prefix for this repository (used by bd init)
-# If not set, bd init will auto-detect from directory name
-# Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-# issue-prefix: ""
-
-# Use no-db mode: load from JSONL, no SQLite, write back after each command
-# When true, bd will use .beads/issues.jsonl as the source of truth
-# instead of SQLite database
-# no-db: false
-
-# Disable daemon for RPC communication (forces direct database access)
-# no-daemon: false
-
-# Disable auto-flush of database to JSONL after mutations
-# no-auto-flush: false
-
-# Disable auto-import from JSONL when it's newer than database
-# no-auto-import: false
-
-# Enable JSON output by default
-# json: false
-
-# Default actor for audit trails (overridden by BD_ACTOR or --actor)
-# actor: ""
-
-# Path to database (overridden by BEADS_DB or --db)
-# db: ""
-
-# Auto-start daemon if not running (can also use BEADS_AUTO_START_DAEMON)
-# auto-start-daemon: true
-
-# Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
-# flush-debounce: "5s"
-
-# Integration settings (access with 'bd config get/set')
-# These are stored in the database, not in this file:
-# - jira.url
-# - jira.project
-# - linear.url
-# - linear.api-key
-# - github.org
-# - github.repo
-# - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)
-`
-			if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
-				// Non-fatal - continue anyway
-			}
+		// Create config.yaml template
+		if err := createConfigYaml(localBeadsDir, quiet); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
+			// Non-fatal - continue anyway
 		}
 	}
 
@@ -577,6 +538,72 @@ func migrateOldDatabases(targetPath string, quiet bool) error {
 	
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "✓ Database migration complete\n\n")
+	}
+	
+	return nil
+}
+
+// createConfigYaml creates the config.yaml template in the specified directory
+func createConfigYaml(beadsDir string, quiet bool) error {
+	configYamlPath := filepath.Join(beadsDir, "config.yaml")
+	
+	// Skip if already exists
+	if _, err := os.Stat(configYamlPath); err == nil {
+		return nil
+	}
+	
+	configYamlTemplate := `# Beads Configuration File
+# This file configures default behavior for all bd commands in this repository
+# All settings can also be set via environment variables (BD_* prefix)
+# or overridden with command-line flags
+
+# Issue prefix for this repository (used by bd init)
+# If not set, bd init will auto-detect from directory name
+# Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
+# issue-prefix: ""
+
+# Use no-db mode: load from JSONL, no SQLite, write back after each command
+# When true, bd will use .beads/issues.jsonl as the source of truth
+# instead of SQLite database
+# no-db: false
+
+# Disable daemon for RPC communication (forces direct database access)
+# no-daemon: false
+
+# Disable auto-flush of database to JSONL after mutations
+# no-auto-flush: false
+
+# Disable auto-import from JSONL when it's newer than database
+# no-auto-import: false
+
+# Enable JSON output by default
+# json: false
+
+# Default actor for audit trails (overridden by BD_ACTOR or --actor)
+# actor: ""
+
+# Path to database (overridden by BEADS_DB or --db)
+# db: ""
+
+# Auto-start daemon if not running (can also use BEADS_AUTO_START_DAEMON)
+# auto-start-daemon: true
+
+# Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
+# flush-debounce: "5s"
+
+# Integration settings (access with 'bd config get/set')
+# These are stored in the database, not in this file:
+# - jira.url
+# - jira.project
+# - linear.url
+# - linear.api-key
+# - github.org
+# - github.repo
+# - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)
+`
+	
+	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
+		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 	
 	return nil
