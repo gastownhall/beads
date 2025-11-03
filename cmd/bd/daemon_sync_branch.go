@@ -198,7 +198,7 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	}
 	
 	// Get remote name
-	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", syncBranch))
+	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", syncBranch)) // #nosec G204 - worktreePath and syncBranch are from config
 	remoteOutput, err := remoteCmd.Output()
 	if err != nil {
 		// If no remote configured, default to "origin"
@@ -207,7 +207,7 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	remote := strings.TrimSpace(string(remoteOutput))
 	
 	// Pull in worktree
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "pull", remote, syncBranch)
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "pull", remote, syncBranch) // #nosec G204 - worktreePath, remote, and syncBranch are from config
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("git pull failed in worktree: %w\n%s", err, output)

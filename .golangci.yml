@@ -53,17 +53,17 @@ linters:
           - gosec
         text: "G302.*0700|G301.*0750"
       # G302/G306: JSONL files and error logs need 0644 for debugging/sharing
-      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon\.go|internal/daemon/registry\.go|internal/daemonrunner/daemon\.go'
+      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon\.go|cmd/bd/daemon_sync_branch\.go|internal/daemon/registry\.go|internal/daemonrunner/daemon\.go|internal/git/worktree\.go'
         linters:
           - gosec
-        text: "G302.*0644|G306.*0644"
+        text: "G306"
       # G306: Git hooks must be executable (0700)
       - path: 'cmd/bd/init\.go'
         linters:
           - gosec
         text: "G306.*0700"
       # G204: Safe subprocess launches with validated arguments
-      - path: 'cmd/bd/daemon_autostart\.go|cmd/bd/show\.go|cmd/bd/sync\.go'
+      - path: 'cmd/bd/daemon_autostart\.go|cmd/bd/daemon_sync_branch\.go|cmd/bd/show\.go|cmd/bd/sync\.go|internal/git/worktree\.go'
         linters:
           - gosec
         text: 'G204'
