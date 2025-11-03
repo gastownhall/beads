@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Daemon Crash Fix**: Fixed panic in daemon when registry file becomes corrupted with duplicate JSON entries. The daemon now gracefully handles malformed registry files and provides better error messages.
+- **Critical Double JSON Encoding Bug** (bd-1048, bd-4ec8): Fixed widespread bug in daemon RPC calls where `ResolveID` responses were incorrectly converted using `string(resp.Data)` instead of `json.Unmarshal`. This caused IDs to become double-quoted (`"\"bd-1048\""`) and database lookups to fail. Affected commands:
+  - `bd show` - nil pointer dereference and 3 instances of double encoding
+  - `bd dep add/remove/tree` - 5 instances
+  - `bd label add/remove/list` - 3 instances  
+  - `bd reopen` - 1 instance
+  
+  All 12 instances fixed with proper JSON unmarshaling.
 
 ## [0.21.4] - 2025-11-02
 
