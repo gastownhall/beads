@@ -175,7 +175,7 @@ func GenerateBatchIssueIDs(ctx context.Context, conn *sql.Conn, prefix string, i
 // EnsureIDs generates or validates IDs for issues
 // For issues with empty IDs, generates unique hash-based IDs
 // For issues with existing IDs, validates they match the prefix and parent exists (if hierarchical)
-func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string) error {
+func (s *SQLiteStorage) EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string) error {
 	usedIDs := make(map[string]bool)
 	
 	// First pass: record explicitly provided IDs
@@ -186,20 +186,19 @@ func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*typ
 				return err
 			}
 			
-			// For hierarchical IDs (bd-a3f8e9.1), validate parent exists
+			// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
 			if strings.Contains(issues[i].ID, ".") {
-				// Extract parent ID (everything before the last dot)
-				lastDot := strings.LastIndex(issues[i].ID, ".")
-				parentID := issues[i].ID[:lastDot]
-				
-				var parentCount int
-				err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&parentCount)
-				if err != nil {
-					return fmt.Errorf("failed to check parent existence: %w", err)
-				}
-				if parentCount == 0 {
-					return fmt.Errorf("parent issue %s does not exist", parentID)
-				}
+			// Try to resurrect entire parent chain if any parents are missing
+			resurrected, err := s.TryResurrectParentChain(ctx, issues[i].ID)
+			if err != nil {
+			 return fmt.Errorf("failed to resurrect parent chain for %s: %w", issues[i].ID, err)
+			}
+			if !resurrected {
+			 // Parent(s) not found in JSONL history - cannot proceed
+			lastDot := strings.LastIndex(issues[i].ID, ".")
+			 parentID := issues[i].ID[:lastDot]
+			 return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
+			}
 			}
 			
 			usedIDs[issues[i].ID] = true

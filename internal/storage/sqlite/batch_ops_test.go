@@ -270,7 +270,7 @@ func TestGenerateBatchIDs(t *testing.T) {
 			{Title: "Issue 3", Description: "Third", CreatedAt: time.Now()},
 		}
 
-		err = generateBatchIDs(ctx, conn, issues, "test-actor")
+		err = s.generateBatchIDs(ctx, conn, issues, "test-actor")
 		if err != nil {
 			t.Fatalf("failed to generate IDs: %v", err)
 		}
@@ -299,7 +299,7 @@ func TestGenerateBatchIDs(t *testing.T) {
 			{ID: "wrong-prefix-123", Title: "Wrong", CreatedAt: time.Now()},
 		}
 
-		err = generateBatchIDs(ctx, conn, issues, "test-actor")
+		err = s.generateBatchIDs(ctx, conn, issues, "test-actor")
 		if err == nil {
 			t.Fatal("expected error for wrong prefix")
 		}

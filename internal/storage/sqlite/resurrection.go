@@ -1,0 +1,205 @@
+package sqlite
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// TryResurrectParent attempts to resurrect a deleted parent issue from JSONL history.
+// If the parent is found in the JSONL file, it creates a tombstone issue (status=closed)
+// to preserve referential integrity for hierarchical children.
+//
+// This function is called during import when a child issue references a missing parent.
+//
+// Returns:
+//   - true if parent was successfully resurrected or already exists
+//   - false if parent was not found in JSONL history
+//   - error if resurrection failed for any other reason
+func (s *SQLiteStorage) TryResurrectParent(ctx context.Context, parentID string) (bool, error) {
+	// First check if parent already exists in database
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check parent existence: %w", err)
+	}
+	if count > 0 {
+		return true, nil // Parent already exists, nothing to do
+	}
+	
+	// Parent doesn't exist - try to find it in JSONL history
+	parentIssue, err := s.findIssueInJSONL(parentID)
+	if err != nil {
+		return false, fmt.Errorf("failed to search JSONL history: %w", err)
+	}
+	if parentIssue == nil {
+		return false, nil // Parent not found in history
+	}
+	
+	// Create tombstone version of the parent
+	now := time.Now()
+	tombstone := &types.Issue{
+		ID:          parentIssue.ID,
+		ContentHash: parentIssue.ContentHash,
+		Title:       parentIssue.Title,
+		Description: "[RESURRECTED] This issue was deleted but recreated as a tombstone to preserve hierarchical structure.",
+		Status:      types.StatusClosed,
+		Priority:    4, // Lowest priority
+		IssueType:   parentIssue.IssueType,
+		CreatedAt:   parentIssue.CreatedAt,
+		UpdatedAt:   now,
+		ClosedAt:    &now,
+	}
+	
+	// If original issue had description, append it
+	if parentIssue.Description != "" {
+		tombstone.Description = fmt.Sprintf("%s\n\nOriginal description:\n%s", tombstone.Description, parentIssue.Description)
+	}
+	
+	// Get a connection for the transaction
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to get database connection: %w", err)
+	}
+	defer conn.Close()
+	
+	// Insert tombstone into database
+	if err := insertIssue(ctx, conn, tombstone); err != nil {
+		return false, fmt.Errorf("failed to create tombstone for parent %s: %w", parentID, err)
+	}
+	
+	// Also copy dependencies if they exist in the JSONL
+	if len(parentIssue.Dependencies) > 0 {
+		for _, dep := range parentIssue.Dependencies {
+			// Only resurrect dependencies if both source and target exist
+			var targetCount int
+			err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.DependsOnID).Scan(&targetCount)
+			if err == nil && targetCount > 0 {
+				_, err := s.db.ExecContext(ctx, `
+					INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, dep_type)
+					VALUES (?, ?, ?)
+				`, parentID, dep.DependsOnID, dep.Type)
+				if err != nil {
+					// Log but don't fail - dependency resurrection is best-effort
+					fmt.Fprintf(os.Stderr, "Warning: failed to resurrect dependency for %s: %v\n", parentID, err)
+				}
+			}
+		}
+	}
+	
+	return true, nil
+}
+
+// findIssueInJSONL searches the JSONL file for a specific issue ID.
+// Returns nil if not found, or the issue if found.
+func (s *SQLiteStorage) findIssueInJSONL(issueID string) (*types.Issue, error) {
+	// Get database directory
+	dbDir := filepath.Dir(s.dbPath)
+	
+	// JSONL file is expected at .beads/issues.jsonl relative to repo root
+	// The db is at .beads/beads.db, so we need the parent directory
+	jsonlPath := filepath.Join(dbDir, "issues.jsonl")
+	
+	// Check if JSONL file exists
+	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+		return nil, nil // No JSONL file, can't resurrect
+	}
+	
+	// Open and scan JSONL file
+	file, err := os.Open(jsonlPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open JSONL file: %w", err)
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	// Increase buffer size for large issues
+	const maxCapacity = 1024 * 1024 // 1MB
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+	
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		// Skip empty lines
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		
+		// Quick check: does this line contain our issue ID?
+		// This is an optimization to avoid parsing every JSON object
+		if !strings.Contains(line, `"`+issueID+`"`) {
+			continue
+		}
+		
+		// Parse JSON
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			// Skip malformed lines with warning
+			fmt.Fprintf(os.Stderr, "Warning: skipping malformed JSONL line %d: %v\n", lineNum, err)
+			continue
+		}
+		
+		// Check if this is the issue we're looking for
+		if issue.ID == issueID {
+			return &issue, nil
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading JSONL file: %w", err)
+	}
+	
+	return nil, nil // Not found
+}
+
+// TryResurrectParentChain recursively resurrects all missing parents in a hierarchical ID chain.
+// For example, if resurrecting "bd-abc.1.2", this ensures both "bd-abc" and "bd-abc.1" exist.
+//
+// Returns:
+//   - true if entire chain was successfully resurrected or already exists
+//   - false if any parent in the chain was not found in JSONL history
+//   - error if resurrection failed for any other reason
+func (s *SQLiteStorage) TryResurrectParentChain(ctx context.Context, childID string) (bool, error) {
+	// Extract all parent IDs from the hierarchical chain
+	parents := extractParentChain(childID)
+	
+	// Resurrect from root to leaf (shallower to deeper)
+	for _, parentID := range parents {
+		resurrected, err := s.TryResurrectParent(ctx, parentID)
+		if err != nil {
+			return false, fmt.Errorf("failed to resurrect parent %s: %w", parentID, err)
+		}
+		if !resurrected {
+			return false, nil // Parent not found in history, can't continue
+		}
+	}
+	
+	return true, nil
+}
+
+// extractParentChain returns all parent IDs in a hierarchical chain, ordered from root to leaf.
+// Example: "bd-abc.1.2" → ["bd-abc", "bd-abc.1"]
+func extractParentChain(id string) []string {
+	parts := strings.Split(id, ".")
+	if len(parts) <= 1 {
+		return nil // No parents (top-level ID)
+	}
+	
+	parents := make([]string, 0, len(parts)-1)
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], ".")
+		parents = append(parents, parent)
+	}
+	
+	return parents
+}
