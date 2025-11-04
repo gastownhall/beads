@@ -557,11 +557,17 @@ jobs:
 
 After a successful release:
 
-1. **Announce** on relevant channels (Twitter, blog, etc.)
-2. **Update documentation** if needed
-3. **Close milestone** on GitHub if using milestones
-4. **Update project board** if using project management
-5. **Monitor** for issues in the first 24-48 hours
+1. **Restart local daemons** to pick up the new version:
+   ```bash
+   bd daemons killall --json
+   # Daemons will auto-restart with new version on next bd command
+   ```
+
+2. **Announce** on relevant channels (Twitter, blog, etc.)
+3. **Update documentation** if needed
+4. **Close milestone** on GitHub if using milestones
+5. **Update project board** if using project management
+6. **Monitor** for issues in the first 24-48 hours
 
 ## Troubleshooting
 
