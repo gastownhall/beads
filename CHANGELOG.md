@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.7] - 2025-11-04
+
+### Fixed
+
+- **Memory Database Connection Pool** (bd-b121): Fixed `:memory:` database handling to use single shared connection
+  - Prevents "no such table" errors when using in-memory databases
+  - Ensures connection pool reuses the same in-memory instance
+  - Critical fix for event-driven daemon mode tests
+
+- **Test Suite Stability**: Fixed event-driven test flakiness
+  - Added `waitFor` helper for event-driven testing
+  - Improved timing-dependent test reliability
+
 ## [0.21.6] - 2025-11-04
 
 ### Added
