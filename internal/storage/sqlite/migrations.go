@@ -29,6 +29,8 @@ var migrations = []Migration{
 	{"export_hashes_table", migrateExportHashesTable},
 	{"content_hash_column", migrateContentHashColumn},
 	{"external_ref_unique", migrateExternalRefUnique},
+	{"source_repo_column", migrateSourceRepoColumn},
+	{"repo_mtimes_table", migrateRepoMtimesTable},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -64,6 +66,8 @@ func getMigrationDescription(name string) string {
 		"export_hashes_table":          "Adds export_hashes table for idempotent exports",
 		"content_hash_column":          "Adds content_hash column for collision resolution",
 		"external_ref_unique":          "Adds UNIQUE constraint on external_ref column",
+		"source_repo_column":           "Adds source_repo column for multi-repo support",
+		"repo_mtimes_table":            "Adds repo_mtimes table for multi-repo hydration caching",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
@@ -571,4 +575,72 @@ func findExternalRefDuplicates(db *sql.DB) (map[string][]string, error) {
 	}
 
 	return duplicates, rows.Err()
+}
+
+// migrateSourceRepoColumn adds source_repo column for multi-repo support (bd-307).
+// Defaults to "." (primary repo) for backward compatibility with existing issues.
+func migrateSourceRepoColumn(db *sql.DB) error {
+	// Check if source_repo column exists
+	var columnExists bool
+	err := db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('issues')
+		WHERE name = 'source_repo'
+	`).Scan(&columnExists)
+	if err != nil {
+		return fmt.Errorf("failed to check source_repo column: %w", err)
+	}
+
+	if columnExists {
+		// Column already exists
+		return nil
+	}
+
+	// Add source_repo column with default "." (primary repo)
+	_, err = db.Exec(`ALTER TABLE issues ADD COLUMN source_repo TEXT DEFAULT '.'`)
+	if err != nil {
+		return fmt.Errorf("failed to add source_repo column: %w", err)
+	}
+
+	// Create index on source_repo for efficient filtering
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_source_repo ON issues(source_repo)`)
+	if err != nil {
+		return fmt.Errorf("failed to create source_repo index: %w", err)
+	}
+
+	return nil
+}
+
+// migrateRepoMtimesTable creates the repo_mtimes table for multi-repo hydration caching (bd-307)
+func migrateRepoMtimesTable(db *sql.DB) error {
+	// Check if repo_mtimes table exists
+	var tableName string
+	err := db.QueryRow(`
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND name='repo_mtimes'
+	`).Scan(&tableName)
+
+	if err == sql.ErrNoRows {
+		// Table doesn't exist, create it
+		_, err := db.Exec(`
+			CREATE TABLE repo_mtimes (
+				repo_path TEXT PRIMARY KEY,
+				jsonl_path TEXT NOT NULL,
+				mtime_ns INTEGER NOT NULL,
+				last_checked DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);
+			CREATE INDEX idx_repo_mtimes_checked ON repo_mtimes(last_checked);
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create repo_mtimes table: %w", err)
+		}
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to check for repo_mtimes table: %w", err)
+	}
+
+	// Table already exists
+	return nil
 }

@@ -166,6 +166,17 @@ CREATE TABLE IF NOT EXISTS compaction_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_comp_snap_issue_level_created ON compaction_snapshots(issue_id, compaction_level, created_at DESC);
 
+-- Repository mtimes table (for multi-repo hydration optimization)
+-- Tracks modification times of JSONL files to skip unchanged repos
+CREATE TABLE IF NOT EXISTS repo_mtimes (
+    repo_path TEXT PRIMARY KEY,  -- Absolute path to the repository root
+    jsonl_path TEXT NOT NULL,    -- Absolute path to the .beads/issues.jsonl file
+    mtime_ns INTEGER NOT NULL,   -- Modification time in nanoseconds since epoch
+    last_checked DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_mtimes_checked ON repo_mtimes(last_checked);
+
 -- Ready work view (with hierarchical blocking)
 -- Uses recursive CTE to propagate blocking through parent-child hierarchy
 CREATE VIEW IF NOT EXISTS ready_issues AS

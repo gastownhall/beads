@@ -117,7 +117,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		-- Step 3: Select ready issues (excluding all blocked)
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		i.created_at, i.updated_at, i.closed_at, i.external_ref
+		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -143,7 +143,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		SELECT
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, updated_at, closed_at, external_ref,
+			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size
 		FROM issues
 		WHERE status != 'closed'
@@ -238,7 +238,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		    i.created_at, i.updated_at, i.closed_at, i.external_ref,
+		    i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		    COUNT(d.depends_on_id) as blocked_by_count,
 		    GROUP_CONCAT(d.depends_on_id, ',') as blocker_ids
 		FROM issues i
@@ -262,13 +262,14 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
 		var externalRef sql.NullString
+		var sourceRepo sql.NullString
 		var blockerIDsStr string
 
 		err := rows.Scan(
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &issue.BlockedByCount,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &issue.BlockedByCount,
 			&blockerIDsStr,
 		)
 		if err != nil {
@@ -287,6 +288,9 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		}
 		if externalRef.Valid {
 			issue.ExternalRef = &externalRef.String
+		}
+		if sourceRepo.Valid {
+			issue.SourceRepo = sourceRepo.String
 		}
 
 		// Parse comma-separated blocker IDs

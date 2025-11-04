@@ -350,6 +350,56 @@ func TestMigrateExternalRefUnique(t *testing.T) {
 	})
 }
 
+func TestMigrateRepoMtimesTable(t *testing.T) {
+	t.Run("creates repo_mtimes table if not exists", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+		db := store.db
+
+		// Drop table if exists
+		_, _ = db.Exec("DROP TABLE IF EXISTS repo_mtimes")
+
+		// Run migration
+		if err := migrateRepoMtimesTable(db); err != nil {
+			t.Fatalf("failed to migrate repo_mtimes table: %v", err)
+		}
+
+		// Verify table exists
+		var tableName string
+		err := db.QueryRow(`
+			SELECT name FROM sqlite_master
+			WHERE type='table' AND name='repo_mtimes'
+		`).Scan(&tableName)
+		if err != nil {
+			t.Fatalf("repo_mtimes table not found: %v", err)
+		}
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+		db := store.db
+
+		// Run migration twice
+		if err := migrateRepoMtimesTable(db); err != nil {
+			t.Fatalf("first migration failed: %v", err)
+		}
+		if err := migrateRepoMtimesTable(db); err != nil {
+			t.Fatalf("second migration failed: %v", err)
+		}
+
+		// Verify table still exists and is correct
+		var tableName string
+		err := db.QueryRow(`
+			SELECT name FROM sqlite_master
+			WHERE type='table' AND name='repo_mtimes'
+		`).Scan(&tableName)
+		if err != nil {
+			t.Fatalf("repo_mtimes table not found after idempotent migration: %v", err)
+		}
+	})
+}
+
 func TestMigrateContentHashColumn(t *testing.T) {
 	t.Run("adds content_hash column if missing", func(t *testing.T) {
 		s, cleanup := setupTestDB(t)
@@ -426,9 +476,10 @@ func TestMigrateContentHashColumn(t *testing.T) {
 				compacted_at DATETIME,
 				original_size INTEGER,
 				compacted_at_commit TEXT,
+				source_repo TEXT DEFAULT '.',
 				CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 			);
-			INSERT INTO issues SELECT id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, assignee, estimated_minutes, created_at, updated_at, closed_at, external_ref, compaction_level, compacted_at, original_size, compacted_at_commit FROM issues_backup;
+			INSERT INTO issues SELECT id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, assignee, estimated_minutes, created_at, updated_at, closed_at, external_ref, compaction_level, compacted_at, original_size, compacted_at_commit, source_repo FROM issues_backup;
 			DROP TABLE issues_backup;
 		`)
 		if err != nil {
