@@ -5,6 +5,7 @@ package beads_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -433,4 +434,137 @@ func TestRoundTripIssue(t *testing.T) {
 	h.assertEqual(original.Priority, retrieved.Priority, "Priority")
 	h.assertEqual(original.IssueType, retrieved.IssueType, "IssueType")
 	h.assertEqual(original.Assignee, retrieved.Assignee, "Assignee")
+}
+
+// TestImportWithDeletedParent verifies parent resurrection during import
+// This tests the fix for bd-d19a (import failure on missing parent issues)
+func TestImportWithDeletedParent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "beads-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	// Create .beads directory
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Phase 1: Create parent and child in JSONL (simulating historical git state)
+	ctx := context.Background()
+
+	parent := beads.Issue{
+		ID:          "bd-parent",
+		Title:       "Parent Epic",
+		Description: "Original parent description",
+		Status:      beads.StatusOpen,
+		Priority:    1,
+		IssueType:   beads.TypeEpic,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	child := beads.Issue{
+		ID:        "bd-parent.1",
+		Title:     "Child Task",
+		Status:    beads.StatusOpen,
+		Priority:  1,
+		IssueType: beads.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	// Write both to JSONL (parent exists in git history)
+	file, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(parent); err != nil {
+		file.Close()
+		t.Fatalf("Failed to encode parent: %v", err)
+	}
+	if err := encoder.Encode(child); err != nil {
+		file.Close()
+		t.Fatalf("Failed to encode child: %v", err)
+	}
+	file.Close()
+
+	// Phase 2: Create fresh database and import only the child
+	// (simulating scenario where parent was deleted)
+	store, err := beads.NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStorage failed: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Manually create only the child (parent missing)
+	childToImport := &beads.Issue{
+		ID:        "bd-parent.1",
+		Title:     "Child Task",
+		Status:    beads.StatusOpen,
+		Priority:  1,
+		IssueType: beads.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	// This should trigger parent resurrection from JSONL
+	if err := store.CreateIssue(ctx, childToImport, "test"); err != nil {
+		t.Fatalf("Failed to create child (resurrection should have prevented error): %v", err)
+	}
+
+	// Phase 3: Verify results
+
+	// Verify child was created successfully
+	retrievedChild, err := store.GetIssue(ctx, "bd-parent.1")
+	if err != nil {
+		t.Fatalf("Failed to retrieve child: %v", err)
+	}
+	if retrievedChild == nil {
+		t.Fatal("Child was not created")
+	}
+	if retrievedChild.Title != "Child Task" {
+		t.Errorf("Expected child title 'Child Task', got %s", retrievedChild.Title)
+	}
+
+	// Verify parent was resurrected as tombstone
+	retrievedParent, err := store.GetIssue(ctx, "bd-parent")
+	if err != nil {
+		t.Fatalf("Failed to retrieve parent: %v", err)
+	}
+	if retrievedParent == nil {
+		t.Fatal("Parent was not resurrected")
+	}
+	if retrievedParent.Status != beads.StatusClosed {
+		t.Errorf("Expected parent status=closed, got %s", retrievedParent.Status)
+	}
+	if retrievedParent.Priority != 4 {
+		t.Errorf("Expected parent priority=4 (lowest), got %d", retrievedParent.Priority)
+	}
+	if retrievedParent.Title != "Parent Epic" {
+		t.Errorf("Expected original title preserved, got %s", retrievedParent.Title)
+	}
+	if retrievedParent.Description == "" {
+		t.Error("Expected tombstone description to be set")
+	}
+	if retrievedParent.ClosedAt == nil {
+		t.Error("Expected tombstone to have ClosedAt set")
+	}
+
+	// Verify description contains resurrection marker
+	if len(retrievedParent.Description) < 13 || retrievedParent.Description[:13] != "[RESURRECTED]" {
+		t.Errorf("Expected [RESURRECTED] prefix in description, got: %s", retrievedParent.Description)
+	}
+
+	t.Logf("✓ Parent %s successfully resurrected as tombstone", "bd-parent")
+	t.Logf("✓ Child %s created successfully with resurrected parent", "bd-parent.1")
 }
