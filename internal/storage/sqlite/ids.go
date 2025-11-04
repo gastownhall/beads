@@ -172,10 +172,22 @@ func GenerateBatchIssueIDs(ctx context.Context, conn *sql.Conn, prefix string, i
 	return nil
 }
 
+// tryResurrectParent attempts to find and resurrect a deleted parent issue from the import batch
+// Returns true if parent was found and will be created, false otherwise
+func tryResurrectParent(parentID string, issues []*types.Issue) bool {
+	for _, issue := range issues {
+		if issue.ID == parentID {
+			return true // Parent exists in the batch being imported
+		}
+	}
+	return false // Parent not in this batch
+}
+
 // EnsureIDs generates or validates IDs for issues
 // For issues with empty IDs, generates unique hash-based IDs
 // For issues with existing IDs, validates they match the prefix and parent exists (if hierarchical)
-func (s *SQLiteStorage) EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string) error {
+// For hierarchical IDs with missing parents, attempts resurrection from the import batch
+func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string) error {
 	usedIDs := make(map[string]bool)
 	
 	// First pass: record explicitly provided IDs
@@ -188,18 +200,23 @@ func (s *SQLiteStorage) EnsureIDs(ctx context.Context, conn *sql.Conn, prefix st
 			
 			// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
 			if strings.Contains(issues[i].ID, ".") {
-			// Try to resurrect entire parent chain if any parents are missing
-			// Use the conn-based version to participate in the same transaction
-			resurrected, err := s.tryResurrectParentChainWithConn(ctx, conn, issues[i].ID)
-			if err != nil {
-			 return fmt.Errorf("failed to resurrect parent chain for %s: %w", issues[i].ID, err)
+				// Extract parent ID (everything before the last dot)
+				lastDot := strings.LastIndex(issues[i].ID, ".")
+				parentID := issues[i].ID[:lastDot]
+				
+				var parentCount int
+				err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&parentCount)
+				if err != nil {
+					return fmt.Errorf("failed to check parent existence: %w", err)
+				}
+				if parentCount == 0 {
+					// Try to resurrect parent from import batch
+					if !tryResurrectParent(parentID, issues) {
+						return fmt.Errorf("parent issue %s does not exist and cannot be resurrected from import batch", parentID)
+					}
+					// Parent will be created in this batch (due to depth-sorting), so allow this child
+				}
 			}
-			if !resurrected {
-			// Parent(s) not found in JSONL history - cannot proceed
-			lastDot := strings.LastIndex(issues[i].ID, ".")
-			parentID := issues[i].ID[:lastDot]
-			 return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
-			 }
 		}
 			
 			usedIDs[issues[i].ID] = true

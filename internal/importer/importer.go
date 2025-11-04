@@ -537,19 +537,24 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
-	// Batch create all new issues with topological sorting
-	// Sort by hierarchy depth to ensure parents are created before children
-	// This prevents "parent does not exist" errors when importing hierarchical issues
-	if len(newIssues) > 0 {
-		SortByDepth(newIssues)
+// Batch create all new issues
+// Sort by hierarchy depth to ensure parents are created before children
+if len(newIssues) > 0 {
+ sort.Slice(newIssues, func(i, j int) bool {
+  depthI := strings.Count(newIssues[i].ID, ".")
+ depthJ := strings.Count(newIssues[j].ID, ".")
+			if depthI != depthJ {
+  return depthI < depthJ // Shallower first
+ }
+ return newIssues[i].ID < newIssues[j].ID // Stable sort
+})
 
-		// Create issues in depth-order batches (max depth 3)
-		// This handles parent-child pairs in the same import batch
+// Create in batches by depth level (max depth 3)
 		for depth := 0; depth <= 3; depth++ {
-			var batchForDepth []*types.Issue
-			for _, issue := range newIssues {
-				if GetHierarchyDepth(issue.ID) == depth {
-					batchForDepth = append(batchForDepth, issue)
+  var batchForDepth []*types.Issue
+  for _, issue := range newIssues {
+   if strings.Count(issue.ID, ".") == depth {
+   batchForDepth = append(batchForDepth, issue)
 				}
 			}
 			if len(batchForDepth) > 0 {
