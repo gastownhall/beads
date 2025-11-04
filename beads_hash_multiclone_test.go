@@ -11,8 +11,41 @@ import (
 	"testing"
 )
 
-// getBDPath returns the correct path to the bd binary for the current OS
+var testBDBinary string
+
+func TestMain(m *testing.M) {
+	// Build bd binary once for all tests
+	binName := "bd"
+	if runtime.GOOS == "windows" {
+		binName = "bd.exe"
+	}
+	
+	tmpDir, err := os.MkdirTemp("", "bd-test-bin-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create temp dir for bd binary: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpDir)
+	
+	testBDBinary = filepath.Join(tmpDir, binName)
+	cmd := exec.Command("go", "build", "-o", testBDBinary, "./cmd/bd")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to build bd binary: %v\n%s\n", err, out)
+		os.Exit(1)
+	}
+	
+	// Optimize git for tests
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	
+	os.Exit(m.Run())
+}
+
+// getBDPath returns the test bd binary path
 func getBDPath() string {
+	if testBDBinary != "" {
+		return testBDBinary
+	}
+	// Fallback for non-TestMain runs
 	if runtime.GOOS == "windows" {
 		return "./bd.exe"
 	}
@@ -35,14 +68,12 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow git e2e test")
 	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	
-	bdPath, err := filepath.Abs(getBDPath())
-	if err != nil {
-		t.Fatalf("Failed to get bd path: %v", err)
-	}
+	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
-		t.Fatalf("bd binary not found at %s - run 'go build -v ./cmd/bd' first", bdPath)
+		t.Fatalf("bd binary not found at %s", bdPath)
 	}
 	
 	// Setup remote and 3 clones
@@ -102,14 +133,12 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow git e2e test")
 	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	
-	bdPath, err := filepath.Abs(getBDPath())
-	if err != nil {
-		t.Fatalf("Failed to get bd path: %v", err)
-	}
+	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
-		t.Fatalf("bd binary not found at %s - run 'go build -v ./cmd/bd' first", bdPath)
+		t.Fatalf("bd binary not found at %s", bdPath)
 	}
 	
 	// Setup remote and 2 clones

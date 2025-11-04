@@ -145,26 +145,20 @@ func TestGenerateHashID_VariableLengths(t *testing.T) {
 }
 
 func TestGetAdaptiveIDLength_Integration(t *testing.T) {
-	// Create in-memory database
-	db, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	// Use newTestStore for proper test isolation
+	db := newTestStore(t, "")
 	defer db.Close()
 	
 	ctx := context.Background()
 	
-	// Initialize with prefix
-	if err := db.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set prefix: %v", err)
-	}
-	
-	// Test default config (should use 3 chars for empty database)
+	// Get a dedicated connection for this test
 	conn, err := db.db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("Failed to get connection: %v", err)
 	}
 	defer conn.Close()
+	
+	// Test default config (should use 3 chars for empty database)
 
 	length, err := GetAdaptiveIDLength(ctx, conn, "test")
 	if err != nil {

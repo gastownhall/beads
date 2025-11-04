@@ -20,9 +20,10 @@ import (
 func newTestStore(t *testing.T, dbPath string) *SQLiteStorage {
 	t.Helper()
 	
-	// Default to private memory for test isolation
+	// Default to temp file for test isolation
+	// File-based databases are more reliable than in-memory for connection pool scenarios
 	if dbPath == "" {
-		dbPath = "file::memory:?mode=memory&cache=private"
+		dbPath = t.TempDir() + "/test.db"
 	}
 	
 	store, err := New(dbPath)

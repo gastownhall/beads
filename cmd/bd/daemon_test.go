@@ -127,6 +127,7 @@ func TestGetLogFilePath(t *testing.T) {
 }
 
 func TestIsDaemonRunning_NotRunning(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "test.pid")
 
@@ -137,6 +138,7 @@ func TestIsDaemonRunning_NotRunning(t *testing.T) {
 }
 
 func TestIsDaemonRunning_StalePIDFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "test.pid")
 
@@ -151,6 +153,7 @@ func TestIsDaemonRunning_StalePIDFile(t *testing.T) {
 }
 
 func TestIsDaemonRunning_CurrentProcess(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "test.pid")
 
@@ -230,6 +233,7 @@ func TestDaemonIntegration(t *testing.T) {
 }
 
 func TestDaemonPIDFileManagement(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "daemon.pid")
 
@@ -262,6 +266,7 @@ func TestDaemonPIDFileManagement(t *testing.T) {
 }
 
 func TestDaemonLogFileCreation(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "test.log")
 
@@ -291,6 +296,7 @@ func TestDaemonLogFileCreation(t *testing.T) {
 }
 
 func TestDaemonIntervalParsing(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected time.Duration
@@ -303,6 +309,7 @@ func TestDaemonIntervalParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
 			d, err := time.ParseDuration(tt.input)
 			if err != nil {
 				t.Errorf("Failed to parse duration %s: %v", tt.input, err)

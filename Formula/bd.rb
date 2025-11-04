@@ -5,21 +5,21 @@
 class Bd < Formula
   desc "AI-supervised issue tracker for coding workflows"
   homepage "https://github.com/steveyegge/beads"
-  version "0.21.6"
+  version "0.21.7"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/steveyegge/beads/releases/download/v0.21.6/beads_0.21.6_darwin_amd64.tar.gz"
-      sha256 "a3893c17624dc3af2fbfa0c201c8ec51e6a95551cf723c6a79fb8ee3230c8b23"
+      url "https://github.com/steveyegge/beads/releases/download/v0.21.7/beads_0.21.7_darwin_amd64.tar.gz"
+      sha256 "8bdf5d82204bad5e2eea83e6b3d7a38420be14687b0d26d7ffc4573f30a97783"
 
       def install
         bin.install "bd"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/steveyegge/beads/releases/download/v0.21.6/beads_0.21.6_darwin_arm64.tar.gz"
-      sha256 "4c9e74398975bcb7eb79bf8dedd23bcd6247014eb5547d4530759a9b98033958"
+      url "https://github.com/steveyegge/beads/releases/download/v0.21.7/beads_0.21.7_darwin_arm64.tar.gz"
+      sha256 "6ea5200a667b02e8c0abd7cab11285eb84d0cdd9bea23c22a9948bc4f29a4e0c"
 
       def install
         bin.install "bd"
@@ -29,15 +29,15 @@ class Bd < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/steveyegge/beads/releases/download/v0.21.6/beads_0.21.6_linux_amd64.tar.gz"
-      sha256 "f17b37144f36b8604d04281948c5850900aa44351cc5b10aefd864fcb2a588cd"
+      url "https://github.com/steveyegge/beads/releases/download/v0.21.7/beads_0.21.7_linux_amd64.tar.gz"
+      sha256 "4c1643a02954df33d7a9c362d359c7ebae1f0ac576d54fc4ca2c8fd81f7821c5"
       def install
         bin.install "bd"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/steveyegge/beads/releases/download/v0.21.6/beads_0.21.6_linux_arm64.tar.gz"
-      sha256 "adf0bd34c8e09179733e33ef370084c10537cd9fd27b933a9eabaa4ec1051a31"
+      url "https://github.com/steveyegge/beads/releases/download/v0.21.7/beads_0.21.7_linux_arm64.tar.gz"
+      sha256 "985d944d2c01c79b07aa914dda3b79b53d22b7986690ad6bc7b44ad80a51c9a3"
       def install
         bin.install "bd"
       end

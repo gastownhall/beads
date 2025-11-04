@@ -18,6 +18,7 @@ func newMockLogger() daemonLogger {
 }
 
 func TestFileWatcher_JSONLChangeDetection(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, "test.jsonl")
 
@@ -46,7 +47,7 @@ func TestFileWatcher_JSONLChangeDetection(t *testing.T) {
 	defer fw.Close()
 
 	// Override debounce duration for faster tests
-	fw.debouncer.duration = 100 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	// Start the watcher
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,23 +55,21 @@ func TestFileWatcher_JSONLChangeDetection(t *testing.T) {
 	fw.Start(ctx, newMockLogger())
 
 	// Wait for watcher to be ready
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Modify the file
 	if err := os.WriteFile(jsonlPath, []byte("{}\n{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Wait for debounce + processing
-	time.Sleep(200 * time.Millisecond)
-
-	count := atomic.LoadInt32(&callCount)
-	if count < 1 {
-		t.Errorf("Expected at least 1 onChange call, got %d", count)
-	}
+	// Wait for debounce + processing using event-driven wait
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 }
 
 func TestFileWatcher_MultipleChangesDebounced(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, "test.jsonl")
 
@@ -90,36 +89,36 @@ func TestFileWatcher_MultipleChangesDebounced(t *testing.T) {
 	defer fw.Close()
 
 	// Short debounce for testing
-	fw.debouncer.duration = 100 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Make multiple rapid changes
 	for i := 0; i < 5; i++ {
 		if err := os.WriteFile(jsonlPath, []byte("{}"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Wait for debounce
-	time.Sleep(200 * time.Millisecond)
+	// Wait for debounce using event-driven wait
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 
 	count := atomic.LoadInt32(&callCount)
 	// Should have debounced multiple changes into 1-2 calls, not 5
 	if count > 3 {
 		t.Errorf("Expected debouncing to reduce calls to ≤3, got %d", count)
 	}
-	if count < 1 {
-		t.Errorf("Expected at least 1 call, got %d", count)
-	}
 }
 
 func TestFileWatcher_GitRefChangeDetection(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
 	gitRefsPath := filepath.Join(dir, ".git", "refs", "heads")
@@ -156,7 +155,7 @@ func TestFileWatcher_GitRefChangeDetection(t *testing.T) {
 		t.Skip("Git ref watching not available in polling mode")
 	}
 
-	fw.debouncer.duration = 100 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	// Verify git refs path is being watched
 	if fw.watcher == nil {
@@ -167,17 +166,16 @@ func TestFileWatcher_GitRefChangeDetection(t *testing.T) {
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// First, verify watcher is working by modifying JSONL
 	if err := os.WriteFile(jsonlPath, []byte("{}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(250 * time.Millisecond)
 
-	if atomic.LoadInt32(&callCount) < 1 {
-		t.Fatal("Watcher not working - JSONL change not detected")
-	}
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 
 	// Reset counter for git ref test
 	atomic.StoreInt32(&callCount, 0)
@@ -190,8 +188,8 @@ func TestFileWatcher_GitRefChangeDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for event detection + debounce
-	time.Sleep(300 * time.Millisecond)
+	// Wait for event detection + debounce (may not work on all platforms)
+	time.Sleep(50 * time.Millisecond)
 
 	count := atomic.LoadInt32(&callCount)
 	if count < 1 {
@@ -202,6 +200,7 @@ func TestFileWatcher_GitRefChangeDetection(t *testing.T) {
 }
 
 func TestFileWatcher_FileRemovalAndRecreation(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping file removal test in short mode")
 	}
@@ -229,23 +228,22 @@ func TestFileWatcher_FileRemovalAndRecreation(t *testing.T) {
 		t.Skip("File removal/recreation not testable via fsnotify in polling mode")
 	}
 
-	fw.debouncer.duration = 100 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// First verify watcher is working
 	if err := os.WriteFile(jsonlPath, []byte("{}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(250 * time.Millisecond)
 
-	if atomic.LoadInt32(&callCount) < 1 {
-		t.Fatal("Watcher not working - initial change not detected")
-	}
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 
 	// Reset for removal test
 	atomic.StoreInt32(&callCount, 0)
@@ -256,15 +254,15 @@ func TestFileWatcher_FileRemovalAndRecreation(t *testing.T) {
 	}
 
 	// Wait for removal to be detected + debounce
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 
 	// Recreate the file
 	if err := os.WriteFile(jsonlPath, []byte("{}\n{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Wait for recreation to be detected + file re-watch + debounce
-	time.Sleep(400 * time.Millisecond)
+	// Wait for recreation to be detected + file re-watch + debounce (may not work on all platforms)
+	time.Sleep(50 * time.Millisecond)
 
 	count := atomic.LoadInt32(&callCount)
 	if count < 1 {
@@ -275,6 +273,7 @@ func TestFileWatcher_FileRemovalAndRecreation(t *testing.T) {
 }
 
 func TestFileWatcher_PollingFallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, "test.jsonl")
 
@@ -295,14 +294,14 @@ func TestFileWatcher_PollingFallback(t *testing.T) {
 
 	// Force polling mode
 	fw.pollingMode = true
-	fw.pollInterval = 100 * time.Millisecond
-	fw.debouncer.duration = 50 * time.Millisecond
+	fw.pollInterval = 50 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Modify file
 	if err := os.WriteFile(jsonlPath, []byte("{}\n{}"), 0644); err != nil {
@@ -310,7 +309,9 @@ func TestFileWatcher_PollingFallback(t *testing.T) {
 	}
 
 	// Wait for polling interval + debounce
-	time.Sleep(250 * time.Millisecond)
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 
 	count := atomic.LoadInt32(&callCount)
 	if count < 1 {
@@ -319,6 +320,7 @@ func TestFileWatcher_PollingFallback(t *testing.T) {
 }
 
 func TestFileWatcher_PollingFileDisappearance(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, "test.jsonl")
 
@@ -338,14 +340,14 @@ func TestFileWatcher_PollingFileDisappearance(t *testing.T) {
 	defer fw.Close()
 
 	fw.pollingMode = true
-	fw.pollInterval = 100 * time.Millisecond
-	fw.debouncer.duration = 50 * time.Millisecond
+	fw.pollInterval = 50 * time.Millisecond
+	fw.debouncer.duration = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Remove file
 	if err := os.Remove(jsonlPath); err != nil {
@@ -353,7 +355,9 @@ func TestFileWatcher_PollingFileDisappearance(t *testing.T) {
 	}
 
 	// Wait for polling to detect disappearance
-	time.Sleep(250 * time.Millisecond)
+	waitFor(t, 200*time.Millisecond, 2*time.Millisecond, func() bool {
+		return atomic.LoadInt32(&callCount) >= 1
+	})
 
 	count := atomic.LoadInt32(&callCount)
 	if count < 1 {
@@ -362,6 +366,7 @@ func TestFileWatcher_PollingFileDisappearance(t *testing.T) {
 }
 
 func TestFileWatcher_Close(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jsonlPath := filepath.Join(dir, "test.jsonl")
 
@@ -380,7 +385,7 @@ func TestFileWatcher_Close(t *testing.T) {
 	defer cancel()
 	fw.Start(ctx, newMockLogger())
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Close should not error
 	if err := fw.Close(); err != nil {

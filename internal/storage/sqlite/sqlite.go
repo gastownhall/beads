@@ -31,8 +31,16 @@ func New(path string) (*SQLiteStorage, error) {
 	// For :memory: databases, use shared cache so multiple connections see the same data
 	var connStr string
 	if path == ":memory:" {
-		// Use shared in-memory database with pragmas
-		connStr = "file::memory:?cache=shared&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+		// Use shared in-memory database with a named identifier
+		// Note: WAL mode doesn't work with shared in-memory databases, so use DELETE mode
+		// The name "memdb" is required for cache=shared to work properly across connections
+		connStr = "file:memdb?mode=memory&cache=shared&_pragma=journal_mode(DELETE)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+	} else if strings.HasPrefix(path, "file:") {
+		// Already a URI - append our pragmas if not present
+		connStr = path
+		if !strings.Contains(path, "_pragma=foreign_keys") {
+			connStr += "&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+		}
 	} else {
 		// Ensure directory exists for file-based databases
 		dir := filepath.Dir(path)
