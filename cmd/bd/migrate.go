@@ -31,6 +31,7 @@ This command:
 - Migrates old databases to beads.db
 - Updates schema version metadata
 - Migrates sequential IDs to hash-based IDs (with --to-hash-ids)
+- Enables separate branch workflow (with --to-separate-branch)
 - Removes stale databases (with confirmation)`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		autoYes, _ := cmd.Flags().GetBool("yes")
@@ -39,6 +40,7 @@ This command:
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
 		toHashIDs, _ := cmd.Flags().GetBool("to-hash-ids")
 		inspect, _ := cmd.Flags().GetBool("inspect")
+		toSeparateBranch, _ := cmd.Flags().GetString("to-separate-branch")
 
 		// Handle --update-repo-id first
 		if updateRepoID {
@@ -49,6 +51,12 @@ This command:
 		// Handle --inspect flag (show migration plan for AI agents)
 		if inspect {
 			handleInspect()
+			return
+		}
+
+		// Handle --to-separate-branch
+		if toSeparateBranch != "" {
+			handleToSeparateBranch(toSeparateBranch, dryRun)
 			return
 		}
 
@@ -898,6 +906,155 @@ func handleInspect() {
 	}
 }
 
+// handleToSeparateBranch configures separate branch workflow for existing repos
+func handleToSeparateBranch(branch string, dryRun bool) {
+	// Validate branch name
+	b := strings.TrimSpace(branch)
+	if b == "" || strings.ContainsAny(b, " \t\n") {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "invalid_branch",
+				"message": "Branch name cannot be empty or contain whitespace",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: invalid branch name '%s'\n", branch)
+			fmt.Fprintf(os.Stderr, "Branch name cannot be empty or contain whitespace\n")
+		}
+		os.Exit(1)
+	}
+
+	// Find .beads directory
+	beadsDir := findBeadsDir()
+	if beadsDir == "" {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "no_beads_directory",
+				"message": "No .beads directory found. Run 'bd init' first.",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
+			fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
+		}
+		os.Exit(1)
+	}
+
+	// Load config
+	cfg, err := loadOrCreateConfig(beadsDir)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "config_load_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// Check database exists
+	targetPath := cfg.DatabasePath(beadsDir)
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "database_missing",
+				"message": "Database not found. Run 'bd init' first.",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: database not found: %s\n", targetPath)
+			fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
+		}
+		os.Exit(1)
+	}
+
+	// Open database
+	store, err := sqlite.New(targetPath)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "database_open_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+		}
+		os.Exit(1)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Get current sync.branch config
+	ctx := context.Background()
+	current, _ := store.GetConfig(ctx, "sync.branch")
+
+	// Dry-run mode
+	if dryRun {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"dry_run":  true,
+				"previous": current,
+				"branch":   b,
+				"changed":  current != b,
+			})
+		} else {
+			fmt.Println("Dry run mode - no changes will be made")
+			if current == b {
+				fmt.Printf("sync.branch already set to '%s'\n", b)
+			} else {
+				fmt.Printf("Would set sync.branch: '%s' → '%s'\n", current, b)
+			}
+		}
+		return
+	}
+
+	// Check if already set
+	if current == b {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"status":   "noop",
+				"branch":   b,
+				"message":  "sync.branch already set to this value",
+			})
+		} else {
+			color.Green("✓ sync.branch already set to '%s'\n", b)
+			fmt.Println("No changes needed")
+		}
+		return
+	}
+
+	// Update sync.branch config
+	if err := store.SetConfig(ctx, "sync.branch", b); err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error":   "config_update_failed",
+				"message": err.Error(),
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: failed to set sync.branch: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// Success output
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":   "success",
+			"previous": current,
+			"branch":   b,
+			"message":  "Enabled separate branch workflow",
+		})
+	} else {
+		color.Green("✓ Enabled separate branch workflow\n\n")
+		fmt.Printf("Set sync.branch to '%s'\n\n", b)
+		fmt.Println("Next steps:")
+		fmt.Println("  1. Restart the daemon to create worktree and start committing to the branch:")
+		fmt.Printf("     bd daemon restart\n")
+		fmt.Printf("     bd daemon start --auto-commit\n\n")
+		fmt.Println("  2. Your existing data is preserved - no changes to git history")
+		fmt.Println("  3. Future issue updates will be committed to the separate branch")
+		fmt.Println("\nSee docs/PROTECTED_BRANCHES.md for complete workflow guide")
+	}
+}
+
 func init() {
 	migrateCmd.Flags().Bool("yes", false, "Auto-confirm cleanup prompts")
 	migrateCmd.Flags().Bool("cleanup", false, "Remove old database files after migration")
@@ -905,6 +1062,7 @@ func init() {
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("to-hash-ids", false, "Migrate sequential IDs to hash-based IDs")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
+	migrateCmd.Flags().String("to-separate-branch", "", "Enable separate branch workflow (e.g., 'beads-metadata')")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	rootCmd.AddCommand(migrateCmd)
 }
