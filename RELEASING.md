@@ -287,7 +287,26 @@ pip install beads-mcp==0.22.0
 python -m beads_mcp --version
 ```
 
-## 5. npm Package Release
+## 5. Claude Code Marketplace Update
+
+Update the Claude Code marketplace metadata files:
+
+```bash
+# Update .claude-plugin/marketplace.json
+# Change version to match current release
+vim .claude-plugin/marketplace.json
+
+# Update .claude-plugin/plugin.json if needed
+vim .claude-plugin/plugin.json
+
+# Commit changes
+git add .claude-plugin/
+git commit -m "chore: Update Claude Code marketplace to v0.22.0"
+```
+
+**Note:** These files define how beads appears in Claude Code's plugin marketplace. Version should match the release version.
+
+## 6. npm Package Release
 
 The npm package wraps the native binary for Node.js environments.
 
@@ -373,7 +392,7 @@ which bd
 bd --help
 ```
 
-## 6. Verify Release
+## 7. Verify Release
 
 After all distribution channels are updated, verify each one:
 
