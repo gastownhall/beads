@@ -123,10 +123,35 @@ Add cycle detection for dependency graphs
 
 ## Testing Guidelines
 
+### Test Strategy
+
+We use a two-tier testing approach:
+
+- **Fast tests** (unit tests): Run on every PR via CI with `-short` flag (~2s)
+- **Slow tests** (integration tests): Run nightly with full git operations (~14s)
+
+Slow tests use `testing.Short()` to skip when `-short` flag is present.
+
+### Running Tests
+
+```bash
+# Fast tests (recommended for development)
+go test -short ./...
+
+# Full test suite (before committing)
+go test ./...
+
+# With race detection and coverage
+go test -race -coverprofile=coverage.out ./...
+```
+
+### Writing Tests
+
 - Write table-driven tests when testing multiple scenarios
 - Use descriptive test names that explain what is being tested
 - Clean up resources (database files, etc.) in test teardown
 - Use `t.Run()` for subtests to organize related test cases
+- Mark slow tests with `if testing.Short() { t.Skip("slow test") }`
 
 Example:
 

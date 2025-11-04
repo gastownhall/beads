@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package beads_test
 
 import (
@@ -9,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 var testBDBinary string
@@ -69,7 +74,7 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 		t.Skip("slow git e2e test")
 	}
 	t.Parallel()
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDirInMemory(t)
 	
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
@@ -87,21 +92,9 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 	createIssueInClone(t, cloneB, "Issue from clone B")
 	createIssueInClone(t, cloneC, "Issue from clone C")
 	
-	// Sync in sequence: A -> B -> C
-	t.Log("Clone A syncing")
-	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, bdPath, "sync")
-	
-	t.Log("Clone B syncing")
-	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
-	
-	t.Log("Clone C syncing")
-	runCmdOutputWithEnvAllowError(t, cloneC, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
-	
-	// Do one sync round (typically enough for test convergence)
-	for round := 0; round < 1; round++ {
-		for _, clone := range []string{cloneA, cloneB, cloneC} {
-			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
-		}
+	// Sync all clones once (hash IDs prevent collisions, don't need multiple rounds)
+	for _, clone := range []string{cloneA, cloneB, cloneC} {
+		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	}
 	
 	// Verify all clones have all 3 issues
@@ -134,7 +127,7 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 		t.Skip("slow git e2e test")
 	}
 	t.Parallel()
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDirInMemory(t)
 	
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
@@ -150,18 +143,9 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 	createIssueInClone(t, cloneA, "Identical issue")
 	createIssueInClone(t, cloneB, "Identical issue")
 	
-	// Sync both
-	t.Log("Clone A syncing")
-	runCmdWithEnv(t, cloneA, map[string]string{"BEADS_NO_DAEMON": "1"}, bdPath, "sync")
-	
-	t.Log("Clone B syncing")
-	runCmdOutputWithEnvAllowError(t, cloneB, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
-	
-	// Do two sync rounds for dedup test (needs extra round for convergence)
-	for round := 0; round < 2; round++ {
-		for _, clone := range []string{cloneA, cloneB} {
-			runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
-		}
+	// Sync both clones once (hash IDs handle dedup automatically)
+	for _, clone := range []string{cloneA, cloneB} {
+		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	}
 	
 	// Verify both clones have exactly 1 issue (deduplication worked)

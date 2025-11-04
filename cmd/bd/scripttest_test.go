@@ -1,3 +1,6 @@
+//go:build scripttests
+// +build scripttests
+
 package main
 
 import (

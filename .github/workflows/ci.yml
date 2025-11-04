@@ -27,7 +27,7 @@ jobs:
         run: go build -v ./cmd/bd
 
       - name: Test
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -v -race -short -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold
         run: |
@@ -69,7 +69,7 @@ jobs:
         run: go build -v ./cmd/bd
 
       - name: Test
-        run: go test -v ./...
+        run: go test -v -short ./...
 
   lint:
     name: Lint
