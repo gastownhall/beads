@@ -1,0 +1,51 @@
+# Built-in template for creating epics
+name: epic
+description: |
+  ## Overview
+  
+  [Describe the high-level goal and scope of this epic]
+  
+  ## Success Criteria
+  
+  - [ ] Criteria 1
+  - [ ] Criteria 2
+  - [ ] Criteria 3
+  
+  ## Background
+  
+  [Provide context and motivation]
+  
+  ## Scope
+  
+  **In Scope:**
+  - Item 1
+  - Item 2
+  
+  **Out of Scope:**
+  - Item 1
+  - Item 2
+
+type: epic
+priority: 1
+labels:
+  - epic
+
+design: |
+  ## Architecture
+  
+  [Describe the overall architecture and approach]
+  
+  ## Components
+  
+  - Component 1: [description]
+  - Component 2: [description]
+  
+  ## Dependencies
+  
+  [List external dependencies or constraints]
+
+acceptance_criteria: |
+  - [ ] All child issues are completed
+  - [ ] Integration tests pass
+  - [ ] Documentation is updated
+  - [ ] Code review completed

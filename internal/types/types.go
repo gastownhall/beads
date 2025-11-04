@@ -305,6 +305,8 @@ type WorkFilter struct {
 	Status     Status
 	Priority   *int
 	Assignee   *string
+	Labels     []string   // AND semantics: issue must have ALL these labels
+	LabelsAny  []string   // OR semantics: issue must have AT LEAST ONE of these labels
 	Limit      int
 	SortPolicy SortPolicy
 }

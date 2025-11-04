@@ -113,10 +113,12 @@ type ResolveIDArgs struct {
 
 // ReadyArgs represents arguments for the ready operation
 type ReadyArgs struct {
-	Assignee   string `json:"assignee,omitempty"`
-	Priority   *int   `json:"priority,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	SortPolicy string `json:"sort_policy,omitempty"`
+	Assignee   string   `json:"assignee,omitempty"`
+	Priority   *int     `json:"priority,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	SortPolicy string   `json:"sort_policy,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	LabelsAny  []string `json:"labels_any,omitempty"`
 }
 
 // StaleArgs represents arguments for the stale command

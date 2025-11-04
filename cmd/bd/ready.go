@@ -17,11 +17,20 @@ var readyCmd = &cobra.Command{
 		limit, _ := cmd.Flags().GetInt("limit")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		sortPolicy, _ := cmd.Flags().GetString("sort")
+		labels, _ := cmd.Flags().GetStringSlice("label")
+		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
+		
+		// Normalize labels: trim, dedupe, remove empty
+		labels = normalizeLabels(labels)
+		labelsAny = normalizeLabels(labelsAny)
+		
 		filter := types.WorkFilter{
 			// Leave Status empty to get both 'open' and 'in_progress' (bd-165)
 			Limit:      limit,
 			SortPolicy: types.SortPolicy(sortPolicy),
+			Labels:     labels,
+			LabelsAny:  labelsAny,
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -42,6 +51,8 @@ var readyCmd = &cobra.Command{
 				Assignee:   assignee,
 				Limit:      limit,
 				SortPolicy: sortPolicy,
+				Labels:     labels,
+				LabelsAny:  labelsAny,
 			}
 			if cmd.Flags().Changed("priority") {
 				priority, _ := cmd.Flags().GetInt("priority")
@@ -261,6 +272,8 @@ func init() {
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	readyCmd.Flags().StringP("sort", "s", "hybrid", "Sort policy: hybrid (default), priority, oldest")
+	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	rootCmd.AddCommand(readyCmd)
 	rootCmd.AddCommand(blockedCmd)
 	rootCmd.AddCommand(statsCmd)

@@ -458,6 +458,8 @@ func (s *Server) handleReady(req *Request) Response {
 		Priority:   readyArgs.Priority,
 		Limit:      readyArgs.Limit,
 		SortPolicy: types.SortPolicy(readyArgs.SortPolicy),
+		Labels:     normalizeLabels(readyArgs.Labels),
+		LabelsAny:  normalizeLabels(readyArgs.LabelsAny),
 	}
 	if readyArgs.Assignee != "" {
 		wf.Assignee = &readyArgs.Assignee

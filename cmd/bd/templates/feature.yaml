@@ -1,0 +1,60 @@
+# Built-in template for feature requests
+name: feature
+description: |
+  ## Feature Request
+  
+  [Describe the desired feature]
+  
+  ## Motivation
+  
+  [Why is this feature needed? What problem does it solve?]
+  
+  ## Use Cases
+  
+  1. **Use Case 1**: [description]
+  2. **Use Case 2**: [description]
+  
+  ## Proposed Solution
+  
+  [High-level approach to implementing this feature]
+  
+  ## Alternatives Considered
+  
+  - **Alternative 1**: [description and why not chosen]
+  - **Alternative 2**: [description and why not chosen]
+
+type: feature
+priority: 2
+labels:
+  - feature
+
+design: |
+  ## Technical Design
+  
+  [Detailed technical approach]
+  
+  ## API Changes
+  
+  [New commands, flags, or APIs]
+  
+  ## Data Model Changes
+  
+  [Database schema changes if any]
+  
+  ## Implementation Notes
+  
+  - Note 1
+  - Note 2
+  
+  ## Testing Strategy
+  
+  - Unit tests: [scope]
+  - Integration tests: [scope]
+  - Manual testing: [steps]
+
+acceptance_criteria: |
+  - [ ] Feature implements all described use cases
+  - [ ] All tests pass
+  - [ ] Documentation updated (README, commands)
+  - [ ] Examples added if applicable
+  - [ ] No performance regressions

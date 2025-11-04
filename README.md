@@ -350,12 +350,21 @@ bd create "Task" -l "backend,urgent" --assignee alice
 # Get JSON output for programmatic use
 bd create "Fix bug" -d "Description" --json
 
+# Create from templates (built-in: epic, bug, feature)
+bd create --from-template epic "Q4 Platform Improvements"
+bd create --from-template bug "Auth token validation fails"
+bd create --from-template feature "Add OAuth support"
+
+# Override template defaults
+bd create --from-template bug "Critical issue" -p 0  # Override priority
+
 # Create multiple issues from a markdown file
 bd create -f feature-plan.md
 ```
 
 Options:
 - `-f, --file` - Create multiple issues from markdown file
+- `--from-template` - Use template (epic, bug, feature, or custom)
 - `-d, --description` - Issue description
 - `-p, --priority` - Priority (0-4, 0=highest, default=2)
 - `-t, --type` - Type (bug|feature|task|epic|chore, default=task)
@@ -363,6 +372,8 @@ Options:
 - `-l, --labels` - Comma-separated labels
 - `--id` - Explicit issue ID (e.g., `worker1-100` for ID space partitioning)
 - `--json` - Output in JSON format
+
+See `bd template list` for available templates and `bd help template` for managing custom templates.
 
 ### Viewing Issues
 

@@ -1,0 +1,14 @@
+name: performance-issue
+description: |-
+    [Describe the issue]
+
+    ## Additional Context
+
+    [Add relevant details]
+type: task
+priority: 2
+labels: []
+design: '[Design notes]'
+acceptance_criteria: |-
+    - [ ] Acceptance criterion 1
+    - [ ] Acceptance criterion 2

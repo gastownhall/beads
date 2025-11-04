@@ -1,0 +1,56 @@
+# Built-in template for bug reports
+name: bug
+description: |
+  ## Summary
+  
+  [Brief description of the bug]
+  
+  ## Steps to Reproduce
+  
+  1. Step 1
+  2. Step 2
+  3. Step 3
+  
+  ## Expected Behavior
+  
+  [What should happen]
+  
+  ## Actual Behavior
+  
+  [What actually happens]
+  
+  ## Environment
+  
+  - OS: [e.g., macOS 15.7.1]
+  - Version: [e.g., bd 0.20.1]
+  - Additional context: [any relevant details]
+  
+  ## Additional Context
+  
+  [Screenshots, logs, or other relevant information]
+
+type: bug
+priority: 1
+labels:
+  - bug
+
+design: |
+  ## Root Cause Analysis
+  
+  [Describe the underlying cause once identified]
+  
+  ## Proposed Fix
+  
+  [Outline the solution approach]
+  
+  ## Impact Assessment
+  
+  - Affected features: [list]
+  - Breaking changes: [yes/no and details]
+  - Migration needed: [yes/no and details]
+
+acceptance_criteria: |
+  - [ ] Bug no longer reproduces with original steps
+  - [ ] Regression tests added
+  - [ ] Related edge cases tested
+  - [ ] Documentation updated if behavior changed

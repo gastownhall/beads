@@ -19,6 +19,7 @@ var createCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(0), // Changed to allow no args when using -f
 	Run: func(cmd *cobra.Command, args []string) {
 		file, _ := cmd.Flags().GetString("file")
+		fromTemplate, _ := cmd.Flags().GetString("from-template")
 
 		// If file flag is provided, parse markdown and create multiple issues
 		if file != "" {
@@ -52,13 +53,51 @@ var createCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error: title required (or use --file to create from markdown)\n")
 			os.Exit(1)
 		}
+
+		// Load template if specified
+		var tmpl *Template
+		if fromTemplate != "" {
+			var err error
+			tmpl, err = loadTemplate(fromTemplate)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		// Get field values, preferring explicit flags over template defaults
 		description, _ := cmd.Flags().GetString("description")
+		if description == "" && tmpl != nil {
+			description = tmpl.Description
+		}
+
 		design, _ := cmd.Flags().GetString("design")
+		if design == "" && tmpl != nil {
+			design = tmpl.Design
+		}
+
 		acceptance, _ := cmd.Flags().GetString("acceptance")
+		if acceptance == "" && tmpl != nil {
+			acceptance = tmpl.AcceptanceCriteria
+		}
 		priority, _ := cmd.Flags().GetInt("priority")
+		if cmd.Flags().Changed("priority") == false && tmpl != nil {
+			priority = tmpl.Priority
+		}
+
 		issueType, _ := cmd.Flags().GetString("type")
+		if !cmd.Flags().Changed("type") && tmpl != nil && tmpl.Type != "" {
+			// Flag not explicitly set and template has a type, use template
+			issueType = tmpl.Type
+		}
+
 		assignee, _ := cmd.Flags().GetString("assignee")
+
 		labels, _ := cmd.Flags().GetStringSlice("labels")
+		if len(labels) == 0 && tmpl != nil && len(tmpl.Labels) > 0 {
+			labels = tmpl.Labels
+		}
+
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
@@ -259,6 +298,7 @@ var createCmd = &cobra.Command{
 
 func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().String("from-template", "", "Create issue from template (e.g., 'epic', 'bug', 'feature')")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().StringP("description", "d", "", "Issue description")
 	createCmd.Flags().String("design", "", "Design notes")

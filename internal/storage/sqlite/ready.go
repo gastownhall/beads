@@ -34,6 +34,36 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		args = append(args, *filter.Assignee)
 	}
 
+	// Label filtering (AND semantics)
+	if len(filter.Labels) > 0 {
+		for _, label := range filter.Labels {
+			whereClauses = append(whereClauses, `
+				EXISTS (
+					SELECT 1 FROM labels
+					WHERE issue_id = i.id AND label = ?
+				)
+			`)
+			args = append(args, label)
+		}
+	}
+
+	// Label filtering (OR semantics)
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i := range filter.LabelsAny {
+			placeholders[i] = "?"
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf(`
+			EXISTS (
+				SELECT 1 FROM labels
+				WHERE issue_id = i.id AND label IN (%s)
+			)
+		`, strings.Join(placeholders, ",")))
+		for _, label := range filter.LabelsAny {
+			args = append(args, label)
+		}
+	}
+
 	// Build WHERE clause properly
 	whereSQL := strings.Join(whereClauses, " AND ")
 
