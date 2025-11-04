@@ -48,6 +48,13 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// For :memory: databases, force single connection to ensure cache sharing works properly.
+	// SQLite's shared cache mode for in-memory databases only works reliably with one connection.
+	// Without this, different connections in the pool can't see each other's writes (bd-b121).
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
+
 	// Test connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
