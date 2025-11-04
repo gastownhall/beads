@@ -512,12 +512,18 @@ func detectDatabases(beadsDir string) ([]*dbInfo, error) {
 }
 
 func getDBVersion(dbPath string) string {
-	// Open database read-only
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	// Open database read-only using file URI (same as production code)
+	connStr := "file:" + dbPath + "?mode=ro&_time_format=sqlite"
+	db, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return "unknown"
 	}
 	defer db.Close()
+
+	// Ping to ensure connection is actually established
+	if err := db.Ping(); err != nil {
+		return "unknown"
+	}
 
 	// Try to read version from metadata table
 	var version string
@@ -526,6 +532,7 @@ func getDBVersion(dbPath string) string {
 		return version
 	}
 
+	// If the row doesn't exist but table does, this is still a database with metadata
 	// Check if metadata table exists
 	var tableName string
 	err = db.QueryRow(`
@@ -535,6 +542,11 @@ func getDBVersion(dbPath string) string {
 
 	if err == sql.ErrNoRows {
 		return "pre-0.17.5"
+	}
+
+	// Table exists but version query failed (probably no bd_version key)
+	if err == nil {
+		return "unknown"
 	}
 
 	return "unknown"

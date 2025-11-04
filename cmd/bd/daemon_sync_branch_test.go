@@ -563,6 +563,11 @@ func TestSyncBranchPull_Success(t *testing.T) {
 		t.Error("JSONL not copied to main repo after pull")
 	}
 
+	// On Windows, file I/O may need time to settle
+	if runtime.GOOS == "windows" {
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	// Verify JSONL content matches
 	clone1Data, err := os.ReadFile(clone1JSONLPath)
 	if err != nil {

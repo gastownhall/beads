@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -132,7 +133,13 @@ func TestDaemonAutoImportAfterGitPull(t *testing.T) {
 		runGitCmd(t, clone2Dir, "pull")
 		
 		// Wait for filesystem to settle after git operations
-		time.Sleep(50 * time.Millisecond)
+		// Windows has lower filesystem timestamp precision (typically 100ms)
+		// so we need a longer delay to ensure mtime comparison works
+		if runtime.GOOS == "windows" {
+			time.Sleep(200 * time.Millisecond)
+		} else {
+			time.Sleep(50 * time.Millisecond)
+		}
 		
 		// Start daemon server in clone2
 		socketPath := filepath.Join(clone2BeadsDir, "bd.sock")
