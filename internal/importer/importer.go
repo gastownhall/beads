@@ -537,12 +537,28 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
-	// Batch create all new issues
+	// Batch create all new issues with topological sorting
+	// Sort by hierarchy depth to ensure parents are created before children
+	// This prevents "parent does not exist" errors when importing hierarchical issues
 	if len(newIssues) > 0 {
-		if err := sqliteStore.CreateIssues(ctx, newIssues, "import"); err != nil {
-			return fmt.Errorf("error creating issues: %w", err)
+		SortByDepth(newIssues)
+
+		// Create issues in depth-order batches (max depth 3)
+		// This handles parent-child pairs in the same import batch
+		for depth := 0; depth <= 3; depth++ {
+			var batchForDepth []*types.Issue
+			for _, issue := range newIssues {
+				if GetHierarchyDepth(issue.ID) == depth {
+					batchForDepth = append(batchForDepth, issue)
+				}
+			}
+			if len(batchForDepth) > 0 {
+				if err := sqliteStore.CreateIssues(ctx, batchForDepth, "import"); err != nil {
+					return fmt.Errorf("error creating depth-%d issues: %w", depth, err)
+				}
+				result.Created += len(batchForDepth)
+			}
 		}
-		result.Created += len(newIssues)
 	}
 
 	// REMOVED (bd-c7af): Counter sync after import - no longer needed with hash IDs
