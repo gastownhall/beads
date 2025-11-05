@@ -101,7 +101,7 @@ brews:
   - name: bd
     repository:
       owner: steveyegge
-      name: beads
+      name: homebrew-beads
       branch: main
     directory: Formula
     homepage: https://github.com/steveyegge/beads
