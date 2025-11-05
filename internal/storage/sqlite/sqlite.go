@@ -543,8 +543,15 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 				if value == nil {
 					updatedIssue.ExternalRef = nil
 				} else {
-					str := value.(string)
-					updatedIssue.ExternalRef = &str
+					// Handle both string and *string
+					switch v := value.(type) {
+					case string:
+						updatedIssue.ExternalRef = &v
+					case *string:
+						updatedIssue.ExternalRef = v
+					default:
+						return fmt.Errorf("external_ref must be string or *string, got %T", value)
+					}
 				}
 			}
 		}
