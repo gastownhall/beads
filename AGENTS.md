@@ -186,8 +186,39 @@ bd label remove <id> [<id>...] <label> --json
 bd label list <id> --json
 bd label list-all --json
 
-# Filter issues by label
-bd list --label bug,critical --json
+# Filter and search issues
+bd list --status open --priority 1 --json               # Status and priority
+bd list --assignee alice --json                         # By assignee
+bd list --type bug --json                               # By issue type
+bd list --label bug,critical --json                     # Labels (AND: must have ALL)
+bd list --label-any frontend,backend --json             # Labels (OR: has ANY)
+bd list --id bd-123,bd-456 --json                       # Specific IDs
+bd list --title "auth" --json                           # Title search (substring)
+
+# Pattern matching (case-insensitive substring)
+bd list --title-contains "auth" --json                  # Search in title
+bd list --desc-contains "implement" --json              # Search in description
+bd list --notes-contains "TODO" --json                  # Search in notes
+
+# Date range filters (YYYY-MM-DD or RFC3339)
+bd list --created-after 2024-01-01 --json               # Created after date
+bd list --created-before 2024-12-31 --json              # Created before date
+bd list --updated-after 2024-06-01 --json               # Updated after date
+bd list --updated-before 2024-12-31 --json              # Updated before date
+bd list --closed-after 2024-01-01 --json                # Closed after date
+bd list --closed-before 2024-12-31 --json               # Closed before date
+
+# Empty/null checks
+bd list --empty-description --json                      # Issues with no description
+bd list --no-assignee --json                            # Unassigned issues
+bd list --no-labels --json                              # Issues with no labels
+
+# Priority ranges
+bd list --priority-min 0 --priority-max 1 --json        # P0 and P1 only
+bd list --priority-min 2 --json                         # P2 and below
+
+# Combine filters
+bd list --status open --priority 1 --label-any urgent,critical --no-assignee --json
 
 # Complete work (supports multiple IDs)
 bd close <id> [<id>...] --reason "Done" --json

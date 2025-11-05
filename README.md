@@ -390,10 +390,28 @@ bd list --label-any=frontend,backend       # Filter by labels (OR)
 # Advanced filters
 bd list --title-contains "auth"            # Search title
 bd list --desc-contains "implement"        # Search description
-bd list --priority-min 0 --priority-max 1  # Priority range
-bd list --created-after 2025-01-01         # Date range
-bd list --empty-description                # Find issues with no description
-bd list --no-assignee                      # Find unassigned issues
+bd list --notes-contains "TODO"            # Search notes
+bd list --id bd-123,bd-456                 # Specific IDs (comma-separated)
+
+# Date range filters (YYYY-MM-DD or RFC3339)
+bd list --created-after 2024-01-01         # Created after date
+bd list --created-before 2024-12-31        # Created before date
+bd list --updated-after 2024-06-01         # Updated after date
+bd list --updated-before 2024-12-31        # Updated before date
+bd list --closed-after 2024-01-01          # Closed after date
+bd list --closed-before 2024-12-31         # Closed before date
+
+# Empty/null checks
+bd list --empty-description                # Issues with no description
+bd list --no-assignee                      # Unassigned issues
+bd list --no-labels                        # Issues with no labels
+
+# Priority ranges
+bd list --priority-min 0 --priority-max 1  # P0 and P1 only
+bd list --priority-min 2                   # P2 and below
+
+# Combine multiple filters
+bd list --status open --priority 1 --label-any urgent,critical --no-assignee
 
 # JSON output for agents
 bd info --json
