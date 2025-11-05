@@ -11,7 +11,7 @@ import (
 
 var (
 	// Version is the current version of bd (overridden by ldflags at build time)
-	Version = "0.21.7"
+	Version = "0.21.8"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
 )
