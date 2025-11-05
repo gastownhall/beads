@@ -391,6 +391,7 @@ var allowedUpdateFields = map[string]bool{
 	"issue_type":          true,
 	"estimated_minutes":   true,
 	"external_ref":        true,
+	"closed_at":           true,
 }
 
 // validatePriority validates a priority value
@@ -420,6 +421,14 @@ func determineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 // manageClosedAt automatically manages the closed_at field based on status changes
 func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
 	statusVal, hasStatus := updates["status"]
+	
+	// If closed_at is explicitly provided in updates, it's already in setClauses/args
+	// and we should not override it (important for import operations that preserve timestamps)
+	_, hasExplicitClosedAt := updates["closed_at"]
+	if hasExplicitClosedAt {
+		return setClauses, args
+	}
+	
 	if !hasStatus {
 		return setClauses, args
 	}
@@ -437,12 +446,10 @@ func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 
 	if newStatus == string(types.StatusClosed) {
 		// Changing to closed: ensure closed_at is set
-		if _, hasClosedAt := updates["closed_at"]; !hasClosedAt {
-			now := time.Now()
-			updates["closed_at"] = now
-			setClauses = append(setClauses, "closed_at = ?")
-			args = append(args, now)
-		}
+		now := time.Now()
+		updates["closed_at"] = now
+		setClauses = append(setClauses, "closed_at = ?")
+		args = append(args, now)
 	} else if oldIssue.Status == types.StatusClosed {
 		// Changing from closed to something else: clear closed_at
 		updates["closed_at"] = nil

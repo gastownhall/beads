@@ -449,18 +449,19 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					updates["design"] = incoming.Design
 					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 					updates["notes"] = incoming.Notes
+					updates["closed_at"] = incoming.ClosedAt
 					
 					if incoming.Assignee != "" {
-						updates["assignee"] = incoming.Assignee
+					 updates["assignee"] = incoming.Assignee
 					} else {
-						updates["assignee"] = nil
+					 updates["assignee"] = nil
 					}
 					
 					if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
-						updates["external_ref"] = *incoming.ExternalRef
+					 updates["external_ref"] = *incoming.ExternalRef
 					} else {
-						updates["external_ref"] = nil
-					}
+					 updates["external_ref"] = nil
+				}
 					
 					// Only update if data actually changed
 					if IssueDataChanged(existing, updates) {
@@ -526,18 +527,19 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				updates["design"] = incoming.Design
 				updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 				updates["notes"] = incoming.Notes
+			updates["closed_at"] = incoming.ClosedAt
 
 				if incoming.Assignee != "" {
-					updates["assignee"] = incoming.Assignee
+				 updates["assignee"] = incoming.Assignee
 				} else {
-					updates["assignee"] = nil
-				}
+				 updates["assignee"] = nil
+			}
 
 				if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
-					updates["external_ref"] = *incoming.ExternalRef
+				 updates["external_ref"] = *incoming.ExternalRef
 				} else {
-					updates["external_ref"] = nil
-				}
+				 updates["external_ref"] = nil
+			}
 
 				// Only update if data actually changed
 				if IssueDataChanged(existingWithID, updates) {
