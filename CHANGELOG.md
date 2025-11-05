@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Parent Resurrection** (bd-58c0): Automatic resurrection of deleted parent issues from JSONL history
+  - Prevents import failures when parent issues have been deleted
+  - Creates tombstone placeholders for missing hierarchical parents
+  - Best-effort dependency resurrection from JSONL
+
+### Changed
+
+- **Error Messages**: Improved error messages for missing parent issues
+  - Old: `"parent issue X does not exist"`
+  - New: `"parent issue X does not exist and could not be resurrected from JSONL history"`
+  - **Breaking**: Scripts parsing exact error messages may need updates
+
+### Fixed
+
+- **JSONL Resurrection Logic**: Fixed to use LAST occurrence instead of FIRST (append-only semantics)
+
 ## [0.21.7] - 2025-11-04
 
 ### Fixed

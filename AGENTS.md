@@ -213,6 +213,13 @@ bd import -i .beads/issues.jsonl --dry-run      # Preview changes
 bd import -i .beads/issues.jsonl                # Import and update issues
 bd import -i .beads/issues.jsonl --dedupe-after # Import + detect duplicates
 
+# Note: Import automatically handles missing parents!
+# - If a hierarchical child's parent is missing (e.g., bd-abc.1 but no bd-abc)
+# - bd will search the JSONL history for the parent
+# - If found, creates a tombstone placeholder (Status=Closed, Priority=4)
+# - Dependencies are also resurrected on best-effort basis
+# - This prevents import failures after parent deletion
+
 # Find and merge duplicate issues
 bd duplicates                                          # Show all duplicates
 bd duplicates --auto-merge                             # Automatically merge all

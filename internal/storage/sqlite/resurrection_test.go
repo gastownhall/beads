@@ -539,6 +539,90 @@ func writeIssuesToJSONL(path string, issues []types.Issue) error {
 	return nil
 }
 
+// TestTryResurrectParent_MultipleVersionsInJSONL verifies that the LAST occurrence is used
+func TestTryResurrectParent_MultipleVersionsInJSONL(t *testing.T) {
+	s := newTestStore(t, "")
+	ctx := context.Background()
+
+	// Create JSONL with multiple versions of the same issue (append-only semantics)
+	dbDir := filepath.Dir(s.dbPath)
+	jsonlPath := filepath.Join(dbDir, "issues.jsonl")
+
+	// First version: priority 3, title "Old Version"
+	v1 := &types.Issue{
+		ID:        "bd-multi",
+		Title:     "Old Version",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	v1JSON, _ := json.Marshal(v1)
+
+	// Second version: priority 2, title "Updated Version"
+	time.Sleep(10 * time.Millisecond) // Ensure different timestamp
+	v2 := &types.Issue{
+		ID:        "bd-multi",
+		Title:     "Updated Version",
+		Status:    types.StatusInProgress,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: v1.CreatedAt, // Same creation time
+		UpdatedAt: time.Now(),
+	}
+	v2JSON, _ := json.Marshal(v2)
+
+	// Third version: priority 1, title "Latest Version"
+	time.Sleep(10 * time.Millisecond)
+	v3 := &types.Issue{
+		ID:        "bd-multi",
+		Title:     "Latest Version",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: v1.CreatedAt,
+		UpdatedAt: time.Now(),
+	}
+	v3JSON, _ := json.Marshal(v3)
+
+	// Write all three versions (append-only)
+	content := string(v1JSON) + "\n" + string(v2JSON) + "\n" + string(v3JSON) + "\n"
+	if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+
+	// Resurrect - should get the LAST version (v3)
+	resurrected, err := s.TryResurrectParent(ctx, "bd-multi")
+	if err != nil {
+		t.Fatalf("TryResurrectParent failed: %v", err)
+	}
+	if !resurrected {
+		t.Error("Expected successful resurrection")
+	}
+
+	// Verify we got the latest version's data
+	retrieved, err := s.GetIssue(ctx, "bd-multi")
+	if err != nil {
+		t.Fatalf("Failed to retrieve resurrected issue: %v", err)
+	}
+
+	// Most important: title should be from LAST occurrence (v3)
+	if retrieved.Title != "Latest Version" {
+		t.Errorf("Expected title 'Latest Version', got '%s' (should use LAST occurrence in JSONL)", retrieved.Title)
+	}
+	
+	// CreatedAt should be preserved from original (all versions share this)
+	if !retrieved.CreatedAt.Equal(v1.CreatedAt) {
+		t.Errorf("Expected CreatedAt %v, got %v", v1.CreatedAt, retrieved.CreatedAt)
+	}
+	
+	// Note: Priority, Status, and Description are modified by tombstone logic
+	// (Priority=4, Status=Closed, Description="[RESURRECTED]...")
+	// This is expected behavior - the test verifies we read the LAST occurrence
+	// before creating the tombstone.
+}
+
 // Helper function to check if string contains substring
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) >= len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsMiddle(s, substr)))

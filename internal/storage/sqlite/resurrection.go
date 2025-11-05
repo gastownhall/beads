@@ -133,6 +133,7 @@ func (s *SQLiteStorage) findIssueInJSONL(issueID string) (*types.Issue, error) {
 	scanner.Buffer(buf, maxCapacity)
 	
 	lineNum := 0
+	var lastMatch *types.Issue
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
@@ -156,9 +157,10 @@ func (s *SQLiteStorage) findIssueInJSONL(issueID string) (*types.Issue, error) {
 			continue
 		}
 		
-		// Check if this is the issue we're looking for
+		// Keep the last occurrence (JSONL append-only semantics)
 		if issue.ID == issueID {
-			return &issue, nil
+			issueCopy := issue
+			lastMatch = &issueCopy
 		}
 	}
 	
@@ -166,7 +168,7 @@ func (s *SQLiteStorage) findIssueInJSONL(issueID string) (*types.Issue, error) {
 		return nil, fmt.Errorf("error reading JSONL file: %w", err)
 	}
 	
-	return nil, nil // Not found
+	return lastMatch, nil // Returns last match or nil if not found
 }
 
 // TryResurrectParentChain recursively resurrects all missing parents in a hierarchical ID chain.
