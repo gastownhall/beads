@@ -170,17 +170,17 @@ var showCmd = &cobra.Command{
 					if len(details.Dependencies) > 0 {
 						fmt.Printf("\nDependencies (%d):\n", len(details.Dependencies))
 						for _, dep := range details.Dependencies {
-							fmt.Printf("  [%s] %s: %s [P%d]\n", 
+							fmt.Printf("  [%s] %s (%s): %s [P%d]\n", 
 								formatDependencyType(dep.DependencyType), 
-								dep.ID, dep.Title, dep.Priority)
+								dep.ID, dep.Status, dep.Title, dep.Priority)
 						}
 					}
 					if len(details.Dependents) > 0 {
 						fmt.Printf("\nDependents (%d):\n", len(details.Dependents))
 						for _, dep := range details.Dependents {
-							fmt.Printf("  [%s] %s: %s [P%d]\n", 
+							fmt.Printf("  [%s] %s (%s): %s [P%d]\n", 
 								formatDependencyType(dep.DependencyType), 
-								dep.ID, dep.Title, dep.Priority)
+								dep.ID, dep.Status, dep.Title, dep.Priority)
 						}
 					}
 					fmt.Println()
@@ -317,9 +317,9 @@ var showCmd = &cobra.Command{
 			if len(depsWithMeta) > 0 {
 				fmt.Printf("\nDependencies (%d):\n", len(depsWithMeta))
 				for _, dep := range depsWithMeta {
-					fmt.Printf("  [%s] %s: %s [P%d]\n", 
+					fmt.Printf("  [%s] %s (%s): %s [P%d]\n", 
 						formatDependencyType(dep.DependencyType), 
-						dep.ID, dep.Title, dep.Priority)
+						dep.ID, dep.Status, dep.Title, dep.Priority)
 				}
 			}
 			
@@ -340,9 +340,9 @@ var showCmd = &cobra.Command{
 			if len(dependentsWithMeta) > 0 {
 				fmt.Printf("\nDependents (%d):\n", len(dependentsWithMeta))
 				for _, dep := range dependentsWithMeta {
-					fmt.Printf("  [%s] %s: %s [P%d]\n", 
+					fmt.Printf("  [%s] %s (%s): %s [P%d]\n", 
 						formatDependencyType(dep.DependencyType), 
-						dep.ID, dep.Title, dep.Priority)
+						dep.ID, dep.Status, dep.Title, dep.Priority)
 				}
 			}
 			// Show comments
