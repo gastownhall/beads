@@ -289,9 +289,29 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 			// The rename is already complete in the database
 			return deletedID, nil
 		}
-		// REMOVED (bd-8e05): Sequential ID collision handling during rename
-		// With hash-based IDs, rename collisions should not occur
-		return "", fmt.Errorf("rename collision handling removed - should not occur with hash IDs")
+		// With hash IDs, same content should produce same ID. If we find same content
+		// with different IDs, treat it as an update to the existing ID (not a rename).
+		// This handles edge cases like test data, legacy data, or data corruption.
+		// Keep the existing ID and update fields if incoming has newer timestamp.
+		if incoming.UpdatedAt.After(existing.UpdatedAt) {
+			// Update existing issue with incoming's fields
+			updates := map[string]interface{}{
+				"title":               incoming.Title,
+				"description":         incoming.Description,
+				"design":              incoming.Design,
+				"acceptance_criteria": incoming.AcceptanceCriteria,
+				"notes":               incoming.Notes,
+				"external_ref":        incoming.ExternalRef,
+				"status":              incoming.Status,
+				"priority":            incoming.Priority,
+				"issue_type":          incoming.IssueType,
+				"assignee":            incoming.Assignee,
+			}
+			if err := s.UpdateIssue(ctx, existing.ID, updates, "importer"); err != nil {
+				return "", fmt.Errorf("failed to update issue %s: %w", existing.ID, err)
+			}
+		}
+		return "", nil
 		
 		/* OLD CODE REMOVED (bd-8e05)
 		// Different content - this is a collision during rename
