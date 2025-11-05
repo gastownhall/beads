@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -250,7 +251,11 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	testBD = filepath.Join(tmpDir, "bd")
+	bdBinary := "bd"
+	if runtime.GOOS == "windows" {
+		bdBinary = "bd.exe"
+	}
+	testBD = filepath.Join(tmpDir, bdBinary)
 	cmd := exec.Command("go", "build", "-o", testBD, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic(string(out))
