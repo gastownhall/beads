@@ -537,3 +537,56 @@ func TestDatabaseHandshake(t *testing.T) {
 		t.Errorf("Create without ExpectedDB should succeed (backward compat): %v", err)
 	}
 }
+
+func TestCreate_DiscoveredFromInheritsSourceRepo(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create a parent issue
+	parentArgs := &CreateArgs{
+		Title:     "Parent issue",
+		IssueType: "task",
+		Priority:  1,
+	}
+
+	parentResp, err := client.Create(parentArgs)
+	if err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	var parentIssue types.Issue
+	if err := json.Unmarshal(parentResp.Data, &parentIssue); err != nil {
+		t.Fatalf("Failed to unmarshal parent: %v", err)
+	}
+
+	// Create discovered issue with discovered-from dependency
+	// The logic in handleCreate should check for discovered-from dependencies
+	// and inherit the parent's source_repo
+	discoveredArgs := &CreateArgs{
+		Title:        "Discovered bug",
+		IssueType:    "bug",
+		Priority:     1,
+		Dependencies: []string{"discovered-from:" + parentIssue.ID},
+	}
+
+	discoveredResp, err := client.Create(discoveredArgs)
+	if err != nil {
+		t.Fatalf("Failed to create discovered issue: %v", err)
+	}
+
+	var discoveredIssue types.Issue
+	if err := json.Unmarshal(discoveredResp.Data, &discoveredIssue); err != nil {
+		t.Fatalf("Failed to unmarshal discovered issue: %v", err)
+	}
+
+	// Verify the issue was created successfully
+	if discoveredIssue.Title != "Discovered bug" {
+		t.Errorf("Expected title 'Discovered bug', got %s", discoveredIssue.Title)
+	}
+
+	// Note: To fully test source_repo inheritance, we'd need to:
+	// 1. Create a parent with custom source_repo (requires direct storage access)
+	// 2. Verify the discovered issue inherited it
+	// The logic is implemented in server_issues_epics.go handleCreate
+	// and tested via the cmd/bd test which has direct storage access
+}

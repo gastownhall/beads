@@ -258,6 +258,42 @@ var createCmd = &cobra.Command{
 		}
 
 		ctx := context.Background()
+		
+		// Check if any dependencies are discovered-from type
+		// If so, inherit source_repo from the parent issue
+		var discoveredFromParentID string
+		for _, depSpec := range deps {
+			depSpec = strings.TrimSpace(depSpec)
+			if depSpec == "" {
+				continue
+			}
+			
+			var depType types.DependencyType
+			var dependsOnID string
+			
+			if strings.Contains(depSpec, ":") {
+				parts := strings.SplitN(depSpec, ":", 2)
+				if len(parts) == 2 {
+					depType = types.DependencyType(strings.TrimSpace(parts[0]))
+					dependsOnID = strings.TrimSpace(parts[1])
+					
+					if depType == types.DepDiscoveredFrom {
+						discoveredFromParentID = dependsOnID
+						break
+					}
+				}
+			}
+		}
+		
+		// If we found a discovered-from dependency, inherit source_repo from parent
+		if discoveredFromParentID != "" {
+			parentIssue, err := store.GetIssue(ctx, discoveredFromParentID)
+			if err == nil && parentIssue.SourceRepo != "" {
+				issue.SourceRepo = parentIssue.SourceRepo
+			}
+			// If error getting parent or parent has no source_repo, continue with default
+		}
+		
 		if err := store.CreateIssue(ctx, issue, actor); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

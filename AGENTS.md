@@ -394,9 +394,11 @@ bd daemons killall  # Restart with default (poll) mode
 - `blocks` - Hard dependency (issue X blocks issue Y)
 - `related` - Soft relationship (issues are connected)
 - `parent-child` - Epic/subtask relationship
-- `discovered-from` - Track issues discovered during work
+- `discovered-from` - Track issues discovered during work (automatically inherits parent's `source_repo`)
 
 Only `blocks` dependencies affect the ready work queue.
+
+**Note:** When creating an issue with a `discovered-from` dependency, the new issue automatically inherits the parent's `source_repo` field. This ensures discovered work stays in the same repository as the parent task.
 
 ### Duplicate Detection & Merging
 

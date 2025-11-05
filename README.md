@@ -428,9 +428,11 @@ bd dep cycles
 - **blocks**: Hard blocker (default) - issue cannot start until blocker is resolved
 - **related**: Soft relationship - issues are connected but not blocking
 - **parent-child**: Hierarchical relationship (child depends on parent)
-- **discovered-from**: Issue discovered during work on another issue
+- **discovered-from**: Issue discovered during work on another issue (automatically inherits parent's `source_repo`)
 
 Only `blocks` dependencies affect ready work detection.
+
+> **Note:** Issues created with `discovered-from` dependencies automatically inherit the parent's `source_repo` field, ensuring discovered work stays in the same repository as the parent task.
 
 ### Finding Work
 

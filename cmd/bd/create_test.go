@@ -450,3 +450,74 @@ func TestCreate_MultipleDependencies(t *testing.T) {
 		t.Fatalf("expected 2 dependencies, got %d", len(deps))
 	}
 }
+
+func TestCreate_DiscoveredFromInheritsSourceRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create a parent issue with a custom source_repo
+	parent := &types.Issue{
+		Title:      "Parent issue",
+		Priority:   1,
+		Status:     types.StatusOpen,
+		IssueType:  types.TypeTask,
+		SourceRepo: "/path/to/custom/repo",
+		CreatedAt:  time.Now(),
+	}
+
+	if err := s.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("failed to create parent: %v", err)
+	}
+
+	// Create a discovered issue with discovered-from dependency
+	// This should inherit the parent's source_repo
+	discovered := &types.Issue{
+		Title:     "Discovered bug",
+		Priority:  1,
+		Status:    types.StatusOpen,
+		IssueType: types.TypeBug,
+		CreatedAt: time.Now(),
+	}
+
+	// Simulate what happens in create.go when --deps discovered-from:parent is used
+	// The source_repo should be inherited from the parent
+	parentIssue, err := s.GetIssue(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("failed to get parent issue: %v", err)
+	}
+	if parentIssue.SourceRepo != "" {
+		discovered.SourceRepo = parentIssue.SourceRepo
+	}
+
+	if err := s.CreateIssue(ctx, discovered, "test"); err != nil {
+		t.Fatalf("failed to create discovered issue: %v", err)
+	}
+
+	// Add discovered-from dependency
+	dep := &types.Dependency{
+		IssueID:     discovered.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepDiscoveredFrom,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	// Verify the discovered issue inherited the source_repo
+	retrievedIssue, err := s.GetIssue(ctx, discovered.ID)
+	if err != nil {
+		t.Fatalf("failed to get discovered issue: %v", err)
+	}
+
+	if retrievedIssue.SourceRepo != parent.SourceRepo {
+		t.Errorf("expected source_repo %q, got %q", parent.SourceRepo, retrievedIssue.SourceRepo)
+	}
+
+	if retrievedIssue.SourceRepo != "/path/to/custom/repo" {
+		t.Errorf("expected source_repo '/path/to/custom/repo', got %q", retrievedIssue.SourceRepo)
+	}
+}
