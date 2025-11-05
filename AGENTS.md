@@ -607,12 +607,9 @@ bd sync --merge
 1. **File beads issues for any remaining work** that needs follow-up
 2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
 3. **Update beads issues** - close finished work, update status
-4. **Git pull & rebase**
-5. **bd sync** - verify both import and export succeeded
-6. **Git push** - redo rebase if necessary until it succeeds
-7. **Double-check for untracked files** (beads files often get dirty again after git push)
-8. **Ensure no untracked files remain**
-9. **Choose a follow-up issue for next session**
+4. **Sync the issue tracker carefully** - Work methodically to ensure both local and remote issues merge safely. This may require pulling, handling conflicts (sometimes accepting remote changes and re-importing), syncing the database, and verifying consistency. Be creative and patient - the goal is clean reconciliation where no issues are lost.
+5. **Verify clean state** - Ensure all changes are committed and pushed, no untracked files remain
+6. **Choose a follow-up issue for next session**
    - Provide a prompt for the user to give to you in the next session
    - Format: "Continue work on bd-X: [issue title]. [Brief context about what's been done and what's next]"
 
@@ -628,19 +625,20 @@ golangci-lint run ./...
 # 3. Close finished issues
 bd close bd-42 bd-43 --reason "Completed" --json
 
-# 4. Pull & rebase
+# 4. Sync carefully - example workflow (adapt as needed):
 git pull --rebase
-
-# 5. Sync beads
-bd sync
-
-# 6. Push
+# If conflicts in .beads/issues.jsonl, resolve thoughtfully:
+#   - git checkout --theirs .beads/issues.jsonl (accept remote)
+#   - bd import -i .beads/issues.jsonl (re-import)
+#   - Or manual merge, then import
+bd sync  # Export/import/verify
 git push
+# Repeat pull/push if needed until clean
 
-# 7-8. Verify clean state
+# 5. Verify clean state
 git status
 
-# 9. Choose next work
+# 6. Choose next work
 bd ready --json
 bd show bd-44 --json
 ```
