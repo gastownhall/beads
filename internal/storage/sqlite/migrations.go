@@ -31,6 +31,7 @@ var migrations = []Migration{
 	{"external_ref_unique", migrateExternalRefUnique},
 	{"source_repo_column", migrateSourceRepoColumn},
 	{"repo_mtimes_table", migrateRepoMtimesTable},
+	{"child_counters_table", migrateChildCountersTable},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -68,6 +69,7 @@ func getMigrationDescription(name string) string {
 		"external_ref_unique":          "Adds UNIQUE constraint on external_ref column",
 		"source_repo_column":           "Adds source_repo column for multi-repo support",
 		"repo_mtimes_table":            "Adds repo_mtimes table for multi-repo hydration caching",
+		"child_counters_table":         "Adds child_counters table for hierarchical ID generation with ON DELETE CASCADE",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
@@ -639,6 +641,38 @@ func migrateRepoMtimesTable(db *sql.DB) error {
 
 	if err != nil {
 		return fmt.Errorf("failed to check for repo_mtimes table: %w", err)
+	}
+
+	// Table already exists
+	return nil
+}
+
+// migrateChildCountersTable creates the child_counters table for hierarchical ID generation (bd-bb08)
+func migrateChildCountersTable(db *sql.DB) error {
+	// Check if child_counters table exists
+	var tableName string
+	err := db.QueryRow(`
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND name='child_counters'
+	`).Scan(&tableName)
+
+	if err == sql.ErrNoRows {
+		// Table doesn't exist, create it
+		_, err := db.Exec(`
+			CREATE TABLE child_counters (
+				parent_id TEXT PRIMARY KEY,
+				last_child INTEGER NOT NULL DEFAULT 0,
+				FOREIGN KEY (parent_id) REFERENCES issues(id) ON DELETE CASCADE
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create child_counters table: %w", err)
+		}
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to check for child_counters table: %w", err)
 	}
 
 	// Table already exists
