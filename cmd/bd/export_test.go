@@ -257,4 +257,67 @@ func TestExportCommand(t *testing.T) {
 			t.Errorf("JSONL file was modified! Expected 2 issues, got %d", countAfter)
 		}
 	})
+
+	t.Run("verify JSONL line count matches exported count", func(t *testing.T) {
+		exportPath := filepath.Join(tmpDir, "export_verify.jsonl")
+
+		// Clear export hashes to force re-export
+		if err := s.ClearAllExportHashes(ctx); err != nil {
+			t.Fatalf("Failed to clear export hashes: %v", err)
+		}
+
+		store = s
+		dbPath = testDB
+		exportCmd.Flags().Set("output", exportPath)
+		exportCmd.Run(exportCmd, []string{})
+
+		// Verify the exported file has exactly 2 lines
+		actualCount, err := countIssuesInJSONL(exportPath)
+		if err != nil {
+			t.Fatalf("Failed to count issues in JSONL: %v", err)
+		}
+		if actualCount != 2 {
+			t.Errorf("Expected 2 issues in JSONL, got %d", actualCount)
+		}
+
+		// Simulate corrupted export by truncating file
+		corruptedPath := filepath.Join(tmpDir, "export_corrupted.jsonl")
+		
+		// First export normally
+		if err := s.ClearAllExportHashes(ctx); err != nil {
+			t.Fatalf("Failed to clear export hashes: %v", err)
+		}
+		store = s
+		exportCmd.Flags().Set("output", corruptedPath)
+		exportCmd.Run(exportCmd, []string{})
+
+		// Now manually corrupt it by removing one line
+		file, err := os.Open(corruptedPath)
+		if err != nil {
+			t.Fatalf("Failed to open file for corruption: %v", err)
+		}
+		scanner := bufio.NewScanner(file)
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		file.Close()
+
+		// Write back only first line (simulating partial write)
+		corruptedFile, err := os.Create(corruptedPath)
+		if err != nil {
+			t.Fatalf("Failed to create corrupted file: %v", err)
+		}
+		corruptedFile.WriteString(lines[0] + "\n")
+		corruptedFile.Close()
+
+		// Verify countIssuesInJSONL detects the corruption
+		count, err := countIssuesInJSONL(corruptedPath)
+		if err != nil {
+			t.Fatalf("Failed to count corrupted file: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Expected 1 line in corrupted file, got %d", count)
+		}
+	})
 }
