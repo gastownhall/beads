@@ -68,12 +68,42 @@ Before starting a release:
 
 - [ ] All tests passing (`go test ./...`)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
-- [ ] CHANGELOG.md updated with changes
-- [ ] Version bumped in all locations (use `scripts/bump-version.sh`)
+- [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] No uncommitted changes
 - [ ] On `main` branch and up to date with origin
 
 ## 1. Prepare Release
+
+### Update CHANGELOG.md
+
+**IMPORTANT: Do this FIRST before running bump-version script.**
+
+Add release notes to CHANGELOG.md:
+
+```markdown
+## [0.22.0] - 2025-11-04
+
+### Added
+- New feature X
+- New command Y
+
+### Changed
+- Improved performance of Z
+
+### Fixed
+- Bug in component A
+
+### Breaking Changes
+- Changed behavior of B (migration guide)
+```
+
+Commit the CHANGELOG changes:
+
+```bash
+git add CHANGELOG.md
+git commit -m "docs: Add CHANGELOG entry for v0.22.0"
+git push origin main
+```
 
 ### Update Version and Create Release Tag
 
@@ -112,27 +142,6 @@ This triggers GitHub Actions to build release artifacts automatically.
 git tag -a v0.22.0 -m "Release v0.22.0"
 git push origin main
 git push origin v0.22.0
-```
-
-### Update CHANGELOG.md (Optional but Recommended)
-
-Add release notes before or after running the version bump:
-
-```markdown
-## [0.22.0] - 2025-11-04
-
-### Added
-- New feature X
-- New command Y
-
-### Changed
-- Improved performance of Z
-
-### Fixed
-- Bug in component A
-
-### Breaking Changes
-- Changed behavior of B (migration guide)
 ```
 
 ## 2. GitHub Release
