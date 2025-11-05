@@ -1208,6 +1208,22 @@ func (s *SQLiteStorage) DeleteConfig(ctx context.Context, key string) error {
 	return err
 }
 
+// GetOrphanHandling gets the import.orphan_handling config value
+// Returns OrphanAllow (the default) if not set or if value is invalid
+func (s *SQLiteStorage) GetOrphanHandling(ctx context.Context) OrphanHandling {
+	value, err := s.GetConfig(ctx, "import.orphan_handling")
+	if err != nil || value == "" {
+		return OrphanAllow // Default
+	}
+	
+	switch OrphanHandling(value) {
+	case OrphanStrict, OrphanResurrect, OrphanSkip, OrphanAllow:
+		return OrphanHandling(value)
+	default:
+		return OrphanAllow // Invalid value, use default
+	}
+}
+
 // SetMetadata sets a metadata value (for internal state like import hashes)
 func (s *SQLiteStorage) SetMetadata(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `

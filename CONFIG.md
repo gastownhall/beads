@@ -169,6 +169,7 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `max_collision_prob` - Maximum collision probability for adaptive hash IDs (default: 0.25)
 - `min_hash_length` - Minimum hash ID length (default: 4)
 - `max_hash_length` - Maximum hash ID length (default: 8)
+- `import.orphan_handling` - How to handle hierarchical issues with missing parents during import (default: `allow`)
 
 ### Integration Namespaces
 
@@ -198,6 +199,47 @@ bd config set min_hash_length "5"
 ```
 
 See [docs/ADAPTIVE_IDS.md](docs/ADAPTIVE_IDS.md) for detailed documentation.
+
+### Example: Import Orphan Handling
+
+Controls how imports handle hierarchical child issues when their parent is missing from the database:
+
+```bash
+# Strictest: Fail import if parent is missing (safest, prevents orphans)
+bd config set import.orphan_handling "strict"
+
+# Auto-resurrect: Search JSONL history and recreate missing parents as tombstones
+bd config set import.orphan_handling "resurrect"
+
+# Skip: Skip orphaned issues with warning (partial import)
+bd config set import.orphan_handling "skip"
+
+# Allow: Import orphans without validation (default, most permissive)
+bd config set import.orphan_handling "allow"
+```
+
+**Mode details:**
+
+- **`strict`** - Import fails immediately if a child's parent is missing. Use when database integrity is critical.
+- **`resurrect`** - Searches the full JSONL file for missing parents and recreates them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`skip`** - Skips orphaned children with a warning. Partial import succeeds but some issues are excluded.
+- **`allow`** - Imports orphans without parent validation. Most permissive, works around import bugs. **This is the default** because it ensures all data is imported even if hierarchy is temporarily broken.
+
+**Override per command:**
+```bash
+# Override config for a single import
+bd import -i issues.jsonl --orphan-handling strict
+
+# Auto-import (sync) uses config value
+bd sync  # Respects import.orphan_handling setting
+```
+
+**When to use each mode:**
+
+- Use `allow` (default) for daily imports and auto-sync - ensures no data loss
+- Use `resurrect` when importing from another database that had parent deletions
+- Use `strict` only for controlled imports where you need to guarantee parent existence
+- Use `skip` rarely - only when you want to selectively import a subset
 
 ### Example: Jira Integration
 

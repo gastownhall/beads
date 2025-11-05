@@ -33,6 +33,7 @@ Behavior:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		renameOnImport, _ := cmd.Flags().GetBool("rename-on-import")
 		dedupeAfter, _ := cmd.Flags().GetBool("dedupe-after")
+		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 
 		// Open input
 		in := os.Stdin
@@ -98,6 +99,7 @@ Behavior:
 			SkipUpdate:     skipUpdate,
 			Strict:         strict,
 			RenameOnImport: renameOnImport,
+			OrphanHandling: orphanHandling,
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -263,6 +265,7 @@ func init() {
 	importCmd.Flags().Bool("dedupe-after", false, "Detect and report content duplicates after import")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
+	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }

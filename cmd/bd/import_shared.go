@@ -158,11 +158,12 @@ func issueDataChanged(existing *types.Issue, updates map[string]interface{}) boo
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	DryRun             bool // Preview changes without applying them
-	SkipUpdate         bool // Skip updating existing issues (create-only mode)
-	Strict             bool // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport     bool // Rename imported issues to match database prefix
+	DryRun             bool   // Preview changes without applying them
+	SkipUpdate         bool   // Skip updating existing issues (create-only mode)
+	Strict             bool   // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport     bool   // Rename imported issues to match database prefix
 	SkipPrefixValidation bool // Skip prefix validation (for auto-import)
+	OrphanHandling     string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
 }
 
 // ImportResult contains statistics about the import operation
@@ -198,6 +199,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		Strict:               opts.Strict,
 		RenameOnImport:       opts.RenameOnImport,
 		SkipPrefixValidation: opts.SkipPrefixValidation,
+		OrphanHandling:       importer.OrphanHandling(opts.OrphanHandling),
 	}
 
 	// Delegate to the importer package

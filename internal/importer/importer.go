@@ -97,6 +97,11 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
 		}
 	}
+	
+	// Read orphan handling from config if not explicitly set
+	if opts.OrphanHandling == "" {
+		opts.OrphanHandling = sqliteStore.GetOrphanHandling(ctx)
+	}
 
 	// Check and handle prefix mismatches
 	if err := handlePrefixMismatch(ctx, sqliteStore, issues, opts, result); err != nil {
