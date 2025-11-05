@@ -600,6 +600,57 @@ bd sync --merge
 
 **See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md) for complete setup guide, troubleshooting, and examples.**
 
+### Landing the Plane
+
+**When the user says "let's land the plane"**, follow this clean session-ending protocol:
+
+1. **File beads issues for any remaining work** that needs follow-up
+2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
+3. **Update beads issues** - close finished work, update status
+4. **Git pull & rebase**
+5. **bd sync** - verify both import and export succeeded
+6. **Git push** - redo rebase if necessary until it succeeds
+7. **Double-check for untracked files** (beads files often get dirty again after git push)
+8. **Ensure no untracked files remain**
+9. **Choose a follow-up issue for next session**
+   - Provide a prompt for the user to give to you in the next session
+   - Format: "Continue work on bd-X: [issue title]. [Brief context about what's been done and what's next]"
+
+**Example "land the plane" session:**
+```bash
+# 1. File remaining work
+bd create "Add integration tests for sync" -t task -p 2 --json
+
+# 2. Run quality gates
+go test ./...
+golangci-lint run ./...
+
+# 3. Close finished issues
+bd close bd-42 bd-43 --reason "Completed" --json
+
+# 4. Pull & rebase
+git pull --rebase
+
+# 5. Sync beads
+bd sync
+
+# 6. Push
+git push
+
+# 7-8. Verify clean state
+git status
+
+# 9. Choose next work
+bd ready --json
+bd show bd-44 --json
+```
+
+**Then provide the user with:**
+- Summary of what was completed this session
+- What issues were filed for follow-up
+- Status of quality gates (all passing / issues filed)
+- Recommended prompt for next session
+
 ### Agent Session Workflow
 
 **IMPORTANT for AI agents:** When you finish making issue changes, always run:

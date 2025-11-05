@@ -141,6 +141,12 @@ var rootCmd = &cobra.Command{
 			noAutoImport = true
 		}
 
+		// Force direct mode for human-only interactive commands
+		// edit: can take minutes in $EDITOR, daemon connection times out (GH #227)
+		if cmd.Name() == "edit" {
+			noDaemon = true
+		}
+
 		// Set auto-flush based on flag (invert no-auto-flush)
 		autoFlushEnabled = !noAutoFlush
 

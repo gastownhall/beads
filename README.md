@@ -127,6 +127,8 @@ echo "BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions" >> AGE
 
 **For new repo clones:** Run `bd init` (or `bd init --quiet` for agents) to import existing issues from `.beads/issues.jsonl` automatically.
 
+**Using devcontainers?** Open the repository in a devcontainer (GitHub Codespaces or VS Code Remote Containers) and bd will be automatically installed with git hooks configured. See [.devcontainer/README.md](.devcontainer/README.md) for details.
+
 Most tasks will be created and managed by agents during conversations. You can check on things with:
 
 ```bash

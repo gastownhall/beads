@@ -306,11 +306,25 @@ Output to stdout by default, or use -o flag for file output.`,
 
 			// Set appropriate file permissions (0600: rw-------)
 			if err := os.Chmod(finalPath, 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 			}
-		}
 
-		// Output statistics if JSON format requested
+		// Verify JSONL file integrity after export
+			 actualCount, err := countIssuesInJSONL(finalPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Export verification failed: %v\n", err)
+			os.Exit(1)
+		}
+		if actualCount != len(exportedIDs) {
+			fmt.Fprintf(os.Stderr, "Error: Export verification failed\n")
+			fmt.Fprintf(os.Stderr, "  Expected: %d issues\n", len(exportedIDs))
+			fmt.Fprintf(os.Stderr, "  JSONL file: %d lines\n", actualCount)
+			fmt.Fprintf(os.Stderr, "  Mismatch indicates export failed to write all issues\n")
+			os.Exit(1)
+		}
+	}
+
+	// Output statistics if JSON format requested
 		if jsonOutput {
 			stats := map[string]interface{}{
 				"success":      true,
