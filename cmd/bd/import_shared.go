@@ -192,6 +192,22 @@ type ImportResult struct {
 // - Displaying results to the user
 // - Setting metadata (e.g., last_import_hash)
 func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
+	// Determine orphan handling: flag > config > default (allow)
+	orphanHandling := opts.OrphanHandling
+	if orphanHandling == "" && store != nil {
+		// Read from config if flag not specified
+		configValue, err := store.GetConfig(ctx, "import.missing_parents")
+		if err == nil && configValue != "" {
+			orphanHandling = configValue
+		} else {
+			// Default to allow (most permissive)
+			orphanHandling = "allow"
+		}
+	} else if orphanHandling == "" {
+		// No store available, default to allow
+		orphanHandling = "allow"
+	}
+	
 	// Convert ImportOptions to importer.Options
 	importerOpts := importer.Options{
 		DryRun:               opts.DryRun,
@@ -199,7 +215,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		Strict:               opts.Strict,
 		RenameOnImport:       opts.RenameOnImport,
 		SkipPrefixValidation: opts.SkipPrefixValidation,
-		OrphanHandling:       importer.OrphanHandling(opts.OrphanHandling),
+		OrphanHandling:       importer.OrphanHandling(orphanHandling),
 	}
 
 	// Delegate to the importer package
