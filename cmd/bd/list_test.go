@@ -221,3 +221,270 @@ func TestListCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestListQueryCapabilities(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-query-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	testDB := filepath.Join(tmpDir, "test.db")
+	st := newTestStore(t, testDB)
+	
+	ctx := context.Background()
+	now := time.Now()
+	yesterday := now.Add(-24 * time.Hour)
+	twoDaysAgo := now.Add(-48 * time.Hour)
+
+	// Create test issues with varied attributes
+	issue1 := &types.Issue{
+		Title:       "Authentication Bug",
+		Description: "Login fails with special characters",
+		Notes:       "Needs urgent fix",
+		Priority:    0,
+		IssueType:   types.TypeBug,
+		Status:      types.StatusOpen,
+		Assignee:    "alice",
+	}
+	issue2 := &types.Issue{
+		Title:       "Add OAuth Support",
+		Description: "", // Empty description
+		Priority:    2,
+		IssueType:   types.TypeFeature,
+		Status:      types.StatusInProgress,
+		// No assignee
+	}
+	issue3 := &types.Issue{
+		Title:       "Update Documentation",
+		Description: "Update README with new features",
+		Notes:       "Include OAuth setup",
+		Priority:    3,
+		IssueType:   types.TypeTask,
+		Status:      types.StatusOpen,
+		Assignee:    "bob",
+	}
+
+	for _, issue := range []*types.Issue{issue1, issue2, issue3} {
+		if err := st.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+	
+	// Close issue3 to set closed_at timestamp
+	if err := st.CloseIssue(ctx, issue3.ID, "test-user", "Testing"); err != nil {
+		t.Fatalf("Failed to close issue3: %v", err)
+	}
+
+	// Add labels
+	st.AddLabel(ctx, issue1.ID, "critical", "test-user")
+	st.AddLabel(ctx, issue1.ID, "security", "test-user")
+	st.AddLabel(ctx, issue3.ID, "docs", "test-user")
+
+	t.Run("pattern matching - title contains", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			TitleContains: "Auth",
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Expected 2 results with 'Auth' in title, got %d", len(results))
+		}
+	})
+
+	t.Run("pattern matching - description contains", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			DescriptionContains: "special characters",
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 result, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue1.ID {
+			t.Errorf("Expected issue1, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("pattern matching - notes contains", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			NotesContains: "OAuth",
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 result, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue3.ID {
+			t.Errorf("Expected issue3, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("empty description check", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			EmptyDescription: true,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with empty description, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("no assignee check", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			NoAssignee: true,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with no assignee, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("no labels check", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			NoLabels: true,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with no labels, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("priority range - min", func(t *testing.T) {
+		minPrio := 2
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMin: &minPrio,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Expected 2 issues with priority >= 2, got %d", len(results))
+		}
+	})
+
+	t.Run("priority range - max", func(t *testing.T) {
+		maxPrio := 1
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMax: &maxPrio,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with priority <= 1, got %d", len(results))
+		}
+	})
+
+	t.Run("priority range - min and max", func(t *testing.T) {
+		minPrio := 1
+		maxPrio := 2
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMin: &minPrio,
+			PriorityMax: &maxPrio,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with priority between 1-2, got %d", len(results))
+		}
+	})
+
+	t.Run("date range - created after", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			CreatedAfter: &twoDaysAgo,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		// All issues created recently
+		if len(results) != 3 {
+			t.Errorf("Expected 3 issues created after two days ago, got %d", len(results))
+		}
+	})
+
+	t.Run("date range - updated before", func(t *testing.T) {
+		futureTime := now.Add(24 * time.Hour)
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			UpdatedBefore: &futureTime,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		// All issues updated before tomorrow
+		if len(results) != 3 {
+			t.Errorf("Expected 3 issues, got %d", len(results))
+		}
+	})
+
+	t.Run("date range - closed after", func(t *testing.T) {
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			ClosedAfter: &yesterday,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 closed issue, got %d", len(results))
+		}
+	})
+
+	t.Run("combined filters", func(t *testing.T) {
+		minPrio := 0
+		maxPrio := 2
+		results, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			TitleContains: "Auth",
+			PriorityMin:   &minPrio,
+			PriorityMax:   &maxPrio,
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Expected 2 results matching combined filters, got %d", len(results))
+		}
+	})
+}
+
+func TestParseTimeFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"RFC3339", "2023-01-15T10:30:00Z", false},
+		{"Date only", "2023-01-15", false},
+		{"DateTime without zone", "2023-01-15T10:30:00", false},
+		{"DateTime with space", "2023-01-15 10:30:00", false},
+		{"Invalid format", "January 15, 2023", true},
+		{"Empty string", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseTimeFlag(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseTimeFlag(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}

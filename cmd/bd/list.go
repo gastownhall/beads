@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -33,6 +34,24 @@ func normalizeLabels(ss []string) []string {
 	return out
 }
 
+// parseTimeFlag parses time strings in multiple formats
+func parseTimeFlag(s string) (time.Time, error) {
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	}
+	
+	for _, format := range formats {
+		if t, err := time.Parse(format, s); err == nil {
+			return t, nil
+		}
+	}
+	
+	return time.Time{}, fmt.Errorf("unable to parse time %q (try formats: 2006-01-02, 2006-01-02T15:04:05, or RFC3339)", s)
+}
+
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List issues",
@@ -45,7 +64,30 @@ var listCmd = &cobra.Command{
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		titleSearch, _ := cmd.Flags().GetString("title")
-	idFilter, _ := cmd.Flags().GetString("id")
+		idFilter, _ := cmd.Flags().GetString("id")
+		
+		// Pattern matching flags
+		titleContains, _ := cmd.Flags().GetString("title-contains")
+		descContains, _ := cmd.Flags().GetString("desc-contains")
+		notesContains, _ := cmd.Flags().GetString("notes-contains")
+		
+		// Date range flags
+		createdAfter, _ := cmd.Flags().GetString("created-after")
+		createdBefore, _ := cmd.Flags().GetString("created-before")
+		updatedAfter, _ := cmd.Flags().GetString("updated-after")
+		updatedBefore, _ := cmd.Flags().GetString("updated-before")
+		closedAfter, _ := cmd.Flags().GetString("closed-after")
+		closedBefore, _ := cmd.Flags().GetString("closed-before")
+		
+		// Empty/null check flags
+		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
+		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
+		noLabels, _ := cmd.Flags().GetBool("no-labels")
+		
+		// Priority range flags
+		priorityMin, _ := cmd.Flags().GetInt("priority-min")
+		priorityMax, _ := cmd.Flags().GetInt("priority-max")
+		
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Normalize labels: trim, dedupe, remove empty
@@ -53,39 +95,119 @@ var listCmd = &cobra.Command{
 	labelsAny = normalizeLabels(labelsAny)
 
 		filter := types.IssueFilter{
-		Limit: limit,
+			Limit: limit,
 		}
 		if status != "" && status != "all" {
-		s := types.Status(status)
-		filter.Status = &s
+			s := types.Status(status)
+			filter.Status = &s
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
-		priority, _ := cmd.Flags().GetInt("priority")
-		filter.Priority = &priority
+			priority, _ := cmd.Flags().GetInt("priority")
+			filter.Priority = &priority
 		}
 		if assignee != "" {
-		filter.Assignee = &assignee
+			filter.Assignee = &assignee
 		}
 		if issueType != "" {
-		t := types.IssueType(issueType)
-		filter.IssueType = &t
+			t := types.IssueType(issueType)
+			filter.IssueType = &t
 		}
 		if len(labels) > 0 {
-		filter.Labels = labels
+			filter.Labels = labels
 		}
 		if len(labelsAny) > 0 {
-		filter.LabelsAny = labelsAny
+			filter.LabelsAny = labelsAny
 		}
 		if titleSearch != "" {
-		filter.TitleSearch = titleSearch
+			filter.TitleSearch = titleSearch
 		}
-	if idFilter != "" {
-	ids := normalizeLabels(strings.Split(idFilter, ","))
-	if len(ids) > 0 {
-	filter.IDs = ids
-	}
-	}
+		if idFilter != "" {
+			ids := normalizeLabels(strings.Split(idFilter, ","))
+			if len(ids) > 0 {
+				filter.IDs = ids
+			}
+		}
+		
+		// Pattern matching
+		if titleContains != "" {
+			filter.TitleContains = titleContains
+		}
+		if descContains != "" {
+			filter.DescriptionContains = descContains
+		}
+		if notesContains != "" {
+			filter.NotesContains = notesContains
+		}
+		
+		// Date ranges
+		if createdAfter != "" {
+			t, err := parseTimeFlag(createdAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedAfter = &t
+		}
+		if createdBefore != "" {
+			t, err := parseTimeFlag(createdBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedBefore = &t
+		}
+		if updatedAfter != "" {
+			t, err := parseTimeFlag(updatedAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedAfter = &t
+		}
+		if updatedBefore != "" {
+			t, err := parseTimeFlag(updatedBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedBefore = &t
+		}
+		if closedAfter != "" {
+			t, err := parseTimeFlag(closedAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --closed-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.ClosedAfter = &t
+		}
+		if closedBefore != "" {
+			t, err := parseTimeFlag(closedBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --closed-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.ClosedBefore = &t
+		}
+		
+		// Empty/null checks
+		if emptyDesc {
+			filter.EmptyDescription = true
+		}
+		if noAssignee {
+			filter.NoAssignee = true
+		}
+		if noLabels {
+			filter.NoLabels = true
+		}
+		
+		// Priority ranges
+		if cmd.Flags().Changed("priority-min") {
+			filter.PriorityMin = &priorityMin
+		}
+		if cmd.Flags().Changed("priority-max") {
+			filter.PriorityMax = &priorityMax
+		}
 
 	// If daemon is running, use RPC
 		if daemonClient != nil {
@@ -112,6 +234,40 @@ var listCmd = &cobra.Command{
 			 if len(filter.IDs) > 0 {
 			listArgs.IDs = filter.IDs
 			 }
+			
+			// Pattern matching
+			listArgs.TitleContains = titleContains
+			listArgs.DescriptionContains = descContains
+			listArgs.NotesContains = notesContains
+			
+			// Date ranges
+			if filter.CreatedAfter != nil {
+				listArgs.CreatedAfter = filter.CreatedAfter.Format(time.RFC3339)
+			}
+			if filter.CreatedBefore != nil {
+				listArgs.CreatedBefore = filter.CreatedBefore.Format(time.RFC3339)
+			}
+			if filter.UpdatedAfter != nil {
+				listArgs.UpdatedAfter = filter.UpdatedAfter.Format(time.RFC3339)
+			}
+			if filter.UpdatedBefore != nil {
+				listArgs.UpdatedBefore = filter.UpdatedBefore.Format(time.RFC3339)
+			}
+			if filter.ClosedAfter != nil {
+				listArgs.ClosedAfter = filter.ClosedAfter.Format(time.RFC3339)
+			}
+			if filter.ClosedBefore != nil {
+				listArgs.ClosedBefore = filter.ClosedBefore.Format(time.RFC3339)
+			}
+			
+			// Empty/null checks
+			listArgs.EmptyDescription = filter.EmptyDescription
+			listArgs.NoAssignee = filter.NoAssignee
+			listArgs.NoLabels = filter.NoLabels
+			
+			// Priority range
+			listArgs.PriorityMin = filter.PriorityMin
+			listArgs.PriorityMax = filter.PriorityMax
 
 			 resp, err := daemonClient.List(listArgs)
 			if err != nil {
@@ -240,6 +396,29 @@ func init() {
 	listCmd.Flags().IntP("limit", "n", 0, "Limit results")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues (default behavior; flag provided for CLI familiarity)")
+	
+	// Pattern matching
+	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
+	listCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
+	listCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
+	
+	// Date ranges
+	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+	
+	// Empty/null checks
+	listCmd.Flags().Bool("empty-description", false, "Filter issues with empty or missing description")
+	listCmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
+	listCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
+	
+	// Priority ranges
+	listCmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
+	listCmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
+	
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)
 }

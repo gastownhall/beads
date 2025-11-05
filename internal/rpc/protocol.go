@@ -99,6 +99,28 @@ type ListArgs struct {
 	LabelsAny []string `json:"labels_any,omitempty"` // OR semantics
 	IDs       []string `json:"ids,omitempty"`        // Filter by specific issue IDs
 	Limit     int      `json:"limit,omitempty"`
+	
+	// Pattern matching
+	TitleContains       string `json:"title_contains,omitempty"`
+	DescriptionContains string `json:"description_contains,omitempty"`
+	NotesContains       string `json:"notes_contains,omitempty"`
+	
+	// Date ranges (ISO 8601 format)
+	CreatedAfter  string `json:"created_after,omitempty"`
+	CreatedBefore string `json:"created_before,omitempty"`
+	UpdatedAfter  string `json:"updated_after,omitempty"`
+	UpdatedBefore string `json:"updated_before,omitempty"`
+	ClosedAfter   string `json:"closed_after,omitempty"`
+	ClosedBefore  string `json:"closed_before,omitempty"`
+	
+	// Empty/null checks
+	EmptyDescription bool `json:"empty_description,omitempty"`
+	NoAssignee       bool `json:"no_assignee,omitempty"`
+	NoLabels         bool `json:"no_labels,omitempty"`
+	
+	// Priority range
+	PriorityMin *int `json:"priority_min,omitempty"`
+	PriorityMax *int `json:"priority_max,omitempty"`
 }
 
 // ShowArgs represents arguments for the show operation

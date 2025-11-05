@@ -271,6 +271,28 @@ type IssueFilter struct {
 	TitleSearch string
 	IDs         []string  // Filter by specific issue IDs
 	Limit       int
+	
+	// Pattern matching
+	TitleContains       string
+	DescriptionContains string
+	NotesContains       string
+	
+	// Date ranges
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
+	ClosedAfter   *time.Time
+	ClosedBefore  *time.Time
+	
+	// Empty/null checks
+	EmptyDescription bool
+	NoAssignee       bool
+	NoLabels         bool
+	
+	// Numeric ranges
+	PriorityMin *int
+	PriorityMax *int
 }
 
 // SortPolicy determines how ready work is ordered

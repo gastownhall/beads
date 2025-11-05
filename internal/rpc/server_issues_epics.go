@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -26,6 +27,27 @@ func normalizeLabels(ss []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// parseTimeRPC parses time strings in multiple formats (RFC3339, YYYY-MM-DD, etc.)
+// Matches the parseTimeFlag behavior in cmd/bd/list.go for CLI parity
+func parseTimeRPC(s string) (time.Time, error) {
+	// Try RFC3339 first (ISO 8601 with timezone)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	
+	// Try YYYY-MM-DD format (common user input)
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	
+	// Try YYYY-MM-DD HH:MM:SS format
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t, nil
+	}
+	
+	return time.Time{}, fmt.Errorf("unsupported date format: %q (use YYYY-MM-DD or RFC3339)", s)
 }
 
 func strValue(p *string) string {
@@ -293,10 +315,13 @@ func (s *Server) handleList(req *Request) Response {
 	filter := types.IssueFilter{
 		Limit: listArgs.Limit,
 	}
-	if listArgs.Status != "" {
+	
+	// Normalize status: treat "" or "all" as unset (no filter)
+	if listArgs.Status != "" && listArgs.Status != "all" {
 		status := types.Status(listArgs.Status)
 		filter.Status = &status
 	}
+	
 	if listArgs.IssueType != "" {
 		issueType := types.IssueType(listArgs.IssueType)
 		filter.IssueType = &issueType
@@ -307,10 +332,11 @@ func (s *Server) handleList(req *Request) Response {
 	if listArgs.Priority != nil {
 		filter.Priority = listArgs.Priority
 	}
+	
 	// Normalize and apply label filters
 	labels := normalizeLabels(listArgs.Labels)
 	labelsAny := normalizeLabels(listArgs.LabelsAny)
-	// Support both old single Label and new Labels array
+	// Support both old single Label and new Labels array (backward compat)
 	if len(labels) > 0 {
 		filter.Labels = labels
 	} else if listArgs.Label != "" {
@@ -325,6 +351,82 @@ func (s *Server) handleList(req *Request) Response {
 			filter.IDs = ids
 		}
 	}
+	
+	// Pattern matching
+	filter.TitleContains = listArgs.TitleContains
+	filter.DescriptionContains = listArgs.DescriptionContains
+	filter.NotesContains = listArgs.NotesContains
+	
+	// Date ranges - use parseTimeRPC helper for flexible formats
+	if listArgs.CreatedAfter != "" {
+		t, err := parseTimeRPC(listArgs.CreatedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --created-after date: %v", err),
+			}
+		}
+		filter.CreatedAfter = &t
+	}
+	if listArgs.CreatedBefore != "" {
+		t, err := parseTimeRPC(listArgs.CreatedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --created-before date: %v", err),
+			}
+		}
+		filter.CreatedBefore = &t
+	}
+	if listArgs.UpdatedAfter != "" {
+		t, err := parseTimeRPC(listArgs.UpdatedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --updated-after date: %v", err),
+			}
+		}
+		filter.UpdatedAfter = &t
+	}
+	if listArgs.UpdatedBefore != "" {
+		t, err := parseTimeRPC(listArgs.UpdatedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --updated-before date: %v", err),
+			}
+		}
+		filter.UpdatedBefore = &t
+	}
+	if listArgs.ClosedAfter != "" {
+		t, err := parseTimeRPC(listArgs.ClosedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --closed-after date: %v", err),
+			}
+		}
+		filter.ClosedAfter = &t
+	}
+	if listArgs.ClosedBefore != "" {
+		t, err := parseTimeRPC(listArgs.ClosedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --closed-before date: %v", err),
+			}
+		}
+		filter.ClosedBefore = &t
+	}
+	
+	// Empty/null checks
+	filter.EmptyDescription = listArgs.EmptyDescription
+	filter.NoAssignee = listArgs.NoAssignee
+	filter.NoLabels = listArgs.NoLabels
+	
+	// Priority range
+	filter.PriorityMin = listArgs.PriorityMin
+	filter.PriorityMax = listArgs.PriorityMax
 
 	// Guard against excessive ID lists to avoid SQLite parameter limits
 	const maxIDs = 1000

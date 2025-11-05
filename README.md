@@ -387,6 +387,14 @@ bd list --assignee alice                   # Filter by assignee
 bd list --label=backend,urgent             # Filter by labels (AND)
 bd list --label-any=frontend,backend       # Filter by labels (OR)
 
+# Advanced filters
+bd list --title-contains "auth"            # Search title
+bd list --desc-contains "implement"        # Search description
+bd list --priority-min 0 --priority-max 1  # Priority range
+bd list --created-after 2025-01-01         # Date range
+bd list --empty-description                # Find issues with no description
+bd list --no-assignee                      # Find unassigned issues
+
 # JSON output for agents
 bd info --json
 bd list --json

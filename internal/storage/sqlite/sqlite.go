@@ -1092,6 +1092,20 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		args = append(args, pattern)
 	}
 
+	// Pattern matching
+	if filter.TitleContains != "" {
+		whereClauses = append(whereClauses, "title LIKE ?")
+		args = append(args, "%"+filter.TitleContains+"%")
+	}
+	if filter.DescriptionContains != "" {
+		whereClauses = append(whereClauses, "description LIKE ?")
+		args = append(args, "%"+filter.DescriptionContains+"%")
+	}
+	if filter.NotesContains != "" {
+		whereClauses = append(whereClauses, "notes LIKE ?")
+		args = append(args, "%"+filter.NotesContains+"%")
+	}
+
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
@@ -1102,6 +1116,16 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		args = append(args, *filter.Priority)
 	}
 
+	// Priority ranges
+	if filter.PriorityMin != nil {
+		whereClauses = append(whereClauses, "priority >= ?")
+		args = append(args, *filter.PriorityMin)
+	}
+	if filter.PriorityMax != nil {
+		whereClauses = append(whereClauses, "priority <= ?")
+		args = append(args, *filter.PriorityMax)
+	}
+
 	if filter.IssueType != nil {
 		whereClauses = append(whereClauses, "issue_type = ?")
 		args = append(args, *filter.IssueType)
@@ -1110,6 +1134,43 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	if filter.Assignee != nil {
 		whereClauses = append(whereClauses, "assignee = ?")
 		args = append(args, *filter.Assignee)
+	}
+
+	// Date ranges
+	if filter.CreatedAfter != nil {
+		whereClauses = append(whereClauses, "created_at > ?")
+		args = append(args, filter.CreatedAfter.Format(time.RFC3339))
+	}
+	if filter.CreatedBefore != nil {
+		whereClauses = append(whereClauses, "created_at < ?")
+		args = append(args, filter.CreatedBefore.Format(time.RFC3339))
+	}
+	if filter.UpdatedAfter != nil {
+		whereClauses = append(whereClauses, "updated_at > ?")
+		args = append(args, filter.UpdatedAfter.Format(time.RFC3339))
+	}
+	if filter.UpdatedBefore != nil {
+		whereClauses = append(whereClauses, "updated_at < ?")
+		args = append(args, filter.UpdatedBefore.Format(time.RFC3339))
+	}
+	if filter.ClosedAfter != nil {
+		whereClauses = append(whereClauses, "closed_at > ?")
+		args = append(args, filter.ClosedAfter.Format(time.RFC3339))
+	}
+	if filter.ClosedBefore != nil {
+		whereClauses = append(whereClauses, "closed_at < ?")
+		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
+	}
+
+	// Empty/null checks
+	if filter.EmptyDescription {
+		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")
+	}
+	if filter.NoAssignee {
+		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
+	}
+	if filter.NoLabels {
+		whereClauses = append(whereClauses, "id NOT IN (SELECT DISTINCT issue_id FROM labels)")
 	}
 
 	// Label filtering: issue must have ALL specified labels
