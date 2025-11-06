@@ -36,11 +36,13 @@ jobs:
         run: |
           curl -sL "https://github.com/steveyegge/beads/releases/download/${{ steps.release.outputs.tag }}/checksums.txt" -o checksums.txt
 
-      - name: Extract macOS checksums
+      - name: Extract checksums
         id: checksums
         run: |
           echo "darwin_amd64=$(grep 'darwin_amd64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "darwin_arm64=$(grep 'darwin_arm64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_amd64=$(grep 'linux_amd64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(grep 'linux_arm64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
 
       - name: Update Homebrew formula
         run: |
@@ -62,8 +64,13 @@ jobs:
             end
 
             on_linux do
-              url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_linux_amd64.tar.gz"
-              sha256 "$(grep 'linux_amd64.tar.gz' ../checksums.txt | awk '{print $1}')"
+              if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+                url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_linux_arm64.tar.gz"
+                sha256 "${{ steps.checksums.outputs.linux_arm64 }}"
+              else
+                url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_linux_amd64.tar.gz"
+                sha256 "${{ steps.checksums.outputs.linux_amd64 }}"
+              end
             end
 
             def install
