@@ -141,7 +141,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Skip database initialization for commands that don't need a database
-		noDbCommands := []string{"init", cmdDaemon, "help", "version", "quickstart", "doctor"}
+		noDbCommands := []string{"init", cmdDaemon, "help", "version", "quickstart", "doctor", "merge"}
 		if slices.Contains(noDbCommands, cmd.Name()) {
 			return
 		}

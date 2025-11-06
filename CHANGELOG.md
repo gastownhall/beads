@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Vendored beads-merge by @neongreen** (bd-bzfy): Native `bd merge` command for intelligent JSONL merging
+  - Vendored beads-merge algorithm into `internal/merge/` with full attribution and MIT license
+  - New `bd merge` command as native wrapper (no external binary needed)
+  - Same field-level 3-way merge algorithm, now built into bd
+  - Auto-configured during `bd init` (both interactive and `--quiet` modes)
+  - Thanks to @neongreen for permission to vendor: https://github.com/neongreen/mono/issues/240
+  - Original tool: https://github.com/neongreen/mono/tree/main/beads-merge
+
 - **Git Hook Version Detection** (bd-iou5, 991c624): `bd info` now detects outdated git hooks
   - Adds version markers to all git hook templates (pre-commit, post-merge, pre-push)
   - Warns when installed hooks are outdated or missing

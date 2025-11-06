@@ -9,106 +9,61 @@ import (
 )
 
 var (
-	mergeDebug bool
-	mergeInto  string
-	mergeDryRun bool
+	debugMerge bool
 )
 
 var mergeCmd = &cobra.Command{
-	Use:   "merge <source-ids...> --into <target-id> | merge <output> <base> <left> <right>",
-	Short: "Merge duplicate issues or perform 3-way JSONL merge",
-	Long: `Two modes of operation:
+	Use:   "merge <output> <base> <left> <right>",
+	Short: "3-way merge tool for beads JSONL issue files",
+	Long: `bd merge is a 3-way merge tool for beads issue tracker JSONL files.
 
-1. Duplicate issue merge (--into flag):
-   bd merge <source-id...> --into <target-id>
-   Consolidates duplicate issues into a single target issue.
+It intelligently merges issues based on identity (id + created_at + created_by),
+applies field-specific merge rules, combines dependencies, and outputs conflict
+markers for unresolvable conflicts.
 
-2. Git 3-way merge (4 positional args, no --into):
-   bd merge <output> <base> <left> <right>
-   Performs intelligent field-level JSONL merging for git merge driver.
+Designed to work as a git merge driver. Configure with:
 
-Git merge mode implements:
-- Dependencies merged with union + dedup
-- Timestamps use max(left, right)
-- Status/priority use 3-way comparison
-- Detects deleted-vs-modified conflicts
-
-Git merge driver setup:
   git config merge.beads.driver "bd merge %A %O %L %R"
+  git config merge.beads.name "bd JSONL merge driver"
+  echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+
+Or use 'bd init' which automatically configures the merge driver.
 
 Exit codes:
-  0 - Clean merge (no conflicts)
-  1 - Conflicts found (conflict markers written to output)
-  Other - Error occurred`,
-	Args: cobra.MinimumNArgs(1),
-	// Skip database initialization check for git merge mode
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// If this is git merge mode (4 args, no --into), skip normal DB init
-		if mergeInto == "" && len(args) == 4 {
-			return
+  0 - Merge successful (no conflicts)
+  1 - Merge completed with conflicts (conflict markers in output)
+  2 - Error (invalid arguments, file not found, etc.)
+
+Original tool by @neongreen: https://github.com/neongreen/mono/tree/main/beads-merge
+Vendored into bd with permission.`,
+	Args: cobra.ExactArgs(4),
+	// PreRun disables PersistentPreRun for this command (no database needed)
+	PreRun: func(cmd *cobra.Command, args []string) {},
+	Run: func(cmd *cobra.Command, args []string) {
+		outputPath := args[0]
+		basePath := args[1]
+		leftPath := args[2]
+		rightPath := args[3]
+
+		err := merge.Merge3Way(outputPath, basePath, leftPath, rightPath, debugMerge)
+		if err != nil {
+			// Check if error is due to conflicts
+			if err.Error() == fmt.Sprintf("merge completed with %d conflicts", 1) || 
+			   err.Error() == fmt.Sprintf("merge completed with %d conflicts", 2) ||
+			   err.Error()[:len("merge completed with")] == "merge completed with" {
+				// Conflicts present - exit with 1 (standard for merge drivers)
+				os.Exit(1)
+			}
+			// Other errors - exit with 2
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(2)
 		}
-		// Otherwise, run the normal PersistentPreRun
-		if rootCmd.PersistentPreRun != nil {
-			rootCmd.PersistentPreRun(cmd, args)
-		}
+		// Success - exit with 0
+		os.Exit(0)
 	},
-	RunE: runMerge,
 }
 
 func init() {
-	mergeCmd.Flags().BoolVar(&mergeDebug, "debug", false, "Enable debug output")
-	mergeCmd.Flags().StringVar(&mergeInto, "into", "", "Target issue ID for duplicate merge")
-	mergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "Preview merge without applying changes")
+	mergeCmd.Flags().BoolVar(&debugMerge, "debug", false, "Enable debug output to stderr")
 	rootCmd.AddCommand(mergeCmd)
-}
-
-func runMerge(cmd *cobra.Command, args []string) error {
-	// Determine mode based on arguments
-	if mergeInto != "" {
-		// Duplicate issue merge mode
-		return runDuplicateMerge(cmd, args)
-	} else if len(args) == 4 {
-		// Git 3-way merge mode
-		return runGitMerge(cmd, args)
-	} else {
-		return fmt.Errorf("invalid arguments: use either '<source-ids...> --into <target-id>' or '<output> <base> <left> <right>'")
-	}
-}
-
-func runGitMerge(_ *cobra.Command, args []string) error {
-	outputPath := args[0]
-	basePath := args[1]
-	leftPath := args[2]
-	rightPath := args[3]
-
-	if mergeDebug {
-		fmt.Fprintf(os.Stderr, "Merging:\n")
-		fmt.Fprintf(os.Stderr, "  Base:   %s\n", basePath)
-		fmt.Fprintf(os.Stderr, "  Left:   %s\n", leftPath)
-		fmt.Fprintf(os.Stderr, "  Right:  %s\n", rightPath)
-		fmt.Fprintf(os.Stderr, "  Output: %s\n", outputPath)
-	}
-
-	// Perform the merge
-	hasConflicts, err := merge.MergeFiles(outputPath, basePath, leftPath, rightPath, mergeDebug)
-	if err != nil {
-		return fmt.Errorf("merge failed: %w", err)
-	}
-
-	if hasConflicts {
-		if mergeDebug {
-			fmt.Fprintf(os.Stderr, "Merge completed with conflicts\n")
-		}
-		os.Exit(1)
-	}
-
-	if mergeDebug {
-		fmt.Fprintf(os.Stderr, "Merge completed successfully\n")
-	}
-	return nil
-}
-
-func runDuplicateMerge(cmd *cobra.Command, sourceIDs []string) error {
-	// This will be implemented later or moved from duplicates.go
-	return fmt.Errorf("duplicate issue merge not yet implemented - use 'bd duplicates --auto-merge' for now")
 }
