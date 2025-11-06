@@ -778,7 +778,7 @@ git commit
 
 ### Intelligent Merge Driver (Auto-Configured)
 
-**As of v0.21+, bd automatically configures its own merge driver during `bd init`.** This provides intelligent JSONL merging to prevent conflicts when multiple branches modify issues.
+**As of v0.21+, bd automatically configures its own merge driver during `bd init`.** This uses the beads-merge algorithm (by @neongreen, vendored into bd) to provide intelligent JSONL merging and prevent conflicts when multiple branches modify issues.
 
 **What it does:**
 - Performs field-level 3-way merging (not line-by-line)
@@ -802,9 +802,9 @@ git config merge.beads.name "bd JSONL merge driver"
 echo ".beads/beads.jsonl merge=beads" >> .gitattributes
 ```
 
-**Alternative: External beads-merge tool**
+**Alternative: Standalone beads-merge binary**
 
-For advanced users, **[beads-merge](https://github.com/neongreen/mono/tree/main/beads-merge)** by @neongreen is a standalone 3-way merge tool that can be used instead of `bd merge`:
+If you prefer to use the standalone beads-merge binary (same algorithm, different package):
 
 ```bash
 # Install (requires Go 1.21+)
@@ -812,7 +812,7 @@ git clone https://github.com/neongreen/mono.git
 cd mono/beads-merge
 go install
 
-# Configure Git merge driver (replaces bd merge)
+# Configure Git merge driver (same algorithm as bd merge)
 git config merge.beads.name "JSONL merge driver for beads"
 git config merge.beads.driver "beads-merge %A %O %A %B"
 ```
