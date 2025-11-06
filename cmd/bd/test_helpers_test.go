@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -65,4 +67,22 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.
 func openExistingTestDB(t *testing.T, dbPath string) (*sqlite.SQLiteStorage, error) {
 	t.Helper()
 	return sqlite.New(dbPath)
+}
+
+// runCommandInDir runs a command in the specified directory
+func runCommandInDir(dir string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	return cmd.Run()
+}
+
+// runCommandInDirWithOutput runs a command in the specified directory and returns its output
+func runCommandInDirWithOutput(dir string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }

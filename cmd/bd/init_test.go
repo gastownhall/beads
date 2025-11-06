@@ -477,3 +477,126 @@ func TestInitNoDbMode(t *testing.T) {
 		t.Error("SQLite database should not be created in --no-db mode")
 	}
 }
+
+func TestInitMergeDriverAutoConfiguration(t *testing.T) {
+	t.Run("merge driver auto-configured during init", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		tmpDir := t.TempDir()
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Failed to get working directory: %v", err)
+		}
+		defer os.Chdir(originalWd)
+
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to change to temp directory: %v", err)
+		}
+
+		// Initialize git repo first
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Run bd init with quiet mode
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		// Verify git config was set
+		output, err := runCommandInDirWithOutput(tmpDir, "git", "config", "merge.beads.driver")
+		if err != nil {
+			t.Fatalf("Failed to get git config: %v", err)
+		}
+		if !strings.Contains(output, "bd merge") {
+			t.Errorf("Expected merge driver to contain 'bd merge', got: %s", output)
+		}
+
+		// Verify .gitattributes was created
+		gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
+		content, err := os.ReadFile(gitattrsPath)
+		if err != nil {
+			t.Fatalf("Failed to read .gitattributes: %v", err)
+		}
+		if !strings.Contains(string(content), ".beads/beads.jsonl merge=beads") {
+			t.Error(".gitattributes should contain merge driver configuration")
+		}
+	})
+
+	t.Run("skip merge driver with flag", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		tmpDir := t.TempDir()
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Failed to get working directory: %v", err)
+		}
+		defer os.Chdir(originalWd)
+
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to change to temp directory: %v", err)
+		}
+
+		// Initialize git repo first
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Run bd init with --skip-merge-driver
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--skip-merge-driver", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		// Verify git config was NOT set
+		_, err = runCommandInDirWithOutput(tmpDir, "git", "config", "merge.beads.driver")
+		if err == nil {
+			t.Error("Expected git config to not be set with --skip-merge-driver")
+		}
+
+		// Verify .gitattributes was NOT created
+		gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
+		if _, err := os.Stat(gitattrsPath); err == nil {
+			t.Error(".gitattributes should not be created with --skip-merge-driver")
+		}
+	})
+
+	t.Run("non-git repo skips merge driver silently", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		tmpDir := t.TempDir()
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Failed to get working directory: %v", err)
+		}
+		defer os.Chdir(originalWd)
+
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to change to temp directory: %v", err)
+		}
+
+		// DON'T initialize git repo
+
+		// Run bd init - should succeed even without git
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init should succeed in non-git directory: %v", err)
+		}
+
+		// Verify .beads was still created
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+			t.Error(".beads directory should be created even without git")
+		}
+	})
+}
