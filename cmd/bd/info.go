@@ -196,6 +196,14 @@ Examples:
 			}
 		}
 
+		// Check git hooks status
+		hookStatuses, err := CheckGitHooks()
+		if err == nil {
+			if warning := FormatHookWarnings(hookStatuses); warning != "" {
+				fmt.Printf("\n%s\n", warning)
+			}
+		}
+
 		fmt.Println()
 	},
 }
