@@ -102,6 +102,12 @@ Beads is designed for **AI coding agents** to use on your behalf. Setup takes 30
 # In your project root:
 bd init
 
+# For OSS contributors (fork workflow):
+bd init --contributor
+
+# For team members (branch workflow):
+bd init --team
+
 # For protected branches (GitHub/GitLab):
 bd init --branch beads-metadata
 

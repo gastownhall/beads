@@ -1048,6 +1048,16 @@ Happy coding! 🔗
 bd init --prefix bd
 ```
 
+**OSS Contributor?** Use the contributor wizard for fork workflows:
+```bash
+bd init --contributor  # Interactive setup for separate planning repo
+```
+
+**Team Member?** Use the team wizard for branch workflows:
+```bash
+bd init --team  # Interactive setup for team collaboration
+```
+
 **Check for ready work:**
 ```bash
 bd ready --json

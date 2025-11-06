@@ -10,6 +10,30 @@ go build -o bd ./cmd/bd
 ./bd --help
 ```
 
+## Initialize
+
+First time in a repository:
+
+```bash
+# Basic setup
+bd init
+
+# OSS contributor (fork workflow with separate planning repo)
+bd init --contributor
+
+# Team member (branch workflow for collaboration)
+bd init --team
+
+# Protected main branch (GitHub/GitLab)
+bd init --branch beads-metadata
+```
+
+The wizard will:
+- Create `.beads/` directory and database
+- Import existing issues from git (if any)
+- Prompt to install git hooks (recommended)
+- Auto-start daemon for sync
+
 ## Your First Issues
 
 ```bash
