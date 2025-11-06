@@ -905,7 +905,7 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			{ID: "bd-1", Title: "Issue 1"},
 			{ID: "bd-2", Title: "Issue 2"},
 		}
-		err := validateNoDuplicateExternalRefs(issues)
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
 		if err != nil {
 			t.Errorf("Expected no error, got: %v", err)
 		}
@@ -918,7 +918,7 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			{ID: "bd-1", Title: "Issue 1", ExternalRef: &ref1},
 			{ID: "bd-2", Title: "Issue 2", ExternalRef: &ref2},
 		}
-		err := validateNoDuplicateExternalRefs(issues)
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
 		if err != nil {
 			t.Errorf("Expected no error, got: %v", err)
 		}
@@ -931,12 +931,36 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			{ID: "bd-1", Title: "Issue 1", ExternalRef: &ref1},
 			{ID: "bd-2", Title: "Issue 2", ExternalRef: &ref2},
 		}
-		err := validateNoDuplicateExternalRefs(issues)
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
 		if err == nil {
 			t.Error("Expected error for duplicate external_ref, got nil")
 		}
 		if err != nil && !strings.Contains(err.Error(), "duplicate external_ref values") {
 			t.Errorf("Expected error about duplicates, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate external_ref values with clear flag", func(t *testing.T) {
+		ref1 := "JIRA-1"
+		ref2 := "JIRA-1"
+		issues := []*types.Issue{
+			{ID: "bd-1", Title: "Issue 1", ExternalRef: &ref1},
+			{ID: "bd-2", Title: "Issue 2", ExternalRef: &ref2},
+		}
+		result := &Result{}
+		err := validateNoDuplicateExternalRefs(issues, true, result)
+		if err != nil {
+			t.Errorf("Expected no error with clear flag, got: %v", err)
+		}
+		// First issue should keep external_ref, second should be cleared
+		if issues[0].ExternalRef == nil || *issues[0].ExternalRef != "JIRA-1" {
+			t.Error("Expected first issue to keep external_ref JIRA-1")
+		}
+		if issues[1].ExternalRef != nil {
+			t.Error("Expected second issue to have cleared external_ref")
+		}
+		if result.Skipped != 1 {
+			t.Errorf("Expected 1 skipped (cleared), got %d", result.Skipped)
 		}
 	})
 
@@ -949,7 +973,7 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			{ID: "bd-3", Title: "Issue 3", ExternalRef: &jira2},
 			{ID: "bd-4", Title: "Issue 4", ExternalRef: &jira2},
 		}
-		err := validateNoDuplicateExternalRefs(issues)
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
 		if err == nil {
 			t.Error("Expected error for duplicate external_ref, got nil")
 		}
@@ -968,7 +992,7 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			{ID: "bd-2", Title: "Issue 2", ExternalRef: &empty},
 			{ID: "bd-3", Title: "Issue 3", ExternalRef: &ref1},
 		}
-		err := validateNoDuplicateExternalRefs(issues)
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
 		if err != nil {
 			t.Errorf("Expected no error for empty refs, got: %v", err)
 		}

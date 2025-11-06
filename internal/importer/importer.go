@@ -29,12 +29,13 @@ const (
 
 // Options contains import configuration
 type Options struct {
-	DryRun               bool           // Preview changes without applying them
-	SkipUpdate           bool           // Skip updating existing issues (create-only mode)
-	Strict               bool           // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport       bool           // Rename imported issues to match database prefix
-	SkipPrefixValidation bool           // Skip prefix validation (for auto-import)
-	OrphanHandling       OrphanHandling // How to handle missing parent issues (default: allow)
+	DryRun                     bool           // Preview changes without applying them
+	SkipUpdate                 bool           // Skip updating existing issues (create-only mode)
+	Strict                     bool           // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool           // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool           // Skip prefix validation (for auto-import)
+	OrphanHandling             OrphanHandling // How to handle missing parent issues (default: allow)
+	ClearDuplicateExternalRefs bool           // Clear duplicate external_ref values instead of erroring
 }
 
 // Result contains statistics about the import operation
@@ -109,7 +110,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	}
 
 	// Validate no duplicate external_ref values in batch
-	if err := validateNoDuplicateExternalRefs(issues); err != nil {
+	if err := validateNoDuplicateExternalRefs(issues, opts.ClearDuplicateExternalRefs, result); err != nil {
 		return result, err
 	}
 
@@ -741,7 +742,7 @@ func GetPrefixList(prefixes map[string]int) []string {
 	return result
 }
 
-func validateNoDuplicateExternalRefs(issues []*types.Issue) error {
+func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool, result *Result) error {
 	seen := make(map[string][]string)
 	
 	for _, issue := range issues {
@@ -752,15 +753,34 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue) error {
 	}
 
 	var duplicates []string
+	duplicateIssueIDs := make(map[string]bool)
 	for ref, issueIDs := range seen {
 		if len(issueIDs) > 1 {
 			duplicates = append(duplicates, fmt.Sprintf("external_ref '%s' appears in issues: %v", ref, issueIDs))
+			// Track all duplicate issue IDs except the first one (keep first, clear rest)
+			for i := 1; i < len(issueIDs); i++ {
+				duplicateIssueIDs[issueIDs[i]] = true
+			}
 		}
 	}
 
 	if len(duplicates) > 0 {
+		if clearDuplicates {
+			// Clear duplicate external_refs (keep first occurrence, clear rest)
+			for _, issue := range issues {
+				if duplicateIssueIDs[issue.ID] {
+					issue.ExternalRef = nil
+				}
+			}
+			// Track how many were cleared in result
+			if result != nil {
+				result.Skipped += len(duplicateIssueIDs)
+			}
+			return nil
+		}
+		
 		sort.Strings(duplicates)
-		return fmt.Errorf("batch import contains duplicate external_ref values:\n%s", strings.Join(duplicates, "\n"))
+		return fmt.Errorf("batch import contains duplicate external_ref values:\n%s\n\nUse --clear-duplicate-external-refs to automatically clear duplicates", strings.Join(duplicates, "\n"))
 	}
 
 	return nil

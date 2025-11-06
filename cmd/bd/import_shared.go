@@ -158,12 +158,13 @@ func issueDataChanged(existing *types.Issue, updates map[string]interface{}) boo
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	DryRun             bool   // Preview changes without applying them
-	SkipUpdate         bool   // Skip updating existing issues (create-only mode)
-	Strict             bool   // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport     bool   // Rename imported issues to match database prefix
-	SkipPrefixValidation bool // Skip prefix validation (for auto-import)
-	OrphanHandling     string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
+	DryRun                     bool   // Preview changes without applying them
+	SkipUpdate                 bool   // Skip updating existing issues (create-only mode)
+	Strict                     bool   // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool   // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool   // Skip prefix validation (for auto-import)
+	ClearDuplicateExternalRefs bool   // Clear duplicate external_ref values instead of erroring
+	OrphanHandling             string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
 }
 
 // ImportResult contains statistics about the import operation
@@ -210,12 +211,13 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 	
 	// Convert ImportOptions to importer.Options
 	importerOpts := importer.Options{
-		DryRun:               opts.DryRun,
-		SkipUpdate:           opts.SkipUpdate,
-		Strict:               opts.Strict,
-		RenameOnImport:       opts.RenameOnImport,
-		SkipPrefixValidation: opts.SkipPrefixValidation,
-		OrphanHandling:       importer.OrphanHandling(orphanHandling),
+		DryRun:                     opts.DryRun,
+		SkipUpdate:                 opts.SkipUpdate,
+		Strict:                     opts.Strict,
+		RenameOnImport:             opts.RenameOnImport,
+		SkipPrefixValidation:       opts.SkipPrefixValidation,
+		ClearDuplicateExternalRefs: opts.ClearDuplicateExternalRefs,
+		OrphanHandling:             importer.OrphanHandling(orphanHandling),
 	}
 
 	// Delegate to the importer package
