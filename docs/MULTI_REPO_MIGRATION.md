@@ -483,5 +483,5 @@ bd create "Issue" -p 1
 
 - [bd-8rd](/.beads/beads.jsonl#bd-8rd) - Migration and onboarding epic
 - [bd-mlcz](/.beads/beads.jsonl#bd-mlcz) - `bd migrate` command (planned)
-- [bd-kla1](/.beads/beads.jsonl#bd-kla1) - `bd init --contributor` wizard (planned)
-- [bd-twlr](/.beads/beads.jsonl#bd-twlr) - `bd init --team` wizard (planned)
+- [bd-kla1](/.beads/beads.jsonl#bd-kla1) - `bd init --contributor` wizard ✅ implemented
+- [bd-twlr](/.beads/beads.jsonl#bd-twlr) - `bd init --team` wizard ✅ implemented

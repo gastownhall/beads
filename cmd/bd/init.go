@@ -27,6 +27,8 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 		branch, _ := cmd.Flags().GetString("branch")
+		contributor, _ := cmd.Flags().GetBool("contributor")
+		team, _ := cmd.Flags().GetBool("team")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -272,6 +274,24 @@ bd.db
 		}
 	}
 
+	// Run contributor wizard if --contributor flag is set
+	if contributor {
+		if err := runContributorWizard(ctx, store); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running contributor wizard: %v\n", err)
+			_ = store.Close()
+			os.Exit(1)
+		}
+	}
+
+	// Run team wizard if --team flag is set
+	if team {
+		if err := runTeamWizard(ctx, store); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running team wizard: %v\n", err)
+			_ = store.Close()
+			os.Exit(1)
+		}
+	}
+
 	if err := store.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
 	}
@@ -331,6 +351,8 @@ func init() {
 	initCmd.Flags().StringP("prefix", "p", "", "Issue prefix (default: current directory name)")
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
+	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
+	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
 	rootCmd.AddCommand(initCmd)
 }
 

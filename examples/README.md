@@ -12,6 +12,8 @@ This directory contains examples of how to integrate bd with AI agents and workf
 <!-- REMOVED (bd-4c74): branch-merge example - collision resolution no longer needed with hash IDs -->
 - **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
 - **[claude-code-skill/](claude-code-skill/)** - Claude Code skill for effective beads usage patterns
+- **[contributor-workflow/](contributor-workflow/)** - OSS contributor setup with separate planning repo
+- **[protected-branch/](protected-branch/)** - Protected branch workflow for team collaboration
 
 ## Quick Start
 
