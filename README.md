@@ -102,6 +102,12 @@ Beads is designed for **AI coding agents** to use on your behalf. Setup takes 30
 # In your project root:
 bd init
 
+# For OSS contributors (fork workflow):
+bd init --contributor
+
+# For team members (branch workflow):
+bd init --team
+
 # For protected branches (GitHub/GitLab):
 bd init --branch beads-metadata
 
@@ -109,6 +115,7 @@ bd init --branch beads-metadata
 # - Create .beads/ directory with database
 # - Import existing issues from git (if any)
 # - Prompt to install git hooks (recommended: say yes)
+# - Prompt to configure git merge driver (recommended: say yes)
 # - Auto-start daemon for sync
 
 # Then tell your agent about bd:
@@ -123,9 +130,16 @@ echo "BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions" >> AGE
 3. Update CLAUDE.md with a note (if present)
 4. Remove the bootstrap instruction
 
-**For agents setting up repos:** Use `bd init --quiet` for non-interactive setup (auto-installs git hooks, no prompts).
+**For agents setting up repos:** Use `bd init --quiet` for non-interactive setup (auto-installs git hooks and merge driver, no prompts).
 
 **For new repo clones:** Run `bd init` (or `bd init --quiet` for agents) to import existing issues from `.beads/issues.jsonl` automatically.
+
+**Git merge driver:** During `bd init`, beads configures git to use `bd merge` for intelligent JSONL merging. This prevents conflicts when multiple branches modify issues. Skip with `--skip-merge-driver` if needed. To configure manually later:
+```bash
+git config merge.beads.driver "bd merge %A %O %L %R"
+git config merge.beads.name "bd JSONL merge driver"
+echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+```
 
 **Using devcontainers?** Open the repository in a devcontainer (GitHub Codespaces or VS Code Remote Containers) and bd will be automatically installed with git hooks configured. See [.devcontainer/README.md](.devcontainer/README.md) for details.
 

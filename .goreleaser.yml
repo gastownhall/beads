@@ -21,6 +21,11 @@ builds:
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
@@ -96,21 +101,21 @@ release:
     **Manual Install:**
     Download the appropriate binary for your platform below, extract it, and place it in your PATH.
 
-# Homebrew tap
-brews:
-  - name: bd
-    repository:
-      owner: steveyegge
-      name: homebrew-beads
-      branch: main
-    directory: Formula
-    homepage: https://github.com/steveyegge/beads
-    description: "AI-supervised issue tracker for coding workflows"
-    license: MIT
-    test: |
-      system "#{bin}/bd", "version"
-    install: |
-      bin.install "bd"
+# Homebrew tap - disabled, handled by separate workflow
+# brews:
+#   - name: bd
+#     repository:
+#       owner: steveyegge
+#       name: homebrew-beads
+#       branch: main
+#     directory: Formula
+#     homepage: https://github.com/steveyegge/beads
+#     description: "AI-supervised issue tracker for coding workflows"
+#     license: MIT
+#     test: |
+#       system "#{bin}/bd", "version"
+#     install: |
+#       bin.install "bd"
 
 # Announce the release
 announce:

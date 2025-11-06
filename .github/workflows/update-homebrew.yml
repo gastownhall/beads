@@ -1,0 +1,88 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout beads repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get release info
+        id: release
+        run: |
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download checksums
+        run: |
+          curl -sL "https://github.com/steveyegge/beads/releases/download/${{ steps.release.outputs.tag }}/checksums.txt" -o checksums.txt
+
+      - name: Extract macOS checksums
+        id: checksums
+        run: |
+          echo "darwin_amd64=$(grep 'darwin_amd64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "darwin_arm64=$(grep 'darwin_arm64.tar.gz' checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        run: |
+          cat > Formula/bd.rb <<'EOF'
+          class Bd < Formula
+            desc "AI-supervised issue tracker for coding workflows"
+            homepage "https://github.com/steveyegge/beads"
+            version "${{ steps.release.outputs.version }}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_arm64.tar.gz"
+                sha256 "${{ steps.checksums.outputs.darwin_arm64 }}"
+              else
+                url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_amd64.tar.gz"
+                sha256 "${{ steps.checksums.outputs.darwin_amd64 }}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_linux_amd64.tar.gz"
+              sha256 "$(grep 'linux_amd64.tar.gz' ../checksums.txt | awk '{print $1}')"
+            end
+
+            def install
+              bin.install "bd"
+            end
+
+            test do
+              system "#{bin}/bd", "version"
+            end
+          end
+          EOF
+
+      - name: Push to homebrew-beads
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping Homebrew update"
+            echo "To enable automatic Homebrew updates:"
+            echo "1. Create a Personal Access Token with 'repo' scope"
+            echo "2. Add it as HOMEBREW_TAP_TOKEN in repository secrets"
+            exit 0
+          fi
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/steveyegge/homebrew-beads.git" tap
+          cp Formula/bd.rb tap/Formula/bd.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/bd.rb
+          git commit -m "Update bd to ${{ steps.release.outputs.version }}"
+          git push

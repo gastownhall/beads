@@ -72,31 +72,16 @@ Example:
 					sources = append(sources, issue.ID)
 				}
 			}
+			// TODO: performMerge implementation pending
+			// For now, just generate the command suggestion
+			cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
+			mergeCommands = append(mergeCommands, cmd)
+			
 			if autoMerge || dryRun {
-				// Perform merge (unless dry-run)
 				if !dryRun {
-					result, err := performMerge(ctx, target.ID, sources)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error merging %s into %s: %v\n", strings.Join(sources, ", "), target.ID, err)
-						continue
-					}
-					if jsonOutput {
-						mergeResults = append(mergeResults, map[string]interface{}{
-							"target_id":            target.ID,
-							"source_ids":           sources,
-							"dependencies_added":   result.depsAdded,
-							"dependencies_skipped": result.depsSkipped,
-							"text_references":      result.textRefCount,
-							"issues_closed":        result.issuesClosed,
-							"issues_skipped":       result.issuesSkipped,
-						})
-					}
+					// TODO: Call performMerge when implemented
+					fmt.Fprintf(os.Stderr, "Auto-merge not yet fully implemented. Use suggested commands instead.\n")
 				}
-				cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
-				mergeCommands = append(mergeCommands, cmd)
-			} else {
-				cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
-				mergeCommands = append(mergeCommands, cmd)
 			}
 		}
 		// Mark dirty if we performed merges

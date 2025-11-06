@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2025-11-05
+
+### Added
+
+- **Intelligent Merge Driver** (bd-omx1, 52c5059): Auto-configured git merge driver for JSONL conflict resolution
+  - Vendors beads-merge algorithm for field-level 3-way merging
+  - Automatically configured during `bd init` (both interactive and `--quiet` modes)
+  - Matches issues by identity (id + created_at + created_by)
+  - Smart field merging: timestamps→max, dependencies→union, status/priority→3-way
+  - Eliminates most git merge conflicts in `.beads/beads.jsonl`
+
+- **Onboarding Wizards** (b230a22): New `bd init` workflows for different collaboration models
+  - `bd init --contributor`: OSS contributor wizard (separate planning repo)
+  - `bd init --team`: Team collaboration wizard (branch-based workflow)
+  - Interactive setup with fork detection and remote configuration
+  - Auto-configures sync settings for each workflow
+
+- **Migration Tools** (349817a): New `bd migrate-issues` command for cross-repo issue migration
+  - Migrate issues between repositories while preserving dependencies
+  - Source filtering (by label, priority, status, type)
+  - Automatic remote repo detection and push
+  - Complete multi-repo workflow documentation
+
+- **Multi-Phase Development Guide** (3ecc16e): Comprehensive workflow examples
+  - Multi-phase development (feature → integration → deployment)
+  - Multiple personas (designer, frontend dev, backend dev)
+  - Best practices for complex projects
+
+- **Dependency Status** (3acaf1d): Show blocker status in `bd show` output
+  - Displays "Blocked by N open issues" when dependencies exist
+  - Shows "Ready to work (no blockers)" when unblocked
+
+- **DevContainer Support** (247e659): Automatic bd setup in GitHub Codespaces
+  - Pre-configured Go environment with bd pre-installed
+  - Auto-detects existing `.beads/` and imports on startup
+
+- **Landing the Plane Protocol** (095e40d): Session-ending checklist for AI agents
+  - Quality gates, sync procedures, git cleanup
+  - Ensures clean handoff between sessions
+
+### Fixed
+
+- **SearchIssues N+1 Query** (bd-5ots, e90e485): Eliminated N+1 query bug in label loading
+  - Batch-loads labels for all issues in one query
+  - Significant performance improvement for `bd list` with many labeled issues
+
+- **Sync Validation** (bd-9bsx, 5438485): Prevent infinite dirty loop in auto-sync
+  - Added export verification to detect write failures
+  - Ensures JSONL line count matches database after export
+
+- **bd edit Direct Mode** (GH #227, d4c73c3): Force `bd edit` to always use direct mode
+  - Prevents daemon interference with interactive editor sessions
+  - Resolves hang issues when editing in terminals
+
+- **SQLite Driver on arm64 macOS** (f9771cd): Fixed missing SQLite driver in arm64 builds
+  - Explicitly imports CGO-enabled sqlite driver
+  - Resolves "database driver not found" errors on Apple Silicon
+
+- **external_ref Type Handling** (e1e58ef): Handle both string and *string in UpdateIssue RPC
+  - Fixes type mismatch errors in MCP server
+  - Ensures consistent API behavior
+
+- **Windows Test Stability** (2ac28b0, 8c5e51e): Skip flaky concurrent tests on Windows
+  - Prevents false failures in CI/CD
+  - Improves overall test suite reliability
+
+### Changed
+
+- **Test Suite Performance** (0fc4da7): Optimized test suite for 15-18x speedup
+  - Reduced redundant database operations
+  - Parallelized independent test cases
+  - Faster CI/CD builds
+
+- **Priority Format** (b8785d3): Added support for P-prefix priority format (P0-P4)
+  - Accepts both `--priority 1` and `--priority P1`
+  - More intuitive for GitHub/Jira users
+
+- **--label Alias** (85ca8c3): Added `--label` as alias for `--labels` in `bd create`
+  - Both singular and plural forms now work
+  - Improved CLI ergonomics
+
+- **--parent Flag in Daemon Mode** (fc89f15): Added `--parent` support in daemon RPC
+  - MCP server can now set parent relationships
+  - Parity with CLI functionality
+
+### Documentation
+
+- **Multi-Repo Migration Guide** (9e60ed1): Complete documentation for multi-repo workflows
+  - OSS contributors, teams, multi-phase development
+  - Addresses common questions about fork vs branch workflows
+
+- **beads-merge Setup Instructions** (527e491): Enhanced merge driver documentation
+  - Installation guide for standalone binary
+  - Jujutsu configuration examples
+
 ## [0.21.9] - 2025-11-05
 
 ### Added

@@ -93,6 +93,56 @@ func (s *SQLiteStorage) GetLabels(ctx context.Context, issueID string) ([]string
 	return labels, nil
 }
 
+// GetLabelsForIssues fetches labels for multiple issues in a single query
+// Returns a map of issue_id -> []labels
+func (s *SQLiteStorage) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]interface{}, len(issueIDs))
+	for i, id := range issueIDs {
+		placeholders[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT issue_id, label 
+		FROM labels 
+		WHERE issue_id IN (%s)
+		ORDER BY issue_id, label
+	`, buildPlaceholders(len(issueIDs)))
+
+	rows, err := s.db.QueryContext(ctx, query, placeholders...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch get labels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]string)
+	for rows.Next() {
+		var issueID, label string
+		if err := rows.Scan(&issueID, &label); err != nil {
+			return nil, err
+		}
+		result[issueID] = append(result[issueID], label)
+	}
+
+	return result, nil
+}
+
+// buildPlaceholders creates a comma-separated list of SQL placeholders
+func buildPlaceholders(count int) string {
+	if count == 0 {
+		return ""
+	}
+	result := "?"
+	for i := 1; i < count; i++ {
+		result += ",?"
+	}
+	return result
+}
+
 // GetIssuesByLabel returns issues with a specific label
 func (s *SQLiteStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
 	rows, err := s.db.QueryContext(ctx, `

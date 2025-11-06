@@ -1,8 +1,11 @@
 // Package merge implements 3-way merge for beads JSONL files.
 //
 // This code is vendored from https://github.com/neongreen/mono/tree/main/beads-merge
-// Original author: @neongreen (https://github.com/neongreen)
-// Used with permission - see ATTRIBUTION.md for full credits
+// Original author: Emily (@neongreen, https://github.com/neongreen)
+//
+// MIT License
+// Copyright (c) 2025 Emily
+// See ATTRIBUTION.md for full license text
 //
 // The merge algorithm provides field-level intelligent merging for beads issues:
 // - Matches issues by identity (id + created_at + created_by)
@@ -359,4 +362,69 @@ func makeConflictWithBase(base, left, right string) string {
 	}
 	conflict += ">>>>>>> right\n"
 	return conflict
+}
+
+// MergeFiles performs 3-way merge on JSONL files and writes result to output
+// Returns true if conflicts were found, false if merge was clean
+func MergeFiles(outputPath, basePath, leftPath, rightPath string, debug bool) (bool, error) {
+	// Read all input files
+	baseIssues, err := ReadIssues(basePath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read base file: %w", err)
+	}
+	
+	leftIssues, err := ReadIssues(leftPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read left file: %w", err)
+	}
+	
+	rightIssues, err := ReadIssues(rightPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read right file: %w", err)
+	}
+	
+	if debug {
+		fmt.Fprintf(os.Stderr, "Base issues: %d\n", len(baseIssues))
+		fmt.Fprintf(os.Stderr, "Left issues: %d\n", len(leftIssues))
+		fmt.Fprintf(os.Stderr, "Right issues: %d\n", len(rightIssues))
+	}
+	
+	// Perform 3-way merge
+	merged, conflicts := Merge3Way(baseIssues, leftIssues, rightIssues)
+	
+	if debug {
+		fmt.Fprintf(os.Stderr, "Merged issues: %d\n", len(merged))
+		fmt.Fprintf(os.Stderr, "Conflicts: %d\n", len(conflicts))
+	}
+	
+	// Write output file
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outFile.Close()
+	
+	// Write merged issues
+	for _, issue := range merged {
+		data, err := json.Marshal(issue)
+		if err != nil {
+			return false, fmt.Errorf("failed to marshal issue: %w", err)
+		}
+		if _, err := outFile.Write(data); err != nil {
+			return false, fmt.Errorf("failed to write issue: %w", err)
+		}
+		if _, err := outFile.WriteString("\n"); err != nil {
+			return false, fmt.Errorf("failed to write newline: %w", err)
+		}
+	}
+	
+	// Write conflict markers if any
+	for _, conflict := range conflicts {
+		if _, err := outFile.WriteString(conflict); err != nil {
+			return false, fmt.Errorf("failed to write conflict: %w", err)
+		}
+	}
+	
+	hasConflicts := len(conflicts) > 0
+	return hasConflicts, nil
 }

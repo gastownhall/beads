@@ -1,7 +1,11 @@
 // Package merge implements 3-way merge for beads JSONL files.
 //
 // This code is vendored from https://github.com/neongreen/mono/tree/main/beads-merge
-// Original author: @neongreen (https://github.com/neongreen)
+// Original author: Emily (@neongreen, https://github.com/neongreen)
+//
+// MIT License
+// Copyright (c) 2025 Emily
+// See ATTRIBUTION.md for full license text
 package merge
 
 import (

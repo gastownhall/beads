@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -27,6 +28,9 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 		branch, _ := cmd.Flags().GetString("branch")
+		contributor, _ := cmd.Flags().GetBool("contributor")
+		team, _ := cmd.Flags().GetBool("team")
+		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -272,6 +276,24 @@ bd.db
 		}
 	}
 
+	// Run contributor wizard if --contributor flag is set
+	if contributor {
+		if err := runContributorWizard(ctx, store); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running contributor wizard: %v\n", err)
+			_ = store.Close()
+			os.Exit(1)
+		}
+	}
+
+	// Run team wizard if --team flag is set
+	if team {
+		if err := runTeamWizard(ctx, store); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running team wizard: %v\n", err)
+			_ = store.Close()
+			os.Exit(1)
+		}
+	}
+
 	if err := store.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
 	}
@@ -282,6 +304,17 @@ if isGitRepo() && !hooksInstalled() {
 	if quiet {
 		// Auto-install hooks silently in quiet mode (best default for agents)
 		_ = installGitHooks() // Ignore errors in quiet mode
+	} else {
+		// Defer to interactive prompt below
+	}
+}
+
+// Check if we're in a git repo and merge driver isn't configured
+// Do this BEFORE quiet mode return so merge driver gets configured for agents
+if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
+	if quiet {
+		// Auto-install merge driver silently in quiet mode (best default for agents)
+		_ = installMergeDriver() // Ignore errors in quiet mode
 	} else {
 		// Defer to interactive prompt below
 	}
@@ -323,6 +356,27 @@ if quiet {
 		}
 	}
 	
+	// Interactive git merge driver prompt for humans
+	if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
+		fmt.Printf("%s Git merge driver not configured\n", yellow("⚠"))
+		fmt.Printf("  bd merge provides intelligent JSONL merging to prevent conflicts.\n")
+		fmt.Printf("  This will configure git to use 'bd merge' for .beads/beads.jsonl\n\n")
+		
+		// Prompt to install
+		fmt.Printf("Configure git merge driver now? [Y/n] ")
+		var response string
+		_, _ = fmt.Scanln(&response) // ignore EOF on empty input
+		response = strings.ToLower(strings.TrimSpace(response))
+		
+		if response == "" || response == "y" || response == "yes" {
+			if err := installMergeDriver(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error configuring merge driver: %v\n", err)
+			} else {
+				fmt.Printf("%s Git merge driver configured successfully!\n\n", green("✓"))
+			}
+		}
+	}
+	
 	fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
 	},
 }
@@ -331,6 +385,9 @@ func init() {
 	initCmd.Flags().StringP("prefix", "p", "", "Issue prefix (default: current directory name)")
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
+	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
+	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
+	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup (non-interactive)")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -478,6 +535,75 @@ exit 0
 	// #nosec G306 - git hooks must be executable
 	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0700); err != nil {
 		return fmt.Errorf("failed to write post-merge hook: %w", err)
+	}
+	
+	return nil
+}
+
+// mergeDriverInstalled checks if bd merge driver is configured
+func mergeDriverInstalled() bool {
+	// Check git config for merge driver
+	cmd := exec.Command("git", "config", "merge.beads.driver")
+	output, err := cmd.Output()
+	if err != nil || len(output) == 0 {
+		return false
+	}
+	
+	// Check if .gitattributes has the merge driver configured
+	gitattributesPath := ".gitattributes"
+	content, err := os.ReadFile(gitattributesPath)
+	if err != nil {
+		return false
+	}
+	
+	// Look for beads JSONL merge attribute
+	return strings.Contains(string(content), ".beads/beads.jsonl") && 
+	       strings.Contains(string(content), "merge=beads")
+}
+
+// installMergeDriver configures git to use bd merge for JSONL files
+func installMergeDriver() error {
+	// Configure git merge driver
+	cmd := exec.Command("git", "config", "merge.beads.driver", "bd merge %A %O %L %R")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to configure git merge driver: %w\n%s", err, output)
+	}
+	
+	cmd = exec.Command("git", "config", "merge.beads.name", "bd JSONL merge driver")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		// Non-fatal, the name is just descriptive
+		fmt.Fprintf(os.Stderr, "Warning: failed to set merge driver name: %v\n%s", err, output)
+	}
+	
+	// Create or update .gitattributes
+	gitattributesPath := ".gitattributes"
+	
+	// Read existing .gitattributes if it exists
+	var existingContent string
+	content, err := os.ReadFile(gitattributesPath)
+	if err == nil {
+		existingContent = string(content)
+	}
+	
+	// Check if beads merge driver is already configured
+	hasBeadsMerge := strings.Contains(existingContent, ".beads/beads.jsonl") &&
+	                 strings.Contains(existingContent, "merge=beads")
+	
+	if !hasBeadsMerge {
+		// Append beads merge driver configuration
+		beadsMergeAttr := "\n# Use bd merge for beads JSONL files\n.beads/beads.jsonl merge=beads\n"
+		
+		newContent := existingContent
+		if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+			newContent += "\n"
+		}
+		newContent += beadsMergeAttr
+		
+		// Write updated .gitattributes (0644 is standard for .gitattributes)
+		// #nosec G306 - .gitattributes needs to be readable
+		if err := os.WriteFile(gitattributesPath, []byte(newContent), 0644); err != nil {
+			return fmt.Errorf("failed to update .gitattributes: %w", err)
+		}
 	}
 	
 	return nil
