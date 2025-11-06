@@ -13,6 +13,9 @@ This directory contains examples of how to integrate bd with AI agents and workf
 - **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
 - **[claude-code-skill/](claude-code-skill/)** - Claude Code skill for effective beads usage patterns
 - **[contributor-workflow/](contributor-workflow/)** - OSS contributor setup with separate planning repo
+- **[team-workflow/](team-workflow/)** - Team collaboration with shared repositories
+- **[multi-phase-development/](multi-phase-development/)** - Organize large projects by phases (planning, MVP, iteration, polish)
+- **[multiple-personas/](multiple-personas/)** - Architect/implementer/reviewer role separation
 - **[protected-branch/](protected-branch/)** - Protected branch workflow for team collaboration
 
 ## Quick Start
