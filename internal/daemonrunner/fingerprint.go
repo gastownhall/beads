@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 func (d *Daemon) validateDatabaseFingerprint() error {

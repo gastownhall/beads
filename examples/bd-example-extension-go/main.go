@@ -10,7 +10,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 //go:embed schema.sql

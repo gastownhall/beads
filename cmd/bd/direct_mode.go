@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 

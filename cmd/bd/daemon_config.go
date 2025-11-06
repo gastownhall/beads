@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // getGlobalBeadsDir returns the global beads directory (~/.beads)

@@ -9,6 +9,7 @@
 # Test binaries
 *.test
 *.out
+/bd-test
 
 # Go workspace file
 go.work
