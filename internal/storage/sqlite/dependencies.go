@@ -650,6 +650,9 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 // Helper function to scan issues from rows
 func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*types.Issue, error) {
 	var issues []*types.Issue
+	var issueIDs []string
+	
+	// First pass: scan all issues
 	for rows.Next() {
 		var issue types.Issue
 		var contentHash sql.NullString
@@ -689,14 +692,21 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			issue.SourceRepo = sourceRepo.String
 		}
 
-		// Fetch labels for this issue
-		labels, err := s.GetLabels(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get labels for issue %s: %w", issue.ID, err)
-		}
-		issue.Labels = labels
-
 		issues = append(issues, &issue)
+		issueIDs = append(issueIDs, issue.ID)
+	}
+
+	// Second pass: batch-load labels for all issues
+	labelsMap, err := s.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch get labels: %w", err)
+	}
+
+	// Assign labels to issues
+	for _, issue := range issues {
+		if labels, ok := labelsMap[issue.ID]; ok {
+			issue.Labels = labels
+		}
 	}
 
 	return issues, nil
