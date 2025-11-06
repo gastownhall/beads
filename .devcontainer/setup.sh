@@ -9,7 +9,7 @@ sudo mv bd /usr/local/bin/bd
 sudo chmod +x /usr/local/bin/bd
 
 echo "✅ Verifying bd installation..."
-bd --version
+bd version
 
 echo "🎯 Initializing bd (non-interactive)..."
 if [ ! -d .beads ]; then
