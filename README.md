@@ -660,6 +660,7 @@ For advanced usage, see:
 - **[README.md](README.md)** - You are here! Core features and quick start
 - **[INSTALLING.md](INSTALLING.md)** - Complete installation guide for all platforms
 - **[QUICKSTART.md](QUICKSTART.md)** - Interactive tutorial (`bd quickstart`)
+- **[docs/MULTI_REPO_MIGRATION.md](docs/MULTI_REPO_MIGRATION.md)** - Multi-repo workflow guide (OSS, teams, multi-phase)
 - **[FAQ.md](FAQ.md)** - Frequently asked questions
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common issues and solutions
 - **[ADVANCED.md](ADVANCED.md)** - Advanced features and use cases
