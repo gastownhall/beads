@@ -61,6 +61,8 @@ See `integrations/beads-mcp/README.md` for complete documentation.
 
 **RECOMMENDED: Use a single MCP server for all beads projects** - it automatically routes to per-project local daemons.
 
+**For complete multi-repo workflow guide**, see [docs/MULTI_REPO_MIGRATION.md](docs/MULTI_REPO_MIGRATION.md) (OSS contributors, teams, multi-phase development).
+
 **Setup (one-time):**
 ```bash
 # MCP config in ~/.config/amp/settings.json or Claude Desktop config:
