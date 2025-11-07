@@ -19,6 +19,12 @@ func (s *Server) handleCompact(req *Request) Response {
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 	if !ok {
@@ -228,6 +234,12 @@ func (s *Server) handleCompactStats(req *Request) Response {
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 	if !ok {

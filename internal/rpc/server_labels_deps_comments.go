@@ -19,6 +19,12 @@ func (s *Server) handleDepAdd(req *Request) Response {
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	dep := &types.Dependency{
 		IssueID:     depArgs.FromID,
@@ -51,6 +57,12 @@ func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc 
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	ctx := s.reqCtx(req)
 	if err := opFunc(ctx, store, s.reqActor(req)); err != nil {
