@@ -9,27 +9,64 @@ before:
     - go mod tidy
 
 builds:
-  - id: bd
+  - id: bd-linux-amd64
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
-      - arm64
-    ignore:
-      - goos: linux
-        goarch: arm64
-      - goos: windows
-        goarch: arm64
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
       - -X main.Build={{.ShortCommit}}
+
+  - id: bd-darwin-amd64
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+
+  - id: bd-darwin-arm64
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+
+  - id: bd-windows-amd64
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+      - CXX=x86_64-w64-mingw32-g++
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+      - -buildmode=exe
 
 archives:
   - id: bd-archive
