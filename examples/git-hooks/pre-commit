@@ -4,7 +4,7 @@
 # bd (beads) pre-commit hook
 #
 # This hook ensures that any pending bd issue changes are flushed to
-# .beads/issues.jsonl before the commit is created, preventing the
+# .beads/beads.jsonl before the commit is created, preventing the
 # race condition where daemon auto-flush fires after the commit.
 #
 # Installation:
@@ -35,9 +35,17 @@ if ! bd sync --flush-only >/dev/null 2>&1; then
     exit 1
 fi
 
+# Find the JSONL file (could be issues.jsonl or beads.jsonl)
+JSONL_FILE=""
+if [ -f .beads/beads.jsonl ]; then
+    JSONL_FILE=".beads/beads.jsonl"
+elif [ -f .beads/issues.jsonl ]; then
+    JSONL_FILE=".beads/issues.jsonl"
+fi
+
 # If the JSONL file was modified, stage it
-if [ -f .beads/issues.jsonl ]; then
-    git add .beads/issues.jsonl 2>/dev/null || true
+if [ -n "$JSONL_FILE" ] && [ -f "$JSONL_FILE" ]; then
+    git add "$JSONL_FILE" 2>/dev/null || true
 fi
 
 exit 0

@@ -3,9 +3,11 @@
 #
 # bd (beads) pre-push hook
 #
-# This hook ensures that the database is exported to JSONL before pushing,
-# preventing the problem where database changes are committed without
-# corresponding JSONL updates.
+# This hook checks if the database has uncommitted changes and prevents
+# pushing stale JSONL by failing with a clear error message.
+#
+# The pre-commit hook should have already exported changes, but if new
+# changes were made between commit and push, this hook catches that.
 #
 # Installation:
 #   cp examples/git-hooks/pre-push .git/hooks/pre-push
@@ -16,7 +18,7 @@
 
 # Check if bd is available
 if ! command -v bd >/dev/null 2>&1; then
-    echo "Warning: bd command not found, skipping pre-push export check" >&2
+    # If bd is not available, we can't check - allow push
     exit 0
 fi
 
@@ -26,26 +28,28 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
-# Check if database is newer than JSONL
-DB_FILE=".beads/beads.db"
-JSONL_FILE=".beads/beads.jsonl"
+# Find the JSONL file (could be issues.jsonl or beads.jsonl)
+JSONL_FILE=""
+if [ -f .beads/beads.jsonl ]; then
+    JSONL_FILE=".beads/beads.jsonl"
+elif [ -f .beads/issues.jsonl ]; then
+    JSONL_FILE=".beads/issues.jsonl"
+fi
 
-if [ -f "$DB_FILE" ] && [ -f "$JSONL_FILE" ]; then
-    # Get modification times
-    if [ "$DB_FILE" -nt "$JSONL_FILE" ]; then
-        echo "⚠️  Database is newer than JSONL - exporting before push..." >&2
-        
-        # Force export to ensure JSONL is up to date
-        if ! BEADS_NO_DAEMON=1 bd export --output "$JSONL_FILE" >/dev/null 2>&1; then
-            echo "Error: Failed to export database to JSONL" >&2
-            echo "Run 'bd export' manually to diagnose" >&2
-            exit 1
-        fi
-        
-        # Stage the updated JSONL
-        git add "$JSONL_FILE" 2>/dev/null || true
-        
-        echo "✓ Exported database to JSONL" >&2
+# Check if JSONL file has uncommitted changes
+if [ -n "$JSONL_FILE" ] && [ -f "$JSONL_FILE" ]; then
+    # Check git status for the JSONL file
+    if ! git diff --quiet "$JSONL_FILE" 2>/dev/null || ! git diff --cached --quiet "$JSONL_FILE" 2>/dev/null; then
+        echo "❌ Error: $JSONL_FILE has uncommitted changes" >&2
+        echo "" >&2
+        echo "You made changes to bd issues between your last commit and this push." >&2
+        echo "Please commit the updated JSONL file before pushing:" >&2
+        echo "" >&2
+        echo "  git add $JSONL_FILE" >&2
+        echo "  git commit -m \"Update beads JSONL\"" >&2
+        echo "  git push" >&2
+        echo "" >&2
+        exit 1
     fi
 fi
 
