@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -25,8 +26,30 @@ Behavior:
   - New issues are created
   - Collisions (same ID, different content) are detected and reported
   - Use --dedupe-after to find and merge content duplicates after import
-  - Use --dry-run to preview changes without applying them`,
+  - Use --dry-run to preview changes without applying them
+
+NOTE: Import requires direct database access and does not work with daemon mode.
+      The command automatically uses --no-daemon when executed.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Import requires direct database access due to complex transaction handling
+		// and collision detection. Force direct mode regardless of daemon state.
+		if daemonClient != nil {
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: import command forcing direct mode (closes daemon connection)\n")
+			}
+			_ = daemonClient.Close()
+			daemonClient = nil
+			
+			// Now initialize direct store
+			var err error
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer func() { _ = store.Close() }()
+		}
+
 		input, _ := cmd.Flags().GetString("input")
 		skipUpdate, _ := cmd.Flags().GetBool("skip-existing")
 		strict, _ := cmd.Flags().GetBool("strict")

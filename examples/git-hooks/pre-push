@@ -3,9 +3,14 @@
 #
 # bd (beads) pre-push hook
 #
-# This hook ensures that the database is exported to JSONL before pushing,
-# preventing the problem where database changes are committed without
-# corresponding JSONL updates.
+# This hook prevents pushing stale JSONL by:
+# 1. Flushing any pending in-memory changes to JSONL (if bd available)
+# 2. Checking for uncommitted changes (staged, unstaged, untracked, deleted)
+# 3. Failing the push with clear instructions if changes found
+#
+# The pre-commit hook already exports changes, but this catches:
+# - Changes made between commit and push
+# - Pending debounced flushes (5s daemon delay)
 #
 # Installation:
 #   cp examples/git-hooks/pre-push .git/hooks/pre-push
@@ -14,38 +19,43 @@
 # Or use the install script:
 #   examples/git-hooks/install.sh
 
-# Check if bd is available
-if ! command -v bd >/dev/null 2>&1; then
-    echo "Warning: bd command not found, skipping pre-push export check" >&2
-    exit 0
-fi
-
 # Check if we're in a bd workspace
 if [ ! -d .beads ]; then
     # Not a bd workspace, nothing to do
     exit 0
 fi
 
-# Check if database is newer than JSONL
-DB_FILE=".beads/beads.db"
-JSONL_FILE=".beads/beads.jsonl"
+# Optionally flush pending bd changes so they surface in JSONL
+# This prevents the race where a debounced flush lands after the check
+if command -v bd >/dev/null 2>&1; then
+    bd sync --flush-only >/dev/null 2>&1 || true
+fi
 
-if [ -f "$DB_FILE" ] && [ -f "$JSONL_FILE" ]; then
-    # Get modification times
-    if [ "$DB_FILE" -nt "$JSONL_FILE" ]; then
-        echo "⚠️  Database is newer than JSONL - exporting before push..." >&2
-        
-        # Force export to ensure JSONL is up to date
-        if ! BEADS_NO_DAEMON=1 bd export --output "$JSONL_FILE" >/dev/null 2>&1; then
-            echo "Error: Failed to export database to JSONL" >&2
-            echo "Run 'bd export' manually to diagnose" >&2
-            exit 1
-        fi
-        
-        # Stage the updated JSONL
-        git add "$JSONL_FILE" 2>/dev/null || true
-        
-        echo "✓ Exported database to JSONL" >&2
+# Collect all tracked or existing JSONL files (supports both old and new names)
+FILES=""
+for f in .beads/beads.jsonl .beads/issues.jsonl; do
+    # Include file if it exists in working tree OR is tracked by git (even if deleted)
+    if git ls-files --error-unmatch "$f" >/dev/null 2>&1 || [ -f "$f" ]; then
+        FILES="$FILES $f"
+    fi
+done
+
+# Check for any uncommitted changes using porcelain status
+# This catches: staged, unstaged, untracked, deleted, renamed, and conflicts
+if [ -n "$FILES" ]; then
+    # shellcheck disable=SC2086
+    if [ -n "$(git status --porcelain -- $FILES 2>/dev/null)" ]; then
+        echo "❌ Error: Beads JSONL has uncommitted changes" >&2
+        echo "" >&2
+        echo "You made changes to bd issues between your last commit and this push." >&2
+        echo "Please commit the updated JSONL before pushing:" >&2
+        echo "" >&2
+        # shellcheck disable=SC2086
+        echo "  git add $FILES" >&2
+        echo '  git commit -m "Update bd JSONL"' >&2
+        echo "  git push" >&2
+        echo "" >&2
+        exit 1
     fi
 fi
 
