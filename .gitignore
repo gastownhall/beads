@@ -52,6 +52,8 @@ Thumbs.db
 # 3-way merge snapshot files (local-only, for deletion tracking)
 .beads/beads.base.jsonl
 .beads/beads.left.jsonl
+.beads/beads.base.meta.json
+.beads/beads.left.meta.json
 
 # Ignore nix result
 result
