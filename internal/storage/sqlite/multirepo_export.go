@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -163,9 +164,7 @@ func (s *SQLiteStorage) exportToRepo(ctx context.Context, repoPath string, issue
 	// Set file permissions
 	if err := os.Chmod(jsonlPath, 0644); err != nil { // nolint:gosec // G302: 0644 intentional for git-tracked files
 		// Non-fatal
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: failed to set permissions on %s: %v\n", jsonlPath, err)
-		}
+		debug.Logf("Debug: failed to set permissions on %s: %v\n", jsonlPath, err)
 	}
 
 	// Update mtime cache for this repo
@@ -175,8 +174,8 @@ func (s *SQLiteStorage) exportToRepo(ctx context.Context, repoPath string, issue
 			INSERT OR REPLACE INTO repo_mtimes (repo_path, jsonl_path, mtime_ns, last_checked)
 			VALUES (?, ?, ?, datetime('now'))
 		`, absRepoPath, jsonlPath, fileInfo.ModTime().UnixNano())
-		if err != nil && os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: failed to update mtime cache for %s: %v\n", absRepoPath, err)
+		if err != nil {
+			debug.Logf("Debug: failed to update mtime cache for %s: %v\n", absRepoPath, err)
 		}
 	}
 

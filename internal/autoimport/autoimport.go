@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -61,7 +62,7 @@ type ImportFunc func(ctx context.Context, issues []*types.Issue) (created, updat
 // dbPath is the full path to the database file (e.g., /path/to/.beads/bd.db)
 func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string, notify Notifier, importFunc ImportFunc, onChanged func(needsFullExport bool)) error {
 	if notify == nil {
-		notify = NewStderrNotifier(os.Getenv("BD_DEBUG") != "")
+		notify = NewStderrNotifier(debug.Enabled())
 	}
 
 	// Find JSONL using database directory (same logic as beads.FindJSONLPath)

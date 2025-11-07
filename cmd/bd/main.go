@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/memory"
@@ -229,9 +230,7 @@ var rootCmd = &cobra.Command{
 		// Try to connect to daemon first (unless --no-daemon flag is set)
 		if noDaemon {
 			daemonStatus.FallbackReason = FallbackFlagNoDaemon
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: --no-daemon flag set, using direct mode\n")
-			}
+			debug.Logf("--no-daemon flag set, using direct mode")
 		} else {
 			// Attempt daemon connection
 			client, err := rpc.TryConnect(socketPath)
@@ -247,10 +246,8 @@ var rootCmd = &cobra.Command{
 				if healthErr == nil && health.Status == statusHealthy {
 					// Check version compatibility
 					if !health.Compatible {
-						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: daemon version mismatch (daemon: %s, client: %s), restarting daemon\n",
-								health.Version, Version)
-						}
+						debug.Logf("daemon version mismatch (daemon: %s, client: %s), restarting daemon",
+							health.Version, Version)
 						_ = client.Close()
 
 						// Kill old daemon and restart with new version
@@ -269,9 +266,7 @@ var rootCmd = &cobra.Command{
 									daemonStatus.Connected = true
 									daemonStatus.Degraded = false
 									daemonStatus.Health = health.Status
-									if os.Getenv("BD_DEBUG") != "" {
-										fmt.Fprintf(os.Stderr, "Debug: connected to restarted daemon (version: %s)\n", health.Version)
-									}
+									debug.Logf("connected to restarted daemon (version: %s)", health.Version)
 									warnWorktreeDaemon(dbPath)
 									return
 								}
@@ -288,9 +283,7 @@ var rootCmd = &cobra.Command{
 						daemonStatus.Connected = true
 						daemonStatus.Degraded = false
 						daemonStatus.Health = health.Status
-						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: connected to daemon at %s (health: %s)\n", socketPath, health.Status)
-						}
+						debug.Logf("connected to daemon at %s (health: %s)", socketPath, health.Status)
 						// Warn if using daemon with git worktrees
 						warnWorktreeDaemon(dbPath)
 						return // Skip direct storage initialization
@@ -301,15 +294,11 @@ var rootCmd = &cobra.Command{
 					daemonStatus.FallbackReason = FallbackHealthFailed
 					if healthErr != nil {
 						daemonStatus.Detail = healthErr.Error()
-						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: daemon health check failed: %v\n", healthErr)
-						}
+						debug.Logf("daemon health check failed: %v", healthErr)
 					} else {
 						daemonStatus.Health = health.Status
 						daemonStatus.Detail = health.Error
-						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: daemon unhealthy (status=%s): %s\n", health.Status, health.Error)
-						}
+						debug.Logf("daemon unhealthy (status=%s): %s", health.Status, health.Error)
 					}
 				}
 			} else {
@@ -317,18 +306,14 @@ var rootCmd = &cobra.Command{
 				daemonStatus.FallbackReason = FallbackConnectFailed
 				if err != nil {
 					daemonStatus.Detail = err.Error()
-					if os.Getenv("BD_DEBUG") != "" {
-						fmt.Fprintf(os.Stderr, "Debug: daemon connect failed at %s: %v\n", socketPath, err)
-					}
+					debug.Logf("daemon connect failed at %s: %v", socketPath, err)
 				}
 			}
 
 			// Daemon not running or unhealthy - try auto-start if enabled
 			if daemonStatus.AutoStartEnabled {
 				daemonStatus.AutoStartAttempted = true
-				if os.Getenv("BD_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "Debug: attempting to auto-start daemon\n")
-				}
+				debug.Logf("attempting to auto-start daemon")
 				startTime := time.Now()
 				if tryAutoStartDaemon(socketPath) {
 					// Retry connection after auto-start
@@ -350,10 +335,8 @@ var rootCmd = &cobra.Command{
 							daemonStatus.AutoStartSucceeded = true
 							daemonStatus.Health = health.Status
 							daemonStatus.FallbackReason = FallbackNone
-							if os.Getenv("BD_DEBUG") != "" {
-								elapsed := time.Since(startTime).Milliseconds()
-								fmt.Fprintf(os.Stderr, "Debug: auto-start succeeded; connected at %s in %dms\n", socketPath, elapsed)
-							}
+							elapsed := time.Since(startTime).Milliseconds()
+							debug.Logf("auto-start succeeded; connected at %s in %dms", socketPath, elapsed)
 							// Warn if using daemon with git worktrees
 							warnWorktreeDaemon(dbPath)
 							return // Skip direct storage initialization
@@ -367,9 +350,7 @@ var rootCmd = &cobra.Command{
 								daemonStatus.Health = health.Status
 								daemonStatus.Detail = health.Error
 							}
-							if os.Getenv("BD_DEBUG") != "" {
-								fmt.Fprintf(os.Stderr, "Debug: auto-started daemon is unhealthy; falling back to direct mode\n")
-							}
+							debug.Logf("auto-started daemon is unhealthy; falling back to direct mode")
 						}
 					} else {
 						// Auto-start completed but connection still failed
@@ -386,24 +367,18 @@ var rootCmd = &cobra.Command{
 								daemonStatus.Detail = string(errMsg)
 							}
 						}
-						if os.Getenv("BD_DEBUG") != "" {
-							fmt.Fprintf(os.Stderr, "Debug: auto-start did not yield a running daemon; falling back to direct mode\n")
-						}
+						debug.Logf("auto-start did not yield a running daemon; falling back to direct mode")
 					}
 				} else {
 					// Auto-start itself failed
 					daemonStatus.FallbackReason = FallbackAutoStartFailed
-					if os.Getenv("BD_DEBUG") != "" {
-						fmt.Fprintf(os.Stderr, "Debug: auto-start failed; falling back to direct mode\n")
-					}
+					debug.Logf("auto-start failed; falling back to direct mode")
 				}
 			} else {
 				// Auto-start disabled - preserve the actual failure reason
 				// Don't override connect_failed or health_failed with auto_start_disabled
 				// This preserves important diagnostic info (daemon crashed vs not running)
-				if os.Getenv("BD_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "Debug: auto-start disabled by BEADS_AUTO_START_DAEMON\n")
-				}
+				debug.Logf("auto-start disabled by BEADS_AUTO_START_DAEMON")
 			}
 
 			// Emit BD_VERBOSE warning if falling back to direct mode
@@ -411,9 +386,7 @@ var rootCmd = &cobra.Command{
 				emitVerboseWarning()
 			}
 
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: using direct mode (reason: %s)\n", daemonStatus.FallbackReason)
-			}
+			debug.Logf("using direct mode (reason: %s)", daemonStatus.FallbackReason)
 		}
 
 		// Fall back to direct storage access
@@ -443,9 +416,7 @@ var rootCmd = &cobra.Command{
 			if cmd.Name() == "sync" {
 				if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
 					// Skip auto-import in dry-run mode
-					if os.Getenv("BD_DEBUG") != "" {
-						fmt.Fprintf(os.Stderr, "Debug: auto-import skipped for sync --dry-run\n")
-					}
+					debug.Logf("auto-import skipped for sync --dry-run")
 				} else {
 					autoImportIfNewer()
 				}

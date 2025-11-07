@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/autoimport"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/importer"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -231,7 +232,7 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	defer cancel()
 
 	// Perform actual import with timeout protection
-	notify := autoimport.NewStderrNotifier(os.Getenv("BD_DEBUG") != "")
+	notify := autoimport.NewStderrNotifier(debug.Enabled())
 
 	importFunc := func(ctx context.Context, issues []*types.Issue) (created, updated int, idMapping map[string]string, err error) {
 		// Use the importer package to perform the actual import

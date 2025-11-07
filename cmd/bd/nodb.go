@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -54,13 +55,9 @@ func initializeNoDbMode() error {
 			return fmt.Errorf("failed to load issues into memory: %w", err)
 		}
 
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: loaded %d issues from %s\n", len(issues), jsonlPath)
-		}
+		debug.Logf("loaded %d issues from %s", len(issues), jsonlPath)
 	} else {
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: no existing %s, starting with empty database\n", jsonlPath)
-		}
+		debug.Logf("no existing %s, starting with empty database", jsonlPath)
 	}
 
 	// Detect and set prefix
@@ -74,9 +71,7 @@ func initializeNoDbMode() error {
 		return fmt.Errorf("failed to set prefix: %w", err)
 	}
 
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: using prefix '%s'\n", prefix)
-	}
+	debug.Logf("using prefix '%s'", prefix)
 
 	// Set global store
 	store = memStore
@@ -203,9 +198,7 @@ func writeIssuesToJSONL(memStore *memory.MemoryStorage, beadsDir string) error {
 		return err
 	}
 
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: wrote %d issues to %s\n", len(issues), jsonlPath)
-	}
+	debug.Logf("wrote %d issues to %s", len(issues), jsonlPath)
 
 	return nil
 }

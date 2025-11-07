@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/debug"
 )
 
 var v *viper.Viper
@@ -103,14 +104,10 @@ func Initialize() error {
 		if err := v.ReadInConfig(); err != nil {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: loaded config from %s\n", v.ConfigFileUsed())
-		}
+		debug.Logf("Debug: loaded config from %s\n", v.ConfigFileUsed())
 	} else {
 		// No config.yaml found - use defaults and environment variables
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: no config.yaml found; using defaults and environment variables\n")
-		}
+		debug.Logf("Debug: no config.yaml found; using defaults and environment variables\n")
 	}
 
 	return nil

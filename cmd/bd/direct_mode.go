@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
@@ -43,8 +43,8 @@ func disableDaemonForFallback(reason string) {
 		daemonStatus.FallbackReason = FallbackDaemonUnsupported
 	}
 
-	if reason != "" && os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: %s\n", reason)
+	if reason != "" {
+		debug.Logf("Debug: %s\n", reason)
 	}
 }
 

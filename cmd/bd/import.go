@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -34,9 +35,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		// Import requires direct database access due to complex transaction handling
 		// and collision detection. Force direct mode regardless of daemon state.
 		if daemonClient != nil {
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: import command forcing direct mode (closes daemon connection)\n")
-			}
+			debug.Logf("Debug: import command forcing direct mode (closes daemon connection)\n")
 			_ = daemonClient.Close()
 			daemonClient = nil
 			

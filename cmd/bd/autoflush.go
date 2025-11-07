@@ -15,6 +15,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 	"golang.org/x/mod/semver"
 )
@@ -66,9 +67,7 @@ func autoImportIfNewer() {
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err != nil {
 		// JSONL doesn't exist or can't be accessed, skip import
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL not found: %v\n", err)
-		}
+		debug.Logf("auto-import skipped, JSONL not found: %v", err)
 		return
 	}
 
@@ -83,24 +82,18 @@ func autoImportIfNewer() {
 	if err != nil {
 		// Metadata error - treat as first import rather than skipping (bd-663)
 		// This allows auto-import to recover from corrupt/missing metadata
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: metadata read failed (%v), treating as first import\n", err)
-		}
+		debug.Logf("metadata read failed (%v), treating as first import", err)
 		lastHash = ""
 	}
 
 	// Compare hashes
 	if currentHash == lastHash {
 		// Content unchanged, skip import
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: auto-import skipped, JSONL unchanged (hash match)\n")
-		}
+		debug.Logf("auto-import skipped, JSONL unchanged (hash match)")
 		return
 	}
 
-	if os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: auto-import triggered (hash changed)\n")
-	}
+	debug.Logf("auto-import triggered (hash changed)")
 
 	// Check for Git merge conflict markers (bd-270)
 	// Only match if they appear as standalone lines (not embedded in JSON strings)
@@ -254,9 +247,7 @@ func checkVersionMismatch() {
 	dbVersion, err := store.GetMetadata(ctx, "bd_version")
 	if err != nil {
 		// Metadata error - skip check (shouldn't happen, but be defensive)
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: version check skipped, metadata error: %v\n", err)
-		}
+		debug.Logf("version check skipped, metadata error: %v", err)
 		return
 	}
 
@@ -500,8 +491,8 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 	}
 	
 	// Report skipped issues if any (helps debugging bd-159)
-	if skippedCount > 0 && os.Getenv("BD_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "Debug: auto-flush skipped %d issue(s) with timestamp-only changes\n", skippedCount)
+	if skippedCount > 0 {
+		debug.Logf("auto-flush skipped %d issue(s) with timestamp-only changes", skippedCount)
 	}
 
 	// Close temp file before renaming
@@ -520,9 +511,7 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 	// nolint:gosec // G302: JSONL needs to be readable by other tools
 	if err := os.Chmod(jsonlPath, 0644); err != nil {
 		// Non-fatal - file is already written
-		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: failed to set file permissions: %v\n", err)
-		}
+		debug.Logf("failed to set file permissions: %v", err)
 	}
 
 	return exportedIDs, nil

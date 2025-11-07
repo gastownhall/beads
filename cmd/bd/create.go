@@ -10,6 +10,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
@@ -127,8 +128,8 @@ var createCmd = &cobra.Command{
 		} else {
 			// Auto-routing based on user role
 			userRole, err := routing.DetectUserRole(".")
-			if err != nil && os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Warning: failed to detect user role: %v\n", err)
+			if err != nil {
+				debug.Logf("Warning: failed to detect user role: %v\n", err)
 			}
 			
 			routingConfig := &routing.RoutingConfig{
@@ -144,8 +145,8 @@ var createCmd = &cobra.Command{
 		
 		// TODO: Switch to target repo for multi-repo support (bd-4ms)
 		// For now, we just log the target repo in debug mode
-		if os.Getenv("BD_DEBUG") != "" && repoPath != "." {
-			fmt.Fprintf(os.Stderr, "DEBUG: Target repo: %s\n", repoPath)
+		if repoPath != "." {
+			debug.Logf("DEBUG: Target repo: %s\n", repoPath)
 		}
 
 		// Check for conflicting flags

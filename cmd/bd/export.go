@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -98,9 +99,7 @@ Output to stdout by default, or use -o flag for file output.`,
 		// Export command requires direct database access for consistent snapshot
 		// If daemon is connected, close it and open direct connection
 		if daemonClient != nil {
-			if os.Getenv("BD_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "Debug: export command forcing direct mode (closes daemon connection)\n")
-			}
+			debug.Logf("Debug: export command forcing direct mode (closes daemon connection)\n")
 			_ = daemonClient.Close()
 			daemonClient = nil
 		}
