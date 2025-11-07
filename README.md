@@ -675,6 +675,7 @@ For advanced usage, see:
 - **[INSTALLING.md](INSTALLING.md)** - Complete installation guide for all platforms
 - **[QUICKSTART.md](QUICKSTART.md)** - Interactive tutorial (`bd quickstart`)
 - **[docs/MULTI_REPO_MIGRATION.md](docs/MULTI_REPO_MIGRATION.md)** - Multi-repo workflow guide (OSS, teams, multi-phase)
+- **[docs/MULTI_REPO_AGENTS.md](docs/MULTI_REPO_AGENTS.md)** - Multi-repo patterns for AI agents
 - **[FAQ.md](FAQ.md)** - Frequently asked questions
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common issues and solutions
 - **[ADVANCED.md](ADVANCED.md)** - Advanced features and use cases

@@ -62,6 +62,8 @@ See `integrations/beads-mcp/README.md` for complete documentation.
 
 **RECOMMENDED: Use a single MCP server for all beads projects** - it automatically routes to per-project local daemons.
 
+**For AI agent multi-repo patterns**, see [docs/MULTI_REPO_AGENTS.md](docs/MULTI_REPO_AGENTS.md) (config options, routing, troubleshooting, best practices).
+
 **For complete multi-repo workflow guide**, see [docs/MULTI_REPO_MIGRATION.md](docs/MULTI_REPO_MIGRATION.md) (OSS contributors, teams, multi-phase development).
 
 **Setup (one-time):**
