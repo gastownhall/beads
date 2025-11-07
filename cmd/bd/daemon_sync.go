@@ -459,6 +459,9 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 			return
 		}
 
+		// Cache multi-repo paths to avoid redundant calls (bd-we4p)
+		multiRepoPaths := getMultiRepoJSONLPaths()
+
 		// Check for exclusive lock before processing database
 		beadsDir := filepath.Dir(jsonlPath)
 		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
@@ -502,7 +505,6 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		// Capture left snapshot (pre-pull state) for 3-way merge
 		// This is mandatory for deletion tracking integrity
 		// In multi-repo mode, capture snapshots for all JSONL files
-		multiRepoPaths := getMultiRepoJSONLPaths()
 		if multiRepoPaths != nil {
 			// Multi-repo mode: snapshot each JSONL file
 			for _, path := range multiRepoPaths {
@@ -572,16 +574,15 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 
 		// Perform 3-way merge and prune deletions
 		// In multi-repo mode, apply deletions for each JSONL file
-		multiRepoPathsForMerge := getMultiRepoJSONLPaths()
-		if multiRepoPathsForMerge != nil {
-			// Multi-repo mode: merge/prune for each JSONL
-			for _, path := range multiRepoPathsForMerge {
+		if multiRepoPaths != nil {
+		 // Multi-repo mode: merge/prune for each JSONL
+		for _, path := range multiRepoPaths {
 				if err := applyDeletionsFromMerge(syncCtx, store, path); err != nil {
 					log.log("Error during 3-way merge for %s: %v", path, err)
 					return
 				}
 			}
-			log.log("Applied deletions from %d repos", len(multiRepoPathsForMerge))
+			log.log("Applied deletions from %d repos", len(multiRepoPaths))
 		} else {
 			// Single-repo mode
 			if err := applyDeletionsFromMerge(syncCtx, store, jsonlPath); err != nil {
@@ -610,9 +611,8 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 
 		// Update base snapshot after successful import
 		// In multi-repo mode, update snapshots for all JSONL files
-		multiRepoPathsForSnapshot := getMultiRepoJSONLPaths()
-		if multiRepoPathsForSnapshot != nil {
-			for _, path := range multiRepoPathsForSnapshot {
+		if multiRepoPaths != nil {
+		 for _, path := range multiRepoPaths {
 				if err := updateBaseSnapshot(path); err != nil {
 					log.log("Warning: failed to update base snapshot for %s: %v", path, err)
 				}
