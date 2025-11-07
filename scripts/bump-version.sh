@@ -167,11 +167,13 @@ main() {
         "Alpha (v$CURRENT_VERSION)" \
         "Alpha (v$NEW_VERSION)"
 
-    # 7. Update PLUGIN.md version requirements
-    echo "  • PLUGIN.md"
-    update_file "PLUGIN.md" \
-        "Plugin $CURRENT_VERSION requires bd CLI $CURRENT_VERSION+" \
-        "Plugin $NEW_VERSION requires bd CLI $NEW_VERSION+"
+    # 7. Update PLUGIN.md version requirements (if exists)
+    if [ -f "PLUGIN.md" ]; then
+        echo "  • PLUGIN.md"
+        update_file "PLUGIN.md" \
+            "Plugin $CURRENT_VERSION requires bd CLI $CURRENT_VERSION+" \
+            "Plugin $NEW_VERSION requires bd CLI $NEW_VERSION+"
+    fi
 
     # 8. Update npm-package/package.json
     echo "  • npm-package/package.json"
