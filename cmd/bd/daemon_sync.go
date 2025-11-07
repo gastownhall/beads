@@ -500,8 +500,10 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		log.log("Exported to JSONL")
 
 		// Capture left snapshot (pre-pull state) for 3-way merge
+		// This is mandatory for deletion tracking integrity
 		if err := captureLeftSnapshot(jsonlPath); err != nil {
-			log.log("Warning: failed to capture snapshot for deletion tracking: %v", err)
+			log.log("Error: failed to capture snapshot (required for deletion tracking): %v", err)
+			return
 		}
 
 		if autoCommit {

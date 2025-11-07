@@ -150,8 +150,10 @@ Use --merge to merge the sync branch back to main branch.`,
 			}
 
 			// Capture left snapshot (pre-pull state) for 3-way merge
+			// This is mandatory for deletion tracking integrity
 			if err := captureLeftSnapshot(jsonlPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to capture snapshot for deletion tracking: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: failed to capture snapshot (required for deletion tracking): %v\n", err)
+				os.Exit(1)
 			}
 		}
 

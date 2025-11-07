@@ -8,10 +8,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/steveyegge/beads/internal/merge"
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+// jsonEquals compares two JSON strings semantically, handling field reordering
+func jsonEquals(a, b string) bool {
+	var objA, objB map[string]interface{}
+	if err := json.Unmarshal([]byte(a), &objA); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(b), &objB); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(objA, objB)
+}
 
 // getSnapshotPaths returns paths for base and left snapshot files
 func getSnapshotPaths(jsonlPath string) (basePath, leftPath string) {
@@ -23,16 +36,30 @@ func getSnapshotPaths(jsonlPath string) (basePath, leftPath string) {
 
 // captureLeftSnapshot copies the current JSONL to the left snapshot file
 // This should be called after export, before git pull
+// Uses atomic file operations to prevent race conditions
 func captureLeftSnapshot(jsonlPath string) error {
 	_, leftPath := getSnapshotPaths(jsonlPath)
-	return copyFileSnapshot(jsonlPath, leftPath)
+	// Use process-specific temp file to prevent concurrent write conflicts
+	tempPath := fmt.Sprintf("%s.%d.tmp", leftPath, os.Getpid())
+	if err := copyFileSnapshot(jsonlPath, tempPath); err != nil {
+		return err
+	}
+	// Atomic rename on POSIX systems
+	return os.Rename(tempPath, leftPath)
 }
 
 // updateBaseSnapshot copies the current JSONL to the base snapshot file
 // This should be called after successful import to track the new baseline
+// Uses atomic file operations to prevent race conditions
 func updateBaseSnapshot(jsonlPath string) error {
 	basePath, _ := getSnapshotPaths(jsonlPath)
-	return copyFileSnapshot(jsonlPath, basePath)
+	// Use process-specific temp file to prevent concurrent write conflicts
+	tempPath := fmt.Sprintf("%s.%d.tmp", basePath, os.Getpid())
+	if err := copyFileSnapshot(jsonlPath, tempPath); err != nil {
+		return err
+	}
+	// Atomic rename on POSIX systems
+	return os.Rename(tempPath, basePath)
 }
 
 // merge3WayAndPruneDeletions performs 3-way merge and prunes accepted deletions from DB
@@ -47,6 +74,13 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 
 	// Run 3-way merge: base (last import) vs left (pre-pull export) vs right (pulled JSONL)
 	tmpMerged := jsonlPath + ".merged"
+	// Ensure temp file cleanup on failure
+	defer func() {
+		if fileExists(tmpMerged) {
+			os.Remove(tmpMerged)
+		}
+	}()
+
 	err := merge.Merge3Way(tmpMerged, basePath, leftPath, jsonlPath, false)
 	if err != nil {
 		// Merge error (including conflicts) is returned as error
@@ -70,15 +104,21 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 		DeleteIssue(context.Context, string) error
 	}
 
+	d, ok := store.(deleter)
+	if !ok {
+		return false, fmt.Errorf("storage backend does not support DeleteIssue")
+	}
+
+	// Collect all deletion errors - fail the operation if any delete fails
+	var deletionErrors []error
 	for _, id := range acceptedDeletions {
-		if d, ok := store.(deleter); ok {
-			if err := d.DeleteIssue(ctx, id); err != nil {
-				// Log warning but continue - issue might already be deleted
-				fmt.Fprintf(os.Stderr, "Warning: failed to delete issue %s during merge: %v\n", id, err)
-			}
-		} else {
-			return false, fmt.Errorf("storage backend does not support DeleteIssue")
+		if err := d.DeleteIssue(ctx, id); err != nil {
+			deletionErrors = append(deletionErrors, fmt.Errorf("issue %s: %w", id, err))
 		}
+	}
+
+	if len(deletionErrors) > 0 {
+		return false, fmt.Errorf("deletion failures (DB may be inconsistent): %v", deletionErrors)
 	}
 
 	if len(acceptedDeletions) > 0 {
@@ -121,8 +161,8 @@ func computeAcceptedDeletions(basePath, leftPath, mergedPath string) ([]string, 
 	for id, baseLine := range baseIndex {
 		// Issue in base but not in merged
 		if !mergedIDs[id] {
-			// Check if unchanged locally (leftLine == baseLine)
-			if leftLine, existsInLeft := leftIndex[id]; existsInLeft && leftLine == baseLine {
+			// Check if unchanged locally using semantic JSON comparison
+			if leftLine, existsInLeft := leftIndex[id]; existsInLeft && jsonEquals(leftLine, baseLine) {
 				deletions = append(deletions, id)
 			}
 		}
