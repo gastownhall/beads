@@ -406,6 +406,29 @@ func (m *MemoryStorage) CloseIssue(ctx context.Context, id string, reason string
 	}, actor)
 }
 
+// DeleteIssue permanently deletes an issue and all associated data
+func (m *MemoryStorage) DeleteIssue(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if issue exists
+	if _, ok := m.issues[id]; !ok {
+		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	// Delete the issue
+	delete(m.issues, id)
+
+	// Delete associated data
+	delete(m.dependencies, id)
+	delete(m.labels, id)
+	delete(m.events, id)
+	delete(m.comments, id)
+	delete(m.dirty, id)
+
+	return nil
+}
+
 // SearchIssues finds issues matching query and filters
 func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	m.mu.RLock()

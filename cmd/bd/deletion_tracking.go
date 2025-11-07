@@ -99,20 +99,10 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 	}
 
 	// Prune accepted deletions from the database
-	// Use type assertion to access DeleteIssue method (available in concrete SQLiteStorage)
-	type deleter interface {
-		DeleteIssue(context.Context, string) error
-	}
-
-	d, ok := store.(deleter)
-	if !ok {
-		return false, fmt.Errorf("storage backend does not support DeleteIssue")
-	}
-
 	// Collect all deletion errors - fail the operation if any delete fails
 	var deletionErrors []error
 	for _, id := range acceptedDeletions {
-		if err := d.DeleteIssue(ctx, id); err != nil {
+		if err := store.DeleteIssue(ctx, id); err != nil {
 			deletionErrors = append(deletionErrors, fmt.Errorf("issue %s: %w", id, err))
 		}
 	}
