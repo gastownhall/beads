@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2025-11-06
+
 ### Added
 
 - **Vendored beads-merge by @neongreen** (bd-bzfy): Native `bd merge` command for intelligent JSONL merging
@@ -22,6 +24,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Warns when installed hooks are outdated or missing
   - Suggests running `examples/git-hooks/install.sh` to update
   - Prevents issues like the `--resolve-collisions` flag error after updates
+
+- **Public API for External Extensions** (8f676a4): Extensibility improvements for third-party tools
+- **Multi-Repo Patterns Documentation** (e73f89e): Comprehensive guide for AI agents working across multiple repositories
+- **Snapshot Versioning** (a891ebe): Add versioning and timestamp validation for snapshots
+- `--clear-duplicate-external-refs` flag for `bd import` command (9de98cf)
+
+### Fixed
+
+- **Multi-Workspace Deletion Tracking** (708a81c, e5a6c05, 4718583): Proper deletion tracking across multiple workspaces
+  - Fixes issue where deletions in one workspace weren't propagated to others
+  - Added `DeleteIssue` to Storage interface for backend extensibility (e291ee0)
+- **Import/Export Deadlock** (a0d24f3): Prevent import/export from hanging when daemon is running
+- **Pre-Push Hook** (3ba245e): Fix pre-push hook blocking instead of exporting
+- **Hash ID Recognition** (c924731, 055f1d9): Fix `isHashID` to recognize Base36 hash IDs and IDs without a-f letters
+- **Git Merge Artifacts** (41b1a21): Ignore merge artifacts in `.beads/.gitignore`
+- **bd status Command** (1edf3c6): Now uses git history for recent activity detection
+- **Performance**: Add raw string equality short-circuit before jsonEquals (5c1f441)
+
+### Changed
+
+- **Code Organization**:
+  - Extract SQLite migrations into separate files (b655b29)
+  - Centralize BD_DEBUG logging into `internal/debug` package (95cbcf4)
+  - Extract `normalizeLabels` to `internal/util/strings.go` (9520e7a)
+  - Reorganize project structure: move Go files to `internal/beads`, docs to `docs/` (584c266)
+  - Remove unused `internal/daemonrunner/` package (~1,500 LOC) (a7ec8a2)
+
+- **Testing**:
+  - Optimize test suite with `testing.Short()` guards for faster local testing (11fa142, 0f4b03e)
+  - Add comprehensive tests for merge driver auto-config (6424ebd)
+  - Add comprehensive tests for 3-way merge functionality (14b2d34)
+  - Add edge case tests for `getMultiRepoJSONLPaths()` (78c9d74)
+
+- **CI/CD**:
+  - Separate Homebrew update workflow with PAT support (739786e)
+  - Add manual trigger to Homebrew workflow for testing (563c12b)
+  - Fix Linux checksums extraction in Homebrew workflow (c47f40b)
+  - Add script to automate Nix vendorHash updates (#235)
+
+### Performance
+
+- Cache `getMultiRepoJSONLPaths()` to avoid redundant calls (7afb143)
 
 ## [0.22.0] - 2025-11-05
 
