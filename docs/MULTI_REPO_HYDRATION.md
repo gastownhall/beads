@@ -47,7 +47,7 @@ repos:
 
 **Modified Files:**
 - `internal/storage/sqlite/schema.go` - Added `repo_mtimes` table
-- `internal/storage/sqlite/migrations.go` - Added migration for `repo_mtimes`
+- `internal/storage/sqlite/migrations/013_repo_mtimes_table.go` - Migration for `repo_mtimes` table
 - `internal/storage/sqlite/sqlite.go` - Integrated hydration into storage initialization
 - `internal/storage/sqlite/ready.go` - Added `source_repo` to all SELECT queries
 - `internal/storage/sqlite/labels.go` - Added `source_repo` to SELECT query
@@ -239,8 +239,8 @@ repos:
 The `repo_mtimes` table is created via standard migration system:
 
 ```go
-// internal/storage/sqlite/migrations.go
-func migrateRepoMtimesTable(db *sql.DB) error {
+// internal/storage/sqlite/migrations/013_repo_mtimes_table.go
+func MigrateRepoMtimesTable(db *sql.DB) error {
     // Check if table exists
     var tableName string
     err := db.QueryRow(`

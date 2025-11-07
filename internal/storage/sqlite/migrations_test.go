@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/sqlite/migrations"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -19,7 +20,7 @@ func TestMigrateDirtyIssuesTable(t *testing.T) {
 		_, _ = db.Exec("DROP TABLE IF EXISTS dirty_issues")
 
 		// Run migration
-		if err := migrateDirtyIssuesTable(db); err != nil {
+		if err := migrations.MigrateDirtyIssuesTable(db); err != nil {
 			t.Fatalf("failed to migrate dirty_issues table: %v", err)
 		}
 
@@ -52,7 +53,7 @@ func TestMigrateDirtyIssuesTable(t *testing.T) {
 		}
 
 		// Run migration
-		if err := migrateDirtyIssuesTable(db); err != nil {
+		if err := migrations.MigrateDirtyIssuesTable(db); err != nil {
 			t.Fatalf("failed to migrate dirty_issues table: %v", err)
 		}
 
@@ -77,7 +78,7 @@ func TestMigrateExternalRefColumn(t *testing.T) {
 	db := store.db
 
 	// Run migration
-	if err := migrateExternalRefColumn(db); err != nil {
+	if err := migrations.MigrateExternalRefColumn(db); err != nil {
 		t.Fatalf("failed to migrate external_ref column: %v", err)
 	}
 
@@ -117,7 +118,7 @@ func TestMigrateCompositeIndexes(t *testing.T) {
 	_, _ = db.Exec("DROP INDEX IF EXISTS idx_dependencies_depends_on_type")
 
 	// Run migration
-	if err := migrateCompositeIndexes(db); err != nil {
+	if err := migrations.MigrateCompositeIndexes(db); err != nil {
 		t.Fatalf("failed to migrate composite indexes: %v", err)
 	}
 
@@ -147,7 +148,7 @@ func TestMigrateClosedAtConstraint(t *testing.T) {
 	}
 
 	// Run migration (should succeed with no inconsistent data)
-	if err := migrateClosedAtConstraint(s.db); err != nil {
+	if err := migrations.MigrateClosedAtConstraint(s.db); err != nil {
 		t.Fatalf("failed to migrate closed_at constraint: %v", err)
 	}
 
@@ -172,7 +173,7 @@ func TestMigrateCompactionColumns(t *testing.T) {
 
 	// Run migration (will fail since columns don't exist, but that's okay for this test)
 	// The migration should handle this gracefully
-	_ = migrateCompactionColumns(s.db)
+	_ = migrations.MigrateCompactionColumns(s.db)
 
 	// Verify at least one column exists by querying
 	var exists bool
@@ -198,7 +199,7 @@ func TestMigrateSnapshotsTable(t *testing.T) {
 	_, _ = db.Exec("DROP TABLE IF EXISTS issue_snapshots")
 
 	// Run migration
-	if err := migrateSnapshotsTable(db); err != nil {
+	if err := migrations.MigrateSnapshotsTable(db); err != nil {
 		t.Fatalf("failed to migrate snapshots table: %v", err)
 	}
 
@@ -226,7 +227,7 @@ func TestMigrateCompactionConfig(t *testing.T) {
 	_, _ = db.Exec("DELETE FROM config WHERE key LIKE 'compact%'")
 
 	// Run migration
-	if err := migrateCompactionConfig(db); err != nil {
+	if err := migrations.MigrateCompactionConfig(db); err != nil {
 		t.Fatalf("failed to migrate compaction config: %v", err)
 	}
 
@@ -247,7 +248,7 @@ func TestMigrateCompactedAtCommitColumn(t *testing.T) {
 	db := store.db
 
 	// Run migration
-	if err := migrateCompactedAtCommitColumn(db); err != nil {
+	if err := migrations.MigrateCompactedAtCommitColumn(db); err != nil {
 		t.Fatalf("failed to migrate compacted_at_commit column: %v", err)
 	}
 
@@ -275,7 +276,7 @@ func TestMigrateExportHashesTable(t *testing.T) {
 	_, _ = db.Exec("DROP TABLE IF EXISTS export_hashes")
 
 	// Run migration
-	if err := migrateExportHashesTable(db); err != nil {
+	if err := migrations.MigrateExportHashesTable(db); err != nil {
 		t.Fatalf("failed to migrate export_hashes table: %v", err)
 	}
 
@@ -308,7 +309,7 @@ func TestMigrateExternalRefUnique(t *testing.T) {
 			t.Fatalf("failed to create issue2: %v", err)
 		}
 
-		if err := migrateExternalRefUnique(db); err != nil {
+		if err := migrations.MigrateExternalRefUnique(db); err != nil {
 			t.Fatalf("failed to migrate external_ref unique constraint: %v", err)
 		}
 
@@ -340,7 +341,7 @@ func TestMigrateExternalRefUnique(t *testing.T) {
 			t.Fatalf("failed to create duplicate: %v", err)
 		}
 
-		err = migrateExternalRefUnique(db)
+		err = migrations.MigrateExternalRefUnique(db)
 		if err == nil {
 			t.Error("Expected migration to fail with duplicates present")
 		}
@@ -360,7 +361,7 @@ func TestMigrateRepoMtimesTable(t *testing.T) {
 		_, _ = db.Exec("DROP TABLE IF EXISTS repo_mtimes")
 
 		// Run migration
-		if err := migrateRepoMtimesTable(db); err != nil {
+		if err := migrations.MigrateRepoMtimesTable(db); err != nil {
 			t.Fatalf("failed to migrate repo_mtimes table: %v", err)
 		}
 
@@ -381,10 +382,10 @@ func TestMigrateRepoMtimesTable(t *testing.T) {
 		db := store.db
 
 		// Run migration twice
-		if err := migrateRepoMtimesTable(db); err != nil {
+		if err := migrations.MigrateRepoMtimesTable(db); err != nil {
 			t.Fatalf("first migration failed: %v", err)
 		}
-		if err := migrateRepoMtimesTable(db); err != nil {
+		if err := migrations.MigrateRepoMtimesTable(db); err != nil {
 			t.Fatalf("second migration failed: %v", err)
 		}
 
@@ -406,7 +407,7 @@ func TestMigrateContentHashColumn(t *testing.T) {
 		defer cleanup()
 
 		// Run migration (should be idempotent)
-		if err := migrateContentHashColumn(s.db); err != nil {
+		if err := migrations.MigrateContentHashColumn(s.db); err != nil {
 			t.Fatalf("failed to migrate content_hash column: %v", err)
 		}
 
@@ -487,7 +488,7 @@ func TestMigrateContentHashColumn(t *testing.T) {
 		}
 
 		// Run migration - this should add the column and populate it
-		if err := migrateContentHashColumn(s.db); err != nil {
+		if err := migrations.MigrateContentHashColumn(s.db); err != nil {
 			t.Fatalf("failed to migrate content_hash column: %v", err)
 		}
 

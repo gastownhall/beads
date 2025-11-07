@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/sqlite/migrations"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -51,7 +52,7 @@ func TestMigrateChildCountersTable(t *testing.T) {
 		}
 
 		// Run migration
-		err = migrateChildCountersTable(db)
+		err = migrations.MigrateChildCountersTable(db)
 		if err != nil {
 			t.Fatalf("migration failed: %v", err)
 		}
@@ -77,12 +78,12 @@ func TestMigrateChildCountersTable(t *testing.T) {
 		db := s.db
 
 		// Run migration twice
-		err := migrateChildCountersTable(db)
+		err := migrations.MigrateChildCountersTable(db)
 		if err != nil {
 			t.Fatalf("first migration failed: %v", err)
 		}
 
-		err = migrateChildCountersTable(db)
+		err = migrations.MigrateChildCountersTable(db)
 		if err != nil {
 			t.Fatalf("second migration failed (not idempotent): %v", err)
 		}
