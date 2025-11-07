@@ -323,8 +323,8 @@ func computeAcceptedDeletions(basePath, leftPath, mergedPath string) ([]string, 
 	for id, baseLine := range baseIndex {
 		// Issue in base but not in merged
 		if !mergedIDs[id] {
-			// Check if unchanged locally using semantic JSON comparison
-			if leftLine, existsInLeft := leftIndex[id]; existsInLeft && jsonEquals(leftLine, baseLine) {
+			// Check if unchanged locally - try raw equality first, then semantic JSON comparison
+			if leftLine, existsInLeft := leftIndex[id]; existsInLeft && (leftLine == baseLine || jsonEquals(leftLine, baseLine)) {
 				deletions = append(deletions, id)
 			}
 		}
