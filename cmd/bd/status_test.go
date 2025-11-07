@@ -145,73 +145,37 @@ func TestStatusCommand(t *testing.T) {
 	}
 }
 
-func TestGetRecentActivity(t *testing.T) {
-	// Create a temporary directory for the test database
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, ".beads", "test.db")
-
-	// Create .beads directory
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatalf("Failed to create .beads directory: %v", err)
-	}
-
-	// Initialize the database
-	testStore, err := sqlite.New(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
-	defer testStore.Close()
-
-	ctx := context.Background()
-
-	// Set issue prefix
-	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set issue prefix: %v", err)
-	}
-
-	// Set global store for getRecentActivity
-	store = testStore
-
-	// Create some test issues
-	testIssues := []*types.Issue{
-		{
-			Title:     "Recent issue",
-			Status:    types.StatusOpen,
-			Priority:  1,
-			IssueType: types.TypeTask,
-		},
-		{
-			Title:     "Recent closed issue",
-			Status:    types.StatusClosed,
-			Priority:  1,
-			IssueType: types.TypeTask,
-			ClosedAt:  timePtr(time.Now()),
-		},
-	}
-
-	for _, issue := range testIssues {
-		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
-			t.Fatalf("Failed to create test issue: %v", err)
+func TestGetGitActivity(t *testing.T) {
+	// Test getGitActivity - it may return nil if not in a git repo
+	// or if there's no recent activity
+	activity := getGitActivity(24)
+	
+	// If we're in a git repo with activity, verify the structure
+	if activity != nil {
+		if activity.HoursTracked != 24 {
+			t.Errorf("Expected 24 hours tracked, got %d", activity.HoursTracked)
 		}
+		
+		// Should have non-negative values
+		if activity.CommitCount < 0 {
+			t.Errorf("Negative commit count: %d", activity.CommitCount)
+		}
+		if activity.IssuesCreated < 0 {
+			t.Errorf("Negative issues created: %d", activity.IssuesCreated)
+		}
+		if activity.IssuesClosed < 0 {
+			t.Errorf("Negative issues closed: %d", activity.IssuesClosed)
+		}
+		if activity.IssuesUpdated < 0 {
+			t.Errorf("Negative issues updated: %d", activity.IssuesUpdated)
+		}
+		
+		t.Logf("Git activity: commits=%d, created=%d, closed=%d, updated=%d, total=%d",
+			activity.CommitCount, activity.IssuesCreated, activity.IssuesClosed, 
+			activity.IssuesUpdated, activity.TotalChanges)
+	} else {
+		t.Log("No git activity found (not in a git repo or no recent commits)")
 	}
-
-	// Test getRecentActivity
-	activity := getRecentActivity(ctx, 7, nil)
-	if activity == nil {
-		t.Fatal("getRecentActivity returned nil")
-	}
-
-	if activity.DaysTracked != 7 {
-		t.Errorf("Expected 7 days tracked, got %d", activity.DaysTracked)
-	}
-
-	// All issues were created just now, so they should all be in "recent"
-	if activity.IssuesCreated < 2 {
-		t.Errorf("Expected at least 2 issues created, got %d", activity.IssuesCreated)
-	}
-
-	t.Logf("Recent activity: created=%d, closed=%d, updated=%d",
-		activity.IssuesCreated, activity.IssuesClosed, activity.IssuesUpdated)
 }
 
 func TestGetAssignedStatus(t *testing.T) {

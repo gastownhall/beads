@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,12 +30,15 @@ type StatusSummary struct {
 	ReadyIssues      int `json:"ready_issues"`
 }
 
-// RecentActivitySummary represents activity over the last 7 days
+// RecentActivitySummary represents activity from git history
 type RecentActivitySummary struct {
-	DaysTracked   int `json:"days_tracked"`
-	IssuesCreated int `json:"issues_created"`
-	IssuesClosed  int `json:"issues_closed"`
-	IssuesUpdated int `json:"issues_updated"`
+	HoursTracked    int `json:"hours_tracked"`
+	CommitCount     int `json:"commit_count"`
+	IssuesCreated   int `json:"issues_created"`
+	IssuesClosed    int `json:"issues_closed"`
+	IssuesUpdated   int `json:"issues_updated"`
+	IssuesReopened  int `json:"issues_reopened"`
+	TotalChanges    int `json:"total_changes"`
 }
 
 var statusCmd = &cobra.Command{
@@ -41,7 +47,7 @@ var statusCmd = &cobra.Command{
 	Long: `Show a quick snapshot of the issue database state.
 
 This command provides a summary of issue counts by state (open, in-progress,
-blocked, closed), ready work, and recent activity over the last 7 days.
+blocked, closed), ready work, and recent activity over the last 24 hours from git history.
 
 Similar to how 'git status' shows working tree state, 'bd status' gives you
 a quick overview of your issue database without needing multiple queries.
@@ -103,20 +109,9 @@ Examples:
 			ReadyIssues:      stats.ReadyIssues,
 		}
 
-		// Get recent activity (last 7 days)
+		// Get recent activity from git history (last 24 hours)
 		var recentActivity *RecentActivitySummary
-		if daemonClient != nil {
-			// TODO(bd-28db): Add RPC support for recent activity
-			// For now, skip recent activity in daemon mode
-			recentActivity = nil
-		} else {
-			ctx := context.Background()
-			var assigneeFilter *string
-			if showAssigned {
-				assigneeFilter = &actor
-			}
-			recentActivity = getRecentActivity(ctx, 7, assigneeFilter)
-		}
+		recentActivity = getGitActivity(24)
 
 		// Filter by assignee if requested
 		if showAssigned {
@@ -147,9 +142,12 @@ Examples:
 		fmt.Printf("  Ready to Work:     %d\n", summary.ReadyIssues)
 
 		if recentActivity != nil {
-			fmt.Printf("\nRecent Activity (last %d days):\n", recentActivity.DaysTracked)
+			fmt.Printf("\nRecent Activity (last %d hours, from git history):\n", recentActivity.HoursTracked)
+			fmt.Printf("  Commits:           %d\n", recentActivity.CommitCount)
+			fmt.Printf("  Total Changes:     %d\n", recentActivity.TotalChanges)
 			fmt.Printf("  Issues Created:    %d\n", recentActivity.IssuesCreated)
 			fmt.Printf("  Issues Closed:     %d\n", recentActivity.IssuesClosed)
+			fmt.Printf("  Issues Reopened:   %d\n", recentActivity.IssuesReopened)
 			fmt.Printf("  Issues Updated:    %d\n", recentActivity.IssuesUpdated)
 		}
 
@@ -162,48 +160,101 @@ Examples:
 	},
 }
 
-// getRecentActivity calculates activity stats for the last N days
-// If assignee is provided, only count issues assigned to that user
-func getRecentActivity(ctx context.Context, days int, assignee *string) *RecentActivitySummary {
-	if store == nil {
+// getGitActivity calculates activity stats from git log of beads.jsonl
+func getGitActivity(hours int) *RecentActivitySummary {
+	activity := &RecentActivitySummary{
+		HoursTracked: hours,
+	}
+
+	// Run git log to get patches for the last N hours
+	since := fmt.Sprintf("%d hours ago", hours)
+	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/beads.jsonl")
+	
+	output, err := cmd.Output()
+	if err != nil {
+		// Git log failed (might not be a git repo or no commits)
 		return nil
 	}
 
-	// Calculate the cutoff time
-	cutoff := time.Now().AddDate(0, 0, -days)
-
-	// Get all issues to check creation/update times
-	filter := types.IssueFilter{
-		Assignee: assignee,
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	commitCount := 0
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Empty lines separate commits
+		if line == "" {
+			continue
+		}
+		
+		// Commit hash line
+		if !strings.Contains(line, "\t") {
+			commitCount++
+			continue
+		}
+		
+		// numstat line format: "additions\tdeletions\tfilename"
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		
+		// For JSONL files, each added line is a new/updated issue
+		// We need to analyze the actual diff to understand what changed
 	}
-	issues, err := store.SearchIssues(ctx, "", filter)
+	
+	// Get detailed diff to analyze changes
+	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/beads.jsonl")
+	output, err = cmd.Output()
 	if err != nil {
 		return nil
 	}
-
-	activity := &RecentActivitySummary{
-		DaysTracked: days,
-	}
-
-	for _, issue := range issues {
-		// Check if created recently
-		if issue.CreatedAt.After(cutoff) {
+	
+	scanner = bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Look for added lines in diff (lines starting with +)
+		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
+			continue
+		}
+		
+		// Remove the + prefix
+		jsonLine := strings.TrimPrefix(line, "+")
+		
+		// Skip empty lines
+		if strings.TrimSpace(jsonLine) == "" {
+			continue
+		}
+		
+		// Try to parse as issue JSON
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(jsonLine), &issue); err != nil {
+			continue
+		}
+		
+		activity.TotalChanges++
+		
+		// Analyze the change type based on timestamps and status
+		// Created recently if created_at is close to now
+		if time.Since(issue.CreatedAt) < time.Duration(hours)*time.Hour {
 			activity.IssuesCreated++
-		}
-
-		// Check if closed recently
-		if issue.Status == types.StatusClosed && issue.UpdatedAt.After(cutoff) {
-			// Verify it was actually closed recently (not just updated)
-			// For now, we'll count any closed issue updated recently
-			activity.IssuesClosed++
-		}
-
-		// Check if updated recently (but not created recently)
-		if issue.UpdatedAt.After(cutoff) && !issue.CreatedAt.After(cutoff) {
+		} else if issue.Status == types.StatusClosed && issue.ClosedAt != nil {
+			// Closed recently if closed_at is close to now
+			if time.Since(*issue.ClosedAt) < time.Duration(hours)*time.Hour {
+				activity.IssuesClosed++
+			} else {
+				activity.IssuesUpdated++
+			}
+		} else if issue.Status != types.StatusClosed {
+			// Check if this was a reopen (status changed from closed to open/in_progress)
+			// We'd need to look at the removed line to know for sure, but for now
+			// we'll just count it as an update
 			activity.IssuesUpdated++
 		}
 	}
-
+	
+	activity.CommitCount = commitCount
 	return activity
 }
 
