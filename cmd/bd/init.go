@@ -87,6 +87,16 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		os.Exit(1)
 	}
 	
+	// Prevent nested .beads directories
+	// Check if current working directory is inside a .beads directory
+	if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
+	   strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
+		fmt.Fprintf(os.Stderr, "Error: cannot initialize bd inside a .beads directory\n")
+		fmt.Fprintf(os.Stderr, "Current directory: %s\n", cwd)
+		fmt.Fprintf(os.Stderr, "Please run 'bd init' from outside the .beads directory.\n")
+		os.Exit(1)
+	}
+	
 	localBeadsDir := filepath.Join(cwd, ".beads")
 	initDBDir := filepath.Dir(initDBPath)
 	
