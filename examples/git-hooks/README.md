@@ -69,18 +69,20 @@ The hook is silent on success, fast (no git operations), and safe (fails commit 
 
 ### pre-push
 
-Before each push, the hook checks:
+Before each push, the hook:
 
 ```bash
-git diff --quiet .beads/beads.jsonl
+bd sync --flush-only  # Flush pending changes (if bd available)
+git status --porcelain .beads/*.jsonl  # Check for uncommitted changes
 ```
 
 This prevents pushing stale JSONL by:
-1. Checking if JSONL has uncommitted changes (working tree or staging)
-2. Failing the push with clear error message if changes exist
-3. Instructing user to commit JSONL before pushing again
+1. Flushing pending in-memory changes from daemon's 5s debounce
+2. Checking for uncommitted changes (staged, unstaged, untracked, deleted)
+3. Failing the push with clear error message if changes exist
+4. Instructing user to commit JSONL before pushing again
 
-This solves bd-my64: changes made between commit and push are caught before reaching remote.
+This solves bd-my64: changes made between commit and push (or pending debounced flushes) are caught before reaching remote.
 
 ### post-merge
 

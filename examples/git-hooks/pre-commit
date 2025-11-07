@@ -35,17 +35,10 @@ if ! bd sync --flush-only >/dev/null 2>&1; then
     exit 1
 fi
 
-# Find the JSONL file (could be issues.jsonl or beads.jsonl)
-JSONL_FILE=""
-if [ -f .beads/beads.jsonl ]; then
-    JSONL_FILE=".beads/beads.jsonl"
-elif [ -f .beads/issues.jsonl ]; then
-    JSONL_FILE=".beads/issues.jsonl"
-fi
-
-# If the JSONL file was modified, stage it
-if [ -n "$JSONL_FILE" ] && [ -f "$JSONL_FILE" ]; then
-    git add "$JSONL_FILE" 2>/dev/null || true
-fi
+# Stage both possible JSONL files (backward compatibility)
+# git add is harmless if file doesn't exist
+for f in .beads/beads.jsonl .beads/issues.jsonl; do
+    [ -f "$f" ] && git add "$f" 2>/dev/null || true
+done
 
 exit 0

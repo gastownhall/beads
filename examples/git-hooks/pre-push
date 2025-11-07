@@ -3,11 +3,14 @@
 #
 # bd (beads) pre-push hook
 #
-# This hook checks if the database has uncommitted changes and prevents
-# pushing stale JSONL by failing with a clear error message.
+# This hook prevents pushing stale JSONL by:
+# 1. Flushing any pending in-memory changes to JSONL (if bd available)
+# 2. Checking for uncommitted changes (staged, unstaged, untracked, deleted)
+# 3. Failing the push with clear instructions if changes found
 #
-# The pre-commit hook should have already exported changes, but if new
-# changes were made between commit and push, this hook catches that.
+# The pre-commit hook already exports changes, but this catches:
+# - Changes made between commit and push
+# - Pending debounced flushes (5s daemon delay)
 #
 # Installation:
 #   cp examples/git-hooks/pre-push .git/hooks/pre-push
@@ -16,37 +19,40 @@
 # Or use the install script:
 #   examples/git-hooks/install.sh
 
-# Check if bd is available
-if ! command -v bd >/dev/null 2>&1; then
-    # If bd is not available, we can't check - allow push
-    exit 0
-fi
-
 # Check if we're in a bd workspace
 if [ ! -d .beads ]; then
     # Not a bd workspace, nothing to do
     exit 0
 fi
 
-# Find the JSONL file (could be issues.jsonl or beads.jsonl)
-JSONL_FILE=""
-if [ -f .beads/beads.jsonl ]; then
-    JSONL_FILE=".beads/beads.jsonl"
-elif [ -f .beads/issues.jsonl ]; then
-    JSONL_FILE=".beads/issues.jsonl"
+# Optionally flush pending bd changes so they surface in JSONL
+# This prevents the race where a debounced flush lands after the check
+if command -v bd >/dev/null 2>&1; then
+    bd sync --flush-only >/dev/null 2>&1 || true
 fi
 
-# Check if JSONL file has uncommitted changes
-if [ -n "$JSONL_FILE" ] && [ -f "$JSONL_FILE" ]; then
-    # Check git status for the JSONL file
-    if ! git diff --quiet "$JSONL_FILE" 2>/dev/null || ! git diff --cached --quiet "$JSONL_FILE" 2>/dev/null; then
-        echo "❌ Error: $JSONL_FILE has uncommitted changes" >&2
+# Collect all tracked or existing JSONL files (supports both old and new names)
+FILES=""
+for f in .beads/beads.jsonl .beads/issues.jsonl; do
+    # Include file if it exists in working tree OR is tracked by git (even if deleted)
+    if git ls-files --error-unmatch "$f" >/dev/null 2>&1 || [ -f "$f" ]; then
+        FILES="$FILES $f"
+    fi
+done
+
+# Check for any uncommitted changes using porcelain status
+# This catches: staged, unstaged, untracked, deleted, renamed, and conflicts
+if [ -n "$FILES" ]; then
+    # shellcheck disable=SC2086
+    if [ -n "$(git status --porcelain -- $FILES 2>/dev/null)" ]; then
+        echo "❌ Error: Beads JSONL has uncommitted changes" >&2
         echo "" >&2
         echo "You made changes to bd issues between your last commit and this push." >&2
-        echo "Please commit the updated JSONL file before pushing:" >&2
+        echo "Please commit the updated JSONL before pushing:" >&2
         echo "" >&2
-        echo "  git add $JSONL_FILE" >&2
-        echo "  git commit -m \"Update beads JSONL\"" >&2
+        # shellcheck disable=SC2086
+        echo "  git add $FILES" >&2
+        echo '  git commit -m "Update bd JSONL"' >&2
         echo "  git push" >&2
         echo "" >&2
         exit 1
