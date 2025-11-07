@@ -182,7 +182,7 @@ jsonlPath := beads.FindJSONLPath(dbPath)
 
 ```go
 // Open same database for extension tables
-db, err := sql.Open("sqlite", dbPath)
+db, err := sql.Open("sqlite3", dbPath)
 
 // Initialize extension schema
 _, err = db.Exec(Schema)

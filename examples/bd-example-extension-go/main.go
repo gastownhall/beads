@@ -30,7 +30,7 @@ func main() {
 	// Open bd storage + extension database
 	store, _ := beads.NewSQLiteStorage(*dbPath)
 	defer store.Close()
-	db, _ := sql.Open("sqlite", *dbPath)
+	db, _ := sql.Open("sqlite3", *dbPath)
 	defer db.Close()
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA busy_timeout=5000")

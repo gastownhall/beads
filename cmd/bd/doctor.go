@@ -314,7 +314,7 @@ func checkIDFormat(path string) doctorCheck {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
 	if err != nil {
 		return doctorCheck{
 			Name:    "Issue IDs",
@@ -400,7 +400,7 @@ func checkCLIVersion() doctorCheck {
 }
 
 func getDatabaseVersionFromPath(dbPath string) string {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
 	if err != nil {
 		return "unknown"
 	}
@@ -785,7 +785,7 @@ func checkDatabaseJSONLSync(path string) doctorCheck {
 	jsonlCount, jsonlPrefixes, jsonlErr := countJSONLIssues(jsonlPath)
 
 	// Single database open for all queries (instead of 3 separate opens)
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		// Database can't be opened. If JSONL has issues, suggest recovery.
 		if jsonlErr == nil && jsonlCount > 0 {
@@ -990,7 +990,7 @@ func checkPermissions(path string) doctorCheck {
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
 		// Try to open database
-		db, err := sql.Open("sqlite", dbPath)
+		db, err := sql.Open("sqlite3", dbPath)
 		if err != nil {
 			return doctorCheck{
 				Name:    "Permissions",
@@ -1038,7 +1038,7 @@ func checkDependencyCycles(path string) doctorCheck {
 	}
 
 	// Open database to check for cycles
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return doctorCheck{
 			Name:    "Dependency Cycles",

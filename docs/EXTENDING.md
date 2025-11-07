@@ -84,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_execution ON myapp_checkpoints(execut
 `
 
 func InitializeMyAppSchema(dbPath string) error {
-    db, err := sql.Open("sqlite", dbPath)
+    db, err := sql.Open("sqlite3", dbPath)
     if err != nil {
         return err
     }
@@ -572,7 +572,7 @@ if dbPath == "" {
 }
 
 // Open your own connection to the same database
-db, err := sql.Open("sqlite", dbPath)
+db, err := sql.Open("sqlite3", dbPath)
 if err != nil {
     log.Fatal(err)
 }
