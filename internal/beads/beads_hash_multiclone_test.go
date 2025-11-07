@@ -207,8 +207,6 @@ func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 		runCmd(t, cloneDir, bdCmd, "init", "--quiet", "--prefix", "test")
 	}
 	
-	// Skip git hooks installation in tests - not needed and slows things down
-	// installGitHooks(t, cloneDir)
 	return cloneDir
 }
 
