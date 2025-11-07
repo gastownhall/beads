@@ -28,7 +28,7 @@ These git hooks ensure bd changes are always synchronized with your commits and 
 
 ## Installation
 
-### Quick Install
+### Quick Install (Recommended)
 
 From your repository root:
 
@@ -36,10 +36,20 @@ From your repository root:
 ./examples/git-hooks/install.sh
 ```
 
-This will:
+Or use `bd init --quiet` to install hooks automatically.
+
+**Hook Chaining (New in v0.23):** If you already have git hooks installed (e.g., pre-commit framework), bd will:
+- Detect existing hooks
+- Offer to chain with them (recommended)
+- Preserve your existing hooks while adding bd functionality
+- Back up hooks if you choose to overwrite
+
+This prevents bd from silently overwriting workflows like pre-commit framework, which previously caused test failures to slip through.
+
+The installer will:
 - Copy hooks to `.git/hooks/`
 - Make them executable
-- Back up any existing hooks
+- Detect and preserve existing hooks
 
 ### Manual Install
 

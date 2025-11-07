@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -430,6 +431,70 @@ func hooksInstalled() bool {
 	return true
 }
 
+// hookInfo contains information about an existing hook
+type hookInfo struct {
+	name         string
+	path         string
+	exists       bool
+	isBdHook     bool
+	isPreCommit  bool
+	content      string
+}
+
+// detectExistingHooks scans for existing git hooks
+func detectExistingHooks() ([]hookInfo, error) {
+	hooksDir := filepath.Join(".git", "hooks")
+	hooks := []hookInfo{
+		{name: "pre-commit", path: filepath.Join(hooksDir, "pre-commit")},
+		{name: "post-merge", path: filepath.Join(hooksDir, "post-merge")},
+		{name: "pre-push", path: filepath.Join(hooksDir, "pre-push")},
+	}
+	
+	for i := range hooks {
+		content, err := os.ReadFile(hooks[i].path)
+		if err == nil {
+			hooks[i].exists = true
+			hooks[i].content = string(content)
+			hooks[i].isBdHook = strings.Contains(hooks[i].content, "bd (beads)")
+			// Only detect pre-commit framework if not a bd hook
+			if !hooks[i].isBdHook {
+				hooks[i].isPreCommit = strings.Contains(hooks[i].content, "pre-commit run") ||
+					strings.Contains(hooks[i].content, ".pre-commit-config")
+			}
+		}
+	}
+	
+	return hooks, nil
+}
+
+// promptHookAction asks user what to do with existing hooks
+func promptHookAction(existingHooks []hookInfo) string {
+	yellow := color.New(color.FgYellow).SprintFunc()
+	
+	fmt.Printf("\n%s Found existing git hooks:\n", yellow("⚠"))
+	for _, hook := range existingHooks {
+		if hook.exists && !hook.isBdHook {
+			hookType := "custom script"
+			if hook.isPreCommit {
+				hookType = "pre-commit framework"
+			}
+			fmt.Printf("  - %s (%s)\n", hook.name, hookType)
+		}
+	}
+	
+	fmt.Printf("\nHow should bd proceed?\n")
+	fmt.Printf("  [1] Chain with existing hooks (recommended)\n")
+	fmt.Printf("  [2] Overwrite existing hooks\n")
+	fmt.Printf("  [3] Skip git hooks installation\n")
+	fmt.Printf("Choice [1-3]: ")
+	
+	var response string
+	_, _ = fmt.Scanln(&response)
+	response = strings.TrimSpace(response)
+	
+	return response
+}
+
 // installGitHooks installs git hooks inline (no external dependencies)
 func installGitHooks() error {
 	hooksDir := filepath.Join(".git", "hooks")
@@ -439,9 +504,111 @@ func installGitHooks() error {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 	
+	// Detect existing hooks
+	existingHooks, err := detectExistingHooks()
+	if err != nil {
+		return fmt.Errorf("failed to detect existing hooks: %w", err)
+	}
+	
+	// Check if any non-bd hooks exist
+	hasExistingHooks := false
+	for _, hook := range existingHooks {
+		if hook.exists && !hook.isBdHook {
+			hasExistingHooks = true
+			break
+		}
+	}
+	
+	// Determine installation mode
+	chainHooks := false
+	if hasExistingHooks {
+		cyan := color.New(color.FgCyan).SprintFunc()
+		choice := promptHookAction(existingHooks)
+		switch choice {
+		case "1", "":
+			chainHooks = true
+		case "2":
+			// Overwrite mode - backup existing hooks
+			for _, hook := range existingHooks {
+				if hook.exists && !hook.isBdHook {
+					timestamp := time.Now().Format("20060102-150405")
+					backup := hook.path + ".backup-" + timestamp
+					if err := os.Rename(hook.path, backup); err != nil {
+						return fmt.Errorf("failed to backup %s: %w", hook.name, err)
+					}
+					fmt.Printf("  Backed up %s to %s\n", hook.name, filepath.Base(backup))
+				}
+			}
+		case "3":
+			fmt.Printf("Skipping git hooks installation.\n")
+			fmt.Printf("You can install manually later with: %s\n", cyan("./examples/git-hooks/install.sh"))
+			return nil
+		default:
+			return fmt.Errorf("invalid choice: %s", choice)
+		}
+	}
+	
 	// pre-commit hook
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
-	preCommitContent := `#!/bin/sh
+	var preCommitContent string
+	
+	if chainHooks {
+		// Find existing pre-commit hook
+		var existingPreCommit string
+		for _, hook := range existingHooks {
+			if hook.name == "pre-commit" && hook.exists && !hook.isBdHook {
+				// Move to .pre-commit-old
+				oldPath := hook.path + ".old"
+				if err := os.Rename(hook.path, oldPath); err != nil {
+					return fmt.Errorf("failed to move existing pre-commit: %w", err)
+				}
+				existingPreCommit = oldPath
+				break
+			}
+		}
+		
+		preCommitContent = `#!/bin/sh
+#
+# bd (beads) pre-commit hook (chained)
+#
+# This hook chains bd functionality with your existing pre-commit hook.
+
+# Run existing hook first
+if [ -x "` + existingPreCommit + `" ]; then
+    "` + existingPreCommit + `" "$@"
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        exit $EXIT_CODE
+    fi
+fi
+
+# Check if bd is available
+if ! command -v bd >/dev/null 2>&1; then
+    echo "Warning: bd command not found, skipping pre-commit flush" >&2
+    exit 0
+fi
+
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
+    exit 0
+fi
+
+# Flush pending changes to JSONL
+if ! bd sync --flush-only >/dev/null 2>&1; then
+    echo "Error: Failed to flush bd changes to JSONL" >&2
+    echo "Run 'bd sync --flush-only' manually to diagnose" >&2
+    exit 1
+fi
+
+# If the JSONL file was modified, stage it
+if [ -f .beads/issues.jsonl ]; then
+    git add .beads/issues.jsonl 2>/dev/null || true
+fi
+
+exit 0
+`
+	} else {
+		preCommitContent = `#!/bin/sh
 #
 # bd (beads) pre-commit hook
 #
@@ -477,10 +644,68 @@ fi
 
 exit 0
 `
+	}
 	
 	// post-merge hook
 	postMergePath := filepath.Join(hooksDir, "post-merge")
-	postMergeContent := `#!/bin/sh
+	var postMergeContent string
+	
+	if chainHooks {
+		// Find existing post-merge hook
+		var existingPostMerge string
+		for _, hook := range existingHooks {
+			if hook.name == "post-merge" && hook.exists && !hook.isBdHook {
+				// Move to .post-merge-old
+				oldPath := hook.path + ".old"
+				if err := os.Rename(hook.path, oldPath); err != nil {
+					return fmt.Errorf("failed to move existing post-merge: %w", err)
+				}
+				existingPostMerge = oldPath
+				break
+			}
+		}
+		
+		postMergeContent = `#!/bin/sh
+#
+# bd (beads) post-merge hook (chained)
+#
+# This hook chains bd functionality with your existing post-merge hook.
+
+# Run existing hook first
+if [ -x "` + existingPostMerge + `" ]; then
+    "` + existingPostMerge + `" "$@"
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        exit $EXIT_CODE
+    fi
+fi
+
+# Check if bd is available
+if ! command -v bd >/dev/null 2>&1; then
+    echo "Warning: bd command not found, skipping post-merge import" >&2
+    exit 0
+fi
+
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
+    exit 0
+fi
+
+# Check if issues.jsonl exists and was updated
+if [ ! -f .beads/issues.jsonl ]; then
+    exit 0
+fi
+
+# Import the updated JSONL
+if ! bd import -i .beads/issues.jsonl >/dev/null 2>&1; then
+    echo "Warning: Failed to import bd changes after merge" >&2
+    echo "Run 'bd import -i .beads/issues.jsonl' manually" >&2
+fi
+
+exit 0
+`
+	} else {
+		postMergeContent = `#!/bin/sh
 #
 # bd (beads) post-merge hook
 #
@@ -515,24 +740,6 @@ fi
 
 exit 0
 `
-	
-	// Backup existing hooks if present
-	for _, hookPath := range []string{preCommitPath, postMergePath} {
-		if _, err := os.Stat(hookPath); err == nil {
-			// Read existing hook to check if it's already a bd hook
-			// #nosec G304 - controlled path from git directory
-			content, err := os.ReadFile(hookPath)
-			if err == nil && strings.Contains(string(content), "bd (beads)") {
-				// Already a bd hook, skip backup
-				continue
-			}
-			
-			// Backup non-bd hook
-			backup := hookPath + ".backup"
-			if err := os.Rename(hookPath, backup); err != nil {
-				return fmt.Errorf("failed to backup existing hook: %w", err)
-			}
-		}
 	}
 	
 	// Write pre-commit hook (executable scripts need 0700)
@@ -545,6 +752,11 @@ exit 0
 	// #nosec G306 - git hooks must be executable
 	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0700); err != nil {
 		return fmt.Errorf("failed to write post-merge hook: %w", err)
+	}
+	
+	if chainHooks {
+		green := color.New(color.FgGreen).SprintFunc()
+		fmt.Printf("%s Chained bd hooks with existing hooks\n", green("✓"))
 	}
 	
 	return nil
