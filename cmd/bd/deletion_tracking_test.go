@@ -252,8 +252,9 @@ func TestDeletionWithLocalModification(t *testing.T) {
 func TestComputeAcceptedDeletions(t *testing.T) {
 	dir := t.TempDir()
 
-	basePath := filepath.Join(dir, "base.jsonl")
-	leftPath := filepath.Join(dir, "left.jsonl")
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
+	sm := NewSnapshotManager(jsonlPath)
+	basePath, leftPath := sm.GetSnapshotPaths()
 	mergedPath := filepath.Join(dir, "merged.jsonl")
 
 	// Base has 3 issues
@@ -280,7 +281,7 @@ func TestComputeAcceptedDeletions(t *testing.T) {
 		t.Fatalf("Failed to write merged: %v", err)
 	}
 
-	deletions, err := computeAcceptedDeletions(basePath, leftPath, mergedPath)
+	deletions, err := sm.ComputeAcceptedDeletions(mergedPath)
 	if err != nil {
 		t.Fatalf("Failed to compute deletions: %v", err)
 	}
@@ -326,7 +327,9 @@ func TestComputeAcceptedDeletions_LocallyModified(t *testing.T) {
 		t.Fatalf("Failed to write merged: %v", err)
 	}
 
-	deletions, err := computeAcceptedDeletions(basePath, leftPath, mergedPath)
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
+	sm := NewSnapshotManager(jsonlPath)
+	deletions, err := sm.ComputeAcceptedDeletions(mergedPath)
 	if err != nil {
 		t.Fatalf("Failed to compute deletions: %v", err)
 	}
@@ -354,7 +357,8 @@ func TestSnapshotManagement(t *testing.T) {
 		t.Fatalf("Failed to initialize snapshots: %v", err)
 	}
 
-	basePath, leftPath := getSnapshotPaths(jsonlPath)
+	sm := NewSnapshotManager(jsonlPath)
+	basePath, leftPath := sm.GetSnapshotPaths()
 
 	// Base should exist, left should not
 	if !fileExists(basePath) {
@@ -491,8 +495,10 @@ func TestMultiRepoDeletionTracking(t *testing.T) {
 	}
 
 	// Verify snapshot files exist for both repos
-	primaryBasePath, primaryLeftPath := getSnapshotPaths(primaryJSONL)
-	additionalBasePath, additionalLeftPath := getSnapshotPaths(additionalJSONL)
+	primarySM := NewSnapshotManager(primaryJSONL)
+	primaryBasePath, primaryLeftPath := primarySM.GetSnapshotPaths()
+	additionalSM := NewSnapshotManager(additionalJSONL)
+	additionalBasePath, additionalLeftPath := additionalSM.GetSnapshotPaths()
 
 	if !fileExists(primaryBasePath) {
 		t.Errorf("Primary base snapshot not created: %s", primaryBasePath)
@@ -762,8 +768,10 @@ func TestMultiRepoSnapshotIsolation(t *testing.T) {
 	}
 
 	// Get snapshot paths for both
-	repo1Base, repo1Left := getSnapshotPaths(repo1JSONL)
-	repo2Base, repo2Left := getSnapshotPaths(repo2JSONL)
+	repo1SM := NewSnapshotManager(repo1JSONL)
+	repo1Base, repo1Left := repo1SM.GetSnapshotPaths()
+	repo2SM := NewSnapshotManager(repo2JSONL)
+	repo2Base, repo2Left := repo2SM.GetSnapshotPaths()
 
 	// Verify isolation: snapshots should be in different directories
 	if filepath.Dir(repo1Base) == filepath.Dir(repo2Base) {
@@ -771,11 +779,11 @@ func TestMultiRepoSnapshotIsolation(t *testing.T) {
 	}
 
 	// Verify each snapshot contains only its own issue
-	repo1IDs, err := buildIDSet(repo1Base)
+	repo1IDs, err := repo1SM.BuildIDSet(repo1Base)
 	if err != nil {
 		t.Fatalf("Failed to read repo1 base snapshot: %v", err)
 	}
-	repo2IDs, err := buildIDSet(repo2Base)
+	repo2IDs, err := repo2SM.BuildIDSet(repo2Base)
 	if err != nil {
 		t.Fatalf("Failed to read repo2 base snapshot: %v", err)
 	}
@@ -807,11 +815,11 @@ func TestMultiRepoSnapshotIsolation(t *testing.T) {
 		t.Error("Both left snapshots should exist")
 	}
 
-	repo1LeftIDs, err := buildIDSet(repo1Left)
+	repo1LeftIDs, err := repo1SM.BuildIDSet(repo1Left)
 	if err != nil {
 		t.Fatalf("Failed to read repo1 left snapshot: %v", err)
 	}
-	repo2LeftIDs, err := buildIDSet(repo2Left)
+	repo2LeftIDs, err := repo2SM.BuildIDSet(repo2Left)
 	if err != nil {
 		t.Fatalf("Failed to read repo2 left snapshot: %v", err)
 	}
