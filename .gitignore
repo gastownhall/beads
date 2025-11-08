@@ -55,6 +55,10 @@ Thumbs.db
 .beads/beads.base.meta.json
 .beads/beads.left.meta.json
 
+# Git merge driver temp files (created during conflicts with numbered extensions)
+.beads/*.json[0-9]
+.beads/*.jsonl[0-9]
+
 # Ignore nix result
 result
 
