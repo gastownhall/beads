@@ -187,7 +187,7 @@ func TestRegistryStaleCleanup(t *testing.T) {
 func TestRegistryEmptyArrayNotNull(t *testing.T) {
 	tmpDir := t.TempDir()
 	registryPath := filepath.Join(tmpDir, ".beads", "registry.json")
-	
+
 	// Override the registry path for testing (platform-specific)
 	homeEnv := "HOME"
 	if runtime.GOOS == "windows" {
@@ -216,5 +216,63 @@ func TestRegistryEmptyArrayNotNull(t *testing.T) {
 	content := string(data)
 	if content != "[]" && content != "[\n]" {
 		t.Errorf("Expected empty array [], got: %s", content)
+	}
+}
+
+func TestRegistryCorruptedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	registryPath := filepath.Join(tmpDir, ".beads", "registry.json")
+
+	homeEnv := "HOME"
+	if runtime.GOOS == "windows" {
+		homeEnv = "USERPROFILE"
+	}
+	oldHome := os.Getenv(homeEnv)
+	os.Setenv(homeEnv, tmpDir)
+	defer os.Setenv(homeEnv, oldHome)
+
+	registry, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("Failed to create registry: %v", err)
+	}
+
+	// Create a corrupted registry file
+	os.MkdirAll(filepath.Dir(registryPath), 0755)
+	os.WriteFile(registryPath, []byte("invalid json{{{"), 0644)
+
+	// Reading should return an error
+	entries, err := registry.readEntries()
+	if err == nil {
+		t.Error("Expected error when reading corrupted registry")
+	}
+	if entries != nil {
+		t.Errorf("Expected nil entries on error, got %v", entries)
+	}
+}
+
+func TestRegistryUnregisterNonExistent(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", oldHome)
+
+	registry, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("Failed to create registry: %v", err)
+	}
+
+	// Unregister from empty registry should succeed
+	err = registry.Unregister("/nonexistent/workspace", 99999)
+	if err != nil {
+		t.Errorf("Unregister should succeed even if entry doesn't exist: %v", err)
+	}
+
+	// Verify registry is still empty
+	rawEntries, err := registry.readEntries()
+	if err != nil {
+		t.Fatalf("Failed to read entries: %v", err)
+	}
+	if len(rawEntries) != 0 {
+		t.Errorf("Expected empty registry, got %d entries", len(rawEntries))
 	}
 }

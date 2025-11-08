@@ -261,3 +261,135 @@ func TestDiscoverDaemons_Legacy(t *testing.T) {
 		t.Errorf("Wrong workspace path: expected %s, got %s", tmpDir, daemon.WorkspacePath)
 	}
 }
+
+func TestCheckDaemonErrorFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	socketPath := filepath.Join(beadsDir, "bd.sock")
+
+	// Test 1: No error file exists
+	errMsg := checkDaemonErrorFile(socketPath)
+	if errMsg != "" {
+		t.Errorf("Expected empty error message, got: %s", errMsg)
+	}
+
+	// Test 2: Error file exists with content
+	errorFilePath := filepath.Join(beadsDir, "daemon-error")
+	expectedError := "failed to start: database locked"
+	os.WriteFile(errorFilePath, []byte(expectedError), 0644)
+
+	errMsg = checkDaemonErrorFile(socketPath)
+	if errMsg != expectedError {
+		t.Errorf("Expected error message %q, got %q", expectedError, errMsg)
+	}
+}
+
+func TestStopDaemon_NotAlive(t *testing.T) {
+	daemon := DaemonInfo{
+		Alive: false,
+	}
+
+	err := StopDaemon(daemon)
+	if err == nil {
+		t.Error("Expected error when stopping non-alive daemon")
+	}
+	if err.Error() != "daemon is not running" {
+		t.Errorf("Unexpected error message: %s", err.Error())
+	}
+}
+
+func TestKillAllDaemons_Empty(t *testing.T) {
+	results := KillAllDaemons([]DaemonInfo{}, false)
+	if results.Stopped != 0 || results.Failed != 0 {
+		t.Errorf("Expected 0 stopped and 0 failed, got %d stopped and %d failed", results.Stopped, results.Failed)
+	}
+	if len(results.Failures) != 0 {
+		t.Errorf("Expected empty failures list, got %d failures", len(results.Failures))
+	}
+}
+
+func TestKillAllDaemons_NotAlive(t *testing.T) {
+	daemons := []DaemonInfo{
+		{Alive: false, WorkspacePath: "/test", PID: 12345},
+	}
+
+	results := KillAllDaemons(daemons, false)
+	if results.Stopped != 0 || results.Failed != 0 {
+		t.Errorf("Expected 0 stopped and 0 failed for dead daemon, got %d stopped and %d failed", results.Stopped, results.Failed)
+	}
+}
+
+func TestFindDaemonByWorkspace_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Try to find daemon in directory without any daemon
+	daemon, err := FindDaemonByWorkspace(tmpDir)
+	if err == nil {
+		t.Error("Expected error when daemon not found")
+	}
+	if daemon != nil {
+		t.Error("Expected nil daemon when not found")
+	}
+}
+
+func TestDiscoverDaemon_SocketMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "nonexistent.sock")
+
+	// Try to discover daemon on non-existent socket
+	daemon := discoverDaemon(socketPath)
+	if daemon.Alive {
+		t.Error("Expected daemon to not be alive for missing socket")
+	}
+	if daemon.SocketPath != socketPath {
+		t.Errorf("Expected socket path %s, got %s", socketPath, daemon.SocketPath)
+	}
+	if daemon.Error == "" {
+		t.Error("Expected error message when daemon not found")
+	}
+}
+
+func TestCleanupStaleSockets_AlreadyRemoved(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create stale daemon with non-existent socket
+	stalePath := filepath.Join(tmpDir, "nonexistent.sock")
+
+	daemons := []DaemonInfo{
+		{
+			SocketPath: stalePath,
+			Alive:      false,
+		},
+	}
+
+	// Should succeed even if socket doesn't exist
+	cleaned, err := CleanupStaleSockets(daemons)
+	if err != nil {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+	if cleaned != 0 {
+		t.Errorf("expected 0 cleaned (socket didn't exist), got %d", cleaned)
+	}
+}
+
+func TestCleanupStaleSockets_AliveDaemon(t *testing.T) {
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "alive.sock")
+
+	daemons := []DaemonInfo{
+		{
+			SocketPath: socketPath,
+			Alive:      true,
+		},
+	}
+
+	// Should not remove socket for alive daemon
+	cleaned, err := CleanupStaleSockets(daemons)
+	if err != nil {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+	if cleaned != 0 {
+		t.Errorf("expected 0 cleaned (daemon alive), got %d", cleaned)
+	}
+}
