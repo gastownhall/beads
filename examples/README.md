@@ -5,6 +5,7 @@ This directory contains examples of how to integrate bd with AI agents and workf
 ## Examples
 
 - **[python-agent/](python-agent/)** - Simple Python agent that discovers ready work and completes tasks
+  - **[AGENT_MAIL_EXAMPLE.md](python-agent/AGENT_MAIL_EXAMPLE.md)** - Multi-agent coordination with Agent Mail
 - **[bash-agent/](bash-agent/)** - Bash script showing the full agent workflow
 - **[monitor-webui/](monitor-webui/)** - Standalone web interface for real-time issue monitoring and visualization
 - **[markdown-to-jsonl/](markdown-to-jsonl/)** - Convert markdown planning docs to bd issues

@@ -58,6 +58,7 @@ Agents report that they enjoy working with Beads, and they will use it spontaneo
 - 🤖 **Agent-friendly** - `--json` flags for programmatic integration
 - 📦 **Git-versioned** - JSONL records stored in git, synced across machines
 - 🌍 **Distributed by design** - Agents on multiple machines share one logical database via git
+- 🚀 **Optional Agent Mail** - Real-time multi-agent coordination (<100ms vs 2-5s git sync)
 - 🔐 **Protected branch support** - Works with GitHub/GitLab protected branches via separate sync branch
 - 🏗️ **Extensible** - Add your own tables to the SQLite database
 - 🔍 **Multi-project isolation** - Each project gets its own database, auto-discovered by directory
@@ -737,6 +738,8 @@ For advanced usage, see:
 - **[README.md](README.md)** - You are here! Core features and quick start
 - **[docs/INSTALLING.md](docs/INSTALLING.md)** - Complete installation guide for all platforms
 - **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Interactive tutorial (`bd quickstart`)
+- **[docs/AGENT_MAIL_QUICKSTART.md](docs/AGENT_MAIL_QUICKSTART.md)** - 5-minute Agent Mail setup guide
+- **[docs/AGENT_MAIL.md](docs/AGENT_MAIL.md)** - Complete Agent Mail integration guide
 - **[docs/MULTI_REPO_MIGRATION.md](docs/MULTI_REPO_MIGRATION.md)** - Multi-repo workflow guide (OSS, teams, multi-phase)
 - **[docs/MULTI_REPO_AGENTS.md](docs/MULTI_REPO_AGENTS.md)** - Multi-repo patterns for AI agents
 - **[docs/FAQ.md](docs/FAQ.md)** - Frequently asked questions

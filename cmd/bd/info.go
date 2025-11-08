@@ -23,13 +23,23 @@ or daemon connection. It shows:
   - If using daemon: socket path, health status, version
   - Database statistics (issue count)
   - Schema information (with --schema flag)
+  - What's new in recent versions (with --whats-new flag)
 
 Examples:
   bd info
   bd info --json
-  bd info --schema --json`,
+  bd info --schema --json
+  bd info --whats-new
+  bd info --whats-new --json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		schemaFlag, _ := cmd.Flags().GetBool("schema")
+		whatsNewFlag, _ := cmd.Flags().GetBool("whats-new")
+
+		// Handle --whats-new flag
+		if whatsNewFlag {
+			showWhatsNew()
+			return
+		}
 
 		// Get database path (absolute)
 		absDBPath, err := filepath.Abs(dbPath)
@@ -239,8 +249,91 @@ func extractPrefix(issueID string) string {
 	return ""
 }
 
+// VersionChange represents agent-relevant changes for a specific version
+type VersionChange struct {
+	Version string   `json:"version"`
+	Date    string   `json:"date"`
+	Changes []string `json:"changes"`
+}
+
+// versionChanges contains agent-actionable changes for recent versions
+var versionChanges = []VersionChange{
+	{
+		Version: "0.22.1",
+		Date:    "2025-11-06",
+		Changes: []string{
+			"Native `bd merge` command vendored from beads-merge - no external binary needed",
+			"`bd info` detects outdated git hooks - warns if version mismatch",
+			"Multi-workspace deletion tracking fixed - deletions now propagate correctly",
+			"Hash ID recognition improved - recognizes Base36 IDs without a-f letters",
+			"Import/export deadlock fixed - no hanging when daemon running",
+		},
+	},
+	{
+		Version: "0.22.0",
+		Date:    "2025-11-05",
+		Changes: []string{
+			"Intelligent merge driver auto-configured - eliminates most JSONL conflicts",
+			"Onboarding wizards: `bd init --contributor` and `bd init --team`",
+			"New `bd migrate-issues` command - migrate issues between repos with dependencies",
+			"`bd show` displays blocker status - 'Blocked by N open issues' or 'Ready to work'",
+			"SearchIssues N+1 query fixed - batch-loads labels for better performance",
+			"Sync validation prevents infinite dirty loop - verifies JSONL export",
+		},
+	},
+	{
+		Version: "0.21.0",
+		Date:    "2025-11-04",
+		Changes: []string{
+			"Hash-based IDs eliminate collisions - remove ID coordination workarounds",
+			"Event-driven daemon mode (opt-in) - set BEADS_DAEMON_MODE=events",
+			"Agent Mail integration - real-time multi-agent coordination (<100ms latency)",
+			"`bd duplicates --auto-merge` - automated duplicate detection and merging",
+			"Hierarchical children for epics - dotted IDs (bd-abc.1, bd-abc.2) up to 3 levels",
+			"`--discovered-from` inline syntax - create with dependency in one command",
+		},
+	},
+}
+
+// showWhatsNew displays agent-relevant changes from recent versions
+func showWhatsNew() {
+	currentVersion := Version // from version.go
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"current_version": currentVersion,
+			"recent_changes":  versionChanges,
+		})
+		return
+	}
+
+	// Human-readable output
+	fmt.Printf("\n🆕 What's New in bd (Current: v%s)\n", currentVersion)
+	fmt.Println("=" + strings.Repeat("=", 60))
+	fmt.Println()
+
+	for _, vc := range versionChanges {
+		// Highlight if this is the current version
+		versionMarker := ""
+		if vc.Version == currentVersion {
+			versionMarker = " ← current"
+		}
+
+		fmt.Printf("## v%s (%s)%s\n\n", vc.Version, vc.Date, versionMarker)
+
+		for _, change := range vc.Changes {
+			fmt.Printf("  • %s\n", change)
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("💡 Tip: Use `bd info --whats-new --json` for machine-readable output")
+	fmt.Println()
+}
+
 func init() {
 	infoCmd.Flags().Bool("schema", false, "Include schema information in output")
+	infoCmd.Flags().Bool("whats-new", false, "Show agent-relevant changes from recent versions")
 	infoCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.AddCommand(infoCmd)
 }
