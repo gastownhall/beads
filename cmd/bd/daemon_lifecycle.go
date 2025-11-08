@@ -117,7 +117,16 @@ func showDaemonHealth(global bool) {
 	}
 
 	if client == nil {
-		fmt.Println("Daemon is not running")
+		// Check if lock is held to provide better diagnostic message
+		beadsDir := filepath.Dir(socketPath)
+		running, _ := tryDaemonLock(beadsDir)
+		if running {
+			fmt.Println("Daemon lock is held but connection failed")
+			fmt.Println("This may indicate a crashed daemon. Try: bd daemons killall")
+		} else {
+			fmt.Println("Daemon is not running")
+			fmt.Println("Start with: bd daemon start")
+		}
 		os.Exit(1)
 	}
 	defer func() { _ = client.Close() }()

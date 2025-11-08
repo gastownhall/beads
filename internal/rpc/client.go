@@ -13,6 +13,19 @@ import (
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
+// rpcDebugEnabled returns true if BD_RPC_DEBUG environment variable is set
+func rpcDebugEnabled() bool {
+	val := os.Getenv("BD_RPC_DEBUG")
+	return val == "1" || val == "true"
+}
+
+// rpcDebugLog logs to stderr if BD_RPC_DEBUG is enabled
+func rpcDebugLog(format string, args ...interface{}) {
+	if rpcDebugEnabled() {
+		fmt.Fprintf(os.Stderr, "[RPC DEBUG] "+format+"\n", args...)
+	}
+}
+
 // ClientVersion is the version of this RPC client
 // This should match the bd CLI version for proper compatibility checks
 // It's set dynamically by main.go from cmd/bd/version.go before making RPC calls
@@ -35,35 +48,49 @@ func TryConnect(socketPath string) (*Client, error) {
 // TryConnectWithTimeout attempts to connect to the daemon socket using the provided dial timeout.
 // Returns nil if no daemon is running or unhealthy.
 func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Client, error) {
+	rpcDebugLog("attempting connection to socket: %s", socketPath)
+	
 	// Fast probe: check daemon lock before attempting RPC connection if socket doesn't exist
 	// This eliminates unnecessary connection attempts when no daemon is running
 	// If socket exists, we skip lock check for backwards compatibility and test scenarios
 	socketExists := endpointExists(socketPath)
+	rpcDebugLog("socket exists check: %v", socketExists)
+	
 	if !socketExists {
 		beadsDir := filepath.Dir(socketPath)
 		running, _ := lockfile.TryDaemonLock(beadsDir)
 		if !running {
 			debug.Logf("daemon lock not held and socket missing (no daemon running)")
+			rpcDebugLog("daemon lock not held (no daemon running)")
 			// Self-heal: clean up stale artifacts when lock is free and socket is missing
 			cleanupStaleDaemonArtifacts(beadsDir)
 			return nil, nil
 		}
+		rpcDebugLog("daemon lock held but socket missing (race or cleanup issue)")
 	}
 	
 	if !socketExists {
 		debug.Logf("RPC endpoint does not exist: %s", socketPath)
+		rpcDebugLog("connection aborted: socket does not exist")
 		return nil, nil
 	}
 
 	if dialTimeout <= 0 {
 		dialTimeout = 200 * time.Millisecond
 	}
-
+	
+	rpcDebugLog("dialing socket (timeout: %v)", dialTimeout)
+	dialStart := time.Now()
 	conn, err := dialRPC(socketPath, dialTimeout)
+	dialDuration := time.Since(dialStart)
+	
 	if err != nil {
 		debug.Logf("failed to connect to RPC endpoint: %v", err)
+		rpcDebugLog("dial failed after %v: %v", dialDuration, err)
 		return nil, nil
 	}
+	
+	rpcDebugLog("dial succeeded in %v", dialDuration)
 
 	client := &Client{
 		conn:       conn,
@@ -71,21 +98,29 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 		timeout:    30 * time.Second,
 	}
 
+	rpcDebugLog("performing health check")
+	healthStart := time.Now()
 	health, err := client.Health()
+	healthDuration := time.Since(healthStart)
+	
 	if err != nil {
 		debug.Logf("health check failed: %v", err)
+		rpcDebugLog("health check failed after %v: %v", healthDuration, err)
 		_ = conn.Close()
 		return nil, nil
 	}
 
 	if health.Status == "unhealthy" {
 		debug.Logf("daemon unhealthy: %s", health.Error)
+		rpcDebugLog("daemon unhealthy (checked in %v): %s", healthDuration, health.Error)
 		_ = conn.Close()
 		return nil, nil
 	}
 
 	debug.Logf("connected to daemon (status: %s, uptime: %.1fs)",
 		health.Status, health.Uptime)
+	rpcDebugLog("connection successful (health check: %v, status: %s, uptime: %.1fs)",
+		healthDuration, health.Status, health.Uptime)
 
 	return client, nil
 }
