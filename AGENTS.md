@@ -748,13 +748,26 @@ See `scripts/README.md` for more details.
 
 ## Release Process (Maintainers)
 
-1. Bump version with `./scripts/bump-version.sh <version> --commit`
+**Automated (Recommended):**
+
+```bash
+# One command to do everything (version bump, tests, tag, Homebrew update, local install)
+./scripts/release.sh 0.9.3
+```
+
+This handles the entire release workflow automatically, including waiting ~5 minutes for GitHub Actions to build release artifacts. See [scripts/README.md](scripts/README.md) for details.
+
+**Manual (Step-by-Step):**
+
+1. Bump version: `./scripts/bump-version.sh <version> --commit`
 2. Update CHANGELOG.md with release notes
-3. Run tests locally: `go test -short ./...` (CI will run full suite)
+3. Run tests: `go test -short ./...` (CI runs full suite)
 4. Push version bump: `git push origin main`
-5. Tag release: `git tag v<version>`
-6. Push tag: `git push origin v<version>`
-7. GitHub Actions handles the rest
+5. Tag release: `git tag v<version> && git push origin v<version>`
+6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
+7. Verify: `brew update && brew upgrade bd && bd version`
+
+See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
 
 ---
 
