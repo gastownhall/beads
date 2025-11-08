@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/rpc"
 )
 
@@ -143,6 +144,25 @@ func discoverDaemon(socketPath string) DaemonInfo {
 	daemon := DaemonInfo{
 		SocketPath: socketPath,
 		Alive:      false,
+	}
+
+	// Fast probe: check daemon lock before attempting RPC if socket doesn't exist
+	// This eliminates unnecessary connection attempts when no daemon is running
+	// If socket exists, we proceed with RPC for backwards compatibility
+	_, err := os.Stat(socketPath)
+	socketExists := err == nil
+	
+	if !socketExists {
+		beadsDir := filepath.Dir(socketPath)
+		running, _ := lockfile.TryDaemonLock(beadsDir)
+		if !running {
+			daemon.Error = "daemon lock not held and socket missing"
+			// Check for daemon-error file
+			if errMsg := checkDaemonErrorFile(socketPath); errMsg != "" {
+				daemon.Error = errMsg
+			}
+			return daemon
+		}
 	}
 
 	// Try to connect with short timeout

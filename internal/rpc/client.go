@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 // ClientVersion is the version of this RPC client
@@ -33,7 +35,20 @@ func TryConnect(socketPath string) (*Client, error) {
 // TryConnectWithTimeout attempts to connect to the daemon socket using the provided dial timeout.
 // Returns nil if no daemon is running or unhealthy.
 func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Client, error) {
-	if !endpointExists(socketPath) {
+	// Fast probe: check daemon lock before attempting RPC connection if socket doesn't exist
+	// This eliminates unnecessary connection attempts when no daemon is running
+	// If socket exists, we skip lock check for backwards compatibility and test scenarios
+	socketExists := endpointExists(socketPath)
+	if !socketExists {
+		beadsDir := filepath.Dir(socketPath)
+		running, _ := lockfile.TryDaemonLock(beadsDir)
+		if !running {
+			debug.Logf("daemon lock not held and socket missing (no daemon running)")
+			return nil, nil
+		}
+	}
+	
+	if !socketExists {
 		debug.Logf("RPC endpoint does not exist: %s", socketPath)
 		return nil, nil
 	}
