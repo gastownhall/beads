@@ -56,11 +56,23 @@ func (s *Server) checkVersionCompatibility(clientVersion string) error {
 			clientVersion, ServerVersion)
 	}
 
-	// Compare full versions - daemon should be >= client for backward compatibility
+	// Compare full versions - daemon must be >= client (bd-ckvw: strict minor version gating)
+	// This prevents stale daemons from serving requests with old schema assumptions
 	cmp := semver.Compare(serverVer, clientVer)
 	if cmp < 0 {
-		// Server is older than client within same major version - may be missing features
-		return fmt.Errorf("version mismatch: daemon %s is older than client %s. Upgrade and restart daemon: 'bd daemon --stop && bd daemon'",
+		// Server is older than client - refuse connection
+		// Extract minor versions for clearer error message
+		serverMinor := semver.MajorMinor(serverVer)
+		clientMinor := semver.MajorMinor(clientVer)
+		
+		if serverMinor != clientMinor {
+			// Minor version mismatch - schema may be incompatible
+			return fmt.Errorf("version mismatch: client v%s requires daemon upgrade (daemon is v%s). The client may expect schema changes not present in this daemon version. Run: bd daemons killall",
+				clientVersion, ServerVersion)
+		}
+		
+		// Patch version difference - usually safe but warn
+		return fmt.Errorf("version mismatch: daemon v%s is older than client v%s. Upgrade and restart daemon: bd daemons killall",
 			ServerVersion, clientVersion)
 	}
 

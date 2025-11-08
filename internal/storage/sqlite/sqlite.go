@@ -78,6 +78,21 @@ func New(path string) (*SQLiteStorage, error) {
 		return nil, err
 	}
 
+	// Verify schema compatibility after migrations (bd-ckvw)
+	// First attempt
+	if err := verifySchemaCompatibility(db); err != nil {
+		// Schema probe failed - retry migrations once
+		if retryErr := RunMigrations(db); retryErr != nil {
+			return nil, fmt.Errorf("migration retry failed after schema probe failure: %w (original: %v)", retryErr, err)
+		}
+		
+		// Probe again after retry
+		if err := verifySchemaCompatibility(db); err != nil {
+			// Still failing - return fatal error with clear message
+			return nil, fmt.Errorf("schema probe failed after migration retry: %w. Database may be corrupted or from incompatible version. Run 'bd doctor' to diagnose", err)
+		}
+	}
+
 	// Convert to absolute path for consistency (but keep :memory: as-is)
 	absPath := path
 	if path != ":memory:" {

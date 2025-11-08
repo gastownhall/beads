@@ -276,9 +276,14 @@ func checkVersionMismatch() {
 			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Some features may not work correctly. Rebuild: go build -o bd ./cmd/bd"))
 		} else if cmp > 0 {
 			// Binary is newer than database
+			// Migrations should have already run in sqlite.New() - verify they succeeded
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears NEWER than the database."))
-			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  The database will be upgraded automatically."))
-			// Update stored version to current
+			
+			// Note: Schema probe already ran in sqlite.New() (bd-ckvw)
+			// If we got here, migrations succeeded. Update version.
+			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Database schema has been verified and upgraded."))
+			
+			// Update stored version to current (only after schema verification passed)
 			_ = store.SetMetadata(ctx, "bd_version", Version)
 		}
 	}

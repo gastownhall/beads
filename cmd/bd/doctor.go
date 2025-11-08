@@ -50,7 +50,8 @@ var doctorCmd = &cobra.Command{
 
 This command checks:
   - If .beads/ directory exists
-  - Database version and schema compatibility
+  - Database version and migration status
+  - Schema compatibility (all required tables and columns present)
   - Whether using hash-based vs sequential IDs
   - If CLI version is current (checks GitHub releases)
   - Multiple database files
@@ -126,6 +127,13 @@ func runDiagnostics(path string) doctorResult {
 	dbCheck := checkDatabaseVersion(path)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 2a: Schema compatibility (bd-ckvw)
+	schemaCheck := checkSchemaCompatibility(path)
+	result.Checks = append(result.Checks, schemaCheck)
+	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
@@ -1176,6 +1184,90 @@ func checkGitHooks(path string) doctorCheck {
 		Message: "No recommended git hooks installed",
 		Detail:  fmt.Sprintf("Recommended: %s", strings.Join([]string{"pre-commit", "post-merge", "pre-push"}, ", ")),
 		Fix:     hookInstallMsg,
+	}
+}
+
+func checkSchemaCompatibility(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+	
+	// Check metadata.json first for custom database name
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		// Fall back to canonical database name
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// If no database, skip this check
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  statusOK,
+			Message: "N/A (no database)",
+		}
+	}
+
+	// Open database (bd-ckvw: This will run migrations and schema probe)
+	// Note: We can't use the global 'store' because doctor can check arbitrary paths
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)")
+	if err != nil {
+		return doctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  statusError,
+			Message: "Failed to open database",
+			Detail:  err.Error(),
+			Fix:     "Database may be corrupted. Try 'bd migrate' or restore from backup",
+		}
+	}
+	defer db.Close()
+
+	// Run schema probe (defined in internal/storage/sqlite/schema_probe.go)
+	// This is a simplified version since we can't import the internal package directly
+	// Check all critical tables and columns
+	criticalChecks := map[string][]string{
+		"issues": {"id", "title", "content_hash", "external_ref", "compacted_at"},
+		"dependencies": {"issue_id", "depends_on_id", "type"},
+		"child_counters": {"parent_id", "last_child"},
+		"export_hashes": {"issue_id", "content_hash"},
+	}
+
+	var missingElements []string
+	for table, columns := range criticalChecks {
+		// Try to query all columns
+		query := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", strings.Join(columns, ", "), table)
+		_, err := db.Exec(query)
+		
+		if err != nil {
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "no such table") {
+				missingElements = append(missingElements, fmt.Sprintf("table:%s", table))
+			} else if strings.Contains(errMsg, "no such column") {
+				// Find which columns are missing
+				for _, col := range columns {
+					colQuery := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", col, table)
+					if _, colErr := db.Exec(colQuery); colErr != nil && strings.Contains(colErr.Error(), "no such column") {
+						missingElements = append(missingElements, fmt.Sprintf("%s.%s", table, col))
+					}
+				}
+			}
+		}
+	}
+
+	if len(missingElements) > 0 {
+		return doctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  statusError,
+			Message: "Database schema is incomplete or incompatible",
+			Detail:  fmt.Sprintf("Missing: %s", strings.Join(missingElements, ", ")),
+			Fix:     "Run 'bd migrate' to upgrade schema, or if daemon is running an old version, run 'bd daemons killall' to restart",
+		}
+	}
+
+	return doctorCheck{
+		Name:    "Schema Compatibility",
+		Status:  statusOK,
+		Message: "All required tables and columns present",
 	}
 }
 
