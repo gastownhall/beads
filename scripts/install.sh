@@ -121,7 +121,6 @@ install_from_release() {
 
     # Extract archive
     log_info "Extracting archive..."
-        cd - > /dev/null || cd "$HOME"
     if ! tar -xzf "$archive_name"; then
         log_error "Failed to extract archive"
         rm -rf "$tmp_dir"
@@ -154,10 +153,9 @@ install_from_release() {
         echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
         echo "  export PATH=\"\$PATH:$install_dir\""
         echo ""
-    cd - > /dev/null || cd "$HOME"
     fi
 
-    cd - > /dev/null
+    cd - > /dev/null || cd "$HOME"
     rm -rf "$tmp_dir"
     return 0
 }
@@ -265,12 +263,10 @@ build_from_source() {
                 echo ""
                 echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
                 echo "  export PATH=\"\$PATH:$install_dir\""
-        cd - > /dev/null || cd "$HOME"
                 echo ""
             fi
 
-            cd - > /dev/null
-        cd - > /dev/null || cd "$HOME"
+            cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
             return 0
         else
@@ -442,3 +438,4 @@ main() {
 }
 
 main "$@"
+
