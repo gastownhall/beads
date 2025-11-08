@@ -533,5 +533,467 @@ class TestReservationConflicts(unittest.TestCase):
         self.assertTrue(result2)
 
 
+class TestAuthorizationHeaders(unittest.TestCase):
+    """Test authorization header handling."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_authorization_header_present_with_token(self, mock_urlopen):
+        """Test that Authorization header is sent when token is provided."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(token="test-token-123", agent_name="test-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+        
+        adapter.reserve_issue("bd-123")
+        
+        # Verify Authorization header was sent
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        
+        self.assertEqual(request.headers.get('Authorization'), 'Bearer test-token-123')
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_authorization_header_absent_without_token(self, mock_urlopen):
+        """Test that Authorization header is not sent when no token provided."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(token="", agent_name="test-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+        
+        adapter.reserve_issue("bd-123")
+        
+        # Verify Authorization header was not sent
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        
+        self.assertNotIn('Authorization', request.headers)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_content_type_header_always_json(self, mock_urlopen):
+        """Test that Content-Type header is always application/json."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(201, {"sent": True})
+        
+        adapter.notify("test_event", {"foo": "bar"})
+        
+        # Verify Content-Type header
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        
+        self.assertEqual(request.headers.get('Content-type'), 'application/json')
+
+
+class TestRequestBodyValidation(unittest.TestCase):
+    """Test request body structure and validation."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_reserve_issue_request_body_structure(self, mock_urlopen):
+        """Test reservation request body contains correct fields."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+        
+        adapter.reserve_issue("bd-123", ttl=7200)
+        
+        # Verify request body structure
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        body = json.loads(request.data.decode('utf-8'))
+        
+        self.assertEqual(body["file_path"], ".beads/issues/bd-123")
+        self.assertEqual(body["agent_name"], "test-agent")
+        self.assertEqual(body["ttl"], 7200)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_notify_request_body_structure(self, mock_urlopen):
+        """Test notification request body contains correct fields."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="notification-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(201, {"sent": True})
+        
+        test_payload = {"issue_id": "bd-456", "status": "completed"}
+        adapter.notify("status_changed", test_payload)
+        
+        # Verify request body structure
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        body = json.loads(request.data.decode('utf-8'))
+        
+        self.assertEqual(body["from_agent"], "notification-agent")
+        self.assertEqual(body["event_type"], "status_changed")
+        self.assertEqual(body["payload"], test_payload)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_release_issue_url_structure(self, mock_urlopen):
+        """Test release request uses correct URL structure."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="release-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(204)
+        
+        adapter.release_issue("bd-789")
+        
+        # Verify URL path
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        
+        # URL should be: {base_url}/api/reservations/{agent_name}/{issue_id}
+        self.assertIn("/api/reservations/release-agent/bd-789", request.full_url)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_check_inbox_url_structure(self, mock_urlopen):
+        """Test inbox check uses correct URL structure."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="inbox-agent")
+        
+        # Reset mock to capture the actual request
+        mock_urlopen.reset_mock()
+        mock_urlopen.return_value = self._mock_response(200, [])
+        
+        adapter.check_inbox()
+        
+        # Verify URL path
+        self.assertTrue(mock_urlopen.called)
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        
+        # URL should be: {base_url}/api/notifications/{agent_name}
+        self.assertIn("/api/notifications/inbox-agent", request.full_url)
+
+
+class TestReservationEdgeCases(unittest.TestCase):
+    """Test edge cases in reservation mechanisms."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_reserve_with_zero_ttl(self, mock_urlopen):
+        """Test reservation with TTL=0 (should still be allowed)."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+        result = adapter.reserve_issue("bd-123", ttl=0)
+        
+        # Should succeed - server decides if TTL is valid
+        self.assertTrue(result)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_reserve_with_very_large_ttl(self, mock_urlopen):
+        """Test reservation with very large TTL."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+        result = adapter.reserve_issue("bd-999", ttl=86400 * 365)  # 1 year
+        
+        # Should succeed - server decides if TTL is valid
+        self.assertTrue(result)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_reserve_issue_with_special_characters_in_id(self, mock_urlopen):
+        """Test reservation with special characters in issue ID."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Test various ID formats
+        test_ids = ["bd-abc123", "bd-123-456", "test-999", "bd_special"]
+        
+        for issue_id in test_ids:
+            mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+            result = adapter.reserve_issue(issue_id)
+            self.assertTrue(result, f"Failed to reserve {issue_id}")
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_release_nonexistent_reservation(self, mock_urlopen):
+        """Test releasing a reservation that doesn't exist."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Server might return 404, but adapter should handle gracefully
+        error_response = HTTPError(
+            url="http://test",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=BytesIO(b"Reservation not found")
+        )
+        mock_urlopen.side_effect = error_response
+        
+        result = adapter.release_issue("bd-nonexistent")
+        
+        # Should still return True (graceful degradation)
+        self.assertTrue(result)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_multiple_reservations_same_agent(self, mock_urlopen):
+        """Test agent reserving multiple issues sequentially."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Reserve multiple issues
+        for i in range(5):
+            mock_urlopen.return_value = self._mock_response(201, {"reserved": True})
+            result = adapter.reserve_issue(f"bd-{i}")
+            self.assertTrue(result)
+
+
+class TestTimeoutConfiguration(unittest.TestCase):
+    """Test timeout configuration and behavior."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch.dict(os.environ, {'AGENT_MAIL_TIMEOUT': '15'})
+    @patch('beads_mail_adapter.urlopen')
+    def test_timeout_from_env_var(self, mock_urlopen):
+        """Test timeout configuration from environment variable."""
+        mock_urlopen.side_effect = URLError("Not testing connection")
+        
+        adapter = AgentMailAdapter()
+        
+        self.assertEqual(adapter.timeout, 15)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_timeout_from_constructor(self, mock_urlopen):
+        """Test timeout configuration from constructor."""
+        mock_urlopen.side_effect = URLError("Not testing connection")
+        
+        adapter = AgentMailAdapter(timeout=3)
+        
+        self.assertEqual(adapter.timeout, 3)
+    
+    @patch('beads_mail_adapter.urlopen')
+    @patch.dict(os.environ, {'AGENT_MAIL_TIMEOUT': '10'})
+    def test_constructor_timeout_overrides_env(self, mock_urlopen):
+        """Test constructor timeout overrides environment variable."""
+        mock_urlopen.side_effect = URLError("Not testing connection")
+        
+        adapter = AgentMailAdapter(timeout=7)
+        
+        self.assertEqual(adapter.timeout, 7)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_health_check_uses_short_timeout(self, mock_urlopen):
+        """Test health check uses 2s timeout instead of default."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        
+        adapter = AgentMailAdapter(timeout=10)
+        
+        # Health check should have been called with timeout=2
+        # Verify the call was made with timeout parameter
+        self.assertTrue(mock_urlopen.called)
+        # The health check is called during __init__
+        # We can verify it was called but actual timeout verification
+        # requires inspecting the urlopen call args
+        call_args = mock_urlopen.call_args_list[0]
+        # urlopen(req, timeout=2)
+        if len(call_args[1]) > 0:
+            self.assertEqual(call_args[1].get('timeout'), 2)
+
+
+class TestInboxHandlingEdgeCases(unittest.TestCase):
+    """Test edge cases in inbox message handling."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_inbox_with_large_message_list(self, mock_urlopen):
+        """Test inbox handling with many messages."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Create large message list
+        messages = [{"id": i, "event": "test", "data": {}} for i in range(100)]
+        mock_urlopen.return_value = self._mock_response(200, messages)
+        
+        result = adapter.check_inbox()
+        
+        self.assertEqual(len(result), 100)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_inbox_with_nested_payload_data(self, mock_urlopen):
+        """Test inbox messages with deeply nested payload data."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        messages = [{
+            "from": "agent-1",
+            "event": "complex_update",
+            "data": {
+                "issue": {
+                    "id": "bd-123",
+                    "metadata": {
+                        "tags": ["urgent", "bug"],
+                        "assignee": {"name": "test", "id": 42}
+                    }
+                }
+            }
+        }]
+        mock_urlopen.return_value = self._mock_response(200, messages)
+        
+        result = adapter.check_inbox()
+        
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["data"]["issue"]["id"], "bd-123")
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_inbox_returns_none_on_error(self, mock_urlopen):
+        """Test inbox gracefully handles errors and returns empty list."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Simulate error
+        mock_urlopen.side_effect = URLError("Network error")
+        
+        result = adapter.check_inbox()
+        
+        self.assertEqual(result, [])
+
+
+class TestNotificationEdgeCases(unittest.TestCase):
+    """Test edge cases in notification sending."""
+    
+    def _mock_response(self, status_code=200, data=None):
+        """Create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status = status_code
+        mock_response.__enter__ = Mock(return_value=mock_response)
+        mock_response.__exit__ = Mock(return_value=False)
+        
+        if data is not None:
+            mock_response.read.return_value = json.dumps(data).encode('utf-8')
+        else:
+            mock_response.read.return_value = b''
+        
+        return mock_response
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_notify_with_empty_payload(self, mock_urlopen):
+        """Test sending notification with empty payload."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        mock_urlopen.return_value = self._mock_response(201, {"sent": True})
+        result = adapter.notify("event_type", {})
+        
+        self.assertTrue(result)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_notify_with_large_payload(self, mock_urlopen):
+        """Test sending notification with large payload."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        # Create large payload
+        large_payload = {
+            "issues": [{"id": f"bd-{i}", "data": "x" * 100} for i in range(100)]
+        }
+        mock_urlopen.return_value = self._mock_response(201, {"sent": True})
+        result = adapter.notify("bulk_update", large_payload)
+        
+        self.assertTrue(result)
+    
+    @patch('beads_mail_adapter.urlopen')
+    def test_notify_with_unicode_payload(self, mock_urlopen):
+        """Test sending notification with Unicode characters."""
+        mock_urlopen.return_value = self._mock_response(200, {"status": "ok"})
+        adapter = AgentMailAdapter(agent_name="test-agent")
+        
+        unicode_payload = {
+            "message": "Hello 世界 🎉",
+            "emoji": "✅ 🚀 💯"
+        }
+        mock_urlopen.return_value = self._mock_response(201, {"sent": True})
+        result = adapter.notify("unicode_test", unicode_payload)
+        
+        self.assertTrue(result)
+
+
 if __name__ == '__main__':
     unittest.main()

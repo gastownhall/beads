@@ -44,7 +44,7 @@ class AgentMailAdapter:
         url: Optional[str] = None,
         token: Optional[str] = None,
         agent_name: Optional[str] = None,
-        timeout: int = 5
+        timeout: Optional[int] = None
     ):
         """
         Initialize Agent Mail adapter with health check.
@@ -53,12 +53,16 @@ class AgentMailAdapter:
             url: Server URL (overrides AGENT_MAIL_URL env var)
             token: Bearer token (overrides AGENT_MAIL_TOKEN env var)
             agent_name: Agent identifier (overrides BEADS_AGENT_NAME env var)
-            timeout: HTTP request timeout in seconds
+            timeout: HTTP request timeout in seconds (overrides AGENT_MAIL_TIMEOUT env var)
         """
         self.url = url or os.getenv("AGENT_MAIL_URL", "http://127.0.0.1:8765")
         self.token = token or os.getenv("AGENT_MAIL_TOKEN", "")
         self.agent_name = agent_name or os.getenv("BEADS_AGENT_NAME") or self._get_default_agent_name()
-        self.timeout = int(os.getenv("AGENT_MAIL_TIMEOUT", str(timeout)))
+        # Constructor argument overrides environment variable
+        if timeout is not None:
+            self.timeout = timeout
+        else:
+            self.timeout = int(os.getenv("AGENT_MAIL_TIMEOUT", "5"))
         self.enabled = False
         
         # Remove trailing slash from URL
