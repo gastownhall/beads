@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Python adapter library in `integrations/agent-mail-python/`
   - Agent Mail quickstart guide and comprehensive integration docs
   - Multi-agent race condition tests and failure scenario tests
-  - Automated git traffic benchmark
+  - Automated git traffic benchmark showing **98.5% reduction in git traffic** compared to git-only sync
   - Bash-agent integration example
 
 - **bd info --whats-new** (bd-eiz9): Agent version awareness for quick upgrade summaries

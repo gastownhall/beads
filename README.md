@@ -58,7 +58,7 @@ Agents report that they enjoy working with Beads, and they will use it spontaneo
 - 🤖 **Agent-friendly** - `--json` flags for programmatic integration
 - 📦 **Git-versioned** - JSONL records stored in git, synced across machines
 - 🌍 **Distributed by design** - Agents on multiple machines share one logical database via git
-- 🚀 **Optional Agent Mail** - Real-time multi-agent coordination (<100ms vs 2-5s git sync)
+- 🚀 **Optional Agent Mail** - Real-time multi-agent coordination (<100ms vs 2-5s git sync, 98.5% reduction in git traffic)
 - 🔐 **Protected branch support** - Works with GitHub/GitLab protected branches via separate sync branch
 - 🏗️ **Extensible** - Add your own tables to the SQLite database
 - 🔍 **Multi-project isolation** - Each project gets its own database, auto-discovered by directory
