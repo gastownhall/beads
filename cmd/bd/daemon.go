@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -181,6 +182,42 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
 
+	// Top-level panic recovery to ensure clean shutdown and diagnostics
+	defer func() {
+		if r := recover(); r != nil {
+			log.log("PANIC: daemon crashed: %v", r)
+			
+			// Capture stack trace
+			stackBuf := make([]byte, 4096)
+			stackSize := runtime.Stack(stackBuf, false)
+			stackTrace := string(stackBuf[:stackSize])
+			log.log("Stack trace:\n%s", stackTrace)
+			
+			// Write crash report to daemon-error file for user visibility
+			var beadsDir string
+			if !global && dbPath != "" {
+				beadsDir = filepath.Dir(dbPath)
+			} else if foundDB := beads.FindDatabasePath(); foundDB != "" {
+				beadsDir = filepath.Dir(foundDB)
+			}
+			
+			if beadsDir != "" {
+				errFile := filepath.Join(beadsDir, "daemon-error")
+				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
+					time.Now().Format(time.RFC3339), r, stackTrace)
+				// nolint:gosec // G306: Error file needs to be readable for debugging
+				if err := os.WriteFile(errFile, []byte(crashReport), 0644); err != nil {
+					log.log("Warning: could not write crash report: %v", err)
+				}
+			}
+			
+			// Clean up PID file
+			_ = os.Remove(pidFile)
+			
+			log.log("Daemon terminated after panic")
+		}
+	}()
+
 	// Determine database path first (needed for lock file metadata)
 	daemonDBPath := ""
 	if !global {
@@ -191,14 +228,14 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			} else {
 				log.log("Error: no beads database found")
 				log.log("Hint: run 'bd init' to create a database or set BEADS_DB environment variable")
-				os.Exit(1)
+				return // Use return instead of os.Exit to allow defers to run
 			}
 		}
 	}
 
 	lock, err := setupDaemonLock(pidFile, daemonDBPath, log)
 	if err != nil {
-		os.Exit(1)
+		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = lock.Close() }()
 	defer func() { _ = os.Remove(pidFile) }()
@@ -241,7 +278,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 				log.log("Warning: could not write daemon-error file: %v", err)
 			}
 
-			os.Exit(1)
+			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
 
@@ -252,7 +289,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		log.log("Expected: %s", beads.CanonicalDatabaseName)
 		log.log("")
 		log.log("Run 'bd init' to migrate to canonical name")
-		os.Exit(1)
+		return // Use return instead of os.Exit to allow defers to run
 	}
 
 	log.log("Using database: %s", daemonDBPath)
@@ -266,7 +303,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	store, err := sqlite.New(daemonDBPath)
 	if err != nil {
 		log.log("Error: cannot open database: %v", err)
-		os.Exit(1)
+		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
 	log.log("Database opened: %s", daemonDBPath)
@@ -275,7 +312,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	hydrateCtx := context.Background()
 	if results, err := store.HydrateFromMultiRepo(hydrateCtx); err != nil {
 		log.log("Error: multi-repo hydration failed: %v", err)
-		os.Exit(1)
+		return // Use return instead of os.Exit to allow defers to run
 	} else if results != nil {
 		log.log("Multi-repo hydration complete:")
 		for repo, count := range results {
@@ -287,7 +324,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	if err := validateDatabaseFingerprint(store, &log); err != nil {
 		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
 			log.log("Error: %v", err)
-			os.Exit(1)
+			return // Use return instead of os.Exit to allow defers to run
 		}
 		log.log("Warning: repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")
 	}
@@ -297,7 +334,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	dbVersion, err := store.GetMetadata(versionCtx, "bd_version")
 	if err != nil && err.Error() != "metadata key not found: bd_version" {
 		log.log("Error: failed to read database version: %v", err)
-		os.Exit(1)
+		return // Use return instead of os.Exit to allow defers to run
 	}
 
 	if dbVersion != "" && dbVersion != Version {
@@ -313,7 +350,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 
 			// Allow override via environment variable for emergencies
 			if os.Getenv("BEADS_IGNORE_VERSION_MISMATCH") != "1" {
-				os.Exit(1)
+				return // Use return instead of os.Exit to allow defers to run
 			}
 			log.log("Warning: Proceeding despite version update failure (BEADS_IGNORE_VERSION_MISMATCH=1)")
 		} else {
@@ -324,7 +361,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		log.log("Warning: Database missing version metadata, setting to %s", Version)
 		if err := store.SetMetadata(versionCtx, "bd_version", Version); err != nil {
 			log.log("Error: failed to set database version: %v", err)
-			os.Exit(1)
+			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
 

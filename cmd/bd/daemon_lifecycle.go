@@ -334,13 +334,28 @@ func stopDaemon(pidFile string) {
 		fmt.Println("Daemon stopped")
 		return
 	}
+	
+	// Determine if this is global or local daemon
+	isGlobal := strings.Contains(pidFile, filepath.Join(".beads", "daemon.lock"))
+	socketPath := getSocketPathForPID(pidFile, isGlobal)
+	
 	if err := process.Kill(); err != nil {
 		// Ignore "process already finished" errors
 		if !strings.Contains(err.Error(), "process already finished") {
 			fmt.Fprintf(os.Stderr, "Error killing process: %v\n", err)
 		}
 	}
+	
+	// Clean up stale artifacts after forced kill
 	_ = os.Remove(pidFile)
+	
+	// Also remove socket file if it exists
+	if _, err := os.Stat(socketPath); err == nil {
+		if err := os.Remove(socketPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove stale socket: %v\n", err)
+		}
+	}
+	
 	fmt.Println("Daemon killed")
 }
 
