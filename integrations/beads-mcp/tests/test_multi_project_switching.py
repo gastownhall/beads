@@ -430,16 +430,18 @@ class TestEdgeCases:
     async def test_no_workspace_raises_error(self):
         """Test calling without workspace raises helpful error."""
         import os
+        from beads_mcp import tools
         
-        # Clear env
+        # Clear context and env
+        tools.current_workspace.set(None)
         os.environ.pop("BEADS_WORKING_DIR", None)
         
-        # No ContextVar set, no env var
+        # No ContextVar set, no env var, and auto-detect fails
         with pytest.raises(Exception) as exc_info:
-            with patch("beads_mcp.tools.create_bd_client") as mock_create:
+            with patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None):
                 await beads_ready_work()
         
-        assert "No workspace set" in str(exc_info.value)
+        assert "No beads workspace found" in str(exc_info.value)
     
     def test_canonicalize_path_cached(self, temp_projects):
         """Test path canonicalization is cached for performance."""

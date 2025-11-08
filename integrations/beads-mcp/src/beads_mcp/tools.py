@@ -63,6 +63,50 @@ def _register_client_for_cleanup(client: BdClientBase) -> None:
         pass
 
 
+def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
+    """Walk up directory tree looking for .beads/*.db (matches Go CLI behavior).
+    
+    Args:
+        start_dir: Starting directory (default: current working directory)
+        
+    Returns:
+        Absolute path to workspace root containing .beads/*.db, or None if not found
+    """
+    import glob
+    
+    try:
+        current = os.path.abspath(start_dir or os.getcwd())
+        
+        # Resolve symlinks like Go CLI does
+        try:
+            current = os.path.realpath(current)
+        except Exception:
+            pass
+        
+        # Walk up directory tree
+        while True:
+            beads_dir = os.path.join(current, ".beads")
+            if os.path.isdir(beads_dir):
+                # Find any .db file in .beads/ (excluding backups)
+                db_files = glob.glob(os.path.join(beads_dir, "*.db"))
+                valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
+                
+                if valid_dbs:
+                    # Return workspace root (parent of .beads), not the db path
+                    return current
+            
+            parent = os.path.dirname(current)
+            if parent == current:  # Reached filesystem root
+                break
+            current = parent
+        
+        return None
+        
+    except Exception as e:
+        logger.debug(f"Failed to search for .beads in tree: {e}")
+        return None
+
+
 def _resolve_workspace_root(path: str) -> str:
     """Resolve workspace root to git repo root if inside a git repo.
     
@@ -181,8 +225,11 @@ async def _get_client() -> BdClientBase:
     """Get a BdClient instance for the current workspace.
     
     Uses connection pool to manage per-project daemon sockets.
-    Workspace is determined by current_workspace ContextVar or BEADS_WORKING_DIR env.
-
+    Workspace is auto-detected using the same logic as CLI:
+    1. current_workspace ContextVar (from workspace_root parameter)
+    2. BEADS_WORKING_DIR environment variable
+    3. Walk up from CWD looking for .beads/*.db
+    
     Performs health check before returning cached client.
     On failure, drops from pool and attempts reconnection with exponential backoff.
     
@@ -193,13 +240,23 @@ async def _get_client() -> BdClientBase:
         Configured BdClientBase instance for the current workspace
 
     Raises:
-        BdError: If no workspace is set, or bd is not installed, or version is incompatible
+        BdError: If no workspace found, or bd is not installed, or version is incompatible
     """
-    # Determine workspace from ContextVar or environment
+    # Determine workspace using standard search order (matches Go CLI)
     workspace = current_workspace.get() or os.environ.get("BEADS_WORKING_DIR")
+    
+    # Auto-detect from CWD if not explicitly set (NEW!)
+    if not workspace:
+        workspace = _find_beads_db_in_tree()
+        if workspace:
+            logger.debug(f"Auto-detected workspace from CWD: {workspace}")
+    
     if not workspace:
         raise BdError(
-            "No workspace set. Either provide workspace_root parameter or call set_context() first."
+            "No beads workspace found. Either:\n"
+            "  1. Call set_context(workspace_root=\"/path/to/project\"), OR\n"
+            "  2. Run from a directory containing .beads/, OR\n"
+            "  3. Set BEADS_WORKING_DIR environment variable"
         )
     
     # Canonicalize path to handle symlinks and deduplicate connections

@@ -299,5 +299,7 @@ async def test_get_client_no_workspace_error():
     tools.current_workspace.set(None)
     
     with patch.dict('os.environ', {}, clear=True):
-        with pytest.raises(BdError, match="No workspace set"):
-            await _get_client()
+        # Mock auto-detection to fail
+        with patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None):
+            with pytest.raises(BdError, match="No beads workspace found"):
+                await _get_client()
