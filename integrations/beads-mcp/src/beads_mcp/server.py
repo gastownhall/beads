@@ -19,16 +19,19 @@ from beads_mcp.tools import (
     beads_blocked,
     beads_close_issue,
     beads_create_issue,
+    beads_detect_pollution,
     beads_get_schema_info,
     beads_init,
     beads_inspect_migration,
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
+    beads_repair_deps,
     beads_reopen_issue,
     beads_show_issue,
     beads_stats,
     beads_update_issue,
+    beads_validate,
     current_workspace,  # ContextVar for per-request workspace routing
 )
 
@@ -600,6 +603,53 @@ async def get_schema_info(workspace_root: str | None = None) -> dict:
     Useful for verifying database state before migrations.
     """
     return await beads_get_schema_info()
+
+
+@mcp.tool(
+    name="repair_deps",
+    description="Find and optionally fix orphaned dependency references.",
+)
+@with_workspace
+async def repair_deps(fix: bool = False, workspace_root: str | None = None) -> dict:
+    """Find and optionally fix orphaned dependency references.
+    
+    Scans all issues for dependencies pointing to non-existent issues.
+    Returns orphaned dependencies and optionally removes them with fix=True.
+    """
+    return await beads_repair_deps(fix=fix)
+
+
+@mcp.tool(
+    name="detect_pollution",
+    description="Detect test issues that leaked into production database.",
+)
+@with_workspace
+async def detect_pollution(clean: bool = False, workspace_root: str | None = None) -> dict:
+    """Detect test issues that leaked into production database.
+    
+    Detects test issues using pattern matching (titles starting with 'test', etc.).
+    Returns detected test issues and optionally deletes them with clean=True.
+    """
+    return await beads_detect_pollution(clean=clean)
+
+
+@mcp.tool(
+    name="validate",
+    description="Run comprehensive database health checks.",
+)
+@with_workspace
+async def validate(
+    checks: str | None = None,
+    fix_all: bool = False,
+    workspace_root: str | None = None,
+) -> dict:
+    """Run comprehensive database health checks.
+    
+    Available checks: orphans, duplicates, pollution, conflicts.
+    If checks is None, runs all checks.
+    Returns validation results for each check.
+    """
+    return await beads_validate(checks=checks, fix_all=fix_all)
 
 
 async def async_main() -> None:

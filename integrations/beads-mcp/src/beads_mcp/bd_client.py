@@ -139,6 +139,43 @@ class BdClientBase(ABC):
         """Get current database schema for inspection."""
         pass
 
+    @abstractmethod
+    async def repair_deps(self, fix: bool = False) -> dict:
+        """Find and optionally fix orphaned dependency references.
+        
+        Args:
+            fix: If True, automatically remove orphaned dependencies
+            
+        Returns:
+            Dict with orphans_found, orphans list, and fixed count if fix=True
+        """
+        pass
+
+    @abstractmethod
+    async def detect_pollution(self, clean: bool = False) -> dict:
+        """Detect test issues that leaked into production database.
+        
+        Args:
+            clean: If True, delete detected test issues
+            
+        Returns:
+            Dict with detected test issues and deleted count if clean=True
+        """
+        pass
+
+    @abstractmethod
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+        """Run database validation checks.
+        
+        Args:
+            checks: Comma-separated list of checks (orphans,duplicates,pollution,conflicts)
+            fix_all: If True, auto-fix all fixable issues
+            
+        Returns:
+            Dict with validation results for each check
+        """
+        pass
+
 
 class BdCliClient(BdClientBase):
     """Client for calling bd CLI commands and parsing JSON output."""
@@ -621,6 +658,63 @@ class BdCliClient(BdClientBase):
         data = await self._run_command("info", "--schema")
         if not isinstance(data, dict):
             raise BdCommandError("Invalid response for get_schema_info")
+        return data
+
+    async def repair_deps(self, fix: bool = False) -> dict:
+        """Find and optionally fix orphaned dependency references.
+
+        Args:
+            fix: If True, automatically remove orphaned dependencies
+
+        Returns:
+            Dict with orphans_found, orphans list, and fixed count if fix=True
+        """
+        args = ["repair-deps"]
+        if fix:
+            args.append("--fix")
+
+        data = await self._run_command(*args)
+        if not isinstance(data, dict):
+            raise BdCommandError("Invalid response for repair-deps")
+        return data
+
+    async def detect_pollution(self, clean: bool = False) -> dict:
+        """Detect test issues that leaked into production database.
+
+        Args:
+            clean: If True, delete detected test issues
+
+        Returns:
+            Dict with detected test issues and deleted count if clean=True
+        """
+        args = ["detect-pollution"]
+        if clean:
+            args.extend(["--clean", "--yes"])
+
+        data = await self._run_command(*args)
+        if not isinstance(data, dict):
+            raise BdCommandError("Invalid response for detect-pollution")
+        return data
+
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+        """Run database validation checks.
+
+        Args:
+            checks: Comma-separated list of checks (orphans,duplicates,pollution,conflicts)
+            fix_all: If True, auto-fix all fixable issues
+
+        Returns:
+            Dict with validation results for each check
+        """
+        args = ["validate"]
+        if checks:
+            args.extend(["--checks", checks])
+        if fix_all:
+            args.append("--fix-all")
+
+        data = await self._run_command(*args)
+        if not isinstance(data, dict):
+            raise BdCommandError("Invalid response for validate")
         return data
 
     async def init(self, params: InitParams | None = None) -> str:

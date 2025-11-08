@@ -452,6 +452,49 @@ class BdDaemonClient(BdClientBase):
         """
         raise NotImplementedError("get_schema_info not supported via daemon - use CLI client")
 
+    async def repair_deps(self, fix: bool = False) -> dict:
+        """Find and optionally fix orphaned dependency references.
+
+        Args:
+            fix: If True, automatically remove orphaned dependencies
+
+        Returns:
+            Dict with orphans_found, orphans list, and fixed count if fix=True
+
+        Note:
+            This falls back to CLI since repair operations are rare
+        """
+        raise NotImplementedError("repair_deps not supported via daemon - use CLI client")
+
+    async def detect_pollution(self, clean: bool = False) -> dict:
+        """Detect test issues that leaked into production database.
+
+        Args:
+            clean: If True, delete detected test issues
+
+        Returns:
+            Dict with detected test issues and deleted count if clean=True
+
+        Note:
+            This falls back to CLI since pollution detection is a rare operation
+        """
+        raise NotImplementedError("detect_pollution not supported via daemon - use CLI client")
+
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+        """Run database validation checks.
+
+        Args:
+            checks: Comma-separated list of checks (orphans,duplicates,pollution,conflicts)
+            fix_all: If True, auto-fix all fixable issues
+
+        Returns:
+            Dict with validation results for each check
+
+        Note:
+            This falls back to CLI since validation is a rare operation
+        """
+        raise NotImplementedError("validate not supported via daemon - use CLI client")
+
     async def add_dependency(self, params: AddDependencyParams) -> None:
         """Add a dependency between issues.
 

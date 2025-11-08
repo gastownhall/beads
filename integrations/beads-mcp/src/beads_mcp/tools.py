@@ -484,6 +484,60 @@ async def beads_get_schema_info() -> dict:
     return await client.get_schema_info()
 
 
+async def beads_repair_deps(
+    fix: Annotated[bool, "If True, automatically remove orphaned dependencies"] = False,
+) -> dict:
+    """Find and optionally fix orphaned dependency references.
+    
+    Scans all issues for dependencies pointing to non-existent issues.
+    Returns orphaned dependencies and optionally removes them with fix=True.
+    
+    Returns dict with:
+    - orphans_found: number of orphaned dependencies
+    - orphans: list of orphaned dependency details
+    - fixed: number of orphans fixed (if fix=True)
+    """
+    client = await _get_client()
+    return await client.repair_deps(fix=fix)
+
+
+async def beads_detect_pollution(
+    clean: Annotated[bool, "If True, delete detected test issues"] = False,
+) -> dict:
+    """Detect test issues that leaked into production database.
+    
+    Detects test issues using pattern matching:
+    - Titles starting with 'test', 'benchmark', 'sample', 'tmp', 'temp'
+    - Sequential numbering (test-1, test-2, ...)
+    - Generic descriptions or no description
+    - Created in rapid succession
+    
+    Returns dict with detected test issues and deleted count if clean=True.
+    """
+    client = await _get_client()
+    return await client.detect_pollution(clean=clean)
+
+
+async def beads_validate(
+    checks: Annotated[str | None, "Comma-separated list of checks (orphans,duplicates,pollution,conflicts)"] = None,
+    fix_all: Annotated[bool, "If True, auto-fix all fixable issues"] = False,
+) -> dict:
+    """Run comprehensive database health checks.
+    
+    Available checks:
+    - orphans: Orphaned dependencies (references to deleted issues)
+    - duplicates: Duplicate issues (identical content)
+    - pollution: Test pollution (leaked test issues)
+    - conflicts: Git merge conflicts in JSONL
+    
+    If checks is None, runs all checks.
+    
+    Returns dict with validation results for each check.
+    """
+    client = await _get_client()
+    return await client.validate(checks=checks, fix_all=fix_all)
+
+
 async def beads_init(
     prefix: Annotated[str | None, "Issue prefix (e.g., 'myproject' for myproject-1, myproject-2)"] = None,
 ) -> str:
