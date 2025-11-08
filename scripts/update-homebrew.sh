@@ -29,12 +29,14 @@ Examples:
   TAP_DIR=~/homebrew-beads $0 v0.9.3
 
 This script:
-1. Fetches the tarball SHA256 from GitHub
-2. Clones/updates the homebrew-beads tap repository
-3. Updates the formula with new version and SHA256
-4. Commits and pushes the changes
+1. Waits for GitHub Actions release build to complete (~5 minutes)
+2. Fetches checksums for all platform-specific release artifacts
+3. Clones/updates the homebrew-beads tap repository
+4. Updates the formula with new version and all platform SHA256s
+5. Commits and pushes the changes
 
 IMPORTANT: Run this AFTER pushing the git tag to GitHub.
+The script will automatically wait for GitHub Actions to finish building.
 EOF
     exit 1
 }
@@ -50,34 +52,68 @@ VERSION="${VERSION#v}"
 
 echo -e "${GREEN}=== Homebrew Formula Update for beads v${VERSION} ===${NC}\n"
 
-# Step 1: Fetch SHA256
-echo -e "${YELLOW}Step 1: Fetching tarball SHA256...${NC}"
-TARBALL_URL="https://github.com/steveyegge/beads/archive/refs/tags/v${VERSION}.tar.gz"
-echo "URL: $TARBALL_URL"
+# Step 1: Wait for GitHub Actions and fetch release checksums
+echo -e "${YELLOW}Step 1: Waiting for GitHub Actions release to complete...${NC}"
+echo "This typically takes ~5 minutes. Checking every 30 seconds..."
+echo ""
 
-# Retry logic for SHA256 fetch (GitHub might need a few seconds to make tarball available)
-MAX_RETRIES=5
-RETRY_DELAY=3
-SHA256=""
+CHECKSUMS_URL="https://github.com/steveyegge/beads/releases/download/v${VERSION}/checksums.txt"
+MAX_RETRIES=15  # 15 attempts * 30s = 7.5 minutes max wait
+RETRY_DELAY=30
+CHECKSUMS=""
 
 for i in $(seq 1 $MAX_RETRIES); do
-    if SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1); then
-        if [ -n "$SHA256" ] && [ "${#SHA256}" -eq 64 ]; then
-            echo -e "${GREEN}✓ SHA256: $SHA256${NC}\n"
+    echo -n "Attempt $i/$MAX_RETRIES: Checking for release artifacts... "
+    
+    if CHECKSUMS=$(curl -sL "$CHECKSUMS_URL" 2>/dev/null); then
+        if echo "$CHECKSUMS" | grep -q "darwin_arm64"; then
+            echo -e "${GREEN}✓ Found!${NC}"
             break
         fi
     fi
     
     if [ $i -lt $MAX_RETRIES ]; then
-        echo -e "${YELLOW}Tarball not ready, retrying in ${RETRY_DELAY}s... (attempt $i/$MAX_RETRIES)${NC}"
+        echo -e "${YELLOW}Not ready yet, waiting ${RETRY_DELAY}s...${NC}"
         sleep $RETRY_DELAY
     else
-        echo -e "${RED}✗ Failed to fetch tarball after $MAX_RETRIES attempts${NC}"
-        echo "The git tag might not be pushed yet, or GitHub needs more time to generate the tarball."
-        echo "Try: git push origin v${VERSION}"
+        echo -e "${RED}✗ Failed to fetch checksums after waiting $(($MAX_RETRIES * $RETRY_DELAY))s${NC}"
+        echo ""
+        echo "Possible issues:"
+        echo "  • GitHub Actions release workflow is still running"
+        echo "  • Git tag was not pushed: git push origin v${VERSION}"
+        echo "  • Release workflow failed (check: https://github.com/steveyegge/beads/actions)"
+        echo ""
         exit 1
     fi
 done
+
+echo ""
+echo -e "${GREEN}✓ Release artifacts ready${NC}"
+echo ""
+echo -e "${YELLOW}Extracting platform SHA256s...${NC}"
+
+# Extract SHA256s for each platform
+SHA256_DARWIN_ARM64=$(echo "$CHECKSUMS" | grep "darwin_arm64.tar.gz" | cut -d' ' -f1)
+SHA256_DARWIN_AMD64=$(echo "$CHECKSUMS" | grep "darwin_amd64.tar.gz" | cut -d' ' -f1)
+SHA256_LINUX_AMD64=$(echo "$CHECKSUMS" | grep "linux_amd64.tar.gz" | cut -d' ' -f1)
+SHA256_LINUX_ARM64=$(echo "$CHECKSUMS" | grep "linux_arm64.tar.gz" | cut -d' ' -f1)
+
+# Validate we got all required checksums
+if [ -z "$SHA256_DARWIN_ARM64" ] || [ -z "$SHA256_DARWIN_AMD64" ] || [ -z "$SHA256_LINUX_AMD64" ]; then
+    echo -e "${RED}✗ Failed to extract all required SHA256s${NC}"
+    echo "darwin_arm64: $SHA256_DARWIN_ARM64"
+    echo "darwin_amd64: $SHA256_DARWIN_AMD64"
+    echo "linux_amd64: $SHA256_LINUX_AMD64"
+    exit 1
+fi
+
+echo "  darwin_arm64: $SHA256_DARWIN_ARM64"
+echo "  darwin_amd64: $SHA256_DARWIN_AMD64"
+echo "  linux_amd64:  $SHA256_LINUX_AMD64"
+if [ -n "$SHA256_LINUX_ARM64" ]; then
+    echo "  linux_arm64:  $SHA256_LINUX_ARM64"
+fi
+echo ""
 
 # Step 2: Clone/update tap repository
 echo -e "${YELLOW}Step 2: Preparing tap repository...${NC}"
@@ -103,13 +139,41 @@ fi
 # Create backup
 cp "$FORMULA_FILE" "${FORMULA_FILE}.bak"
 
-# Update version and SHA256 in formula
-# The formula has lines like:
-#   url "https://github.com/steveyegge/beads/archive/refs/tags/v0.9.2.tar.gz"
-#   sha256 "abc123..."
+# Update version number (line 4)
+sed -i.tmp "s/version \"[0-9.]*\"/version \"${VERSION}\"/" "$FORMULA_FILE"
 
-sed -i.tmp "s|archive/refs/tags/v[0-9.]*\.tar\.gz|archive/refs/tags/v${VERSION}.tar.gz|" "$FORMULA_FILE"
-sed -i.tmp "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA256}\"|" "$FORMULA_FILE"
+# Update SHA256s - need to handle the multi-platform structure
+# We'll use awk for more precise control since the formula has multiple sha256 lines
+
+awk -v version="$VERSION" \
+    -v sha_darwin_arm64="$SHA256_DARWIN_ARM64" \
+    -v sha_darwin_amd64="$SHA256_DARWIN_AMD64" \
+    -v sha_linux_amd64="$SHA256_LINUX_AMD64" \
+    -v sha_linux_arm64="$SHA256_LINUX_ARM64" '
+BEGIN { in_macos_arm=0; in_macos_amd=0; in_linux_arm=0; in_linux_amd=0 }
+/on_macos do/ { in_macos=1; next }
+/on_linux do/ { in_macos=0; in_linux=1; next }
+/if Hardware::CPU.arm\?/ { 
+    if (in_macos) in_macos_arm=1
+    if (in_linux) in_linux_arm=1
+    next
+}
+/else/ {
+    if (in_macos) { in_macos_arm=0; in_macos_amd=1 }
+    if (in_linux) { in_linux_arm=0; in_linux_amd=1 }
+    next
+}
+/end/ { in_macos_arm=0; in_macos_amd=0; in_linux_arm=0; in_linux_amd=0; in_macos=0; in_linux=0 }
+/sha256/ {
+    if (in_macos_arm) { print "      sha256 \"" sha_darwin_arm64 "\""; next }
+    if (in_macos_amd) { print "      sha256 \"" sha_darwin_amd64 "\""; next }
+    if (in_linux_arm) { print "      sha256 \"" sha_linux_arm64 "\""; next }
+    if (in_linux_amd) { print "      sha256 \"" sha_linux_amd64 "\""; next }
+}
+{ print }
+' "$FORMULA_FILE" > "${FORMULA_FILE}.new"
+
+mv "${FORMULA_FILE}.new" "$FORMULA_FILE"
 rm -f "${FORMULA_FILE}.tmp"
 
 # Show diff
