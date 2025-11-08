@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/debug"
@@ -301,6 +302,15 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			flushToJSONL()
 		}
 
+		// Update database mtime to reflect it's now in sync with JSONL
+		// This prevents bd doctor from incorrectly warning that JSONL is newer
+		// Only touch if actual changes were made (not dry-run, not unchanged-only)
+		if result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 {
+			if err := touchDatabaseFile(dbPath, input); err != nil {
+				debug.Logf("Warning: failed to update database mtime: %v", err)
+			}
+		}
+
 		// Print summary
 		fmt.Fprintf(os.Stderr, "Import complete: %d created, %d updated", result.Created, result.Updated)
 		if result.Unchanged > 0 {
@@ -362,6 +372,33 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			fmt.Fprintf(os.Stderr, "Run 'bd duplicates --auto-merge' to merge all duplicates.\n")
 		}
 	},
+}
+
+// touchDatabaseFile updates the modification time of the database file.
+// This is used after import to ensure the database appears "in sync" with JSONL,
+// preventing bd doctor from incorrectly warning that JSONL is newer.
+//
+// In SQLite WAL mode, writes go to beads.db-wal and beads.db mtime may not update
+// until a checkpoint. Since bd doctor compares JSONL mtime to beads.db mtime only,
+// we need to explicitly touch the DB file after import.
+//
+// The function sets DB mtime to max(JSONL mtime, now) + 1ns to handle clock skew.
+// If jsonlPath is empty or can't be read, falls back to time.Now().
+func touchDatabaseFile(dbPath, jsonlPath string) error {
+	targetTime := time.Now()
+	
+	// If we have the JSONL path, use max(JSONL mtime, now) to handle clock skew
+	if jsonlPath != "" {
+		if info, err := os.Stat(jsonlPath); err == nil {
+			jsonlTime := info.ModTime()
+			if jsonlTime.After(targetTime) {
+				targetTime = jsonlTime.Add(time.Nanosecond)
+			}
+		}
+	}
+	
+	// Best-effort touch - don't fail import if this doesn't work
+	return os.Chtimes(dbPath, targetTime, targetTime)
 }
 
 // checkUncommittedChanges detects if the JSONL file has uncommitted changes

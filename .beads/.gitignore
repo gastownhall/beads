@@ -18,7 +18,3 @@ bd.db
 !*.jsonl
 !metadata.json
 !config.json
-
-# Exclude merge artifacts (temporary files from 3-way merge)
-beads.base.jsonl
-beads.left.jsonl
