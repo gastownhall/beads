@@ -314,7 +314,7 @@ func checkIDFormat(path string) doctorCheck {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		return doctorCheck{
 			Name:    "Issue IDs",
@@ -400,7 +400,7 @@ func checkCLIVersion() doctorCheck {
 }
 
 func getDatabaseVersionFromPath(dbPath string) string {
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		return "unknown"
 	}
