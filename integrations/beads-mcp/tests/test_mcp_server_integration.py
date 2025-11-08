@@ -348,8 +348,8 @@ async def test_ready_work_tool(mcp_client):
     await mcp_client.call_tool(
         "dep",
         {
-            "from_id": blocked_issue["id"],
-            "to_id": blocking_issue["id"],
+            "issue_id": blocked_issue["id"],
+            "depends_on_id": blocking_issue["id"],
             "dep_type": "blocks",
         },
     )
@@ -573,8 +573,8 @@ async def test_blocked_tool(mcp_client):
     await mcp_client.call_tool(
         "dep",
         {
-            "from_id": blocked_issue["id"],
-            "to_id": blocking_issue["id"],
+            "issue_id": blocked_issue["id"],
+            "depends_on_id": blocking_issue["id"],
             "dep_type": "blocks",
         },
     )

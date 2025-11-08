@@ -281,8 +281,8 @@ async def test_ready_work(bd_client):
     # Add blocking dependency
     await bd_client.add_dependency(
         AddDependencyParams(
-            from_id=blocked_issue.id,
-            to_id=blocking_issue.id,
+            issue_id=blocked_issue.id,
+            depends_on_id=blocking_issue.id,
             dep_type="blocks",
         )
     )

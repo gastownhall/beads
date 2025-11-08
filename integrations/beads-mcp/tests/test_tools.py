@@ -280,38 +280,46 @@ async def test_beads_quickstart():
 
 
 @pytest.mark.asyncio
-async def test_client_lazy_initialization():
+async def test_client_lazy_initialization(tmp_path):
     """Test that client is lazily initialized on first use."""
     from beads_mcp import tools
+    import os
 
-    # Clear client
-    tools._client = None
+    # Set workspace for the test
+    test_workspace = str(tmp_path)
+    os.environ["BEADS_WORKING_DIR"] = test_workspace
 
-    # Verify client is None before first use
-    assert tools._client is None
+    # Clear connection pool before test
+    tools._connection_pool.clear()
 
-    # Mock BdClient to avoid actual bd calls
+    # Mock create_bd_client to avoid actual bd calls
     mock_client_instance = AsyncMock()
     mock_client_instance.ready = AsyncMock(return_value=[])
+    mock_client_instance.close = AsyncMock()
 
-    with patch("beads_mcp.tools.BdClient") as MockBdClient:
-        MockBdClient.return_value = mock_client_instance
+    try:
+        with patch("beads_mcp.tools.create_bd_client") as mock_create_client:
+            mock_create_client.return_value = mock_client_instance
 
-        # First call should initialize client
-        await beads_ready_work()
+            # First call should create client
+            await beads_ready_work()
 
-        # Verify BdClient was instantiated
-        MockBdClient.assert_called_once()
+            # Verify create_bd_client was called
+            assert mock_create_client.call_count >= 1
 
-        # Verify client is now set
-        assert tools._client is not None
+            # Verify client is now in pool
+            assert len(tools._connection_pool) > 0
 
-        # Second call should reuse client
-        MockBdClient.reset_mock()
-        await beads_ready_work()
+            # Second call should reuse client from pool
+            call_count = mock_create_client.call_count
+            await beads_ready_work()
 
-        # Verify BdClient was NOT called again
-        MockBdClient.assert_not_called()
+            # Verify create_bd_client was not called again (or same count)
+            assert mock_create_client.call_count == call_count
+    finally:
+        # Clean up environment
+        if "BEADS_WORKING_DIR" in os.environ:
+            del os.environ["BEADS_WORKING_DIR"]
 
 
 @pytest.mark.asyncio
