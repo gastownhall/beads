@@ -17,9 +17,10 @@ import (
 )
 
 var createCmd = &cobra.Command{
-	Use:   "create [title]",
-	Short: "Create a new issue (or multiple issues from markdown file)",
-	Args:  cobra.MinimumNArgs(0), // Changed to allow no args when using -f
+	Use:     "create [title]",
+	Aliases: []string{"new"},
+	Short:   "Create a new issue (or multiple issues from markdown file)",
+	Args:    cobra.MinimumNArgs(0), // Changed to allow no args when using -f
 	Run: func(cmd *cobra.Command, args []string) {
 		file, _ := cmd.Flags().GetString("file")
 		fromTemplate, _ := cmd.Flags().GetString("from-template")
