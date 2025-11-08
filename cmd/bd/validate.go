@@ -1,5 +1,6 @@
 package main
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -324,14 +325,15 @@ func validateGitConflicts(_ context.Context, fix bool) checkResult {
 		result.err = fmt.Errorf("failed to read JSONL: %w", err)
 		return result
 	}
-	// Look for git conflict markers
-	lines := strings.Split(string(data), "\n")
+	// Look for git conflict markers in raw bytes (before JSON decoding)
+	// This prevents false positives when issue content contains these strings
+	lines := bytes.Split(data, []byte("\n"))
 	var conflictLines []int
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "<<<<<<< ") ||
-			trimmed == "=======" ||
-			strings.HasPrefix(trimmed, ">>>>>>> ") {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
+			bytes.Equal(trimmed, []byte("=======")) ||
+			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
 			conflictLines = append(conflictLines, i+1)
 		}
 	}

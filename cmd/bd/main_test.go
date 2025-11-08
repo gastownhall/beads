@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1064,6 +1065,83 @@ func TestAutoImportMergeConflict(t *testing.T) {
 	}
 	if result.Title != "Original issue" {
 		t.Errorf("Expected title 'Original issue' (unchanged), got '%s'", result.Title)
+	}
+}
+
+// TestAutoImportConflictMarkerFalsePositive tests that conflict marker detection
+// doesn't trigger on JSON-encoded conflict markers in issue content (bd-17d5)
+func TestAutoImportConflictMarkerFalsePositive(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-false-positive-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath = filepath.Join(tmpDir, "test.db")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+
+	testStore := newTestStore(t, dbPath)
+
+	store = testStore
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	defer func() {
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+		testStore.Close()
+	}()
+
+	ctx := context.Background()
+
+	// Create a JSONL file with an issue that has conflict markers in the description
+	// The conflict markers are JSON-encoded (as \u003c\u003c\u003c...) which should NOT trigger detection
+	now := time.Now().Format(time.RFC3339Nano)
+	jsonlContent := fmt.Sprintf(`{"id":"test-fp-1","title":"Test false positive","description":"This issue documents git conflict markers:\n\u003c\u003c\u003c\u003c\u003c\u003c\u003c HEAD\n=======\n\u003e\u003e\u003e\u003e\u003e\u003e\u003e branch","status":"open","priority":1,"issue_type":"task","created_at":"%s","updated_at":"%s"}`, now, now)
+	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0644); err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+
+	// Verify the JSONL contains JSON-encoded conflict markers (not literal ones)
+	jsonlData, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to read JSONL: %v", err)
+	}
+	jsonlStr := string(jsonlData)
+	if !strings.Contains(jsonlStr, `\u003c\u003c\u003c`) {
+		t.Logf("JSONL content: %s", jsonlStr)
+		t.Fatalf("Expected JSON-encoded conflict markers in JSONL")
+	}
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	// Run auto-import - should succeed without conflict detection
+	autoImportIfNewer()
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	// Verify NO conflict was detected
+	if strings.Contains(stderrOutput, "conflict") {
+		t.Errorf("False positive: conflict detection triggered on JSON-encoded markers. stderr: %s", stderrOutput)
+	}
+
+	// Verify the issue was successfully imported
+	result, err := testStore.GetIssue(ctx, "test-fp-1")
+	if err != nil {
+		t.Fatalf("Failed to get issue (import failed): %v", err)
+	}
+	expectedDesc := "This issue documents git conflict markers:\n<<<<<<< HEAD\n=======\n>>>>>>> branch"
+	if result.Description != expectedDesc {
+		t.Errorf("Expected description with conflict markers, got: %s", result.Description)
 	}
 }
 

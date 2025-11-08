@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,15 +97,20 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		for scanner.Scan() {
 		lineNum++
-		line := scanner.Text()
+		rawLine := scanner.Bytes()
+		line := string(rawLine)
 
 		// Skip empty lines
 		if line == "" {
 		continue
 		}
 
-		// Detect git conflict markers and attempt automatic 3-way merge
-		if strings.Contains(line, "<<<<<<<") || strings.Contains(line, "=======") || strings.Contains(line, ">>>>>>>") {
+		// Detect git conflict markers in raw bytes (before JSON decoding)
+		// This prevents false positives when issue content contains these strings
+		trimmed := bytes.TrimSpace(rawLine)
+		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) || 
+			bytes.Equal(trimmed, []byte("=======")) || 
+			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
 			fmt.Fprintf(os.Stderr, "Git conflict markers detected in JSONL file (line %d)\n", lineNum)
 			fmt.Fprintf(os.Stderr, "→ Attempting automatic 3-way merge...\n\n")
 
