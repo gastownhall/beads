@@ -13,10 +13,68 @@ import (
 
 const windowsOS = "windows"
 
+// ensureTestMode sets BEADS_TEST_MODE environment variable to prevent production pollution
+func ensureTestMode(t *testing.T) {
+	t.Helper()
+	os.Setenv("BEADS_TEST_MODE", "1")
+	t.Cleanup(func() {
+		os.Unsetenv("BEADS_TEST_MODE")
+	})
+}
+
+// failIfProductionDatabase checks if the database path is in a production directory
+// and fails the test to prevent test pollution (bd-2c5a)
+func failIfProductionDatabase(t *testing.T, dbPath string) {
+	t.Helper()
+	
+	// CRITICAL (bd-2c5a): Set test mode flag
+	ensureTestMode(t)
+	
+	// Get absolute path for comparison
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		t.Logf("Warning: Could not get absolute path for %s: %v", dbPath, err)
+		return
+	}
+	
+	// Check if database is in a directory that contains .git
+	dir := filepath.Dir(absPath)
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			// Found .git directory - check if this is a test or production database
+			beadsPath := filepath.Join(dir, ".beads")
+			if strings.HasPrefix(absPath, beadsPath) {
+				// Database is in .beads/ directory of a git repository
+				// This is ONLY allowed if we're in a temp directory
+				if !strings.Contains(absPath, os.TempDir()) {
+					t.Fatalf("PRODUCTION DATABASE POLLUTION DETECTED (bd-2c5a):\n"+
+						"  Database: %s\n"+
+						"  Git repo: %s\n"+
+						"  Tests MUST use t.TempDir() or tempfile to create isolated databases.\n"+
+						"  This prevents test issues from polluting the production database.",
+						absPath, dir)
+				}
+			}
+			break
+		}
+		
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root
+			break
+		}
+		dir = parent
+	}
+}
+
 // newTestStore creates a SQLite store with issue_prefix configured (bd-166)
 // This prevents "database not initialized" errors in tests
 func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 	t.Helper()
+	
+	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
+	failIfProductionDatabase(t, dbPath)
 	
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatalf("Failed to create database directory: %v", err)
@@ -41,6 +99,9 @@ func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 // newTestStoreWithPrefix creates a SQLite store with custom issue_prefix configured
 func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.SQLiteStorage {
 	t.Helper()
+	
+	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
+	failIfProductionDatabase(t, dbPath)
 	
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatalf("Failed to create database directory: %v", err)

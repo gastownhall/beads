@@ -19,6 +19,11 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
+	// CRITICAL (bd-2c5a): Verify we're using a temp directory to prevent production pollution
+	if !strings.Contains(tmpDir, os.TempDir()) {
+		t.Fatalf("PRODUCTION DATABASE POLLUTION RISK (bd-2c5a): tmpDir must be in system temp directory, got: %s", tmpDir)
+	}
+
 	// Create .beads subdirectory so findDatabaseForCwd finds THIS database, not project's
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
@@ -130,6 +135,11 @@ func setupTestServerIsolated(t *testing.T) (tmpDir, beadsDir, dbPath, socketPath
 	tmpDir, err := os.MkdirTemp("", "bd-rpc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	// CRITICAL (bd-2c5a): Verify we're using a temp directory to prevent production pollution
+	if !strings.Contains(tmpDir, os.TempDir()) {
+		t.Fatalf("PRODUCTION DATABASE POLLUTION RISK (bd-2c5a): tmpDir must be in system temp directory, got: %s", tmpDir)
 	}
 
 	// Create .beads subdirectory so findDatabaseForCwd finds THIS database, not project's
