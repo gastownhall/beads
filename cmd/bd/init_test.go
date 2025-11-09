@@ -788,3 +788,90 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 	})
 }
+
+// TestReadFirstIssueFromJSONL_ValidFile verifies reading first issue from valid JSONL
+func TestReadFirstIssueFromJSONL_ValidFile(t *testing.T) {
+	tempDir := t.TempDir()
+	jsonlPath := filepath.Join(tempDir, "test.jsonl")
+
+	// Create test JSONL file with multiple issues
+	content := `{"id":"bd-1","title":"First Issue","description":"First test"}
+{"id":"bd-2","title":"Second Issue","description":"Second test"}
+{"id":"bd-3","title":"Third Issue","description":"Third test"}
+`
+	if err := os.WriteFile(jsonlPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	issue, err := readFirstIssueFromJSONL(jsonlPath)
+	if err != nil {
+		t.Fatalf("readFirstIssueFromJSONL failed: %v", err)
+	}
+
+	if issue == nil {
+		t.Fatal("Expected non-nil issue, got nil")
+	}
+
+	// Verify we got the FIRST issue
+	if issue.ID != "bd-1" {
+		t.Errorf("Expected ID 'bd-1', got '%s'", issue.ID)
+	}
+	if issue.Title != "First Issue" {
+		t.Errorf("Expected title 'First Issue', got '%s'", issue.Title)
+	}
+	if issue.Description != "First test" {
+		t.Errorf("Expected description 'First test', got '%s'", issue.Description)
+	}
+}
+
+// TestReadFirstIssueFromJSONL_EmptyLines verifies skipping empty lines
+func TestReadFirstIssueFromJSONL_EmptyLines(t *testing.T) {
+	tempDir := t.TempDir()
+	jsonlPath := filepath.Join(tempDir, "test.jsonl")
+
+	// Create JSONL with empty lines before first valid issue
+	content := `
+
+{"id":"bd-1","title":"First Valid Issue"}
+{"id":"bd-2","title":"Second Issue"}
+`
+	if err := os.WriteFile(jsonlPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	issue, err := readFirstIssueFromJSONL(jsonlPath)
+	if err != nil {
+		t.Fatalf("readFirstIssueFromJSONL failed: %v", err)
+	}
+
+	if issue == nil {
+		t.Fatal("Expected non-nil issue, got nil")
+	}
+
+	if issue.ID != "bd-1" {
+		t.Errorf("Expected ID 'bd-1', got '%s'", issue.ID)
+	}
+	if issue.Title != "First Valid Issue" {
+		t.Errorf("Expected title 'First Valid Issue', got '%s'", issue.Title)
+	}
+}
+
+// TestReadFirstIssueFromJSONL_EmptyFile verifies handling of empty file
+func TestReadFirstIssueFromJSONL_EmptyFile(t *testing.T) {
+	tempDir := t.TempDir()
+	jsonlPath := filepath.Join(tempDir, "empty.jsonl")
+
+	// Create empty file
+	if err := os.WriteFile(jsonlPath, []byte(""), 0o600); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	issue, err := readFirstIssueFromJSONL(jsonlPath)
+	if err != nil {
+		t.Fatalf("readFirstIssueFromJSONL should not error on empty file: %v", err)
+	}
+
+	if issue != nil {
+		t.Errorf("Expected nil issue for empty file, got %+v", issue)
+	}
+}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +18,8 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var initCmd = &cobra.Command{
@@ -47,12 +51,24 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			}
 		}
 
-		// Determine prefix with precedence: flag > config > auto-detect
+		// Determine prefix with precedence: flag > config > auto-detect from git > auto-detect from directory name
 		if prefix == "" {
 			// Try to get from config file
 			prefix = config.GetString("issue-prefix")
 		}
 
+		// auto-detect prefix from first issue in JSONL file
+		if prefix == "" {
+			issueCount, jsonlPath := checkGitForIssues()
+			if issueCount > 0 {
+				firstIssue, err := readFirstIssueFromJSONL(jsonlPath)
+				if firstIssue != nil && err == nil {
+					prefix = utils.ExtractIssuePrefix(firstIssue.ID)
+				}
+			}
+		}
+		
+		// auto-detect prefix from directory name
 		if prefix == "" {
 			// Auto-detect from directory name
 			cwd, err := os.Getwd()
@@ -968,4 +984,40 @@ func createConfigYaml(beadsDir string, noDbMode bool) error {
 	}
 	
 	return nil
+}
+
+// readFirstIssueFromJSONL reads the first issue from a JSONL file
+func readFirstIssueFromJSONL(path string) (*types.Issue, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open JSONL file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+
+		// skip empty lines
+		if line == "" {
+			continue
+		}
+
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err == nil {
+			return &issue, nil
+		} else {
+			// Skip malformed lines with warning
+			fmt.Fprintf(os.Stderr, "Warning: skipping malformed JSONL line %d: %v\n", lineNum, err)
+			continue
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading JSONL file: %w", err)
+	}
+
+	return nil, nil
 }
