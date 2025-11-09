@@ -42,9 +42,16 @@ func TestCLI_Create(t *testing.T) {
 	tmpDir := setupCLITestDB(t)
 	out := runBD(t, tmpDir, "create", "Test issue", "-p", "1", "--json")
 	
+	// Extract JSON from output (may contain warnings before JSON)
+	jsonStart := strings.Index(out, "{")
+	if jsonStart == -1 {
+		t.Fatalf("No JSON found in output: %s", out)
+	}
+	jsonOut := out[jsonStart:]
+	
 	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, jsonOut)
 	}
 	if result["title"] != "Test issue" {
 		t.Errorf("Expected title 'Test issue', got: %v", result["title"])
@@ -309,6 +316,93 @@ func init() {
 	cmd := exec.Command("go", "build", "-o", testBD, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic(string(out))
+	}
+}
+
+func TestCLI_Labels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	t.Parallel()
+	tmpDir := setupCLITestDB(t)
+	out := runBD(t, tmpDir, "create", "Label test", "-p", "1", "--json")
+	
+	jsonStart := strings.Index(out, "{")
+	jsonOut := out[jsonStart:]
+	
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(jsonOut), &issue)
+	id := issue["id"].(string)
+	
+	// Add label
+	runBD(t, tmpDir, "label", "add", id, "urgent")
+	
+	// List labels
+	out = runBD(t, tmpDir, "label", "list", id)
+	if !strings.Contains(out, "urgent") {
+		t.Errorf("Expected 'urgent' label, got: %s", out)
+	}
+	
+	// Remove label
+	runBD(t, tmpDir, "label", "remove", id, "urgent")
+	out = runBD(t, tmpDir, "label", "list", id)
+	if strings.Contains(out, "urgent") {
+		t.Errorf("Label should be removed, got: %s", out)
+	}
+}
+
+func TestCLI_PriorityFormats(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	t.Parallel()
+	tmpDir := setupCLITestDB(t)
+	
+	// Test numeric priority
+	out := runBD(t, tmpDir, "create", "Test P0", "-p", "0", "--json")
+	jsonStart := strings.Index(out, "{")
+	jsonOut := out[jsonStart:]
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(jsonOut), &issue)
+	if issue["priority"].(float64) != 0 {
+		t.Errorf("Expected priority 0, got: %v", issue["priority"])
+	}
+	
+	// Test P-format priority
+	out = runBD(t, tmpDir, "create", "Test P3", "-p", "P3", "--json")
+	jsonStart = strings.Index(out, "{")
+	jsonOut = out[jsonStart:]
+	json.Unmarshal([]byte(jsonOut), &issue)
+	if issue["priority"].(float64) != 3 {
+		t.Errorf("Expected priority 3, got: %v", issue["priority"])
+	}
+}
+
+func TestCLI_Reopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	t.Parallel()
+	tmpDir := setupCLITestDB(t)
+	out := runBD(t, tmpDir, "create", "Reopen test", "-p", "1", "--json")
+	
+	jsonStart := strings.Index(out, "{")
+	jsonOut := out[jsonStart:]
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(jsonOut), &issue)
+	id := issue["id"].(string)
+	
+	// Close it
+	runBD(t, tmpDir, "close", id)
+	
+	// Reopen it
+	runBD(t, tmpDir, "reopen", id)
+	
+	out = runBD(t, tmpDir, "show", id, "--json")
+	var reopened []map[string]interface{}
+	json.Unmarshal([]byte(out), &reopened)
+	if reopened[0]["status"] != "open" {
+		t.Errorf("Expected status 'open', got: %v", reopened[0]["status"])
 	}
 }
 
