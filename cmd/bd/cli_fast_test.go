@@ -168,7 +168,7 @@ func TestCLI_Ready(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Ready issue", "-p", "1")
 	out := runBDInProcess(t, tmpDir, "ready")
@@ -181,7 +181,7 @@ func TestCLI_Create(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Test issue", "-p", "1", "--json")
 	
@@ -205,7 +205,7 @@ func TestCLI_List(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "First", "-p", "1")
 	runBDInProcess(t, tmpDir, "create", "Second", "-p", "2")
@@ -224,7 +224,7 @@ func TestCLI_Update(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue to update", "-p", "1", "--json")
 	
@@ -246,7 +246,7 @@ func TestCLI_Close(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue to close", "-p", "1", "--json")
 	
@@ -268,7 +268,7 @@ func TestCLI_DepAdd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	
 	out1 := runBDInProcess(t, tmpDir, "create", "First", "-p", "1", "--json")
@@ -291,7 +291,7 @@ func TestCLI_DepRemove(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	
 	out1 := runBDInProcess(t, tmpDir, "create", "First", "-p", "1", "--json")
@@ -315,7 +315,7 @@ func TestCLI_DepTree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	
 	out1 := runBDInProcess(t, tmpDir, "create", "Parent", "-p", "1", "--json")
@@ -339,7 +339,7 @@ func TestCLI_Blocked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	
 	out1 := runBDInProcess(t, tmpDir, "create", "Blocker", "-p", "1", "--json")
@@ -363,7 +363,7 @@ func TestCLI_Stats(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Issue 1", "-p", "1")
 	runBDInProcess(t, tmpDir, "create", "Issue 2", "-p", "1")
@@ -378,7 +378,7 @@ func TestCLI_Show(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Show test", "-p", "1", "--json")
 	
@@ -396,7 +396,7 @@ func TestCLI_Export(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Export test", "-p", "1")
 	
@@ -412,7 +412,7 @@ func TestCLI_Import(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Import test", "-p", "1")
 	
@@ -489,7 +489,7 @@ func TestCLI_EndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	
 	tmpDir := createTempDirWithCleanup(t)
 	
@@ -526,7 +526,7 @@ func TestCLI_Labels(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Label test", "-p", "1", "--json")
 	
@@ -558,7 +558,7 @@ func TestCLI_PriorityFormats(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	
 	// Test numeric priority
@@ -585,7 +585,7 @@ func TestCLI_Reopen(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
-	t.Parallel()
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Reopen test", "-p", "1", "--json")
 	
