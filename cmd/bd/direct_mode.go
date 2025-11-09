@@ -75,7 +75,6 @@ func ensureStoreActive() error {
 	storeActive = true
 	storeMutex.Unlock()
 
-	checkVersionMismatch()
 	if autoImportEnabled {
 		autoImportIfNewer()
 	}

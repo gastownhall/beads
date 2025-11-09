@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
-	"golang.org/x/mod/semver"
 )
 
 // outputJSON outputs data as pretty-printed JSON
@@ -238,60 +237,7 @@ func autoImportIfNewer() {
 	}
 }
 
-// checkVersionMismatch checks if the binary version matches the database version
-// and warns the user if they're running an outdated binary
-func checkVersionMismatch() {
-	ctx := context.Background()
 
-	// Get the database version (version that last wrote to this DB)
-	dbVersion, err := store.GetMetadata(ctx, "bd_version")
-	if err != nil {
-		// Metadata error - skip check (shouldn't happen, but be defensive)
-		debug.Logf("version check skipped, metadata error: %v", err)
-		return
-	}
-
-	// If no version stored, this is an old database - store current version and continue
-	if dbVersion == "" {
-		_ = store.SetMetadata(ctx, "bd_version", Version)
-		return
-	}
-
-	// Compare versions: warn if binary is older than database
-	if dbVersion != Version {
-		yellow := color.New(color.FgYellow, color.Bold).SprintFunc()
-		fmt.Fprintf(os.Stderr, "\n%s\n", yellow("⚠️  WARNING: Version mismatch detected!"))
-		fmt.Fprintf(os.Stderr, "%s\n", yellow(fmt.Sprintf("⚠️  Your bd binary (v%s) differs from the database version (v%s)", Version, dbVersion)))
-
-		// Use semantic version comparison (requires v prefix)
-		binaryVer := "v" + Version
-		dbVer := "v" + dbVersion
-
-		// semver.Compare returns -1 if binaryVer < dbVer, 0 if equal, 1 if binaryVer > dbVer
-		cmp := semver.Compare(binaryVer, dbVer)
-
-		if cmp < 0 {
-			// Binary is older than database
-			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears to be OUTDATED."))
-			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Some features may not work correctly. Rebuild: go build -o bd ./cmd/bd"))
-		} else if cmp > 0 {
-			// Binary is newer than database
-			// Migrations should have already run in sqlite.New() - verify they succeeded
-			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears NEWER than the database."))
-			
-			// Note: Schema probe already ran in sqlite.New() (bd-ckvw)
-			// If we got here, migrations succeeded. Update version.
-			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Database schema has been verified and upgraded."))
-			
-			// Update stored version to current (only after schema verification passed)
-			_ = store.SetMetadata(ctx, "bd_version", Version)
-		}
-	}
-
-	// Always update the version metadata to track last-used version
-	// This is safe even if versions match (idempotent operation)
-	_ = store.SetMetadata(ctx, "bd_version", Version)
-}
 
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a flush
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a debounced

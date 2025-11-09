@@ -133,7 +133,7 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			}
 
 			// Create metadata.json for --no-db mode
-			cfg := configfile.DefaultConfig(Version)
+			cfg := configfile.DefaultConfig()
 			if err := cfg.Save(localBeadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
 				// Non-fatal - continue anyway
@@ -256,7 +256,7 @@ bd.db
 
 	// Create metadata.json for database metadata
 	if useLocalBeads {
-		cfg := configfile.DefaultConfig(Version)
+		cfg := configfile.DefaultConfig()
 		if err := cfg.Save(localBeadsDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
 			// Non-fatal - continue anyway

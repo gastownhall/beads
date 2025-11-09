@@ -7,14 +7,10 @@ import (
 )
 
 func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig("0.17.5")
+	cfg := DefaultConfig()
 	
 	if cfg.Database != "beads.db" {
 		t.Errorf("Database = %q, want beads.db", cfg.Database)
-	}
-	
-	if cfg.Version != "0.17.5" {
-		t.Errorf("Version = %q, want 0.17.5", cfg.Version)
 	}
 	
 	if cfg.JSONLExport != "beads.jsonl" {
@@ -29,7 +25,7 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 	
-	cfg := DefaultConfig("0.17.5")
+	cfg := DefaultConfig()
 	
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("Save() failed: %v", err)
@@ -46,10 +42,6 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 	
 	if loaded.Database != cfg.Database {
 		t.Errorf("Database = %q, want %q", loaded.Database, cfg.Database)
-	}
-	
-	if loaded.Version != cfg.Version {
-		t.Errorf("Version = %q, want %q", loaded.Version, cfg.Version)
 	}
 	
 	if loaded.JSONLExport != cfg.JSONLExport {

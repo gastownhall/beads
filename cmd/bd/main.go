@@ -410,9 +410,6 @@ var rootCmd = &cobra.Command{
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)
 
-		// Check for version mismatch (warn if binary is older than DB)
-		checkVersionMismatch()
-
 		// Auto-import if JSONL is newer than DB (e.g., after git pull)
 		// Skip for import command itself to avoid recursion
 		// Skip for delete command to prevent resurrection of deleted issues (bd-8kde)

@@ -11,14 +11,12 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database     string `json:"database"`
-	Version      string `json:"version"`
 	JSONLExport  string `json:"jsonl_export,omitempty"`
 }
 
-func DefaultConfig(version string) *Config {
+func DefaultConfig() *Config {
 	return &Config{
 		Database:    "beads.db",
-		Version:     version,
 		JSONLExport: "beads.jsonl",
 	}
 }

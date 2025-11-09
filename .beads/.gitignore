@@ -18,3 +18,7 @@ bd.db
 !*.jsonl
 !metadata.json
 !config.json
+
+# 3-way merge snapshot files (local-only, for deletion tracking)
+beads.base.jsonl
+beads.left.jsonl

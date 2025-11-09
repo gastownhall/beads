@@ -456,11 +456,11 @@ This command:
 			}
 		}
 		
-		// Save updated config with current version (fixes GH #193)
+		// Save updated config
 		if !dryRun {
 			if err := cfg.Save(beadsDir); err != nil {
 				if !jsonOutput {
-					color.Yellow("Warning: failed to update metadata.json version: %v\n", err)
+					color.Yellow("Warning: failed to save metadata.json: %v\n", err)
 				}
 				// Don't fail migration if config save fails
 			}
@@ -704,10 +704,7 @@ func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
 	
 	// Create default if no config exists
 	if cfg == nil {
-		cfg = configfile.DefaultConfig(Version)
-	} else {
-		// Update version field in existing config (fixes GH #193)
-		cfg.Version = Version
+		cfg = configfile.DefaultConfig()
 	}
 	
 	return cfg, nil
