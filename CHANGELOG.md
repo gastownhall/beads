@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2025-11-08
+
+### Fixed
+
+- **#263: Database mtime not updated after import causing false `bd doctor` warnings**
+  - When `bd sync --import-only` completed, SQLite WAL mode wouldn't update the main database file's mtime
+  - This caused `bd doctor` to incorrectly warn "JSONL is newer than database" even when perfectly synced
+  - Now updates database mtime after imports to prevent false warnings
+
+- **#261: SQLite URI missing 'file:' prefix causing version detection failures**
+  - Without 'file:' scheme, SQLite treated `?mode=ro` as part of filename instead of connection option
+  - Created bogus files like `beads.db?mode=ro`
+  - Caused `bd doctor` to incorrectly report "version pre-0.17.5 (very old)" on modern databases
+
+- **bd-17d5: Conflict marker false positives on JSON-encoded content**
+  - Issues containing JSON strings with `<<<<<<<` would trigger false conflict marker detection
+  - Now checks raw bytes before JSON decoding to avoid false positives
+
+- **bd-ckvw: Schema compatibility probe prevents silent migration failures**
+  - Migrations could fail silently, causing cryptic "no such column" and UNIQUE constraint errors later
+  - Now probes schema after migrations, retries once if incomplete, and fails fast with clear error
+  - Daemon refuses RPC if client has newer minor version to prevent schema mismatches
+
+- **#264/#262: Remove stale `--resolve-collisions` references**
+  - Docs/error messages still referenced `--resolve-collisions` flag (removed in v0.20)
+  - Fixed post-merge hook error messages and git-hooks README
+
+### Changed
+
+- **bd-auf1: Auto-cleanup snapshot files after successful merge**
+  - `.beads/` no longer accumulates orphaned `.base`, `.ours`, `.theirs` snapshot files after merges
+
+- **bd-ky74: Optimize CLI tests with in-process testing**
+  - Converted exec.Command() tests to in-process rootCmd.Execute() calls
+  - **Dramatically faster: 10+ minutes → just a few seconds**
+  - Improved test coverage from 20.2% to 23.3%
+
+- **bd-6uix: Message system improvements**
+  - 30s HTTP timeout prevents hangs, full message reading, --importance validation, server-side filtering
+
+- **Remove noisy version field from metadata.json**
+  - Eliminated redundant version mismatch warnings on every bd upgrade
+  - Daemon version checking via RPC is sufficient
+
+### Added
+
+- Go agent example with Agent Mail support
+- Agent Mail multi-workspace deployment guide and scripts
+
 ## [0.23.0] - 2025-11-08
 
 ### Added
