@@ -347,9 +347,24 @@ func gitHasUnmergedPaths() (bool, error) {
 }
 
 // gitHasUpstream checks if the current branch has an upstream configured
+// Uses git config directly for compatibility with Git for Windows
 func gitHasUpstream() bool {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	return cmd.Run() == nil
+	// Get current branch name
+	branchCmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	branchOutput, err := branchCmd.Output()
+	if err != nil {
+		return false
+	}
+	branch := strings.TrimSpace(string(branchOutput))
+	
+	// Check if remote and merge refs are configured
+	remoteCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch))
+	mergeCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.merge", branch))
+	
+	remoteErr := remoteCmd.Run()
+	mergeErr := mergeCmd.Run()
+	
+	return remoteErr == nil && mergeErr == nil
 }
 
 // gitHasChanges checks if the specified file has uncommitted changes
