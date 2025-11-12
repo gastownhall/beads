@@ -127,7 +127,20 @@ For Claude Code users, the beads plugin provides slash commands and MCP tools.
 
 **Prerequisites:**
 1. First, install the bd CLI (see above)
-2. Then install the plugin:
+2. Install `uv` (Python package manager) - required for the MCP server:
+   ```bash
+   # macOS/Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # Or via Homebrew
+   brew install uv
+
+   # Or via pip
+   pip install uv
+   ```
+   After installation, restart your shell or run `source ~/.local/bin/env` to update PATH.
+
+3. Then install the plugin:
 
 ```bash
 # In Claude Code
@@ -233,6 +246,31 @@ sudo mv bd /usr/local/bin/
 ```
 
 If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+
+### Claude Code Plugin: MCP server fails to start
+
+If the Claude Code plugin's MCP server fails immediately after installation, it's likely that `uv` is not installed or not in your PATH.
+
+**Symptoms:**
+- Plugin slash commands work, but MCP tools are unavailable
+- Error logs show `command not found: uv`
+- Server fails silently on startup
+
+**Solution:**
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Restart your shell or update PATH
+source ~/.local/bin/env
+
+# Verify uv is available
+which uv
+
+# Restart Claude Code
+```
+
+See the "Claude Code Plugin" section above for alternative installation methods (Homebrew, pip).
 
 ## Next Steps
 
