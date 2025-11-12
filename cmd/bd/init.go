@@ -13,6 +13,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -175,43 +176,13 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			return
 		}
 
-		// Create .gitignore in .beads directory
+		// Create/update .gitignore in .beads directory (idempotent - always update to latest)
 		gitignorePath := filepath.Join(localBeadsDir, ".gitignore")
-		gitignoreContent := `# SQLite databases
-*.db
-*.db?*
-*.db-journal
-*.db-wal
-*.db-shm
-
-# Daemon runtime files
-daemon.lock
-daemon.log
-daemon.pid
-bd.sock
-
-# Legacy database files
-db.sqlite
-bd.db
-
-# Merge artifacts (temporary files from 3-way merge)
-beads.base.jsonl
-beads.base.meta.json
-beads.left.jsonl
-beads.left.meta.json
-beads.right.jsonl
-beads.right.meta.json
-
-# Keep JSONL exports and config (source of truth for git)
-!issues.jsonl
-!metadata.json
-!config.json
-`
-			if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create .gitignore: %v\n", err)
-				// Non-fatal - continue anyway
-			}
+		if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %v\n", err)
+			// Non-fatal - continue anyway
 		}
+	}
 	
 		// Ensure parent directory exists for the database
 		if err := os.MkdirAll(initDBDir, 0750); err != nil {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -307,6 +308,17 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 	defer func() { _ = store.Close() }()
 	log.log("Database opened: %s", daemonDBPath)
+
+	// Auto-upgrade .beads/.gitignore if outdated
+	gitignoreCheck := doctor.CheckGitignore()
+	if gitignoreCheck.Status == "warning" || gitignoreCheck.Status == "error" {
+		log.log("Upgrading .beads/.gitignore...")
+		if err := doctor.FixGitignore(); err != nil {
+			log.log("Warning: failed to upgrade .gitignore: %v", err)
+		} else {
+			log.log("Successfully upgraded .beads/.gitignore")
+		}
+	}
 
 	// Hydrate from multi-repo if configured
 	hydrateCtx := context.Background()

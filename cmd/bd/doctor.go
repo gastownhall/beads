@@ -44,6 +44,10 @@ type doctorResult struct {
 	CLIVersion string        `json:"cli_version"`
 }
 
+var (
+	doctorFix bool
+)
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor [path]",
 	Short: "Check beads installation health",
@@ -62,11 +66,13 @@ This command checks:
   - File permissions
   - Circular dependencies
   - Git hooks (pre-commit, post-merge, pre-push)
+  - .beads/.gitignore up to date
 
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
-  bd doctor --json       # Machine-readable output`,
+  bd doctor --json       # Machine-readable output
+  bd doctor --fix        # Automatically fix issues`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -86,6 +92,13 @@ Examples:
 		// Run diagnostics
 		result := runDiagnostics(absPath)
 
+		// Apply fixes if requested
+		if doctorFix {
+			applyFixes(result)
+			// Re-run diagnostics to show results
+			result = runDiagnostics(absPath)
+		}
+
 		// Output results
 		if jsonOutput {
 			outputJSON(result)
@@ -100,7 +113,27 @@ Examples:
 	},
 }
 
-func runDiagnostics(path string) doctorResult {
+func init() {
+	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Automatically fix issues where possible")
+}
+
+func applyFixes(result doctorResult) {
+	for _, check := range result.Checks {
+		if check.Status == statusWarning || check.Status == statusError {
+			switch check.Name {
+			case "Gitignore":
+				fmt.Println("Fixing .beads/.gitignore...")
+				if err := doctor.FixGitignore(); err != nil {
+					fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
+				} else {
+					fmt.Println("  ✓ Updated .beads/.gitignore")
+				}
+			}
+		}
+	}
+}
+
+func runDiagnostics(path string) doctorResult{
 	result := doctorResult{
 		Path:       path,
 		CLIVersion: Version,
@@ -201,6 +234,11 @@ func runDiagnostics(path string) doctorResult {
 	legacyDocsCheck := convertDoctorCheck(doctor.CheckLegacyBeadsSlashCommands(path))
 	result.Checks = append(result.Checks, legacyDocsCheck)
 	// Don't fail overall check for legacy docs, just warn
+
+	// Check 13: Gitignore up to date
+	gitignoreCheck := convertDoctorCheck(doctor.CheckGitignore())
+	result.Checks = append(result.Checks, gitignoreCheck)
+	// Don't fail overall check for gitignore, just warn
 
 	return result
 }
