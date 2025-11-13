@@ -66,6 +66,7 @@ type CreateArgs struct {
 	Design             string   `json:"design,omitempty"`
 	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"`
 	Assignee           string   `json:"assignee,omitempty"`
+	ExternalRef        string   `json:"external_ref,omitempty"`  // Link to external issue trackers
 	Labels             []string `json:"labels,omitempty"`
 	Dependencies       []string `json:"dependencies,omitempty"`
 }
@@ -81,6 +82,7 @@ type UpdateArgs struct {
 	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
 	Notes              *string `json:"notes,omitempty"`
 	Assignee           *string `json:"assignee,omitempty"`
+	ExternalRef        *string `json:"external_ref,omitempty"` // Link to external issue trackers
 }
 
 // CloseArgs represents arguments for the close operation

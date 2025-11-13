@@ -710,3 +710,125 @@ func TestCreate_DiscoveredFromInheritsSourceRepo(t *testing.T) {
 	// The logic is implemented in server_issues_epics.go handleCreate
 	// and tested via the cmd/bd test which has direct storage access
 }
+
+func TestRPCCreateWithExternalRef(t *testing.T) {
+	server, client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create issue with external_ref via RPC
+	createArgs := &CreateArgs{
+		Title:       "Test issue with external ref",
+		Description: "Testing external_ref in daemon mode",
+		IssueType:   "bug",
+		Priority:    1,
+		ExternalRef: "github:303",
+	}
+
+	resp, err := client.Create(createArgs)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	var issue types.Issue
+	if err := json.Unmarshal(resp.Data, &issue); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// Verify external_ref was saved
+	if issue.ExternalRef == nil {
+		t.Fatal("Expected ExternalRef to be set, got nil")
+	}
+	if *issue.ExternalRef != "github:303" {
+		t.Errorf("Expected ExternalRef='github:303', got '%s'", *issue.ExternalRef)
+	}
+
+	// Verify via Show operation
+	showArgs := &ShowArgs{ID: issue.ID}
+	resp, err = client.Show(showArgs)
+	if err != nil {
+		t.Fatalf("Show failed: %v", err)
+	}
+
+	var retrieved types.Issue
+	if err := json.Unmarshal(resp.Data, &retrieved); err != nil {
+		t.Fatalf("Failed to unmarshal show response: %v", err)
+	}
+
+	if retrieved.ExternalRef == nil {
+		t.Fatal("Expected retrieved ExternalRef to be set, got nil")
+	}
+	if *retrieved.ExternalRef != "github:303" {
+		t.Errorf("Expected retrieved ExternalRef='github:303', got '%s'", *retrieved.ExternalRef)
+	}
+
+	_ = server // Silence unused warning
+}
+
+func TestRPCUpdateWithExternalRef(t *testing.T) {
+	server, client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create issue without external_ref
+	createArgs := &CreateArgs{
+		Title:       "Test issue for update",
+		Description: "Testing external_ref update in daemon mode",
+		IssueType:   "task",
+		Priority:    2,
+	}
+
+	resp, err := client.Create(createArgs)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	var issue types.Issue
+	if err := json.Unmarshal(resp.Data, &issue); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// Update with external_ref
+	newRef := "jira-ABC-123"
+	updateArgs := &UpdateArgs{
+		ID:          issue.ID,
+		ExternalRef: &newRef,
+	}
+
+	resp, err = client.Update(updateArgs)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	var updated types.Issue
+	if err := json.Unmarshal(resp.Data, &updated); err != nil {
+		t.Fatalf("Failed to unmarshal update response: %v", err)
+	}
+
+	// Verify external_ref was updated
+	if updated.ExternalRef == nil {
+		t.Fatal("Expected ExternalRef to be set after update, got nil")
+	}
+	if *updated.ExternalRef != "jira-ABC-123" {
+		t.Errorf("Expected ExternalRef='jira-ABC-123', got '%s'", *updated.ExternalRef)
+	}
+
+	// Verify via Show operation
+	showArgs := &ShowArgs{ID: issue.ID}
+	resp, err = client.Show(showArgs)
+	if err != nil {
+		t.Fatalf("Show failed: %v", err)
+	}
+
+	var retrieved types.Issue
+	if err := json.Unmarshal(resp.Data, &retrieved); err != nil {
+		t.Fatalf("Failed to unmarshal show response: %v", err)
+	}
+
+	if retrieved.ExternalRef == nil {
+		t.Fatal("Expected retrieved ExternalRef to be set, got nil")
+	}
+	if *retrieved.ExternalRef != "jira-ABC-123" {
+		t.Errorf("Expected retrieved ExternalRef='jira-ABC-123', got '%s'", *retrieved.ExternalRef)
+	}
+
+	_ = server // Silence unused warning
+}

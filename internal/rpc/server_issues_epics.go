@@ -66,6 +66,9 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Assignee != nil {
 		u["assignee"] = *a.Assignee
 	}
+	if a.ExternalRef != nil {
+		u["external_ref"] = *a.ExternalRef
+	}
 	return u
 }
 
@@ -108,7 +111,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		issueID = childID
 	}
 
-	var design, acceptance, assignee *string
+	var design, acceptance, assignee, externalRef *string
 	if createArgs.Design != "" {
 		design = &createArgs.Design
 	}
@@ -117,6 +120,9 @@ func (s *Server) handleCreate(req *Request) Response {
 	}
 	if createArgs.Assignee != "" {
 		assignee = &createArgs.Assignee
+	}
+	if createArgs.ExternalRef != "" {
+		externalRef = &createArgs.ExternalRef
 	}
 
 	issue := &types.Issue{
@@ -128,6 +134,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		Design:             strValue(design),
 		AcceptanceCriteria: strValue(acceptance),
 		Assignee:           strValue(assignee),
+		ExternalRef:        externalRef,
 		Status:             types.StatusOpen,
 	}
 	
