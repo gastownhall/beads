@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -14,6 +15,8 @@ var (
 	Version = "0.23.1"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
+	// Commit is the git revision the binary was built from (optional ldflag)
+	Commit = ""
 )
 
 var versionCmd = &cobra.Command{
@@ -27,13 +30,23 @@ var versionCmd = &cobra.Command{
 			return
 		}
 
+		commit := resolveCommitHash()
+
 		if jsonOutput {
-			outputJSON(map[string]string{
+			result := map[string]string{
 				"version": Version,
 				"build":   Build,
-			})
+			}
+			if commit != "" {
+				result["commit"] = commit
+			}
+			outputJSON(result)
 		} else {
-			fmt.Printf("bd version %s (%s)\n", Version, Build)
+			if commit != "" {
+				fmt.Printf("bd version %s (%s, commit %s)\n", Version, Build, shortCommit(commit))
+			} else {
+				fmt.Printf("bd version %s (%s)\n", Version, Build)
+			}
 		}
 	},
 }
@@ -89,4 +102,27 @@ func showDaemonVersion() {
 func init() {
 	versionCmd.Flags().Bool("daemon", false, "Check daemon version and compatibility")
 	rootCmd.AddCommand(versionCmd)
+}
+
+func resolveCommitHash() string {
+	if Commit != "" {
+		return Commit
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				return setting.Value
+			}
+		}
+	}
+
+	return ""
+}
+
+func shortCommit(hash string) string {
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
 }
