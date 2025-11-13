@@ -229,6 +229,7 @@ var createCmd = &cobra.Command{
 				Design:             design,
 				AcceptanceCriteria: acceptance,
 				Assignee:           assignee,
+				ExternalRef:        externalRef,
 				Labels:             labels,
 				Dependencies:       deps,
 			}
