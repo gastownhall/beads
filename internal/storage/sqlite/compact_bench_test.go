@@ -1,3 +1,5 @@
+//go:build bench
+
 package sqlite
 
 import (
@@ -124,6 +126,9 @@ func setupBenchDB(tb testing.TB) (*SQLiteStorage, func()) {
 	}
 
 	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		tb.Fatalf("Failed to set issue_prefix: %v", err)
+	}
 	if err := store.SetConfig(ctx, "compact_tier1_days", "30"); err != nil {
 		tb.Fatalf("Failed to set config: %v", err)
 	}

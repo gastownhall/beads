@@ -46,6 +46,7 @@ type doctorResult struct {
 
 var (
 	doctorFix bool
+	perfMode  bool
 )
 
 var doctorCmd = &cobra.Command{
@@ -68,11 +69,19 @@ This command checks:
   - Git hooks (pre-commit, post-merge, pre-push)
   - .beads/.gitignore up to date
 
+Performance Mode (--perf):
+  Run performance diagnostics on your database:
+  - Times key operations (bd ready, bd list, bd show, etc.)
+  - Collects system info (OS, arch, SQLite version, database stats)
+  - Generates CPU profile for analysis
+  - Outputs shareable report for bug reports
+
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
   bd doctor --json       # Machine-readable output
-  bd doctor --fix        # Automatically fix issues`,
+  bd doctor --fix        # Automatically fix issues
+  bd doctor --perf       # Performance diagnostics`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -87,6 +96,12 @@ Examples:
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to resolve path: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Run performance diagnostics if --perf flag is set
+		if perfMode {
+			doctor.RunPerformanceDiagnostics(absPath)
+			return
 		}
 
 		// Run diagnostics
@@ -1309,4 +1324,5 @@ func checkSchemaCompatibility(path string) doctorCheck {
 
 func init() {
 	rootCmd.AddCommand(doctorCmd)
+	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
 }
