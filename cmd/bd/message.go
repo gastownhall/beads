@@ -202,7 +202,7 @@ func sendAgentMailRequest(config *AgentMailConfig, method string, params interfa
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Agent Mail server: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

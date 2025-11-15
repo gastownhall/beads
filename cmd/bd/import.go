@@ -545,7 +545,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	basePath := filepath.Join(tmpDir, "base.jsonl")
 	leftPath := filepath.Join(tmpDir, "left.jsonl")
