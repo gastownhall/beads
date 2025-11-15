@@ -313,6 +313,18 @@ var createCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		// If parent was specified, add parent-child dependency
+		if parentID != "" {
+			dep := &types.Dependency{
+				IssueID:     issue.ID,
+				DependsOnID: parentID,
+				Type:        types.DepParentChild,
+			}
+			if err := store.AddDependency(ctx, dep, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to add parent-child dependency %s -> %s: %v\n", issue.ID, parentID, err)
+			}
+		}
+
 		// Add labels if specified
 		for _, label := range labels {
 			if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {

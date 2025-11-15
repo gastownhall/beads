@@ -180,6 +180,21 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
+	// If parent was specified, add parent-child dependency
+	if createArgs.Parent != "" {
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: createArgs.Parent,
+			Type:        types.DepParentChild,
+		}
+		if err := store.AddDependency(ctx, dep, s.reqActor(req)); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to add parent-child dependency %s -> %s: %v", issue.ID, createArgs.Parent, err),
+			}
+		}
+	}
+
 	// Add labels if specified
 	for _, label := range createArgs.Labels {
 		if err := store.AddLabel(ctx, issue.ID, label, s.reqActor(req)); err != nil {
