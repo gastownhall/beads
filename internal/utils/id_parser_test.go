@@ -90,6 +90,21 @@ func TestResolvePartialID(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
+	// Test hierarchical IDs - parent and child
+	parentIssue := &types.Issue{
+		ID:        "offlinebrew-3d0",
+		Title:     "Parent Epic",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	childIssue := &types.Issue{
+		ID:        "offlinebrew-3d0.1",
+		Title:     "Child Task",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
 	
 	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 		t.Fatal(err)
@@ -98,6 +113,12 @@ func TestResolvePartialID(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.CreateIssue(ctx, issue3, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, parentIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, childIssue, "test"); err != nil {
 		t.Fatal(err)
 	}
 	
@@ -148,6 +169,16 @@ func TestResolvePartialID(t *testing.T) {
 			name:        "ambiguous partial match",
 			input:       "bd-1",
 			expected:    "bd-1",  // Will match exactly, not ambiguously
+		},
+		{
+			name:     "exact match parent ID with hierarchical child - gh-316",
+			input:    "offlinebrew-3d0",
+			expected: "offlinebrew-3d0",  // Should match exactly, not be ambiguous with offlinebrew-3d0.1
+		},
+		{
+			name:     "exact match parent without prefix - gh-316",
+			input:    "3d0",
+			expected: "offlinebrew-3d0",  // Should still prefer exact hash match
 		},
 	}
 

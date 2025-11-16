@@ -81,12 +81,39 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	hashPart := strings.TrimPrefix(normalizedID, prefixWithHyphen)
 
 	var matches []string
+	var exactMatch string
+	
 	for _, issue := range issues {
-		issueHash := strings.TrimPrefix(issue.ID, prefixWithHyphen)
+		// Check for exact full ID match first (case: user typed full ID with different prefix)
+		if issue.ID == input {
+			exactMatch = issue.ID
+			break
+		}
+		
+		// Extract hash from each issue, regardless of its prefix
+		// This handles cross-prefix matching (e.g., "3d0" matching "offlinebrew-3d0")
+		var issueHash string
+		if idx := strings.Index(issue.ID, "-"); idx >= 0 {
+			issueHash = issue.ID[idx+1:]
+		} else {
+			issueHash = issue.ID
+		}
+		
+		// Check for exact hash match (excluding hierarchical children)
+		if issueHash == hashPart {
+			exactMatch = issue.ID
+			// Don't break - keep searching in case there's a full ID match
+		}
+		
 		// Check if the issue hash contains the input hash as substring
 		if strings.Contains(issueHash, hashPart) {
 			matches = append(matches, issue.ID)
 		}
+	}
+	
+	// Prefer exact match over substring matches
+	if exactMatch != "" {
+		return exactMatch, nil
 	}
 	
 	if len(matches) == 0 {

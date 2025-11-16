@@ -630,7 +630,7 @@ func displayMigrationPlan(plan migrationPlan, dryRun bool) error {
 func confirmMigration(plan migrationPlan) bool {
 	fmt.Printf("\nMigrate %d issues from %s to %s? [y/N] ", len(plan.IssueIDs), plan.From, plan.To)
 	var response string
-	fmt.Scanln(&response)
+	_, _ = fmt.Scanln(&response)
 	return strings.ToLower(strings.TrimSpace(response)) == "y"
 }
 
@@ -698,6 +698,6 @@ func init() {
 	migrateIssuesCmd.Flags().Bool("strict", false, "Fail on orphaned dependencies or missing repos")
 	migrateIssuesCmd.Flags().Bool("yes", false, "Skip confirmation prompt")
 
-	migrateIssuesCmd.MarkFlagRequired("from")
-	migrateIssuesCmd.MarkFlagRequired("to")
+	_ = migrateIssuesCmd.MarkFlagRequired("from")
+	_ = migrateIssuesCmd.MarkFlagRequired("to")
 }

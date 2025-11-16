@@ -607,11 +607,11 @@ Examples:
 
 		// Write current value to temp file
 		if _, err := tmpFile.WriteString(currentValue); err != nil {
-			tmpFile.Close()
+			_ = tmpFile.Close()
 			fmt.Fprintf(os.Stderr, "Error writing to temp file: %v\n", err)
 			os.Exit(1)
 		}
-		tmpFile.Close()
+		_ = tmpFile.Close()
 
 		// Open the editor
 		editorCmd := exec.Command(editor, tmpPath)

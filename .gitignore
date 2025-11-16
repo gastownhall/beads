@@ -99,3 +99,11 @@ __pycache__/
 *.so
 .Python
 .envrc
+
+# Performance profiling files (benchmarks, bd doctor --perf, and bd --profile)
+*.prof
+*.out
+beads-perf-*.prof
+bench-cpu-*.prof
+bd-profile-*.prof
+bd-trace-*.out
