@@ -9,7 +9,9 @@ import (
 func TestOnboardCommand(t *testing.T) {
 	t.Run("onboard output contains key sections", func(t *testing.T) {
 		var buf bytes.Buffer
-		renderOnboardInstructions(&buf)
+		if err := renderOnboardInstructions(&buf); err != nil {
+			t.Fatalf("renderOnboardInstructions() error = %v", err)
+		}
 		output := buf.String()
 
 		// Verify output contains expected sections

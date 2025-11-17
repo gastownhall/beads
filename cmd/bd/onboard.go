@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -138,48 +139,119 @@ history/
 
 For more details, see README.md and QUICKSTART.md.`
 
-func renderOnboardInstructions(w io.Writer) {
+func renderOnboardInstructions(w io.Writer) error {
 	bold := color.New(color.Bold).SprintFunc()
 	cyan := color.New(color.FgCyan).SprintFunc()
 	yellow := color.New(color.FgYellow).SprintFunc()
 	green := color.New(color.FgGreen).SprintFunc()
 
-	fmt.Fprintf(w, "\n%s\n\n", bold("bd Onboarding Instructions for AI Agent"))
+	writef := func(format string, args ...interface{}) error {
+		_, err := fmt.Fprintf(w, format, args...)
+		return err
+	}
+	writeln := func(text string) error {
+		_, err := fmt.Fprintln(w, text)
+		return err
+	}
+	writeBlank := func() error {
+		_, err := fmt.Fprintln(w)
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n\n", yellow("Please complete the following tasks:"))
+	if err := writef("\n%s\n\n", bold("bd Onboarding Instructions for AI Agent")); err != nil {
+		return err
+	}
+	if err := writef("%s\n\n", yellow("Please complete the following tasks:")); err != nil {
+		return err
+	}
+	if err := writef("%s\n", bold("1. Update AGENTS.md")); err != nil {
+		return err
+	}
+	if err := writeln("   Add the following content to AGENTS.md in an appropriate location."); err != nil {
+		return err
+	}
+	if err := writeln("   If AGENTS.md doesn't exist, create it with this content."); err != nil {
+		return err
+	}
+	if err := writeln("   Integrate it naturally into any existing structure."); err != nil {
+		return err
+	}
+	if err := writeBlank(); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n", bold("1. Update AGENTS.md"))
-	fmt.Fprintln(w, "   Add the following content to AGENTS.md in an appropriate location.")
-	fmt.Fprintln(w, "   If AGENTS.md doesn't exist, create it with this content.")
-	fmt.Fprintln(w, "   Integrate it naturally into any existing structure.")
-	fmt.Fprintln(w)
+	if err := writef("%s\n", cyan("--- BEGIN AGENTS.MD CONTENT ---")); err != nil {
+		return err
+	}
+	if err := writeln(agentsContent); err != nil {
+		return err
+	}
+	if err := writef("%s\n\n", cyan("--- END AGENTS.MD CONTENT ---")); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n", cyan("--- BEGIN AGENTS.MD CONTENT ---"))
-	fmt.Fprintln(w, agentsContent)
-	fmt.Fprintf(w, "%s\n\n", cyan("--- END AGENTS.MD CONTENT ---"))
+	if err := writef("%s\n", bold("2. Update CLAUDE.md (if present)")); err != nil {
+		return err
+	}
+	if err := writeln("   If CLAUDE.md exists in this directory, add this note at the top:"); err != nil {
+		return err
+	}
+	if err := writeBlank(); err != nil {
+		return err
+	}
+	if err := writef("%s\n", cyan("   **Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads)")); err != nil {
+		return err
+	}
+	if err := writef("%s\n", cyan("   for issue tracking. Use `bd` commands instead of markdown TODOs.")); err != nil {
+		return err
+	}
+	if err := writef("%s\n", cyan("   See AGENTS.md for workflow details.")); err != nil {
+		return err
+	}
+	if err := writeBlank(); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n", bold("2. Update CLAUDE.md (if present)"))
-	fmt.Fprintln(w, "   If CLAUDE.md exists in this directory, add this note at the top:")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s\n", cyan("   **Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads)"))
-	fmt.Fprintf(w, "%s\n", cyan("   for issue tracking. Use `bd` commands instead of markdown TODOs."))
-	fmt.Fprintf(w, "%s\n", cyan("   See AGENTS.md for workflow details."))
-	fmt.Fprintln(w)
+	if err := writef("%s\n", bold("3. Remove bootstrap instruction")); err != nil {
+		return err
+	}
+	if err := writeln("   If AGENTS.md or CLAUDE.md contains a line like:"); err != nil {
+		return err
+	}
+	if err := writef("%s\n", cyan("   \"BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions\"")); err != nil {
+		return err
+	}
+	if err := writeln("   Delete that line after completing steps 1 and 2."); err != nil {
+		return err
+	}
+	if err := writeBlank(); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n", bold("3. Remove bootstrap instruction"))
-	fmt.Fprintln(w, "   If AGENTS.md or CLAUDE.md contains a line like:")
-	fmt.Fprintf(w, "%s\n", cyan("   \"BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions\""))
-	fmt.Fprintln(w, "   Delete that line after completing steps 1 and 2.")
-	fmt.Fprintln(w)
+	if err := writef("%s\n", bold("Important reminders:")); err != nil {
+		return err
+	}
+	if err := writeln("   • Use bd for ALL task tracking - NO markdown TODO lists"); err != nil {
+		return err
+	}
+	if err := writeln("   • Always use --json flag for programmatic bd commands"); err != nil {
+		return err
+	}
+	if err := writeln("   • Link discovered work with discovered-from dependencies"); err != nil {
+		return err
+	}
+	if err := writef("   • Check %s before asking \"what should I work on?\"\n", cyan("bd ready")); err != nil {
+		return err
+	}
+	if err := writeBlank(); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n", bold("Important reminders:"))
-	fmt.Fprintln(w, "   • Use bd for ALL task tracking - NO markdown TODO lists")
-	fmt.Fprintln(w, "   • Always use --json flag for programmatic bd commands")
-	fmt.Fprintln(w, "   • Link discovered work with discovered-from dependencies")
-	fmt.Fprintf(w, "   • Check %s before asking \"what should I work on?\"\n", cyan("bd ready"))
-	fmt.Fprintln(w)
+	if err := writef("%s\n\n", green("When done, tell your AI assistant: \"bd onboarding complete\"")); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(w, "%s\n\n", green("When done, tell your AI assistant: \"bd onboarding complete\""))
+	return nil
 }
 
 var onboardCmd = &cobra.Command{
@@ -191,7 +263,12 @@ This command outputs instructions that AI agents should follow to integrate bd
 into the project's agent documentation. The agent will intelligently merge the
 content into AGENTS.md and update CLAUDE.md if present.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		renderOnboardInstructions(cmd.OutOrStdout())
+		if err := renderOnboardInstructions(cmd.OutOrStdout()); err != nil {
+			if _, writeErr := fmt.Fprintf(cmd.ErrOrStderr(), "Error rendering onboarding instructions: %v\n", err); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error rendering onboarding instructions: %v (stderr write failed: %v)\n", err, writeErr)
+			}
+			os.Exit(1)
+		}
 	},
 }
 
