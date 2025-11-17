@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime/debug"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -15,8 +17,9 @@ var (
 	Version = "0.23.1"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
-	// Commit is the git revision the binary was built from (optional ldflag)
+	// Commit and branch the git revision the binary was built from (optional ldflag)
 	Commit = ""
+	Branch = ""
 )
 
 var versionCmd = &cobra.Command{
@@ -31,6 +34,7 @@ var versionCmd = &cobra.Command{
 		}
 
 		commit := resolveCommitHash()
+		branch := resolveBranch()
 
 		if jsonOutput {
 			result := map[string]string{
@@ -40,10 +44,15 @@ var versionCmd = &cobra.Command{
 			if commit != "" {
 				result["commit"] = commit
 			}
+			if branch != "" {
+				result["branch"] = branch
+			}
 			outputJSON(result)
 		} else {
-			if commit != "" {
-				fmt.Printf("bd version %s (%s, commit %s)\n", Version, Build, shortCommit(commit))
+			if commit != "" && branch != "" {
+				fmt.Printf("bd version %s (%s: %s@%s)\n", Version, Build, branch, shortCommit(commit))
+			} else if commit != "" {
+				fmt.Printf("bd version %s (%s: %s)\n", Version, Build, shortCommit(commit))
 			} else {
 				fmt.Printf("bd version %s (%s)\n", Version, Build)
 			}
@@ -125,4 +134,30 @@ func shortCommit(hash string) string {
 		return hash[:12]
 	}
 	return hash
+}
+
+func resolveBranch() string {
+	if Branch != "" {
+		return Branch
+	}
+
+	// Try to get branch from build info (build-time VCS detection)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.branch" && setting.Value != "" {
+				return setting.Value
+			}
+		}
+	}
+
+	// Fallback: try to get branch from git at runtime
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = "."
+	if output, err := cmd.Output(); err == nil {
+		if branch := strings.TrimSpace(string(output)); branch != "" && branch != "HEAD" {
+			return branch
+		}
+	}
+
+	return ""
 }
