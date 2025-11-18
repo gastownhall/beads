@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// TestTouchDatabaseFile verifies the touchDatabaseFile helper function
+// TestTouchDatabaseFile verifies the TouchDatabaseFile helper function
 func TestTouchDatabaseFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.db")
@@ -27,8 +27,8 @@ func TestTouchDatabaseFile(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Touch the file
-	if err := touchDatabaseFile(testFile, ""); err != nil {
-		t.Fatalf("touchDatabaseFile failed: %v", err)
+	if err := TouchDatabaseFile(testFile, ""); err != nil {
+		t.Fatalf("TouchDatabaseFile failed: %v", err)
 	}
 
 	// Get new mtime
@@ -64,8 +64,8 @@ func TestTouchDatabaseFileWithClockSkew(t *testing.T) {
 	}
 
 	// Touch the DB file with JSONL path
-	if err := touchDatabaseFile(dbFile, jsonlFile); err != nil {
-		t.Fatalf("touchDatabaseFile failed: %v", err)
+	if err := TouchDatabaseFile(dbFile, jsonlFile); err != nil {
+		t.Fatalf("TouchDatabaseFile failed: %v", err)
 	}
 
 	// Get DB mtime

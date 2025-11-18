@@ -385,6 +385,18 @@ Output to stdout by default, or use -o flag for file output.`,
 			fmt.Fprintf(os.Stderr, "  Mismatch indicates export failed to write all issues\n")
 			os.Exit(1)
 		}
+
+			// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
+			// Only do this when exporting to default JSONL path (not arbitrary outputs)
+			// This prevents validatePreExport from incorrectly blocking on next export
+			if output == "" || output == findJSONLPath() {
+				beadsDir := filepath.Dir(finalPath)
+				dbPath := filepath.Join(beadsDir, "beads.db")
+				if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
+					// Log warning but don't fail export
+					fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+				}
+			}
 	}
 
 	// Output statistics if JSON format requested

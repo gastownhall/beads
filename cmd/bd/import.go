@@ -314,7 +314,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		// 2. Without mtime update, bd sync refuses to export (thinks JSONL is newer)
 		// 3. This can happen after git pull updates JSONL mtime but content is identical
 		// Fix for: refusing to export: JSONL is newer than database (import first to avoid data loss)
-		if err := touchDatabaseFile(dbPath, input); err != nil {
+		if err := TouchDatabaseFile(dbPath, input); err != nil {
 			debug.Logf("Warning: failed to update database mtime: %v", err)
 		}
 
@@ -381,17 +381,19 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 	},
 }
 
-// touchDatabaseFile updates the modification time of the database file.
-// This is used after import to ensure the database appears "in sync" with JSONL,
-// preventing bd doctor from incorrectly warning that JSONL is newer.
+// TouchDatabaseFile updates the modification time of the database file.
+// This is used after import AND export to ensure the database appears "in sync" with JSONL,
+// preventing bd doctor and validatePreExport from incorrectly warning that JSONL is newer.
 //
 // In SQLite WAL mode, writes go to beads.db-wal and beads.db mtime may not update
-// until a checkpoint. Since bd doctor compares JSONL mtime to beads.db mtime only,
-// we need to explicitly touch the DB file after import.
+// until a checkpoint. Since validation compares JSONL mtime to beads.db mtime only,
+// we need to explicitly touch the DB file after both import and export operations.
 //
 // The function sets DB mtime to max(JSONL mtime, now) + 1ns to handle clock skew.
 // If jsonlPath is empty or can't be read, falls back to time.Now().
-func touchDatabaseFile(dbPath, jsonlPath string) error {
+//
+// Fixes issues #278, #301, #321: daemon export leaving JSONL newer than DB.
+func TouchDatabaseFile(dbPath, jsonlPath string) error {
 	targetTime := time.Now()
 	
 	// If we have the JSONL path, use max(JSONL mtime, now) to handle clock skew
