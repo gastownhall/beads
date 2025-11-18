@@ -419,16 +419,8 @@ func checkIDFormat(path string) doctorCheck {
 	}
 	defer func() { _ = db.Close() }() // Intentionally ignore close error
 
-	// Get first issue to check ID format
-	var issueID string
-	err = db.QueryRow("SELECT id FROM issues ORDER BY created_at LIMIT 1").Scan(&issueID)
-	if err == sql.ErrNoRows {
-		return doctorCheck{
-			Name:    "Issue IDs",
-			Status:  statusOK,
-			Message: "No issues yet (will use hash-based IDs)",
-		}
-	}
+	// Get sample of issues to check ID format (up to 10 for pattern analysis)
+	rows, err := db.Query("SELECT id FROM issues ORDER BY created_at LIMIT 10")
 	if err != nil {
 		return doctorCheck{
 			Name:    "Issue IDs",
@@ -436,9 +428,26 @@ func checkIDFormat(path string) doctorCheck {
 			Message: "Unable to query issues",
 		}
 	}
+	defer rows.Close()
 
-	// Detect ID format
-	if isHashID(issueID) {
+	var issueIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			issueIDs = append(issueIDs, id)
+		}
+	}
+
+	if len(issueIDs) == 0 {
+		return doctorCheck{
+			Name:    "Issue IDs",
+			Status:  statusOK,
+			Message: "No issues yet (will use hash-based IDs)",
+		}
+	}
+
+	// Detect ID format using robust heuristic
+	if detectHashBasedIDs(db, issueIDs) {
 		return doctorCheck{
 			Name:    "Issue IDs",
 			Status:  statusOK,
@@ -520,6 +529,110 @@ func getDatabaseVersionFromPath(dbPath string) string {
 	}
 
 	return "unknown"
+}
+
+// detectHashBasedIDs uses multiple heuristics to determine if the database uses hash-based IDs.
+// This is more robust than checking a single ID's format, since base36 hash IDs can be all-numeric.
+func detectHashBasedIDs(db *sql.DB, sampleIDs []string) bool {
+	// Heuristic 1: Check for child_counters table (added for hash ID support)
+	var tableName string
+	err := db.QueryRow(`
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND name='child_counters'
+	`).Scan(&tableName)
+	if err == nil {
+		// child_counters table exists - this is a strong indicator of hash IDs
+		return true
+	}
+
+	// Heuristic 2: Check if any sample ID clearly contains letters (a-z)
+	// Hash IDs use base36 (0-9, a-z), sequential IDs are purely numeric
+	for _, id := range sampleIDs {
+		if isHashID(id) {
+			return true
+		}
+	}
+
+	// Heuristic 3: Look for patterns that indicate hash IDs
+	if len(sampleIDs) >= 2 {
+		// Extract suffixes (part after prefix-) for analysis
+		var suffixes []string
+		for _, id := range sampleIDs {
+			parts := strings.SplitN(id, "-", 2)
+			if len(parts) == 2 {
+				// Strip hierarchical suffix like .1 or .1.2
+				baseSuffix := strings.Split(parts[1], ".")[0]
+				suffixes = append(suffixes, baseSuffix)
+			}
+		}
+
+		if len(suffixes) >= 2 {
+			// Check for variable lengths (strong indicator of adaptive hash IDs)
+			// BUT: sequential IDs can also have variable length (1, 10, 100)
+			// So we need to check if the length variation is natural (1→2→3 digits)
+			// or random (3→8→4 chars typical of adaptive hash IDs)
+			lengths := make(map[int]int) // length -> count
+			for _, s := range suffixes {
+				lengths[len(s)]++
+			}
+			
+			// If we have 3+ different lengths, likely hash IDs (adaptive length)
+			// Sequential IDs typically have 1-2 lengths (e.g., 1-9, 10-99, 100-999)
+			if len(lengths) >= 3 {
+				return true
+			}
+
+			// Check for leading zeros (rare in sequential IDs, common in hash IDs)
+			// Sequential IDs: bd-1, bd-2, bd-10, bd-100
+			// Hash IDs: bd-0088, bd-02a4, bd-05a1
+			hasLeadingZero := false
+			for _, s := range suffixes {
+				if len(s) > 1 && s[0] == '0' {
+					hasLeadingZero = true
+					break
+				}
+			}
+			if hasLeadingZero {
+				return true
+			}
+
+			// Check for non-sequential ordering
+			// Try to parse as integers - if they're not sequential, likely hash IDs
+			allNumeric := true
+			var nums []int
+			for _, s := range suffixes {
+				var num int
+				if _, err := fmt.Sscanf(s, "%d", &num); err == nil {
+					nums = append(nums, num)
+				} else {
+					allNumeric = false
+					break
+				}
+			}
+
+			if allNumeric && len(nums) >= 2 {
+				// Check if they form a roughly sequential pattern (1,2,3 or 10,11,12)
+				// Hash IDs would be more random (e.g., 88, 13452, 676)
+				isSequentialPattern := true
+				for i := 1; i < len(nums); i++ {
+					diff := nums[i] - nums[i-1]
+					// Allow for some gaps (deleted issues), but should be mostly sequential
+					if diff < 0 || diff > 100 {
+						isSequentialPattern = false
+						break
+					}
+				}
+				// If the numbers are NOT sequential, they're likely hash IDs
+				if !isSequentialPattern {
+					return true
+				}
+			}
+		}
+	}
+
+	// If we can't determine for sure, default to assuming sequential IDs
+	// This is conservative - better to recommend migration than miss sequential IDs
+	return false
 }
 
 // Note: isHashID is defined in migrate_hash_ids.go to avoid duplication
