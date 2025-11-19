@@ -100,12 +100,12 @@ Examples:
 		// Save current daemon state
 		wasDaemon := daemonClient != nil
 		var tempErr error
-		
+
 		if wasDaemon {
 			// Temporarily switch to direct mode to read config
 			tempErr = ensureDirectMode("info: reading config")
 		}
-		
+
 		if store != nil {
 			ctx := context.Background()
 			configMap, err := store.GetAllConfig(ctx)
@@ -113,7 +113,7 @@ Examples:
 				info["config"] = configMap
 			}
 		}
-		
+
 		// Note: We don't restore daemon mode since info is a read-only command
 		// and the process will exit immediately after this
 		_ = tempErr // silence unused warning
@@ -121,23 +121,23 @@ Examples:
 		// Add schema information if requested
 		if schemaFlag && store != nil {
 			ctx := context.Background()
-			
+
 			// Get schema version
 			schemaVersion, err := store.GetMetadata(ctx, "bd_version")
 			if err != nil {
 				schemaVersion = "unknown"
 			}
-			
+
 			// Get tables
 			tables := []string{"issues", "dependencies", "labels", "config", "metadata"}
-			
+
 			// Get config
 			configMap := make(map[string]string)
 			prefix, _ := store.GetConfig(ctx, "issue_prefix")
 			if prefix != "" {
 				configMap["issue_prefix"] = prefix
 			}
-			
+
 			// Get sample issue IDs
 			filter := types.IssueFilter{}
 			issues, err := store.SearchIssues(ctx, "", filter)
@@ -157,13 +157,13 @@ Examples:
 					detectedPrefix = extractPrefix(issues[0].ID)
 				}
 			}
-			
+
 			info["schema"] = map[string]interface{}{
-				"tables":          tables,
-				"schema_version":  schemaVersion,
-				"config":          configMap,
+				"tables":           tables,
+				"schema_version":   schemaVersion,
+				"config":           configMap,
 				"sample_issue_ids": sampleIDs,
-				"detected_prefix": detectedPrefix,
+				"detected_prefix":  detectedPrefix,
 			}
 		}
 
@@ -229,11 +229,9 @@ Examples:
 		}
 
 		// Check git hooks status
-		hookStatuses, err := CheckGitHooks()
-		if err == nil {
-			if warning := FormatHookWarnings(hookStatuses); warning != "" {
-				fmt.Printf("\n%s\n", warning)
-			}
+		hookStatuses := CheckGitHooks()
+		if warning := FormatHookWarnings(hookStatuses); warning != "" {
+			fmt.Printf("\n%s\n", warning)
 		}
 
 		fmt.Println()

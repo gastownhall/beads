@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -59,7 +60,11 @@ func TestInstallHooks(t *testing.T) {
 		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 			t.Errorf("Hook %s was not installed", hookName)
 		}
-		// Check it's executable
+		// Windows does not support POSIX executable bits, so skip the check there.
+		if runtime.GOOS == "windows" {
+			continue
+		}
+
 		info, err := os.Stat(hookPath)
 		if err != nil {
 			t.Errorf("Failed to stat %s: %v", hookName, err)
@@ -206,10 +211,7 @@ func TestHooksCheckGitHooks(t *testing.T) {
 	os.Chdir(tmpDir)
 
 	// Initially no hooks installed
-	statuses, err := CheckGitHooks()
-	if err != nil {
-		t.Fatalf("CheckGitHooks() failed: %v", err)
-	}
+	statuses := CheckGitHooks()
 
 	for _, status := range statuses {
 		if status.Installed {
@@ -227,10 +229,7 @@ func TestHooksCheckGitHooks(t *testing.T) {
 	}
 
 	// Check again
-	statuses, err = CheckGitHooks()
-	if err != nil {
-		t.Fatalf("CheckGitHooks() failed: %v", err)
-	}
+	statuses = CheckGitHooks()
 
 	for _, status := range statuses {
 		if !status.Installed {

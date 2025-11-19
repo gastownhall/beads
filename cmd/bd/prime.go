@@ -75,6 +75,7 @@ func isMCPActive() bool {
 	}
 
 	settingsPath := filepath.Join(home, ".claude/settings.json")
+	// #nosec G304 -- settings path derived from user home directory
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return false

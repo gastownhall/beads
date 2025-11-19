@@ -64,19 +64,19 @@ func RunPerformanceDiagnostics(path string) {
 	fmt.Printf("\nOperation Performance:\n")
 
 	// Measure GetReadyWork
-	readyDuration := measureOperation("bd ready", func() error {
+	readyDuration := measureOperation(func() error {
 		return runReadyWork(dbPath)
 	})
 	fmt.Printf("  bd ready                  %dms\n", readyDuration.Milliseconds())
 
 	// Measure SearchIssues (list open)
-	listDuration := measureOperation("bd list --status=open", func() error {
+	listDuration := measureOperation(func() error {
 		return runListOpen(dbPath)
 	})
 	fmt.Printf("  bd list --status=open     %dms\n", listDuration.Milliseconds())
 
 	// Measure GetIssue (show random issue)
-	showDuration := measureOperation("bd show <issue>", func() error {
+	showDuration := measureOperation(func() error {
 		return runShowRandom(dbPath)
 	})
 	if showDuration > 0 {
@@ -84,7 +84,7 @@ func RunPerformanceDiagnostics(path string) {
 	}
 
 	// Measure SearchIssues with filters
-	searchDuration := measureOperation("bd list (complex filters)", func() error {
+	searchDuration := measureOperation(func() error {
 		return runComplexSearch(dbPath)
 	})
 	fmt.Printf("  bd list (complex filters) %dms\n", searchDuration.Milliseconds())
@@ -188,6 +188,7 @@ func collectDatabaseStats(dbPath string) map[string]string {
 }
 
 func startCPUProfile(path string) error {
+	// #nosec G304 -- profile path supplied by CLI flag in trusted environment
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -205,7 +206,7 @@ func stopCPUProfile() {
 	}
 }
 
-func measureOperation(name string, op func() error) time.Duration {
+func measureOperation(op func() error) time.Duration {
 	start := time.Now()
 	if err := op(); err != nil {
 		return 0

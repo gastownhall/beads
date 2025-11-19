@@ -306,6 +306,7 @@ func (sm *SnapshotManager) writeMetadata(path string, meta snapshotMetadata) err
 
 	// Use process-specific temp file for atomic write
 	tempPath := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	// #nosec G306 -- metadata is shared across repo users and must stay readable
 	if err := os.WriteFile(tempPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write metadata temp file: %w", err)
 	}
@@ -315,6 +316,7 @@ func (sm *SnapshotManager) writeMetadata(path string, meta snapshotMetadata) err
 }
 
 func (sm *SnapshotManager) readMetadata(path string) (*snapshotMetadata, error) {
+	// #nosec G304 -- metadata lives under .beads and path is derived internally
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -360,6 +362,7 @@ func (sm *SnapshotManager) validateMetadata(meta *snapshotMetadata, currentCommi
 func (sm *SnapshotManager) buildIDToLineMap(path string) (map[string]string, error) {
 	result := make(map[string]string)
 
+	// #nosec G304 -- snapshot file lives in .beads/snapshots and path is derived internally
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -397,6 +400,7 @@ func (sm *SnapshotManager) buildIDToLineMap(path string) (map[string]string, err
 func (sm *SnapshotManager) buildIDSet(path string) (map[string]bool, error) {
 	result := make(map[string]bool)
 
+	// #nosec G304 -- snapshot file path derived from internal state
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -443,12 +447,14 @@ func (sm *SnapshotManager) jsonEquals(a, b string) bool {
 }
 
 func (sm *SnapshotManager) copyFile(src, dst string) error {
+	// #nosec G304 -- snapshot copy only touches files inside .beads/snapshots
 	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer sourceFile.Close()
 
+	// #nosec G304 -- snapshot copy only writes files inside .beads/snapshots
 	destFile, err := os.Create(dst)
 	if err != nil {
 		return err

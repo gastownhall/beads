@@ -14,20 +14,20 @@ import (
 )
 
 var (
-	compactDryRun     bool
-	compactTier       int
-	compactAll        bool
-	compactID         string
-	compactForce      bool
-	compactBatch      int
-	compactWorkers    int
-	compactStats      bool
-	compactAnalyze    bool
-	compactApply      bool
-	compactAuto       bool
-	compactSummary    string
-	compactActor      string
-	compactLimit      int
+	compactDryRun  bool
+	compactTier    int
+	compactAll     bool
+	compactID      string
+	compactForce   bool
+	compactBatch   int
+	compactWorkers int
+	compactStats   bool
+	compactAnalyze bool
+	compactApply   bool
+	compactAuto    bool
+	compactSummary string
+	compactActor   string
+	compactLimit   int
 )
 
 var compactCmd = &cobra.Command{
@@ -762,6 +762,7 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 			os.Exit(1)
 		}
 	} else {
+		// #nosec G304 -- summary file path provided explicitly by operator
 		summaryBytes, err = os.ReadFile(compactSummary)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to read summary file: %v\n", err)

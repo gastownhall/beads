@@ -138,15 +138,15 @@ type migrateIssuesParams struct {
 }
 
 type migrationPlan struct {
-	TotalSelected      int                `json:"total_selected"`
-	AddedByDependency  int                `json:"added_by_dependency"`
-	IncomingEdges      int                `json:"incoming_edges"`
-	OutgoingEdges      int                `json:"outgoing_edges"`
-	Orphans            int                `json:"orphans"`
-	OrphanSamples      []string           `json:"orphan_samples,omitempty"`
-	IssueIDs           []string           `json:"issue_ids"`
-	From               string             `json:"from"`
-	To                 string             `json:"to"`
+	TotalSelected     int      `json:"total_selected"`
+	AddedByDependency int      `json:"added_by_dependency"`
+	IncomingEdges     int      `json:"incoming_edges"`
+	OutgoingEdges     int      `json:"outgoing_edges"`
+	Orphans           int      `json:"orphans"`
+	OrphanSamples     []string `json:"orphan_samples,omitempty"`
+	IssueIDs          []string `json:"issue_ids"`
+	From              string   `json:"from"`
+	To                string   `json:"to"`
 }
 
 func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
@@ -186,7 +186,7 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 	}
 
 	// Step 4: Check for orphaned dependencies
-	orphans, err := checkOrphanedDependencies(ctx, db, migrationSet)
+	orphans, err := checkOrphanedDependencies(ctx, db)
 	if err != nil {
 		return fmt.Errorf("failed to check dependencies: %w", err)
 	}
@@ -207,7 +207,7 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 	if !p.dryRun {
 		if !p.yes && !jsonOutput {
 			if !confirmMigration(plan) {
-				fmt.Println("Migration cancelled")
+				fmt.Println("Migration canceled")
 				return nil
 			}
 		}
@@ -299,7 +299,7 @@ func findCandidateIssues(ctx context.Context, db *sql.DB, p migrateIssuesParams)
 	}
 
 	// Build query
-	query := "SELECT id FROM issues WHERE " + strings.Join(conditions, " AND ")
+	query := "SELECT id FROM issues WHERE " + strings.Join(conditions, " AND ") // #nosec G202 -- query fragments are constant strings with parameter placeholders
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -499,7 +499,7 @@ func countCrossRepoEdges(ctx context.Context, db *sql.DB, migrationSet []string)
 	incomingQuery := fmt.Sprintf(`
 		SELECT COUNT(*) FROM dependencies 
 		WHERE depends_on_id IN (%s) 
-		AND issue_id NOT IN (%s)`, inClause, inClause)
+		AND issue_id NOT IN (%s)`, inClause, inClause) // #nosec G201 -- inClause generated from sanitized placeholders
 
 	var incoming int
 	if err := db.QueryRowContext(ctx, incomingQuery, append(args, args...)...).Scan(&incoming); err != nil {
@@ -510,7 +510,7 @@ func countCrossRepoEdges(ctx context.Context, db *sql.DB, migrationSet []string)
 	outgoingQuery := fmt.Sprintf(`
 		SELECT COUNT(*) FROM dependencies 
 		WHERE issue_id IN (%s) 
-		AND depends_on_id NOT IN (%s)`, inClause, inClause)
+		AND depends_on_id NOT IN (%s)`, inClause, inClause) // #nosec G201 -- inClause generated from sanitized placeholders
 
 	var outgoing int
 	if err := db.QueryRowContext(ctx, outgoingQuery, append(args, args...)...).Scan(&outgoing); err != nil {
@@ -523,7 +523,7 @@ func countCrossRepoEdges(ctx context.Context, db *sql.DB, migrationSet []string)
 	}, nil
 }
 
-func checkOrphanedDependencies(ctx context.Context, db *sql.DB, migrationSet []string) ([]string, error) {
+func checkOrphanedDependencies(ctx context.Context, db *sql.DB) ([]string, error) {
 	// Check for dependencies referencing non-existent issues
 	query := `
 		SELECT DISTINCT d.depends_on_id 
@@ -580,7 +580,8 @@ func displayMigrationPlan(plan migrationPlan, dryRun bool) error {
 			"plan":    plan,
 			"dry_run": dryRun,
 		}
-		outputJSON(output); return nil
+		outputJSON(output)
+		return nil
 	}
 
 	// Human-readable output
@@ -664,6 +665,7 @@ func executeMigration(ctx context.Context, db *sql.DB, migrationSet []string, to
 }
 
 func loadIDsFromFile(path string) ([]string, error) {
+	// #nosec G304 -- file path supplied explicitly via CLI flag
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

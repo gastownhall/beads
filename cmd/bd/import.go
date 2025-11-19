@@ -42,14 +42,14 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			fmt.Fprintf(os.Stderr, "Error: failed to create database directory: %v\n", err)
 			os.Exit(1)
 		}
-		
+
 		// Import requires direct database access due to complex transaction handling
 		// and collision detection. Force direct mode regardless of daemon state.
 		if daemonClient != nil {
 			debug.Logf("Debug: import command forcing direct mode (closes daemon connection)\n")
 			_ = daemonClient.Close()
 			daemonClient = nil
-			
+
 			var err error
 			store, err = sqlite.New(dbPath)
 			if err != nil {
@@ -58,7 +58,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			}
 			defer func() { _ = store.Close() }()
 		}
-		
+
 		// We'll check if database needs initialization after reading the JSONL
 		// so we can detect the prefix from the imported issues
 
@@ -96,77 +96,77 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		lineNum := 0
 
 		for scanner.Scan() {
-		lineNum++
-		rawLine := scanner.Bytes()
-		line := string(rawLine)
+			lineNum++
+			rawLine := scanner.Bytes()
+			line := string(rawLine)
 
-		// Skip empty lines
-		if line == "" {
-		continue
-		}
-
-		// Detect git conflict markers in raw bytes (before JSON decoding)
-		// This prevents false positives when issue content contains these strings
-		trimmed := bytes.TrimSpace(rawLine)
-		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) || 
-			bytes.Equal(trimmed, []byte("=======")) || 
-			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
-			fmt.Fprintf(os.Stderr, "Git conflict markers detected in JSONL file (line %d)\n", lineNum)
-			fmt.Fprintf(os.Stderr, "→ Attempting automatic 3-way merge...\n\n")
-
-			// Attempt automatic merge using bd merge command
-			if err := attemptAutoMerge(input); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: Automatic merge failed: %v\n\n", err)
-				fmt.Fprintf(os.Stderr, "To resolve manually:\n")
-				fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
-				fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n\n")
-				fmt.Fprintf(os.Stderr, "For advanced field-level merging, see: https://github.com/neongreen/mono/tree/main/beads-merge\n")
-				os.Exit(1)
+			// Skip empty lines
+			if line == "" {
+				continue
 			}
 
-			fmt.Fprintf(os.Stderr, "✓ Automatic merge successful\n")
-			fmt.Fprintf(os.Stderr, "→ Restarting import with merged JSONL...\n\n")
+			// Detect git conflict markers in raw bytes (before JSON decoding)
+			// This prevents false positives when issue content contains these strings
+			trimmed := bytes.TrimSpace(rawLine)
+			if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
+				bytes.Equal(trimmed, []byte("=======")) ||
+				bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
+				fmt.Fprintf(os.Stderr, "Git conflict markers detected in JSONL file (line %d)\n", lineNum)
+				fmt.Fprintf(os.Stderr, "→ Attempting automatic 3-way merge...\n\n")
 
-			// Re-open the input file to read the merged content
-			if input != "" {
-				// Close current file handle
-				if in != os.Stdin {
-					_ = in.Close()
-				}
-
-				// Re-open the merged file
-				// #nosec G304 - user-provided file path is intentional
-				f, err := os.Open(input)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error reopening merged file: %v\n", err)
+				// Attempt automatic merge using bd merge command
+				if err := attemptAutoMerge(input); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: Automatic merge failed: %v\n\n", err)
+					fmt.Fprintf(os.Stderr, "To resolve manually:\n")
+					fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
+					fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n\n")
+					fmt.Fprintf(os.Stderr, "For advanced field-level merging, see: https://github.com/neongreen/mono/tree/main/beads-merge\n")
 					os.Exit(1)
 				}
-				defer func() {
-					if err := f.Close(); err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to close input file: %v\n", err)
+
+				fmt.Fprintf(os.Stderr, "✓ Automatic merge successful\n")
+				fmt.Fprintf(os.Stderr, "→ Restarting import with merged JSONL...\n\n")
+
+				// Re-open the input file to read the merged content
+				if input != "" {
+					// Close current file handle
+					if in != os.Stdin {
+						_ = in.Close()
 					}
-				}()
-				in = f
-				scanner = bufio.NewScanner(in)
-				allIssues = nil // Reset issues list
-				lineNum = 0     // Reset line counter
-				continue        // Restart parsing from beginning
-			} else {
-				// Can't retry stdin - should not happen since git conflicts only in files
-				fmt.Fprintf(os.Stderr, "Error: Cannot retry merge from stdin\n")
+
+					// Re-open the merged file
+					// #nosec G304 - user-provided file path is intentional
+					f, err := os.Open(input)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error reopening merged file: %v\n", err)
+						os.Exit(1)
+					}
+					defer func() {
+						if err := f.Close(); err != nil {
+							fmt.Fprintf(os.Stderr, "Warning: failed to close input file: %v\n", err)
+						}
+					}()
+					in = f
+					scanner = bufio.NewScanner(in)
+					allIssues = nil // Reset issues list
+					lineNum = 0     // Reset line counter
+					continue        // Restart parsing from beginning
+				} else {
+					// Can't retry stdin - should not happen since git conflicts only in files
+					fmt.Fprintf(os.Stderr, "Error: Cannot retry merge from stdin\n")
+					os.Exit(1)
+				}
+			}
+
+			// Parse JSON
+			var issue types.Issue
+			if err := json.Unmarshal([]byte(line), &issue); err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing line %d: %v\n", lineNum, err)
 				os.Exit(1)
 			}
-		}
 
-		// Parse JSON
-		var issue types.Issue
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing line %d: %v\n", lineNum, err)
-			os.Exit(1)
+			allIssues = append(allIssues, &issue)
 		}
-
-		allIssues = append(allIssues, &issue)
-	}
 
 		if err := scanner.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
@@ -190,12 +190,12 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 				detectedPrefix = filepath.Base(cwd)
 			}
 			detectedPrefix = strings.TrimRight(detectedPrefix, "-")
-			
+
 			if err := store.SetConfig(initCtx, "issue_prefix", detectedPrefix); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
 				os.Exit(1)
 			}
-			
+
 			fmt.Fprintf(os.Stderr, "✓ Initialized database with prefix '%s' (detected from issues)\n", detectedPrefix)
 		}
 
@@ -233,7 +233,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 				fmt.Fprintf(os.Stderr, "\nOr use 'bd rename-prefix' after import to fix the database.\n")
 				os.Exit(1)
 			}
-			
+
 			// Check if it's a collision error
 			if result != nil && len(result.CollisionIDs) > 0 {
 				// Print collision report before exiting
@@ -259,7 +259,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 				}
 				fmt.Fprintf(os.Stderr, "\nUse --rename-on-import to automatically fix prefixes during import.\n")
 			}
-			
+
 			if result.Collisions > 0 {
 				fmt.Fprintf(os.Stderr, "\n=== Collision Detection Report ===\n")
 				fmt.Fprintf(os.Stderr, "COLLISIONS DETECTED: %d\n", result.Collisions)
@@ -395,7 +395,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 // Fixes issues #278, #301, #321: daemon export leaving JSONL newer than DB.
 func TouchDatabaseFile(dbPath, jsonlPath string) error {
 	targetTime := time.Now()
-	
+
 	// If we have the JSONL path, use max(JSONL mtime, now) to handle clock skew
 	if jsonlPath != "" {
 		if info, err := os.Stat(jsonlPath); err == nil {
@@ -405,7 +405,7 @@ func TouchDatabaseFile(dbPath, jsonlPath string) error {
 			}
 		}
 	}
-	
+
 	// Best-effort touch - don't fail import if this doesn't work
 	return os.Chtimes(dbPath, targetTime, targetTime)
 }
@@ -420,17 +420,17 @@ func checkUncommittedChanges(filePath string, result *ImportResult) {
 
 	// Get the directory containing the file to use as git working directory
 	workDir := filepath.Dir(filePath)
-	
+
 	// Use git diff to check if working tree differs from HEAD
 	cmd := fmt.Sprintf("git diff --quiet HEAD %s", filePath)
 	exitCode, _ := runGitCommand(cmd, workDir)
-	
+
 	// Exit code 0 = no changes, 1 = changes exist, >1 = error
 	if exitCode == 1 {
 		// Get line counts for context
 		workingTreeLines := countLines(filePath)
 		headLines := countLinesInGitHEAD(filePath, workDir)
-		
+
 		fmt.Fprintf(os.Stderr, "\n⚠️  Warning: .beads/issues.jsonl has uncommitted changes\n")
 		fmt.Fprintf(os.Stderr, "   Working tree: %d lines\n", workingTreeLines)
 		if headLines > 0 {
@@ -468,7 +468,7 @@ func countLines(filePath string) int {
 		return 0
 	}
 	defer func() { _ = f.Close() }()
-	
+
 	scanner := bufio.NewScanner(f)
 	lines := 0
 	for scanner.Scan() {
@@ -486,24 +486,24 @@ func countLinesInGitHEAD(filePath string, workDir string) int {
 		return 0
 	}
 	gitRoot := strings.TrimSpace(gitRootOutput)
-	
+
 	// Make filePath relative to git root
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return 0
 	}
-	
+
 	relPath, err := filepath.Rel(gitRoot, absPath)
 	if err != nil {
 		return 0
 	}
-	
+
 	cmd := fmt.Sprintf("git show HEAD:%s 2>/dev/null | wc -l", relPath)
 	exitCode, output := runGitCommand(cmd, workDir)
 	if exitCode != 0 {
 		return 0
 	}
-	
+
 	var lines int
 	_, err = fmt.Sscanf(strings.TrimSpace(output), "%d", &lines)
 	if err != nil {
@@ -520,7 +520,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Get git repository root
-	gitRootCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	gitRootCmd := exec.Command("git", "rev-parse", "--show-toplevel") // #nosec G204 -- fixed git invocation for repo root discovery
 	gitRootOutput, err := gitRootCmd.Output()
 	if err != nil {
 		return fmt.Errorf("not in a git repository: %w", err)
@@ -555,7 +555,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	outputPath := filepath.Join(tmpDir, "merged.jsonl")
 
 	// Extract base version (merge-base)
-	baseCmd := exec.Command("git", "show", fmt.Sprintf(":1:%s", relPath))
+	baseCmd := exec.Command("git", "show", fmt.Sprintf(":1:%s", relPath)) // #nosec G204 -- relPath limited to files tracked in current repo
 	baseCmd.Dir = gitRoot
 	baseContent, err := baseCmd.Output()
 	if err != nil {
@@ -568,7 +568,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Extract left version (ours/HEAD)
-	leftCmd := exec.Command("git", "show", fmt.Sprintf(":2:%s", relPath))
+	leftCmd := exec.Command("git", "show", fmt.Sprintf(":2:%s", relPath)) // #nosec G204 -- relPath limited to files tracked in current repo
 	leftCmd.Dir = gitRoot
 	leftContent, err := leftCmd.Output()
 	if err != nil {
@@ -579,7 +579,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Extract right version (theirs/MERGE_HEAD)
-	rightCmd := exec.Command("git", "show", fmt.Sprintf(":3:%s", relPath))
+	rightCmd := exec.Command("git", "show", fmt.Sprintf(":3:%s", relPath)) // #nosec G204 -- relPath limited to files tracked in current repo
 	rightCmd.Dir = gitRoot
 	rightContent, err := rightCmd.Output()
 	if err != nil {
@@ -596,7 +596,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Invoke bd merge command
-	mergeCmd := exec.Command(exe, "merge", outputPath, basePath, leftPath, rightPath)
+	mergeCmd := exec.Command(exe, "merge", outputPath, basePath, leftPath, rightPath) // #nosec G204 -- executes current bd binary for deterministic merge
 	mergeOutput, err := mergeCmd.CombinedOutput()
 	if err != nil {
 		// Check exit code - bd merge returns 1 if there are conflicts, 2 for errors
@@ -610,6 +610,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Merge succeeded - copy merged result back to original file
+	// #nosec G304 -- merged output created earlier in this function
 	mergedContent, err := os.ReadFile(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to read merged output: %w", err)
@@ -620,7 +621,7 @@ func attemptAutoMerge(conflictedPath string) error {
 	}
 
 	// Stage the resolved file
-	stageCmd := exec.Command("git", "add", relPath)
+	stageCmd := exec.Command("git", "add", relPath) // #nosec G204 -- relPath constrained to file within current repo
 	stageCmd.Dir = gitRoot
 	if err := stageCmd.Run(); err != nil {
 		// Non-fatal - user can stage manually
@@ -636,7 +637,7 @@ func detectPrefixFromIssues(issues []*types.Issue) string {
 	if len(issues) == 0 {
 		return ""
 	}
-	
+
 	// Count prefix occurrences
 	prefixCounts := make(map[string]int)
 	for _, issue := range issues {
@@ -646,7 +647,7 @@ func detectPrefixFromIssues(issues []*types.Issue) string {
 			prefixCounts[issue.ID[:idx]]++
 		}
 	}
-	
+
 	// Find most common prefix
 	maxCount := 0
 	commonPrefix := ""
@@ -656,7 +657,7 @@ func detectPrefixFromIssues(issues []*types.Issue) string {
 			commonPrefix = prefix
 		}
 	}
-	
+
 	return commonPrefix
 }
 

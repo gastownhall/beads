@@ -111,7 +111,7 @@ func (s *SQLiteStorage) GetLabelsForIssues(ctx context.Context, issueIDs []strin
 		FROM labels 
 		WHERE issue_id IN (%s)
 		ORDER BY issue_id, label
-	`, buildPlaceholders(len(issueIDs)))
+	`, buildPlaceholders(len(issueIDs))) // #nosec G201 -- placeholders are generated internally
 
 	rows, err := s.db.QueryContext(ctx, query, placeholders...)
 	if err != nil {

@@ -18,7 +18,7 @@ var hooksFS embed.FS
 func getEmbeddedHooks() (map[string]string, error) {
 	hooks := make(map[string]string)
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
-	
+
 	for _, name := range hookNames {
 		content, err := hooksFS.ReadFile("templates/hooks/" + name)
 		if err != nil {
@@ -26,7 +26,7 @@ func getEmbeddedHooks() (map[string]string, error) {
 		}
 		hooks[name] = string(content)
 	}
-	
+
 	return hooks, nil
 }
 
@@ -41,7 +41,7 @@ type HookStatus struct {
 }
 
 // CheckGitHooks checks the status of bd git hooks in .git/hooks/
-func CheckGitHooks() ([]HookStatus, error) {
+func CheckGitHooks() []HookStatus {
 	hooks := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
 	statuses := make([]HookStatus, 0, len(hooks))
 
@@ -59,7 +59,7 @@ func CheckGitHooks() ([]HookStatus, error) {
 		} else {
 			status.Installed = true
 			status.Version = version
-			
+
 			// Check if outdated (compare to current bd version)
 			if version != "" && version != Version {
 				status.Outdated = true
@@ -69,11 +69,12 @@ func CheckGitHooks() ([]HookStatus, error) {
 		statuses = append(statuses, status)
 	}
 
-	return statuses, nil
+	return statuses
 }
 
 // getHookVersion extracts the version from a hook file
 func getHookVersion(path string) (string, error) {
+	// #nosec G304 -- hook path constrained to .git/hooks directory
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -99,10 +100,10 @@ func getHookVersion(path string) (string, error) {
 // FormatHookWarnings returns a formatted warning message if hooks are outdated
 func FormatHookWarnings(statuses []HookStatus) string {
 	var warnings []string
-	
+
 	missingCount := 0
 	outdatedCount := 0
-	
+
 	for _, status := range statuses {
 		if !status.Installed {
 			missingCount++
@@ -110,21 +111,21 @@ func FormatHookWarnings(statuses []HookStatus) string {
 			outdatedCount++
 		}
 	}
-	
+
 	if missingCount > 0 {
 		warnings = append(warnings, fmt.Sprintf("⚠️  Git hooks not installed (%d missing)", missingCount))
 		warnings = append(warnings, "   Run: bd hooks install")
 	}
-	
+
 	if outdatedCount > 0 {
 		warnings = append(warnings, fmt.Sprintf("⚠️  Git hooks are outdated (%d hooks)", outdatedCount))
 		warnings = append(warnings, "   Run: bd hooks install")
 	}
-	
+
 	if len(warnings) > 0 {
 		return strings.Join(warnings, "\n")
 	}
-	
+
 	return ""
 }
 
@@ -157,7 +158,7 @@ Installed hooks:
   - post-checkout: Import JSONL after branch checkout`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
-		
+
 		embeddedHooks, err := getEmbeddedHooks()
 		if err != nil {
 			if jsonOutput {
@@ -171,7 +172,7 @@ Installed hooks:
 			}
 			os.Exit(1)
 		}
-		
+
 		if err := installHooks(embeddedHooks, force); err != nil {
 			if jsonOutput {
 				output := map[string]interface{}{
@@ -184,7 +185,7 @@ Installed hooks:
 			}
 			os.Exit(1)
 		}
-		
+
 		if jsonOutput {
 			output := map[string]interface{}{
 				"success": true,
@@ -220,7 +221,7 @@ var hooksUninstallCmd = &cobra.Command{
 			}
 			os.Exit(1)
 		}
-		
+
 		if jsonOutput {
 			output := map[string]interface{}{
 				"success": true,
@@ -239,20 +240,8 @@ var hooksListCmd = &cobra.Command{
 	Short: "List installed git hooks status",
 	Long:  `Show the status of bd git hooks (installed, outdated, missing).`,
 	Run: func(cmd *cobra.Command, args []string) {
-		statuses, err := CheckGitHooks()
-		if err != nil {
-			if jsonOutput {
-				output := map[string]interface{}{
-					"error": err.Error(),
-				}
-				jsonBytes, _ := json.MarshalIndent(output, "", "  ")
-				fmt.Println(string(jsonBytes))
-			} else {
-				fmt.Fprintf(os.Stderr, "Error checking hooks: %v\n", err)
-			}
-			os.Exit(1)
-		}
-		
+		statuses := CheckGitHooks()
+
 		if jsonOutput {
 			output := map[string]interface{}{
 				"hooks": statuses,
@@ -265,7 +254,7 @@ var hooksListCmd = &cobra.Command{
 				if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.Outdated {
-					fmt.Printf("  ⚠ %s: installed (version %s, current: %s) - outdated\n", 
+					fmt.Printf("  ⚠ %s: installed (version %s, current: %s) - outdated\n",
 						status.Name, status.Version, Version)
 				} else {
 					fmt.Printf("  ✓ %s: installed (version %s)\n", status.Name, status.Version)
@@ -281,18 +270,18 @@ func installHooks(embeddedHooks map[string]string, force bool) error {
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		return fmt.Errorf("not a git repository (no .git directory found)")
 	}
-	
+
 	hooksDir := filepath.Join(gitDir, "hooks")
-	
+
 	// Create hooks directory if it doesn't exist
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
-	
+
 	// Install each hook
 	for hookName, hookContent := range embeddedHooks {
 		hookPath := filepath.Join(hooksDir, hookName)
-		
+
 		// Check if hook already exists
 		if _, err := os.Stat(hookPath); err == nil {
 			// Hook exists - back it up unless force is set
@@ -303,33 +292,34 @@ func installHooks(embeddedHooks map[string]string, force bool) error {
 				}
 			}
 		}
-		
+
 		// Write hook file
+		// #nosec G306 -- git hooks must be executable for Git to run them
 		if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
 			return fmt.Errorf("failed to write %s: %w", hookName, err)
 		}
 	}
-	
+
 	return nil
 }
 
 func uninstallHooks() error {
 	hooksDir := filepath.Join(".git", "hooks")
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
-	
+
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
-		
+
 		// Check if hook exists
 		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 			continue
 		}
-		
+
 		// Remove hook
 		if err := os.Remove(hookPath); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", hookName, err)
 		}
-		
+
 		// Restore backup if exists
 		backupPath := hookPath + ".backup"
 		if _, err := os.Stat(backupPath); err == nil {
@@ -339,16 +329,16 @@ func uninstallHooks() error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 func init() {
 	hooksInstallCmd.Flags().Bool("force", false, "Overwrite existing hooks without backup")
-	
+
 	hooksCmd.AddCommand(hooksInstallCmd)
 	hooksCmd.AddCommand(hooksUninstallCmd)
 	hooksCmd.AddCommand(hooksListCmd)
-	
+
 	rootCmd.AddCommand(hooksCmd)
 }

@@ -90,47 +90,47 @@ var taskTitles = []string{
 
 // DataConfig controls the distribution and characteristics of generated test data
 type DataConfig struct {
-	TotalIssues      int     // total number of issues to generate
-	EpicRatio        float64 // percentage of issues that are epics (e.g., 0.1 for 10%)
-	FeatureRatio     float64 // percentage of issues that are features (e.g., 0.3 for 30%)
-	OpenRatio        float64 // percentage of issues that are open (e.g., 0.5 for 50%)
-	CrossLinkRatio   float64 // percentage of tasks with cross-epic blocking dependencies (e.g., 0.2 for 20%)
-	MaxEpicAgeDays   int     // maximum age in days for epics (e.g., 180)
-	MaxFeatureAgeDays int    // maximum age in days for features (e.g., 150)
-	MaxTaskAgeDays   int     // maximum age in days for tasks (e.g., 120)
-	MaxClosedAgeDays int     // maximum days since closure (e.g., 30)
-	RandSeed         int64   // random seed for reproducibility
+	TotalIssues       int     // total number of issues to generate
+	EpicRatio         float64 // percentage of issues that are epics (e.g., 0.1 for 10%)
+	FeatureRatio      float64 // percentage of issues that are features (e.g., 0.3 for 30%)
+	OpenRatio         float64 // percentage of issues that are open (e.g., 0.5 for 50%)
+	CrossLinkRatio    float64 // percentage of tasks with cross-epic blocking dependencies (e.g., 0.2 for 20%)
+	MaxEpicAgeDays    int     // maximum age in days for epics (e.g., 180)
+	MaxFeatureAgeDays int     // maximum age in days for features (e.g., 150)
+	MaxTaskAgeDays    int     // maximum age in days for tasks (e.g., 120)
+	MaxClosedAgeDays  int     // maximum days since closure (e.g., 30)
+	RandSeed          int64   // random seed for reproducibility
 }
 
 // DefaultLargeConfig returns configuration for 10K issue dataset
 func DefaultLargeConfig() DataConfig {
 	return DataConfig{
-		TotalIssues:      10000,
-		EpicRatio:        0.1,
-		FeatureRatio:     0.3,
-		OpenRatio:        0.5,
-		CrossLinkRatio:   0.2,
-		MaxEpicAgeDays:   180,
+		TotalIssues:       10000,
+		EpicRatio:         0.1,
+		FeatureRatio:      0.3,
+		OpenRatio:         0.5,
+		CrossLinkRatio:    0.2,
+		MaxEpicAgeDays:    180,
 		MaxFeatureAgeDays: 150,
-		MaxTaskAgeDays:   120,
-		MaxClosedAgeDays: 30,
-		RandSeed:         42,
+		MaxTaskAgeDays:    120,
+		MaxClosedAgeDays:  30,
+		RandSeed:          42,
 	}
 }
 
 // DefaultXLargeConfig returns configuration for 20K issue dataset
 func DefaultXLargeConfig() DataConfig {
 	return DataConfig{
-		TotalIssues:      20000,
-		EpicRatio:        0.1,
-		FeatureRatio:     0.3,
-		OpenRatio:        0.5,
-		CrossLinkRatio:   0.2,
-		MaxEpicAgeDays:   180,
+		TotalIssues:       20000,
+		EpicRatio:         0.1,
+		FeatureRatio:      0.3,
+		OpenRatio:         0.5,
+		CrossLinkRatio:    0.2,
+		MaxEpicAgeDays:    180,
 		MaxFeatureAgeDays: 150,
-		MaxTaskAgeDays:   120,
-		MaxClosedAgeDays: 30,
-		RandSeed:         43,
+		MaxTaskAgeDays:    120,
+		MaxClosedAgeDays:  30,
+		RandSeed:          43,
 	}
 }
 
@@ -162,7 +162,7 @@ func XLargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string)
 
 // generateIssuesWithConfig creates issues with realistic epic hierarchies and cross-links using provided configuration
 func generateIssuesWithConfig(ctx context.Context, store storage.Storage, cfg DataConfig) error {
-	rng := rand.New(rand.NewSource(cfg.RandSeed))
+	rng := rand.New(rand.NewSource(cfg.RandSeed)) // #nosec G404 -- deterministic math/rand used for repeatable fixture data
 
 	// Calculate breakdown using configuration ratios
 	numEpics := int(float64(cfg.TotalIssues) * cfg.EpicRatio)
@@ -403,6 +403,7 @@ func exportToJSONL(ctx context.Context, store storage.Storage, path string) erro
 	}
 
 	// Write to JSONL file
+	// #nosec G304 -- fixture exports to deterministic file controlled by tests
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create JSONL file: %w", err)
@@ -422,6 +423,7 @@ func exportToJSONL(ctx context.Context, store storage.Storage, path string) erro
 // importFromJSONL imports issues from a JSONL file
 func importFromJSONL(ctx context.Context, store storage.Storage, path string) error {
 	// Read JSONL file
+	// #nosec G304 -- fixture imports from deterministic file created earlier in test
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read JSONL file: %w", err)
