@@ -34,7 +34,12 @@ var showCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
 					os.Exit(1)
 				}
-				resolvedIDs = append(resolvedIDs, string(resp.Data))
+				var resolvedID string
+				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					os.Exit(1)
+				}
+				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
 		} else {
 			// In direct mode, resolve via storage
@@ -392,7 +397,12 @@ var updateCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
 					os.Exit(1)
 				}
-				resolvedIDs = append(resolvedIDs, string(resp.Data))
+				var resolvedID string
+				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					os.Exit(1)
+				}
+				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
 		} else {
 			var err error
@@ -710,7 +720,12 @@ var closeCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
 					os.Exit(1)
 				}
-				resolvedIDs = append(resolvedIDs, string(resp.Data))
+				var resolvedID string
+				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					os.Exit(1)
+				}
+				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
 		} else {
 			var err error
