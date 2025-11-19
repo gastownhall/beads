@@ -111,11 +111,9 @@ func main() {
 
 // getSocketPath returns the Unix socket path for the daemon
 func getSocketPath(dbPath string) string {
-	// Use the database directory to determine socket path
+	// The daemon always creates the socket as "bd.sock" in the same directory as the database
 	dbDir := filepath.Dir(dbPath)
-	dbName := filepath.Base(dbPath)
-	socketName := dbName + ".sock"
-	return filepath.Join(dbDir, ".beads", socketName)
+	return filepath.Join(dbDir, "bd.sock")
 }
 
 // connectToDaemon establishes connection to the daemon
