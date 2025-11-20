@@ -181,6 +181,15 @@ main() {
         "\"version\": \"$CURRENT_VERSION\"" \
         "\"version\": \"$NEW_VERSION\""
 
+    # 9. Update hook templates
+    echo "  • cmd/bd/templates/hooks/*"
+    HOOK_FILES=("pre-commit" "post-merge" "pre-push" "post-checkout")
+    for hook in "${HOOK_FILES[@]}"; do
+        update_file "cmd/bd/templates/hooks/$hook" \
+            "# bd-hooks-version: $CURRENT_VERSION" \
+            "# bd-hooks-version: $NEW_VERSION"
+    done
+
     echo ""
     echo -e "${GREEN}✓ Version updated to $NEW_VERSION${NC}"
     echo ""
@@ -199,6 +208,7 @@ main() {
         "$(grep 'version = ' integrations/beads-mcp/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
         "$(grep '__version__ = ' integrations/beads-mcp/src/beads_mcp/__init__.py | sed 's/.*"\(.*\)".*/\1/')"
         "$(jq -r '.version' npm-package/package.json)"
+        "$(grep '# bd-hooks-version: ' cmd/bd/templates/hooks/pre-commit | sed 's/.*: \(.*\)/\1/')"
     )
 
     ALL_MATCH=true
@@ -228,7 +238,8 @@ main() {
                 integrations/beads-mcp/pyproject.toml \
                 integrations/beads-mcp/src/beads_mcp/__init__.py \
                 npm-package/package.json \
-                README.md
+                README.md \
+                cmd/bd/templates/hooks/*
         
         # Add PLUGIN.md if it exists
         if [ -f "PLUGIN.md" ]; then
