@@ -32,13 +32,13 @@ type StatusSummary struct {
 
 // RecentActivitySummary represents activity from git history
 type RecentActivitySummary struct {
-	HoursTracked    int `json:"hours_tracked"`
-	CommitCount     int `json:"commit_count"`
-	IssuesCreated   int `json:"issues_created"`
-	IssuesClosed    int `json:"issues_closed"`
-	IssuesUpdated   int `json:"issues_updated"`
-	IssuesReopened  int `json:"issues_reopened"`
-	TotalChanges    int `json:"total_changes"`
+	HoursTracked   int `json:"hours_tracked"`
+	CommitCount    int `json:"commit_count"`
+	IssuesCreated  int `json:"issues_created"`
+	IssuesClosed   int `json:"issues_closed"`
+	IssuesUpdated  int `json:"issues_updated"`
+	IssuesReopened int `json:"issues_reopened"`
+	TotalChanges   int `json:"total_changes"`
 }
 
 var statusCmd = &cobra.Command{
@@ -168,8 +168,8 @@ func getGitActivity(hours int) *RecentActivitySummary {
 
 	// Run git log to get patches for the last N hours
 	since := fmt.Sprintf("%d hours ago", hours)
-	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/beads.jsonl")
-	
+	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/beads.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+
 	output, err := cmd.Output()
 	if err != nil {
 		// Git log failed (might not be a git repo or no commits)
@@ -178,63 +178,63 @@ func getGitActivity(hours int) *RecentActivitySummary {
 
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	commitCount := 0
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Empty lines separate commits
 		if line == "" {
 			continue
 		}
-		
+
 		// Commit hash line
 		if !strings.Contains(line, "\t") {
 			commitCount++
 			continue
 		}
-		
+
 		// numstat line format: "additions\tdeletions\tfilename"
 		parts := strings.Split(line, "\t")
 		if len(parts) < 3 {
 			continue
 		}
-		
+
 		// For JSONL files, each added line is a new/updated issue
 		// We need to analyze the actual diff to understand what changed
 	}
-	
+
 	// Get detailed diff to analyze changes
-	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/beads.jsonl")
+	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/beads.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
 	output, err = cmd.Output()
 	if err != nil {
 		return nil
 	}
-	
+
 	scanner = bufio.NewScanner(strings.NewReader(string(output)))
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Look for added lines in diff (lines starting with +)
 		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
 			continue
 		}
-		
+
 		// Remove the + prefix
 		jsonLine := strings.TrimPrefix(line, "+")
-		
+
 		// Skip empty lines
 		if strings.TrimSpace(jsonLine) == "" {
 			continue
 		}
-		
+
 		// Try to parse as issue JSON
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(jsonLine), &issue); err != nil {
 			continue
 		}
-		
+
 		activity.TotalChanges++
-		
+
 		// Analyze the change type based on timestamps and status
 		// Created recently if created_at is close to now
 		if time.Since(issue.CreatedAt) < time.Duration(hours)*time.Hour {
@@ -253,7 +253,7 @@ func getGitActivity(hours int) *RecentActivitySummary {
 			activity.IssuesUpdated++
 		}
 	}
-	
+
 	activity.CommitCount = commitCount
 	return activity
 }

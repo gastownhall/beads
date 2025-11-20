@@ -307,6 +307,14 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 		}
 		log.log("Exported to JSONL")
 
+		// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
+		// This prevents validatePreExport from incorrectly blocking on next export
+		// with "JSONL is newer than database" after daemon auto-export
+		dbPath := filepath.Join(beadsDir, "beads.db")
+		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+			log.log("Warning: failed to update database mtime: %v", err)
+		}
+
 		// Auto-commit if enabled
 		if autoCommit {
 			// Try sync branch commit first
@@ -502,6 +510,13 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		}
 		log.log("Exported to JSONL")
 
+		// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
+		// This prevents validatePreExport from incorrectly blocking on next export
+		dbPath := filepath.Join(beadsDir, "beads.db")
+		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+			log.log("Warning: failed to update database mtime: %v", err)
+		}
+
 		// Capture left snapshot (pre-pull state) for 3-way merge
 		// This is mandatory for deletion tracking integrity
 		// In multi-repo mode, capture snapshots for all JSONL files
@@ -596,6 +611,12 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 			return
 		}
 		log.log("Imported from JSONL")
+
+		// Update database mtime after import (fixes #278, #301, #321)
+		// Sync branch import can update JSONL timestamp, so ensure DB >= JSONL
+		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+			log.log("Warning: failed to update database mtime: %v", err)
+		}
 
 		// Validate import didn't cause data loss
 		afterCount, err := countDBIssues(syncCtx, store)

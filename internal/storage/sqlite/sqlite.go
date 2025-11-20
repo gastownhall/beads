@@ -14,10 +14,10 @@ import (
 	"time"
 
 	// Import SQLite driver
-	"github.com/steveyegge/beads/internal/types"
 	sqlite3 "github.com/ncruces/go-sqlite3"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/tetratelabs/wazero"
 )
 
@@ -98,7 +98,7 @@ func New(path string) (*SQLiteStorage, error) {
 			return nil, fmt.Errorf("failed to create directory: %w", err)
 		}
 		// Use file URI with pragmas
-		connStr = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+		connStr = "file:" + path + "?_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
 	}
 
 	db, err := sql.Open("sqlite3", connStr)
@@ -125,6 +125,13 @@ func New(path string) (*SQLiteStorage, error) {
 		db.SetConnMaxLifetime(0) // SQLite doesn't need connection recycling
 	}
 
+	// For file-based databases, enable WAL mode once after opening the connection.
+	if !isInMemory {
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+		}
+	}
+
 	// Test connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
@@ -147,7 +154,7 @@ func New(path string) (*SQLiteStorage, error) {
 		if retryErr := RunMigrations(db); retryErr != nil {
 			return nil, fmt.Errorf("migration retry failed after schema probe failure: %w (original: %v)", retryErr, err)
 		}
-		
+
 		// Probe again after retry
 		if err := verifySchemaCompatibility(db); err != nil {
 			// Still failing - return fatal error with clear message
@@ -267,22 +274,22 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
 			return err
 		}
-		
+
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
 		if strings.Contains(issue.ID, ".") {
-		// Try to resurrect entire parent chain if any parents are missing
-		// Use the conn-based version to participate in the same transaction
-		resurrected, err := s.tryResurrectParentChainWithConn(ctx, conn, issue.ID)
-		if err != nil {
-		 return fmt.Errorf("failed to resurrect parent chain for %s: %w", issue.ID, err)
+			// Try to resurrect entire parent chain if any parents are missing
+			// Use the conn-based version to participate in the same transaction
+			resurrected, err := s.tryResurrectParentChainWithConn(ctx, conn, issue.ID)
+			if err != nil {
+				return fmt.Errorf("failed to resurrect parent chain for %s: %w", issue.ID, err)
+			}
+			if !resurrected {
+				// Parent(s) not found in JSONL history - cannot proceed
+				lastDot := strings.LastIndex(issue.ID, ".")
+				parentID := issue.ID[:lastDot]
+				return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
+			}
 		}
-		if !resurrected {
-		// Parent(s) not found in JSONL history - cannot proceed
-		lastDot := strings.LastIndex(issue.ID, ".")
-		parentID := issue.ID[:lastDot]
-		 return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
-		 }
-	}
 	}
 
 	// Insert issue
@@ -498,14 +505,14 @@ func determineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 // manageClosedAt automatically manages the closed_at field based on status changes
 func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
 	statusVal, hasStatus := updates["status"]
-	
+
 	// If closed_at is explicitly provided in updates, it's already in setClauses/args
 	// and we should not override it (important for import operations that preserve timestamps)
 	_, hasExplicitClosedAt := updates["closed_at"]
 	if hasExplicitClosedAt {
 		return setClauses, args
 	}
-	
+
 	if !hasStatus {
 		return setClauses, args
 	}
@@ -1365,7 +1372,7 @@ func (s *SQLiteStorage) GetOrphanHandling(ctx context.Context) OrphanHandling {
 	if err != nil || value == "" {
 		return OrphanAllow // Default
 	}
-	
+
 	switch OrphanHandling(value) {
 	case OrphanStrict, OrphanResurrect, OrphanSkip, OrphanAllow:
 		return OrphanHandling(value)
@@ -1494,26 +1501,26 @@ func (s *SQLiteStorage) IsClosed() bool {
 // IMPORTANT SAFETY RULES:
 //
 // 1. DO NOT call Close() on the returned *sql.DB
-//    - The SQLiteStorage owns the connection lifecycle
-//    - Closing it will break all storage operations
-//    - Use storage.Close() to close the database
+//   - The SQLiteStorage owns the connection lifecycle
+//   - Closing it will break all storage operations
+//   - Use storage.Close() to close the database
 //
 // 2. DO NOT modify connection pool settings
-//    - Avoid SetMaxOpenConns, SetMaxIdleConns, SetConnMaxLifetime, etc.
-//    - The storage has already configured these for optimal performance
+//   - Avoid SetMaxOpenConns, SetMaxIdleConns, SetConnMaxLifetime, etc.
+//   - The storage has already configured these for optimal performance
 //
 // 3. DO NOT change SQLite PRAGMAs
-//    - The database is configured with WAL mode, foreign keys, and busy timeout
-//    - Changing these (e.g., journal_mode, synchronous, locking_mode) can cause corruption
+//   - The database is configured with WAL mode, foreign keys, and busy timeout
+//   - Changing these (e.g., journal_mode, synchronous, locking_mode) can cause corruption
 //
 // 4. Expect errors after storage.Close()
-//    - Check storage.IsClosed() before long-running operations if needed
-//    - Pass contexts with timeouts to prevent hanging on closed connections
+//   - Check storage.IsClosed() before long-running operations if needed
+//   - Pass contexts with timeouts to prevent hanging on closed connections
 //
 // 5. Keep write transactions SHORT
-//    - SQLite has a single-writer lock even in WAL mode
-//    - Long-running write transactions will block core storage operations
-//    - Use read transactions (BEGIN DEFERRED) when possible
+//   - SQLite has a single-writer lock even in WAL mode
+//   - Long-running write transactions will block core storage operations
+//   - Use read transactions (BEGIN DEFERRED) when possible
 //
 // GOOD PRACTICES:
 //
@@ -1535,7 +1542,6 @@ func (s *SQLiteStorage) IsClosed() bool {
 //	    );
 //	    CREATE INDEX IF NOT EXISTS idx_vc_executions_issue ON vc_executions(issue_id);
 //	`)
-//
 func (s *SQLiteStorage) UnderlyingDB() *sql.DB {
 	return s.db
 }

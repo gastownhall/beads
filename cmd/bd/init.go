@@ -68,7 +68,7 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 				}
 			}
 		}
-		
+
 		// auto-detect prefix from directory name
 		if prefix == "" {
 			// Auto-detect from directory name
@@ -88,108 +88,108 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		// Use global dbPath if set via --db flag or BEADS_DB env var, otherwise default to .beads/beads.db
 		initDBPath := dbPath
 		if initDBPath == "" {
-		initDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
+			initDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 		}
 
 		// Migrate old database files if they exist
-	if err := migrateOldDatabases(initDBPath, quiet); err != nil {
-		fmt.Fprintf(os.Stderr, "Error during database migration: %v\n", err)
-		os.Exit(1)
-	}
-	
-	// Determine if we should create .beads/ directory in CWD
-		// Only create it if the database will be stored there
-	cwd, err := os.Getwd()
-		if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get current directory: %v\n", err)
-		os.Exit(1)
-	}
-	
-	// Prevent nested .beads directories
-	// Check if current working directory is inside a .beads directory
-	if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
-	   strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
-		fmt.Fprintf(os.Stderr, "Error: cannot initialize bd inside a .beads directory\n")
-		fmt.Fprintf(os.Stderr, "Current directory: %s\n", cwd)
-		fmt.Fprintf(os.Stderr, "Please run 'bd init' from outside the .beads directory.\n")
-		os.Exit(1)
-	}
-	
-	localBeadsDir := filepath.Join(cwd, ".beads")
-	initDBDir := filepath.Dir(initDBPath)
-	
-	// Convert both to absolute paths for comparison
-	localBeadsDirAbs, err := filepath.Abs(localBeadsDir)
-	if err != nil {
-		localBeadsDirAbs = filepath.Clean(localBeadsDir)
-	}
-	initDBDirAbs, err := filepath.Abs(initDBDir)
-	if err != nil {
-		initDBDirAbs = filepath.Clean(initDBDir)
-	}
-	
-	useLocalBeads := filepath.Clean(initDBDirAbs) == filepath.Clean(localBeadsDirAbs)
-	
-	if useLocalBeads {
-		// Create .beads directory
-		if err := os.MkdirAll(localBeadsDir, 0750); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to create .beads directory: %v\n", err)
+		if err := migrateOldDatabases(initDBPath, quiet); err != nil {
+			fmt.Fprintf(os.Stderr, "Error during database migration: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Handle --no-db mode: create issues.jsonl file instead of database
-		if noDb {
-			// Create empty issues.jsonl file
-			jsonlPath := filepath.Join(localBeadsDir, "issues.jsonl")
-			if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-			// nolint:gosec // G306: JSONL file needs to be readable by other tools
-			if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: failed to create issues.jsonl: %v\n", err)
-					os.Exit(1)
+		// Determine if we should create .beads/ directory in CWD
+		// Only create it if the database will be stored there
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to get current directory: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Prevent nested .beads directories
+		// Check if current working directory is inside a .beads directory
+		if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
+			strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
+			fmt.Fprintf(os.Stderr, "Error: cannot initialize bd inside a .beads directory\n")
+			fmt.Fprintf(os.Stderr, "Current directory: %s\n", cwd)
+			fmt.Fprintf(os.Stderr, "Please run 'bd init' from outside the .beads directory.\n")
+			os.Exit(1)
+		}
+
+		localBeadsDir := filepath.Join(cwd, ".beads")
+		initDBDir := filepath.Dir(initDBPath)
+
+		// Convert both to absolute paths for comparison
+		localBeadsDirAbs, err := filepath.Abs(localBeadsDir)
+		if err != nil {
+			localBeadsDirAbs = filepath.Clean(localBeadsDir)
+		}
+		initDBDirAbs, err := filepath.Abs(initDBDir)
+		if err != nil {
+			initDBDirAbs = filepath.Clean(initDBDir)
+		}
+
+		useLocalBeads := filepath.Clean(initDBDirAbs) == filepath.Clean(localBeadsDirAbs)
+
+		if useLocalBeads {
+			// Create .beads directory
+			if err := os.MkdirAll(localBeadsDir, 0750); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to create .beads directory: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Handle --no-db mode: create issues.jsonl file instead of database
+			if noDb {
+				// Create empty issues.jsonl file
+				jsonlPath := filepath.Join(localBeadsDir, "issues.jsonl")
+				if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+					// nolint:gosec // G306: JSONL file needs to be readable by other tools
+					if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to create issues.jsonl: %v\n", err)
+						os.Exit(1)
+					}
 				}
+
+				// Create metadata.json for --no-db mode
+				cfg := configfile.DefaultConfig()
+				if err := cfg.Save(localBeadsDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+					// Non-fatal - continue anyway
+				}
+
+				// Create config.yaml with no-db: true
+				if err := createConfigYaml(localBeadsDir, true); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
+					// Non-fatal - continue anyway
+				}
+
+				if !quiet {
+					green := color.New(color.FgGreen).SprintFunc()
+					cyan := color.New(color.FgCyan).SprintFunc()
+
+					fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", green("✓"))
+					fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
+					fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
+					fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
+					fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
+					fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
+				}
+				return
 			}
 
-			// Create metadata.json for --no-db mode
-			cfg := configfile.DefaultConfig()
-			if err := cfg.Save(localBeadsDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+			// Create/update .gitignore in .beads directory (idempotent - always update to latest)
+			gitignorePath := filepath.Join(localBeadsDir, ".gitignore")
+			if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %v\n", err)
 				// Non-fatal - continue anyway
 			}
-
-			// Create config.yaml with no-db: true
-			if err := createConfigYaml(localBeadsDir, true); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
-				// Non-fatal - continue anyway
-			}
-
-			if !quiet {
-				green := color.New(color.FgGreen).SprintFunc()
-				cyan := color.New(color.FgCyan).SprintFunc()
-
-				fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", green("✓"))
-				fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
-				fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
-				fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
-				fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
-				fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
-			}
-			return
 		}
 
-		// Create/update .gitignore in .beads directory (idempotent - always update to latest)
-		gitignorePath := filepath.Join(localBeadsDir, ".gitignore")
-		if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %v\n", err)
-			// Non-fatal - continue anyway
-		}
-	}
-	
 		// Ensure parent directory exists for the database
 		if err := os.MkdirAll(initDBDir, 0750); err != nil {
-		 fmt.Fprintf(os.Stderr, "Error: failed to create database directory %s: %v\n", initDBDir, err)
-		 os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: failed to create database directory %s: %v\n", initDBDir, err)
+			os.Exit(1)
 		}
-		
+
 		store, err := sqlite.New(initDBPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create database: %v\n", err)
@@ -199,192 +199,192 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		// Set the issue prefix in config
 		ctx := context.Background()
 		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
-		_ = store.Close()
-		os.Exit(1)
-		}
-
-	// Set sync.branch if specified
-	if branch != "" {
-		if err := syncbranch.Set(ctx, store, branch); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
 			_ = store.Close()
 			os.Exit(1)
 		}
-		if !quiet {
-			fmt.Printf("  Sync branch: %s\n", branch)
+
+		// Set sync.branch if specified
+		if branch != "" {
+			if err := syncbranch.Set(ctx, store, branch); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
+				_ = store.Close()
+				os.Exit(1)
+			}
+			if !quiet {
+				fmt.Printf("  Sync branch: %s\n", branch)
+			}
 		}
-	}
 
 		// Store the bd version in metadata (for version mismatch detection)
 		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
-		// Non-fatal - continue anyway
-		}
-
-	// Compute and store repository fingerprint
-	repoID, err := beads.ComputeRepoID()
-	if err != nil {
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
-		}
-	} else {
-		if err := store.SetMetadata(ctx, "repo_id", repoID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to set repo_id: %v\n", err)
-		} else if !quiet {
-			fmt.Printf("  Repository ID: %s\n", repoID[:8])
-		}
-	}
-
-	// Store clone-specific ID
-	cloneID, err := beads.GetCloneID()
-	if err != nil {
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
-		}
-	} else {
-		if err := store.SetMetadata(ctx, "clone_id", cloneID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to set clone_id: %v\n", err)
-		} else if !quiet {
-			fmt.Printf("  Clone ID: %s\n", cloneID)
-		}
-	}
-
-	// Create metadata.json for database metadata
-	if useLocalBeads {
-		cfg := configfile.DefaultConfig()
-		if err := cfg.Save(localBeadsDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to store version metadata: %v\n", err)
 			// Non-fatal - continue anyway
 		}
-		
-		// Create config.yaml template
-		if err := createConfigYaml(localBeadsDir, false); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
-			// Non-fatal - continue anyway
-		}
-	}
 
-	// Check if git has existing issues to import (fresh clone scenario)
-	issueCount, jsonlPath := checkGitForIssues()
-	if issueCount > 0 {
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
-		}
-		
-		if err := importFromGit(ctx, initDBPath, store, jsonlPath); err != nil {
+		// Compute and store repository fingerprint
+		repoID, err := beads.ComputeRepoID()
+		if err != nil {
 			if !quiet {
-				fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
+				fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
 			}
-			// Non-fatal - continue with empty database
-		} else if !quiet {
-			fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+		} else {
+			if err := store.SetMetadata(ctx, "repo_id", repoID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set repo_id: %v\n", err)
+			} else if !quiet {
+				fmt.Printf("  Repository ID: %s\n", repoID[:8])
+			}
 		}
-	}
 
-	// Run contributor wizard if --contributor flag is set
-	if contributor {
-		if err := runContributorWizard(ctx, store); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running contributor wizard: %v\n", err)
-			_ = store.Close()
-			os.Exit(1)
+		// Store clone-specific ID
+		cloneID, err := beads.GetCloneID()
+		if err != nil {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
+			}
+		} else {
+			if err := store.SetMetadata(ctx, "clone_id", cloneID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set clone_id: %v\n", err)
+			} else if !quiet {
+				fmt.Printf("  Clone ID: %s\n", cloneID)
+			}
 		}
-	}
 
-	// Run team wizard if --team flag is set
-	if team {
-		if err := runTeamWizard(ctx, store); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running team wizard: %v\n", err)
-			_ = store.Close()
-			os.Exit(1)
+		// Create metadata.json for database metadata
+		if useLocalBeads {
+			cfg := configfile.DefaultConfig()
+			if err := cfg.Save(localBeadsDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+				// Non-fatal - continue anyway
+			}
+
+			// Create config.yaml template
+			if err := createConfigYaml(localBeadsDir, false); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
+				// Non-fatal - continue anyway
+			}
 		}
-	}
 
-	if err := store.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
-	}
+		// Check if git has existing issues to import (fresh clone scenario)
+		issueCount, jsonlPath := checkGitForIssues()
+		if issueCount > 0 {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
+			}
 
-// Check if we're in a git repo and hooks aren't installed
-// Do this BEFORE quiet mode return so hooks get installed for agents
-if isGitRepo() && !hooksInstalled() {
-	if quiet {
-		// Auto-install hooks silently in quiet mode (best default for agents)
-		_ = installGitHooks() // Ignore errors in quiet mode
-	} else {
-		// Defer to interactive prompt below
-	}
-}
+			if err := importFromGit(ctx, initDBPath, store, jsonlPath); err != nil {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
+				}
+				// Non-fatal - continue with empty database
+			} else if !quiet {
+				fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+			}
+		}
 
-// Check if we're in a git repo and merge driver isn't configured
-// Do this BEFORE quiet mode return so merge driver gets configured for agents
-if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-	if quiet {
-		// Auto-install merge driver silently in quiet mode (best default for agents)
-		_ = installMergeDriver() // Ignore errors in quiet mode
-	} else {
-		// Defer to interactive prompt below
-	}
-}
+		// Run contributor wizard if --contributor flag is set
+		if contributor {
+			if err := runContributorWizard(ctx, store); err != nil {
+				fmt.Fprintf(os.Stderr, "Error running contributor wizard: %v\n", err)
+				_ = store.Close()
+				os.Exit(1)
+			}
+		}
 
-// Skip output if quiet mode
-if quiet {
-		return
-}
+		// Run team wizard if --team flag is set
+		if team {
+			if err := runTeamWizard(ctx, store); err != nil {
+				fmt.Fprintf(os.Stderr, "Error running team wizard: %v\n", err)
+				_ = store.Close()
+				os.Exit(1)
+			}
+		}
+
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
+		}
+
+		// Check if we're in a git repo and hooks aren't installed
+		// Do this BEFORE quiet mode return so hooks get installed for agents
+		if isGitRepo() && !hooksInstalled() {
+			if quiet {
+				// Auto-install hooks silently in quiet mode (best default for agents)
+				_ = installGitHooks() // Ignore errors in quiet mode
+			} else {
+				// Defer to interactive prompt below
+			}
+		}
+
+		// Check if we're in a git repo and merge driver isn't configured
+		// Do this BEFORE quiet mode return so merge driver gets configured for agents
+		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
+			if quiet {
+				// Auto-install merge driver silently in quiet mode (best default for agents)
+				_ = installMergeDriver() // Ignore errors in quiet mode
+			} else {
+				// Defer to interactive prompt below
+			}
+		}
+
+		// Skip output if quiet mode
+		if quiet {
+			return
+		}
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
+		yellow := color.New(color.FgYellow).SprintFunc()
 
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
-	
-	// Interactive git hooks prompt for humans
-	if isGitRepo() && !hooksInstalled() {
-		fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
-		fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
-		fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-		
-		// Prompt to install
-		fmt.Printf("Install git hooks now? [Y/n] ")
-		var response string
-		_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-		response = strings.ToLower(strings.TrimSpace(response))
-		
-		if response == "" || response == "y" || response == "yes" {
-			if err := installGitHooks(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
-				fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-			} else {
-				fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
+
+		// Interactive git hooks prompt for humans
+		if isGitRepo() && !hooksInstalled() {
+			fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
+			fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
+			fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+
+			// Prompt to install
+			fmt.Printf("Install git hooks now? [Y/n] ")
+			var response string
+			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
+			response = strings.ToLower(strings.TrimSpace(response))
+
+			if response == "" || response == "y" || response == "yes" {
+				if err := installGitHooks(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
+					fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
+				} else {
+					fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
+				}
 			}
 		}
-	}
-	
-	// Interactive git merge driver prompt for humans
-	if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-		fmt.Printf("%s Git merge driver not configured\n", yellow("⚠"))
-		fmt.Printf("  bd merge provides intelligent JSONL merging to prevent conflicts.\n")
-		fmt.Printf("  This will configure git to use 'bd merge' for .beads/beads.jsonl\n\n")
-		
-		// Prompt to install
-		fmt.Printf("Configure git merge driver now? [Y/n] ")
-		var response string
-		_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-		response = strings.ToLower(strings.TrimSpace(response))
-		
-		if response == "" || response == "y" || response == "yes" {
-			if err := installMergeDriver(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error configuring merge driver: %v\n", err)
-			} else {
-				fmt.Printf("%s Git merge driver configured successfully!\n\n", green("✓"))
+
+		// Interactive git merge driver prompt for humans
+		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
+			fmt.Printf("%s Git merge driver not configured\n", yellow("⚠"))
+			fmt.Printf("  bd merge provides intelligent JSONL merging to prevent conflicts.\n")
+			fmt.Printf("  This will configure git to use 'bd merge' for .beads/beads.jsonl\n\n")
+
+			// Prompt to install
+			fmt.Printf("Configure git merge driver now? [Y/n] ")
+			var response string
+			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
+			response = strings.ToLower(strings.TrimSpace(response))
+
+			if response == "" || response == "y" || response == "yes" {
+				if err := installMergeDriver(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error configuring merge driver: %v\n", err)
+				} else {
+					fmt.Printf("%s Git merge driver configured successfully!\n\n", green("✓"))
+				}
 			}
 		}
-	}
-	
-	fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+
+		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
 	},
 }
 
@@ -402,50 +402,50 @@ func init() {
 func hooksInstalled() bool {
 	preCommit := filepath.Join(".git", "hooks", "pre-commit")
 	postMerge := filepath.Join(".git", "hooks", "post-merge")
-	
+
 	// Check if both hooks exist
 	_, err1 := os.Stat(preCommit)
 	_, err2 := os.Stat(postMerge)
-	
+
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	
+
 	// Verify they're bd hooks by checking for signature comment
 	// #nosec G304 - controlled path from git directory
 	preCommitContent, err := os.ReadFile(preCommit)
 	if err != nil || !strings.Contains(string(preCommitContent), "bd (beads) pre-commit hook") {
 		return false
 	}
-	
+
 	// #nosec G304 - controlled path from git directory
 	postMergeContent, err := os.ReadFile(postMerge)
 	if err != nil || !strings.Contains(string(postMergeContent), "bd (beads) post-merge hook") {
 		return false
 	}
-	
+
 	return true
 }
 
 // hookInfo contains information about an existing hook
 type hookInfo struct {
-	name         string
-	path         string
-	exists       bool
-	isBdHook     bool
-	isPreCommit  bool
-	content      string
+	name        string
+	path        string
+	exists      bool
+	isBdHook    bool
+	isPreCommit bool
+	content     string
 }
 
 // detectExistingHooks scans for existing git hooks
-func detectExistingHooks() ([]hookInfo, error) {
+func detectExistingHooks() []hookInfo {
 	hooksDir := filepath.Join(".git", "hooks")
 	hooks := []hookInfo{
 		{name: "pre-commit", path: filepath.Join(hooksDir, "pre-commit")},
 		{name: "post-merge", path: filepath.Join(hooksDir, "post-merge")},
 		{name: "pre-push", path: filepath.Join(hooksDir, "pre-push")},
 	}
-	
+
 	for i := range hooks {
 		content, err := os.ReadFile(hooks[i].path)
 		if err == nil {
@@ -459,14 +459,14 @@ func detectExistingHooks() ([]hookInfo, error) {
 			}
 		}
 	}
-	
-	return hooks, nil
+
+	return hooks
 }
 
 // promptHookAction asks user what to do with existing hooks
 func promptHookAction(existingHooks []hookInfo) string {
 	yellow := color.New(color.FgYellow).SprintFunc()
-	
+
 	fmt.Printf("\n%s Found existing git hooks:\n", yellow("⚠"))
 	for _, hook := range existingHooks {
 		if hook.exists && !hook.isBdHook {
@@ -477,35 +477,32 @@ func promptHookAction(existingHooks []hookInfo) string {
 			fmt.Printf("  - %s (%s)\n", hook.name, hookType)
 		}
 	}
-	
+
 	fmt.Printf("\nHow should bd proceed?\n")
 	fmt.Printf("  [1] Chain with existing hooks (recommended)\n")
 	fmt.Printf("  [2] Overwrite existing hooks\n")
 	fmt.Printf("  [3] Skip git hooks installation\n")
 	fmt.Printf("Choice [1-3]: ")
-	
+
 	var response string
 	_, _ = fmt.Scanln(&response)
 	response = strings.TrimSpace(response)
-	
+
 	return response
 }
 
 // installGitHooks installs git hooks inline (no external dependencies)
 func installGitHooks() error {
 	hooksDir := filepath.Join(".git", "hooks")
-	
+
 	// Ensure hooks directory exists
 	if err := os.MkdirAll(hooksDir, 0750); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
-	
+
 	// Detect existing hooks
-	existingHooks, err := detectExistingHooks()
-	if err != nil {
-		return fmt.Errorf("failed to detect existing hooks: %w", err)
-	}
-	
+	existingHooks := detectExistingHooks()
+
 	// Check if any non-bd hooks exist
 	hasExistingHooks := false
 	for _, hook := range existingHooks {
@@ -514,7 +511,7 @@ func installGitHooks() error {
 			break
 		}
 	}
-	
+
 	// Determine installation mode
 	chainHooks := false
 	if hasExistingHooks {
@@ -543,11 +540,11 @@ func installGitHooks() error {
 			return fmt.Errorf("invalid choice: %s", choice)
 		}
 	}
-	
+
 	// pre-commit hook
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
 	var preCommitContent string
-	
+
 	if chainHooks {
 		// Find existing pre-commit hook
 		var existingPreCommit string
@@ -562,7 +559,7 @@ func installGitHooks() error {
 				break
 			}
 		}
-		
+
 		preCommitContent = `#!/bin/sh
 #
 # bd (beads) pre-commit hook (chained)
@@ -641,11 +638,11 @@ fi
 exit 0
 `
 	}
-	
+
 	// post-merge hook
 	postMergePath := filepath.Join(hooksDir, "post-merge")
 	var postMergeContent string
-	
+
 	if chainHooks {
 		// Find existing post-merge hook
 		var existingPostMerge string
@@ -660,7 +657,7 @@ exit 0
 				break
 			}
 		}
-		
+
 		postMergeContent = `#!/bin/sh
 #
 # bd (beads) post-merge hook (chained)
@@ -737,24 +734,24 @@ fi
 exit 0
 `
 	}
-	
+
 	// Write pre-commit hook (executable scripts need 0700)
 	// #nosec G306 - git hooks must be executable
 	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0700); err != nil {
 		return fmt.Errorf("failed to write pre-commit hook: %w", err)
 	}
-	
+
 	// Write post-merge hook (executable scripts need 0700)
 	// #nosec G306 - git hooks must be executable
 	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0700); err != nil {
 		return fmt.Errorf("failed to write post-merge hook: %w", err)
 	}
-	
+
 	if chainHooks {
 		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("%s Chained bd hooks with existing hooks\n", green("✓"))
 	}
-	
+
 	return nil
 }
 
@@ -766,17 +763,17 @@ func mergeDriverInstalled() bool {
 	if err != nil || len(output) == 0 {
 		return false
 	}
-	
+
 	// Check if .gitattributes has the merge driver configured
 	gitattributesPath := ".gitattributes"
 	content, err := os.ReadFile(gitattributesPath)
 	if err != nil {
 		return false
 	}
-	
+
 	// Look for beads JSONL merge attribute
-	return strings.Contains(string(content), ".beads/beads.jsonl") && 
-	       strings.Contains(string(content), "merge=beads")
+	return strings.Contains(string(content), ".beads/beads.jsonl") &&
+		strings.Contains(string(content), "merge=beads")
 }
 
 // installMergeDriver configures git to use bd merge for JSONL files
@@ -786,44 +783,44 @@ func installMergeDriver() error {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to configure git merge driver: %w\n%s", err, output)
 	}
-	
+
 	cmd = exec.Command("git", "config", "merge.beads.name", "bd JSONL merge driver")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Non-fatal, the name is just descriptive
 		fmt.Fprintf(os.Stderr, "Warning: failed to set merge driver name: %v\n%s", err, output)
 	}
-	
+
 	// Create or update .gitattributes
 	gitattributesPath := ".gitattributes"
-	
+
 	// Read existing .gitattributes if it exists
 	var existingContent string
 	content, err := os.ReadFile(gitattributesPath)
 	if err == nil {
 		existingContent = string(content)
 	}
-	
+
 	// Check if beads merge driver is already configured
 	hasBeadsMerge := strings.Contains(existingContent, ".beads/beads.jsonl") &&
-	                 strings.Contains(existingContent, "merge=beads")
-	
+		strings.Contains(existingContent, "merge=beads")
+
 	if !hasBeadsMerge {
 		// Append beads merge driver configuration
 		beadsMergeAttr := "\n# Use bd merge for beads JSONL files\n.beads/beads.jsonl merge=beads\n"
-		
+
 		newContent := existingContent
 		if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
 			newContent += "\n"
 		}
 		newContent += beadsMergeAttr
-		
+
 		// Write updated .gitattributes (0644 is standard for .gitattributes)
 		// #nosec G306 - .gitattributes needs to be readable
 		if err := os.WriteFile(gitattributesPath, []byte(newContent), 0644); err != nil {
 			return fmt.Errorf("failed to update .gitattributes: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -831,24 +828,24 @@ func installMergeDriver() error {
 func migrateOldDatabases(targetPath string, quiet bool) error {
 	targetDir := filepath.Dir(targetPath)
 	targetName := filepath.Base(targetPath)
-	
+
 	// If target already exists, no migration needed
 	if _, err := os.Stat(targetPath); err == nil {
 		return nil
 	}
-	
+
 	// Create .beads directory if it doesn't exist
 	if err := os.MkdirAll(targetDir, 0750); err != nil {
 		return fmt.Errorf("failed to create .beads directory: %w", err)
 	}
-	
+
 	// Look for existing .db files in the .beads directory
 	pattern := filepath.Join(targetDir, "*.db")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return fmt.Errorf("failed to search for existing databases: %w", err)
 	}
-	
+
 	// Filter out the target file name and any backup files
 	var oldDBs []string
 	for _, match := range matches {
@@ -857,50 +854,50 @@ func migrateOldDatabases(targetPath string, quiet bool) error {
 			oldDBs = append(oldDBs, match)
 		}
 	}
-	
+
 	if len(oldDBs) == 0 {
 		// No old databases to migrate
 		return nil
 	}
-	
+
 	if len(oldDBs) > 1 {
 		// Multiple databases found - ambiguous, require manual intervention
 		return fmt.Errorf("multiple database files found in %s: %v\nPlease manually rename the correct database to %s and remove others",
 			targetDir, oldDBs, targetName)
 	}
-	
+
 	// Migrate the single old database
 	oldDB := oldDBs[0]
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "→ Migrating database: %s → %s\n", filepath.Base(oldDB), targetName)
 	}
-	
+
 	// Rename the old database to the new canonical name
 	if err := os.Rename(oldDB, targetPath); err != nil {
 		return fmt.Errorf("failed to migrate database %s to %s: %w", oldDB, targetPath, err)
 	}
-	
+
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "✓ Database migration complete\n\n")
 	}
-	
+
 	return nil
 }
 
 // createConfigYaml creates the config.yaml template in the specified directory
 func createConfigYaml(beadsDir string, noDbMode bool) error {
 	configYamlPath := filepath.Join(beadsDir, "config.yaml")
-	
+
 	// Skip if already exists
 	if _, err := os.Stat(configYamlPath); err == nil {
 		return nil
 	}
-	
+
 	noDbLine := "# no-db: false"
 	if noDbMode {
 		noDbLine = "no-db: true  # JSONL-only mode, no SQLite database"
 	}
-	
+
 	configYamlTemplate := fmt.Sprintf(`# Beads Configuration File
 # This file configures default behavior for all bd commands in this repository
 # All settings can also be set via environment variables (BD_* prefix)
@@ -958,16 +955,17 @@ func createConfigYaml(beadsDir string, noDbMode bool) error {
 # - github.repo
 # - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)
 `, noDbLine)
-	
+
 	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
-	
+
 	return nil
 }
 
 // readFirstIssueFromJSONL reads the first issue from a JSONL file
 func readFirstIssueFromJSONL(path string) (*types.Issue, error) {
+	// #nosec G304 -- helper reads JSONL file chosen by current bd command
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open JSONL file: %w", err)

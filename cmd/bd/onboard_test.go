@@ -2,31 +2,16 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestOnboardCommand(t *testing.T) {
-	// Save original stdout
-	oldStdout := os.Stdout
-	defer func() { os.Stdout = oldStdout }()
-
 	t.Run("onboard output contains key sections", func(t *testing.T) {
-		// Create a pipe to capture output
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("Failed to create pipe: %v", err)
-		}
-		os.Stdout = w
-
-		// Run onboard command
-		onboardCmd.Run(onboardCmd, []string{})
-
-		// Close writer and read output
-		w.Close()
 		var buf bytes.Buffer
-		buf.ReadFrom(r)
+		if err := renderOnboardInstructions(&buf); err != nil {
+			t.Fatalf("renderOnboardInstructions() error = %v", err)
+		}
 		output := buf.String()
 
 		// Verify output contains expected sections

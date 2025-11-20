@@ -22,7 +22,7 @@ var showCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		ctx := context.Background()
-		
+
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -50,7 +50,7 @@ var showCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-		
+
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			allDetails := []interface{}{}
@@ -386,7 +386,7 @@ var updateCmd = &cobra.Command{
 		}
 
 		ctx := context.Background()
-		
+
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -412,7 +412,7 @@ var updateCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-		
+
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			updatedIssues := []*types.Issue{}
@@ -444,7 +444,7 @@ var updateCmd = &cobra.Command{
 				if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
 					updateArgs.AcceptanceCriteria = &acceptanceCriteria
 				}
-				if externalRef, ok := updates["external_ref"].(string); ok {  // NEW: Map external_ref
+				if externalRef, ok := updates["external_ref"].(string); ok { // NEW: Map external_ref
 					updateArgs.ExternalRef = &externalRef
 				}
 
@@ -474,12 +474,12 @@ var updateCmd = &cobra.Command{
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
-		 if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-		 fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-		 continue
-		}
+			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				continue
+			}
 
-		if jsonOutput {
+			if jsonOutput {
 				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil {
 					updatedIssues = append(updatedIssues, issue)
@@ -518,7 +518,7 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		id := args[0]
 		ctx := context.Background()
-		
+
 		// Resolve partial ID if in direct mode
 		if daemonClient == nil {
 			fullID, err := utils.ResolvePartialID(ctx, store, id)
@@ -635,6 +635,7 @@ Examples:
 		}
 
 		// Read the edited content
+		// #nosec G304 -- tmpPath was created earlier in this function
 		editedContent, err := os.ReadFile(tmpPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading edited file: %v\n", err)
@@ -709,7 +710,7 @@ var closeCmd = &cobra.Command{
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
 		ctx := context.Background()
-		
+
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {

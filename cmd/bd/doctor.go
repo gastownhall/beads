@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // Status constants for doctor checks
@@ -148,7 +148,7 @@ func applyFixes(result doctorResult) {
 	}
 }
 
-func runDiagnostics(path string) doctorResult{
+func runDiagnostics(path string) doctorResult {
 	result := doctorResult{
 		Path:       path,
 		CLIVersion: Version,
@@ -293,7 +293,7 @@ func checkInstallation(path string) doctorCheck {
 
 func checkDatabaseVersion(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
-	
+
 	// Check metadata.json first for custom database name
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
@@ -379,7 +379,7 @@ func checkDatabaseVersion(path string) doctorCheck {
 
 func checkIDFormat(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
-	
+
 	// Check metadata.json first for custom database name
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
@@ -781,7 +781,7 @@ func printDiagnostics(result doctorResult) {
 
 func checkMultipleDatabases(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
-	
+
 	// Find all .db files (excluding backups and vc.db)
 	files, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
 	if err != nil {
@@ -1145,7 +1145,7 @@ func countJSONLIssues(jsonlPath string) (int, map[string]int, error) {
 
 func checkPermissions(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
-	
+
 	// Check if .beads/ is writable
 	testFile := filepath.Join(beadsDir, ".doctor-test-write")
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
@@ -1303,9 +1303,9 @@ func checkGitHooks(path string) doctorCheck {
 
 	// Recommended hooks and their purposes
 	recommendedHooks := map[string]string{
-		"pre-commit":  "Flushes pending bd changes to JSONL before commit",
-		"post-merge":  "Imports updated JSONL after git pull/merge",
-		"pre-push":    "Exports database to JSONL before push",
+		"pre-commit": "Flushes pending bd changes to JSONL before commit",
+		"post-merge": "Imports updated JSONL after git pull/merge",
+		"pre-push":   "Exports database to JSONL before push",
 	}
 
 	hooksDir := filepath.Join(gitDir, "hooks")
@@ -1353,7 +1353,7 @@ func checkGitHooks(path string) doctorCheck {
 
 func checkSchemaCompatibility(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
-	
+
 	// Check metadata.json first for custom database name
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
@@ -1390,18 +1390,22 @@ func checkSchemaCompatibility(path string) doctorCheck {
 	// This is a simplified version since we can't import the internal package directly
 	// Check all critical tables and columns
 	criticalChecks := map[string][]string{
-		"issues": {"id", "title", "content_hash", "external_ref", "compacted_at"},
-		"dependencies": {"issue_id", "depends_on_id", "type"},
+		"issues":         {"id", "title", "content_hash", "external_ref", "compacted_at"},
+		"dependencies":   {"issue_id", "depends_on_id", "type"},
 		"child_counters": {"parent_id", "last_child"},
-		"export_hashes": {"issue_id", "content_hash"},
+		"export_hashes":  {"issue_id", "content_hash"},
 	}
 
 	var missingElements []string
 	for table, columns := range criticalChecks {
 		// Try to query all columns
-		query := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", strings.Join(columns, ", "), table)
+		query := fmt.Sprintf(
+			"SELECT %s FROM %s LIMIT 0",
+			strings.Join(columns, ", "),
+			table,
+		) // #nosec G201 -- table/column names sourced from hardcoded map
 		_, err := db.Exec(query)
-		
+
 		if err != nil {
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "no such table") {
@@ -1409,7 +1413,7 @@ func checkSchemaCompatibility(path string) doctorCheck {
 			} else if strings.Contains(errMsg, "no such column") {
 				// Find which columns are missing
 				for _, col := range columns {
-					colQuery := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", col, table)
+					colQuery := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", col, table) // #nosec G201 -- names come from static schema definition
 					if _, colErr := db.Exec(colQuery); colErr != nil && strings.Contains(colErr.Error(), "no such column") {
 						missingElements = append(missingElements, fmt.Sprintf("%s.%s", table, col))
 					}

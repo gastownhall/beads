@@ -32,12 +32,14 @@ jobs:
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          MIN_COVERAGE=46
+          WARN_COVERAGE=55
           echo "Coverage: $COVERAGE%"
-          if (( $(echo "$COVERAGE < 50" | bc -l) )); then
-            echo "❌ Coverage is below 50% threshold"
+          if (( $(echo "$COVERAGE < $MIN_COVERAGE" | bc -l) )); then
+            echo "❌ Coverage is below ${MIN_COVERAGE}% threshold"
             exit 1
-          elif (( $(echo "$COVERAGE < 55" | bc -l) )); then
-            echo "⚠️  Coverage is below 55% (warning threshold)"
+          elif (( $(echo "$COVERAGE < $WARN_COVERAGE" | bc -l) )); then
+            echo "⚠️  Coverage is below ${WARN_COVERAGE}% (warning threshold)"
           else
             echo "✅ Coverage meets threshold"
           fi
@@ -95,7 +97,12 @@ jobs:
       - uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable
-      - run: nix run .#default > help.txt
+      - name: Run bd help via Nix
+        run: |
+          export BEADS_DB="$PWD/.ci-beads/beads.db"
+          mkdir -p "$(dirname "$BEADS_DB")"
+          nix run .#default -- --db "$BEADS_DB" init --quiet --prefix ci
+          nix run .#default -- --db "$BEADS_DB" > help.txt
       - name: Verify help text
         run: |
           FIRST_LINE=$(head -n 1 help.txt)

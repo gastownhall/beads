@@ -590,6 +590,15 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	// Clear auto-flush state
 	clearAutoFlushState()
 
+	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
+	// This prevents validatePreExport from incorrectly blocking on next export
+	beadsDir := filepath.Dir(jsonlPath)
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+		// Non-fatal warning
+		fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+	}
+
 	return nil
 }
 
