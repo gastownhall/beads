@@ -37,6 +37,14 @@ func ParseIssueID(input string, prefix string) string {
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
 func ResolvePartialID(ctx context.Context, store storage.Storage, input string) (string, error) {
+	// Fast path: if the user typed an exact ID that exists, return it as-is.
+	// This preserves behavior where issue IDs may not match the configured
+	// issue_prefix (e.g. cross-repo IDs like "ao-izl"), while still allowing
+	// prefix-based and hash-based resolution for other inputs.
+	if issue, err := store.GetIssue(ctx, input); err == nil && issue != nil {
+		return input, nil
+	}
+	
 	// Get the configured prefix
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil || prefix == "" {
@@ -63,7 +71,7 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		normalizedID = prefixWithHyphen + input
 	}
 	
-	// First try exact match
+	// First try exact match on normalized ID
 	issue, err := store.GetIssue(ctx, normalizedID)
 	if err == nil && issue != nil {
 		return normalizedID, nil
