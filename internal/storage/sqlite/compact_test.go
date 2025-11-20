@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,3 +370,22 @@ func TestApplyCompaction(t *testing.T) {
 func timePtr(t time.Time) *time.Time {
 	return &t
 }
+
+func TestApplyCompactionNotFound(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	nonExistentID := "bd-999"
+
+	err := store.ApplyCompaction(ctx, nonExistentID, 1, 100, 50, "abc123")
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	expectedError := "issue bd-999 not found"
+	if !strings.Contains(err.Error(), expectedError) {
+		t.Errorf("Expected error to contain %q, got %q", expectedError, err.Error())
+	}
+}
+

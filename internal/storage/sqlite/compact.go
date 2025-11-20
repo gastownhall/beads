@@ -273,7 +273,7 @@ func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, lev
 			commitHashPtr = &commitHash
 		}
 		
-		_, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			UPDATE issues
 			SET compaction_level = ?,
 			    compacted_at = ?,
@@ -285,6 +285,14 @@ func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, lev
 		
 		if err != nil {
 			return fmt.Errorf("failed to apply compaction metadata: %w", err)
+		}
+		
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("issue %s not found", issueID)
 		}
 		
 		reductionPct := 0.0

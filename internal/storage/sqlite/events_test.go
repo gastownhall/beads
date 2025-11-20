@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -337,5 +338,23 @@ func TestEventTypesInHistory(t *testing.T) {
 	}
 	if !eventTypes[types.EventClosed] {
 		t.Error("Expected EventClosed in history")
+	}
+}
+
+func TestAddCommentNotFound(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	nonExistentID := "bd-999"
+
+	err := store.AddComment(ctx, nonExistentID, "alice", "This should fail cleanly")
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	expectedError := "issue bd-999 not found"
+	if !strings.Contains(err.Error(), expectedError) {
+		t.Errorf("Expected error to contain %q, got %q", expectedError, err.Error())
 	}
 }

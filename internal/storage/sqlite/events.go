@@ -14,21 +14,29 @@ const limitClause = " LIMIT ?"
 // AddComment adds a comment to an issue
 func (s *SQLiteStorage) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `
+		// Update issue updated_at timestamp first to verify issue exists
+		now := time.Now()
+		res, err := tx.ExecContext(ctx, `
+			UPDATE issues SET updated_at = ? WHERE id = ?
+		`, now, issueID)
+		if err != nil {
+			return fmt.Errorf("failed to update timestamp: %w", err)
+		}
+
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("issue %s not found", issueID)
+		}
+
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO events (issue_id, event_type, actor, comment)
 			VALUES (?, ?, ?, ?)
 		`, issueID, types.EventCommented, actor, comment)
 		if err != nil {
 			return fmt.Errorf("failed to add comment: %w", err)
-		}
-
-		// Update issue updated_at timestamp
-		now := time.Now()
-		_, err = tx.ExecContext(ctx, `
-			UPDATE issues SET updated_at = ? WHERE id = ?
-		`, now, issueID)
-		if err != nil {
-			return fmt.Errorf("failed to update timestamp: %w", err)
 		}
 
 		// Mark issue as dirty for incremental export
