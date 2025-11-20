@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -113,6 +114,15 @@ func New(path string) (*SQLiteStorage, error) {
 	if isInMemory {
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
+	} else {
+		// For file-based databases in daemon mode, limit connection pool to prevent
+		// connection exhaustion under concurrent load. SQLite WAL mode supports
+		// 1 writer + unlimited readers, but we limit to prevent goroutine pile-up
+		// on write lock contention (bd-qhws).
+		maxConns := runtime.NumCPU() + 1 // 1 writer + N readers
+		db.SetMaxOpenConns(maxConns)
+		db.SetMaxIdleConns(2)
+		db.SetConnMaxLifetime(0) // SQLite doesn't need connection recycling
 	}
 
 	// For file-based databases, enable WAL mode once after opening the connection.
@@ -1134,11 +1144,11 @@ func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.
 		if err != nil {
 			return nil, err
 		}
+		defer rows.Close()
 
 		for rows.Next() {
 			var depID string
 			if err := rows.Scan(&depID); err != nil {
-				_ = rows.Close()
 				return nil, err
 			}
 			if !result[depID] {
@@ -1147,10 +1157,8 @@ func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.
 			}
 		}
 		if err := rows.Err(); err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
-		_ = rows.Close()
 	}
 
 	return result, nil

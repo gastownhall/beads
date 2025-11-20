@@ -210,7 +210,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 				Success: false,
 				Error:   fmt.Sprintf("invalid request: %v", err),
 			}
-			s.writeResponse(writer, resp)
+			if err := s.writeResponse(writer, resp); err != nil {
+				// Connection broken, stop handling this connection
+				return
+			}
 			continue
 		}
 
@@ -220,15 +223,32 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		resp := s.handleRequest(&req)
-		s.writeResponse(writer, resp)
+		if err := s.writeResponse(writer, resp); err != nil {
+			// Connection broken, stop handling this connection
+			return
+		}
 	}
 }
 
-func (s *Server) writeResponse(writer *bufio.Writer, resp Response) {
-	data, _ := json.Marshal(resp)
-	_, _ = writer.Write(data)
-	_ = writer.WriteByte('\n')
-	_ = writer.Flush()
+func (s *Server) writeResponse(writer *bufio.Writer, resp Response) error {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal response: %w", err)
+	}
+
+	if _, err := writer.Write(data); err != nil {
+		return fmt.Errorf("failed to write response: %w", err)
+	}
+
+	if err := writer.WriteByte('\n'); err != nil {
+		return fmt.Errorf("failed to write newline: %w", err)
+	}
+
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush response: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Server) handleShutdown(_ *Request) Response {

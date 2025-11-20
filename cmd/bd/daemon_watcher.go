@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -27,6 +28,7 @@ type FileWatcher struct {
 	lastHeadModTime time.Time
 	lastHeadExists bool
 	cancel         context.CancelFunc
+	wg             sync.WaitGroup // Track goroutines for graceful shutdown (bd-jo38)
 }
 
 // NewFileWatcher creates a file watcher for the given JSONL path.
@@ -120,7 +122,9 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 		return
 	}
 
+	fw.wg.Add(1)
 	go func() {
+		defer fw.wg.Done()
 		jsonlBase := filepath.Base(fw.jsonlPath)
 
 		for {
@@ -212,7 +216,9 @@ func (fw *FileWatcher) reEstablishWatch(ctx context.Context, log daemonLogger) {
 func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
 	log.log("Starting polling mode with %v interval", fw.pollInterval)
 	ticker := time.NewTicker(fw.pollInterval)
+	fw.wg.Add(1)
 	go func() {
+		defer fw.wg.Done()
 		defer ticker.Stop()
 		for {
 			select {
@@ -297,6 +303,8 @@ func (fw *FileWatcher) Close() error {
 	if fw.cancel != nil {
 		fw.cancel()
 	}
+	// Wait for goroutines to finish before cleanup (bd-jo38)
+	fw.wg.Wait()
 	fw.debouncer.Cancel()
 	if fw.watcher != nil {
 		return fw.watcher.Close()

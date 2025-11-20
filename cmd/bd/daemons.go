@@ -248,7 +248,24 @@ Stops the daemon gracefully, then starts a new one.`,
 			os.Exit(1)
 		}
 		// Don't wait for daemon to exit (it will fork and continue in background)
-		go func() { _ = daemonCmd.Wait() }()
+		// Use timeout to prevent goroutine leak if daemon never completes (bd-zqmb)
+		go func() {
+			done := make(chan struct{})
+			go func() {
+				_ = daemonCmd.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// Daemon exited normally (forked successfully)
+			case <-time.After(10 * time.Second):
+				// Timeout - daemon should have forked by now
+				if daemonCmd.Process != nil {
+					_ = daemonCmd.Process.Kill()
+				}
+			}
+		}()
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"workspace": workspace,

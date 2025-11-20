@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +99,250 @@ func TestDoctorJSONOutput(t *testing.T) {
 }
 
 // Note: isHashID is tested in migrate_hash_ids_test.go
+
+func TestDetectHashBasedIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		sampleIDs []string
+		hasTable  bool
+		expected  bool
+	}{
+		{
+			name:      "hash IDs with letters",
+			sampleIDs: []string{"bd-a3f8e9", "bd-b2c4d6"},
+			hasTable:  false,
+			expected:  true,
+		},
+		{
+			name:      "hash IDs with mixed alphanumeric",
+			sampleIDs: []string{"bd-0134cc5a", "bd-abc123"},
+			hasTable:  false,
+			expected:  true,
+		},
+		{
+			name:      "hash IDs all numeric with variable length",
+			sampleIDs: []string{"bd-0088", "bd-0134cc5a", "bd-02a4"},
+			hasTable:  false,
+			expected:  true, // Variable length indicates hash IDs
+		},
+		{
+			name:      "hash IDs with leading zeros",
+			sampleIDs: []string{"bd-0088", "bd-02a4", "bd-05a1"},
+			hasTable:  false,
+			expected:  true, // Leading zeros indicate hash IDs
+		},
+		{
+			name:      "hash IDs all numeric non-sequential",
+			sampleIDs: []string{"bd-0088", "bd-2312", "bd-0458"},
+			hasTable:  false,
+			expected:  true, // Non-sequential pattern
+		},
+		{
+			name:      "sequential IDs",
+			sampleIDs: []string{"bd-1", "bd-2", "bd-3", "bd-4"},
+			hasTable:  false,
+			expected:  false, // Sequential pattern
+		},
+		{
+			name:      "sequential IDs with gaps",
+			sampleIDs: []string{"bd-1", "bd-5", "bd-10", "bd-15"},
+			hasTable:  false,
+			expected:  false, // Still sequential pattern (small gaps allowed)
+		},
+		{
+			name:      "database with child_counters table",
+			sampleIDs: []string{"bd-1", "bd-2"},
+			hasTable:  true,
+			expected:  true, // child_counters table indicates hash IDs
+		},
+		{
+			name:      "hash IDs with hierarchical children",
+			sampleIDs: []string{"bd-a3f8e9.1", "bd-a3f8e9.2", "bd-b2c4d6"},
+			hasTable:  false,
+			expected:  true, // Base IDs have letters
+		},
+		{
+			name:      "edge case: single ID with letters",
+			sampleIDs: []string{"bd-abc"},
+			hasTable:  false,
+			expected:  true,
+		},
+		{
+			name:      "edge case: single sequential ID",
+			sampleIDs: []string{"bd-1"},
+			hasTable:  false,
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary database
+			tmpDir := t.TempDir()
+			dbPath := filepath.Join(tmpDir, "test.db")
+
+			// Open database and create schema
+			db, err := sql.Open("sqlite3", dbPath)
+			if err != nil {
+				t.Fatalf("Failed to open database: %v", err)
+			}
+			defer db.Close()
+
+			// Create issues table
+			_, err = db.Exec(`
+				CREATE TABLE IF NOT EXISTS issues (
+					id TEXT PRIMARY KEY,
+					title TEXT,
+					created_at TIMESTAMP
+				)
+			`)
+			if err != nil {
+				t.Fatalf("Failed to create issues table: %v", err)
+			}
+
+			// Create child_counters table if test requires it
+			if tt.hasTable {
+				_, err = db.Exec(`
+					CREATE TABLE IF NOT EXISTS child_counters (
+						parent_id TEXT PRIMARY KEY,
+						last_child INTEGER NOT NULL DEFAULT 0
+					)
+				`)
+				if err != nil {
+					t.Fatalf("Failed to create child_counters table: %v", err)
+				}
+			}
+
+			// Insert sample issues
+			for _, id := range tt.sampleIDs {
+				_, err = db.Exec("INSERT INTO issues (id, title, created_at) VALUES (?, ?, datetime('now'))",
+					id, "Test issue")
+				if err != nil {
+					t.Fatalf("Failed to insert issue %s: %v", id, err)
+				}
+			}
+
+			// Test detection
+			result := detectHashBasedIDs(db, tt.sampleIDs)
+			if result != tt.expected {
+				t.Errorf("detectHashBasedIDs() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCheckIDFormat(t *testing.T) {
+	tests := []struct {
+		name           string
+		issueIDs       []string
+		createTable    bool // create child_counters table
+		expectedStatus string
+	}{
+		{
+			name:           "hash IDs with letters",
+			issueIDs:       []string{"bd-a3f8e9", "bd-b2c4d6", "bd-xyz123"},
+			createTable:    false,
+			expectedStatus: statusOK,
+		},
+		{
+			name:           "hash IDs all numeric with leading zeros",
+			issueIDs:       []string{"bd-0088", "bd-02a4", "bd-05a1", "bd-0458"},
+			createTable:    false,
+			expectedStatus: statusOK,
+		},
+		{
+			name:           "hash IDs with child_counters table",
+			issueIDs:       []string{"bd-123", "bd-456"},
+			createTable:    true,
+			expectedStatus: statusOK,
+		},
+		{
+			name:           "sequential IDs",
+			issueIDs:       []string{"bd-1", "bd-2", "bd-3", "bd-4"},
+			createTable:    false,
+			expectedStatus: statusWarning,
+		},
+		{
+			name:           "mixed: mostly hash IDs",
+			issueIDs:       []string{"bd-0088", "bd-0134cc5a", "bd-02a4"},
+			createTable:    false,
+			expectedStatus: statusOK, // Variable length = hash IDs
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary workspace
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create database
+			dbPath := filepath.Join(beadsDir, "beads.db")
+			db, err := sql.Open("sqlite3", dbPath)
+			if err != nil {
+				t.Fatalf("Failed to open database: %v", err)
+			}
+			defer db.Close()
+
+			// Create schema
+			_, err = db.Exec(`
+				CREATE TABLE IF NOT EXISTS issues (
+					id TEXT PRIMARY KEY,
+					title TEXT NOT NULL,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+				)
+			`)
+			if err != nil {
+				t.Fatalf("Failed to create issues table: %v", err)
+			}
+
+			if tt.createTable {
+				_, err = db.Exec(`
+					CREATE TABLE IF NOT EXISTS child_counters (
+						parent_id TEXT PRIMARY KEY,
+						last_child INTEGER NOT NULL DEFAULT 0
+					)
+				`)
+				if err != nil {
+					t.Fatalf("Failed to create child_counters table: %v", err)
+				}
+			}
+
+			// Insert test issues
+			for i, id := range tt.issueIDs {
+				_, err = db.Exec(
+					"INSERT INTO issues (id, title, created_at) VALUES (?, ?, datetime('now', ?||' seconds'))",
+					id, "Test issue "+id, fmt.Sprintf("+%d", i))
+				if err != nil {
+					t.Fatalf("Failed to insert issue %s: %v", id, err)
+				}
+			}
+			db.Close()
+
+			// Run check
+			check := checkIDFormat(tmpDir)
+
+			if check.Status != tt.expectedStatus {
+				t.Errorf("Expected status %s, got %s (message: %s)", tt.expectedStatus, check.Status, check.Message)
+			}
+
+			if tt.expectedStatus == statusOK && check.Status == statusOK {
+				if !strings.Contains(check.Message, "hash-based") {
+					t.Errorf("Expected hash-based message, got: %s", check.Message)
+				}
+			}
+
+			if tt.expectedStatus == statusWarning && check.Status == statusWarning {
+				if check.Fix == "" {
+					t.Error("Expected fix message for sequential IDs")
+				}
+			}
+		})
+	}
+}
 
 func TestCheckInstallation(t *testing.T) {
 	// Test with missing .beads directory
