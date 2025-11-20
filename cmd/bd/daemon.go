@@ -179,6 +179,19 @@ func init() {
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
+
+// computeDaemonParentPID determines which parent PID the daemon should track.
+// When BD_DAEMON_FOREGROUND=1 (used by startDaemon for background CLI launches),
+// we return 0 to disable parent tracking, since the short-lived launcher
+// process is expected to exit immediately after spawning the daemon.
+// In all other cases we track the current OS parent PID.
+func computeDaemonParentPID() int {
+	if os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
+		// 0 means "not tracked" in checkParentProcessAlive
+		return 0
+	}
+	return os.Getppid()
+}
 func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string, global bool) {
 	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
@@ -422,7 +435,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	doSync()
 
 	// Get parent PID for monitoring (exit if parent dies)
-	parentPID := os.Getppid()
+	parentPID := computeDaemonParentPID()
 	log.log("Monitoring parent process (PID %d)", parentPID)
 
 	// Choose event loop based on BEADS_DAEMON_MODE
