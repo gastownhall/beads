@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -334,25 +333,14 @@ func TestExportUpdatesMetadata(t *testing.T) {
 		t.Fatalf("first export failed: %v", err)
 	}
 
-	// Manually update metadata as daemon would (this is what we're testing)
-	// Note: In production, createExportFunc and createSyncFunc do this
-	currentHash, err := computeJSONLHash(jsonlPath)
-	if err != nil {
-		t.Fatalf("failed to compute JSONL hash: %v", err)
+	// Update metadata using the actual daemon helper function (bd-ar2.3 fix)
+	// This verifies that updateExportMetadata (used by createExportFunc and createSyncFunc) works correctly
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
 	}
-	if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
-		t.Fatalf("failed to set last_import_hash: %v", err)
-	}
-	exportTime := time.Now().Format(time.RFC3339)
-	if err := store.SetMetadata(ctx, "last_import_time", exportTime); err != nil {
-		t.Fatalf("failed to set last_import_time: %v", err)
-	}
-	if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
-		mtimeStr := jsonlInfo.ModTime().Unix()
-		if err := store.SetMetadata(ctx, "last_import_mtime", fmt.Sprintf("%d", mtimeStr)); err != nil {
-			t.Fatalf("failed to set last_import_mtime: %v", err)
-		}
-	}
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// Verify metadata was set
 	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
@@ -379,5 +367,131 @@ func TestExportUpdatesMetadata(t *testing.T) {
 	// Verify validatePreExport doesn't fail with "content has changed"
 	if err := validatePreExport(ctx, store, jsonlPath); err != nil {
 		t.Fatalf("validatePreExport failed after metadata update: %v", err)
+	}
+}
+
+func TestUpdateExportMetadataMultiRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+	jsonlPath1 := filepath.Join(tmpDir, "repo1", ".beads", "issues.jsonl")
+	jsonlPath2 := filepath.Join(tmpDir, "repo2", ".beads", "issues.jsonl")
+
+	// Create storage
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create test issues for each repo
+	issue1 := &types.Issue{
+		ID:          "test-1",
+		Title:       "Test Issue 1",
+		Description: "Repo 1 issue",
+		IssueType:   types.TypeBug,
+		Priority:    1,
+		Status:      types.StatusOpen,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		SourceRepo:  "repo1",
+	}
+	issue2 := &types.Issue{
+		ID:          "test-2",
+		Title:       "Test Issue 2",
+		Description: "Repo 2 issue",
+		IssueType:   types.TypeBug,
+		Priority:    1,
+		Status:      types.StatusOpen,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		SourceRepo:  "repo2",
+	}
+
+	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
+		t.Fatalf("failed to create issue1: %v", err)
+	}
+	if err := store.CreateIssue(ctx, issue2, "test"); err != nil {
+		t.Fatalf("failed to create issue2: %v", err)
+	}
+
+	// Create directories for JSONL files
+	if err := os.MkdirAll(filepath.Dir(jsonlPath1), 0755); err != nil {
+		t.Fatalf("failed to create dir for jsonlPath1: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(jsonlPath2), 0755); err != nil {
+		t.Fatalf("failed to create dir for jsonlPath2: %v", err)
+	}
+
+	// Export issues to JSONL files
+	if err := exportToJSONLWithStore(ctx, store, jsonlPath1); err != nil {
+		t.Fatalf("failed to export to jsonlPath1: %v", err)
+	}
+	if err := exportToJSONLWithStore(ctx, store, jsonlPath2); err != nil {
+		t.Fatalf("failed to export to jsonlPath2: %v", err)
+	}
+
+	// Create mock logger
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
+
+	// Update metadata for each repo with different keys (bd-ar2.2 multi-repo support)
+	updateExportMetadata(ctx, store, jsonlPath1, mockLogger, jsonlPath1)
+	updateExportMetadata(ctx, store, jsonlPath2, mockLogger, jsonlPath2)
+
+	// Verify per-repo metadata was set with correct keys
+	hash1Key := "last_import_hash:" + jsonlPath1
+	hash1, err := store.GetMetadata(ctx, hash1Key)
+	if err != nil {
+		t.Fatalf("failed to get %s: %v", hash1Key, err)
+	}
+	if hash1 == "" {
+		t.Errorf("expected %s to be set", hash1Key)
+	}
+
+	hash2Key := "last_import_hash:" + jsonlPath2
+	hash2, err := store.GetMetadata(ctx, hash2Key)
+	if err != nil {
+		t.Fatalf("failed to get %s: %v", hash2Key, err)
+	}
+	if hash2 == "" {
+		t.Errorf("expected %s to be set", hash2Key)
+	}
+
+	// Verify that single-repo metadata key is NOT set (we're using per-repo keys)
+	globalHash, err := store.GetMetadata(ctx, "last_import_hash")
+	if err != nil {
+		t.Fatalf("failed to get last_import_hash: %v", err)
+	}
+	if globalHash != "" {
+		t.Error("expected global last_import_hash to not be set when using per-repo keys")
+	}
+
+	// Verify mtime metadata was also set per-repo
+	mtime1Key := "last_import_mtime:" + jsonlPath1
+	mtime1, err := store.GetMetadata(ctx, mtime1Key)
+	if err != nil {
+		t.Fatalf("failed to get %s: %v", mtime1Key, err)
+	}
+	if mtime1 == "" {
+		t.Errorf("expected %s to be set", mtime1Key)
+	}
+
+	mtime2Key := "last_import_mtime:" + jsonlPath2
+	mtime2, err := store.GetMetadata(ctx, mtime2Key)
+	if err != nil {
+		t.Fatalf("failed to get %s: %v", mtime2Key, err)
+	}
+	if mtime2 == "" {
+		t.Errorf("expected %s to be set", mtime2Key)
 	}
 }

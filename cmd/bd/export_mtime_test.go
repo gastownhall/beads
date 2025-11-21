@@ -61,6 +61,14 @@ func TestExportUpdatesDatabaseMtime(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
+	// Update metadata after export (bd-ymj fix)
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
+
 	// Get JSONL mtime
 	jsonlInfo, err := os.Stat(jsonlPath)
 	if err != nil {
@@ -158,6 +166,14 @@ func TestDaemonExportScenario(t *testing.T) {
 		t.Fatalf("Daemon export failed: %v", err)
 	}
 
+	// Daemon updates metadata after export (bd-ymj fix)
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
+
 	// THIS IS THE FIX: daemon now calls TouchDatabaseFile after export
 	if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
 		t.Fatalf("TouchDatabaseFile failed: %v", err)
@@ -228,6 +244,14 @@ func TestMultipleExportCycles(t *testing.T) {
 		if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
 			t.Fatalf("Cycle %d: Export failed: %v", i, err)
 		}
+
+		// Update metadata after export (bd-ymj fix)
+		mockLogger := daemonLogger{
+			logFunc: func(format string, args ...interface{}) {
+				t.Logf(format, args...)
+			},
+		}
+		updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 		// Apply fix
 		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {

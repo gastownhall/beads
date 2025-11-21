@@ -94,10 +94,20 @@ func computeJSONLHash(jsonlPath string) (string, error) {
 // Performance optimization: Checks mtime first as a fast-path. Only computes expensive
 // SHA256 hash if mtime changed. This makes 99% of checks instant (mtime unchanged = content
 // unchanged) while still catching git operations that restore old content with new mtimes.
-func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath string) bool {
+//
+// In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
+func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath string, keySuffix string) bool {
+	// Build metadata keys with optional suffix for per-repo tracking (bd-ar2.10, bd-ar2.11)
+	hashKey := "last_import_hash"
+	mtimeKey := "last_import_mtime"
+	if keySuffix != "" {
+		hashKey += ":" + keySuffix
+		mtimeKey += ":" + keySuffix
+	}
+
 	// Fast-path: Check mtime first to avoid expensive hash computation
 	// Get last known mtime from metadata
-	lastMtimeStr, err := store.GetMetadata(ctx, "last_import_mtime")
+	lastMtimeStr, err := store.GetMetadata(ctx, mtimeKey)
 	if err == nil && lastMtimeStr != "" {
 		// We have a previous mtime - check if file mtime changed
 		jsonlInfo, statErr := os.Stat(jsonlPath)
@@ -122,7 +132,7 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 	}
 
 	// Get last import hash from metadata
-	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
+	lastHash, err := store.GetMetadata(ctx, hashKey)
 	if err != nil {
 		// No previous import hash - this is the first run or metadata is missing
 		// Assume changed to trigger import
@@ -138,7 +148,9 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath string) error {
 	// Check if JSONL content has changed since last import - if so, must import first
 	// Uses content-based detection (bd-xwo fix) instead of mtime-based to avoid false positives from git operations
-	if hasJSONLChanged(ctx, store, jsonlPath) {
+	// Use getRepoKeyForPath to get stable repo identifier for multi-repo support (bd-ar2.10, bd-ar2.11)
+	repoKey := getRepoKeyForPath(jsonlPath)
+	if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
 		return fmt.Errorf("refusing to export: JSONL content has changed since last import (import first to avoid data loss)")
 	}
 

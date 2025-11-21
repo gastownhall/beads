@@ -287,7 +287,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// Should return false (no change)
-		if hasJSONLChanged(ctx, store, jsonlPath) {
+		if hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return false for matching hash")
 		}
 	})
@@ -324,7 +324,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// Should return true (content changed)
-		if !hasJSONLChanged(ctx, store, jsonlPath) {
+		if !hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return true for different hash")
 		}
 	})
@@ -343,7 +343,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// Should return true (no previous hash, first run)
-		if !hasJSONLChanged(ctx, store, jsonlPath) {
+		if !hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return true for empty file with no metadata")
 		}
 	})
@@ -364,7 +364,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// No metadata stored - should return true (assume changed)
-		if !hasJSONLChanged(ctx, store, jsonlPath) {
+		if !hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return true when no metadata exists")
 		}
 	})
@@ -378,7 +378,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		store := newTestStore(t, dbPath)
 
 		// File doesn't exist - should return false (don't auto-import broken files)
-		if hasJSONLChanged(ctx, store, jsonlPath) {
+		if hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return false for nonexistent file")
 		}
 	})
@@ -419,7 +419,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// Should return false using fast-path (mtime unchanged)
-		if hasJSONLChanged(ctx, store, jsonlPath) {
+		if hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return false using mtime fast-path")
 		}
 	})
@@ -467,7 +467,7 @@ func TestHasJSONLChanged(t *testing.T) {
 		}
 
 		// Should return false (content hasn't changed despite new mtime)
-		if hasJSONLChanged(ctx, store, jsonlPath) {
+		if hasJSONLChanged(ctx, store, jsonlPath, "") {
 			t.Error("Expected hasJSONLChanged to return false for git operation with same content")
 		}
 	})

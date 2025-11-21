@@ -35,9 +35,9 @@ func (s *SQLiteStorage) GetNextChildID(ctx context.Context, parentID string) (st
 	}
 	if count == 0 {
 		// Try to resurrect parent from JSONL history before failing (bd-dvd fix)
-		resurrected, err := s.TryResurrectParent(ctx, parentID)
-		if err != nil {
-			return "", fmt.Errorf("failed to resurrect parent %s: %w", parentID, err)
+		resurrected, resurrectErr := s.TryResurrectParent(ctx, parentID)
+		if resurrectErr != nil {
+			return "", fmt.Errorf("failed to resurrect parent %s: %w", parentID, resurrectErr)
 		}
 		if !resurrected {
 			return "", fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)

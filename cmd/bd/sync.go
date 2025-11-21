@@ -129,7 +129,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			// Smart conflict resolution: if JSONL content changed, auto-import first
 			// Use content-based check (not mtime) to avoid git resurrection bug (bd-khnb)
 			if err := ensureStoreActive(); err == nil && store != nil {
-				if hasJSONLChanged(ctx, store, jsonlPath) {
+				// Use getRepoKeyForPath for multi-repo support (bd-ar2.10, bd-ar2.11)
+			repoKey := getRepoKeyForPath(jsonlPath)
+			if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
 					fmt.Println("→ JSONL content changed, importing first...")
 					if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
 						fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
