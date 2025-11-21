@@ -161,6 +161,26 @@ git config merge.beads.name "bd JSONL merge driver"
 echo ".beads/beads.jsonl merge=beads" >> .gitattributes
 ```
 
+### Files Created by `bd init`
+
+**`bd init` creates these files in your repository:**
+
+**Should be committed to git:**
+- `.gitattributes` - Configures git merge driver for intelligent JSONL merging (critical for team collaboration)
+- `.beads/beads.jsonl` - Issue data in JSONL format (source of truth, synced via git)
+- `.beads/config.yaml` - Repository configuration template
+- `.beads/README.md` - Documentation about beads for repository visitors
+- `.beads/metadata.json` - Database metadata
+
+**Should be in `.gitignore` (local-only):**
+- `.beads/beads.db` - SQLite cache (auto-synced with JSONL)
+- `.beads/beads.db-*` - SQLite journal files
+- `.beads/bd.sock` / `.beads/bd.pipe` - Daemon communication socket
+- `.beads/.exclusive-lock` - Daemon lock file
+- `.git/beads-worktrees/` - Git worktrees (only created when using protected branch workflows)
+
+The `.gitignore` entries are automatically created inside `.beads/.gitignore` by `bd init`, but your project's root `.gitignore` should also exclude the database and daemon files if you want to keep your git status clean.
+
 **Using devcontainers?** Open the repository in a devcontainer (GitHub Codespaces or VS Code Remote Containers) and bd will be automatically installed with git hooks configured. See [.devcontainer/README.md](.devcontainer/README.md) for details.
 
 Most tasks will be created and managed by agents during conversations. You can check on things with:

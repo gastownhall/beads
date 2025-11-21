@@ -434,6 +434,8 @@ export BEADS_NO_DAEMON=1  # Direct mode
 
 ### Recommended .gitattributes
 
+**IMPORTANT:** The `.gitattributes` file should be **committed to git**, not ignored. It configures merge behavior for the entire team.
+
 ```
 # Intelligent merge driver for JSONL (auto-configured by bd init)
 .beads/beads.jsonl merge=beads
@@ -441,6 +443,11 @@ export BEADS_NO_DAEMON=1  # Direct mode
 # Treat JSONL as text for diffs
 .beads/*.jsonl text diff
 ```
+
+This file is automatically created by `bd init` and is essential for:
+- Preventing spurious merge conflicts in `.beads/beads.jsonl`
+- Enabling field-level 3-way merging instead of line-by-line
+- Ensuring all team members get intelligent JSONL merging
 
 ### Git LFS Considerations
 
