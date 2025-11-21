@@ -579,6 +579,17 @@ func TestCLI_PriorityFormats(t *testing.T) {
 	if issue["priority"].(float64) != 3 {
 		t.Errorf("Expected priority 3, got: %v", issue["priority"])
 	}
+
+	// Test update with P-format
+	id := issue["id"].(string)
+	runBDInProcess(t, tmpDir, "update", id, "-p", "P1")
+	
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	json.Unmarshal([]byte(out), &updated)
+	if updated[0]["priority"].(float64) != 1 {
+		t.Errorf("Expected priority 1 after update, got: %v", updated[0]["priority"])
+	}
 }
 
 func TestCLI_Reopen(t *testing.T) {

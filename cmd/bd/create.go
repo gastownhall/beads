@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var createCmd = &cobra.Command{
@@ -94,7 +95,7 @@ var createCmd = &cobra.Command{
 		
 		// Parse priority (supports both "1" and "P1" formats)
 		priorityStr, _ := cmd.Flags().GetString("priority")
-		priority := parsePriority(priorityStr)
+		priority := validation.ParsePriority(priorityStr)
 		if priority == -1 {
 			fmt.Fprintf(os.Stderr, "Error: invalid priority %q (expected 0-4 or P0-P4)\n", priorityStr)
 			os.Exit(1)
@@ -394,18 +395,14 @@ func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
 	createCmd.Flags().String("from-template", "", "Create issue from template (e.g., 'epic', 'bug', 'feature')")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
-	createCmd.Flags().StringP("description", "d", "", "Issue description")
-	createCmd.Flags().String("design", "", "Design notes")
-	createCmd.Flags().String("acceptance", "", "Acceptance criteria")
-	createCmd.Flags().StringP("priority", "p", "2", "Priority (0-4 or P0-P4, 0=highest)")
+	registerPriorityFlag(createCmd, "2")
 	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore)")
-	createCmd.Flags().StringP("assignee", "a", "", "Assignee")
+	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
 	_ = createCmd.Flags().MarkHidden("label")
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
-	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")

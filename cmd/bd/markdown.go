@@ -14,6 +14,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var (
@@ -39,47 +40,7 @@ type IssueTemplate struct {
 	Dependencies       []string
 }
 
-// parsePriority extracts and validates a priority value from content.
-// Supports both numeric (0-4) and P-prefix format (P0-P4).
-// Returns the parsed priority (0-4) or -1 if invalid.
-func parsePriority(content string) int {
-	content = strings.TrimSpace(content)
-	
-	// Handle "P1", "P0", etc. format
-	if strings.HasPrefix(strings.ToUpper(content), "P") {
-		content = content[1:] // Strip the "P" prefix
-	}
-	
-	var p int
-	if _, err := fmt.Sscanf(content, "%d", &p); err == nil && p >= 0 && p <= 4 {
-		return p
-	}
-	return -1 // Invalid
-}
 
-// parseIssueType extracts and validates an issue type from content.
-// Returns the validated type or empty string if invalid.
-func parseIssueType(content, issueTitle string) types.IssueType {
-	issueType := types.IssueType(strings.TrimSpace(content))
-
-	// Validate issue type
-	validTypes := map[types.IssueType]bool{
-		types.TypeBug:     true,
-		types.TypeFeature: true,
-		types.TypeTask:    true,
-		types.TypeEpic:    true,
-		types.TypeChore:   true,
-	}
-
-	if !validTypes[issueType] {
-		// Warn but continue with default
-		fmt.Fprintf(os.Stderr, "Warning: invalid issue type '%s' in '%s', using default 'task'\n",
-			issueType, issueTitle)
-		return types.TypeTask
-	}
-
-	return issueType
-}
 
 // parseStringList extracts a list of strings from content, splitting by comma or whitespace.
 // This is a generic helper used by parseLabels and parseDependencies.
@@ -116,11 +77,18 @@ func processIssueSection(issue *IssueTemplate, section, content string) {
 
 	switch strings.ToLower(section) {
 	case "priority":
-		if p := parsePriority(content); p != -1 {
+		if p := validation.ParsePriority(content); p != -1 {
 			issue.Priority = p
 		}
 	case "type":
-		issue.IssueType = parseIssueType(content, issue.Title)
+		t, err := validation.ParseIssueType(content)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: invalid issue type '%s' in '%s', using default 'task'\n",
+				strings.TrimSpace(content), issue.Title)
+			issue.IssueType = types.TypeTask
+		} else {
+			issue.IssueType = t
+		}
 	case "description":
 		issue.Description = content
 	case "design":

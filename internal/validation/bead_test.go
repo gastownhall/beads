@@ -1,4 +1,4 @@
-package main
+package validation
 
 import (
 	"testing"
@@ -43,9 +43,9 @@ func TestParsePriority(t *testing.T) {
 	
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := parsePriority(tt.input)
+			got := ParsePriority(tt.input)
 			if got != tt.expected {
-				t.Errorf("parsePriority(%q) = %d, want %d", tt.input, got, tt.expected)
+				t.Errorf("ParsePriority(%q) = %d, want %d", tt.input, got, tt.expected)
 			}
 		})
 	}

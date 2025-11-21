@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var showCmd = &cobra.Command{
@@ -343,7 +344,12 @@ var updateCmd = &cobra.Command{
 			updates["status"] = status
 		}
 		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
+			priorityStr, _ := cmd.Flags().GetString("priority")
+			priority := validation.ParsePriority(priorityStr)
+			if priority == -1 {
+				fmt.Fprintf(os.Stderr, "Error: invalid priority %q (expected 0-4 or P0-P4)\n", priorityStr)
+				os.Exit(1)
+			}
 			updates["priority"] = priority
 		}
 		if cmd.Flags().Changed("title") {
@@ -802,16 +808,13 @@ func init() {
 	rootCmd.AddCommand(showCmd)
 
 	updateCmd.Flags().StringP("status", "s", "", "New status")
-	updateCmd.Flags().IntP("priority", "p", 0, "New priority")
+	registerPriorityFlag(updateCmd, "")
 	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("assignee", "a", "", "New assignee")
-	updateCmd.Flags().StringP("description", "d", "", "Issue description")
-	updateCmd.Flags().String("design", "", "Design notes")
+	registerCommonIssueFlags(updateCmd)
 	updateCmd.Flags().String("notes", "", "Additional notes")
-	updateCmd.Flags().String("acceptance", "", "Acceptance criteria")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
-	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
+
 	updateCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(updateCmd)
 
