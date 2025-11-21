@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -258,14 +257,13 @@ func TestValidateGitConflicts_NoFile(t *testing.T) {
 
 	// Create temp dir without JSONL
 	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Override dbPath to point to temp dir
+	// Override dbPath to point to temp dir (file won't exist)
 	originalDBPath := dbPath
-	dbPath = filepath.Join(beadsDir, "beads.db")
+	dbPath = tmpDir + "/nonexistent.db"
 	defer func() { dbPath = originalDBPath }()
 
 	result := validateGitConflicts(ctx, false)
@@ -283,12 +281,7 @@ func TestValidateGitConflicts_WithMarkers(t *testing.T) {
 
 	// Create temp JSONL with conflict markers
 	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	jsonlPath := tmpDir + "/test.jsonl"
 	content := `{"id":"bd-1"}
 <<<<<<< HEAD
 {"id":"bd-2","title":"Version A"}
@@ -301,9 +294,9 @@ func TestValidateGitConflicts_WithMarkers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Override dbPath to point to temp dir
+	// Override dbPath to point to temp file
 	originalDBPath := dbPath
-	dbPath = filepath.Join(beadsDir, "beads.db")
+	dbPath = jsonlPath
 	defer func() { dbPath = originalDBPath }()
 
 	result := validateGitConflicts(ctx, false)
@@ -321,12 +314,7 @@ func TestValidateGitConflicts_Clean(t *testing.T) {
 
 	// Create temp JSONL without conflicts
 	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	jsonlPath := tmpDir + "/test.jsonl"
 	content := `{"id":"bd-1","title":"Normal"}
 {"id":"bd-2","title":"Also normal"}`
 
@@ -334,9 +322,9 @@ func TestValidateGitConflicts_Clean(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Override dbPath to point to temp dir
+	// Override dbPath to point to temp file
 	originalDBPath := dbPath
-	dbPath = filepath.Join(beadsDir, "beads.db")
+	dbPath = jsonlPath
 	defer func() { dbPath = originalDBPath }()
 
 	result := validateGitConflicts(ctx, false)
