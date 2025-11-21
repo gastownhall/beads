@@ -168,7 +168,6 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .filter-group label {
-    font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-secondary);
     margin-bottom: 0;
@@ -181,7 +180,6 @@ h1, h2, h3, h4, h5, h6 {
     border-radius: 4px;
     padding: 0.5rem;
     height: 38px;
-    font-size: 0.95rem;
     background-color: #fff;
 }
 
@@ -209,7 +207,7 @@ h1, h2, h3, h4, h5, h6 {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-top: 1.35rem; /* Align with inputs visually */
+    margin-top: 3.0rem; /* Align with search field visually */
 }
 
 .reload-button:hover {
