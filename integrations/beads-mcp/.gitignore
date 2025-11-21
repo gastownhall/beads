@@ -6,9 +6,12 @@ wheels/
 *.egg-info
 __pycache__
 
+# Testing artifacts
+.pytest_cache/
+.coverage
+
 # Virtual environments
 .venv
 /.env
 /CLAUDE.md
 /TODO.md
-/.coverage
