@@ -62,14 +62,17 @@ var (
 
 	// Auto-flush state
 	autoFlushEnabled  = true  // Can be disabled with --no-auto-flush
-	isDirty           = false // Tracks if DB has changes needing export
-	needsFullExport   = false // Set to true when IDs change (e.g., rename-prefix)
+	isDirty           = false // Tracks if DB has changes needing export (used by legacy code)
+	needsFullExport   = false // Set to true when IDs change (used by legacy code)
 	flushMutex        sync.Mutex
-	flushTimer        *time.Timer
-	storeMutex        sync.Mutex // Protects store access from background goroutine
-	storeActive       = false    // Tracks if store is available
-	flushFailureCount = 0        // Consecutive flush failures
-	lastFlushError    error      // Last flush error for debugging
+	flushTimer        *time.Timer // DEPRECATED: Use flushManager instead
+	storeMutex        sync.Mutex  // Protects store access from background goroutine
+	storeActive       = false     // Tracks if store is available
+	flushFailureCount = 0         // Consecutive flush failures
+	lastFlushError    error       // Last flush error for debugging
+
+	// Auto-flush manager (replaces timer-based approach to fix bd-52)
+	flushManager *FlushManager
 
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
@@ -445,6 +448,12 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
+		// Initialize flush manager (fixes bd-52: race condition in auto-flush)
+		// For in-process test scenarios where commands run multiple times,
+		// we create a new manager each time. Shutdown() is idempotent so
+		// PostRun can safely shutdown whichever manager is active.
+		flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
+
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)
 
@@ -502,22 +511,11 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Otherwise, handle direct mode cleanup
-		// Flush any pending changes before closing
-		flushMutex.Lock()
-		needsFlush := isDirty && autoFlushEnabled
-		if needsFlush {
-			// Cancel timer and flush immediately
-			if flushTimer != nil {
-				flushTimer.Stop()
-				flushTimer = nil
+		// Shutdown flush manager (performs final flush if needed)
+		if flushManager != nil {
+			if err := flushManager.Shutdown(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: flush manager shutdown error: %v\n", err)
 			}
-			// Don't clear isDirty or needsFullExport here - let flushToJSONL do it
-		}
-		flushMutex.Unlock()
-
-		if needsFlush {
-			// Call the shared flush function (handles both incremental and full export)
-			flushToJSONL()
 		}
 
 		// Signal that store is closing (prevents background flush from accessing closed store)

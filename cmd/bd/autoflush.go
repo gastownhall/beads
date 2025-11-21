@@ -241,19 +241,25 @@ func autoImportIfNewer() {
 
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a flush
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a debounced
-// export to JSONL. Uses a timer that resets on each call - flush occurs 5 seconds
-// after the LAST database modification (not the first).
+// export to JSONL. Uses FlushManager's event-driven architecture (fixes bd-52).
 //
-// Debouncing behavior: If multiple operations happen within 5 seconds, the timer
-// resets each time, and only one flush occurs after the burst of activity completes.
-// This prevents excessive writes during rapid issue creation/updates.
+// Debouncing behavior: If multiple operations happen within the debounce window, only
+// one flush occurs after the burst of activity completes. This prevents excessive
+// writes during rapid issue creation/updates.
 //
-// Flush-on-exit guarantee: PersistentPostRun cancels the timer and flushes immediately
-// before the command exits, ensuring no data is lost even if the timer hasn't fired.
+// Flush-on-exit guarantee: PersistentPostRun calls flushManager.Shutdown() which
+// performs a final flush before the command exits, ensuring no data is lost.
 //
-// Thread-safe: Protected by flushMutex. Safe to call from multiple goroutines.
+// Thread-safe: Safe to call from multiple goroutines (no shared mutable state).
 // No-op if auto-flush is disabled via --no-auto-flush flag.
 func markDirtyAndScheduleFlush() {
+	// Use FlushManager if available (new path, fixes bd-52)
+	if flushManager != nil {
+		flushManager.MarkDirty(false) // Incremental export
+		return
+	}
+
+	// Legacy path for backward compatibility with tests
 	if !autoFlushEnabled {
 		return
 	}
@@ -277,6 +283,13 @@ func markDirtyAndScheduleFlush() {
 
 // markDirtyAndScheduleFullExport marks DB as needing a full export (for ID-changing operations)
 func markDirtyAndScheduleFullExport() {
+	// Use FlushManager if available (new path, fixes bd-52)
+	if flushManager != nil {
+		flushManager.MarkDirty(true) // Full export
+		return
+	}
+
+	// Legacy path for backward compatibility with tests
 	if !autoFlushEnabled {
 		return
 	}
@@ -443,32 +456,35 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 	return exportedIDs, nil
 }
 
-// flushToJSONL exports dirty issues to JSONL using incremental updates
-// flushToJSONL exports dirty database changes to the JSONL file. Uses incremental
-// export by default (only exports modified issues), or full export for ID-changing
-// operations (e.g., rename-prefix). Invoked by the debounce timer or
-// immediately on command exit.
+// flushState captures the state needed for a flush operation
+type flushState struct {
+	forceDirty      bool // Force flush even if isDirty is false
+	forceFullExport bool // Force full export even if needsFullExport is false
+}
+
+// flushToJSONLWithState performs the actual flush with explicit state parameters.
+// This is the core implementation that doesn't touch global state.
 //
 // Export modes:
 //   - Incremental (default): Exports only GetDirtyIssues(), merges with existing JSONL
-//   - Full (after rename-prefix): Exports all issues, rebuilds JSONL from scratch
+//   - Full (forceFullExport=true): Exports all issues, rebuilds JSONL from scratch
 //
 // Error handling: Tracks consecutive failures. After 3+ failures, displays prominent
 // warning suggesting manual "bd export" to recover. Failure counter resets on success.
 //
 // Thread-safety:
-//   - Protected by flushMutex for isDirty/needsFullExport access
 //   - Checks storeActive flag (via storeMutex) to prevent use-after-close
-//   - Safe to call from timer goroutine or main thread
+//   - Does NOT modify global isDirty/needsFullExport flags
+//   - Safe to call from multiple goroutines
 //
 // No-op conditions:
 //   - Store already closed (storeActive=false)
-//   - Database not dirty (isDirty=false)
+//   - Database not dirty (isDirty=false) AND forceDirty=false
 //   - No dirty issues found (incremental mode only)
-func flushToJSONL() {
-	// Check if store is still active (not closed)
+func flushToJSONLWithState(state flushState) {
+	// Check if store is still active (not closed) and not nil
 	storeMutex.Lock()
-	if !storeActive {
+	if !storeActive || store == nil {
 		storeMutex.Unlock()
 		return
 	}
@@ -478,7 +494,7 @@ func flushToJSONL() {
 
 	// Double-check store is still active before accessing
 	storeMutex.Lock()
-	if !storeActive {
+	if !storeActive || store == nil {
 		storeMutex.Unlock()
 		return
 	}
@@ -516,19 +532,16 @@ func flushToJSONL() {
 		integrityNeedsFullExport = true
 	}
 
-	// Now check if we should proceed with export
-	flushMutex.Lock()
-	if !isDirty && !integrityNeedsFullExport {
-		// Nothing to do: no dirty issues and no integrity issue
-		flushMutex.Unlock()
+	// Check if we should proceed with export
+	// Use only the state parameter - don't read global flags (fixes bd-52)
+	// Caller is responsible for passing correct forceDirty/forceFullExport values
+	if !state.forceDirty && !integrityNeedsFullExport {
+		// Nothing to do: not forced and no integrity issue
 		return
 	}
-	
-	// We're proceeding with export - capture state and clear flags
-	isDirty = false
-	fullExport := needsFullExport || integrityNeedsFullExport
-	needsFullExport = false // Reset flag
-	flushMutex.Unlock()
+
+	// Determine export mode
+	fullExport := state.forceFullExport || integrityNeedsFullExport
 
 	// Helper to record failure
 	recordFailure := func(err error) {
@@ -684,6 +697,38 @@ func flushToJSONL() {
 		}
 	}
 
-	// Success!
+	// Success! Don't clear global flags here - let the caller manage its own state.
+	// FlushManager manages its local state in run() goroutine.
+	// Legacy path clears global state in flushToJSONL() wrapper.
 	recordSuccess()
+}
+
+// flushToJSONL is a backward-compatible wrapper that reads global state.
+// New code should use FlushManager instead of calling this directly.
+//
+// Reads global isDirty and needsFullExport flags, then calls flushToJSONLWithState.
+// Invoked by the debounce timer or immediately on command exit (for legacy code).
+func flushToJSONL() {
+	// Read current state and failure count
+	flushMutex.Lock()
+	forceDirty := isDirty
+	forceFullExport := needsFullExport
+	beforeFailCount := flushFailureCount
+	flushMutex.Unlock()
+
+	// Call new implementation
+	flushToJSONLWithState(flushState{
+		forceDirty:      forceDirty,
+		forceFullExport: forceFullExport,
+	})
+
+	// Clear global state only if flush succeeded (legacy path only)
+	// Success is indicated by failure count not increasing
+	flushMutex.Lock()
+	if flushFailureCount == beforeFailCount {
+		// Flush succeeded - clear dirty flags
+		isDirty = false
+		needsFullExport = false
+	}
+	flushMutex.Unlock()
 }
