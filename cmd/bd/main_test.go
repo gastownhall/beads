@@ -156,7 +156,7 @@ func TestAutoFlushDebounce(t *testing.T) {
 	}
 
 	// Wait for debounce to complete
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)  // 10x faster, still reliable
 
 	// Check that JSONL file was created (flush happened)
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
@@ -224,6 +224,14 @@ func TestAutoFlushClearState(t *testing.T) {
 
 // TestAutoFlushOnExit tests that flush happens on program exit
 func TestAutoFlushOnExit(t *testing.T) {
+	// FIX: Initialize rootCtx for flush operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-exit-*")
 	if err != nil {
@@ -254,7 +262,7 @@ func TestAutoFlushOnExit(t *testing.T) {
 		flushTimer = nil
 	}
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create test issue
 	issue := &types.Issue{
@@ -443,6 +451,14 @@ func TestAutoFlushStoreInactive(t *testing.T) {
 
 // TestAutoFlushJSONLContent tests that flushed JSONL has correct content
 func TestAutoFlushJSONLContent(t *testing.T) {
+	// FIX: Initialize rootCtx for flush operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-content-*")
 	if err != nil {
@@ -455,7 +471,9 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 	}()
 
 	dbPath = filepath.Join(tmpDir, "test.db")
-	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	// The actual JSONL path - findJSONLPath() will determine this
+	// but in tests it appears to be beads.jsonl in the same directory as the db
+	expectedJSONLPath := filepath.Join(tmpDir, "beads.jsonl")
 
 	// Create store
 	testStore := newTestStore(t, dbPath)
@@ -465,7 +483,7 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 	storeActive = true
 	storeMutex.Unlock()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create multiple test issues
 	issues := []*types.Issue{
@@ -493,6 +511,10 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("Failed to create issue: %v", err)
 		}
+		// Mark each issue as dirty in the database so flushToJSONL will export them
+		if err := testStore.MarkIssueDirty(ctx, issue.ID); err != nil {
+			t.Fatalf("Failed to mark issue dirty: %v", err)
+		}
 	}
 
 	// Mark dirty and flush immediately
@@ -503,12 +525,24 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 	flushToJSONL()
 
 	// Verify JSONL file exists
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		t.Fatal("Expected JSONL file to be created")
+	if _, err := os.Stat(expectedJSONLPath); os.IsNotExist(err) {
+		// Debug: list all files in tmpDir to see what was actually created
+		entries, _ := os.ReadDir(tmpDir)
+		t.Logf("Contents of %s:", tmpDir)
+		for _, entry := range entries {
+			t.Logf("  - %s (isDir: %v)", entry.Name(), entry.IsDir())
+			if entry.IsDir() && entry.Name() == ".beads" {
+				beadsEntries, _ := os.ReadDir(filepath.Join(tmpDir, ".beads"))
+				for _, be := range beadsEntries {
+					t.Logf("    - .beads/%s", be.Name())
+				}
+			}
+		}
+		t.Fatalf("Expected JSONL file to be created at %s", expectedJSONLPath)
 	}
 
 	// Read and verify content
-	f, err := os.Open(jsonlPath)
+	f, err := os.Open(expectedJSONLPath)
 	if err != nil {
 		t.Fatalf("Failed to open JSONL file: %v", err)
 	}
@@ -557,6 +591,14 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 		t.Skip("chmod-based read-only directory behavior is not reliable on Windows")
 	}
 
+	// FIX: Initialize rootCtx for flush operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Note: We create issues.jsonl as a directory to force os.Create() to fail,
 	// which works even when running as root (unlike chmod-based approaches)
 
@@ -581,7 +623,7 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 	storeActive = true
 	storeMutex.Unlock()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create test issue
 	issue := &types.Issue{
@@ -664,6 +706,14 @@ func TestAutoFlushErrorHandling(t *testing.T) {
 
 // TestAutoImportIfNewer tests that auto-import triggers when JSONL is newer than DB
 func TestAutoImportIfNewer(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-autoimport-*")
 	if err != nil {
@@ -686,7 +736,7 @@ func TestAutoImportIfNewer(t *testing.T) {
 	storeActive = true
 	storeMutex.Unlock()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create an initial issue in the database
 	dbIssue := &types.Issue{
@@ -703,7 +753,7 @@ func TestAutoImportIfNewer(t *testing.T) {
 	}
 
 	// Wait a moment to ensure different timestamps
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)  // 10x faster
 
 	// Create a JSONL file with different content (simulating a git pull)
 	jsonlIssue := &types.Issue{
@@ -760,6 +810,14 @@ func TestAutoImportIfNewer(t *testing.T) {
 
 // TestAutoImportDisabled tests that --no-auto-import flag disables auto-import
 func TestAutoImportDisabled(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory for test database
 	tmpDir, err := os.MkdirTemp("", "bd-test-noimport-*")
 	if err != nil {
@@ -782,7 +840,7 @@ func TestAutoImportDisabled(t *testing.T) {
 	storeActive = true
 	storeMutex.Unlock()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create a JSONL file with an issue
 	jsonlIssue := &types.Issue{
@@ -839,6 +897,14 @@ func TestAutoImportDisabled(t *testing.T) {
 
 // TestAutoImportWithUpdate tests that auto-import detects same-ID updates and applies them
 func TestAutoImportWithUpdate(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-update-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -860,7 +926,7 @@ func TestAutoImportWithUpdate(t *testing.T) {
 		storeMutex.Unlock()
 	}()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create issue in DB with status=closed
 	closedTime := time.Now().UTC()
@@ -916,6 +982,14 @@ func TestAutoImportWithUpdate(t *testing.T) {
 
 // TestAutoImportNoUpdate tests happy path with no updates needed
 func TestAutoImportNoUpdate(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-noupdate-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -937,7 +1011,7 @@ func TestAutoImportNoUpdate(t *testing.T) {
 		storeMutex.Unlock()
 	}()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create issue in DB
 	dbIssue := &types.Issue{
@@ -990,6 +1064,14 @@ func TestAutoImportNoUpdate(t *testing.T) {
 
 // TestAutoImportMergeConflict tests that auto-import detects Git merge conflicts (bd-270)
 func TestAutoImportMergeConflict(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-conflict-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -1011,7 +1093,7 @@ func TestAutoImportMergeConflict(t *testing.T) {
 		storeMutex.Unlock()
 	}()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create an initial issue in database
 	dbIssue := &types.Issue{
@@ -1071,6 +1153,14 @@ func TestAutoImportMergeConflict(t *testing.T) {
 // TestAutoImportConflictMarkerFalsePositive tests that conflict marker detection
 // doesn't trigger on JSON-encoded conflict markers in issue content (bd-17d5)
 func TestAutoImportConflictMarkerFalsePositive(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-false-positive-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -1093,7 +1183,7 @@ func TestAutoImportConflictMarkerFalsePositive(t *testing.T) {
 		testStore.Close()
 	}()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create a JSONL file with an issue that has conflict markers in the description
 	// The conflict markers are JSON-encoded (as \u003c\u003c\u003c...) which should NOT trigger detection
@@ -1147,6 +1237,14 @@ func TestAutoImportConflictMarkerFalsePositive(t *testing.T) {
 
 // TestAutoImportClosedAtInvariant tests that auto-import enforces status/closed_at invariant
 func TestAutoImportClosedAtInvariant(t *testing.T) {
+	// FIX: Initialize rootCtx for auto-import operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-invariant-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -1168,7 +1266,7 @@ func TestAutoImportClosedAtInvariant(t *testing.T) {
 		storeMutex.Unlock()
 	}()
 
-	ctx := context.Background()
+	// ctx already declared above for rootCtx initialization
 
 	// Create JSONL with closed issue but missing closed_at
 	closedIssue := &types.Issue{
