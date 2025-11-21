@@ -157,6 +157,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed external_ref migration failure on old databases
   - Backward compatibility improvements
 
+- **Duplicate Function Declaration** (#328, 167ab67)
+  - Fixed compilation failure from duplicate computeJSONLHash declaration
+  - Removed old version, kept simpler implementation
+  - Updated test to match new API
+
 ### Changed
 
 - **Performance Improvements** (#319, 690c73f):
