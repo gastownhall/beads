@@ -180,7 +180,7 @@ func TestHealthCheckIncludesVersionInfo(t *testing.T) {
 	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
 	defer cleanup()
 
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestIncompatibleVersionInHealth(t *testing.T) {
 	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
 	defer cleanup()
 
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestPingAndHealthBypassVersionCheck(t *testing.T) {
 	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
 	defer cleanup()
 
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestMetricsOperation(t *testing.T) {
 	tmpDir, _, dbPath, socketPath, cleanup := setupTestServerIsolated(t)
 	defer cleanup()
 
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

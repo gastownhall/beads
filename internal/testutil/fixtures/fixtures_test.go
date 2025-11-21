@@ -13,7 +13,7 @@ import (
 
 func TestLargeSQLite(t *testing.T) {
 	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestXLargeSQLite(t *testing.T) {
 	}
 
 	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestLargeFromJSONL(t *testing.T) {
 	}
 
 	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}

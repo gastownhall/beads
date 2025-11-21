@@ -16,7 +16,7 @@ import (
 // TestConcurrentExternalRefUpdates tests concurrent updates to same external_ref with different timestamps
 // This is a slow integration test that verifies no deadlocks occur
 func TestConcurrentExternalRefUpdates(t *testing.T) {
-	store, err := sqlite.New(":memory:")
+	store, err := sqlite.New(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

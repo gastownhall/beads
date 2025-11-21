@@ -24,7 +24,7 @@ func BenchmarkDirectCreate(b *testing.B) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		b.Fatalf("Failed to create store: %v", err)
 	}
@@ -75,7 +75,7 @@ func BenchmarkDirectUpdate(b *testing.B) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		b.Fatalf("Failed to create store: %v", err)
 	}
@@ -149,7 +149,7 @@ func BenchmarkDirectList(b *testing.B) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		b.Fatalf("Failed to create store: %v", err)
 	}
@@ -279,7 +279,7 @@ func setupBenchServer(b *testing.B) (*Server, *Client, func(), string) {
 	dbPath := filepath.Join(beadsDir, "test.db")
 	socketPath := filepath.Join(beadsDir, "bd.sock")
 
-	store, err := sqlitestorage.New(dbPath)
+	store, err := sqlitestorage.New(context.Background(), dbPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		b.Fatalf("Failed to create store: %v", err)
