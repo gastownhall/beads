@@ -3,35 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestEpicCommand(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	sqliteStore, err := sqlite.New(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqliteStore.Close()
-
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	sqliteStore := newTestStore(t, testDB)
 	ctx := context.Background()
-
-	// Set issue_prefix
-	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
 
 	// Create an epic with children
 	epic := &types.Issue{
@@ -146,24 +129,9 @@ func TestEpicCommandInit(t *testing.T) {
 
 func TestEpicEligibleForClose(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	sqliteStore, err := sqlite.New(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqliteStore.Close()
-
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	sqliteStore := newTestStore(t, testDB)
 	ctx := context.Background()
-
-	// Set issue_prefix
-	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
 
 	// Create an epic where all children are closed
 	epic := &types.Issue{

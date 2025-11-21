@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -199,13 +200,14 @@ func TestDuplicateGroupsWithDifferentStatuses(t *testing.T) {
 
 func TestDuplicatesIntegration(t *testing.T) {
 	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, "test.db")
+	testStore := newTestStore(t, testDB)
 
 	// Create duplicate issues
 	issues := []*types.Issue{
 		{
-			ID:          "bd-1",
+			ID:          "test-1",
 			Title:       "Fix authentication bug",
 			Description: "Users can't login",
 			Status:      types.StatusOpen,
@@ -213,7 +215,7 @@ func TestDuplicatesIntegration(t *testing.T) {
 			IssueType:   types.TypeBug,
 		},
 		{
-			ID:          "bd-2",
+			ID:          "test-2",
 			Title:       "Fix authentication bug",
 			Description: "Users can't login",
 			Status:      types.StatusOpen,
@@ -221,7 +223,7 @@ func TestDuplicatesIntegration(t *testing.T) {
 			IssueType:   types.TypeBug,
 		},
 		{
-			ID:          "bd-3",
+			ID:          "test-3",
 			Title:       "Different task",
 			Description: "Different description",
 			Status:      types.StatusOpen,
@@ -253,13 +255,13 @@ func TestDuplicatesIntegration(t *testing.T) {
 		t.Fatalf("Expected 2 issues in group, got %d", len(groups[0]))
 	}
 
-	// Verify the duplicate group contains bd-1 and bd-2
+	// Verify the duplicate group contains test-1 and test-2
 	ids := make(map[string]bool)
 	for _, issue := range groups[0] {
 		ids[issue.ID] = true
 	}
 
-	if !ids["bd-1"] || !ids["bd-2"] {
-		t.Errorf("Expected duplicate group to contain bd-1 and bd-2")
+	if !ids["test-1"] || !ids["test-2"] {
+		t.Errorf("Expected duplicate group to contain test-1 and test-2")
 	}
 }
