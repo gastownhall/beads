@@ -156,11 +156,18 @@ function filterIssues() {
     const statusSelect = document.getElementById('filter-status');
     const selectedStatuses = Array.from(statusSelect.selectedOptions).map(opt => opt.value);
     const priorityFilter = document.getElementById('filter-priority').value;
+    const searchText = document.getElementById('filter-text').value.toLowerCase();
 
     const filtered = allIssues.filter(issue => {
         // If statuses are selected, check if issue status is in the selected list
         if (selectedStatuses.length > 0 && !selectedStatuses.includes(issue.status)) return false;
         if (priorityFilter && issue.priority !== parseInt(priorityFilter)) return false;
+        
+        if (searchText) {
+            const title = (issue.title || '').toLowerCase();
+            const description = (issue.description || '').toLowerCase();
+            if (!title.includes(searchText) && !description.includes(searchText)) return false;
+        }
         return true;
     });
 
@@ -230,6 +237,7 @@ window.onclick = function(event) {
 // Filter event listeners
 document.getElementById('filter-status').addEventListener('change', filterIssues);
 document.getElementById('filter-priority').addEventListener('change', filterIssues);
+document.getElementById('filter-text').addEventListener('input', filterIssues);
 
 // Reload button listener
 document.getElementById('reload-button').addEventListener('click', reloadData);
