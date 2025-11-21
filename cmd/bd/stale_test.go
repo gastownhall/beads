@@ -11,8 +11,8 @@ import (
 
 func TestStaleIssues(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	sqliteStore := newTestStore(t, dbPath)
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
 	now := time.Now()
@@ -61,14 +61,14 @@ func TestStaleIssues(t *testing.T) {
 	}
 
 	for _, issue := range issues {
-		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Update timestamps directly in DB (CreateIssue sets updated_at to now)
 	// Use datetime() function to compute old timestamps
-	db := sqliteStore.UnderlyingDB()
+	db := s.UnderlyingDB()
 	_, err := db.ExecContext(ctx, "UPDATE issues SET updated_at = datetime('now', '-40 days') WHERE id IN (?, ?)", "test-stale-1", "test-stale-2")
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestStaleIssues(t *testing.T) {
 	}
 
 	// Test basic stale detection (30 days)
-	stale, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  30,
 		Limit: 50,
 	})
@@ -115,8 +115,8 @@ func TestStaleIssues(t *testing.T) {
 
 func TestStaleIssuesWithStatusFilter(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	sqliteStore := newTestStore(t, dbPath)
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
 	oldTime := time.Now().Add(-40 * 24 * time.Hour)
@@ -153,13 +153,13 @@ func TestStaleIssuesWithStatusFilter(t *testing.T) {
 	}
 
 	for _, issue := range issues {
-		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Update timestamps directly in DB using datetime() function
-	db := sqliteStore.UnderlyingDB()
+	db := s.UnderlyingDB()
 	_, err := db.ExecContext(ctx, "UPDATE issues SET updated_at = datetime('now', '-40 days') WHERE id IN (?, ?, ?)",
 		"test-open", "test-in-progress", "test-blocked")
 	if err != nil {
@@ -167,7 +167,7 @@ func TestStaleIssuesWithStatusFilter(t *testing.T) {
 	}
 
 	// Test status filter: only in_progress
-	stale, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:   30,
 		Status: "in_progress",
 		Limit:  50,
@@ -185,7 +185,7 @@ func TestStaleIssuesWithStatusFilter(t *testing.T) {
 	}
 
 	// Test status filter: only open
-	staleOpen, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	staleOpen, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:   30,
 		Status: "open",
 		Limit:  50,
@@ -205,8 +205,8 @@ func TestStaleIssuesWithStatusFilter(t *testing.T) {
 
 func TestStaleIssuesWithLimit(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	sqliteStore := newTestStore(t, dbPath)
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
 	oldTime := time.Now().Add(-40 * 24 * time.Hour)
@@ -215,7 +215,7 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		updatedAt := oldTime.Add(time.Duration(i) * time.Hour) // Slightly different times for sorting
 		issue := &types.Issue{
-			ID:        "test-stale-" + string(rune('0'+i)),
+			ID:        "test-stale-limit-" + string(rune('0'+i)),
 			Title:     "Stale issue",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -223,15 +223,15 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 			CreatedAt: oldTime,
 			UpdatedAt: updatedAt,
 		}
-		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Update timestamps directly in DB using datetime() function
-	db := sqliteStore.UnderlyingDB()
+	db := s.UnderlyingDB()
 	for i := 1; i <= 5; i++ {
-		id := "test-stale-" + string(rune('0'+i))
+		id := "test-stale-limit-" + string(rune('0'+i))
 		// Make each slightly different (40 days ago + i hours)
 		_, err := db.ExecContext(ctx, "UPDATE issues SET updated_at = datetime('now', '-40 days', '+' || ? || ' hours') WHERE id = ?", i, id)
 		if err != nil {
@@ -240,7 +240,7 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 	}
 
 	// Test with limit
-	stale, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  30,
 		Limit: 2,
 	})
@@ -255,15 +255,15 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 
 func TestStaleIssuesEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	sqliteStore := newTestStore(t, dbPath)
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
 	recentTime := time.Now().Add(-10 * 24 * time.Hour)
 
 	// Create only recent issues
 	issue := &types.Issue{
-		ID:        "test-recent",
+		ID:        "test-recent-only",
 		Title:     "Recent issue",
 		Status:    types.StatusOpen,
 		Priority:  1,
@@ -272,12 +272,12 @@ func TestStaleIssuesEmpty(t *testing.T) {
 		UpdatedAt: recentTime,
 	}
 
-	if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+	if err := s.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Test stale detection with no stale issues
-	stale, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  30,
 		Limit: 50,
 	})
@@ -292,8 +292,8 @@ func TestStaleIssuesEmpty(t *testing.T) {
 
 func TestStaleIssuesDifferentDaysThreshold(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	sqliteStore := newTestStore(t, dbPath)
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
 	now := time.Now()
@@ -322,13 +322,13 @@ func TestStaleIssuesDifferentDaysThreshold(t *testing.T) {
 	}
 
 	for _, issue := range issues {
-		if err := sqliteStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Update timestamps directly in DB using datetime() function
-	db := sqliteStore.UnderlyingDB()
+	db := s.UnderlyingDB()
 	_, err := db.ExecContext(ctx, "UPDATE issues SET updated_at = datetime('now', '-20 days') WHERE id = ?", "test-20-days")
 	if err != nil {
 		t.Fatal(err)
@@ -339,7 +339,7 @@ func TestStaleIssuesDifferentDaysThreshold(t *testing.T) {
 	}
 
 	// Test with 30 days threshold - should get both
-	stale30, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale30, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  30,
 		Limit: 50,
 	})
@@ -352,7 +352,7 @@ func TestStaleIssuesDifferentDaysThreshold(t *testing.T) {
 	}
 
 	// Test with 10 days threshold - should get both
-	stale10, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale10, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  10,
 		Limit: 50,
 	})
@@ -365,7 +365,7 @@ func TestStaleIssuesDifferentDaysThreshold(t *testing.T) {
 	}
 
 	// Test with 60 days threshold - should get only the 50-day old one
-	stale60, err := sqliteStore.GetStaleIssues(ctx, types.StaleFilter{
+	stale60, err := s.GetStaleIssues(ctx, types.StaleFilter{
 		Days:  60,
 		Limit: 50,
 	})
