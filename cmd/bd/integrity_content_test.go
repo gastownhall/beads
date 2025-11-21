@@ -28,7 +28,7 @@ func TestContentBasedComparison(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	// Create and populate database
-	localStore, err := sqlite.New(dbPath)
+	localStore, err := sqlite.New(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestContentHashComputation(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	// Create and populate database
-	localStore, err := sqlite.New(dbPath)
+	localStore, err := sqlite.New(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

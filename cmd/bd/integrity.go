@@ -385,20 +385,6 @@ func dbNeedsExport(ctx context.Context, store storage.Storage, jsonlPath string)
 	return false, nil
 }
 
-// computeJSONLHash computes a content hash of the JSONL file.
-// Returns the SHA256 hash of the file contents.
-func computeJSONLHash(jsonlPath string) (string, error) {
-	data, err := os.ReadFile(jsonlPath) // #nosec G304 - controlled path from config
-	if err != nil {
-		return "", fmt.Errorf("failed to read JSONL: %w", err)
-	}
-
-	// Use sha256 for consistency with autoimport package
-	hasher := sha256.New()
-	hasher.Write(data)
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
 // computeDBHash computes a content hash of the database by exporting to memory.
 // This is used to compare DB content with JSONL content without relying on timestamps.
 func computeDBHash(ctx context.Context, store storage.Storage) (string, error) {
