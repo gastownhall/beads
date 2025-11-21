@@ -245,12 +245,17 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, claudeCheck)
 	// Don't fail overall check for missing Claude integration, just warn
 
-	// Check 12: Legacy beads slash commands in documentation
+	// Check 12: Agent documentation presence
+	agentDocsCheck := convertDoctorCheck(doctor.CheckAgentDocumentation(path))
+	result.Checks = append(result.Checks, agentDocsCheck)
+	// Don't fail overall check for missing docs, just warn
+
+	// Check 13: Legacy beads slash commands in documentation
 	legacyDocsCheck := convertDoctorCheck(doctor.CheckLegacyBeadsSlashCommands(path))
 	result.Checks = append(result.Checks, legacyDocsCheck)
 	// Don't fail overall check for legacy docs, just warn
 
-	// Check 13: Gitignore up to date
+	// Check 14: Gitignore up to date
 	gitignoreCheck := convertDoctorCheck(doctor.CheckGitignore())
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn

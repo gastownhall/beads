@@ -42,16 +42,64 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:    "Documentation",
+		Name:    "Integration Pattern",
 		Status:  "warning",
-		Message: fmt.Sprintf("Legacy /beads:* slash commands found in: %s", strings.Join(filesWithLegacyCommands, ", ")),
-		Detail:  "Old pattern: /beads:quickstart, /beads:ready (~10.5k tokens)",
-		Fix:     "Migration steps:\n" +
-			"  1. Run 'bd setup claude' (or 'bd setup cursor') to install bd prime hooks\n" +
-			"  2. Remove /beads:* slash commands from AGENTS.md/CLAUDE.md\n" +
-			"  3. Add this to AGENTS.md/CLAUDE.md for team members without hooks:\n" +
-			"     \"This project uses bd (beads) for issue tracking. Run 'bd prime' at session start for workflow context.\"\n" +
-			"  Token savings: ~10.5k → ~50-2k tokens per session",
+		Message: fmt.Sprintf("Old beads integration detected in %s", strings.Join(filesWithLegacyCommands, ", ")),
+		Detail:  "Found: /beads:* slash command references (deprecated)\n" +
+			"  These commands are token-inefficient (~10.5k tokens per session)",
+		Fix: "Migrate to bd prime hooks for better token efficiency:\n" +
+			"\n" +
+			"Migration Steps:\n" +
+			"  1. Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
+			"  2. Update AGENTS.md/CLAUDE.md:\n" +
+			"     - Remove /beads:* slash command references\n" +
+			"     - Add: \"Run 'bd prime' for workflow context\" (for users without hooks)\n" +
+			"\n" +
+			"Benefits:\n" +
+			"  • MCP mode: ~50 tokens vs ~10.5k for full MCP scan (99% reduction)\n" +
+			"  • CLI mode: ~1-2k tokens with automatic context recovery\n" +
+			"  • Hooks auto-refresh context on session start and before compaction\n" +
+			"\n" +
+			"See: bd setup claude --help",
+	}
+}
+
+// CheckAgentDocumentation checks if agent documentation (AGENTS.md or CLAUDE.md) exists
+// and recommends adding it if missing, suggesting bd onboard or bd setup claude.
+func CheckAgentDocumentation(repoPath string) DoctorCheck {
+	docFiles := []string{
+		filepath.Join(repoPath, "AGENTS.md"),
+		filepath.Join(repoPath, "CLAUDE.md"),
+		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
+	}
+
+	var foundDocs []string
+	for _, docFile := range docFiles {
+		if _, err := os.Stat(docFile); err == nil {
+			foundDocs = append(foundDocs, filepath.Base(docFile))
+		}
+	}
+
+	if len(foundDocs) > 0 {
+		return DoctorCheck{
+			Name:    "Agent Documentation",
+			Status:  "ok",
+			Message: fmt.Sprintf("Documentation found: %s", strings.Join(foundDocs, ", ")),
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Agent Documentation",
+		Status:  "warning",
+		Message: "No agent documentation found",
+		Detail:  "Missing: AGENTS.md or CLAUDE.md\n" +
+			"  Documenting workflow helps AI agents work more effectively",
+		Fix: "Add agent documentation:\n" +
+			"  • Run 'bd onboard' to create AGENTS.md with workflow guidance\n" +
+			"  • Or run 'bd setup claude' to add Claude-specific documentation\n" +
+			"\n" +
+			"Recommended: Include bd workflow in your project documentation so\n" +
+			"AI agents understand how to track issues and manage dependencies",
 	}
 }
 
