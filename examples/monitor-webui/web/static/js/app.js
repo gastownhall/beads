@@ -103,7 +103,7 @@ async function loadIssues() {
         const response = await fetch('/api/issues');
         if (!response.ok) throw new Error('Failed to load issues');
         allIssues = await response.json();
-        renderIssues(allIssues);
+        filterIssues();
     } catch (error) {
         console.error('Error loading issues:', error);
         showError('Failed to load issues: ' + error.message);
@@ -236,6 +236,11 @@ window.onclick = function(event) {
 
 // Filter event listeners
 document.getElementById('filter-status').addEventListener('change', filterIssues);
+document.getElementById('clear-status').addEventListener('click', function() {
+    const statusSelect = document.getElementById('filter-status');
+    Array.from(statusSelect.options).forEach(opt => opt.selected = false);
+    filterIssues();
+});
 document.getElementById('filter-priority').addEventListener('change', filterIssues);
 document.getElementById('filter-text').addEventListener('input', filterIssues);
 
