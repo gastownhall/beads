@@ -98,6 +98,16 @@ var readyCmd = &cobra.Command{
 		}
 		// Direct mode
 		ctx := context.Background()
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		issues, err := store.GetReadyWork(ctx, filter)
 		if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -184,8 +184,13 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	// Fast path: Check if JSONL is stale using cheap mtime check
 	// This avoids reading/hashing JSONL on every request
 	isStale, err := autoimport.CheckStaleness(ctx, store, dbPath)
-	if err != nil || !isStale {
-		return err
+	if err != nil {
+		// Log error but allow request to proceed (don't block on staleness check failure)
+		fmt.Fprintf(os.Stderr, "Warning: failed to check staleness: %v\n", err)
+		return nil
+	}
+	if !isStale {
+		return nil
 	}
 
 	// Single-flight guard: Only allow one import at a time
@@ -220,8 +225,13 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 
 	// Double-check staleness after acquiring lock (another goroutine may have imported)
 	isStale, err = autoimport.CheckStaleness(ctx, store, dbPath)
-	if err != nil || !isStale {
-		return err
+	if err != nil {
+		// Log error but allow request to proceed (don't block on staleness check failure)
+		fmt.Fprintf(os.Stderr, "Warning: failed to check staleness: %v\n", err)
+		return nil
+	}
+	if !isStale {
+		return nil
 	}
 
 	// Create timeout context for import operation (bd-8931, bd-1048)

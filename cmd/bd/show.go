@@ -24,6 +24,15 @@ var showCmd = &cobra.Command{
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		ctx := context.Background()
 
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {

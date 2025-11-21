@@ -250,36 +250,49 @@ func parseJSONL(jsonlData []byte, _ Notifier) ([]*types.Issue, error) {
 
 // CheckStaleness checks if JSONL is newer than last import
 // dbPath is the full path to the database file
+//
+// Returns:
+//   - (true, nil) if JSONL is newer than last import (database is stale)
+//   - (false, nil) if database is fresh or no JSONL exists yet
+//   - (false, err) if an abnormal error occurred (file system issues, permissions, etc.)
 func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (bool, error) {
 	lastImportStr, err := store.GetMetadata(ctx, "last_import_time")
 	if err != nil {
+		// No metadata yet - expected for first run
 		return false, nil
 	}
-	
+
 	lastImportTime, err := time.Parse(time.RFC3339, lastImportStr)
 	if err != nil {
+		// Corrupted metadata - not critical, assume not stale
 		return false, nil
 	}
-	
+
 	// Find JSONL using database directory
 	dbDir := filepath.Dir(dbPath)
 	pattern := filepath.Join(dbDir, "*.jsonl")
 	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		// Glob failed - this is abnormal
+		return false, fmt.Errorf("failed to find JSONL file: %w", err)
+	}
+
 	var jsonlPath string
-	if err == nil && len(matches) > 0 {
+	if len(matches) > 0 {
 		jsonlPath = matches[0]
 	} else {
 		jsonlPath = filepath.Join(dbDir, "issues.jsonl")
 	}
-	
-	if jsonlPath == "" {
-		return false, nil
-	}
-	
+
 	stat, err := os.Stat(jsonlPath)
 	if err != nil {
-		return false, nil
+		if os.IsNotExist(err) {
+			// JSONL doesn't exist - expected for new repo
+			return false, nil
+		}
+		// Other stat error (permissions, etc.) - abnormal
+		return false, fmt.Errorf("failed to stat JSONL file %s: %w", jsonlPath, err)
 	}
-	
+
 	return stat.ModTime().After(lastImportTime), nil
 }

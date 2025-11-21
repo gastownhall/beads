@@ -193,6 +193,16 @@ var listCmd = &cobra.Command{
 			filter.PriorityMax = &priorityMax
 		}
 
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		ctx := context.Background()
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 	// If daemon is running, use RPC
 		if daemonClient != nil {
 			listArgs := &rpc.ListArgs{
@@ -310,7 +320,7 @@ var listCmd = &cobra.Command{
 		}
 
 		// Direct mode
-		ctx := context.Background()
+		// ctx already created above for staleness check
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -1,0 +1,51 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/steveyegge/beads/internal/autoimport"
+)
+
+// ensureDatabaseFresh checks if the database is in sync with JSONL before read operations.
+// If JSONL is newer than database, refuses to operate with an error message.
+// This prevents users from making decisions based on stale/incomplete data.
+//
+// NOTE: Callers must check if daemonClient != nil and skip calling this function
+// when running in daemon mode (daemon auto-imports on staleness).
+//
+// Implements bd-2q6d: All read operations should validate database freshness.
+// Implements bd-c4rq: Daemon check moved to call sites to avoid function call overhead.
+func ensureDatabaseFresh(ctx context.Context) error {
+	// Skip check if no storage available (shouldn't happen in practice)
+	if store == nil {
+		return nil
+	}
+
+	// Check if database is stale
+	isStale, err := autoimport.CheckStaleness(ctx, store, dbPath)
+	if err != nil {
+		// If we can't determine staleness, allow operation to proceed
+		// (better to show potentially stale data than block user)
+		fmt.Fprintf(os.Stderr, "Warning: could not check database staleness: %v\n", err)
+		return nil
+	}
+
+	if !isStale {
+		// Database is fresh, proceed
+		return nil
+	}
+
+	// Database is stale - refuse to operate
+	return fmt.Errorf(
+		"Database out of sync with JSONL. Run 'bd import' first.\n\n"+
+			"The JSONL file has been updated (e.g., after 'git pull') but the database\n"+
+			"hasn't been imported yet. This would cause you to see stale/incomplete data.\n\n"+
+			"To fix:\n"+
+			"  bd import        # Import JSONL updates to database\n\n"+
+			"Or use daemon mode (auto-imports on every operation):\n"+
+			"  bd daemon start\n"+
+			"  bd <command>     # Will auto-import before executing",
+	)
+}

@@ -33,6 +33,16 @@ Example:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := context.Background()
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
