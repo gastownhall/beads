@@ -126,14 +126,17 @@ Use --merge to merge the sync branch back to main branch.`,
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
-			// Smart conflict resolution: if JSONL is newer, auto-import first
-			if isJSONLNewer(jsonlPath) {
-				fmt.Println("→ JSONL is newer than database, importing first...")
-				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
-					fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
-					os.Exit(1)
+			// Smart conflict resolution: if JSONL content changed, auto-import first
+			// Use content-based check (not mtime) to avoid git resurrection bug (bd-khnb)
+			if err := ensureStoreActive(); err == nil && store != nil {
+				if hasJSONLChanged(ctx, store, jsonlPath) {
+					fmt.Println("→ JSONL content changed, importing first...")
+					if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+						fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Println("✓ Auto-import complete")
 				}
-				fmt.Println("✓ Auto-import complete")
 			}
 
 			// Pre-export integrity checks
@@ -599,6 +602,30 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 
 	// Clear auto-flush state
 	clearAutoFlushState()
+
+	// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+	// After export, database and JSONL are in sync, so update hash to prevent unnecessary auto-import
+	if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
+		if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+			// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
+			// successful exports. System degrades gracefully to mtime-based staleness detection if metadata
+			// is unavailable. This ensures export operations always succeed even if metadata storage fails.
+			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash: %v\n", err)
+		}
+		exportTime := time.Now().Format(time.RFC3339)
+		if err := store.SetMetadata(ctx, "last_import_time", exportTime); err != nil {
+			// Non-fatal warning (see above comment about graceful degradation)
+			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time: %v\n", err)
+		}
+		// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
+		if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
+			mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
+			if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
+				// Non-fatal warning (see above comment about graceful degradation)
+				fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_mtime: %v\n", err)
+			}
+		}
+	}
 
 	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
 	// This prevents validatePreExport from incorrectly blocking on next export

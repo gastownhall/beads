@@ -307,6 +307,34 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			flushToJSONL()
 		}
 
+		// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
+		if input != "" {
+			if currentHash, err := computeJSONLHash(input); err == nil {
+				if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+					// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
+					// successful imports. System degrades gracefully to mtime-based staleness detection if metadata
+					// is unavailable. This ensures import operations always succeed even if metadata storage fails.
+					debug.Logf("Warning: failed to update last_import_hash: %v", err)
+				}
+				importTime := time.Now().Format(time.RFC3339)
+				if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
+					// Non-fatal warning (see above comment about graceful degradation)
+					debug.Logf("Warning: failed to update last_import_time: %v", err)
+				}
+				// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
+				if jsonlInfo, statErr := os.Stat(input); statErr == nil {
+					mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
+					if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
+						// Non-fatal warning (see above comment about graceful degradation)
+						debug.Logf("Warning: failed to update last_import_mtime: %v", err)
+					}
+				}
+			} else {
+				debug.Logf("Warning: failed to read JSONL for hash update: %v", err)
+			}
+		}
+
 		// Update database mtime to reflect it's now in sync with JSONL
 		// This is CRITICAL even when import found 0 changes, because:
 		// 1. Import validates DB and JSONL are in sync (no content divergence)

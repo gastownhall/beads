@@ -385,26 +385,13 @@ func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemon
 			log.log("Removed stale lock (%s), proceeding", holder)
 		}
 
-		// Check JSONL modification time to avoid redundant imports
-		jsonlInfo, err := os.Stat(jsonlPath)
-		if err != nil {
-			log.log("Failed to stat JSONL: %v", err)
+		// Check JSONL content hash to avoid redundant imports
+		// Use content-based check (not mtime) to avoid git resurrection bug (bd-khnb)
+		if !hasJSONLChanged(importCtx, store, jsonlPath) {
+			log.log("Skipping import: JSONL content unchanged")
 			return
 		}
-
-		// Get database modification time
-		dbPath := filepath.Join(beadsDir, "beads.db")
-		dbInfo, err := os.Stat(dbPath)
-		if err != nil {
-			log.log("Failed to stat database: %v", err)
-			return
-		}
-
-		// Skip if JSONL is older than database (nothing new to import)
-		if !jsonlInfo.ModTime().After(dbInfo.ModTime()) {
-			log.log("Skipping import: JSONL not newer than database")
-			return
-		}
+		log.log("JSONL content changed, proceeding with import...")
 
 		// Pull from git (try sync branch first)
 		pulled, err := syncBranchPull(importCtx, store, log)

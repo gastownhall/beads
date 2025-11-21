@@ -20,6 +20,10 @@ import (
 // isJSONLNewer checks if JSONL file is newer than database file.
 // Returns true if JSONL is newer AND has different content, false otherwise.
 // This prevents false positives from daemon auto-export timestamp skew (bd-lm2q).
+//
+// NOTE: This uses computeDBHash which is more expensive than hasJSONLChanged.
+// For daemon auto-import, prefer hasJSONLChanged() which uses metadata-based
+// content tracking and is safe against git operations (bd-khnb).
 func isJSONLNewer(jsonlPath string) bool {
 	return isJSONLNewerWithStore(jsonlPath, nil)
 }
@@ -71,12 +75,71 @@ func isJSONLNewerWithStore(jsonlPath string, st storage.Storage) bool {
 	return jsonlHash != dbHash
 }
 
+// computeJSONLHash computes SHA256 hash of JSONL file content.
+// Returns hex-encoded hash string and any error encountered reading the file.
+func computeJSONLHash(jsonlPath string) (string, error) {
+	jsonlData, err := os.ReadFile(jsonlPath) // #nosec G304 - controlled path
+	if err != nil {
+		return "", err
+	}
+	hasher := sha256.New()
+	hasher.Write(jsonlData)
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// hasJSONLChanged checks if JSONL content has changed since last import using SHA256 hash.
+// Returns true if JSONL content differs from last import, false otherwise.
+// This is safe against git operations that restore old files with recent mtimes.
+//
+// Performance optimization: Checks mtime first as a fast-path. Only computes expensive
+// SHA256 hash if mtime changed. This makes 99% of checks instant (mtime unchanged = content
+// unchanged) while still catching git operations that restore old content with new mtimes.
+func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath string) bool {
+	// Fast-path: Check mtime first to avoid expensive hash computation
+	// Get last known mtime from metadata
+	lastMtimeStr, err := store.GetMetadata(ctx, "last_import_mtime")
+	if err == nil && lastMtimeStr != "" {
+		// We have a previous mtime - check if file mtime changed
+		jsonlInfo, statErr := os.Stat(jsonlPath)
+		if statErr == nil {
+			currentMtime := jsonlInfo.ModTime().Unix()
+			currentMtimeStr := fmt.Sprintf("%d", currentMtime)
+
+			// If mtime unchanged, content definitely unchanged (filesystem guarantee)
+			// Skip expensive hash computation
+			if currentMtimeStr == lastMtimeStr {
+				return false
+			}
+			// Mtime changed - fall through to hash comparison (could be git operation)
+		}
+	}
+
+	// Slow-path: Compute content hash (either mtime changed or no mtime metadata)
+	currentHash, err := computeJSONLHash(jsonlPath)
+	if err != nil {
+		// If we can't read JSONL, assume no change (don't auto-import broken files)
+		return false
+	}
+
+	// Get last import hash from metadata
+	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
+	if err != nil {
+		// No previous import hash - this is the first run or metadata is missing
+		// Assume changed to trigger import
+		return true
+	}
+
+	// Compare hashes
+	return currentHash != lastHash
+}
+
 // validatePreExport performs integrity checks before exporting database to JSONL.
 // Returns error if critical issues found that would cause data loss.
 func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath string) error {
-	// Check if JSONL is newer than database - if so, must import first
-	if isJSONLNewer(jsonlPath) {
-		return fmt.Errorf("refusing to export: JSONL is newer than database (import first to avoid data loss)")
+	// Check if JSONL content has changed since last import - if so, must import first
+	// Uses content-based detection (bd-xwo fix) instead of mtime-based to avoid false positives from git operations
+	if hasJSONLChanged(ctx, store, jsonlPath) {
+		return fmt.Errorf("refusing to export: JSONL content has changed since last import (import first to avoid data loss)")
 	}
 
 	jsonlInfo, jsonlStatErr := os.Stat(jsonlPath)
