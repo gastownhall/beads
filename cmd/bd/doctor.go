@@ -17,6 +17,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
@@ -133,18 +134,84 @@ func init() {
 }
 
 func applyFixes(result doctorResult) {
+	// Collect all fixable issues
+	var fixableIssues []doctorCheck
 	for _, check := range result.Checks {
-		if check.Status == statusWarning || check.Status == statusError {
-			switch check.Name {
-			case "Gitignore":
-				fmt.Println("Fixing .beads/.gitignore...")
-				if err := doctor.FixGitignore(); err != nil {
-					fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
-				} else {
-					fmt.Println("  ✓ Updated .beads/.gitignore")
-				}
-			}
+		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
+			fixableIssues = append(fixableIssues, check)
 		}
+	}
+
+	if len(fixableIssues) == 0 {
+		fmt.Println("\nNo fixable issues found.")
+		return
+	}
+
+	// Show what will be fixed
+	fmt.Println("\nFixable issues:")
+	for i, issue := range fixableIssues {
+		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
+	}
+
+	// Ask for confirmation
+	fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixableIssues))
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+		return
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response != "" && response != "y" && response != "yes" {
+		fmt.Println("Fix cancelled.")
+		return
+	}
+
+	// Apply fixes
+	fmt.Println("\nApplying fixes...")
+	fixedCount := 0
+	errorCount := 0
+
+	for _, check := range fixableIssues {
+		fmt.Printf("\nFixing %s...\n", check.Name)
+
+		var err error
+		switch check.Name {
+		case "Gitignore":
+			err = doctor.FixGitignore()
+		case "Git Hooks":
+			err = fix.GitHooks(result.Path)
+		case "Daemon Health":
+			err = fix.Daemon(result.Path)
+		case "DB-JSONL Sync":
+			err = fix.DBJSONLSync(result.Path)
+		case "Permissions":
+			err = fix.Permissions(result.Path)
+		case "Database":
+			err = fix.DatabaseVersion(result.Path)
+		case "Schema Compatibility":
+			err = fix.SchemaCompatibility(result.Path)
+		default:
+			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
+			fmt.Printf("  Manual fix: %s\n", check.Fix)
+			continue
+		}
+
+		if err != nil {
+			errorCount++
+			color.Red("  ✗ Error: %v\n", err)
+			fmt.Printf("  Manual fix: %s\n", check.Fix)
+		} else {
+			fixedCount++
+			color.Green("  ✓ Fixed\n")
+		}
+	}
+
+	// Summary
+	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
+	if errorCount > 0 {
+		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
 }
 

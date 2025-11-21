@@ -93,12 +93,11 @@ func CheckGitignore() DoctorCheck {
 // FixGitignore updates .beads/.gitignore to the current template
 func FixGitignore() error {
 	gitignorePath := filepath.Join(".beads", ".gitignore")
-	
-	// Write canonical template
-	// #nosec G306 -- 0600 is appropriate for gitignore
-	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+
+	// Write canonical template with standard git file permissions (world-readable)
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
