@@ -58,14 +58,34 @@ func CheckClaude() DoctorCheck {
 			Name:    "Claude Integration",
 			Status:  "warning",
 			Message: "MCP server installed but hooks missing",
-			Fix:     "Run: bd setup claude",
+			Detail: "MCP-only mode: relies on tools for every query (~10.5k tokens)\n" +
+				"  bd prime hooks provide much better token efficiency",
+			Fix: "Add bd prime hooks for better token efficiency:\n" +
+				"  1. Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
+				"\n" +
+				"Benefits:\n" +
+				"  • MCP mode: ~50 tokens vs ~10.5k for full tool scan (99% reduction)\n" +
+				"  • Automatic context refresh on session start and compaction\n" +
+				"  • Works alongside MCP tools for when you need them\n" +
+				"\n" +
+				"See: bd setup claude --help",
 		}
 	} else {
 		return DoctorCheck{
 			Name:    "Claude Integration",
 			Status:  "warning",
 			Message: "Not configured",
-			Fix:     "Run: bd setup claude (and install beads plugin for slash commands)",
+			Detail: "Claude can use bd more effectively with hooks and optional plugin",
+			Fix: "Set up Claude integration:\n" +
+				"  1. Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
+				"  2. (Optional) Install beads plugin for slash commands\n" +
+				"\n" +
+				"Benefits:\n" +
+				"  • Hooks: Auto-inject workflow context (~50-2k tokens)\n" +
+				"  • Plugin: Convenient slash commands + MCP tools\n" +
+				"  • CLI mode: Works without plugin (hooks + manual 'bd prime')\n" +
+				"\n" +
+				"See: bd setup claude --help",
 		}
 	}
 }
