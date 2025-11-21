@@ -154,7 +154,7 @@ Tests that already use good patterns:
 **Recommendation**: Mix - some can share, some need isolation
 
 #### Misc Tests:
-- **compact_test.go** (10 tests)
+- ✅ **compact_test.go** (10 tests → 1 suite + 4 standalone = Phase 2 DONE)
 - **duplicates_test.go** (5 tests)
 - **epic_test.go** (3 tests)
 - **hooks_test.go** (6 tests)
