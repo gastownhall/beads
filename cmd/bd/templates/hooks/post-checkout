@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bd-hooks-version: 0.23.1
+# bd-hooks-version: 0.24.0
 #
 # Beads post-checkout hook
 # Automatically imports JSONL to SQLite database after checking out branches
