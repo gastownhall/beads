@@ -235,10 +235,29 @@ window.onclick = function(event) {
 };
 
 // Filter event listeners
-document.getElementById('filter-status').addEventListener('change', filterIssues);
-document.getElementById('clear-status').addEventListener('click', function() {
+document.getElementById('filter-status').addEventListener('change', function() {
     const statusSelect = document.getElementById('filter-status');
-    Array.from(statusSelect.options).forEach(opt => opt.selected = false);
+    const options = Array.from(statusSelect.options);
+    const allSelected = options.every(opt => opt.selected);
+    const btn = document.getElementById('toggle-status');
+    btn.textContent = allSelected ? 'Select None' : 'Select All';
+    filterIssues();
+});
+document.getElementById('toggle-status').addEventListener('click', function() {
+    const statusSelect = document.getElementById('filter-status');
+    const options = Array.from(statusSelect.options);
+    const allSelected = options.every(opt => opt.selected);
+    const btn = document.getElementById('toggle-status');
+
+    if (allSelected) {
+        // Select None (which effectively shows all, but we'll clear selection)
+        options.forEach(opt => opt.selected = false);
+        btn.textContent = 'Select All';
+    } else {
+        // Select All
+        options.forEach(opt => opt.selected = true);
+        btn.textContent = 'Select None';
+    }
     filterIssues();
 });
 document.getElementById('filter-priority').addEventListener('change', filterIssues);
