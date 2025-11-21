@@ -12,22 +12,33 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// isJSONLNewer checks if JSONL file is newer than database file.
+// Returns true if JSONL is newer, false otherwise.
+func isJSONLNewer(jsonlPath string) bool {
+	jsonlInfo, jsonlStatErr := os.Stat(jsonlPath)
+	if jsonlStatErr != nil {
+		return false
+	}
+
+	beadsDir := filepath.Dir(jsonlPath)
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	dbInfo, dbStatErr := os.Stat(dbPath)
+	if dbStatErr != nil {
+		return false
+	}
+
+	return jsonlInfo.ModTime().After(dbInfo.ModTime())
+}
+
 // validatePreExport performs integrity checks before exporting database to JSONL.
 // Returns error if critical issues found that would cause data loss.
 func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath string) error {
 	// Check if JSONL is newer than database - if so, must import first
-	jsonlInfo, jsonlStatErr := os.Stat(jsonlPath)
-	if jsonlStatErr == nil {
-		beadsDir := filepath.Dir(jsonlPath)
-		dbPath := filepath.Join(beadsDir, "beads.db")
-		dbInfo, dbStatErr := os.Stat(dbPath)
-		if dbStatErr == nil {
-			// If JSONL is newer, refuse export - caller must import first
-			if jsonlInfo.ModTime().After(dbInfo.ModTime()) {
-				return fmt.Errorf("refusing to export: JSONL is newer than database (import first to avoid data loss)")
-			}
-		}
+	if isJSONLNewer(jsonlPath) {
+		return fmt.Errorf("refusing to export: JSONL is newer than database (import first to avoid data loss)")
 	}
+
+	jsonlInfo, jsonlStatErr := os.Stat(jsonlPath)
 
 	// Get database issue count (fast path with COUNT(*) if available)
 	dbCount, err := countDBIssuesFast(ctx, store)

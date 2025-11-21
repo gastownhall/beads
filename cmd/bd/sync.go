@@ -126,6 +126,16 @@ Use --merge to merge the sync branch back to main branch.`,
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
+			// Smart conflict resolution: if JSONL is newer, auto-import first
+			if isJSONLNewer(jsonlPath) {
+				fmt.Println("→ JSONL is newer than database, importing first...")
+				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+					fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("✓ Auto-import complete")
+			}
+
 			// Pre-export integrity checks
 			if err := ensureStoreActive(); err == nil && store != nil {
 				if err := validatePreExport(ctx, store, jsonlPath); err != nil {

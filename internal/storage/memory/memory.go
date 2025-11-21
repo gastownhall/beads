@@ -791,6 +791,19 @@ func (m *MemoryStorage) GetLabels(ctx context.Context, issueID string) ([]string
 	return m.labels[issueID], nil
 }
 
+func (m *MemoryStorage) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]string)
+	for _, issueID := range issueIDs {
+		if labels, exists := m.labels[issueID]; exists {
+			result[issueID] = labels
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

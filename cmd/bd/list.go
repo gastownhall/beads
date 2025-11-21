@@ -339,17 +339,18 @@ var listCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			// Populate labels for JSON output
-			for _, issue := range issues {
-				issue.Labels, _ = store.GetLabels(ctx, issue.ID)
-			}
-
-			// Get dependency counts in bulk (single query instead of N queries)
+			// Get labels and dependency counts in bulk (single query instead of N queries)
 			issueIDs := make([]string, len(issues))
 			for i, issue := range issues {
 				issueIDs[i] = issue.ID
 			}
+			labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 			depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+
+			// Populate labels for JSON output
+			for _, issue := range issues {
+				issue.Labels = labelsMap[issue.ID]
+			}
 
 			// Build response with counts
 			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
@@ -368,12 +369,18 @@ var listCmd = &cobra.Command{
 			return
 		}
 
+		// Load labels in bulk for display
+		issueIDs := make([]string, len(issues))
+		for i, issue := range issues {
+			issueIDs[i] = issue.ID
+		}
+		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
+
 		if longFormat {
 			// Long format: multi-line with details
 			fmt.Printf("\nFound %d issues:\n\n", len(issues))
 			for _, issue := range issues {
-				// Load labels for display
-				labels, _ := store.GetLabels(ctx, issue.ID)
+				labels := labelsMap[issue.ID]
 
 				fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
 				fmt.Printf("  %s\n", issue.Title)
@@ -388,8 +395,7 @@ var listCmd = &cobra.Command{
 		} else {
 			// Compact format: one line per issue
 			for _, issue := range issues {
-				// Load labels for display
-				labels, _ := store.GetLabels(ctx, issue.ID)
+				labels := labelsMap[issue.ID]
 
 				labelsStr := ""
 				if len(labels) > 0 {
