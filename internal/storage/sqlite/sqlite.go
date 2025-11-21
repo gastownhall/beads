@@ -694,6 +694,14 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
+	// Invalidate blocked issues cache if status changed (bd-5qim)
+	// Status changes affect which issues are blocked (blockers must be open/in_progress/blocked)
+	if _, statusChanged := updates["status"]; statusChanged {
+		if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -859,6 +867,12 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	`, id, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
+	// Invalidate blocked issues cache since status changed to closed (bd-5qim)
+	// Closed issues don't block others, so this affects blocking calculations
+	if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+		return fmt.Errorf("failed to invalidate blocked cache: %w", err)
 	}
 
 	return tx.Commit()

@@ -5,7 +5,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .config import load_config
 from .models import (
@@ -115,6 +115,11 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
+    async def quickstart(self) -> str:
+        """Get quickstart guide."""
+        pass
+
+    @abstractmethod
     async def stats(self) -> Stats:
         """Get repository statistics."""
         pass
@@ -130,17 +135,17 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def inspect_migration(self) -> dict:
+    async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis."""
         pass
 
     @abstractmethod
-    async def get_schema_info(self) -> dict:
+    async def get_schema_info(self) -> dict[str, Any]:
         """Get current database schema for inspection."""
         pass
 
     @abstractmethod
-    async def repair_deps(self, fix: bool = False) -> dict:
+    async def repair_deps(self, fix: bool = False) -> dict[str, Any]:
         """Find and optionally fix orphaned dependency references.
         
         Args:
@@ -152,7 +157,7 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def detect_pollution(self, clean: bool = False) -> dict:
+    async def detect_pollution(self, clean: bool = False) -> dict[str, Any]:
         """Detect test issues that leaked into production database.
         
         Args:
@@ -164,7 +169,7 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict[str, Any]:
         """Run database validation checks.
         
         Args:
@@ -246,7 +251,7 @@ class BdCliClient(BdClientBase):
             flags.append("--no-auto-import")
         return flags
 
-    async def _run_command(self, *args: str, cwd: str | None = None) -> object:
+    async def _run_command(self, *args: str, cwd: str | None = None) -> Any:
         """Run bd command and parse JSON output.
 
         Args:
@@ -638,7 +643,7 @@ class BdCliClient(BdClientBase):
 
         return [BlockedIssue.model_validate(issue) for issue in data]
 
-    async def inspect_migration(self) -> dict:
+    async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis.
 
         Returns:
@@ -649,7 +654,7 @@ class BdCliClient(BdClientBase):
             raise BdCommandError("Invalid response for inspect_migration")
         return data
 
-    async def get_schema_info(self) -> dict:
+    async def get_schema_info(self) -> dict[str, Any]:
         """Get current database schema for inspection.
 
         Returns:
@@ -660,7 +665,7 @@ class BdCliClient(BdClientBase):
             raise BdCommandError("Invalid response for get_schema_info")
         return data
 
-    async def repair_deps(self, fix: bool = False) -> dict:
+    async def repair_deps(self, fix: bool = False) -> dict[str, Any]:
         """Find and optionally fix orphaned dependency references.
 
         Args:
@@ -678,7 +683,7 @@ class BdCliClient(BdClientBase):
             raise BdCommandError("Invalid response for repair-deps")
         return data
 
-    async def detect_pollution(self, clean: bool = False) -> dict:
+    async def detect_pollution(self, clean: bool = False) -> dict[str, Any]:
         """Detect test issues that leaked into production database.
 
         Args:
@@ -696,7 +701,7 @@ class BdCliClient(BdClientBase):
             raise BdCommandError("Invalid response for detect-pollution")
         return data
 
-    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict[str, Any]:
         """Run database validation checks.
 
         Args:
@@ -804,9 +809,9 @@ def create_bd_client(
 
             current = search_dir.resolve()
             while True:
-                beads_dir = current / ".beads"
-                if beads_dir.is_dir():
-                    sock_path = beads_dir / "bd.sock"
+                local_beads_dir = current / ".beads"
+                if local_beads_dir.is_dir():
+                    sock_path = local_beads_dir / "bd.sock"
                     if sock_path.exists():
                         socket_found = True
                         break

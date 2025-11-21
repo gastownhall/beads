@@ -150,6 +150,14 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 			return wrapDBError("mark issues dirty after adding dependency", err)
 		}
 
+		// Invalidate blocked issues cache since dependencies changed (bd-5qim)
+		// Only invalidate for 'blocks' and 'parent-child' types since they affect blocking
+		if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+			if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+				return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+			}
+		}
+
 		return nil
 	})
 }
@@ -157,6 +165,18 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 // RemoveDependency removes a dependency
 func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		// First, check what type of dependency is being removed
+		var depType types.DependencyType
+		err := tx.QueryRowContext(ctx, `
+			SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
+		`, issueID, dependsOnID).Scan(&depType)
+
+		// Store whether cache needs invalidation before deletion
+		needsCacheInvalidation := false
+		if err == nil {
+			needsCacheInvalidation = (depType == types.DepBlocks || depType == types.DepParentChild)
+		}
+
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
 		`, issueID, dependsOnID)
@@ -185,6 +205,13 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 		// Mark both issues as dirty for incremental export
 		if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
 			return wrapDBError("mark issues dirty after removing dependency", err)
+		}
+
+		// Invalidate blocked issues cache if this was a blocking dependency (bd-5qim)
+		if needsCacheInvalidation {
+			if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+				return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+			}
 		}
 
 		return nil

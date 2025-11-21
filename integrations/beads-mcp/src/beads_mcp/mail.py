@@ -21,7 +21,7 @@ AGENT_MAIL_RETRIES = 2
 class MailError(Exception):
     """Base exception for Agent Mail errors."""
 
-    def __init__(self, code: str, message: str, data: Optional[dict] = None):
+    def __init__(self, code: str, message: str, data: Optional[dict[str, Any]] = None):
         self.code = code
         self.message = message
         self.data = data or {}
@@ -97,9 +97,9 @@ def _get_project_key() -> str:
 def _call_agent_mail(
     method: str,
     endpoint: str,
-    json_data: Optional[dict] = None,
-    params: Optional[dict] = None,
-) -> dict[str, Any]:
+    json_data: Optional[dict[str, Any]] = None,
+    params: Optional[dict[str, Any]] = None,
+) -> Any:
     """Make HTTP request to Agent Mail server with retries.
 
     Args:
@@ -205,7 +205,9 @@ def _call_agent_mail(
             time.sleep(0.5 * (2**attempt))
 
     # All retries exhausted
-    raise last_error
+    if last_error:
+        raise last_error
+    raise MailError("INTERNAL_ERROR", "Request failed with no error details")
 
 
 def mail_send(
@@ -350,7 +352,7 @@ def mail_inbox(
     )
 
     # Agent Mail returns list of messages directly
-    messages = result if isinstance(result, list) else []
+    messages: list[dict[str, Any]] = result if isinstance(result, list) else []
 
     # Transform to our format and filter unread if requested
     formatted_messages = []

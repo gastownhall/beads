@@ -89,4 +89,5 @@ dev = [
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.0",
+    "types-requests>=2.31.0",
 ]

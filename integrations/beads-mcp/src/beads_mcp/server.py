@@ -9,7 +9,8 @@ import signal
 import subprocess
 import sys
 from functools import wraps
-from typing import Callable, TypeVar
+from types import FrameType
+from typing import Any, Awaitable, Callable, TypeVar
 
 from fastmcp import FastMCP
 
@@ -46,7 +47,7 @@ logging.basicConfig(
 T = TypeVar("T")
 
 # Global state for cleanup
-_daemon_clients: list = []
+_daemon_clients: list[Any] = []
 _cleanup_done = False
 
 # Persistent workspace context (survives across MCP tool calls)
@@ -92,7 +93,7 @@ def cleanup() -> None:
     logger.info("Cleanup complete")
 
 
-def signal_handler(signum: int, frame) -> None:
+def signal_handler(signum: int, frame: FrameType | None) -> None:
     """Handle termination signals gracefully."""
     sig_name = signal.Signals(signum).name
     logger.info(f"Received {sig_name}, shutting down gracefully...")
@@ -114,7 +115,7 @@ except importlib.metadata.PackageNotFoundError:
 logger.info(f"beads-mcp v{__version__} initialized with lifecycle management")
 
 
-def with_workspace(func: Callable[..., T]) -> Callable[..., T]:
+def with_workspace(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
     """Decorator to set workspace context for the duration of a tool call.
 
     Extracts workspace_root parameter from tool call kwargs, resolves it,
@@ -124,7 +125,7 @@ def with_workspace(func: Callable[..., T]) -> Callable[..., T]:
     This enables per-request workspace routing for multi-project support.
     """
     @wraps(func)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(*args: Any, **kwargs: Any) -> T:
         # Extract workspace_root parameter (if provided)
         workspace_root = kwargs.get('workspace_root')
 
@@ -148,7 +149,7 @@ def with_workspace(func: Callable[..., T]) -> Callable[..., T]:
     return wrapper
 
 
-def require_context(func: Callable[..., T]) -> Callable[..., T]:
+def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
     """Decorator to enforce context has been set before write operations.
     
     Passes if either:
@@ -159,7 +160,7 @@ def require_context(func: Callable[..., T]) -> Callable[..., T]:
     This allows backward compatibility while adding safety for multi-repo setups.
     """
     @wraps(func)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(*args: Any, **kwargs: Any) -> T:
         # Only enforce if explicitly enabled
         if os.environ.get("BEADS_REQUIRE_CONTEXT") == "1":
             # Check ContextVar or environment
@@ -453,7 +454,7 @@ async def update_issue(
     notes: str | None = None,
     external_ref: str | None = None,
     workspace_root: str | None = None,
-) -> Issue:
+) -> Issue | list[Issue] | None:
     """Update an existing issue."""
     # If trying to close via update, redirect to close_issue to preserve approval workflow
     if status == "closed":
@@ -577,7 +578,7 @@ async def debug_env(workspace_root: str | None = None) -> str:
     description="Get migration plan and database state for agent analysis.",
 )
 @with_workspace
-async def inspect_migration(workspace_root: str | None = None) -> dict:
+async def inspect_migration(workspace_root: str | None = None) -> dict[str, Any]:
     """Get migration plan and database state for agent analysis.
     
     AI agents should:
@@ -596,7 +597,7 @@ async def inspect_migration(workspace_root: str | None = None) -> dict:
     description="Get current database schema for inspection.",
 )
 @with_workspace
-async def get_schema_info(workspace_root: str | None = None) -> dict:
+async def get_schema_info(workspace_root: str | None = None) -> dict[str, Any]:
     """Get current database schema for inspection.
     
     Returns tables, schema version, config, sample issue IDs, and detected prefix.
@@ -610,7 +611,7 @@ async def get_schema_info(workspace_root: str | None = None) -> dict:
     description="Find and optionally fix orphaned dependency references.",
 )
 @with_workspace
-async def repair_deps(fix: bool = False, workspace_root: str | None = None) -> dict:
+async def repair_deps(fix: bool = False, workspace_root: str | None = None) -> dict[str, Any]:
     """Find and optionally fix orphaned dependency references.
     
     Scans all issues for dependencies pointing to non-existent issues.
@@ -624,7 +625,7 @@ async def repair_deps(fix: bool = False, workspace_root: str | None = None) -> d
     description="Detect test issues that leaked into production database.",
 )
 @with_workspace
-async def detect_pollution(clean: bool = False, workspace_root: str | None = None) -> dict:
+async def detect_pollution(clean: bool = False, workspace_root: str | None = None) -> dict[str, Any]:
     """Detect test issues that leaked into production database.
     
     Detects test issues using pattern matching (titles starting with 'test', etc.).
@@ -642,7 +643,7 @@ async def validate(
     checks: str | None = None,
     fix_all: bool = False,
     workspace_root: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Run comprehensive database health checks.
     
     Available checks: orphans, duplicates, pollution, conflicts.

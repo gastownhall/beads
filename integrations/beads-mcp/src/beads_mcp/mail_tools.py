@@ -155,7 +155,7 @@ def beads_mail_reply(params: MailReplyParams) -> dict[str, Any]:
         return {"error": e.code, "message": e.message, "data": e.data}
 
 
-def beads_mail_ack(params: MailAckParams) -> dict[str, bool]:
+def beads_mail_ack(params: MailAckParams) -> dict[str, Any]:
     """Acknowledge a message (for ack_required messages).
 
     Safe to call even if message doesn't require acknowledgement.
@@ -183,7 +183,7 @@ def beads_mail_ack(params: MailAckParams) -> dict[str, bool]:
         return {"error": e.code, "acknowledged": False, "message": e.message}
 
 
-def beads_mail_delete(params: MailDeleteParams) -> dict[str, bool]:
+def beads_mail_delete(params: MailDeleteParams) -> dict[str, Any]:
     """Delete (archive) a message from Agent Mail inbox.
 
     Note: Agent Mail archives messages rather than permanently deleting them.

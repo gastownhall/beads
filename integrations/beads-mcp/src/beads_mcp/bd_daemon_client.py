@@ -46,7 +46,7 @@ class BdDaemonClient(BdClientBase):
     """Client for calling bd daemon via RPC over Unix socket."""
 
     socket_path: str | None
-    working_dir: str | None
+    working_dir: str
     actor: str | None
     timeout: float
 
@@ -113,7 +113,7 @@ class BdDaemonClient(BdClientBase):
             "Daemon socket not found. Is the daemon running? Try: bd daemon (local) or bd daemon --global"
         )
 
-    async def _send_request(self, operation: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def _send_request(self, operation: str, args: Dict[str, Any]) -> Any:
         """Send RPC request to daemon and get response.
 
         Args:
@@ -192,7 +192,7 @@ class BdDaemonClient(BdClientBase):
             writer.close()
             await writer.wait_closed()
 
-    async def ping(self) -> Dict[str, str]:
+    async def ping(self) -> Dict[str, Any]:
         """Ping daemon to check if it's running.
 
         Returns:
@@ -204,7 +204,8 @@ class BdDaemonClient(BdClientBase):
             DaemonError: If request fails
         """
         data = await self._send_request("ping", {})
-        return json.loads(data) if isinstance(data, str) else data
+        result = json.loads(data) if isinstance(data, str) else data
+        return dict(result)
 
     async def health(self) -> Dict[str, Any]:
         """Get daemon health status.
@@ -224,7 +225,24 @@ class BdDaemonClient(BdClientBase):
             DaemonError: If request fails
         """
         data = await self._send_request("health", {})
-        return json.loads(data) if isinstance(data, str) else data
+        result = json.loads(data) if isinstance(data, str) else data
+        return dict(result)
+
+    async def quickstart(self) -> str:
+        """Get quickstart guide.
+
+        Note: Daemon RPC doesn't support quickstart command.
+        Returns static guide text pointing users to CLI.
+
+        Returns:
+            Quickstart guide text
+        """
+        return (
+            "Beads (bd) Quickstart\n\n"
+            "To get started with beads, please refer to the documentation or use the CLI:\n"
+            "  bd quickstart\n\n"
+            "For MCP usage, try 'beads list' or 'beads create'."
+        )
 
     async def init(self, params: Optional[InitParams] = None) -> str:
         """Initialize new beads database (not typically used via daemon).
@@ -256,7 +274,7 @@ class BdDaemonClient(BdClientBase):
         """
         args = {
             "title": params.title,
-            "issue_type": params.issue_type or "task",
+            "issue_type": params.issue_type,
             "priority": params.priority if params.priority is not None else 2,
         }
         if params.id:
@@ -430,7 +448,7 @@ class BdDaemonClient(BdClientBase):
         # This is a placeholder for when it's added
         raise NotImplementedError("Blocked operation not yet supported via daemon")
 
-    async def inspect_migration(self) -> dict:
+    async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis.
 
         Returns:
@@ -441,7 +459,7 @@ class BdDaemonClient(BdClientBase):
         """
         raise NotImplementedError("inspect_migration not supported via daemon - use CLI client")
 
-    async def get_schema_info(self) -> dict:
+    async def get_schema_info(self) -> dict[str, Any]:
         """Get current database schema for inspection.
 
         Returns:
@@ -452,7 +470,7 @@ class BdDaemonClient(BdClientBase):
         """
         raise NotImplementedError("get_schema_info not supported via daemon - use CLI client")
 
-    async def repair_deps(self, fix: bool = False) -> dict:
+    async def repair_deps(self, fix: bool = False) -> dict[str, Any]:
         """Find and optionally fix orphaned dependency references.
 
         Args:
@@ -466,7 +484,7 @@ class BdDaemonClient(BdClientBase):
         """
         raise NotImplementedError("repair_deps not supported via daemon - use CLI client")
 
-    async def detect_pollution(self, clean: bool = False) -> dict:
+    async def detect_pollution(self, clean: bool = False) -> dict[str, Any]:
         """Detect test issues that leaked into production database.
 
         Args:
@@ -480,7 +498,7 @@ class BdDaemonClient(BdClientBase):
         """
         raise NotImplementedError("detect_pollution not supported via daemon - use CLI client")
 
-    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict:
+    async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict[str, Any]:
         """Run database validation checks.
 
         Args:
@@ -504,7 +522,7 @@ class BdDaemonClient(BdClientBase):
         args = {
             "from_id": params.issue_id,
             "to_id": params.depends_on_id,
-            "dep_type": params.dep_type or "blocks",
+            "dep_type": params.dep_type,
         }
         await self._send_request("dep_add", args)
 
