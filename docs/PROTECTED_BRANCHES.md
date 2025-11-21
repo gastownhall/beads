@@ -38,6 +38,34 @@ bd init --branch beads-metadata
 
 This creates a `.beads/` directory and configures beads to commit to `beads-metadata` instead of `main`.
 
+**Important:** After initialization, you'll see some untracked files that should be committed to your protected branch:
+
+```bash
+# Check what files were created
+git status
+
+# Commit the beads configuration to your protected branch
+git add .beads/.gitignore .gitattributes
+git commit -m "Initialize beads issue tracker"
+git push origin main  # Or create a PR if required
+```
+
+**Files created by `bd init --branch`:**
+
+Files that should be committed to your protected branch (main):
+- `.beads/.gitignore` - Tells git what to ignore in .beads/ directory
+- `.gitattributes` - Configures merge driver for intelligent JSONL conflict resolution
+
+Files that are automatically gitignored (do NOT commit):
+- `.beads/beads.db` - SQLite database (local only, regenerated from JSONL)
+- `.beads/daemon.lock`, `daemon.log`, `daemon.pid` - Runtime files
+- `.beads/beads.left.jsonl`, `beads.right.jsonl` - Temporary merge artifacts
+
+The sync branch (beads-metadata) will contain:
+- `.beads/beads.jsonl` - Issue data in JSONL format (committed automatically by daemon)
+- `.beads/metadata.json` - Metadata about the beads installation
+- `.beads/config.yaml` - Configuration template (optional)
+
 **2. Start the daemon with auto-commit:**
 
 ```bash
@@ -75,9 +103,26 @@ your-project/
 │               └── beads.jsonl
 ├── .beads/                  # Your main copy
 │   ├── beads.db
-│   └── beads.jsonl
+│   ├── beads.jsonl
+│   └── .gitignore
+├── .gitattributes           # Merge driver config (in main branch)
 └── src/                     # Your code (untouched)
 ```
+
+**What lives in each branch:**
+
+Main branch (protected):
+- `.beads/.gitignore` - Tells git what to ignore
+- `.gitattributes` - Merge driver configuration
+
+Sync branch (beads-metadata):
+- `.beads/beads.jsonl` - Issue data (committed by daemon)
+- `.beads/metadata.json` - Repository metadata
+- `.beads/config.yaml` - Configuration template
+
+Not tracked (gitignored):
+- `.beads/beads.db` - SQLite database (local only)
+- `.beads/daemon.*` - Runtime files
 
 **Key points:**
 - The worktree is in `.git/beads-worktrees/` (hidden from your workspace)
