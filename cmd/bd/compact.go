@@ -105,11 +105,13 @@ Examples:
 		if compactAnalyze {
 			if err := ensureDirectMode("compact --analyze requires direct database access"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
 				os.Exit(1)
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
+				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
 				os.Exit(1)
 			}
 			runCompactAnalyze(ctx, sqliteStore)
@@ -120,6 +122,7 @@ Examples:
 		if compactApply {
 			if err := ensureDirectMode("compact --apply requires direct database access"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
 				os.Exit(1)
 			}
 			if compactID == "" {
@@ -132,7 +135,8 @@ Examples:
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
+				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
 				os.Exit(1)
 			}
 			runCompactApply(ctx, sqliteStore)

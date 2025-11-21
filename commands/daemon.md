@@ -19,6 +19,24 @@ Each project runs its own daemon at `.beads/bd.sock` for complete database isola
 
 **Note:** Global daemon support was removed in v0.16.0. The `--global` flag is no longer functional.
 
+## When to Use Daemon Mode
+
+**✅ You SHOULD use daemon mode if:**
+- Working in a team with git remote sync
+- Want automatic commit/push of issue changes
+- Need background auto-sync (5-second debounce)
+- Making frequent bd commands (performance benefit from connection pooling)
+
+**❌ You DON'T need daemon mode if:**
+- Solo developer with local-only tracking
+- Working in git worktrees (use --no-daemon to avoid conflicts)
+- Running one-off commands or scripts
+- Debugging database issues (direct mode is simpler)
+
+**Local-only users:** Direct mode (default without daemon) is perfectly fine. The daemon mainly helps with git sync automation. You can still use `bd sync` manually when needed.
+
+**Performance note:** For most operations, the daemon provides minimal performance benefit. The main value is automatic JSONL export (5s debounce) and optional git sync (--auto-commit, --auto-push).
+
 ## Common Operations
 
 - **Start**: `bd daemon` (auto-starts on first `bd` command)

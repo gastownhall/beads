@@ -82,9 +82,13 @@ Example:
 					sources = append(sources, issue.ID)
 				}
 			}
-			// TODO: performMerge implementation pending
-			// For now, just generate the command suggestion
-			cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
+			// Generate actionable command suggestion
+			cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
+				strings.Join(sources, " "),
+				target.ID,
+				strings.Join(sources, " "),
+				strings.Join(sources, " "),
+				target.ID)
 			mergeCommands = append(mergeCommands, cmd)
 			
 			if autoMerge || dryRun {
@@ -134,8 +138,9 @@ Example:
 						sources = append(sources, issue.ID)
 					}
 				}
-				fmt.Printf("  %s bd merge %s --into %s\n\n",
-					cyan("Suggested:"), strings.Join(sources, " "), target.ID)
+				fmt.Printf("  %s Duplicate: %s (same content as %s)\n", cyan("Note:"), strings.Join(sources, " "), target.ID)
+				fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
+					cyan("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
 			}
 			if autoMerge {
 				if dryRun {
@@ -245,11 +250,12 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 			}
 		}
 		result = append(result, map[string]interface{}{
-			"title":               group[0].Title,
-			"issues":              issues,
-			"suggested_target":    target.ID,
-			"suggested_sources":   sources,
-			"suggested_merge_cmd": fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID),
+			"title":             group[0].Title,
+			"issues":            issues,
+			"suggested_target":  target.ID,
+			"suggested_sources": sources,
+			"suggested_action":  fmt.Sprintf("bd close %s && bd dep add %s %s --type related", strings.Join(sources, " "), strings.Join(sources, " "), target.ID),
+			"note":              fmt.Sprintf("Duplicate: %s (same content as %s)", strings.Join(sources, " "), target.ID),
 		})
 	}
 	return result

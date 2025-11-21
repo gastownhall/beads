@@ -172,6 +172,31 @@ After upgrading bd, use `bd migrate` to check for and migrate old database files
 
 **AI agents:** Use `--inspect` to analyze migration safety before running. The system verifies required config keys and data integrity invariants.
 
+## Database Maintenance
+
+As your project accumulates closed issues, the database grows. Manage size with these commands:
+
+```bash
+# View compaction statistics
+bd compact --stats
+
+# Preview compaction candidates (30+ days closed)
+bd compact --analyze --json --no-daemon
+
+# Apply agent-generated summary
+bd compact --apply --id bd-42 --summary summary.txt --no-daemon
+
+# Immediately delete closed issues (CAUTION: permanent!)
+bd cleanup --force
+```
+
+**When to compact:**
+- Database file > 10MB with many old closed issues
+- After major project milestones when old issues are no longer relevant
+- Before archiving a project phase
+
+**Note:** Compaction is permanent graceful decay. Original content is discarded but viewable via `bd restore <id>` from git history.
+
 ## Advanced: Agent Mail (Optional)
 
 For **multi-agent workflows** (2+ AI agents working concurrently), Agent Mail provides real-time coordination:
