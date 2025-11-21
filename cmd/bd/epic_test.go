@@ -16,11 +16,6 @@ func TestEpicCommand(t *testing.T) {
 	sqliteStore := newTestStore(t, testDB)
 	ctx := context.Background()
 
-	// Set issue_prefix
-	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
-
 	// Create an epic with children
 	epic := &types.Issue{
 		ID:          "test-epic-1",
@@ -137,11 +132,6 @@ func TestEpicEligibleForClose(t *testing.T) {
 	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
 	sqliteStore := newTestStore(t, testDB)
 	ctx := context.Background()
-
-	// Set issue_prefix
-	if err := sqliteStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
 
 	// Create an epic where all children are closed
 	epic := &types.Issue{
