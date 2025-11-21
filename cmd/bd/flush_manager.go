@@ -3,8 +3,20 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
+)
+
+const (
+	// Channel buffer sizes
+	markDirtyBufferSize = 10 // Larger buffer for high-frequency dirty marks
+	timerBufferSize     = 1  // Single-slot buffer for timer notifications
+	flushNowBufferSize  = 1  // Single-slot buffer for flush requests
+	shutdownBufferSize  = 1  // Single-slot buffer for shutdown requests
+
+	// Timeouts
+	shutdownTimeout = 30 * time.Second // Maximum time to wait for graceful shutdown
 )
 
 // FlushManager coordinates auto-flush operations using an event-driven architecture.
@@ -61,10 +73,10 @@ func NewFlushManager(enabled bool, debounceDuration time.Duration) *FlushManager
 	fm := &FlushManager{
 		ctx:              ctx,
 		cancel:           cancel,
-		markDirtyCh:      make(chan markDirtyEvent, 10), // Buffered to prevent blocking
-		timerFiredCh:     make(chan struct{}, 1),        // Buffered to prevent timer blocking
-		flushNowCh:       make(chan chan error, 1),
-		shutdownCh:       make(chan shutdownRequest, 1),
+		markDirtyCh:      make(chan markDirtyEvent, markDirtyBufferSize),
+		timerFiredCh:     make(chan struct{}, timerBufferSize),
+		flushNowCh:       make(chan chan error, flushNowBufferSize),
+		shutdownCh:       make(chan shutdownRequest, shutdownBufferSize),
 		enabled:          enabled,
 		debounceDuration: debounceDuration,
 	}
@@ -136,13 +148,13 @@ func (fm *FlushManager) Shutdown() error {
 			// Cancel context after shutdown completes
 			fm.cancel()
 			shutdownErr = err
-		case <-time.After(30 * time.Second):
+		case <-time.After(shutdownTimeout):
 			// Timeout waiting for shutdown
-			// 30s is generous - most flushes complete in <1s
+			// Most flushes complete in <1s
 			// Large databases with thousands of issues may take longer
 			// If this timeout fires, we risk losing unflushed data
 			fm.cancel()
-			shutdownErr = fmt.Errorf("shutdown timeout after 30s - final flush may not have completed")
+			shutdownErr = fmt.Errorf("shutdown timeout after %v - final flush may not have completed", shutdownTimeout)
 		}
 	})
 
@@ -197,10 +209,15 @@ func (fm *FlushManager) run() {
 		case <-fm.timerFiredCh:
 			// Debounce timer fired - flush if dirty
 			if isDirty {
-				_ = fm.performFlush(needsFullExport)
-				// Clear dirty flags after successful flush
-				isDirty = false
-				needsFullExport = false
+				err := fm.performFlush(needsFullExport)
+				if err != nil {
+					// Log error from timer-triggered flush
+					fmt.Fprintf(os.Stderr, "Warning: auto-flush timer failed: %v\n", err)
+				} else {
+					// Clear dirty flags after successful flush
+					isDirty = false
+					needsFullExport = false
+				}
 			}
 
 		case responseCh := <-fm.flushNowCh:
