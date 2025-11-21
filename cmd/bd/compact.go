@@ -62,7 +62,7 @@ Examples:
   bd compact --stats                       # Show statistics
 `,
 	Run: func(_ *cobra.Command, _ []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Handle compact stats first
 		if compactStats {

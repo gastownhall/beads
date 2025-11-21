@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -88,7 +87,7 @@ Examples:
 
 			// Get issue count from direct store
 			if store != nil {
-				ctx := context.Background()
+				ctx := rootCtx
 
 				// Check database freshness before reading (bd-2q6d, bd-c4rq)
 				// Skip check when using daemon (daemon auto-imports on staleness)
@@ -118,7 +117,7 @@ Examples:
 		}
 
 		if store != nil {
-			ctx := context.Background()
+			ctx := rootCtx
 			configMap, err := store.GetAllConfig(ctx)
 			if err == nil && len(configMap) > 0 {
 				info["config"] = configMap
@@ -131,7 +130,7 @@ Examples:
 
 		// Add schema information if requested
 		if schemaFlag && store != nil {
-			ctx := context.Background()
+			ctx := rootCtx
 
 			// Get schema version
 			schemaVersion, err := store.GetMetadata(ctx, "bd_version")

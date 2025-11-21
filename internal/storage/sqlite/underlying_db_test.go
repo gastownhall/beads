@@ -211,7 +211,9 @@ func TestUnderlyingDB_AfterClose(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := New(dbPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}

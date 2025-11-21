@@ -12,7 +12,7 @@ import (
 func TestRepairMultiplePrefixes(t *testing.T) {
 	// Create a temporary database
 	dbPath := t.TempDir() + "/test.db"
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}

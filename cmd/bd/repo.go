@@ -33,7 +33,7 @@ var repoAddCmd = &cobra.Command{
 			return err
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		path := args[0]
 		var alias string
 		if len(args) > 1 {
@@ -82,7 +82,7 @@ var repoRemoveCmd = &cobra.Command{
 			return err
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		key := args[0]
 
 		// Get existing repos
@@ -125,7 +125,7 @@ var repoListCmd = &cobra.Command{
 			return err
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		repos, err := getRepoConfig(ctx, store)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
@@ -160,7 +160,7 @@ var repoSyncCmd = &cobra.Command{
 			return err
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Import from all repos
 		jsonlPath := findJSONLPath()

@@ -79,7 +79,7 @@ Force: Delete and orphan dependents
 				os.Exit(1)
 			}
 		}
-		ctx := context.Background()
+		ctx := rootCtx
 		// Get the issue to be deleted
 		issue, err := store.GetIssue(ctx, issueID)
 		if err != nil {
@@ -332,7 +332,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			os.Exit(1)
 		}
 	}
-	ctx := context.Background()
+	ctx := rootCtx
 	// Type assert to SQLite storage
 	d, ok := store.(*sqlite.SQLiteStorage)
 	if !ok {

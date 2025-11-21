@@ -28,7 +28,7 @@ func TestMultiWorkspaceDeletionSync(t *testing.T) {
 	ctx := context.Background()
 
 	// Create stores for both clones
-	storeA, err := sqlite.New(cloneADB)
+	storeA, err := sqlite.New(context.Background(), cloneADB)
 	if err != nil {
 		t.Fatalf("Failed to create store A: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestMultiWorkspaceDeletionSync(t *testing.T) {
 		t.Fatalf("Failed to set issue_prefix for store A: %v", err)
 	}
 
-	storeB, err := sqlite.New(cloneBDB)
+	storeB, err := sqlite.New(context.Background(), cloneBDB)
 	if err != nil {
 		t.Fatalf("Failed to create store B: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestDeletionWithLocalModification(t *testing.T) {
 
 	ctx := context.Background()
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestMultiRepoDeletionTracking(t *testing.T) {
 	dbPath := filepath.Join(primaryBeadsDir, "beads.db")
 	ctx := context.Background()
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

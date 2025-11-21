@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -196,14 +195,14 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			os.Exit(1)
 		}
 
-		store, err := sqlite.New(initDBPath)
+		ctx := rootCtx
+		store, err := sqlite.New(ctx, initDBPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create database: %v\n", err)
 			os.Exit(1)
 		}
 
 		// Set the issue prefix in config
-		ctx := context.Background()
 		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
 			_ = store.Close()

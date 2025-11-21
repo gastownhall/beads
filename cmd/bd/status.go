@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -79,7 +78,7 @@ Examples:
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
-		ctx := context.Background()
+		ctx := rootCtx
 		if daemonClient == nil {
 			if err := ensureDatabaseFresh(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -101,7 +100,7 @@ Examples:
 			}
 		} else {
 			// Direct mode
-			ctx := context.Background()
+			ctx := rootCtx
 			stats, err = store.GetStatistics(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -274,7 +273,7 @@ func getAssignedStatus(assignee string) *StatusSummary {
 		return nil
 	}
 
-	ctx := context.Background()
+	ctx := rootCtx
 
 	// Filter by assignee
 	assigneePtr := assignee

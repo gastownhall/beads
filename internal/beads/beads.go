@@ -114,8 +114,8 @@ type Storage = storage.Storage
 
 // NewSQLiteStorage opens a bd SQLite database for programmatic access.
 // Most extensions should use this to query ready work and update issue status.
-func NewSQLiteStorage(dbPath string) (Storage, error) {
-	return sqlite.New(dbPath)
+func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
+	return sqlite.New(ctx, dbPath)
 }
 
 // FindDatabasePath discovers the bd database path using bd's standard search order:
@@ -364,9 +364,9 @@ func FindAllDatabases() []DatabaseInfo {
 				dbPath := matches[0]
 				// Don't fail if we can't open/query the database - it might be locked
 				// or corrupted, but we still want to detect and warn about it
-				store, err := sqlite.New(dbPath)
+				ctx := context.Background()
+				store, err := sqlite.New(ctx, dbPath)
 				if err == nil {
-					ctx := context.Background()
 					if issues, err := store.SearchIssues(ctx, "", types.IssueFilter{}); err == nil {
 						issueCount = len(issues)
 					}

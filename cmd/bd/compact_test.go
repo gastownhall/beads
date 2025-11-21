@@ -20,7 +20,7 @@ func TestCompactDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestCompactStats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestRunCompactStats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestCompactStatsJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestRunCompactSingleDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestRunCompactAllDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,7 @@ func TestRepairDeps_NoOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRepairDeps_FindOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestRepairDeps_FixOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestRepairDeps_MultipleTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

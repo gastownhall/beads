@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,7 +37,7 @@ var epicStatusCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		} else {
-			ctx := context.Background()
+			ctx := rootCtx
 			epics, err = store.GetEpicsEligibleForClosure(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting epic status: %v\n", err)
@@ -120,7 +119,7 @@ var closeEligibleEpicsCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		} else {
-			ctx := context.Background()
+			ctx := rootCtx
 			epics, err := store.GetEpicsEligibleForClosure(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting eligible epics: %v\n", err)
@@ -175,7 +174,7 @@ var closeEligibleEpicsCmd = &cobra.Command{
 					continue
 				}
 			} else {
-				ctx := context.Background()
+				ctx := rootCtx
 				err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system")
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)

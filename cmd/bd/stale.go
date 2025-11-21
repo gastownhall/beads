@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,7 +60,7 @@ This helps identify:
 			return
 		}
 		// Direct mode
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)

@@ -41,7 +41,7 @@ func startRPCServer(ctx context.Context, socketPath string, store storage.Storag
 }
 
 // runGlobalDaemon runs the global routing daemon
-func runGlobalDaemon(log daemonLogger) {
+func runGlobalDaemon(ctx context.Context, log daemonLogger) {
 	globalDir, err := getGlobalBeadsDir()
 	if err != nil {
 		log.log("Error: cannot get global beads directory: %v", err)
@@ -49,10 +49,10 @@ func runGlobalDaemon(log daemonLogger) {
 	}
 	socketPath := filepath.Join(globalDir, "bd.sock")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	serverCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	server, _, err := startRPCServer(ctx, socketPath, nil, globalDir, "", log)
+	server, _, err := startRPCServer(serverCtx, socketPath, nil, globalDir, "", log)
 	if err != nil {
 		return
 	}

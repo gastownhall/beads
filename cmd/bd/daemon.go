@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -196,6 +198,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
 
+	// Set up signal-aware context for graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	// Top-level panic recovery to ensure clean shutdown and diagnostics
 	defer func() {
 		if r := recover(); r != nil {
@@ -257,7 +263,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	log.log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
 
 	if global {
-		runGlobalDaemon(log)
+		runGlobalDaemon(ctx, log)
 		return
 	}
 
@@ -314,7 +320,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		log.log("Warning: could not remove daemon-error file: %v", err)
 	}
 
-	store, err := sqlite.New(daemonDBPath)
+	store, err := sqlite.New(ctx, daemonDBPath)
 	if err != nil {
 		log.log("Error: cannot open database: %v", err)
 		return // Use return instead of os.Exit to allow defers to run
@@ -334,8 +340,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 
 	// Hydrate from multi-repo if configured
-	hydrateCtx := context.Background()
-	if results, err := store.HydrateFromMultiRepo(hydrateCtx); err != nil {
+	if results, err := store.HydrateFromMultiRepo(ctx); err != nil {
 		log.log("Error: multi-repo hydration failed: %v", err)
 		return // Use return instead of os.Exit to allow defers to run
 	} else if results != nil {
@@ -346,7 +351,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}
 
 	// Validate database fingerprint
-	if err := validateDatabaseFingerprint(store, &log); err != nil {
+	if err := validateDatabaseFingerprint(ctx, store, &log); err != nil {
 		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
 			log.log("Error: %v", err)
 			return // Use return instead of os.Exit to allow defers to run
@@ -394,10 +399,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	// Get actual workspace root (parent of .beads)
 	workspacePath := filepath.Dir(beadsDir)
 	socketPath := filepath.Join(beadsDir, "bd.sock")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	defer serverCancel()
 
-	server, serverErrChan, err := startRPCServer(ctx, socketPath, store, workspacePath, daemonDBPath, log)
+	server, serverErrChan, err := startRPCServer(serverCtx, socketPath, store, workspacePath, daemonDBPath, log)
 	if err != nil {
 		return
 	}

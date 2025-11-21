@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -168,7 +167,7 @@ var createCmd = &cobra.Command{
 		// In daemon mode, the parent will be sent to the RPC handler
 		// In direct mode, we generate the child ID here
 		if parentID != "" && daemonClient == nil {
-			ctx := context.Background()
+			ctx := rootCtx
 			childID, err := store.GetNextChildID(ctx, parentID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -186,7 +185,7 @@ var createCmd = &cobra.Command{
 			}
 
 			// Validate prefix matches database prefix
-			ctx := context.Background()
+			ctx := rootCtx
 
 			// Get database prefix from config
 			var dbPrefix string
@@ -263,7 +262,7 @@ var createCmd = &cobra.Command{
 			ExternalRef:        externalRefPtr,
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Check if any dependencies are discovered-from type
 		// If so, inherit source_repo from the parent issue

@@ -16,7 +16,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Create test database with sequential IDs
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	store.Close()
 
 	// Test dry run
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to reopen database: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	store.Close()
 
 	// Test actual migration
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to reopen database: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestMigrateHashIDsWithParentChild(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Create test database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}

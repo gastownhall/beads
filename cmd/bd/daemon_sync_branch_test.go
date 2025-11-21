@@ -34,7 +34,7 @@ func TestSyncBranchCommitAndPush_NotConfigured(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSyncBranchCommitAndPush_Success(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestSyncBranchCommitAndPush_NoChanges(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestSyncBranchCommitAndPush_WorktreeHealthCheck(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestSyncBranchPull_NotConfigured(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 	}
 
 	clone1DBPath := filepath.Join(clone1BeadsDir, "test.db")
-	store1, err := sqlite.New(clone1DBPath)
+	store1, err := sqlite.New(context.Background(), clone1DBPath)
 	if err != nil {
 		t.Fatalf("Failed to create store1: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 
 	clone2BeadsDir := filepath.Join(clone2Dir, ".beads")
 	clone2DBPath := filepath.Join(clone2BeadsDir, "test.db")
-	store2, err := sqlite.New(clone2DBPath)
+	store2, err := sqlite.New(context.Background(), clone2DBPath)
 	if err != nil {
 		t.Fatalf("Failed to create store2: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	clone1BeadsDir := filepath.Join(clone1Dir, ".beads")
 	os.MkdirAll(clone1BeadsDir, 0755)
 	clone1DBPath := filepath.Join(clone1BeadsDir, "test.db")
-	store1, _ := sqlite.New(clone1DBPath)
+	store1, _ := sqlite.New(context.Background(), clone1DBPath)
 	defer store1.Close()
 
 	ctx := context.Background()
@@ -664,7 +664,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 
 	clone2BeadsDir := filepath.Join(clone2Dir, ".beads")
 	clone2DBPath := filepath.Join(clone2BeadsDir, "test.db")
-	store2, _ := sqlite.New(clone2DBPath)
+	store2, _ := sqlite.New(context.Background(), clone2DBPath)
 	defer store2.Close()
 
 	store2.SetConfig(ctx, "issue_prefix", "test")
@@ -763,7 +763,7 @@ func TestSyncBranchConfigChange(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -903,7 +903,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 		beadsDir := filepath.Join(cloneDir, ".beads")
 		os.MkdirAll(beadsDir, 0755)
 		dbPath := filepath.Join(beadsDir, "test.db")
-		store, _ := sqlite.New(dbPath)
+		store, _ := sqlite.New(context.Background(), dbPath)
 
 		ctx := context.Background()
 		store.SetConfig(ctx, "issue_prefix", "test")
@@ -1046,7 +1046,7 @@ func TestSyncBranchPerformance(t *testing.T) {
 	os.MkdirAll(beadsDir, 0755)
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -1137,7 +1137,7 @@ func TestSyncBranchNetworkFailure(t *testing.T) {
 	os.MkdirAll(beadsDir, 0755)
 
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

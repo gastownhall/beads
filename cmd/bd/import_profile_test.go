@@ -46,7 +46,7 @@ func profileImportOperation(t *testing.T, numIssues int) {
 	// Initialize storage
 	ctx := context.Background()
 	var store storage.Storage
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestImportWithExistingData(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	ctx := context.Background()
 	var store storage.Storage
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -46,7 +45,7 @@ var configSetCmd = &cobra.Command{
 		key := args[0]
 		value := args[1]
 
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Special handling for sync.branch to apply validation
 		if strings.TrimSpace(key) == syncbranch.ConfigKey {
@@ -85,7 +84,7 @@ var configGetCmd = &cobra.Command{
 
 		key := args[0]
 
-		ctx := context.Background()
+		ctx := rootCtx
 		var value string
 		var err error
 		
@@ -126,7 +125,7 @@ var configListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		config, err := store.GetAllConfig(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error listing config: %v\n", err)
@@ -170,7 +169,7 @@ var configUnsetCmd = &cobra.Command{
 
 		key := args[0]
 
-		ctx := context.Background()
+		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, key); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting config: %v\n", err)
 			os.Exit(1)

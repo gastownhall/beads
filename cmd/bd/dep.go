@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,7 +27,7 @@ var depAddCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		depType, _ := cmd.Flags().GetString("type")
 
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Resolve partial IDs first
 		var fromID, toID string
@@ -155,7 +154,7 @@ var depRemoveCmd = &cobra.Command{
 	Short: "Remove a dependency",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Resolve partial IDs first
 		var fromID, toID string
@@ -252,7 +251,7 @@ var depTreeCmd = &cobra.Command{
 	Short: "Show dependency tree",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Resolve partial ID first
 		var fullID string
@@ -279,7 +278,7 @@ var depTreeCmd = &cobra.Command{
 		// If daemon is running but doesn't support this command, use direct storage
 		if daemonClient != nil && store == nil {
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -365,7 +364,7 @@ var depCyclesCmd = &cobra.Command{
 		// If daemon is running but doesn't support this command, use direct storage
 		if daemonClient != nil && store == nil {
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -373,7 +372,7 @@ var depCyclesCmd = &cobra.Command{
 			defer func() { _ = store.Close() }()
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		cycles, err := store.DetectCycles(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

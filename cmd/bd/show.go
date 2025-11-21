@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,7 +21,7 @@ var showCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
@@ -400,7 +399,7 @@ var updateCmd = &cobra.Command{
 			return
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -532,7 +531,7 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		id := args[0]
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial ID if in direct mode
 		if daemonClient == nil {
@@ -724,7 +723,7 @@ var closeCmd = &cobra.Command{
 		}
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial IDs first
 		var resolvedIDs []string

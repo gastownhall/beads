@@ -153,7 +153,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 }
 
 // getOrCreateStore returns an existing storage or creates a new one
-func getOrCreateStore(_ context.Context, dbPath string, store storage.Storage) (*sqlite.SQLiteStorage, bool, error) {
+func getOrCreateStore(ctx context.Context, dbPath string, store storage.Storage) (*sqlite.SQLiteStorage, bool, error) {
 	if store != nil {
 		sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 		if !ok {
@@ -166,7 +166,7 @@ func getOrCreateStore(_ context.Context, dbPath string, store storage.Storage) (
 	if dbPath == "" {
 		return nil, false, fmt.Errorf("database path not set")
 	}
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(ctx, dbPath)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to open database: %w", err)
 	}

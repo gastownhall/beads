@@ -24,7 +24,7 @@ func TestExportIntegrityAfterJSONLTruncation(t *testing.T) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 	
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestExportIntegrityAfterJSONLDeletion(t *testing.T) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 	
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestMultipleExportsStayConsistent(t *testing.T) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 	
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}

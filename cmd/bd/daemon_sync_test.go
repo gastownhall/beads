@@ -18,7 +18,7 @@ func TestExportToJSONLWithStore(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 
 	// Create storage
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestExportToJSONLWithStore_EmptyDatabase(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 
 	// Create storage (empty)
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestImportToJSONLWithStore(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 
 	// Create storage first to initialize database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 
 	// Create storage and add issues
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// Create new database
 	dbPath2 := filepath.Join(tmpDir, ".beads", "beads2.db")
-	store2, err := sqlite.New(dbPath2)
+	store2, err := sqlite.New(context.Background(), dbPath2)
 	if err != nil {
 		t.Fatalf("failed to create store2: %v", err)
 	}

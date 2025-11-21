@@ -43,7 +43,7 @@ Example:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		repair, _ := cmd.Flags().GetBool("repair")
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// rename-prefix requires direct mode (not supported by daemon)
 		if daemonClient != nil {

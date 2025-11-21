@@ -65,7 +65,7 @@ func ensureStoreActive() error {
 		}
 	}
 
-	sqlStore, err := sqlite.New(dbPath)
+	sqlStore, err := sqlite.New(rootCtx, dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}

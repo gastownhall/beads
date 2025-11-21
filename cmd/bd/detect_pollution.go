@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,7 +37,7 @@ Example:
 		clean, _ := cmd.Flags().GetBool("clean")
 		yes, _ := cmd.Flags().GetBool("yes")
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})

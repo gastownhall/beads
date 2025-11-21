@@ -77,7 +77,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 	os.Remove(dbPath)
 
 	// Run bd init with auto-import disabled to test checkGitForIssues
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -181,7 +181,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 
 	// Initialize database and import
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -261,7 +261,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 
 	// Initialize and import
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -377,7 +377,7 @@ func testInitSafetyCheck(t *testing.T) {
 
 	// Create empty database (simulating failed import)
 	dbPath := filepath.Join(beadsDir, "test.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}

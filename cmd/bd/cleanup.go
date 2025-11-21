@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -55,7 +54,7 @@ SAFETY:
 			}
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Build filter for closed issues
 		statusClosed := types.StatusClosed

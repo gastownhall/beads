@@ -22,14 +22,16 @@ func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
 	}
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := New(dbPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, dbPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	ctx := context.Background()
+	ctx = context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -1234,7 +1236,9 @@ func TestPath(t *testing.T) {
 
 	// Test with relative path
 	relPath := filepath.Join(tmpDir, "test.db")
-	store, err := New(relPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, relPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
@@ -1266,13 +1270,14 @@ func TestMultipleStorageDistinctPaths(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir2)
 
-	store1, err := New(filepath.Join(tmpDir1, "db1.db"))
+	ctx := context.Background()
+	store1, err := New(ctx, filepath.Join(tmpDir1, "db1.db"))
 	if err != nil {
 		t.Fatalf("failed to create storage 1: %v", err)
 	}
 	defer store1.Close()
 
-	store2, err := New(filepath.Join(tmpDir2, "db2.db"))
+	store2, err := New(ctx, filepath.Join(tmpDir2, "db2.db"))
 	if err != nil {
 		t.Fatalf("failed to create storage 2: %v", err)
 	}
@@ -1296,7 +1301,9 @@ func TestInMemoryDatabase(t *testing.T) {
 	ctx := context.Background()
 
 	// Test that :memory: database works
-	store, err := New(":memory:")
+	ctx = context.Background()
+
+	store, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create in-memory storage: %v", err)
 	}
@@ -1345,7 +1352,9 @@ func TestInMemorySharedCache(t *testing.T) {
 	ctx := context.Background()
 
 	// Create first connection
-	store1, err := New(":memory:")
+	ctx = context.Background()
+
+	store1, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create first in-memory storage: %v", err)
 	}
@@ -1372,7 +1381,9 @@ func TestInMemorySharedCache(t *testing.T) {
 
 	// Create second connection - Note: this creates a SEPARATE database
 	// Shared cache only works within a single sql.DB connection pool
-	store2, err := New(":memory:")
+	ctx = context.Background()
+
+	store2, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create second in-memory storage: %v", err)
 	}

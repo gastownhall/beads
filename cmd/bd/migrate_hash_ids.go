@@ -36,7 +36,7 @@ Use --dry-run to preview changes before applying.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Find database
 		dbPath := beads.FindDatabasePath()
@@ -73,7 +73,7 @@ Use --dry-run to preview changes before applying.`,
 		}
 		
 		// Open database
-		store, err := sqlite.New(dbPath)
+		store, err := sqlite.New(rootCtx, dbPath)
 		if err != nil {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{

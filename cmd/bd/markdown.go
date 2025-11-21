@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -319,7 +318,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
+	ctx := rootCtx
 	createdIssues := []*types.Issue{}
 	failedIssues := []string{}
 

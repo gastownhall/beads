@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -63,7 +62,7 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
 				os.Exit(1)
 			}
-			ctx := context.Background()
+			ctx := rootCtx
 			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
@@ -183,7 +182,7 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)
 				os.Exit(1)
 			}
-			ctx := context.Background()
+			ctx := rootCtx
 			
 			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
 			if err != nil {

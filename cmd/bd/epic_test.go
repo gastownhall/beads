@@ -20,7 +20,7 @@ func TestEpicCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestEpicEligibleForClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sqliteStore, err := sqlite.New(dbPath)
+	sqliteStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

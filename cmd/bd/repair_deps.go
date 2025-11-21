@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -26,7 +25,7 @@ Interactive mode with --interactive prompts for each orphan.`,
 		// If daemon is running but doesn't support this command, use direct storage
 		if daemonClient != nil && store == nil {
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -34,7 +33,7 @@ Interactive mode with --interactive prompts for each orphan.`,
 			defer func() { _ = store.Close() }()
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Get all dependency records
 		allDeps, err := store.GetAllDependencyRecords(ctx)

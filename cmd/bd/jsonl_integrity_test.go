@@ -27,7 +27,7 @@ func TestJSONLIntegrityValidation(t *testing.T) {
 	}
 	
 	// Create database
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestImportClearsExportHashes(t *testing.T) {
 	}
 	
 	// Create database
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}

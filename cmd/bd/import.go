@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,7 +50,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			daemonClient = nil
 
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -89,7 +88,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		}
 
 		// Phase 1: Read and parse all JSONL
-		ctx := context.Background()
+		ctx := rootCtx
 		scanner := bufio.NewScanner(in)
 
 		var allIssues []*types.Issue
@@ -175,7 +174,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		// Check if database needs initialization (prefix not set)
 		// Detect prefix from the imported issues
-		initCtx := context.Background()
+		initCtx := rootCtx
 		configuredPrefix, err2 := store.GetConfig(initCtx, "issue_prefix")
 		if err2 != nil || strings.TrimSpace(configuredPrefix) == "" {
 			// Database exists but not initialized - detect prefix from issues

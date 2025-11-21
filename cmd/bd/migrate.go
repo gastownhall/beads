@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -265,7 +264,7 @@ This command:
 			// Clean up WAL files before opening to avoid "disk I/O error"
 			cleanupWALFiles(currentDB.path)
 
-			store, err := sqlite.New(currentDB.path)
+			store, err := sqlite.New(rootCtx, currentDB.path)
 			if err != nil {
 				if jsonOutput {
 					outputJSON(map[string]interface{}{
@@ -278,7 +277,7 @@ This command:
 				os.Exit(1)
 			}
 
-			ctx := context.Background()
+			ctx := rootCtx
 			
 			// Detect and set issue_prefix if missing (fixes GH #201)
 			prefix, err := store.GetConfig(ctx, "issue_prefix")
@@ -377,7 +376,7 @@ This command:
 				fmt.Println("\n→ Migrating to hash-based IDs...")
 			}
 			
-			store, err := sqlite.New(targetPath)
+			store, err := sqlite.New(rootCtx, targetPath)
 			if err != nil {
 				if jsonOutput {
 					outputJSON(map[string]interface{}{
@@ -390,7 +389,7 @@ This command:
 				os.Exit(1)
 			}
 			
-			ctx := context.Background()
+			ctx := rootCtx
 			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 			if err != nil {
 			_ = store.Close()
@@ -605,7 +604,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 	}
 
 	// Open database
-	store, err := sqlite.New(foundDB)
+	store, err := sqlite.New(rootCtx, foundDB)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -620,7 +619,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 	defer func() { _ = store.Close() }()
 
 	// Get old repo ID
-	ctx := context.Background()
+	ctx := rootCtx
 	oldRepoID, err := store.GetMetadata(ctx, "repo_id")
 	if err != nil && err.Error() != "metadata key not found: repo_id" {
 		if jsonOutput {
@@ -796,7 +795,7 @@ func handleInspect() {
 	}
 
 	// Open database in read-only mode for inspection
-	store, err := sqlite.New(targetPath)
+	store, err := sqlite.New(rootCtx, targetPath)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -810,7 +809,7 @@ func handleInspect() {
 	}
 	defer func() { _ = store.Close() }()
 
-	ctx := context.Background()
+	ctx := rootCtx
 
 	// Get current schema version
 	schemaVersion, err := store.GetMetadata(ctx, "bd_version")
@@ -965,7 +964,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	}
 
 	// Open database
-	store, err := sqlite.New(targetPath)
+	store, err := sqlite.New(rootCtx, targetPath)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -980,7 +979,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	defer func() { _ = store.Close() }()
 
 	// Get current sync.branch config
-	ctx := context.Background()
+	ctx := rootCtx
 	current, _ := store.GetConfig(ctx, "sync.branch")
 
 	// Dry-run mode

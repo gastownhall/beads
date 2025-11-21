@@ -76,7 +76,7 @@ func init() {
 }
 
 // New creates a new SQLite storage backend
-func New(path string) (*SQLiteStorage, error) {
+func New(ctx context.Context, path string) (*SQLiteStorage, error) {
 	// Build connection string with proper URI syntax
 	// For :memory: databases, use shared cache so multiple connections see the same data
 	var connStr string
@@ -180,7 +180,6 @@ func New(path string) (*SQLiteStorage, error) {
 	// Hydrate from multi-repo config if configured (bd-307)
 	// Skip for in-memory databases (used in tests)
 	if path != ":memory:" {
-		ctx := context.Background()
 		_, err := storage.HydrateFromMultiRepo(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to hydrate from multi-repo: %w", err)

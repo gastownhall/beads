@@ -17,13 +17,15 @@ func TestPrefixValidation(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := New(dbPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 	defer store.Close()
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Set prefix to "test"
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -93,13 +95,15 @@ func TestPrefixValidationBatch(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := New(dbPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 	defer store.Close()
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Set prefix to "batch"
 	if err := store.SetConfig(ctx, "issue_prefix", "batch"); err != nil {

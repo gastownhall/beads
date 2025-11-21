@@ -76,7 +76,7 @@ func autoImportIfNewer() {
 	currentHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Get last import hash from DB metadata
-	ctx := context.Background()
+	ctx := rootCtx
 	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
 	if err != nil {
 		// Metadata error - treat as first import rather than skipping (bd-663)
@@ -500,7 +500,7 @@ func flushToJSONLWithState(state flushState) {
 	}
 	storeMutex.Unlock()
 
-	ctx := context.Background()
+	ctx := rootCtx
 	
 	// Validate JSONL integrity BEFORE checking isDirty (bd-c6cf)
 	// This detects if JSONL and export_hashes are out of sync (e.g., after git operations)

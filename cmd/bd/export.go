@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -148,7 +147,7 @@ Output to stdout by default, or use -o flag for file output.`,
 				fmt.Fprintf(os.Stderr, "Error: no database path found\n")
 				os.Exit(1)
 			}
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -164,7 +163,7 @@ Output to stdout by default, or use -o flag for file output.`,
 		}
 
 		// Get all issues
-		ctx := context.Background()
+		ctx := rootCtx
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

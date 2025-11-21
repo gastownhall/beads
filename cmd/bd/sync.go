@@ -33,7 +33,7 @@ Use --import-only to just import from JSONL (useful after git pull).
 Use --status to show diff between sync branch and main branch.
 Use --merge to merge the sync branch back to main branch.`,
 	Run: func(cmd *cobra.Command, _ []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 
 		message, _ := cmd.Flags().GetString("message")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")

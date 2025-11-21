@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,7 +29,7 @@ This is read-only and does not modify the database or git state.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		issueID := args[0]
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Check if we're in a git repository
 		if !isGitRepo() {

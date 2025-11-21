@@ -35,7 +35,7 @@ Examples:
   # Move issues with label filter
   bd migrate-issues --from . --to ~/feature-work --label frontend --label urgent`,
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Parse flags
 		from, _ := cmd.Flags().GetString("from")

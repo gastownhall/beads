@@ -8,6 +8,8 @@
 package beads
 
 import (
+	"context"
+
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -16,8 +18,8 @@ import (
 type Storage = beads.Storage
 
 // NewSQLiteStorage creates a new SQLite storage instance at the given path
-func NewSQLiteStorage(dbPath string) (Storage, error) {
-	return beads.NewSQLiteStorage(dbPath)
+func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
+	return beads.NewSQLiteStorage(ctx, dbPath)
 }
 
 // FindDatabasePath finds the beads database in the current directory tree

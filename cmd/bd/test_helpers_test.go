@@ -80,7 +80,7 @@ func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 		t.Fatalf("Failed to create database directory: %v", err)
 	}
 	
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -107,7 +107,7 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.
 		t.Fatalf("Failed to create database directory: %v", err)
 	}
 	
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -127,7 +127,7 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.
 // Used in tests where the database was already created by the code under test.
 func openExistingTestDB(t *testing.T, dbPath string) (*sqlite.SQLiteStorage, error) {
 	t.Helper()
-	return sqlite.New(dbPath)
+	return sqlite.New(context.Background(), dbPath)
 }
 
 // runCommandInDir runs a command in the specified directory

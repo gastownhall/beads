@@ -495,7 +495,7 @@ func TestDaemonServerStartFailureSocketExists(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "test.sock")
 	testDBPath := filepath.Join(tmpDir, "test.db")
 
-	testStore1, err := sqlite.New(testDBPath)
+	testStore1, err := sqlite.New(context.Background(), testDBPath)
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestDaemonServerStartFailureSocketExists(t *testing.T) {
 		t.Fatal("Socket should exist for first server")
 	}
 
-	testStore2, err := sqlite.New(filepath.Join(tmpDir, "test2.db"))
+	testStore2, err := sqlite.New(context.Background(), filepath.Join(tmpDir, "test2.db"))
 	if err != nil {
 		t.Fatalf("Failed to create second test database: %v", err)
 	}

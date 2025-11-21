@@ -9,13 +9,15 @@ import (
 )
 
 func TestHashIDGeneration(t *testing.T) {
-	store, err := New(":memory:")
+	ctx := context.Background()
+
+	store, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Set up database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
@@ -73,13 +75,15 @@ func TestHashIDDeterministic(t *testing.T) {
 }
 
 func TestHashIDCollisionHandling(t *testing.T) {
-	store, err := New(":memory:")
+	ctx := context.Background()
+
+	store, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Set up database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
@@ -132,13 +136,15 @@ func TestHashIDCollisionHandling(t *testing.T) {
 }
 
 func TestHashIDBatchCreation(t *testing.T) {
-	store, err := New(":memory:")
+	ctx := context.Background()
+
+	store, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Set up database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {

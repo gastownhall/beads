@@ -200,8 +200,7 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 }
 
 // validateDatabaseFingerprint checks that the database belongs to this repository
-func validateDatabaseFingerprint(store storage.Storage, log *daemonLogger) error {
-	ctx := context.Background()
+func validateDatabaseFingerprint(ctx context.Context, store storage.Storage, log *daemonLogger) error {
 
 	// Get stored repo ID
 	storedRepoID, err := store.GetMetadata(ctx, "repo_id")

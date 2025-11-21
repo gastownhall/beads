@@ -13,7 +13,7 @@ import (
 func TestCheckAndAutoImport_NoAutoImportFlag(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestCheckAndAutoImport_NoAutoImportFlag(t *testing.T) {
 func TestCheckAndAutoImport_DatabaseHasIssues(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestCheckAndAutoImport_EmptyDatabaseNoGit(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	tmpDB := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(tmpDB)
+	store, err := sqlite.New(context.Background(), tmpDB)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

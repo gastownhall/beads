@@ -33,7 +33,7 @@ Example:
 		fixAll, _ := cmd.Flags().GetBool("fix-all")
 		checksFlag, _ := cmd.Flags().GetString("checks")
 		jsonOut, _ := cmd.Flags().GetBool("json")
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)

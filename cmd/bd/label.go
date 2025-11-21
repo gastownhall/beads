@@ -20,7 +20,7 @@ var labelCmd = &cobra.Command{
 // Helper function to process label operations for multiple issues
 func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
 	daemonFunc func(string, string) error, storeFunc func(context.Context, string, string, string) error) {
-	ctx := context.Background()
+	ctx := rootCtx
 	results := []map[string]interface{}{}
 	for _, issueID := range issueIDs {
 		var err error
@@ -71,7 +71,7 @@ var labelAddCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun
 		issueIDs, label := parseLabelArgs(args)
 		// Resolve partial IDs
-		ctx := context.Background()
+		ctx := rootCtx
 		resolvedIDs := make([]string, 0, len(issueIDs))
 		for _, id := range issueIDs {
 			var fullID string
@@ -116,7 +116,7 @@ var labelRemoveCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun
 		issueIDs, label := parseLabelArgs(args)
 		// Resolve partial IDs
-		ctx := context.Background()
+		ctx := rootCtx
 		resolvedIDs := make([]string, 0, len(issueIDs))
 		for _, id := range issueIDs {
 			var fullID string
@@ -158,7 +158,7 @@ var labelListCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
-		ctx := context.Background()
+		ctx := rootCtx
 		// Resolve partial ID first
 		var issueID string
 		if daemonClient != nil {
@@ -228,7 +228,7 @@ var labelListAllCmd = &cobra.Command{
 	Short: "List all unique labels in the database",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
-		ctx := context.Background()
+		ctx := rootCtx
 		var issues []*types.Issue
 		var err error
 		// Use daemon if available

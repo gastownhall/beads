@@ -13,13 +13,12 @@ func TestAdaptiveIDLength_E2E(t *testing.T) {
 		t.Skip("skipping slow E2E test in short mode")
 	}
 	// Create in-memory database
-	db, err := New(":memory:")
+	ctx := context.Background()
+	db, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
 	defer db.Close()
-	
-	ctx := context.Background()
 	
 	// Initialize with prefix
 	if err := db.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -121,13 +120,12 @@ func formatTitle(format string, i int) string {
 
 func TestAdaptiveIDLength_CustomConfig(t *testing.T) {
 	// Create in-memory database
-	db, err := New(":memory:")
+	ctx := context.Background()
+	db, err := New(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
 	defer db.Close()
-	
-	ctx := context.Background()
 	
 	// Initialize with custom config
 	if err := db.SetConfig(ctx, "issue_prefix", "test"); err != nil {

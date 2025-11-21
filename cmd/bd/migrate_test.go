@@ -30,7 +30,7 @@ func TestMigrateCommand(t *testing.T) {
 	t.Run("single old database", func(t *testing.T) {
 		// Create old database
 		oldDBPath := filepath.Join(beadsDir, "vc.db")
-		store, err := sqlite.New(oldDBPath)
+		store, err := sqlite.New(context.Background(), oldDBPath)
 		if err != nil {
 			t.Fatalf("Failed to create old database: %v", err)
 		}
@@ -82,7 +82,7 @@ func TestMigrateCommand(t *testing.T) {
 		}
 
 		// Update version
-		store, err := sqlite.New(dbPath)
+		store, err := sqlite.New(context.Background(), dbPath)
 		if err != nil {
 			t.Fatalf("Failed to open database: %v", err)
 		}
@@ -143,7 +143,7 @@ func TestMigrateRespectsConfigJSON(t *testing.T) {
 
 	// Create old database with custom name
 	oldDBPath := filepath.Join(beadsDir, "beady.db")
-	store, err := sqlite.New(oldDBPath)
+	store, err := sqlite.New(context.Background(), oldDBPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}

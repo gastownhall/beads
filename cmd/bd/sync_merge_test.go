@@ -15,7 +15,7 @@ import (
 func setupTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 	t.Helper()
 	
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

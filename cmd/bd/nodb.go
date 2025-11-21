@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -66,7 +65,7 @@ func initializeNoDbMode() error {
 		return fmt.Errorf("failed to detect prefix: %w", err)
 	}
 
-	ctx := context.Background()
+	ctx := rootCtx
 	if err := memStore.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("failed to set prefix: %w", err)
 	}

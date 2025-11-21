@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"fmt"
 	"os"
 	"regexp"
@@ -32,7 +31,7 @@ Example:
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		// Use global jsonOutput set by PersistentPreRun
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
