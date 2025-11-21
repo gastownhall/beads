@@ -462,8 +462,9 @@ The 30-second debounce provides a **transaction window** for batch operations - 
 2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
 3. **Update beads issues** - close finished work, update status
 4. **Sync the issue tracker carefully** - Work methodically to ensure both local and remote issues merge safely. This may require pulling, handling conflicts (sometimes accepting remote changes and re-importing), syncing the database, and verifying consistency. Be creative and patient - the goal is clean reconciliation where no issues are lost.
-5. **Clean up git state** - Clear old stashes and prune dead remote branches:
+5. **Clean up git state** - Clear old stashes, prune dead remote branches, and remove temporary artifacts:
    ```bash
+   bd cleanup                         # Remove backup files and temporary artifacts
    git stash clear                    # Remove old stashes
    git remote prune origin            # Clean up deleted remote branches
    ```
