@@ -147,7 +147,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		// Mark both issues as dirty for incremental export
 		// (dependencies are exported with each issue, so both need updating)
 		if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
-			return err
+			return wrapDBError("mark issues dirty after adding dependency", err)
 		}
 
 		return nil
@@ -184,7 +184,7 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 
 		// Mark both issues as dirty for incremental export
 		if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
-			return err
+			return wrapDBError("mark issues dirty after removing dependency", err)
 		}
 
 		return nil

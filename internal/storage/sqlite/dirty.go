@@ -16,7 +16,7 @@ func (s *SQLiteStorage) MarkIssueDirty(ctx context.Context, issueID string) erro
 		VALUES (?, ?)
 		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
 	`, issueID, time.Now())
-	return err
+	return wrapDBErrorf(err, "mark issue %s dirty", issueID)
 }
 
 // MarkIssuesDirty marks multiple issues as dirty in a single transaction
@@ -68,7 +68,10 @@ func (s *SQLiteStorage) GetDirtyIssues(ctx context.Context) ([]string, error) {
 		issueIDs = append(issueIDs, issueID)
 	}
 
-	return issueIDs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate dirty issues", err)
+	}
+	return issueIDs, nil
 }
 
 // GetDirtyIssueHash returns the stored content hash for a dirty issue, if it exists
@@ -77,18 +80,18 @@ func (s *SQLiteStorage) GetDirtyIssueHash(ctx context.Context, issueID string) (
 	err := s.db.QueryRowContext(ctx, `
 		SELECT content_hash FROM dirty_issues WHERE issue_id = ?
 	`, issueID).Scan(&hash)
-	
-	if err == sql.ErrNoRows {
+
+	if IsNotFound(wrapDBErrorf(err, "get dirty issue hash for %s", issueID)) {
 		return "", nil // Issue not dirty
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to get dirty issue hash: %w", err)
+		return "", wrapDBErrorf(err, "get dirty issue hash for %s", issueID)
 	}
-	
+
 	if !hash.Valid {
 		return "", nil // No hash stored yet
 	}
-	
+
 	return hash.String, nil
 }
 
@@ -133,8 +136,11 @@ func (s *SQLiteStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 func (s *SQLiteStorage) GetDirtyIssueCount(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dirty_issues`).Scan(&count)
-	if err != nil && err != sql.ErrNoRows {
-		return 0, fmt.Errorf("failed to count dirty issues: %w", err)
+	if IsNotFound(wrapDBError("count dirty issues", err)) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, wrapDBError("count dirty issues", err)
 	}
 	return count, nil
 }

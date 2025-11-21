@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 )
 
@@ -24,7 +23,7 @@ func (s *SQLiteStorage) BeginTx(ctx context.Context) (*sql.Tx, error) {
 func (s *SQLiteStorage) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return wrapDBError("begin transaction", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -33,7 +32,7 @@ func (s *SQLiteStorage) withTx(ctx context.Context, fn func(*sql.Tx) error) erro
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return wrapDBError("commit transaction", err)
 	}
 
 	return nil

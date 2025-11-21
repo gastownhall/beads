@@ -205,7 +205,7 @@ func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*typ
 		if issues[i].ID != "" {
 			// Validate that explicitly provided ID matches the configured prefix (bd-177)
 			if err := ValidateIssueIDPrefix(issues[i].ID, prefix); err != nil {
-				return err
+				return wrapDBErrorf(err, "validate ID prefix for %s", issues[i].ID)
 			}
 			
 			// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists

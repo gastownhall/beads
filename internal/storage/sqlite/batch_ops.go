@@ -46,7 +46,7 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 
 	// Generate or validate IDs for all issues
 	if err := EnsureIDs(ctx, conn, prefix, issues, actor, orphanHandling); err != nil {
-		return err
+		return wrapDBError("ensure IDs", err)
 	}
 	
 	// Compute content hashes
@@ -157,22 +157,22 @@ func (s *SQLiteStorage) CreateIssuesWithOptions(ctx context.Context, issues []*t
 
 	// Phase 3: Generate IDs for issues that need them
 	if err := s.generateBatchIDs(ctx, conn, issues, actor, orphanHandling); err != nil {
-		return err
+		return wrapDBError("generate batch IDs", err)
 	}
 
 	// Phase 4: Bulk insert issues
 	if err := bulkInsertIssues(ctx, conn, issues); err != nil {
-		return err
+		return wrapDBError("bulk insert issues", err)
 	}
 
 	// Phase 5: Record creation events
 	if err := bulkRecordEvents(ctx, conn, issues, actor); err != nil {
-		return err
+		return wrapDBError("record creation events", err)
 	}
 
 	// Phase 6: Mark issues dirty for incremental export
 	if err := bulkMarkDirty(ctx, conn, issues); err != nil {
-		return err
+		return wrapDBError("mark issues dirty", err)
 	}
 
 	// Phase 7: Commit transaction
