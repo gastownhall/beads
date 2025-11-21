@@ -53,26 +53,27 @@
                 <div class="filter-group">
                     <div class="label-with-action">
                         <label for="filter-status">Status</label>
-                        <button id="toggle-status" class="button-link" title="Toggle Select All/None">Select All</button>
                     </div>
                     <select id="filter-status" multiple>
                         <option value="open" selected>Open</option>
                         <option value="in_progress">In Progress</option>
                         <option value="closed">Closed</option>
                     </select>
+                    <button id="toggle-status" class="button-link" title="Toggle Select All/None">Select All</button>
                 </div>
                 <div class="filter-group">
                     <label for="filter-priority">Priority</label>
-                    <select id="filter-priority">
-                        <option value="">All</option>
-                        <option value="1">P1</option>
-                        <option value="2">P2</option>
-                        <option value="3">P3</option>
+                    <select id="filter-priority" multiple>
+                        <option value="1" selected>P1</option>
+                        <option value="2" selected>P2</option>
+                        <option value="3" selected>P3</option>
                     </select>
+                    <button id="toggle-priority" class="button-link" title="Toggle Select All/None">Select All</button>
                 </div>
                 <div class="filter-group search-group">
                     <label for="filter-text">Search</label>
                     <input type="text" id="filter-text" placeholder="Search issues...">
+                    <button id="clear-text" class="button-link" title="Clear Search">Clear</button>
                 </div>
                 <div class="filter-group action-group">
                     <button class="reload-button" id="reload-button" title="Reload all data">
