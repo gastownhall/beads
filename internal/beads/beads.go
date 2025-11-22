@@ -222,7 +222,7 @@ func FindBeadsDir() string {
 
 // FindJSONLPath returns the expected JSONL file path for the given database path.
 // It searches for existing *.jsonl files in the database directory and returns
-// the first one found, or defaults to "issues.jsonl".
+// the first one found, or defaults to "beads.jsonl".
 //
 // This function does not create directories or files - it only discovers paths.
 // Use this when you need to know where bd stores its JSONL export.
