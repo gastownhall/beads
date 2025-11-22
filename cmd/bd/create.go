@@ -77,7 +77,7 @@ var createCmd = &cobra.Command{
 		}
 
 		// Get field values, preferring explicit flags over template defaults
-		description, _ := cmd.Flags().GetString("description")
+		description, _ := getDescriptionFlag(cmd)
 		if description == "" && tmpl != nil {
 			description = tmpl.Description
 		}
