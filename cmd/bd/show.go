@@ -368,8 +368,8 @@ var updateCmd = &cobra.Command{
 			assignee, _ := cmd.Flags().GetString("assignee")
 			updates["assignee"] = assignee
 		}
-		if cmd.Flags().Changed("description") {
-			description, _ := cmd.Flags().GetString("description")
+		description, descChanged := getDescriptionFlag(cmd)
+		if descChanged {
 			updates["description"] = description
 		}
 		if cmd.Flags().Changed("design") {
