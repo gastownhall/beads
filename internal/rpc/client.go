@@ -294,6 +294,11 @@ func (c *Client) List(args *ListArgs) (*Response, error) {
 	return c.Execute(OpList, args)
 }
 
+// Count counts issues via the daemon
+func (c *Client) Count(args *CountArgs) (*Response, error) {
+	return c.Execute(OpCount, args)
+}
+
 // Show shows an issue via the daemon
 func (c *Client) Show(args *ShowArgs) (*Response, error) {
 	return c.Execute(OpShow, args)

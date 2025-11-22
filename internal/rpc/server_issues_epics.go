@@ -529,6 +529,238 @@ func (s *Server) handleList(req *Request) Response {
 	}
 }
 
+func (s *Server) handleCount(req *Request) Response {
+	var countArgs CountArgs
+	if err := json.Unmarshal(req.Args, &countArgs); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid count args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
+
+	filter := types.IssueFilter{}
+
+	// Normalize status: treat "" or "all" as unset (no filter)
+	if countArgs.Status != "" && countArgs.Status != "all" {
+		status := types.Status(countArgs.Status)
+		filter.Status = &status
+	}
+
+	if countArgs.IssueType != "" {
+		issueType := types.IssueType(countArgs.IssueType)
+		filter.IssueType = &issueType
+	}
+	if countArgs.Assignee != "" {
+		filter.Assignee = &countArgs.Assignee
+	}
+	if countArgs.Priority != nil {
+		filter.Priority = countArgs.Priority
+	}
+
+	// Normalize and apply label filters
+	labels := util.NormalizeLabels(countArgs.Labels)
+	labelsAny := util.NormalizeLabels(countArgs.LabelsAny)
+	if len(labels) > 0 {
+		filter.Labels = labels
+	}
+	if len(labelsAny) > 0 {
+		filter.LabelsAny = labelsAny
+	}
+	if len(countArgs.IDs) > 0 {
+		ids := util.NormalizeLabels(countArgs.IDs)
+		if len(ids) > 0 {
+			filter.IDs = ids
+		}
+	}
+
+	// Pattern matching
+	filter.TitleContains = countArgs.TitleContains
+	filter.DescriptionContains = countArgs.DescriptionContains
+	filter.NotesContains = countArgs.NotesContains
+
+	// Date ranges - use parseTimeRPC helper for flexible formats
+	if countArgs.CreatedAfter != "" {
+		t, err := parseTimeRPC(countArgs.CreatedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --created-after date: %v", err),
+			}
+		}
+		filter.CreatedAfter = &t
+	}
+	if countArgs.CreatedBefore != "" {
+		t, err := parseTimeRPC(countArgs.CreatedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --created-before date: %v", err),
+			}
+		}
+		filter.CreatedBefore = &t
+	}
+	if countArgs.UpdatedAfter != "" {
+		t, err := parseTimeRPC(countArgs.UpdatedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --updated-after date: %v", err),
+			}
+		}
+		filter.UpdatedAfter = &t
+	}
+	if countArgs.UpdatedBefore != "" {
+		t, err := parseTimeRPC(countArgs.UpdatedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --updated-before date: %v", err),
+			}
+		}
+		filter.UpdatedBefore = &t
+	}
+	if countArgs.ClosedAfter != "" {
+		t, err := parseTimeRPC(countArgs.ClosedAfter)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --closed-after date: %v", err),
+			}
+		}
+		filter.ClosedAfter = &t
+	}
+	if countArgs.ClosedBefore != "" {
+		t, err := parseTimeRPC(countArgs.ClosedBefore)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid --closed-before date: %v", err),
+			}
+		}
+		filter.ClosedBefore = &t
+	}
+
+	// Empty/null checks
+	filter.EmptyDescription = countArgs.EmptyDescription
+	filter.NoAssignee = countArgs.NoAssignee
+	filter.NoLabels = countArgs.NoLabels
+
+	// Priority range
+	filter.PriorityMin = countArgs.PriorityMin
+	filter.PriorityMax = countArgs.PriorityMax
+
+	ctx := s.reqCtx(req)
+	issues, err := store.SearchIssues(ctx, countArgs.Query, filter)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to count issues: %v", err),
+		}
+	}
+
+	// If no grouping, just return the count
+	if countArgs.GroupBy == "" {
+		type CountResult struct {
+			Count int `json:"count"`
+		}
+		data, _ := json.Marshal(CountResult{Count: len(issues)})
+		return Response{
+			Success: true,
+			Data:    data,
+		}
+	}
+
+	// Group by the specified field
+	type GroupCount struct {
+		Group string `json:"group"`
+		Count int    `json:"count"`
+	}
+
+	counts := make(map[string]int)
+
+	// For label grouping, fetch all labels in one query to avoid N+1
+	var labelsMap map[string][]string
+	if countArgs.GroupBy == "label" {
+		issueIDs := make([]string, len(issues))
+		for i, issue := range issues {
+			issueIDs[i] = issue.ID
+		}
+		var err error
+		labelsMap, err = store.GetLabelsForIssues(ctx, issueIDs)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get labels: %v", err),
+			}
+		}
+	}
+
+	for _, issue := range issues {
+		var groupKey string
+		switch countArgs.GroupBy {
+		case "status":
+			groupKey = string(issue.Status)
+		case "priority":
+			groupKey = fmt.Sprintf("P%d", issue.Priority)
+		case "type":
+			groupKey = string(issue.IssueType)
+		case "assignee":
+			if issue.Assignee == "" {
+				groupKey = "(unassigned)"
+			} else {
+				groupKey = issue.Assignee
+			}
+		case "label":
+			// For labels, count each label separately
+			labels := labelsMap[issue.ID]
+			if len(labels) > 0 {
+				for _, label := range labels {
+					counts[label]++
+				}
+				continue
+			} else {
+				groupKey = "(no labels)"
+			}
+		default:
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid group_by value: %s (must be one of: status, priority, type, assignee, label)", countArgs.GroupBy),
+			}
+		}
+		counts[groupKey]++
+	}
+
+	// Convert map to sorted slice
+	groups := make([]GroupCount, 0, len(counts))
+	for group, count := range counts {
+		groups = append(groups, GroupCount{Group: group, Count: count})
+	}
+
+	type GroupedCountResult struct {
+		Total  int          `json:"total"`
+		Groups []GroupCount `json:"groups"`
+	}
+
+	result := GroupedCountResult{
+		Total:  len(issues),
+		Groups: groups,
+	}
+
+	data, _ := json.Marshal(result)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
 func (s *Server) handleResolveID(req *Request) Response {
 	var args ResolveIDArgs
 	if err := json.Unmarshal(req.Args, &args); err != nil {

@@ -178,6 +178,8 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleClose(req)
 	case OpList:
 		resp = s.handleList(req)
+	case OpCount:
+		resp = s.handleCount(req)
 	case OpShow:
 		resp = s.handleShow(req)
 	case OpResolveID:

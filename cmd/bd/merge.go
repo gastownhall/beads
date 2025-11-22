@@ -118,6 +118,9 @@ func cleanupMergeArtifacts(outputPath string, debug bool) {
 			fullPath := filepath.Join(beadsDir, entry.Name())
 
 			// Try to git rm if tracked
+			// #nosec G204 -- fullPath is safely constructed via filepath.Join from entry.Name()
+			// from os.ReadDir. exec.Command does NOT use shell interpretation - arguments
+			// are passed directly to git binary. See TestCleanupMergeArtifacts_CommandInjectionPrevention
 			gitRmCmd := exec.Command("git", "rm", "-f", "--quiet", fullPath)
 			gitRmCmd.Dir = filepath.Dir(beadsDir)
 			_ = gitRmCmd.Run() // Ignore errors, file may not be tracked

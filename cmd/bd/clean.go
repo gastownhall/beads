@@ -115,6 +115,9 @@ Preview what would be deleted:
 // patterns from the "Merge artifacts" section
 func readMergeArtifactPatterns(beadsDir string) ([]string, error) {
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	// #nosec G304 -- gitignorePath is safely constructed via filepath.Join from beadsDir
+	// (which comes from findBeadsDir searching upward for .beads). This can only open
+	// .gitignore within the project's .beads directory. See TestReadMergeArtifactPatterns_PathTraversal
 	file, err := os.Open(gitignorePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open .gitignore: %w", err)
