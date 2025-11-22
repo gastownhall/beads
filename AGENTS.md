@@ -8,6 +8,8 @@
 
 This is **beads** (command: `bd`), an issue tracker designed for AI-supervised coding workflows. We dogfood our own tool!
 
+> **🤖 Using GitHub Copilot?** See [.github/copilot-instructions.md](.github/copilot-instructions.md) for a concise, Copilot-optimized version of these instructions that GitHub Copilot will automatically load.
+
 ## 🆕 What's New?
 
 **New to bd or upgrading?** Run `bd info --whats-new` to see agent-relevant changes from recent versions:
