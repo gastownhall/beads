@@ -18,6 +18,11 @@ import (
 // Implements bd-2q6d: All read operations should validate database freshness.
 // Implements bd-c4rq: Daemon check moved to call sites to avoid function call overhead.
 func ensureDatabaseFresh(ctx context.Context) error {
+	if allowStale {
+		fmt.Fprintf(os.Stderr, "⚠️  Staleness check skipped (--allow-stale), data may be out of sync\n")
+		return nil
+	}
+
 	// Skip check if no storage available (shouldn't happen in practice)
 	if store == nil {
 		return nil
@@ -43,7 +48,11 @@ func ensureDatabaseFresh(ctx context.Context) error {
 			"The JSONL file has been updated (e.g., after 'git pull') but the database\n"+
 			"hasn't been imported yet. This would cause you to see stale/incomplete data.\n\n"+
 			"To fix:\n"+
-			"  bd import        # Import JSONL updates to database\n\n"+
+			"  bd import -i .beads/beads.jsonl  # Import JSONL updates to database\n\n"+
+			"If in a sandboxed environment (e.g., Codex) where daemon can't be stopped:\n"+
+			"  bd --sandbox ready               # Use direct mode (no daemon)\n"+
+			"  bd import --force                # Force metadata update\n"+
+			"  bd ready --allow-stale           # Skip staleness check (use with caution)\n\n"+
 			"Or use daemon mode (auto-imports on every operation):\n"+
 			"  bd daemon start\n"+
 			"  bd <command>     # Will auto-import before executing",

@@ -69,6 +69,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		dedupeAfter, _ := cmd.Flags().GetBool("dedupe-after")
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
+		force, _ := cmd.Flags().GetBool("force")
 
 		// Open input
 		in := os.Stdin
@@ -309,7 +310,8 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
 		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
-		if input != "" {
+		// When --force is true, ALWAYS update metadata even if no changes were made
+		if input != "" && (result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 || force) {
 			if currentHash, err := computeJSONLHash(input); err == nil {
 				if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
 					// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
@@ -357,6 +359,11 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
 		fmt.Fprintf(os.Stderr, "\n")
+
+		// Print force message if metadata was updated despite no changes
+		if force && result.Created == 0 && result.Updated == 0 && len(result.IDMapping) == 0 {
+			fmt.Fprintf(os.Stderr, "Metadata updated (database already in sync with JSONL)\n")
+		}
 
 		// Run duplicate detection if requested
 		if dedupeAfter {
@@ -697,6 +704,7 @@ func init() {
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
+	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }
