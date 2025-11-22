@@ -165,7 +165,7 @@ func applyFixes(result doctorResult) {
 
 	response = strings.TrimSpace(strings.ToLower(response))
 	if response != "" && response != "y" && response != "yes" {
-		fmt.Println("Fix cancelled.")
+		fmt.Println("Fix canceled.")
 		return
 	}
 

@@ -41,10 +41,9 @@ Examples:
 		// If no query provided, show help
 		if query == "" {
 			fmt.Fprintf(os.Stderr, "Error: search query is required\n")
-			// #nosec G104 -- cmd.Help() error intentionally ignored. We're already in an
-			// error path (missing query) and will exit(1) regardless. Help() errors are
-			// rare (I/O failures) and don't affect the outcome. See TestSearchCommand_HelpErrorHandling
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
+			}
 			os.Exit(1)
 		}
 

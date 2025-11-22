@@ -437,15 +437,12 @@ func TestPerformFlushErrorHandling(t *testing.T) {
 		}
 	}()
 
-	// performFlush with inactive store should return nil (graceful degradation)
+	// performFlush with inactive store should handle gracefully (no return value)
 	storeMutex.Lock()
 	storeActive = false
 	storeMutex.Unlock()
 
-	err := fm.performFlush(false)
-	if err != nil {
-		t.Errorf("performFlush should return nil when store inactive, got: %v", err)
-	}
+	fm.performFlush(false) // Should not panic
 
 	// Restore store for cleanup
 	storeMutex.Lock()
@@ -470,16 +467,10 @@ func TestPerformFlushStoreInactive(t *testing.T) {
 	storeActive = false
 	storeMutex.Unlock()
 
-	// performFlush should handle this gracefully
-	err := fm.performFlush(false)
-	if err != nil {
-		t.Errorf("Expected performFlush to handle inactive store gracefully, got error: %v", err)
-	}
+	// performFlush should handle this gracefully (no return value)
+	fm.performFlush(false) // Should not panic
 
-	err = fm.performFlush(true) // Try full export too
-	if err != nil {
-		t.Errorf("Expected performFlush (full) to handle inactive store gracefully, got error: %v", err)
-	}
+	fm.performFlush(true) // Try full export too - should not panic
 
 	// Restore store for cleanup
 	storeMutex.Lock()
