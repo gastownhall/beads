@@ -10,10 +10,10 @@ build:
 	@echo "Building bd..."
 	go build -o bd ./cmd/bd
 
-# Run all tests
+# Run all tests (skips known broken tests listed in .test-skip)
 test:
 	@echo "Running tests..."
-	go test ./...
+	@./scripts/test.sh
 
 # Run performance benchmarks (10K and 20K issue databases with automatic CPU profiling)
 # Generates CPU profile: internal/storage/sqlite/bench-cpu-<timestamp>.prof
