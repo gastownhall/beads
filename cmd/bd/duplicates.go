@@ -92,7 +92,7 @@ Example:
 			
 			if autoMerge || dryRun {
 				if !dryRun {
-					// TODO: Call performMerge when implemented
+					// TODO(bd-hdt): Call performMerge when implemented
 					fmt.Fprintf(os.Stderr, "Auto-merge not yet fully implemented. Use suggested commands instead.\n")
 				}
 			}

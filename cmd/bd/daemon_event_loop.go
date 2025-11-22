@@ -167,7 +167,7 @@ func runEventDrivenLoop(
 // checkDaemonHealth performs periodic health validation.
 // Separate from sync operations - just validates state.
 func checkDaemonHealth(ctx context.Context, store storage.Storage, log daemonLogger) {
-	// TODO: Add health checks:
+	// TODO(bd-gqo): Add health checks:
 	// - Database integrity check
 	// - Disk space check
 	// - Memory usage check
