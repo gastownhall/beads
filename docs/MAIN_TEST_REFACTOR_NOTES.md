@@ -1,6 +1,6 @@
 # main_test.go Refactoring Notes (bd-1rh follow-up)
 
-## Status: DEFERRED - Needs Different Approach
+## Status: RESOLVED - Redundant Tests Deleted ✅
 
 ### Summary
 Attempted to refactor `main_test.go` (18 tests, 14 `newTestStore()` calls) to use shared DB pattern like P1 files. **Discovered fundamental incompatibility** with shared DB approach due to global state manipulation and integration test characteristics.
@@ -151,7 +151,43 @@ func TestAutoFlushGroup(t *testing.T) {
 2. **Update audit classification**: Move main_test.go to "Special Cases" category
 3. **Focus P2 efforts** on `integrity_test.go` and `export_import_test.go` instead
 
+## 2025-11-21 Update: Solution Implemented ✅
+
+### What We Did
+Rather than forcing shared DB pattern on integration tests, we **deleted redundant tests** that were duplicating coverage from `flush_manager_test.go`.
+
+### Key Insight
+After FlushManager refactoring (bd-52), `main_test.go` was testing the DEPRECATED legacy path while `flush_manager_test.go` tested the NEW FlushManager. Solution: delete the redundant legacy tests.
+
+### Changes Made
+1. **Deleted 7 redundant tests** (407 lines):
+   - TestAutoFlushDirtyMarking (→ TestFlushManagerMarkDirtyTriggersFlush)
+   - TestAutoFlushDisabled (→ TestFlushManagerDisabledDoesNotFlush)
+   - TestAutoFlushDebounce (already skipped, obsolete)
+   - TestAutoFlushClearState (clearAutoFlushState tested in export/sync)
+   - TestAutoFlushConcurrency (→ TestFlushManagerConcurrentMarkDirty)
+   - TestAutoFlushStoreInactive (→ TestPerformFlushStoreInactive)
+   - TestAutoFlushErrorHandling (→ TestPerformFlushErrorHandling)
+
+2. **Kept 2 integration tests**:
+   - TestAutoFlushOnExit (PersistentPostRun behavior)
+   - TestAutoFlushJSONLContent (DB → JSONL file content)
+
+3. **Updated clearAutoFlushState()** to no-op when FlushManager exists
+
+### Results
+- **Before**: 18 tests, 1079 lines, ~15-20s
+- **After**: 11 tests, 672 lines, ~5-7s (estimated)
+- **Speedup**: ~3x faster
+- **All tests passing**: ✅
+
+### Future Work (Optional)
+- Phase 2: Remove legacy path from `markDirtyAndScheduleFlush()` entirely
+- Phase 3: Remove global variables (isDirty, flushTimer, flushMutex)
+- These are deferred as they provide diminishing returns vs. complexity
+
 ## References
 - Original issue: bd-1rh (Phase 2 test suite optimization)
 - Pattern source: `label_test.go`, P1 refactored files
 - Related: bd-159 (test config issues), bd-270 (merge conflict detection)
+- Solution documented: `docs/MAIN_TEST_CLEANUP_PLAN.md`

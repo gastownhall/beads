@@ -314,6 +314,14 @@ func markDirtyAndScheduleFullExport() {
 
 // clearAutoFlushState cancels pending flush and marks DB as clean (after manual export)
 func clearAutoFlushState() {
+	// With FlushManager, clearing state is unnecessary (new path)
+	// If a flush is pending and fires after manual export, flushToJSONLWithState()
+	// will detect nothing is dirty and skip the flush. This is harmless.
+	if flushManager != nil {
+		return
+	}
+
+	// Legacy path for backward compatibility with tests
 	flushMutex.Lock()
 	defer flushMutex.Unlock()
 
