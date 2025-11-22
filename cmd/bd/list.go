@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 // parseTimeFlag parses time strings in multiple formats
@@ -69,8 +70,8 @@ var listCmd = &cobra.Command{
 		noLabels, _ := cmd.Flags().GetBool("no-labels")
 		
 		// Priority range flags
-		priorityMin, _ := cmd.Flags().GetInt("priority-min")
-		priorityMax, _ := cmd.Flags().GetInt("priority-max")
+		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
+		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
 		
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -87,7 +88,12 @@ var listCmd = &cobra.Command{
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
+			priorityStr, _ := cmd.Flags().GetString("priority")
+			priority, err := validation.ValidatePriority(priorityStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 			filter.Priority = &priority
 		}
 		if assignee != "" {
@@ -187,9 +193,19 @@ var listCmd = &cobra.Command{
 		
 		// Priority ranges
 		if cmd.Flags().Changed("priority-min") {
+			priorityMin, err := validation.ValidatePriority(priorityMinStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-min: %v\n", err)
+				os.Exit(1)
+			}
 			filter.PriorityMin = &priorityMin
 		}
 		if cmd.Flags().Changed("priority-max") {
+			priorityMax, err := validation.ValidatePriority(priorityMaxStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-max: %v\n", err)
+				os.Exit(1)
+			}
 			filter.PriorityMax = &priorityMax
 		}
 
@@ -212,7 +228,12 @@ var listCmd = &cobra.Command{
 				Limit:     limit,
 			}
 			if cmd.Flags().Changed("priority") {
-				priority, _ := cmd.Flags().GetInt("priority")
+				priorityStr, _ := cmd.Flags().GetString("priority")
+				priority, err := validation.ValidatePriority(priorityStr)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 				listArgs.Priority = &priority
 			}
 			if len(labels) > 0 {
@@ -425,7 +446,7 @@ var listCmd = &cobra.Command{
 
 func init() {
 	listCmd.Flags().StringP("status", "s", "", "Filter by status (open, in_progress, blocked, closed)")
-	listCmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
+	registerPriorityFlag(listCmd, "")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore)")
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
@@ -456,8 +477,8 @@ func init() {
 	listCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 	
 	// Priority ranges
-	listCmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
-	listCmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
+	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
+	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
 	
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)
