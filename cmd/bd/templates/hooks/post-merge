@@ -1,5 +1,5 @@
 #!/bin/sh
-# bd-hooks-version: 0.24.1
+# bd-hooks-version: 0.24.2
 #
 # bd (beads) post-merge hook
 #
