@@ -190,14 +190,14 @@ func TestCheckLegacyJSONLFilename(t *testing.T) {
 			expectWarning:  false,
 		},
 		{
-			name:           "canonical beads.jsonl",
-			files:          []string{"beads.jsonl"},
+			name:           "canonical issues.jsonl",
+			files:          []string{"issues.jsonl"},
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
-			name:           "legacy issues.jsonl",
-			files:          []string{"issues.jsonl"},
+			name:           "non-standard beads.jsonl",
+			files:          []string{"beads.jsonl"},
 			expectedStatus: "warning",
 			expectWarning:  true,
 		},

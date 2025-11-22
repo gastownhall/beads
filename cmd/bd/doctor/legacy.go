@@ -103,20 +103,20 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 	}
 }
 
-// CheckLegacyJSONLFilename detects if project is using legacy issues.jsonl
-// instead of the canonical beads.jsonl filename.
+// CheckLegacyJSONLFilename detects if project is using non-standard beads.jsonl
+// instead of the canonical issues.jsonl filename.
 func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 	beadsDir := filepath.Join(repoPath, ".beads")
 
 	var jsonlFiles []string
-	hasIssuesJSON := false
+	hasBeadsJSON := false
 
 	for _, name := range []string{"issues.jsonl", "beads.jsonl"} {
 		jsonlPath := filepath.Join(beadsDir, name)
 		if _, err := os.Stat(jsonlPath); err == nil {
 			jsonlFiles = append(jsonlFiles, name)
-			if name == "issues.jsonl" {
-				hasIssuesJSON = true
+			if name == "beads.jsonl" {
+				hasBeadsJSON = true
 			}
 		}
 	}
@@ -130,13 +130,13 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 	}
 
 	if len(jsonlFiles) == 1 {
-		// Single JSONL file - check if it's the legacy name
-		if hasIssuesJSON {
+		// Single JSONL file - check if it's the non-standard name
+		if hasBeadsJSON {
 			return DoctorCheck{
 				Name:    "JSONL Files",
 				Status:  "warning",
-				Message: "Using legacy JSONL filename: issues.jsonl",
-				Fix:     "Run 'git mv .beads/issues.jsonl .beads/beads.jsonl' to use canonical name (matches beads.db)",
+				Message: "Using non-standard JSONL filename: beads.jsonl",
+				Fix:     "Run 'git mv .beads/beads.jsonl .beads/issues.jsonl' to use canonical name",
 			}
 		}
 		return DoctorCheck{
@@ -151,6 +151,6 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 		Name:    "JSONL Files",
 		Status:  "warning",
 		Message: fmt.Sprintf("Multiple JSONL files found: %s", strings.Join(jsonlFiles, ", ")),
-		Fix:     "Run 'git rm .beads/issues.jsonl' to standardize on beads.jsonl (canonical name)",
+		Fix:     "Run 'git rm .beads/beads.jsonl' to standardize on issues.jsonl (canonical name)",
 	}
 }

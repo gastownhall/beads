@@ -19,8 +19,8 @@ func TestMultiWorkspaceDeletionSync(t *testing.T) {
 	cloneADir := t.TempDir()
 	cloneBDir := t.TempDir()
 
-	cloneAJSONL := filepath.Join(cloneADir, "beads.jsonl")
-	cloneBJSONL := filepath.Join(cloneBDir, "beads.jsonl")
+	cloneAJSONL := filepath.Join(cloneADir, "issues.jsonl")
+	cloneBJSONL := filepath.Join(cloneBDir, "issues.jsonl")
 
 	cloneADB := filepath.Join(cloneADir, "beads.db")
 	cloneBDB := filepath.Join(cloneBDir, "beads.db")
@@ -177,7 +177,7 @@ func TestMultiWorkspaceDeletionSync(t *testing.T) {
 // Remote deletes an issue, but local has modified it
 func TestDeletionWithLocalModification(t *testing.T) {
 	dir := t.TempDir()
-	jsonlPath := filepath.Join(dir, "beads.jsonl")
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
 	dbPath := filepath.Join(dir, "beads.db")
 
 	ctx := context.Background()
@@ -343,7 +343,7 @@ func TestComputeAcceptedDeletions_LocallyModified(t *testing.T) {
 // TestSnapshotManagement tests the snapshot file lifecycle
 func TestSnapshotManagement(t *testing.T) {
 	dir := t.TempDir()
-	jsonlPath := filepath.Join(dir, "beads.jsonl")
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
 
 	// Write initial JSONL
 	content := `{"id":"bd-1","title":"Test"}

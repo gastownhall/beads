@@ -17,7 +17,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Database:    "beads.db",
-		JSONLExport: "beads.jsonl",
+		JSONLExport: "issues.jsonl",
 	}
 }
 
@@ -89,7 +89,7 @@ func (c *Config) DatabasePath(beadsDir string) string {
 
 func (c *Config) JSONLPath(beadsDir string) string {
 	if c.JSONLExport == "" {
-		return filepath.Join(beadsDir, "beads.jsonl")
+		return filepath.Join(beadsDir, "issues.jsonl")
 	}
 	return filepath.Join(beadsDir, c.JSONLExport)
 }

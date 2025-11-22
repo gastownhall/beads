@@ -33,7 +33,7 @@ func setupTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 func TestDBNeedsExport_InSync(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "beads.db")
-	jsonlPath := filepath.Join(tmpDir, "beads.jsonl")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	store := setupTestStore(t, dbPath)
 	defer store.Close()
@@ -81,7 +81,7 @@ func TestDBNeedsExport_InSync(t *testing.T) {
 func TestDBNeedsExport_DBNewer(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "beads.db")
-	jsonlPath := filepath.Join(tmpDir, "beads.jsonl")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	store := setupTestStore(t, dbPath)
 	defer store.Close()
@@ -132,7 +132,7 @@ func TestDBNeedsExport_DBNewer(t *testing.T) {
 func TestDBNeedsExport_CountMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "beads.db")
-	jsonlPath := filepath.Join(tmpDir, "beads.jsonl")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	store := setupTestStore(t, dbPath)
 	defer store.Close()
@@ -189,7 +189,7 @@ func TestDBNeedsExport_CountMismatch(t *testing.T) {
 func TestDBNeedsExport_NoJSONL(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "beads.db")
-	jsonlPath := filepath.Join(tmpDir, "beads.jsonl")
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	store := setupTestStore(t, dbPath)
 	defer store.Close()

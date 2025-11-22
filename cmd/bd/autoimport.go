@@ -85,10 +85,10 @@ func checkGitForIssues() (int, string) {
 		return 0, ""
 	}
 
-	// Try canonical JSONL filenames in precedence order
+	// Try canonical JSONL filenames in precedence order (issues.jsonl is canonical)
 	candidates := []string{
-		filepath.Join(relBeads, "beads.jsonl"),
 		filepath.Join(relBeads, "issues.jsonl"),
+		filepath.Join(relBeads, "beads.jsonl"),
 	}
 
 	for _, relPath := range candidates {

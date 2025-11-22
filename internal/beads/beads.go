@@ -242,8 +242,8 @@ func FindJSONLPath(dbPath string) string {
 		return matches[0]
 	}
 
-	// Default to beads.jsonl
-	return filepath.Join(dbDir, "beads.jsonl")
+	// Default to issues.jsonl
+	return filepath.Join(dbDir, "issues.jsonl")
 }
 
 // DatabaseInfo contains information about a discovered beads database
