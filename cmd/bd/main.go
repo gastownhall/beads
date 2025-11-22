@@ -200,6 +200,15 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
+		// Auto-detect sandboxed environment (bd-u3t: Phase 2 for GH #353)
+		// Only auto-enable if user hasn't explicitly set --sandbox or --no-daemon
+		if !cmd.Flags().Changed("sandbox") && !cmd.Flags().Changed("no-daemon") {
+			if isSandboxed() {
+				sandboxMode = true
+				fmt.Fprintf(os.Stderr, "ℹ️  Sandbox detected, using direct mode\n")
+			}
+		}
+
 		// If sandbox mode is set, enable all sandbox flags
 		if sandboxMode {
 			noDaemon = true

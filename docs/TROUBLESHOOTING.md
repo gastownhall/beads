@@ -436,19 +436,36 @@ ps aux | grep "bd daemon"
 
 See [integrations/beads-mcp/README.md](integrations/beads-mcp/README.md) for MCP-specific troubleshooting.
 
-### Claude Code sandbox mode
+### Sandboxed environments (Codex, Claude Code, etc.)
 
-**Issue:** Claude Code's sandbox restricts network access to a single socket, conflicting with bd's daemon and git operations.
+**Issue:** Sandboxed environments restrict permissions, preventing daemon control and causing "out of sync" errors.
 
-**Solution:** Use the `--sandbox` flag:
+**Common symptoms:**
+- "Database out of sync with JSONL" errors that persist after running `bd import`
+- `bd daemon --stop` fails with "operation not permitted"
+- Cannot kill daemon process with `kill <pid>`
+- JSONL hash mismatch warnings (bd-160)
+- Commands intermittently fail with staleness errors
+
+**Root cause:** The sandbox can't signal/kill the existing daemon process, so the DB stays stale and refuses to import.
+
+---
+
+#### Quick fix: Sandbox mode (auto-detected)
+
+**As of v0.21.1+**, bd automatically detects sandboxed environments and enables sandbox mode.
+
+When auto-detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
+
+**Manual override** (if auto-detection fails):
 
 ```bash
-# Sandbox mode disables daemon and auto-sync
+# Explicitly enable sandbox mode
 bd --sandbox ready
 bd --sandbox create "Fix bug" -p 1
 bd --sandbox update bd-42 --status in_progress
 
-# Or set individual flags
+# Equivalent to:
 bd --no-daemon --no-auto-flush --no-auto-import <command>
 ```
 
@@ -464,7 +481,83 @@ bd --no-daemon --no-auto-flush --no-auto-import <command>
 bd sync
 ```
 
-**Related:** See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions.
+---
+
+#### Escape hatches for stuck states
+
+If you're stuck in a "database out of sync" loop with a running daemon you can't stop, use these flags:
+
+**1. Force metadata update (`--force` flag on import)**
+
+When `bd import` reports "0 created, 0 updated" but staleness persists:
+
+```bash
+# Force metadata refresh even when DB appears synced
+bd import --force
+
+# This updates internal metadata tracking without changing issues
+# Fixes: stuck state caused by stale daemon cache
+```
+
+**Shows:** `Metadata updated (database already in sync with JSONL)`
+
+**2. Skip staleness check (`--allow-stale` global flag)**
+
+Emergency escape hatch to bypass staleness validation:
+
+```bash
+# Allow operations on potentially stale data
+bd --allow-stale ready
+bd --allow-stale list --status open
+
+# Shows warning:
+# ⚠️  Staleness check skipped (--allow-stale), data may be out of sync
+```
+
+**⚠️ Caution:** Use sparingly - you may see incomplete or outdated data.
+
+**3. Use sandbox mode (preferred)**
+
+```bash
+# Most reliable for sandboxed environments
+bd --sandbox ready
+bd --sandbox import -i .beads/beads.jsonl
+```
+
+---
+
+#### Troubleshooting workflow
+
+If stuck in a sandboxed environment:
+
+```bash
+# Step 1: Try sandbox mode (cleanest solution)
+bd --sandbox ready
+
+# Step 2: If you get staleness errors, force import
+bd import --force -i .beads/beads.jsonl
+
+# Step 3: If still blocked, use allow-stale (emergency only)
+bd --allow-stale ready
+
+# Step 4: When back outside sandbox, sync normally
+bd sync
+```
+
+---
+
+#### Understanding the flags
+
+| Flag | Purpose | When to use | Risk |
+|------|---------|-------------|------|
+| `--sandbox` | Disable daemon and auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
+| `--force` (import) | Force metadata update | Stuck "0 created, 0 updated" loop | Low - updates metadata only |
+| `--allow-stale` | Skip staleness validation | Emergency access to database | **High** - may show stale data |
+
+**Related:**
+- See [DAEMON.md](DAEMON.md) for daemon troubleshooting
+- See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions
+- GitHub issue [#353](https://github.com/steveyegge/beads/issues/353) for background
 
 ## Platform-Specific Issues
 

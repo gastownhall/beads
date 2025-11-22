@@ -203,6 +203,83 @@ bd list --priority-min 2 --json                         # P2 and below
 bd list --status open --priority 1 --label-any urgent,critical --no-assignee --json
 ```
 
+## Global Flags
+
+Global flags work with any bd command and must appear **before** the subcommand.
+
+### Sandbox Mode
+
+**Auto-detection (v0.21.1+):** bd automatically detects sandboxed environments and enables sandbox mode.
+
+When detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
+
+**Manual override:**
+
+```bash
+# Explicitly enable sandbox mode
+bd --sandbox <command>
+
+# Equivalent to combining these flags:
+bd --no-daemon --no-auto-flush --no-auto-import <command>
+```
+
+**What it does:**
+- Disables daemon (uses direct SQLite mode)
+- Disables auto-export to JSONL
+- Disables auto-import from JSONL
+
+**When to use:** Sandboxed environments where daemon can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
+
+### Staleness Control
+
+```bash
+# Skip staleness check (emergency escape hatch)
+bd --allow-stale <command>
+
+# Example: access database even if out of sync with JSONL
+bd --allow-stale ready --json
+bd --allow-stale list --status open --json
+```
+
+**Shows:** `⚠️  Staleness check skipped (--allow-stale), data may be out of sync`
+
+**⚠️ Caution:** May show stale or incomplete data. Use only when stuck and other options fail.
+
+### Force Import
+
+```bash
+# Force metadata update even when DB appears synced
+bd import --force -i .beads/beads.jsonl
+```
+
+**When to use:** `bd import` reports "0 created, 0 updated" but staleness errors persist.
+
+**Shows:** `Metadata updated (database already in sync with JSONL)`
+
+### Other Global Flags
+
+```bash
+# JSON output for programmatic use
+bd --json <command>
+
+# Force direct mode (bypass daemon)
+bd --no-daemon <command>
+
+# Disable auto-sync
+bd --no-auto-flush <command>    # Disable auto-export to JSONL
+bd --no-auto-import <command>   # Disable auto-import from JSONL
+
+# Custom database path
+bd --db /path/to/.beads/beads.db <command>
+
+# Custom actor for audit trail
+bd --actor alice <command>
+```
+
+**See also:**
+- [TROUBLESHOOTING.md - Sandboxed environments](TROUBLESHOOTING.md#sandboxed-environments-codex-claude-code-etc) for detailed sandbox troubleshooting
+- [DAEMON.md](DAEMON.md) for daemon mode details
+
 ## Advanced Operations
 
 ### Cleanup
