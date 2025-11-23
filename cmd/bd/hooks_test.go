@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -50,7 +51,7 @@ func TestInstallHooks(t *testing.T) {
 	}
 
 	// Install hooks
-	if err := installHooks(hooks, false); err != nil {
+	if err := installHooks(hooks, false, false); err != nil {
 		t.Fatalf("installHooks() failed: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestInstallHooksBackup(t *testing.T) {
 	}
 
 	// Install hooks (should backup existing)
-	if err := installHooks(hooks, false); err != nil {
+	if err := installHooks(hooks, false, false); err != nil {
 		t.Fatalf("installHooks() failed: %v", err)
 	}
 
@@ -149,7 +150,7 @@ func TestInstallHooksForce(t *testing.T) {
 	}
 
 	// Install hooks with force (should not create backup)
-	if err := installHooks(hooks, true); err != nil {
+	if err := installHooks(hooks, true, false); err != nil {
 		t.Fatalf("installHooks() failed: %v", err)
 	}
 
@@ -178,7 +179,7 @@ func TestUninstallHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getEmbeddedHooks() failed: %v", err)
 	}
-	if err := installHooks(hooks, false); err != nil {
+	if err := installHooks(hooks, false, false); err != nil {
 		t.Fatalf("installHooks() failed: %v", err)
 	}
 
@@ -224,7 +225,7 @@ func TestHooksCheckGitHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getEmbeddedHooks() failed: %v", err)
 	}
-	if err := installHooks(hooks, false); err != nil {
+	if err := installHooks(hooks, false, false); err != nil {
 		t.Fatalf("installHooks() failed: %v", err)
 	}
 
@@ -240,6 +241,63 @@ func TestHooksCheckGitHooks(t *testing.T) {
 		}
 		if status.Outdated {
 			t.Errorf("Hook %s should not be outdated", status.Name)
+		}
+	}
+}
+
+func TestInstallHooksShared(t *testing.T) {
+	// Create temp directory
+	tmpDir := t.TempDir()
+
+	// Change to temp directory
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (needed for git config command)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed (git may not be available): %v", err)
+	}
+
+	// Get embedded hooks
+	hooks, err := getEmbeddedHooks()
+	if err != nil {
+		t.Fatalf("getEmbeddedHooks() failed: %v", err)
+	}
+
+	// Install hooks in shared mode
+	if err := installHooks(hooks, false, true); err != nil {
+		t.Fatalf("installHooks() with shared=true failed: %v", err)
+	}
+
+	// Verify hooks were installed to .beads-hooks/
+	sharedHooksDir := ".beads-hooks"
+	for hookName := range hooks {
+		hookPath := filepath.Join(sharedHooksDir, hookName)
+		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+			t.Errorf("Hook %s was not installed to .beads-hooks/", hookName)
+		}
+		// Windows does not support POSIX executable bits, so skip the check there.
+		if runtime.GOOS == "windows" {
+			continue
+		}
+
+		info, err := os.Stat(hookPath)
+		if err != nil {
+			t.Errorf("Failed to stat %s: %v", hookName, err)
+			continue
+		}
+		if info.Mode()&0111 == 0 {
+			t.Errorf("Hook %s is not executable", hookName)
+		}
+	}
+
+	// Verify hooks were NOT installed to .git/hooks/
+	standardHooksDir := filepath.Join(".git", "hooks")
+	for hookName := range hooks {
+		hookPath := filepath.Join(standardHooksDir, hookName)
+		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+			t.Errorf("Hook %s should not be in .git/hooks/ when using --shared", hookName)
 		}
 	}
 }

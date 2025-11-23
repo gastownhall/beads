@@ -51,6 +51,36 @@ The installer will:
 - Make them executable
 - Detect and preserve existing hooks
 
+### Shared Hooks for Teams (New in v0.24.3)
+
+For teams that need to share hooks across members (especially when using pre-built containers or CI/CD):
+
+```bash
+bd hooks install --shared
+```
+
+This installs hooks to `.beads-hooks/` (a versioned directory) instead of `.git/hooks/`, and configures git to use them via `git config core.hooksPath .beads-hooks`.
+
+**Benefits:**
+- ✅ Hooks are versioned and can be committed to your repository
+- ✅ Team members get hooks automatically when they clone/pull
+- ✅ Security teams can scan and audit hook contents before deployment
+- ✅ Works with pre-built containers (hooks are already in the repo)
+- ✅ Hooks stay in sync when you run `bd hooks install --shared` after upgrades
+
+**Use cases:**
+- Teams building containers in CI that need hooks pre-installed
+- Organizations requiring security scanning of all code (including hooks)
+- Projects where consistent tooling across team members is critical
+- Devcontainer workflows where bd is installed during container build
+
+After running `bd hooks install --shared`, commit `.beads-hooks/` to your repository:
+
+```bash
+git add .beads-hooks/
+git commit -m "Add bd git hooks for team"
+```
+
 ### Manual Install
 
 ```bash
