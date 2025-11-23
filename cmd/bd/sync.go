@@ -862,7 +862,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	// Suggest next steps
 	fmt.Println("\nNext steps:")
 	fmt.Println("1. Review the merged changes")
-	fmt.Println("2. Run 'bd import' to sync the database with merged JSONL")
+	fmt.Println("2. Run 'bd sync --import-only' to sync the database with merged JSONL")
 	fmt.Println("3. Run 'bd sync' to push changes to remote")
 
 	return nil
