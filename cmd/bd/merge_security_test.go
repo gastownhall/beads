@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -110,8 +111,11 @@ func TestCleanupMergeArtifacts_CommandInjectionPrevention(t *testing.T) {
 			// exec.Command safely handled the filename.
 
 			// Verify that sensitive paths are NOT affected
-			if _, err := os.Stat("/etc/passwd"); err != nil {
-				t.Errorf("Command injection may have occurred - /etc/passwd missing")
+			// Note: /etc/passwd only exists on Unix systems, so skip this check on Windows
+			if runtime.GOOS != "windows" {
+				if _, err := os.Stat("/etc/passwd"); err != nil {
+					t.Errorf("Command injection may have occurred - /etc/passwd missing")
+				}
 			}
 		})
 	}
@@ -129,14 +133,14 @@ func TestCleanupMergeArtifacts_OnlyBackupFiles(t *testing.T) {
 
 	// Create various files
 	files := map[string]bool{
-		"issues.jsonl":              false, // Should NOT be removed
-		"beads.db":                 false, // Should NOT be removed
-		"backup.jsonl":             true,  // Should be removed
-		"issues.jsonl.backup":       true,  // Should be removed
-		"BACKUP_FILE":              true,  // Should be removed (case-insensitive)
-		"my_backup_2024.txt":       true,  // Should be removed
-		"important_data.jsonl":     false, // Should NOT be removed
-		"issues.jsonl.bak":          false, // Should NOT be removed (no "backup")
+		"issues.jsonl":         false, // Should NOT be removed
+		"beads.db":             false, // Should NOT be removed
+		"backup.jsonl":         true,  // Should be removed
+		"issues.jsonl.backup":  true,  // Should be removed
+		"BACKUP_FILE":          true,  // Should be removed (case-insensitive)
+		"my_backup_2024.txt":   true,  // Should be removed
+		"important_data.jsonl": false, // Should NOT be removed
+		"issues.jsonl.bak":     false, // Should NOT be removed (no "backup")
 	}
 
 	for filename := range files {
