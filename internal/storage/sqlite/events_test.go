@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -252,6 +253,10 @@ func TestAddCommentUpdatesTimestamp(t *testing.T) {
 	}
 
 	originalUpdatedAt := issue.UpdatedAt
+
+	// Sleep briefly to ensure timestamp difference on systems with low time resolution (e.g., Windows)
+	// This prevents flaky test failures when both operations complete in the same millisecond
+	time.Sleep(2 * time.Millisecond)
 
 	// Add comment
 	err = store.AddComment(ctx, issue.ID, "alice", "Test comment")
