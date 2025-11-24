@@ -13,8 +13,11 @@ import (
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Delete all closed issues (optionally filtered by age)",
-	Long: `Delete all closed issues to clean up the database.
+	Short: "Delete closed issues from database to free up space",
+	Long: `Delete closed issues from the database to reduce database size.
+
+This command permanently removes closed issues from beads.db and beads.jsonl.
+It does NOT remove temporary files - use 'bd clean' for that.
 
 By default, deletes ALL closed issues. Use --older-than to only delete
 issues closed before a certain date.
@@ -34,7 +37,10 @@ SAFETY:
 - Requires --force flag to actually delete (unless --dry-run)
 - Supports --cascade to delete dependents
 - Shows preview of what will be deleted
-- Use --json for programmatic output`,
+- Use --json for programmatic output
+
+SEE ALSO:
+  bd clean      Remove temporary git merge artifacts`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")

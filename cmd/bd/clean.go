@@ -13,11 +13,11 @@ import (
 
 var cleanCmd = &cobra.Command{
 	Use:   "clean",
-	Short: "Clean up temporary beads artifacts",
-	Long: `Delete temporary beads artifacts to clean up after git operations.
+	Short: "Clean up temporary git merge artifacts from .beads directory",
+	Long: `Delete temporary git merge artifacts from the .beads directory.
 
-This removes temporary files created during git merges and conflicts from the
-.beads directory.
+This command removes temporary files created during git merges and conflicts.
+It does NOT delete issues from the database - use 'bd cleanup' for that.
 
 Files removed:
 - 3-way merge snapshots (beads.base.jsonl, beads.left.jsonl, beads.right.jsonl)
@@ -36,7 +36,10 @@ Clean up temporary files:
   bd clean
 
 Preview what would be deleted:
-  bd clean --dry-run`,
+  bd clean --dry-run
+
+SEE ALSO:
+  bd cleanup    Delete closed issues from database`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 

@@ -18,9 +18,15 @@ import (
 
 var renamePrefixCmd = &cobra.Command{
 	Use:   "rename-prefix <new-prefix>",
-	Short: "Rename the issue prefix for all issues",
+	Short: "Rename the issue prefix for all issues in the database",
 	Long: `Rename the issue prefix for all issues in the database.
 This will update all issue IDs and all text references across all fields.
+
+USE CASES:
+- Shortening long prefixes (e.g., 'knowledge-work-' → 'kw-')
+- Rebranding project naming conventions
+- Consolidating multiple prefixes after database corruption
+- Migrating to team naming standards
 
 Prefix validation rules:
 - Max length: 8 characters
@@ -34,9 +40,12 @@ If issues have multiple prefixes (corrupted database), use --repair to consolida
 The --repair flag will rename all issues with incorrect prefixes to the new prefix,
 preserving issues that already have the correct prefix.
 
-Example:
-  bd rename-prefix kw-         # Rename from 'knowledge-work-' to 'kw-'
-  bd rename-prefix mtg- --repair  # Consolidate multiple prefixes into 'mtg-'`,
+EXAMPLES:
+  bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
+  bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
+  bd rename-prefix team- --dry-run    # Preview changes without applying
+
+NOTE: This is a rare operation. Most users never need this command.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		newPrefix := args[0]

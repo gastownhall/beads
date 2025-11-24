@@ -170,6 +170,12 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `min_hash_length` - Minimum hash ID length (default: 4)
 - `max_hash_length` - Maximum hash ID length (default: 8)
 - `import.orphan_handling` - How to handle hierarchical issues with missing parents during import (default: `allow`)
+- `export.error_policy` - Error handling strategy for exports (default: `strict`)
+- `export.retry_attempts` - Number of retry attempts for transient errors (default: 3)
+- `export.retry_backoff_ms` - Initial backoff in milliseconds for retries (default: 100)
+- `export.skip_encoding_errors` - Skip issues that fail JSON encoding (default: false)
+- `export.write_manifest` - Write .manifest.json with export metadata (default: false)
+- `auto_export.error_policy` - Override error policy for auto-exports (default: `best-effort`)
 
 ### Integration Namespaces
 
@@ -199,6 +205,74 @@ bd config set min_hash_length "5"
 ```
 
 See [docs/ADAPTIVE_IDS.md](docs/ADAPTIVE_IDS.md) for detailed documentation.
+
+### Example: Export Error Handling
+
+Controls how export operations handle errors when fetching issue data (labels, comments, dependencies).
+
+```bash
+# Strict: Fail fast on any error (default for user-initiated exports)
+bd config set export.error_policy "strict"
+
+# Best-effort: Skip failed operations with warnings (good for auto-export)
+bd config set export.error_policy "best-effort"
+
+# Partial: Retry transient failures, skip persistent ones with manifest
+bd config set export.error_policy "partial"
+bd config set export.write_manifest "true"
+
+# Required-core: Fail on core data (issues/deps), skip enrichments (labels/comments)
+bd config set export.error_policy "required-core"
+
+# Customize retry behavior
+bd config set export.retry_attempts "5"
+bd config set export.retry_backoff_ms "200"
+
+# Skip individual issues that fail JSON encoding
+bd config set export.skip_encoding_errors "true"
+
+# Auto-export uses different policy (background operation)
+bd config set auto_export.error_policy "best-effort"
+```
+
+**Policy details:**
+
+- **`strict`** (default) - Fail immediately on any error. Ensures complete exports but may block on transient issues like database locks. Best for critical exports and migrations.
+
+- **`best-effort`** - Skip failed batches with warnings. Continues export even if labels or comments fail to load. Best for auto-exports and background sync where availability matters more than completeness.
+
+- **`partial`** - Retry transient failures (3x by default), then skip with manifest file. Creates `.manifest.json` alongside JSONL documenting what succeeded/failed. Best for large databases with occasional corruption.
+
+- **`required-core`** - Fail on core data (issues, dependencies), skip enrichments (labels, comments) with warnings. Best when metadata is secondary to issue tracking.
+
+**When to use each mode:**
+
+- Use `strict` (default) for production backups and critical exports
+- Use `best-effort` for auto-exports (default via `auto_export.error_policy`)
+- Use `partial` when you need visibility into export completeness
+- Use `required-core` when labels/comments are optional
+
+**Context-specific behavior:**
+
+User-initiated exports (`bd sync`, manual export commands) use `export.error_policy` (default: `strict`).
+
+Auto-exports (daemon background sync) use `auto_export.error_policy` (default: `best-effort`), falling back to `export.error_policy` if not set.
+
+**Example: Different policies for different contexts:**
+
+```bash
+# Critical project: strict everywhere
+bd config set export.error_policy "strict"
+
+# Development project: strict user exports, permissive auto-exports
+bd config set export.error_policy "strict"
+bd config set auto_export.error_policy "best-effort"
+
+# Large database with occasional corruption
+bd config set export.error_policy "partial"
+bd config set export.write_manifest "true"
+bd config set export.retry_attempts "5"
+```
 
 ### Example: Import Orphan Handling
 

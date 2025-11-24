@@ -99,6 +99,8 @@ var (
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
+	verboseFlag    bool // Enable verbose/debug output
+	quietFlag      bool // Suppress non-essential output
 )
 
 func init() {
@@ -118,9 +120,11 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
+	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 
 	// Add --version flag to root command (same behavior as version subcommand)
-	rootCmd.Flags().BoolP("version", "v", false, "Print version information")
+	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
 }
 
 var rootCmd = &cobra.Command{
@@ -139,6 +143,10 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Set up signal-aware context for graceful cancellation
 		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+		// Apply verbosity flags early (before any output)
+		debug.SetVerbose(verboseFlag)
+		debug.SetQuiet(quietFlag)
 
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults

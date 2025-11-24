@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/autoimport"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/export"
 	"github.com/steveyegge/beads/internal/importer"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -30,10 +31,24 @@ func (s *Server) handleExport(req *Request) Response {
 	}
 
 	store := s.storage
-
 	ctx := s.reqCtx(req)
 
-	// Get all issues
+	// Load export configuration (user-initiated export, not auto)
+	cfg, err := export.LoadConfig(ctx, store, false)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to load export config: %v", err),
+		}
+	}
+
+	// Initialize manifest if configured
+	var manifest *export.Manifest
+	if cfg.WriteManifest {
+		manifest = export.NewManifest(cfg.Policy)
+	}
+
+	// Get all issues (core operation, always fail-fast)
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return Response{
@@ -47,40 +62,73 @@ func (s *Server) handleExport(req *Request) Response {
 		return issues[i].ID < issues[j].ID
 	})
 
-	// Populate dependencies for all issues (avoid N+1)
-	allDeps, err := store.GetAllDependencyRecords(ctx)
-	if err != nil {
+	// Populate dependencies for all issues (core data)
+	var allDeps map[string][]*types.Dependency
+	result := export.FetchWithPolicy(ctx, cfg, export.DataTypeCore, "get dependencies", func() error {
+		var err error
+		allDeps, err = store.GetAllDependencyRecords(ctx)
+		return err
+	})
+	if result.Err != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("failed to get dependencies: %v", err),
+			Error:   fmt.Sprintf("failed to get dependencies: %v", result.Err),
 		}
 	}
 	for _, issue := range issues {
 		issue.Dependencies = allDeps[issue.ID]
 	}
 
-	// Populate labels for all issues (avoid N+1)
+	// Populate labels for all issues (enrichment data)
 	issueIDs := make([]string, len(issues))
 	for i, issue := range issues {
 		issueIDs[i] = issue.ID
 	}
-	allLabels, err := store.GetLabelsForIssues(ctx, issueIDs)
-	if err != nil {
+	var allLabels map[string][]string
+	result = export.FetchWithPolicy(ctx, cfg, export.DataTypeLabels, "get labels", func() error {
+		var err error
+		allLabels, err = store.GetLabelsForIssues(ctx, issueIDs)
+		return err
+	})
+	if result.Err != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("failed to get labels: %v", err),
+			Error:   fmt.Sprintf("failed to get labels: %v", result.Err),
+		}
+	}
+	if !result.Success {
+		// Labels fetch failed but policy allows continuing
+		allLabels = make(map[string][]string) // Empty map
+		if manifest != nil {
+			manifest.PartialData = append(manifest.PartialData, "labels")
+			manifest.Warnings = append(manifest.Warnings, result.Warnings...)
+			manifest.Complete = false
 		}
 	}
 	for _, issue := range issues {
 		issue.Labels = allLabels[issue.ID]
 	}
 
-	// Populate comments for all issues (avoid N+1)
-	allComments, err := store.GetCommentsForIssues(ctx, issueIDs)
-	if err != nil {
+	// Populate comments for all issues (enrichment data)
+	var allComments map[string][]*types.Comment
+	result = export.FetchWithPolicy(ctx, cfg, export.DataTypeComments, "get comments", func() error {
+		var err error
+		allComments, err = store.GetCommentsForIssues(ctx, issueIDs)
+		return err
+	})
+	if result.Err != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("failed to get comments: %v", err),
+			Error:   fmt.Sprintf("failed to get comments: %v", result.Err),
+		}
+	}
+	if !result.Success {
+		// Comments fetch failed but policy allows continuing
+		allComments = make(map[string][]*types.Comment) // Empty map
+		if manifest != nil {
+			manifest.PartialData = append(manifest.PartialData, "comments")
+			manifest.Warnings = append(manifest.Warnings, result.Warnings...)
+			manifest.Complete = false
 		}
 	}
 	for _, issue := range issues {
@@ -106,8 +154,24 @@ func (s *Server) handleExport(req *Request) Response {
 	// Write JSONL
 	encoder := json.NewEncoder(tempFile)
 	exportedIDs := make([]string, 0, len(issues))
+	var encodingWarnings []string
 	for _, issue := range issues {
 		if err := encoder.Encode(issue); err != nil {
+			if cfg.SkipEncodingErrors {
+				// Skip this issue and continue
+				warning := fmt.Sprintf("skipped encoding issue %s: %v", issue.ID, err)
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+				encodingWarnings = append(encodingWarnings, warning)
+				if manifest != nil {
+					manifest.FailedIssues = append(manifest.FailedIssues, export.FailedIssue{
+						IssueID: issue.ID,
+						Reason:  err.Error(),
+					})
+					manifest.Complete = false
+				}
+				continue
+			}
+			// Fail-fast on encoding errors
 			return Response{
 				Success: false,
 				Error:   fmt.Sprintf("failed to encode issue %s: %v", issue.ID, err),
@@ -139,11 +203,25 @@ func (s *Server) handleExport(req *Request) Response {
 		fmt.Fprintf(os.Stderr, "Warning: failed to clear dirty flags: %v\n", err)
 	}
 
-	result := map[string]interface{}{
+	// Write manifest if configured
+	if manifest != nil {
+		manifest.ExportedCount = len(exportedIDs)
+		manifest.Warnings = append(manifest.Warnings, encodingWarnings...)
+		if err := export.WriteManifest(exportArgs.JSONLPath, manifest); err != nil {
+			// Non-fatal, just log
+			fmt.Fprintf(os.Stderr, "Warning: failed to write manifest: %v\n", err)
+		}
+	}
+
+	responseData := map[string]interface{}{
 		"exported_count": len(exportedIDs),
 		"path":           exportArgs.JSONLPath,
+		"skipped_count":  len(encodingWarnings),
 	}
-	data, _ := json.Marshal(result)
+	if len(encodingWarnings) > 0 {
+		responseData["warnings"] = encodingWarnings
+	}
+	data, _ := json.Marshal(responseData)
 	return Response{
 		Success: true,
 		Data:    data,
@@ -379,6 +457,18 @@ func (s *Server) triggerExport(ctx context.Context, store storage.Storage, dbPat
 		return fmt.Errorf("storage is not SQLiteStorage")
 	}
 
+	// Load export configuration (auto-export mode)
+	cfg, err := export.LoadConfig(ctx, store, true)
+	if err != nil {
+		// Fall back to defaults if config load fails
+		cfg = &export.Config{
+			Policy:         export.DefaultAutoExportPolicy,
+			RetryAttempts:  export.DefaultRetryAttempts,
+			RetryBackoffMS: export.DefaultRetryBackoffMS,
+			IsAutoExport:   true,
+		}
+	}
+
 	// Export to JSONL (this will update the file with remapped IDs)
 	allIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -393,32 +483,55 @@ func (s *Server) triggerExport(ctx context.Context, store storage.Storage, dbPat
 	// CRITICAL: Populate all related data to prevent data loss
 	// This mirrors the logic in handleExport
 
-	// Populate dependencies for all issues (avoid N+1 queries)
-	allDeps, err := store.GetAllDependencyRecords(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get dependencies: %w", err)
+	// Populate dependencies for all issues (core data)
+	var allDeps map[string][]*types.Dependency
+	result := export.FetchWithPolicy(ctx, cfg, export.DataTypeCore, "get dependencies", func() error {
+		var err error
+		allDeps, err = store.GetAllDependencyRecords(ctx)
+		return err
+	})
+	if result.Err != nil {
+		return fmt.Errorf("failed to get dependencies: %w", result.Err)
 	}
 	for _, issue := range allIssues {
 		issue.Dependencies = allDeps[issue.ID]
 	}
 
-	// Populate labels for all issues (avoid N+1 queries)
+	// Populate labels for all issues (enrichment data)
 	issueIDs := make([]string, len(allIssues))
 	for i, issue := range allIssues {
 		issueIDs[i] = issue.ID
 	}
-	allLabels, err := store.GetLabelsForIssues(ctx, issueIDs)
-	if err != nil {
-		return fmt.Errorf("failed to get labels: %w", err)
+	var allLabels map[string][]string
+	result = export.FetchWithPolicy(ctx, cfg, export.DataTypeLabels, "get labels", func() error {
+		var err error
+		allLabels, err = store.GetLabelsForIssues(ctx, issueIDs)
+		return err
+	})
+	if result.Err != nil {
+		return fmt.Errorf("failed to get labels: %w", result.Err)
+	}
+	if !result.Success {
+		// Labels fetch failed but policy allows continuing
+		allLabels = make(map[string][]string) // Empty map
 	}
 	for _, issue := range allIssues {
 		issue.Labels = allLabels[issue.ID]
 	}
 
-	// Populate comments for all issues (avoid N+1 queries)
-	allComments, err := store.GetCommentsForIssues(ctx, issueIDs)
-	if err != nil {
-		return fmt.Errorf("failed to get comments: %w", err)
+	// Populate comments for all issues (enrichment data)
+	var allComments map[string][]*types.Comment
+	result = export.FetchWithPolicy(ctx, cfg, export.DataTypeComments, "get comments", func() error {
+		var err error
+		allComments, err = store.GetCommentsForIssues(ctx, issueIDs)
+		return err
+	})
+	if result.Err != nil {
+		return fmt.Errorf("failed to get comments: %w", result.Err)
+	}
+	if !result.Success {
+		// Comments fetch failed but policy allows continuing
+		allComments = make(map[string][]*types.Comment) // Empty map
 	}
 	for _, issue := range allIssues {
 		issue.Comments = allComments[issue.ID]
