@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -846,5 +847,126 @@ func TestParseVersionParts(t *testing.T) {
 				t.Errorf("parseVersionParts(%q)[%d] = %d, expected %d", tc.version, i, result[i], tc.expected[i])
 			}
 		}
+	}
+}
+
+func TestCheckSyncBranchConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupFunc      func(t *testing.T, tmpDir string)
+		expectedStatus string
+		expectWarning  bool
+	}{
+		{
+			name: "no beads directory",
+			setupFunc: func(t *testing.T, tmpDir string) {
+				// No .beads directory
+			},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name: "not a git repo",
+			setupFunc: func(t *testing.T, tmpDir string) {
+				beadsDir := filepath.Join(tmpDir, ".beads")
+				if err := os.Mkdir(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name: "sync.branch configured",
+			setupFunc: func(t *testing.T, tmpDir string) {
+				// Initialize git repo
+				cmd := exec.Command("git", "init")
+				cmd.Dir = tmpDir
+				if err := cmd.Run(); err != nil {
+					t.Fatal(err)
+				}
+				cmd = exec.Command("git", "config", "user.email", "test@example.com")
+				cmd.Dir = tmpDir
+				_ = cmd.Run()
+				cmd = exec.Command("git", "config", "user.name", "Test User")
+				cmd.Dir = tmpDir
+				_ = cmd.Run()
+
+				// Create .beads directory and database
+				beadsDir := filepath.Join(tmpDir, ".beads")
+				if err := os.Mkdir(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+				dbPath := filepath.Join(beadsDir, "beads.db")
+				db, err := sql.Open("sqlite3", dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+
+				// Create config table and set sync.branch
+				if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO config (key, value) VALUES ('sync.branch', 'main')`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name: "sync.branch not configured",
+			setupFunc: func(t *testing.T, tmpDir string) {
+				// Initialize git repo
+				cmd := exec.Command("git", "init")
+				cmd.Dir = tmpDir
+				if err := cmd.Run(); err != nil {
+					t.Fatal(err)
+				}
+				cmd = exec.Command("git", "config", "user.email", "test@example.com")
+				cmd.Dir = tmpDir
+				_ = cmd.Run()
+				cmd = exec.Command("git", "config", "user.name", "Test User")
+				cmd.Dir = tmpDir
+				_ = cmd.Run()
+
+				// Create .beads directory and database
+				beadsDir := filepath.Join(tmpDir, ".beads")
+				if err := os.Mkdir(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+				dbPath := filepath.Join(beadsDir, "beads.db")
+				db, err := sql.Open("sqlite3", dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+
+				// Create config table but don't set sync.branch
+				if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			tc.setupFunc(t, tmpDir)
+
+			result := checkSyncBranchConfig(tmpDir)
+
+			if result.Status != tc.expectedStatus {
+				t.Errorf("Expected status %q, got %q", tc.expectedStatus, result.Status)
+			}
+
+			if tc.expectWarning && result.Fix == "" {
+				t.Error("Expected Fix field to be set for warning status")
+			}
+		})
 	}
 }
