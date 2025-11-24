@@ -18,9 +18,9 @@ func (d *daemonLogger) log(format string, args ...interface{}) {
 
 // setupDaemonLogger creates a rotating log file logger for the daemon
 func setupDaemonLogger(logPath string) (*lumberjack.Logger, daemonLogger) {
-	maxSizeMB := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 10)
-	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 3)
-	maxAgeDays := getEnvInt("BEADS_DAEMON_LOG_MAX_AGE", 7)
+	maxSizeMB := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 50)
+	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 7)
+	maxAgeDays := getEnvInt("BEADS_DAEMON_LOG_MAX_AGE", 30)
 	compress := getEnvBool("BEADS_DAEMON_LOG_COMPRESS", true)
 
 	logF := &lumberjack.Logger{

@@ -38,6 +38,10 @@ Tool-level settings you can configure:
 | `actor` | `--actor` | `BD_ACTOR` | `$USER` | Actor name for audit trail |
 | `flush-debounce` | - | `BEADS_FLUSH_DEBOUNCE` | `5s` | Debounce time for auto-flush |
 | `auto-start-daemon` | - | `BEADS_AUTO_START_DAEMON` | `true` | Auto-start daemon if not running |
+| `daemon-log-max-size` | - | `BEADS_DAEMON_LOG_MAX_SIZE` | `50` | Max daemon log size in MB before rotation |
+| `daemon-log-max-backups` | - | `BEADS_DAEMON_LOG_MAX_BACKUPS` | `7` | Max number of old log files to keep |
+| `daemon-log-max-age` | - | `BEADS_DAEMON_LOG_MAX_AGE` | `30` | Max days to keep old log files |
+| `daemon-log-compress` | - | `BEADS_DAEMON_LOG_COMPRESS` | `true` | Compress rotated log files |
 
 ### Example Config File
 
@@ -54,6 +58,12 @@ flush-debounce: 10s
 
 # Auto-start daemon (default true)
 auto-start-daemon: true
+
+# Daemon log rotation settings
+daemon-log-max-size: 50      # MB per file (default 50)
+daemon-log-max-backups: 7    # Number of old logs to keep (default 7)
+daemon-log-max-age: 30       # Days to keep old logs (default 30)
+daemon-log-compress: true    # Compress rotated logs (default true)
 ```
 
 `.beads/config.yaml` (project-specific):

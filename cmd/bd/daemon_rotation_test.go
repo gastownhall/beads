@@ -107,19 +107,19 @@ func TestLogFileRotationDefaults(t *testing.T) {
 	os.Unsetenv("BEADS_DAEMON_LOG_MAX_AGE")
 	os.Unsetenv("BEADS_DAEMON_LOG_COMPRESS")
 
-	maxSize := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 10)
-	if maxSize != 10 {
-		t.Errorf("Expected default max size 10, got %d", maxSize)
+	maxSize := getEnvInt("BEADS_DAEMON_LOG_MAX_SIZE", 50)
+	if maxSize != 50 {
+		t.Errorf("Expected default max size 50, got %d", maxSize)
 	}
 
-	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 3)
-	if maxBackups != 3 {
-		t.Errorf("Expected default max backups 3, got %d", maxBackups)
+	maxBackups := getEnvInt("BEADS_DAEMON_LOG_MAX_BACKUPS", 7)
+	if maxBackups != 7 {
+		t.Errorf("Expected default max backups 7, got %d", maxBackups)
 	}
 
-	maxAge := getEnvInt("BEADS_DAEMON_LOG_MAX_AGE", 7)
-	if maxAge != 7 {
-		t.Errorf("Expected default max age 7, got %d", maxAge)
+	maxAge := getEnvInt("BEADS_DAEMON_LOG_MAX_AGE", 30)
+	if maxAge != 30 {
+		t.Errorf("Expected default max age 30, got %d", maxAge)
 	}
 
 	compress := getEnvBool("BEADS_DAEMON_LOG_COMPRESS", true)

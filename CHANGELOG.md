@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **Daemon Log Rotation**: Increased default rotation limits for better production use (bd-t7ds)
+  - Max size increased from 10MB to 50MB per file
+  - Max backups increased from 3 to 7 files
+  - Max age increased from 7 to 30 days
+  - Added comprehensive documentation in CONFIG.md
+  - Better handles long-running daemons with high log output
+
 - **Git Pre-Push Hook**: Better error messaging and auto-sync option
   - Error message now suggests `bd sync` instead of manual git commands
   - Interactive prompt offers to run `bd sync` automatically
@@ -1233,9 +1240,9 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Includes comprehensive test coverage
 - **Log Rotation**: Automatic daemon log rotation with configurable limits (bd-154)
   - Prevents unbounded log file growth for long-running daemons
-  - Configurable via environment variables: `BEADS_DAEMON_LOG_MAX_SIZE`, `BEADS_DAEMON_LOG_MAX_BACKUPS`, `BEADS_DAEMON_LOG_MAX_AGE`
+  - Configurable via environment variables: `BEADS_DAEMON_LOG_MAX_SIZE`, `BEADS_DAEMON_LOG_MAX_BACKUPS`, `BEADS_DAEMON_LOG_MAX_AGE`, `BEADS_DAEMON_LOG_COMPRESS`
   - Optional compression of rotated logs
-  - Defaults: 10MB max size, 3 backups, 7 day retention, compression enabled
+  - Defaults: 50MB max size, 7 backups, 30 day retention, compression enabled
 - **Batch Deletion**: Enhanced `bd delete` command with batch operations (bd-127)
   - Delete multiple issues at once: `bd delete bd-1 bd-2 bd-3 --force`
   - Read from file: `bd delete --from-file deletions.txt --force`
