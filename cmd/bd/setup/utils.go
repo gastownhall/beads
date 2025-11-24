@@ -31,8 +31,8 @@ func atomicWriteFile(path string, data []byte) error {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 
-	// Set permissions to 0644
-	if err := os.Chmod(tmpPath, 0644); err != nil {
+	// Set permissions to 0600 (owner read/write only)
+	if err := os.Chmod(tmpPath, 0600); err != nil {
 		_ = os.Remove(tmpPath) // Best effort cleanup
 		return fmt.Errorf("set permissions: %w", err)
 	}
