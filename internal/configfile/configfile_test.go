@@ -12,9 +12,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Database != "beads.db" {
 		t.Errorf("Database = %q, want beads.db", cfg.Database)
 	}
-	
-	if cfg.JSONLExport != "beads.jsonl" {
-		t.Errorf("JSONLExport = %q, want beads.jsonl", cfg.JSONLExport)
+
+	if cfg.JSONLExport != "issues.jsonl" {
+		t.Errorf("JSONLExport = %q, want issues.jsonl", cfg.JSONLExport)
 	}
 }
 
@@ -84,8 +84,8 @@ func TestJSONLPath(t *testing.T) {
 	}{
 		{
 			name: "default",
-			cfg:  &Config{JSONLExport: "beads.jsonl"},
-			want: filepath.Join(beadsDir, "beads.jsonl"),
+			cfg:  &Config{JSONLExport: "issues.jsonl"},
+			want: filepath.Join(beadsDir, "issues.jsonl"),
 		},
 		{
 			name: "custom",
@@ -95,7 +95,7 @@ func TestJSONLPath(t *testing.T) {
 		{
 			name: "empty falls back to default",
 			cfg:  &Config{JSONLExport: ""},
-			want: filepath.Join(beadsDir, "beads.jsonl"),
+			want: filepath.Join(beadsDir, "issues.jsonl"),
 		},
 	}
 	

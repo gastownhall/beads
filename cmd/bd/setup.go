@@ -14,7 +14,7 @@ var (
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Setup integration with AI editors",
-	Long:  `Setup integration files for AI editors like Claude Code and Cursor.`,
+	Long:  `Setup integration files for AI editors like Claude Code, Cursor, and Aider.`,
 }
 
 var setupCursorCmd = &cobra.Command{
@@ -36,6 +36,32 @@ Uses BEGIN/END markers for safe idempotent updates.`,
 		}
 
 		setup.InstallCursor()
+	},
+}
+
+var setupAiderCmd = &cobra.Command{
+	Use:   "aider",
+	Short: "Setup Aider integration",
+	Long: `Install Beads workflow configuration for Aider.
+
+Creates .aider.conf.yml with bd workflow instructions.
+The AI will suggest bd commands for you to run via /run.
+
+Note: Aider requires explicit command execution - the AI cannot
+run commands autonomously. It will suggest bd commands which you
+must confirm using Aider's /run command.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if setupCheck {
+			setup.CheckAider()
+			return
+		}
+
+		if setupRemove {
+			setup.RemoveAider()
+			return
+		}
+
+		setup.InstallAider()
 	},
 }
 
@@ -72,7 +98,11 @@ func init() {
 	setupCursorCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Cursor integration is installed")
 	setupCursorCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd rules from Cursor")
 
+	setupAiderCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Aider integration is installed")
+	setupAiderCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd config from Aider")
+
 	setupCmd.AddCommand(setupClaudeCmd)
 	setupCmd.AddCommand(setupCursorCmd)
+	setupCmd.AddCommand(setupAiderCmd)
 	rootCmd.AddCommand(setupCmd)
 }

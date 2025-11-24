@@ -6,12 +6,21 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
+	// FIX: Initialize rootCtx for flush operations (issue #355)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+
 	origDaemonClient := daemonClient
 	origDaemonStatus := daemonStatus
 	origStore := store
@@ -68,14 +77,14 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	// Seed database with issues
 	setupStore := newTestStore(t, testDBPath)
 
-	ctx := context.Background()
+	setupCtx := context.Background()
 	target := &types.Issue{
 		Title:     "Issue to delete",
 		IssueType: types.TypeTask,
 		Priority:  2,
 		Status:    types.StatusOpen,
 	}
-	if err := setupStore.CreateIssue(ctx, target, "test"); err != nil {
+	if err := setupStore.CreateIssue(setupCtx, target, "test"); err != nil {
 		t.Fatalf("failed to create target issue: %v", err)
 	}
 
@@ -86,7 +95,7 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 		Priority:    2,
 		Status:      types.StatusOpen,
 	}
-	if err := setupStore.CreateIssue(ctx, neighbor, "test"); err != nil {
+	if err := setupStore.CreateIssue(setupCtx, neighbor, "test"); err != nil {
 		t.Fatalf("failed to create neighbor issue: %v", err)
 	}
 	if err := setupStore.Close(); err != nil {

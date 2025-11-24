@@ -218,6 +218,14 @@ func strPtr(s string) *string {
 // TestIdempotentImportNoTimestampChurn verifies that importing unchanged issues
 // does not update their timestamps (bd-84)
 func TestIdempotentImportNoTimestampChurn(t *testing.T) {
+	// FIX: Initialize rootCtx for autoImportIfNewer (issue #355)
+	testRootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = testRootCtx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "bd-test-idempotent-*")
 	if err != nil {
@@ -300,6 +308,14 @@ func TestIdempotentImportNoTimestampChurn(t *testing.T) {
 // TestImportMultipleUnchangedIssues verifies that importing multiple unchanged issues
 // does not update any of their timestamps (bd-84)
 func TestImportMultipleUnchangedIssues(t *testing.T) {
+	// FIX: Initialize rootCtx for autoImportIfNewer (issue #355)
+	testRootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	oldRootCtx := rootCtx
+	rootCtx = testRootCtx
+	defer func() { rootCtx = oldRootCtx }()
+
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "bd-test-changed-*")
 	if err != nil {

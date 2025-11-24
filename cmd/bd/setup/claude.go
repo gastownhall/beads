@@ -66,7 +66,7 @@ func InstallClaude(project bool) {
 		os.Exit(1)
 	}
 
-	if err := atomicWriteFile(settingsPath, data, 0644); err != nil {
+	if err := atomicWriteFile(settingsPath, data); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: write settings: %v\n", err)
 		os.Exit(1)
 	}
@@ -148,7 +148,7 @@ func RemoveClaude(project bool) {
 		os.Exit(1)
 	}
 
-	if err := atomicWriteFile(settingsPath, data, 0644); err != nil {
+	if err := atomicWriteFile(settingsPath, data); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: write settings: %v\n", err)
 		os.Exit(1)
 	}

@@ -1,0 +1,157 @@
+package setup
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestAtomicWriteFile(t *testing.T) {
+	// Create temp directory
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.txt")
+	testData := []byte("test content")
+
+	// Write file
+	err := atomicWriteFile(testFile, testData)
+	if err != nil {
+		t.Fatalf("atomicWriteFile failed: %v", err)
+	}
+
+	// Verify file exists and has correct content
+	data, err := os.ReadFile(testFile)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	if string(data) != string(testData) {
+		t.Errorf("file content mismatch: got %q, want %q", string(data), string(testData))
+	}
+
+	// Verify permissions
+	info, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+
+	mode := info.Mode()
+	if mode.Perm() != 0644 {
+		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0644)
+	}
+
+	// Test overwriting existing file
+	newData := []byte("updated content")
+	err = atomicWriteFile(testFile, newData)
+	if err != nil {
+		t.Fatalf("atomicWriteFile overwrite failed: %v", err)
+	}
+
+	data, err = os.ReadFile(testFile)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+
+	if string(data) != string(newData) {
+		t.Errorf("updated file content mismatch: got %q, want %q", string(data), string(newData))
+	}
+
+	// Test error case: write to non-existent directory
+	badPath := filepath.Join(tmpDir, "nonexistent", "test.txt")
+	err = atomicWriteFile(badPath, testData)
+	if err == nil {
+		t.Error("expected error when writing to non-existent directory")
+	}
+}
+
+func TestDirExists(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Test existing directory
+	if !DirExists(tmpDir) {
+		t.Error("DirExists returned false for existing directory")
+	}
+
+	// Test non-existing directory
+	nonExistent := filepath.Join(tmpDir, "nonexistent")
+	if DirExists(nonExistent) {
+		t.Error("DirExists returned true for non-existing directory")
+	}
+
+	// Test file (not directory)
+	testFile := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	if DirExists(testFile) {
+		t.Error("DirExists returned true for a file")
+	}
+}
+
+func TestFileExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.txt")
+
+	// Test non-existing file
+	if FileExists(testFile) {
+		t.Error("FileExists returned true for non-existing file")
+	}
+
+	// Create file
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Test existing file
+	if !FileExists(testFile) {
+		t.Error("FileExists returned false for existing file")
+	}
+
+	// Test directory (not file)
+	if FileExists(tmpDir) {
+		t.Error("FileExists returned true for a directory")
+	}
+}
+
+func TestEnsureDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Test creating new directory
+	newDir := filepath.Join(tmpDir, "newdir")
+	err := EnsureDir(newDir, 0755)
+	if err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+
+	if !DirExists(newDir) {
+		t.Error("directory was not created")
+	}
+
+	// Verify permissions
+	info, err := os.Stat(newDir)
+	if err != nil {
+		t.Fatalf("failed to stat directory: %v", err)
+	}
+
+	mode := info.Mode()
+	if mode.Perm() != 0755 {
+		t.Errorf("directory permissions mismatch: got %o, want %o", mode.Perm(), 0755)
+	}
+
+	// Test with existing directory (should be no-op)
+	err = EnsureDir(newDir, 0755)
+	if err != nil {
+		t.Errorf("EnsureDir failed on existing directory: %v", err)
+	}
+
+	// Test creating nested directories
+	nestedDir := filepath.Join(tmpDir, "a", "b", "c")
+	err = EnsureDir(nestedDir, 0755)
+	if err != nil {
+		t.Fatalf("EnsureDir failed for nested directory: %v", err)
+	}
+
+	if !DirExists(nestedDir) {
+		t.Error("nested directory was not created")
+	}
+}

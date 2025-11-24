@@ -362,6 +362,13 @@ async def beads_create_issue(
 ) -> Issue:
     """Create a new issue.
 
+    IMPORTANT: Always provide a meaningful description with context about:
+    - Why this issue exists (problem statement or need)
+    - What needs to be done (scope and approach)
+    - How you discovered it (if applicable)
+
+    Issues without descriptions lack context for future work and make prioritization difficult.
+
     Use this when you discover new work during your session.
     Link it back with beads_add_dependency using 'discovered-from' type.
     """

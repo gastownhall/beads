@@ -82,6 +82,14 @@ var createCmd = &cobra.Command{
 			description = tmpl.Description
 		}
 
+		// Warn if creating an issue without a description (unless it's a test issue)
+		if description == "" && !strings.Contains(strings.ToLower(title), "test") {
+			yellow := color.New(color.FgYellow).SprintFunc()
+			fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
+			fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
+			fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
+		}
+
 		design, _ := cmd.Flags().GetString("design")
 		if design == "" && tmpl != nil {
 			design = tmpl.Design

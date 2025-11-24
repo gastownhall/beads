@@ -27,6 +27,7 @@ var (
 	host       = flag.String("host", "localhost", "Host to bind to")
 	dbPath     = flag.String("db", "", "Path to beads database (optional, will auto-detect)")
 	socketPath = flag.String("socket", "", "Path to daemon socket (optional, will auto-detect)")
+	devMode    = flag.Bool("dev", false, "Run in development mode (serve web files from disk)")
 
 	// WebSocket upgrader
 	upgrader = websocket.Upgrader{
@@ -45,6 +46,9 @@ var (
 
 	// RPC client for daemon communication
 	daemonClient *rpc.Client
+
+	// File system for web files
+	webFS fs.FS
 )
 
 func main() {
@@ -56,6 +60,19 @@ func main() {
 	}()
 
 	flag.Parse()
+
+	// Set up web file system
+	if *devMode {
+		fmt.Println("⚠️  Running in DEVELOPMENT mode: serving web files from disk")
+		webFS = os.DirFS("web")
+	} else {
+		var err error
+		webFS, err = fs.Sub(webFiles, "web")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error accessing embedded web files: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	// Find database path if not specified
 	dbPathResolved := *dbPath
@@ -97,11 +114,6 @@ func main() {
 	http.HandleFunc("/ws", handleWebSocket)
 
 	// Serve static files
-	webFS, err := fs.Sub(webFiles, "web")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error accessing web files: %v\n", err)
-		os.Exit(1)
-	}
 	http.Handle("/static/", http.StripPrefix("/", http.FileServer(http.FS(webFS))))
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
@@ -164,12 +176,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Only serve index for root path
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
-		return
-	}
-
-	webFS, err := fs.Sub(webFiles, "web")
-	if err != nil {
-		http.Error(w, "Error accessing web files", http.StatusInternalServerError)
 		return
 	}
 

@@ -680,3 +680,171 @@ func TestCheckGitHooks(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckMetadataVersionTracking(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupMetadata  func(beadsDir string) error
+		expectedStatus string
+		expectWarning  bool
+	}{
+		{
+			name: "valid current version",
+			setupMetadata: func(beadsDir string) error {
+				cfg := map[string]string{
+					"database":        "beads.db",
+					"last_bd_version": Version,
+				}
+				data, _ := json.Marshal(cfg)
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name: "slightly outdated version",
+			setupMetadata: func(beadsDir string) error {
+				cfg := map[string]string{
+					"database":        "beads.db",
+					"last_bd_version": "0.24.0",
+				}
+				data, _ := json.Marshal(cfg)
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			},
+			expectedStatus: statusOK,
+			expectWarning:  false,
+		},
+		{
+			name: "very old version",
+			setupMetadata: func(beadsDir string) error {
+				cfg := map[string]string{
+					"database":        "beads.db",
+					"last_bd_version": "0.14.0",
+				}
+				data, _ := json.Marshal(cfg)
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+		{
+			name: "empty version field",
+			setupMetadata: func(beadsDir string) error {
+				cfg := map[string]string{
+					"database":        "beads.db",
+					"last_bd_version": "",
+				}
+				data, _ := json.Marshal(cfg)
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+		{
+			name: "invalid version format",
+			setupMetadata: func(beadsDir string) error {
+				cfg := map[string]string{
+					"database":        "beads.db",
+					"last_bd_version": "invalid-version",
+				}
+				data, _ := json.Marshal(cfg)
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+		{
+			name: "corrupted metadata.json",
+			setupMetadata: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{invalid json}"), 0644)
+			},
+			expectedStatus: statusError,
+			expectWarning:  false,
+		},
+		{
+			name: "missing metadata.json",
+			setupMetadata: func(beadsDir string) error {
+				// Don't create metadata.json
+				return nil
+			},
+			expectedStatus: statusWarning,
+			expectWarning:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+
+			// Setup metadata.json
+			if err := tc.setupMetadata(beadsDir); err != nil {
+				t.Fatal(err)
+			}
+
+			check := checkMetadataVersionTracking(tmpDir)
+
+			if check.Status != tc.expectedStatus {
+				t.Errorf("Expected status %s, got %s (message: %s)", tc.expectedStatus, check.Status, check.Message)
+			}
+
+			if tc.expectWarning && check.Status == statusWarning && check.Fix == "" {
+				t.Error("Expected fix message for warning status")
+			}
+		})
+	}
+}
+
+func TestIsValidSemver(t *testing.T) {
+	tests := []struct {
+		version  string
+		expected bool
+	}{
+		{"0.24.2", true},
+		{"1.0.0", true},
+		{"0.1", true},       // Major.minor is valid
+		{"1", true},         // Just major is valid
+		{"", false},         // Empty is invalid
+		{"invalid", false},  // Non-numeric is invalid
+		{"0.a.2", false},    // Letters in parts are invalid
+		{"1.2.3.4", true},   // Extra parts are ok
+	}
+
+	for _, tc := range tests {
+		result := isValidSemver(tc.version)
+		if result != tc.expected {
+			t.Errorf("isValidSemver(%q) = %v, expected %v", tc.version, result, tc.expected)
+		}
+	}
+}
+
+func TestParseVersionParts(t *testing.T) {
+	tests := []struct {
+		version  string
+		expected []int
+	}{
+		{"0.24.2", []int{0, 24, 2}},
+		{"1.0.0", []int{1, 0, 0}},
+		{"0.1", []int{0, 1}},
+		{"1", []int{1}},
+		{"", []int{}},
+		{"invalid", []int{}},
+		{"1.a.3", []int{1}}, // Stops at first non-numeric part
+	}
+
+	for _, tc := range tests {
+		result := parseVersionParts(tc.version)
+		if len(result) != len(tc.expected) {
+			t.Errorf("parseVersionParts(%q) returned %d parts, expected %d", tc.version, len(result), len(tc.expected))
+			continue
+		}
+		for i := range result {
+			if result[i] != tc.expected[i] {
+				t.Errorf("parseVersionParts(%q)[%d] = %d, expected %d", tc.version, i, result[i], tc.expected[i])
+			}
+		}
+	}
+}

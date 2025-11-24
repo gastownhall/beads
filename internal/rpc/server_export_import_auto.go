@@ -219,7 +219,7 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 		s.importInProgress.Store(false)
 		shouldDeferRelease = false
 
-		fmt.Fprintf(os.Stderr, "Warning: auto-import skipped - .beads files have uncommitted changes. Run 'bd import' manually after committing.\n")
+		fmt.Fprintf(os.Stderr, "Warning: auto-import skipped - .beads files have uncommitted changes. Run 'bd sync' after committing.\n")
 		return nil
 	}
 
@@ -292,7 +292,7 @@ func (s *Server) checkAndAutoImportIfStale(req *Request) error {
 	err = autoimport.AutoImportIfNewer(importCtx, store, dbPath, notify, importFunc, onChanged)
 	if err != nil {
 		if importCtx.Err() == context.DeadlineExceeded {
-			fmt.Fprintf(os.Stderr, "Error: auto-import timed out after 5s. Run 'bd import' manually.\n")
+			fmt.Fprintf(os.Stderr, "Error: auto-import timed out after 5s. Run 'bd sync --import-only' manually.\n")
 			return fmt.Errorf("auto-import timed out")
 		}
 		// Log but don't fail the request - let it proceed with stale data

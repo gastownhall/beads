@@ -27,6 +27,25 @@ This shows the last 3 versions with workflow-impacting changes, avoiding the nee
 
 **Why this matters:** bd releases weekly with major versions. This command helps you quickly understand what changed without parsing the full CHANGELOG.
 
+### 🔄 After Upgrading bd
+
+When bd is upgraded to a new version, follow this workflow:
+
+```bash
+# 1. Check what changed
+bd info --whats-new
+
+# 2. Update git hooks to match new bd version
+bd hooks install
+
+# 3. Check for any outdated hooks (optional)
+bd info  # Shows warnings if hooks are outdated
+```
+
+**Why update hooks?** Git hooks (pre-commit, post-merge, pre-push) are versioned with bd. Outdated hooks may miss new auto-sync features or bug fixes. Running `bd hooks install` ensures hooks match your bd version.
+
+**Related:** See GitHub Discussion #239 for background on agent upgrade workflows.
+
 ## Human Setup vs Agent Usage
 
 **IMPORTANT:** If you need to initialize bd, use the `--quiet` flag:
@@ -173,8 +192,8 @@ bd ready --json                                    # Unblocked issues
 bd stale --days 30 --json                          # Forgotten issues
 
 # Create and manage issues
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Found bug" -p 1 --deps discovered-from:<parent-id> --json
+bd create "Issue title" --description="Detailed context about the issue" -t bug|feature|task -p 0-4 --json
+bd create "Found bug" --description="What the bug is and how it was discovered" -p 1 --deps discovered-from:<parent-id> --json
 bd update <id> --status in_progress --json
 bd close <id> --reason "Done" --json
 
@@ -221,10 +240,45 @@ bd monitor --port 3000      # Custom port
 2. **Claim your task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
 4. **Discover new work**: If you find bugs or TODOs, create issues:
-   - Old way (two commands): `bd create "Found bug in auth" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
-   - New way (one command): `bd create "Found bug in auth" -t bug -p 1 --deps discovered-from:<current-id> --json`
+   - Old way (two commands): `bd create "Found bug in auth" --description="Details about the bug" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
+   - New way (one command): `bd create "Found bug in auth" --description="Login fails with 500 when password has special chars" -t bug -p 1 --deps discovered-from:<current-id> --json`
 5. **Complete**: `bd close <id> --reason "Implemented"`
 6. **Sync at end of session**: `bd sync` (see "Agent Session Workflow" below)
+
+### IMPORTANT: Always Include Issue Descriptions
+
+**Issues without descriptions lack context for future work.** When creating issues, always include a meaningful description with:
+
+- **Why** the issue exists (problem statement or need)
+- **What** needs to be done (scope and approach)
+- **How** you discovered it (if applicable during work)
+
+**Good examples:**
+
+```bash
+# Bug discovered during work
+bd create "Fix auth bug in login handler" \
+  --description="Login fails with 500 error when password contains special characters like quotes. Found while testing GH#123 feature. Stack trace shows unescaped SQL in auth/login.go:45." \
+  -t bug -p 1 --deps discovered-from:bd-abc --json
+
+# Feature request
+bd create "Add password reset flow" \
+  --description="Users need ability to reset forgotten passwords via email. Should follow OAuth best practices and include rate limiting to prevent abuse." \
+  -t feature -p 2 --json
+
+# Technical debt
+bd create "Refactor auth package for testability" \
+  --description="Current auth code has tight DB coupling making unit tests difficult. Need to extract interfaces and add dependency injection. Blocks writing tests for bd-xyz." \
+  -t task -p 3 --json
+```
+
+**Bad examples (missing context):**
+
+```bash
+bd create "Fix auth bug" -t bug -p 1 --json  # What bug? Where? Why?
+bd create "Add feature" -t feature --json     # What feature? Why needed?
+bd create "Refactor code" -t task --json      # What code? Why refactor?
+```
 
 ### Optional: Agent Mail for Multi-Agent Coordination
 
@@ -339,7 +393,7 @@ bd import -i issues.jsonl --dedupe-after
 
 3. **During work discovery**: Check for duplicates when filing discovered-from issues
    ```bash
-   # Before: bd create "Fix auth bug" --deps discovered-from:bd-100
+   # Before: bd create "Fix auth bug" --description="Details..." --deps discovered-from:bd-100
    # First: bd list --json | grep -i "auth bug"
    # Then decide: create new or link to existing
    ```
@@ -382,7 +436,9 @@ bd show bd-41 --json  # Verify merged content
 - Add labels like `duplicate` to source issues before merging (for tracking)
 - File a discovered-from issue if you found duplicates during work:
   ```bash
-  bd create "Found duplicates during bd-X" -p 2 --deps discovered-from:bd-X --json
+  bd create "Found duplicates during bd-X" \
+    --description="Issues bd-A, bd-B, and bd-C are duplicates and need merging" \
+    -p 2 --deps discovered-from:bd-X --json
   ```
 
 ## Development Guidelines
@@ -438,6 +494,8 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for detailed instructions on:
 
 - Always use `--json` flags for programmatic use
 - **Always run `bd sync` at end of session** to flush/commit/push immediately
+- **Check `bd info --whats-new` at session start** if bd was recently upgraded
+- **Run `bd hooks install`** if `bd info` warns about outdated git hooks
 - Link discoveries with `discovered-from` to maintain context
 - Check `bd ready` before asking "what next?"
 - Auto-sync batches changes in 30-second window - use `bd sync` to force immediate flush
@@ -508,8 +566,8 @@ bd ready --json
 **Create new issues:**
 
 ```bash
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" -p 1 --deps discovered-from:bd-123 --json
+bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
+bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
 ```
 
 **Claim and update:**
@@ -547,7 +605,7 @@ bd close bd-42 --reason "Completed" --json
 2. **Claim your task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** Create linked issue:
-   - `bd create "Found bug" -p 1 --deps discovered-from:<parent-id>`
+   - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
 
 ### Auto-Sync

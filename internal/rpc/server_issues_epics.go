@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -87,6 +88,12 @@ func (s *Server) handleCreate(req *Request) Response {
 			Success: false,
 			Error:   "cannot specify both ID and Parent",
 		}
+	}
+
+	// Warn if creating an issue without a description (unless it's a test issue)
+	if createArgs.Description == "" && !strings.Contains(strings.ToLower(createArgs.Title), "test") {
+		// Log warning to daemon logs (stderr goes to daemon logs)
+		fmt.Fprintf(os.Stderr, "[WARNING] Creating issue '%s' without description. Issues without descriptions lack context for future work.\n", createArgs.Title)
 	}
 
 	store := s.storage
@@ -279,19 +286,73 @@ func (s *Server) handleUpdate(req *Request) Response {
 
 	ctx := s.reqCtx(req)
 	updates := updatesFromArgs(updateArgs)
-	if len(updates) == 0 {
-		return Response{Success: true}
-	}
+	actor := s.reqActor(req)
 
-	if err := store.UpdateIssue(ctx, updateArgs.ID, updates, s.reqActor(req)); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to update issue: %v", err),
+	// Apply regular field updates if any
+	if len(updates) > 0 {
+		if err := store.UpdateIssue(ctx, updateArgs.ID, updates, actor); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to update issue: %v", err),
+			}
 		}
 	}
 
-	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationUpdate, updateArgs.ID)
+	// Handle label operations
+	// Set labels (replaces all existing labels)
+	if len(updateArgs.SetLabels) > 0 {
+		// Get current labels
+		currentLabels, err := store.GetLabels(ctx, updateArgs.ID)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get current labels: %v", err),
+			}
+		}
+		// Remove all current labels
+		for _, label := range currentLabels {
+			if err := store.RemoveLabel(ctx, updateArgs.ID, label, actor); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to remove label %s: %v", label, err),
+				}
+			}
+		}
+		// Add new labels
+		for _, label := range updateArgs.SetLabels {
+			if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to set label %s: %v", label, err),
+				}
+			}
+		}
+	}
+
+	// Add labels
+	for _, label := range updateArgs.AddLabels {
+		if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to add label %s: %v", label, err),
+			}
+		}
+	}
+
+	// Remove labels
+	for _, label := range updateArgs.RemoveLabels {
+		if err := store.RemoveLabel(ctx, updateArgs.ID, label, actor); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to remove label %s: %v", label, err),
+			}
+		}
+	}
+
+	// Emit mutation event for event-driven daemon (only if any updates or label operations were performed)
+	if len(updates) > 0 || len(updateArgs.SetLabels) > 0 || len(updateArgs.AddLabels) > 0 || len(updateArgs.RemoveLabels) > 0 {
+		s.emitMutation(MutationUpdate, updateArgs.ID)
+	}
 
 	issue, err := store.GetIssue(ctx, updateArgs.ID)
 	if err != nil {

@@ -47,7 +47,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 	runCmd(t, dir, "git", "config", "user.email", "test@example.com")
 	runCmd(t, dir, "git", "config", "user.name", "Test User")
 
-	// Create .beads directory with beads.jsonl (use forward slashes for git)
+	// Create .beads directory with issues.jsonl (canonical name)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
@@ -63,13 +63,13 @@ func testFreshCloneAutoImport(t *testing.T) {
 		IssueType:   types.TypeTask,
 	}
 
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if err := writeJSONL(jsonlPath, []*types.Issue{issue}); err != nil {
 		t.Fatalf("Failed to write JSONL: %v", err)
 	}
 
 	// Commit to git (use forward slashes for git path)
-	runCmd(t, dir, "git", "add", ".beads/beads.jsonl")
+	runCmd(t, dir, "git", "add", ".beads/issues.jsonl")
 	runCmd(t, dir, "git", "commit", "-m", "Initial commit")
 
 	// Remove database to simulate fresh clone
@@ -88,7 +88,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	// Test checkGitForIssues detects beads.jsonl
+	// Test checkGitForIssues detects issues.jsonl
 	originalDir, _ := os.Getwd()
 	os.Chdir(dir)
 	defer os.Chdir(originalDir)
@@ -98,7 +98,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 		t.Errorf("Expected 1 issue in git, got %d", count)
 	}
 	// Normalize path for comparison (handle both forward and backslash)
-	expectedPath := normalizeGitPath(".beads/beads.jsonl")
+	expectedPath := normalizeGitPath(".beads/issues.jsonl")
 	if normalizeGitPath(path) != expectedPath {
 		t.Errorf("Expected path %s, got %s", expectedPath, path)
 	}
@@ -127,7 +127,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	runCmd(t, dir, "git", "config", "user.email", "test@example.com")
 	runCmd(t, dir, "git", "config", "user.name", "Test User")
 
-	// Create .beads directory with beads.jsonl
+	// Create .beads directory with issues.jsonl (canonical name)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
@@ -151,13 +151,13 @@ func testDatabaseRemovalScenario(t *testing.T) {
 		},
 	}
 
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if err := writeJSONL(jsonlPath, issues); err != nil {
 		t.Fatalf("Failed to write JSONL: %v", err)
 	}
 
 	// Commit to git
-	runCmd(t, dir, "git", "add", ".beads/beads.jsonl")
+	runCmd(t, dir, "git", "add", ".beads/issues.jsonl")
 	runCmd(t, dir, "git", "commit", "-m", "Add issues")
 
 	// Simulate rm -rf .beads/
@@ -169,12 +169,12 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(originalDir)
 
-	// Test checkGitForIssues finds beads.jsonl (not issues.jsonl)
+	// Test checkGitForIssues finds issues.jsonl (canonical name)
 	count, path := checkGitForIssues()
 	if count != 2 {
 		t.Errorf("Expected 2 issues in git, got %d", count)
 	}
-	expectedPath := normalizeGitPath(".beads/beads.jsonl")
+	expectedPath := normalizeGitPath(".beads/issues.jsonl")
 	if normalizeGitPath(path) != expectedPath {
 		t.Errorf("Expected %s, got %s", expectedPath, path)
 	}
@@ -197,8 +197,8 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	}
 
 	// Verify correct filename was detected
-	if filepath.Base(path) != "beads.jsonl" {
-		t.Errorf("Should have imported from beads.jsonl, got %s", path)
+	if filepath.Base(path) != "issues.jsonl" {
+		t.Errorf("Should have imported from issues.jsonl, got %s", path)
 	}
 
 	// Verify stats show >0 issues
@@ -286,7 +286,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 	}
 }
 
-// testPrecedenceTest verifies beads.jsonl is preferred over issues.jsonl
+// testPrecedenceTest verifies issues.jsonl is preferred over beads.jsonl
 func testPrecedenceTest(t *testing.T) {
 	dir := t.TempDir()
 
@@ -301,21 +301,21 @@ func testPrecedenceTest(t *testing.T) {
 		t.Fatalf("Failed to create .beads dir: %v", err)
 	}
 
-	// Create beads.jsonl with 2 issues
-	beadsIssues := []*types.Issue{
-		{ID: "test-1", Title: "From beads.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
-		{ID: "test-2", Title: "Also from beads.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	// Create issues.jsonl with 2 issues (canonical, should be preferred)
+	canonicalIssues := []*types.Issue{
+		{ID: "test-1", Title: "From issues.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-2", Title: "Also from issues.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
 	}
-	if err := writeJSONL(filepath.Join(beadsDir, "beads.jsonl"), beadsIssues); err != nil {
-		t.Fatalf("Failed to write beads.jsonl: %v", err)
+	if err := writeJSONL(filepath.Join(beadsDir, "issues.jsonl"), canonicalIssues); err != nil {
+		t.Fatalf("Failed to write issues.jsonl: %v", err)
 	}
 
-	// Create issues.jsonl with 1 issue (should be ignored)
+	// Create beads.jsonl with 1 issue (should be ignored)
 	legacyIssues := []*types.Issue{
-		{ID: "test-99", Title: "From issues.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-99", Title: "From beads.jsonl", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
 	}
-	if err := writeJSONL(filepath.Join(beadsDir, "issues.jsonl"), legacyIssues); err != nil {
-		t.Fatalf("Failed to write issues.jsonl: %v", err)
+	if err := writeJSONL(filepath.Join(beadsDir, "beads.jsonl"), legacyIssues); err != nil {
+		t.Fatalf("Failed to write beads.jsonl: %v", err)
 	}
 
 	// Commit both files
@@ -327,14 +327,14 @@ func testPrecedenceTest(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(originalDir)
 
-	// Test checkGitForIssues prefers beads.jsonl
+	// Test checkGitForIssues prefers issues.jsonl
 	count, path := checkGitForIssues()
 	if count != 2 {
-		t.Errorf("Expected 2 issues (from beads.jsonl), got %d", count)
+		t.Errorf("Expected 2 issues (from issues.jsonl), got %d", count)
 	}
-	expectedPath := normalizeGitPath(".beads/beads.jsonl")
+	expectedPath := normalizeGitPath(".beads/issues.jsonl")
 	if normalizeGitPath(path) != expectedPath {
-		t.Errorf("Expected beads.jsonl to be preferred, got %s", path)
+		t.Errorf("Expected issues.jsonl to be preferred, got %s", path)
 	}
 }
 
@@ -347,7 +347,7 @@ func testInitSafetyCheck(t *testing.T) {
 	runCmd(t, dir, "git", "config", "user.email", "test@example.com")
 	runCmd(t, dir, "git", "config", "user.name", "Test User")
 
-	// Create .beads directory with beads.jsonl
+	// Create .beads directory with issues.jsonl (canonical name)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
@@ -361,13 +361,13 @@ func testInitSafetyCheck(t *testing.T) {
 		IssueType: types.TypeTask,
 	}
 
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if err := writeJSONL(jsonlPath, []*types.Issue{issue}); err != nil {
 		t.Fatalf("Failed to write JSONL: %v", err)
 	}
 
 	// Commit to git
-	runCmd(t, dir, "git", "add", ".beads/beads.jsonl")
+	runCmd(t, dir, "git", "add", ".beads/issues.jsonl")
 	runCmd(t, dir, "git", "commit", "-m", "Add issue")
 
 	// Change to test directory
@@ -398,7 +398,7 @@ func testInitSafetyCheck(t *testing.T) {
 		if recheck == 0 {
 			t.Error("Safety check should have detected issues in git")
 		}
-		expectedPath := normalizeGitPath(".beads/beads.jsonl")
+		expectedPath := normalizeGitPath(".beads/issues.jsonl")
 		if normalizeGitPath(recheckPath) != expectedPath {
 			t.Errorf("Safety check found wrong path: %s", recheckPath)
 		}

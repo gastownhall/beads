@@ -8,7 +8,7 @@ import (
 
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 
 	// Create unique temp file in same directory
@@ -31,8 +31,8 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 
-	// Set permissions
-	if err := os.Chmod(tmpPath, perm); err != nil {
+	// Set permissions to 0644
+	if err := os.Chmod(tmpPath, 0644); err != nil {
 		_ = os.Remove(tmpPath) // Best effort cleanup
 		return fmt.Errorf("set permissions: %w", err)
 	}

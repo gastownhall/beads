@@ -238,6 +238,14 @@ func getRepoKeyForPath(jsonlPath string) string {
 	return ""
 }
 
+// sanitizeMetadataKey removes or replaces characters that conflict with metadata key format.
+// On Windows, absolute paths contain colons (e.g., C:\...) which conflict with the ':' separator
+// used in multi-repo metadata keys. This function replaces colons with underscores to make
+// paths safe for use as metadata key suffixes (bd-web8).
+func sanitizeMetadataKey(key string) string {
+	return strings.ReplaceAll(key, ":", "_")
+}
+
 // updateExportMetadata updates last_import_hash and related metadata after a successful export.
 // This prevents "JSONL content has changed since last import" errors on subsequent exports (bd-ymj fix).
 // In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
@@ -246,6 +254,7 @@ func getRepoKeyForPath(jsonlPath string) string {
 //   - Single-repo mode: "last_import_hash", "last_import_time", "last_import_mtime"
 //   - Multi-repo mode: "last_import_hash:<repo_key>", "last_import_time:<repo_key>", etc.
 //     where <repo_key> is a stable repo identifier like "." or "../frontend"
+//   - Windows paths: Colons in absolute paths (e.g., C:\...) are replaced with underscores (bd-web8)
 //
 // Transaction boundaries (bd-ar2.6):
 // This function does NOT provide atomicity between JSONL write, metadata updates, and DB mtime.
@@ -256,10 +265,9 @@ func getRepoKeyForPath(jsonlPath string) string {
 //   3. Current approach is simple and doesn't require complex WAL or format changes
 // Future: Consider Option 4 (defensive checks on startup) if this becomes a common issue.
 func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath string, log daemonLogger, keySuffix string) {
-	// Validate keySuffix doesn't contain the separator character (bd-ar2.12)
-	if keySuffix != "" && strings.Contains(keySuffix, ":") {
-		log.log("Error: invalid keySuffix contains ':' separator: %s", keySuffix)
-		return
+	// Sanitize keySuffix to handle Windows paths with colons (bd-web8)
+	if keySuffix != "" {
+		keySuffix = sanitizeMetadataKey(keySuffix)
 	}
 
 	currentHash, err := computeJSONLHash(jsonlPath)

@@ -59,7 +59,7 @@ func InstallCursor() {
 	}
 
 	// Write beads rules file (overwrite if exists)
-	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate), 0644); err != nil {
+	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: write rules: %v\n", err)
 		os.Exit(1)
 	}

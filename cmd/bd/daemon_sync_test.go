@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -450,8 +448,8 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 	updateExportMetadata(ctx, store, jsonlPath1, mockLogger, jsonlPath1)
 	updateExportMetadata(ctx, store, jsonlPath2, mockLogger, jsonlPath2)
 
-	// Verify per-repo metadata was set with correct keys
-	hash1Key := "last_import_hash:" + jsonlPath1
+	// Verify per-repo metadata was set with correct keys (bd-web8: keys are sanitized)
+	hash1Key := "last_import_hash:" + sanitizeMetadataKey(jsonlPath1)
 	hash1, err := store.GetMetadata(ctx, hash1Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", hash1Key, err)
@@ -460,7 +458,7 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 		t.Errorf("expected %s to be set", hash1Key)
 	}
 
-	hash2Key := "last_import_hash:" + jsonlPath2
+	hash2Key := "last_import_hash:" + sanitizeMetadataKey(jsonlPath2)
 	hash2, err := store.GetMetadata(ctx, hash2Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", hash2Key, err)
@@ -478,8 +476,8 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 		t.Error("expected global last_import_hash to not be set when using per-repo keys")
 	}
 
-	// Verify mtime metadata was also set per-repo
-	mtime1Key := "last_import_mtime:" + jsonlPath1
+	// Verify mtime metadata was also set per-repo (bd-web8: keys are sanitized)
+	mtime1Key := "last_import_mtime:" + sanitizeMetadataKey(jsonlPath1)
 	mtime1, err := store.GetMetadata(ctx, mtime1Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", mtime1Key, err)
@@ -488,7 +486,7 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 		t.Errorf("expected %s to be set", mtime1Key)
 	}
 
-	mtime2Key := "last_import_mtime:" + jsonlPath2
+	mtime2Key := "last_import_mtime:" + sanitizeMetadataKey(jsonlPath2)
 	mtime2, err := store.GetMetadata(ctx, mtime2Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", mtime2Key, err)
@@ -587,8 +585,8 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		updateExportMetadata(ctx, store, path, mockLogger, repoKey)
 	}
 
-	// Verify metadata for primary repo
-	primaryHashKey := "last_import_hash:" + primaryDir
+	// Verify metadata for primary repo (bd-web8: keys are sanitized)
+	primaryHashKey := "last_import_hash:" + sanitizeMetadataKey(primaryDir)
 	primaryHash, err := store.GetMetadata(ctx, primaryHashKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", primaryHashKey, err)
@@ -597,7 +595,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", primaryHashKey)
 	}
 
-	primaryTimeKey := "last_import_time:" + primaryDir
+	primaryTimeKey := "last_import_time:" + sanitizeMetadataKey(primaryDir)
 	primaryTime, err := store.GetMetadata(ctx, primaryTimeKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", primaryTimeKey, err)
@@ -606,7 +604,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", primaryTimeKey)
 	}
 
-	primaryMtimeKey := "last_import_mtime:" + primaryDir
+	primaryMtimeKey := "last_import_mtime:" + sanitizeMetadataKey(primaryDir)
 	primaryMtime, err := store.GetMetadata(ctx, primaryMtimeKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", primaryMtimeKey, err)
@@ -615,8 +613,8 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", primaryMtimeKey)
 	}
 
-	// Verify metadata for additional repo
-	additionalHashKey := "last_import_hash:" + additionalDir
+	// Verify metadata for additional repo (bd-web8: keys are sanitized)
+	additionalHashKey := "last_import_hash:" + sanitizeMetadataKey(additionalDir)
 	additionalHash, err := store.GetMetadata(ctx, additionalHashKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", additionalHashKey, err)
@@ -625,7 +623,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", additionalHashKey)
 	}
 
-	additionalTimeKey := "last_import_time:" + additionalDir
+	additionalTimeKey := "last_import_time:" + sanitizeMetadataKey(additionalDir)
 	additionalTime, err := store.GetMetadata(ctx, additionalTimeKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", additionalTimeKey, err)
@@ -634,7 +632,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", additionalTimeKey)
 	}
 
-	additionalMtimeKey := "last_import_mtime:" + additionalDir
+	additionalMtimeKey := "last_import_mtime:" + sanitizeMetadataKey(additionalDir)
 	additionalMtime, err := store.GetMetadata(ctx, additionalMtimeKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", additionalMtimeKey, err)
@@ -707,39 +705,36 @@ func TestUpdateExportMetadataInvalidKeySuffix(t *testing.T) {
 		t.Fatalf("export failed: %v", err)
 	}
 
-	// Create mock logger that captures error messages
-	var logMessages []string
+	// Create mock logger
 	mockLogger := daemonLogger{
 		logFunc: func(format string, args ...interface{}) {
-			msg := fmt.Sprintf(format, args...)
-			logMessages = append(logMessages, msg)
-			t.Logf("%s", msg)
+			t.Logf(format, args...)
 		},
 	}
 
-	// Try to update metadata with invalid keySuffix containing ':'
-	invalidKeySuffix := "repo:path"
-	updateExportMetadata(ctx, store, jsonlPath, mockLogger, invalidKeySuffix)
+	// Update metadata with keySuffix containing ':' (bd-web8: should be auto-sanitized)
+	// This simulates Windows absolute paths like "C:\Users\..."
+	keySuffixWithColon := "C:/Users/repo/path"
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, keySuffixWithColon)
 
-	// Verify that error was logged
-	var foundError bool
-	for _, msg := range logMessages {
-		if strings.Contains(msg, "Error: invalid keySuffix") && strings.Contains(msg, invalidKeySuffix) {
-			foundError = true
-			break
-		}
-	}
-	if !foundError {
-		t.Error("expected error log for invalid keySuffix containing ':'")
-	}
-
-	// Verify metadata was NOT set (update should have been rejected)
-	invalidKey := "last_import_hash:" + invalidKeySuffix
-	hash, err := store.GetMetadata(ctx, invalidKey)
+	// Verify metadata WAS set with sanitized key (colons replaced with underscores)
+	sanitized := sanitizeMetadataKey(keySuffixWithColon)
+	sanitizedKey := "last_import_hash:" + sanitized
+	hash, err := store.GetMetadata(ctx, sanitizedKey)
 	if err != nil {
 		t.Fatalf("failed to get metadata: %v", err)
 	}
-	if hash != "" {
-		t.Errorf("expected no metadata to be set with invalid key, but got: %s", hash)
+	if hash == "" {
+		t.Errorf("expected metadata to be set with sanitized key %s", sanitizedKey)
+	}
+
+	// Verify that the original unsanitized key was NOT used
+	unsanitizedKey := "last_import_hash:" + keySuffixWithColon
+	unsanitizedHash, err := store.GetMetadata(ctx, unsanitizedKey)
+	if err != nil {
+		t.Fatalf("failed to check unsanitized key: %v", err)
+	}
+	if unsanitizedHash != "" {
+		t.Errorf("expected unsanitized key %s to NOT be set", unsanitizedKey)
 	}
 }

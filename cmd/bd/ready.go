@@ -75,6 +75,10 @@ var readyCmd = &cobra.Command{
 				outputJSON(issues)
 				return
 			}
+
+			// Show upgrade notification if needed (bd-loka)
+			maybeShowUpgradeNotification()
+
 			if len(issues) == 0 {
 				yellow := color.New(color.FgYellow).SprintFunc()
 				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
@@ -131,6 +135,9 @@ var readyCmd = &cobra.Command{
 			outputJSON(issues)
 			return
 		}
+		// Show upgrade notification if needed (bd-loka)
+		maybeShowUpgradeNotification()
+
 		if len(issues) == 0 {
 			yellow := color.New(color.FgYellow).SprintFunc()
 			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",

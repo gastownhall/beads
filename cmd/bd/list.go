@@ -301,6 +301,9 @@ var listCmd = &cobra.Command{
 				return
 			}
 
+			// Show upgrade notification if needed (bd-loka)
+			maybeShowUpgradeNotification()
+
 			var issues []*types.Issue
 			if err := json.Unmarshal(resp.Data, &issues); err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
@@ -399,6 +402,9 @@ var listCmd = &cobra.Command{
 			outputJSON(issuesWithCounts)
 			return
 		}
+
+		// Show upgrade notification if needed (bd-loka)
+		maybeShowUpgradeNotification()
 
 		// Load labels in bulk for display
 		issueIDs := make([]string, len(issues))

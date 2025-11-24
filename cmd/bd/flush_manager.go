@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 )
@@ -136,7 +135,7 @@ func (fm *FlushManager) Shutdown() error {
 	var shutdownErr error
 
 	fm.shutdownOnce.Do(func() {
-		// Send shutdown request FIRST (before cancelling context)
+		// Send shutdown request FIRST (before canceling context)
 		// This ensures the run() loop processes the shutdown request
 		responseCh := make(chan error, 1)
 		select {
@@ -209,15 +208,10 @@ func (fm *FlushManager) run() {
 		case <-fm.timerFiredCh:
 			// Debounce timer fired - flush if dirty
 			if isDirty {
-				err := fm.performFlush(needsFullExport)
-				if err != nil {
-					// Log error from timer-triggered flush
-					fmt.Fprintf(os.Stderr, "Warning: auto-flush timer failed: %v\n", err)
-				} else {
-					// Clear dirty flags after successful flush
-					isDirty = false
-					needsFullExport = false
-				}
+				fm.performFlush(needsFullExport)
+				// Clear dirty flags after flush
+				isDirty = false
+				needsFullExport = false
 			}
 
 		case responseCh := <-fm.flushNowCh:
@@ -234,13 +228,11 @@ func (fm *FlushManager) run() {
 			}
 
 			// Perform the flush
-			err := fm.performFlush(needsFullExport)
-			if err == nil {
-				// Success - clear dirty flags
-				isDirty = false
-				needsFullExport = false
-			}
-			responseCh <- err
+			fm.performFlush(needsFullExport)
+			// Clear dirty flags
+			isDirty = false
+			needsFullExport = false
+			responseCh <- nil
 
 		case req := <-fm.shutdownCh:
 			// Shutdown requested
@@ -249,16 +241,15 @@ func (fm *FlushManager) run() {
 			}
 
 			// Perform final flush if dirty
-			var err error
 			if isDirty {
-				err = fm.performFlush(needsFullExport)
+				fm.performFlush(needsFullExport)
 			}
 
-			req.responseCh <- err
+			req.responseCh <- nil
 			return // Exit goroutine
 
 		case <-fm.ctx.Done():
-			// Context cancelled (shouldn't normally happen)
+			// Context canceled (shouldn't normally happen)
 			return
 		}
 	}
@@ -266,12 +257,12 @@ func (fm *FlushManager) run() {
 
 // performFlush executes the actual flush operation.
 // Called only from the run() goroutine, so no concurrency issues.
-func (fm *FlushManager) performFlush(fullExport bool) error {
+func (fm *FlushManager) performFlush(fullExport bool) {
 	// Check if store is still active
 	storeMutex.Lock()
 	if !storeActive {
 		storeMutex.Unlock()
-		return nil // Store closed, nothing to do
+		return // Store closed, nothing to do
 	}
 	storeMutex.Unlock()
 
@@ -281,6 +272,4 @@ func (fm *FlushManager) performFlush(fullExport bool) error {
 		forceDirty:      true, // We know we're dirty (we wouldn't be here otherwise)
 		forceFullExport: fullExport,
 	})
-
-	return nil
 }

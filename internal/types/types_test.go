@@ -332,6 +332,77 @@ func TestTreeNodeEmbedding(t *testing.T) {
 	}
 }
 
+func TestComputeContentHash(t *testing.T) {
+	issue1 := Issue{
+		ID:                "test-1",
+		Title:             "Test Issue",
+		Description:       "Description",
+		Status:            StatusOpen,
+		Priority:          2,
+		IssueType:         TypeFeature,
+		EstimatedMinutes:  intPtr(60),
+	}
+
+	// Same content should produce same hash
+	issue2 := Issue{
+		ID:                "test-2", // Different ID
+		Title:             "Test Issue",
+		Description:       "Description",
+		Status:            StatusOpen,
+		Priority:          2,
+		IssueType:         TypeFeature,
+		EstimatedMinutes:  intPtr(60),
+		CreatedAt:         time.Now(), // Different timestamp
+	}
+
+	hash1 := issue1.ComputeContentHash()
+	hash2 := issue2.ComputeContentHash()
+
+	if hash1 != hash2 {
+		t.Errorf("Expected same hash for identical content, got %s and %s", hash1, hash2)
+	}
+
+	// Different content should produce different hash
+	issue3 := issue1
+	issue3.Title = "Different Title"
+	hash3 := issue3.ComputeContentHash()
+
+	if hash1 == hash3 {
+		t.Errorf("Expected different hash for different content")
+	}
+
+	// Test with external ref
+	externalRef := "EXT-123"
+	issue4 := issue1
+	issue4.ExternalRef = &externalRef
+	hash4 := issue4.ComputeContentHash()
+
+	if hash1 == hash4 {
+		t.Errorf("Expected different hash when external ref is present")
+	}
+}
+
+func TestSortPolicyIsValid(t *testing.T) {
+	tests := []struct {
+		policy SortPolicy
+		valid  bool
+	}{
+		{SortPolicyHybrid, true},
+		{SortPolicyPriority, true},
+		{SortPolicyOldest, true},
+		{SortPolicy(""), true}, // empty is valid
+		{SortPolicy("invalid"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.policy), func(t *testing.T) {
+			if got := tt.policy.IsValid(); got != tt.valid {
+				t.Errorf("SortPolicy(%q).IsValid() = %v, want %v", tt.policy, got, tt.valid)
+			}
+		})
+	}
+}
+
 // Helper functions
 
 func intPtr(i int) *int {

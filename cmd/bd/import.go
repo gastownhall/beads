@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/term"
 )
 
 var importCmd = &cobra.Command{
@@ -70,6 +71,18 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 		force, _ := cmd.Flags().GetBool("force")
+
+		// Check if stdin is being used interactively (not piped)
+		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "Error: No input specified.\n\n")
+			fmt.Fprintf(os.Stderr, "Usage:\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl          # Import from file\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl --dry-run # Preview changes\n")
+			fmt.Fprintf(os.Stderr, "  cat data.jsonl | bd import               # Import from pipe\n")
+			fmt.Fprintf(os.Stderr, "  bd sync --import-only                    # Import latest JSONL\n\n")
+			fmt.Fprintf(os.Stderr, "For more information, run: bd import --help\n")
+			os.Exit(1)
+		}
 
 		// Open input
 		in := os.Stdin

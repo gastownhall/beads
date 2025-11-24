@@ -47,6 +47,35 @@ Use --health to check daemon health and metrics.`,
 		logFile, _ := cmd.Flags().GetString("log")
 		global, _ := cmd.Flags().GetBool("global")
 
+		// If auto-commit/auto-push flags weren't explicitly provided, read from config
+		// (skip if --stop, --status, --health, --metrics, or --migrate-to-global)
+		if !stop && !status && !health && !metrics && !migrateToGlobal && !global {
+			if !cmd.Flags().Changed("auto-commit") {
+				if dbPath := beads.FindDatabasePath(); dbPath != "" {
+					ctx := context.Background()
+					store, err := sqlite.New(ctx, dbPath)
+					if err == nil {
+						if configVal, err := store.GetConfig(ctx, "daemon.auto_commit"); err == nil && configVal == "true" {
+							autoCommit = true
+						}
+						_ = store.Close()
+					}
+				}
+			}
+			if !cmd.Flags().Changed("auto-push") {
+				if dbPath := beads.FindDatabasePath(); dbPath != "" {
+					ctx := context.Background()
+					store, err := sqlite.New(ctx, dbPath)
+					if err == nil {
+						if configVal, err := store.GetConfig(ctx, "daemon.auto_push"); err == nil && configVal == "true" {
+							autoPush = true
+						}
+						_ = store.Close()
+					}
+				}
+			}
+		}
+
 		if interval <= 0 {
 			fmt.Fprintf(os.Stderr, "Error: interval must be positive (got %v)\n", interval)
 			os.Exit(1)

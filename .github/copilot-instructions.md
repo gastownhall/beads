@@ -50,8 +50,8 @@
 bd ready --json                    # Unblocked issues
 bd stale --days 30 --json          # Forgotten issues
 
-# Create and manage
-bd create "Title" -t bug|feature|task -p 0-4 --json
+# Create and manage (ALWAYS include --description)
+bd create "Title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
 bd update <id> --status in_progress --json
 bd close <id> --reason "Done" --json
 
@@ -68,9 +68,11 @@ bd sync  # Force immediate export/commit/push
 1. **Check ready work**: `bd ready --json`
 2. **Claim task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
-4. **Discover new work?** `bd create "Found bug" -p 1 --deps discovered-from:<parent-id> --json`
+4. **Discover new work?** `bd create "Found bug" --description="What was found and why" -p 1 --deps discovered-from:<parent-id> --json`
 5. **Complete**: `bd close <id> --reason "Done" --json`
 6. **Sync**: `bd sync` (flushes changes to git immediately)
+
+**IMPORTANT**: Always include `--description` when creating issues. Issues without descriptions lack context for future work.
 
 ### Priorities
 

@@ -83,6 +83,11 @@ var (
 
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
+
+	// Version upgrade tracking (bd-loka)
+	versionUpgradeDetected = false // Set to true if bd version changed since last run
+	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
+	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
 
 var (
@@ -196,7 +201,15 @@ var rootCmd = &cobra.Command{
 			"version",
 			"zsh",
 		}
-		if slices.Contains(noDbCommands, cmd.Name()) {
+		// Check both the command name and parent command name for subcommands
+		cmdName := cmd.Name()
+		if cmd.Parent() != nil {
+			parentName := cmd.Parent().Name()
+			if slices.Contains(noDbCommands, parentName) {
+				return
+			}
+		}
+		if slices.Contains(noDbCommands, cmdName) {
 			return
 		}
 
@@ -256,8 +269,10 @@ var rootCmd = &cobra.Command{
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {
-				// Allow import command to auto-initialize database if missing
-				if cmd.Name() != "import" {
+				// Allow some commands to run without a database
+				// - import: auto-initializes database if missing
+				// - setup: creates editor integration files (no DB needed)
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - error out instead of falling back to ~/.beads
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
@@ -265,7 +280,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DB to point to your database file (deprecated)\n")
 					os.Exit(1)
 				}
-				// For import command, set default database path
+				// For import/setup commands, set default database path
 				dbPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 			}
 		}
@@ -282,6 +297,10 @@ var rootCmd = &cobra.Command{
 				actor = "unknown"
 			}
 		}
+
+		// Track bd version changes (bd-loka)
+		// Best-effort tracking - failures are silent
+		trackBdVersion()
 
 		// Initialize daemon status
 		socketPath := getSocketPath()

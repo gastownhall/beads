@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -148,8 +149,9 @@ var hooksInstallCmd = &cobra.Command{
 	Short: "Install bd git hooks",
 	Long: `Install git hooks for automatic bd sync.
 
-Hooks are installed to .git/hooks/ in the current repository.
-Existing hooks are backed up with a .backup suffix.
+By default, hooks are installed to .git/hooks/ in the current repository.
+Use --shared to install to a versioned directory (.beads-hooks/) that can be
+committed to git and shared with team members.
 
 Installed hooks:
   - pre-commit: Flush changes to JSONL before commit
@@ -158,6 +160,7 @@ Installed hooks:
   - post-checkout: Import JSONL after branch checkout`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
+		shared, _ := cmd.Flags().GetBool("shared")
 
 		embeddedHooks, err := getEmbeddedHooks()
 		if err != nil {
@@ -173,7 +176,7 @@ Installed hooks:
 			os.Exit(1)
 		}
 
-		if err := installHooks(embeddedHooks, force); err != nil {
+		if err := installHooks(embeddedHooks, force, shared); err != nil {
 			if jsonOutput {
 				output := map[string]interface{}{
 					"error": err.Error(),
@@ -190,12 +193,20 @@ Installed hooks:
 			output := map[string]interface{}{
 				"success": true,
 				"message": "Git hooks installed successfully",
+				"shared":  shared,
 			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
 			fmt.Println("✓ Git hooks installed successfully")
 			fmt.Println()
+			if shared {
+				fmt.Println("Hooks installed to: .beads-hooks/")
+				fmt.Println("Git config set: core.hooksPath=.beads-hooks")
+				fmt.Println()
+				fmt.Println("⚠️  Remember to commit .beads-hooks/ to share with your team!")
+				fmt.Println()
+			}
 			fmt.Println("Installed hooks:")
 			for hookName := range embeddedHooks {
 				fmt.Printf("  - %s\n", hookName)
@@ -264,14 +275,21 @@ var hooksListCmd = &cobra.Command{
 	},
 }
 
-func installHooks(embeddedHooks map[string]string, force bool) error {
+func installHooks(embeddedHooks map[string]string, force bool, shared bool) error {
 	// Check if .git directory exists
 	gitDir := ".git"
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		return fmt.Errorf("not a git repository (no .git directory found)")
 	}
 
-	hooksDir := filepath.Join(gitDir, "hooks")
+	var hooksDir string
+	if shared {
+		// Use versioned directory for shared hooks
+		hooksDir = ".beads-hooks"
+	} else {
+		// Use standard .git/hooks directory
+		hooksDir = filepath.Join(gitDir, "hooks")
+	}
 
 	// Create hooks directory if it doesn't exist
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
@@ -300,6 +318,22 @@ func installHooks(embeddedHooks map[string]string, force bool) error {
 		}
 	}
 
+	// If shared mode, configure git to use the shared hooks directory
+	if shared {
+		if err := configureSharedHooksPath(); err != nil {
+			return fmt.Errorf("failed to configure git hooks path: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func configureSharedHooksPath() error {
+	// Set git config core.hooksPath to .beads-hooks
+	cmd := exec.Command("git", "config", "core.hooksPath", ".beads-hooks")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config failed: %w (output: %s)", err, string(output))
+	}
 	return nil
 }
 
@@ -335,6 +369,7 @@ func uninstallHooks() error {
 
 func init() {
 	hooksInstallCmd.Flags().Bool("force", false, "Overwrite existing hooks without backup")
+	hooksInstallCmd.Flags().Bool("shared", false, "Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/")
 
 	hooksCmd.AddCommand(hooksInstallCmd)
 	hooksCmd.AddCommand(hooksUninstallCmd)

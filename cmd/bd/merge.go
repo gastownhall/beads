@@ -28,7 +28,7 @@ Designed to work as a git merge driver. Configure with:
 
   git config merge.beads.driver "bd merge %A %O %A %B"
   git config merge.beads.name "bd JSONL merge driver"
-  echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+  echo ".beads/issues.jsonl merge=beads" >> .gitattributes
 
 Or use 'bd init' which automatically configures the merge driver.
 

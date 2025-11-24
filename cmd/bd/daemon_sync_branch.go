@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // syncBranchCommitAndPush commits JSONL to the sync branch using a worktree
@@ -21,13 +22,13 @@ func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPus
 		return true, nil // Skip sync branch commit/push in local-only mode
 	}
 	
-	// Get sync.branch config
-	syncBranch, err := store.GetConfig(ctx, "sync.branch")
+	// Get sync branch configuration (supports BEADS_SYNC_BRANCH override)
+	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {
-		return false, fmt.Errorf("failed to get sync.branch config: %w", err)
+		return false, fmt.Errorf("failed to get sync branch: %w", err)
 	}
-	
-	// If no sync.branch configured, caller should use regular commit logic
+
+	// If no sync branch configured, caller should use regular commit logic
 	if syncBranch == "" {
 		return false, nil
 	}
@@ -64,14 +65,24 @@ func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPus
 	}
 	
 	// Sync JSONL file to worktree
-	// Use hardcoded relative path since JSONL is always at .beads/beads.jsonl
-	jsonlRelPath := filepath.Join(".beads", "beads.jsonl")
+	// Get the actual JSONL path (could be issues.jsonl, beads.base.jsonl, etc.)
+	jsonlPath := findJSONLPath()
+	if jsonlPath == "" {
+		return false, fmt.Errorf("JSONL path not found")
+	}
+	
+	// Convert absolute path to relative path from repo root
+	jsonlRelPath, err := filepath.Rel(repoRoot, jsonlPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to get relative JSONL path: %w", err)
+	}
+	
 	if err := wtMgr.SyncJSONLToWorktree(worktreePath, jsonlRelPath); err != nil {
 		return false, fmt.Errorf("failed to sync JSONL to worktree: %w", err)
 	}
 	
 	// Check for changes in worktree
-	worktreeJSONLPath := filepath.Join(worktreePath, ".beads", "beads.jsonl")
+	worktreeJSONLPath := filepath.Join(worktreePath, jsonlRelPath)
 	hasChanges, err := gitHasChangesInWorktree(ctx, worktreePath, worktreeJSONLPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to check for changes in worktree: %w", err)
@@ -179,13 +190,13 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 		return true, nil // Skip sync branch pull in local-only mode
 	}
 	
-	// Get sync.branch config
-	syncBranch, err := store.GetConfig(ctx, "sync.branch")
+	// Get sync branch configuration (supports BEADS_SYNC_BRANCH override)
+	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {
-		return false, fmt.Errorf("failed to get sync.branch config: %w", err)
+		return false, fmt.Errorf("failed to get sync branch: %w", err)
 	}
-	
-	// If no sync.branch configured, caller should use regular pull logic
+
+	// If no sync branch configured, caller should use regular pull logic
 	if syncBranch == "" {
 		return false, nil
 	}
@@ -225,9 +236,21 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	
 	log.log("Pulled sync branch %s", syncBranch)
 	
+	// Get the actual JSONL path
+	jsonlPath := findJSONLPath()
+	if jsonlPath == "" {
+		return false, fmt.Errorf("JSONL path not found")
+	}
+	
+	// Convert to relative path
+	jsonlRelPath, err := filepath.Rel(repoRoot, jsonlPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to get relative JSONL path: %w", err)
+	}
+	
 	// Copy JSONL back to main repo
-	worktreeJSONLPath := filepath.Join(worktreePath, ".beads", "beads.jsonl")
-	mainJSONLPath := filepath.Join(repoRoot, ".beads", "beads.jsonl")
+	worktreeJSONLPath := filepath.Join(worktreePath, jsonlRelPath)
+	mainJSONLPath := jsonlPath
 	
 	// Check if worktree JSONL exists
 	if _, err := os.Stat(worktreeJSONLPath); os.IsNotExist(err) {

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var searchCmd = &cobra.Command{
@@ -22,7 +24,10 @@ Examples:
   bd search "login" --status open
   bd search "database" --label backend --limit 10
   bd search --query "performance" --assignee alice
-  bd search "bd-5q" # Search by partial ID`,
+  bd search "bd-5q" # Search by partial ID
+  bd search "security" --priority-min 0 --priority-max 2
+  bd search "bug" --created-after 2025-01-01
+  bd search "refactor" --updated-after 2025-01-01 --priority-min 1`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get query from args or --query flag
 		queryFlag, _ := cmd.Flags().GetString("query")
@@ -36,10 +41,9 @@ Examples:
 		// If no query provided, show help
 		if query == "" {
 			fmt.Fprintf(os.Stderr, "Error: search query is required\n")
-			// #nosec G104 -- cmd.Help() error intentionally ignored. We're already in an
-			// error path (missing query) and will exit(1) regardless. Help() errors are
-			// rare (I/O failures) and don't affect the outcome. See TestSearchCommand_HelpErrorHandling
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
+			}
 			os.Exit(1)
 		}
 
@@ -51,6 +55,18 @@ Examples:
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		longFormat, _ := cmd.Flags().GetBool("long")
+
+		// Date range flags
+		createdAfter, _ := cmd.Flags().GetString("created-after")
+		createdBefore, _ := cmd.Flags().GetString("created-before")
+		updatedAfter, _ := cmd.Flags().GetString("updated-after")
+		updatedBefore, _ := cmd.Flags().GetString("updated-before")
+		closedAfter, _ := cmd.Flags().GetString("closed-after")
+		closedBefore, _ := cmd.Flags().GetString("closed-before")
+
+		// Priority range flags
+		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
+		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
 
 		// Normalize labels
 		labels = util.NormalizeLabels(labels)
@@ -83,6 +99,74 @@ Examples:
 			filter.LabelsAny = labelsAny
 		}
 
+		// Date ranges
+		if createdAfter != "" {
+			t, err := parseTimeFlag(createdAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedAfter = &t
+		}
+		if createdBefore != "" {
+			t, err := parseTimeFlag(createdBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedBefore = &t
+		}
+		if updatedAfter != "" {
+			t, err := parseTimeFlag(updatedAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedAfter = &t
+		}
+		if updatedBefore != "" {
+			t, err := parseTimeFlag(updatedBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedBefore = &t
+		}
+		if closedAfter != "" {
+			t, err := parseTimeFlag(closedAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --closed-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.ClosedAfter = &t
+		}
+		if closedBefore != "" {
+			t, err := parseTimeFlag(closedBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --closed-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.ClosedBefore = &t
+		}
+
+		// Priority ranges
+		if cmd.Flags().Changed("priority-min") {
+			priorityMin, err := validation.ValidatePriority(priorityMinStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-min: %v\n", err)
+				os.Exit(1)
+			}
+			filter.PriorityMin = &priorityMin
+		}
+		if cmd.Flags().Changed("priority-max") {
+			priorityMax, err := validation.ValidatePriority(priorityMaxStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-max: %v\n", err)
+				os.Exit(1)
+			}
+			filter.PriorityMax = &priorityMax
+		}
+
 		ctx := rootCtx
 
 		// Check database freshness before reading (skip when using daemon)
@@ -110,6 +194,30 @@ Examples:
 			if len(labelsAny) > 0 {
 				listArgs.LabelsAny = labelsAny
 			}
+
+			// Date ranges
+			if filter.CreatedAfter != nil {
+				listArgs.CreatedAfter = filter.CreatedAfter.Format(time.RFC3339)
+			}
+			if filter.CreatedBefore != nil {
+				listArgs.CreatedBefore = filter.CreatedBefore.Format(time.RFC3339)
+			}
+			if filter.UpdatedAfter != nil {
+				listArgs.UpdatedAfter = filter.UpdatedAfter.Format(time.RFC3339)
+			}
+			if filter.UpdatedBefore != nil {
+				listArgs.UpdatedBefore = filter.UpdatedBefore.Format(time.RFC3339)
+			}
+			if filter.ClosedAfter != nil {
+				listArgs.ClosedAfter = filter.ClosedAfter.Format(time.RFC3339)
+			}
+			if filter.ClosedBefore != nil {
+				listArgs.ClosedBefore = filter.ClosedBefore.Format(time.RFC3339)
+			}
+
+			// Priority range
+			listArgs.PriorityMin = filter.PriorityMin
+			listArgs.PriorityMax = filter.PriorityMax
 
 			resp, err := daemonClient.List(listArgs)
 			if err != nil {
@@ -251,6 +359,18 @@ func init() {
 	searchCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	searchCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50)")
 	searchCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
+
+	// Date range flags
+	searchCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
+	searchCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
+	searchCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
+	searchCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
+	searchCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
+	searchCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+
+	// Priority range flags
+	searchCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
+	searchCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
 
 	rootCmd.AddCommand(searchCmd)
 }

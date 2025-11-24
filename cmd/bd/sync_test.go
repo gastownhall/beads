@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 func TestIsGitRepo_InGitRepo(t *testing.T) {
@@ -384,5 +387,57 @@ func TestMergeSyncBranch_DirtyWorkingTree(t *testing.T) {
 	output, _ := statusCmd.Output()
 	if len(output) == 0 {
 		t.Error("expected dirty working tree for test setup")
+	}
+}
+
+func TestGetSyncBranch_EnvOverridesDB(t *testing.T) {
+	ctx := context.Background()
+
+	// Save and restore global store state
+	oldStore := store
+	storeMutex.Lock()
+	oldStoreActive := storeActive
+	storeMutex.Unlock()
+	oldDBPath := dbPath
+
+	// Use an in-memory SQLite store for testing
+	testStore, err := sqlite.New(context.Background(), "file::memory:?mode=memory&cache=private")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Seed DB config and globals
+	if err := testStore.SetConfig(ctx, "sync.branch", "db-branch"); err != nil {
+		t.Fatalf("failed to set sync.branch in db: %v", err)
+	}
+
+	storeMutex.Lock()
+	store = testStore
+	storeActive = true
+	storeMutex.Unlock()
+	dbPath = "" // avoid FindDatabasePath in ensureStoreActive
+
+	// Set environment override
+	if err := os.Setenv(syncbranch.EnvVar, "env-branch"); err != nil {
+		t.Fatalf("failed to set %s: %v", syncbranch.EnvVar, err)
+	}
+	defer os.Unsetenv(syncbranch.EnvVar)
+
+	// Ensure we restore globals after the test
+	defer func() {
+		storeMutex.Lock()
+		store = oldStore
+		storeActive = oldStoreActive
+		storeMutex.Unlock()
+		dbPath = oldDBPath
+	}()
+
+	branch, err := getSyncBranch(ctx)
+	if err != nil {
+		t.Fatalf("getSyncBranch() error = %v", err)
+	}
+	if branch != "env-branch" {
+		t.Errorf("getSyncBranch() = %q, want %q (env override)", branch, "env-branch")
 	}
 }

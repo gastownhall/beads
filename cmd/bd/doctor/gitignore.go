@@ -94,8 +94,8 @@ func CheckGitignore() DoctorCheck {
 func FixGitignore() error {
 	gitignorePath := filepath.Join(".beads", ".gitignore")
 
-	// Write canonical template with standard git file permissions (world-readable)
-	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil {
+	// Write canonical template with secure file permissions
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
 		return err
 	}
 

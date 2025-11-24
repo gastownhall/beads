@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -693,9 +694,9 @@ func getSyncBranch(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to initialize store: %w", err)
 	}
 
-	syncBranch, err := store.GetConfig(ctx, "sync.branch")
+	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {
-		return "", fmt.Errorf("failed to get sync.branch config: %w", err)
+		return "", fmt.Errorf("failed to get sync branch config: %w", err)
 	}
 
 	if syncBranch == "" {
@@ -861,7 +862,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	// Suggest next steps
 	fmt.Println("\nNext steps:")
 	fmt.Println("1. Review the merged changes")
-	fmt.Println("2. Run 'bd import' to sync the database with merged JSONL")
+	fmt.Println("2. Run 'bd sync --import-only' to sync the database with merged JSONL")
 	fmt.Println("3. Run 'bd sync' to push changes to remote")
 
 	return nil

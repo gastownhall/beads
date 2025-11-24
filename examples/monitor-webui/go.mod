@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.17.0 // indirect
+	github.com/anthropics/anthropic-sdk-go v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/ncruces/go-sqlite3 v0.30.1 // indirect

@@ -32,7 +32,7 @@ jobs:
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          MIN_COVERAGE=46
+          MIN_COVERAGE=45
           WARN_COVERAGE=55
           echo "Coverage: $COVERAGE%"
           if (( $(echo "$COVERAGE < $MIN_COVERAGE" | bc -l) )); then

@@ -25,67 +25,84 @@
 
     <div class="error-message" id="error-message"></div>
 
-    <div class="stats">
-        <h2>Statistics</h2>
-        <div class="stats-grid" id="stats-grid">
-            <div class="stat-card">
-                <div class="stat-value" id="stat-total">-</div>
-                <div class="stat-label">Total Issues</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-in-progress">-</div>
-                <div class="stat-label">In Progress</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-open">-</div>
-                <div class="stat-label">Open</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-closed">-</div>
-                <div class="stat-label">Closed</div>
+    <div class="main-container">
+        <div class="card stats-card">
+            <h2>Statistics</h2>
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-item" id="stat-item-total">
+                    <div class="stat-value" id="stat-total">-</div>
+                    <div class="stat-label">Total Issues</div>
+                </div>
+                <div class="stat-item" id="stat-item-in-progress">
+                    <div class="stat-value" id="stat-in-progress">-</div>
+                    <div class="stat-label">In Progress</div>
+                </div>
+                <div class="stat-item" id="stat-item-open">
+                    <div class="stat-value" id="stat-open">-</div>
+                    <div class="stat-label">Open</div>
+                </div>
+                <div class="stat-item" id="stat-item-closed">
+                    <div class="stat-value" id="stat-closed">-</div>
+                    <div class="stat-label">Closed</div>
+                </div>
             </div>
         </div>
-    </div>
 
-    <div class="filter-controls">
-        <label>
-            Status (multi-select):
-            <select id="filter-status" multiple>
-                <option value="open" selected>Open</option>
-                <option value="in-progress">In Progress</option>
-                <option value="closed">Closed</option>
-            </select>
-        </label>
-        <label>
-            Priority:
-            <select id="filter-priority">
-                <option value="">All</option>
-                <option value="1">P1</option>
-                <option value="2">P2</option>
-                <option value="3">P3</option>
-            </select>
-        </label>
-        <button class="reload-button" id="reload-button" title="Reload all data">
-            🔄 Reload
-        </button>
-    </div>
+        <div class="card filters-card">
+            <div class="filter-controls">
+                <div class="filter-group">
+                    <div class="label-with-action">
+                        <label for="filter-status">Status</label>
+                    </div>
+                    <select id="filter-status" multiple>
+                        <option value="open" selected>Open</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="closed">Closed</option>
+                    </select>
+                    <button id="toggle-status" class="button-link" title="Toggle Select All/None">Select All</button>
+                </div>
+                <div class="filter-group">
+                    <label for="filter-priority">Priority</label>
+                    <select id="filter-priority" multiple>
+                        <option value="0" selected>P0</option>
+                        <option value="1" selected>P1</option>
+                        <option value="2" selected>P2</option>
+                        <option value="3" selected>P3</option>
+                    </select>
+                    <button id="toggle-priority" class="button-link" title="Toggle Select All/None">Select All</button>
+                </div>
+                <div class="filter-group search-group">
+                    <label for="filter-text">Search</label>
+                    <input type="text" id="filter-text" placeholder="Search issues...">
+                    <button id="clear-text" class="button-link" title="Clear Search">Clear</button>
+                </div>
+                <div class="filter-group action-group">
+                    <button class="reload-button" id="reload-button" title="Reload all data">
+                        🔄 Reload
+                    </button>
+                </div>
+            </div>
+        </div>
 
-    <h2>Issues</h2>
-    <table id="issues-table">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Title</th>
-                <th>Status</th>
-                <th>Priority</th>
-                <th>Type</th>
-                <th>Assignee</th>
-            </tr>
-        </thead>
-        <tbody id="issues-tbody">
-            <tr><td colspan="6"><div class="spinner"></div></td></tr>
-        </tbody>
-    </table>
+        <div class="card issues-card">
+            <h2>Issues</h2>
+            <table id="issues-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                        <th>Priority</th>
+                        <th>Type</th>
+                        <th>Assignee</th>
+                    </tr>
+                </thead>
+                <tbody id="issues-tbody">
+                    <tr><td colspan="6"><div class="spinner"></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
 
     <!-- Mobile card view -->
     <div class="issues-card-view" id="issues-card-view">

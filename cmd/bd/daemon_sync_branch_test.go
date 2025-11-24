@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -197,6 +198,99 @@ func TestSyncBranchCommitAndPush_Success(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "bd daemon sync") {
 		t.Errorf("Expected commit message with 'bd daemon sync', got: %s", string(output))
+	}
+}
+
+// TestSyncBranchCommitAndPush_EnvOverridesDB verifies that BEADS_SYNC_BRANCH
+// takes precedence over the sync.branch database config for daemon commits.
+func TestSyncBranchCommitAndPush_EnvOverridesDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	initTestGitRepo(t, tmpDir)
+
+	// Setup test store
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "test.db")
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Configure DB sync.branch to one value
+	if err := store.SetConfig(ctx, "sync.branch", "db-branch"); err != nil {
+		t.Fatalf("Failed to set sync.branch: %v", err)
+	}
+
+	// Set BEADS_SYNC_BRANCH to a different value and ensure it takes precedence.
+	t.Setenv(syncbranch.EnvVar, "env-branch")
+
+	// Initial commit on main branch
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change directory: %v", err)
+	}
+
+	initMainBranch(t, tmpDir)
+
+	// Create test issue and export JSONL
+	issue := &types.Issue{
+		Title:       "Env override issue",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
+		t.Fatalf("Failed to export: %v", err)
+	}
+
+	log, _ := newTestSyncBranchLogger()
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
+	if err != nil {
+		t.Fatalf("syncBranchCommitAndPush failed: %v", err)
+	}
+	if !committed {
+		t.Fatal("Expected committed=true with env override")
+	}
+
+	// Verify that the worktree and branch are created using the env branch.
+	worktreePath := filepath.Join(tmpDir, ".git", "beads-worktrees", "env-branch")
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		t.Fatalf("Env sync branch worktree not created at %s", worktreePath)
+	}
+
+	cmd := exec.Command("git", "branch", "--list", "env-branch")
+	cmd.Dir = tmpDir
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to list branches: %v", err)
+	}
+	if !strings.Contains(string(output), "env-branch") {
+		t.Errorf("Env sync branch not created, branches: %s", string(output))
 	}
 }
 

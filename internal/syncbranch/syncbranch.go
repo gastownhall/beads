@@ -12,7 +12,7 @@ import (
 const (
 	// ConfigKey is the database config key for sync branch
 	ConfigKey = "sync.branch"
-	
+
 	// EnvVar is the environment variable for sync branch
 	EnvVar = "BEADS_SYNC_BRANCH"
 )
@@ -26,32 +26,32 @@ func ValidateBranchName(name string) error {
 	if name == "" {
 		return nil // Empty is valid (means use current branch)
 	}
-	
+
 	// Basic length check
 	if len(name) > 255 {
 		return fmt.Errorf("branch name too long (max 255 characters)")
 	}
-	
+
 	// Check pattern
 	if !branchNamePattern.MatchString(name) {
 		return fmt.Errorf("invalid branch name: must start and end with alphanumeric, can contain .-_/ in middle")
 	}
-	
+
 	// Disallow certain patterns
 	if name == "HEAD" || name == "." || name == ".." {
 		return fmt.Errorf("invalid branch name: %s is reserved", name)
 	}
-	
+
 	// No consecutive dots
 	if regexp.MustCompile(`\.\.`).MatchString(name) {
 		return fmt.Errorf("invalid branch name: cannot contain '..'")
 	}
-	
+
 	// No leading/trailing slashes
 	if name[0] == '/' || name[len(name)-1] == '/' {
 		return fmt.Errorf("invalid branch name: cannot start or end with '/'")
 	}
-	
+
 	return nil
 }
 
@@ -67,19 +67,19 @@ func Get(ctx context.Context, store storage.Storage) (string, error) {
 		}
 		return envBranch, nil
 	}
-	
+
 	// Check database config
 	dbBranch, err := store.GetConfig(ctx, ConfigKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to get %s from config: %w", ConfigKey, err)
 	}
-	
+
 	if dbBranch != "" {
 		if err := ValidateBranchName(dbBranch); err != nil {
 			return "", fmt.Errorf("invalid %s in database: %w", ConfigKey, err)
 		}
 	}
-	
+
 	return dbBranch, nil
 }
 
@@ -88,7 +88,7 @@ func Set(ctx context.Context, store storage.Storage, branch string) error {
 	if err := ValidateBranchName(branch); err != nil {
 		return err
 	}
-	
+
 	return store.SetConfig(ctx, ConfigKey, branch)
 }
 

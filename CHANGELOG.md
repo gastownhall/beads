@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **Git Pre-Push Hook**: Better error messaging and auto-sync option
+  - Error message now suggests `bd sync` instead of manual git commands
+  - Interactive prompt offers to run `bd sync` automatically
+  - Falls back to manual instructions in non-interactive terminals or when bd is unavailable
+  - Improves user experience when beads JSONL has uncommitted changes
+
+## [0.24.2] - 2025-11-22
+
+### Fixed
+
+- **Test Stability**: Complete rootCtx initialization fix for all hanging tests (issue #355, b8db5ab)
+  - Fixed TestGetAssignedStatus missing rootCtx initialization (a517ec9)
+  - Prevents test hangs from uninitialized context
+  - Improved test reliability and isolation
+
+- **JSONL Configuration**: Improved bd doctor JSONL checks to focus on real problems (87ee3a6)
+  - Reduces false positives in JSONL validation
+  - Better detection of actual configuration issues
+
+### Changed
+
+- **JSONL Filename Default**: Changed default JSONL filename from `beads.jsonl` to `issues.jsonl` (c4c5c80)
+  - Updated TestFindJSONLPathDefault to match new default (5eefec7)
+  - Removed stale `issues.jsonl` in favor of configured `beads.jsonl` (d918e47)
+  - More intuitive default filename for new users
+
+## [0.24.1] - 2025-11-22
+
+### Added
+
+- **bd search**: Date and priority filters (787fb4e)
+  - `--created-after`, `--created-before` for date filtering
+  - `--priority-min`, `--priority-max` for priority range filtering
+  - Enables more precise search queries
+
+- **bd count**: New command for counting and grouping issues (d7f4189)
+  - Count issues by status, priority, type, or labels
+  - Helpful for generating statistics and reports
+
+- **Test Infrastructure**: Automatic skip list for tests (0040e80)
+  - Improves test reliability and maintenance
+  - Automatically manages flaky or environment-specific tests
+
+### Fixed
+
+- **Test Stability**: Fixed hanging tests by initializing rootCtx (822baa0, bd-n25)
+  - Prevents test hangs from context cancellation issues
+  - Better test isolation and cleanup
+
+- **Git Merge Driver**: Corrected placeholders from %L/%R to %A/%B (ddd209e)
+  - Fixes merge driver configuration for proper conflict resolution
+  - Uses correct git merge driver variable names
+
+- **Database Paths**: Deduplicate database paths when symlinks present (#354, f724b61)
+  - Prevents duplicate database detection when symlinks are involved
+  - Improves reliability in complex filesystem setups
+
+### Changed
+
+- **bd list**: Accept both integer and P-format for priority flags (2e2b8d7)
+  - `--priority 1` and `--priority P1` now both work
+  - More flexible CLI input for priority filtering
+
+- **bd update**: Added `--body` flag as alias for `--description` (bb5a480)
+  - More intuitive flag name for updating issue descriptions
+  - Both flags work identically for backward compatibility
+
+- **bd update**: Added label operations (3065db2)
+  - `--add-labels` and `--remove-labels` flags
+  - Simplifies label management in update operations
+
+- **GitHub Copilot Support**: Added `.github/copilot-instructions.md` (605fff1)
+  - Provides project-specific guidance for GitHub Copilot
+  - Improves AI-assisted development experience
+
+- **Documentation**: Moved design/audit docs from cmd/bd to docs/ (ce433bb)
+  - Better organization of project documentation
+  - Clearer separation of code and documentation
+
+### Performance
+
+- **Test Suite**: Deleted 7 redundant tests from main_test.go (fa727c7)
+  - 3x speedup in test execution
+  - Improved CI/CD performance
+
+- **Test Coverage**: Tagged 16 slow integration tests with build tags (8290243)
+  - Faster local test runs with `-short` flag
+  - CI can still run full test suite
+
+### Testing
+
+- **Security Tests**: Added security and error handling tests for lint warnings (74f3844)
+  - Improved code quality and safety
+  - Better coverage of edge cases
+
+- **Shared Database Pattern**: Refactored multiple test files to use shared DB pattern (bd-1rh)
+  - compact_test.go, integrity_test.go, validate_test.go, epic_test.go, duplicates_test.go
+  - Improved test consistency and maintainability
+  - Faster test execution through better resource sharing
+
 ## [0.24.0] - 2025-11-20
 
 ### Added

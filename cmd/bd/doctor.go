@@ -70,6 +70,7 @@ This command checks:
   - Circular dependencies
   - Git hooks (pre-commit, post-merge, pre-push)
   - .beads/.gitignore up to date
+  - Metadata.json version tracking (LastBdVersion field)
 
 Performance Mode (--perf):
   Run performance diagnostics on your database:
@@ -165,7 +166,7 @@ func applyFixes(result doctorResult) {
 
 	response = strings.TrimSpace(strings.ToLower(response))
 	if response != "" && response != "y" && response != "yes" {
-		fmt.Println("Fix cancelled.")
+		fmt.Println("Fix canceled.")
 		return
 	}
 
@@ -275,21 +276,28 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 6: Legacy JSONL filename (issues.jsonl vs beads.jsonl)
+	// Check 6: Multiple JSONL files (excluding merge artifacts)
 	jsonlCheck := convertDoctorCheck(doctor.CheckLegacyJSONLFilename(path))
 	result.Checks = append(result.Checks, jsonlCheck)
 	if jsonlCheck.Status == statusWarning || jsonlCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
-	// Check 7: Daemon health
+	// Check 7: Database/JSONL configuration mismatch
+	configCheck := convertDoctorCheck(doctor.CheckDatabaseConfig(path))
+	result.Checks = append(result.Checks, configCheck)
+	if configCheck.Status == statusWarning || configCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 8: Daemon health
 	daemonCheck := checkDaemonStatus(path)
 	result.Checks = append(result.Checks, daemonCheck)
 	if daemonCheck.Status == statusWarning || daemonCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
-	// Check 8: Database-JSONL sync
+	// Check 9: Database-JSONL sync
 	syncCheck := checkDatabaseJSONLSync(path)
 	result.Checks = append(result.Checks, syncCheck)
 	if syncCheck.Status == statusWarning || syncCheck.Status == statusError {
@@ -334,6 +342,11 @@ func runDiagnostics(path string) doctorResult {
 	mergeDriverCheck := checkMergeDriver(path)
 	result.Checks = append(result.Checks, mergeDriverCheck)
 	// Don't fail overall check for merge driver, just warn
+
+	// Check 16: Metadata.json version tracking (bd-u4sb)
+	metadataCheck := checkMetadataVersionTracking(path)
+	result.Checks = append(result.Checks, metadataCheck)
+	// Don't fail overall check for metadata, just warn
 
 	return result
 }
@@ -1577,6 +1590,138 @@ func checkMergeDriver(path string) doctorCheck {
 		Message: "Correctly configured",
 		Detail:  currentConfig,
 	}
+}
+
+func checkMetadataVersionTracking(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Load metadata.json
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusError,
+			Message: "Unable to read metadata.json",
+			Detail:  err.Error(),
+			Fix:     "Ensure metadata.json exists and is valid JSON. Run 'bd init' if needed.",
+		}
+	}
+
+	// Check if metadata.json exists
+	if cfg == nil {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: "metadata.json not found",
+			Fix:     "Run any bd command to create metadata.json with version tracking",
+		}
+	}
+
+	// Check if LastBdVersion field is present
+	if cfg.LastBdVersion == "" {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: "LastBdVersion field is empty (first run)",
+			Detail:  "Version tracking will be initialized on next command",
+			Fix:     "Run any bd command to initialize version tracking",
+		}
+	}
+
+	// Validate that LastBdVersion is a valid semver-like string
+	// Simple validation: should be X.Y.Z format where X, Y, Z are numbers
+	if !isValidSemver(cfg.LastBdVersion) {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: fmt.Sprintf("LastBdVersion has invalid format: %q", cfg.LastBdVersion),
+			Detail:  "Expected semver format like '0.24.2'",
+			Fix:     "Run any bd command to reset version tracking to current version",
+		}
+	}
+
+	// Check if LastBdVersion is very old (> 10 versions behind)
+	// Calculate version distance
+	versionDiff := compareVersions(Version, cfg.LastBdVersion)
+	if versionDiff > 0 {
+		// Current version is newer - check how far behind
+		currentParts := parseVersionParts(Version)
+		lastParts := parseVersionParts(cfg.LastBdVersion)
+
+		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
+		majorDiff := currentParts[0] - lastParts[0]
+		minorDiff := currentParts[1] - lastParts[1]
+
+		if majorDiff >= 1 || (majorDiff == 0 && minorDiff >= 10) {
+			return doctorCheck{
+				Name:    "Metadata Version Tracking",
+				Status:  statusWarning,
+				Message: fmt.Sprintf("LastBdVersion is very old: %s (current: %s)", cfg.LastBdVersion, Version),
+				Detail:  "You may have missed important upgrade notifications",
+				Fix:     "Run 'bd upgrade review' to see recent changes",
+			}
+		}
+
+		// Version is behind but not too old
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusOK,
+			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", cfg.LastBdVersion, Version),
+		}
+	}
+
+	// Version is current or ahead (shouldn't happen, but handle it)
+	return doctorCheck{
+		Name:    "Metadata Version Tracking",
+		Status:  statusOK,
+		Message: fmt.Sprintf("Version tracking active (version: %s)", cfg.LastBdVersion),
+	}
+}
+
+// isValidSemver checks if a version string is valid semver-like format (X.Y.Z)
+func isValidSemver(version string) bool {
+	if version == "" {
+		return false
+	}
+
+	// Split by dots and ensure all parts are numeric
+	versionParts := strings.Split(version, ".")
+	if len(versionParts) < 1 {
+		return false
+	}
+
+	// Parse each part to ensure it's a valid number
+	for _, part := range versionParts {
+		if part == "" {
+			return false
+		}
+		var num int
+		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
+			return false
+		}
+		if num < 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parseVersionParts parses version string into numeric parts
+// Returns [major, minor, patch, ...] or empty slice on error
+func parseVersionParts(version string) []int {
+	parts := strings.Split(version, ".")
+	result := make([]int, 0, len(parts))
+
+	for _, part := range parts {
+		var num int
+		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
+			return result
+		}
+		result = append(result, num)
+	}
+
+	return result
 }
 
 func init() {

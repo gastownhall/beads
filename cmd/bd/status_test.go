@@ -202,7 +202,10 @@ func TestGetAssignedStatus(t *testing.T) {
 		t.Fatalf("Failed to set issue prefix: %v", err)
 	}
 
-	// Set global store for getAssignedStatus
+	// Set global store and rootCtx for getAssignedStatus
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
 	store = testStore
 
 	// Create test issues with different assignees

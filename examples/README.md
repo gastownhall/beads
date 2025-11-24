@@ -4,16 +4,22 @@ This directory contains examples of how to integrate bd with AI agents and workf
 
 ## Examples
 
+### Agent Integration
 - **[python-agent/](python-agent/)** - Simple Python agent that discovers ready work and completes tasks
   - **[AGENT_MAIL_EXAMPLE.md](python-agent/AGENT_MAIL_EXAMPLE.md)** - Multi-agent coordination with Agent Mail
 - **[bash-agent/](bash-agent/)** - Bash script showing the full agent workflow
+- **[startup-hooks/](startup-hooks/)** - Session startup scripts for automatic bd upgrade detection
+- **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
+- **[claude-code-skill/](claude-code-skill/)** - Claude Code skill for effective beads usage patterns
+
+### Tools & Utilities
 - **[monitor-webui/](monitor-webui/)** - Standalone web interface for real-time issue monitoring and visualization
 - **[markdown-to-jsonl/](markdown-to-jsonl/)** - Convert markdown planning docs to bd issues
 - **[github-import/](github-import/)** - Import issues from GitHub repositories
 - **[git-hooks/](git-hooks/)** - Pre-configured git hooks for automatic export/import
 <!-- REMOVED (bd-4c74): branch-merge example - collision resolution no longer needed with hash IDs -->
-- **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration
-- **[claude-code-skill/](claude-code-skill/)** - Claude Code skill for effective beads usage patterns
+
+### Workflow Patterns
 - **[contributor-workflow/](contributor-workflow/)** - OSS contributor setup with separate planning repo
 - **[team-workflow/](team-workflow/)** - Team collaboration with shared repositories
 - **[multi-phase-development/](multi-phase-development/)** - Organize large projects by phases (planning, MVP, iteration, polish)

@@ -248,6 +248,71 @@ func TestCLI_Update(t *testing.T) {
 	}
 }
 
+func TestCLI_UpdateLabels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	out := runBDInProcess(t, tmpDir, "create", "Issue for label testing", "-p", "2", "--json")
+
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(out), &issue)
+	id := issue["id"].(string)
+
+	// Test adding labels
+	runBDInProcess(t, tmpDir, "update", id, "--add-label", "feature", "--add-label", "backend")
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	json.Unmarshal([]byte(out), &updated)
+	labels := updated[0]["labels"].([]interface{})
+	if len(labels) != 2 {
+		t.Errorf("Expected 2 labels after add, got: %d", len(labels))
+	}
+	hasBackend, hasFeature := false, false
+	for _, l := range labels {
+		if l.(string) == "backend" {
+			hasBackend = true
+		}
+		if l.(string) == "feature" {
+			hasFeature = true
+		}
+	}
+	if !hasBackend || !hasFeature {
+		t.Errorf("Expected labels 'backend' and 'feature', got: %v", labels)
+	}
+
+	// Test removing a label
+	runBDInProcess(t, tmpDir, "update", id, "--remove-label", "backend")
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	json.Unmarshal([]byte(out), &updated)
+	labels = updated[0]["labels"].([]interface{})
+	if len(labels) != 1 {
+		t.Errorf("Expected 1 label after remove, got: %d", len(labels))
+	}
+	if labels[0].(string) != "feature" {
+		t.Errorf("Expected label 'feature', got: %v", labels[0])
+	}
+
+	// Test setting labels (replaces all)
+	runBDInProcess(t, tmpDir, "update", id, "--set-labels", "api,database,critical")
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	json.Unmarshal([]byte(out), &updated)
+	labels = updated[0]["labels"].([]interface{})
+	if len(labels) != 3 {
+		t.Errorf("Expected 3 labels after set, got: %d", len(labels))
+	}
+	expectedLabels := map[string]bool{"api": true, "database": true, "critical": true}
+	for _, l := range labels {
+		if !expectedLabels[l.(string)] {
+			t.Errorf("Unexpected label: %v", l)
+		}
+	}
+}
+
 func TestCLI_Close(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")

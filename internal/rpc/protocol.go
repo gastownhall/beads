@@ -74,16 +74,19 @@ type CreateArgs struct {
 
 // UpdateArgs represents arguments for the update operation
 type UpdateArgs struct {
-	ID                 string  `json:"id"`
-	Title              *string `json:"title,omitempty"`
-	Description        *string `json:"description,omitempty"`
-	Status             *string `json:"status,omitempty"`
-	Priority           *int    `json:"priority,omitempty"`
-	Design             *string `json:"design,omitempty"`
-	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
-	Notes              *string `json:"notes,omitempty"`
-	Assignee           *string `json:"assignee,omitempty"`
-	ExternalRef        *string `json:"external_ref,omitempty"` // Link to external issue trackers
+	ID                 string   `json:"id"`
+	Title              *string  `json:"title,omitempty"`
+	Description        *string  `json:"description,omitempty"`
+	Status             *string  `json:"status,omitempty"`
+	Priority           *int     `json:"priority,omitempty"`
+	Design             *string  `json:"design,omitempty"`
+	AcceptanceCriteria *string  `json:"acceptance_criteria,omitempty"`
+	Notes              *string  `json:"notes,omitempty"`
+	Assignee           *string  `json:"assignee,omitempty"`
+	ExternalRef        *string  `json:"external_ref,omitempty"` // Link to external issue trackers
+	AddLabels          []string `json:"add_labels,omitempty"`
+	RemoveLabels       []string `json:"remove_labels,omitempty"`
+	SetLabels          []string `json:"set_labels,omitempty"`
 }
 
 // CloseArgs represents arguments for the close operation
