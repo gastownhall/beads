@@ -778,6 +778,10 @@ For advanced usage, see:
 
 ## Community & Ecosystem
 
+### Third-Party Tools
+
+- **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates, kanban board, and keyboard navigation. Zero-setup launch with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni).
+
 Have you built something cool with bd? [Open an issue](https://github.com/steveyegge/beads/issues) to get it featured here!
 
 ## Development
