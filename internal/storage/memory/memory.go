@@ -912,6 +912,19 @@ func (m *MemoryStorage) GetIssueComments(ctx context.Context, issueID string) ([
 	return m.comments[issueID], nil
 }
 
+func (m *MemoryStorage) GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]*types.Comment)
+	for _, issueID := range issueIDs {
+		if comments, exists := m.comments[issueID]; exists {
+			result[issueID] = comments
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryStorage) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

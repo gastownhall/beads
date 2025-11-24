@@ -81,3 +81,46 @@ func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([
 
 	return comments, nil
 }
+
+// GetCommentsForIssues fetches comments for multiple issues in a single query
+// Returns a map of issue_id -> []*Comment
+func (s *SQLiteStorage) GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string][]*types.Comment), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]interface{}, len(issueIDs))
+	for i, id := range issueIDs {
+		placeholders[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, issue_id, author, text, created_at
+		FROM comments
+		WHERE issue_id IN (%s)
+		ORDER BY issue_id, created_at ASC
+	`, buildPlaceholders(len(issueIDs))) // #nosec G201 -- placeholders are generated internally
+
+	rows, err := s.db.QueryContext(ctx, query, placeholders...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch get comments: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]*types.Comment)
+	for rows.Next() {
+		comment := &types.Comment{}
+		err := rows.Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan comment: %w", err)
+		}
+		result[comment.IssueID] = append(result[comment.IssueID], comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating comments: %w", err)
+	}
+
+	return result, nil
+}

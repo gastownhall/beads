@@ -51,6 +51,7 @@ type Storage interface {
 	// Comments
 	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
+	GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error)
 
 	// Statistics
 	GetStatistics(ctx context.Context) (*types.Statistics, error)

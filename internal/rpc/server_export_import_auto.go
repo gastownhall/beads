@@ -59,28 +59,32 @@ func (s *Server) handleExport(req *Request) Response {
 		issue.Dependencies = allDeps[issue.ID]
 	}
 
-	// Populate labels for all issues
-	for _, issue := range issues {
-		labels, err := store.GetLabels(ctx, issue.ID)
-		if err != nil {
-			return Response{
-				Success: false,
-				Error:   fmt.Sprintf("failed to get labels for %s: %v", issue.ID, err),
-			}
+	// Populate labels for all issues (avoid N+1)
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	allLabels, err := store.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get labels: %v", err),
 		}
-		issue.Labels = labels
+	}
+	for _, issue := range issues {
+		issue.Labels = allLabels[issue.ID]
 	}
 
-	// Populate comments for all issues
-	for _, issue := range issues {
-		comments, err := store.GetIssueComments(ctx, issue.ID)
-		if err != nil {
-			return Response{
-				Success: false,
-				Error:   fmt.Sprintf("failed to get comments for %s: %v", issue.ID, err),
-			}
+	// Populate comments for all issues (avoid N+1)
+	allComments, err := store.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get comments: %v", err),
 		}
-		issue.Comments = comments
+	}
+	for _, issue := range issues {
+		issue.Comments = allComments[issue.ID]
 	}
 
 	// Create temp file for atomic write
@@ -387,7 +391,7 @@ func (s *Server) triggerExport(ctx context.Context, store storage.Storage, dbPat
 	})
 
 	// CRITICAL: Populate all related data to prevent data loss
-	// This mirrors the logic in handleExport (lines 50-83)
+	// This mirrors the logic in handleExport
 
 	// Populate dependencies for all issues (avoid N+1 queries)
 	allDeps, err := store.GetAllDependencyRecords(ctx)
@@ -398,22 +402,26 @@ func (s *Server) triggerExport(ctx context.Context, store storage.Storage, dbPat
 		issue.Dependencies = allDeps[issue.ID]
 	}
 
-	// Populate labels for all issues
+	// Populate labels for all issues (avoid N+1 queries)
+	issueIDs := make([]string, len(allIssues))
+	for i, issue := range allIssues {
+		issueIDs[i] = issue.ID
+	}
+	allLabels, err := store.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return fmt.Errorf("failed to get labels: %w", err)
+	}
 	for _, issue := range allIssues {
-		labels, err := store.GetLabels(ctx, issue.ID)
-		if err != nil {
-			return fmt.Errorf("failed to get labels for %s: %w", issue.ID, err)
-		}
-		issue.Labels = labels
+		issue.Labels = allLabels[issue.ID]
 	}
 
-	// Populate comments for all issues
+	// Populate comments for all issues (avoid N+1 queries)
+	allComments, err := store.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		return fmt.Errorf("failed to get comments: %w", err)
+	}
 	for _, issue := range allIssues {
-		comments, err := store.GetIssueComments(ctx, issue.ID)
-		if err != nil {
-			return fmt.Errorf("failed to get comments for %s: %w", issue.ID, err)
-		}
-		issue.Comments = comments
+		issue.Comments = allComments[issue.ID]
 	}
 
 	// Write to JSONL file with atomic replace (temp file + rename)
