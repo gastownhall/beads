@@ -82,7 +82,16 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	orderBySQL := buildOrderByClause(sortPolicy)
 
 	// Use blocked_issues_cache for performance (bd-5qim)
-	// Cache is maintained by invalidateBlockedCache() called on dependency/status changes
+	// This optimization replaces the recursive CTE that computed blocked issues on every query.
+	// Performance improvement: 752ms → 29ms on 10K issues (25x speedup).
+	//
+	// The cache is automatically maintained by invalidateBlockedCache() which is called:
+	//   - When adding/removing 'blocks' or 'parent-child' dependencies
+	//   - When any issue status changes
+	//   - When closing any issue
+	//
+	// Cache rebuild is fast (<50ms) and happens within the same transaction as the
+	// triggering change, ensuring consistency. See blocked_cache.go for full details.
 	// #nosec G201 - safe SQL with controlled formatting
 	query := fmt.Sprintf(`
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,

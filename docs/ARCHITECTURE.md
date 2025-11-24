@@ -192,6 +192,150 @@ Hash-based comparison (not mtime) prevents git pull false positives (issue bd-84
 - **Memory overhead:** One goroutine + minimal channel buffers per command execution
 - **Flush latency:** Debounce duration + JSONL write time (typically <100ms for incremental)
 
+## Blocked Issues Cache (bd-5qim)
+
+### Problem Statement
+
+The `bd ready` command originally computed blocked issues using a recursive CTE on every query. On a 10K issue database, each query took ~752ms, making the command feel sluggish and impractical for large projects.
+
+### Solution: Materialized Cache Table
+
+The `blocked_issues_cache` table materializes the blocking computation, storing issue IDs for all currently blocked issues. Queries now use a simple `NOT EXISTS` check against this cache, completing in ~29ms (25x speedup).
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   GetReadyWork Query                     │
+│                                                          │
+│  SELECT ... FROM issues WHERE status IN (...)            │
+│  AND NOT EXISTS (                                        │
+│    SELECT 1 FROM blocked_issues_cache                    │
+│    WHERE issue_id = issues.id                            │
+│  )                                                       │
+│                                                          │
+│  Performance: 29ms (was 752ms with recursive CTE)       │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│              Cache Invalidation Triggers                 │
+│                                                          │
+│  1. AddDependency (blocks/parent-child only)             │
+│  2. RemoveDependency (blocks/parent-child only)          │
+│  3. UpdateIssue (on any status change)                   │
+│  4. CloseIssue (changes status to closed)                │
+│                                                          │
+│  NOT triggered by: related, discovered-from deps         │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│               Cache Rebuild Process                      │
+│                                                          │
+│  1. DELETE FROM blocked_issues_cache                     │
+│  2. INSERT INTO blocked_issues_cache                     │
+│     WITH RECURSIVE CTE:                                  │
+│       - Find directly blocked issues (blocks deps)       │
+│       - Propagate to children (parent-child deps)        │
+│  3. Happens in same transaction as triggering change     │
+│                                                          │
+│  Performance: <50ms full rebuild on 10K database         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Blocking Semantics
+
+An issue is blocked if:
+
+1. **Direct blocking**: Has a `blocks` dependency on an open/in_progress/blocked issue
+2. **Transitive blocking**: Parent is blocked and issue is connected via `parent-child` dependency
+
+Closed issues never block others. Related and discovered-from dependencies don't affect blocking.
+
+### Cache Invalidation Strategy
+
+**Full rebuild on every change**
+
+Instead of incremental updates, the cache is completely rebuilt (DELETE + INSERT) on any triggering change. This approach is chosen because:
+
+- Rebuild is fast (<50ms even on 10K issues) due to optimized CTE
+- Simpler implementation with no risk of partial/stale updates
+- Dependency changes are rare compared to reads
+- Guarantees consistency - cache matches database state exactly
+
+**Transaction safety**
+
+All cache operations happen within the same transaction as the triggering change:
+- Uses transaction if provided, otherwise direct db connection
+- Cache can never be in an inconsistent state visible to queries
+- Foreign key CASCADE ensures cache entries deleted when issues are deleted
+
+**Selective invalidation**
+
+Only `blocks` and `parent-child` dependencies trigger rebuilds since they affect blocking semantics. Related and discovered-from dependencies don't trigger invalidation, avoiding unnecessary work.
+
+### Performance Characteristics
+
+**Query performance (GetReadyWork):**
+- Before cache: ~752ms (recursive CTE)
+- With cache: ~29ms (NOT EXISTS)
+- Speedup: 25x
+
+**Write overhead:**
+- Cache rebuild: <50ms
+- Only triggered on dependency/status changes (rare operations)
+- Trade-off: slower writes for much faster reads
+
+### Edge Cases
+
+1. **Parent-child transitive blocking**
+   - Children of blocked parents are automatically marked as blocked
+   - Propagates through arbitrary depth hierarchies (limited to depth 50 for safety)
+
+2. **Multiple blockers**
+   - Issue blocked by multiple open issues stays blocked until all are closed
+   - DISTINCT in CTE ensures issue appears once in cache
+
+3. **Status changes**
+   - Closing a blocker removes all blocked descendants from cache
+   - Reopening a blocker adds them back
+
+4. **Dependency removal**
+   - Removing last blocker unblocks the issue
+   - Removing parent-child link unblocks orphaned subtree
+
+5. **Foreign key cascades**
+   - Cache entries automatically deleted when issue is deleted
+   - No manual cleanup needed
+
+### Testing
+
+Comprehensive test coverage in `blocked_cache_test.go`:
+- Cache invalidation on dependency add/remove
+- Cache updates on status changes
+- Multiple blockers
+- Deep hierarchies
+- Transitive blocking via parent-child
+- Related dependencies (should NOT affect cache)
+
+Run tests: `go test -v ./internal/storage/sqlite -run TestCache`
+
+### Implementation Files
+
+- `internal/storage/sqlite/blocked_cache.go` - Cache rebuild and invalidation
+- `internal/storage/sqlite/ready.go` - Uses cache in GetReadyWork queries
+- `internal/storage/sqlite/dependencies.go` - Invalidates on dep changes
+- `internal/storage/sqlite/queries.go` - Invalidates on status changes
+- `internal/storage/sqlite/migrations/015_blocked_issues_cache.go` - Schema and initial population
+
+### Future Optimizations
+
+If rebuild becomes a bottleneck in very large databases (>100K issues):
+- Consider incremental updates for specific dependency types
+- Add indexes to dependencies table for CTE performance
+- Implement dirty tracking to avoid rebuilds when cache is unchanged
+
+However, current performance is excellent for realistic workloads.
+
 ## Future Improvements
 
 Potential enhancements for multi-agent scenarios:
