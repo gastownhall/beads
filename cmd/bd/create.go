@@ -176,6 +176,16 @@ var createCmd = &cobra.Command{
 		// In direct mode, we generate the child ID here
 		if parentID != "" && daemonClient == nil {
 			ctx := rootCtx
+			// Validate parent exists before generating child ID
+			parentIssue, err := store.GetIssue(ctx, parentID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to check parent issue: %v\n", err)
+				os.Exit(1)
+			}
+			if parentIssue == nil {
+				fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", parentID)
+				os.Exit(1)
+			}
 			childID, err := store.GetNextChildID(ctx, parentID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -290,7 +300,7 @@ var createCmd = &cobra.Command{
 					depType = types.DependencyType(strings.TrimSpace(parts[0]))
 					dependsOnID = strings.TrimSpace(parts[1])
 					
-					if depType == types.DepDiscoveredFrom {
+					if depType == types.DepDiscoveredFrom && dependsOnID != "" {
 						discoveredFromParentID = dependsOnID
 						break
 					}
