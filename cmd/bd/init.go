@@ -353,7 +353,6 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
 
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
