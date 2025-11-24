@@ -87,13 +87,13 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		// Generate hash-based ID with adaptive length based on database size (bd-ea2a13)
 		generatedID, err := GenerateIssueID(ctx, conn, prefix, issue, actor)
 		if err != nil {
-			return err
+			return wrapDBError("generate issue ID", err)
 		}
 		issue.ID = generatedID
 	} else {
 		// Validate that explicitly provided ID matches the configured prefix (bd-177)
 		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
-			return err
+			return wrapDBError("validate issue ID prefix", err)
 		}
 
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
@@ -115,17 +115,17 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 	// Insert issue
 	if err := insertIssue(ctx, conn, issue); err != nil {
-		return err
+		return wrapDBError("insert issue", err)
 	}
 
 	// Record creation event
 	if err := recordCreatedEvent(ctx, conn, issue, actor); err != nil {
-		return err
+		return wrapDBError("record creation event", err)
 	}
 
 	// Mark issue as dirty for incremental export
 	if err := markDirty(ctx, conn, issue.ID); err != nil {
-		return err
+		return wrapDBError("mark issue dirty", err)
 	}
 
 	// Commit the transaction
@@ -370,7 +370,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	// Get old issue for event
 	oldIssue, err := s.GetIssue(ctx, id)
 	if err != nil {
-		return err
+		return wrapDBError("get issue for update", err)
 	}
 	if oldIssue == nil {
 		return fmt.Errorf("issue %s not found", id)
@@ -388,7 +388,7 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 
 		// Validate field values
 		if err := validateFieldUpdate(key, value); err != nil {
-			return err
+			return wrapDBError("validate field update", err)
 		}
 
 		setClauses = append(setClauses, fmt.Sprintf("%s = ?", key))
@@ -740,7 +740,7 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 	}
 
 	if err := tx.Commit(); err != nil {
-		return err
+		return wrapDBError("commit delete transaction", err)
 	}
 
 	// REMOVED (bd-c7af): Counter sync after deletion - no longer needed with hash IDs
@@ -777,7 +777,7 @@ func (s *SQLiteStorage) DeleteIssues(ctx context.Context, ids []string, cascade 
 
 	expandedIDs, err := s.resolveDeleteSet(ctx, tx, ids, idSet, cascade, force, result)
 	if err != nil {
-		return nil, err
+		return nil, wrapDBError("resolve delete set", err)
 	}
 
 	inClause, args := buildSQLInClause(expandedIDs)
@@ -835,7 +835,7 @@ func (s *SQLiteStorage) expandWithDependents(ctx context.Context, tx *sql.Tx, id
 func (s *SQLiteStorage) validateNoDependents(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, result *DeleteIssuesResult) error {
 	for _, id := range ids {
 		if err := s.checkSingleIssueValidation(ctx, tx, id, idSet, result); err != nil {
-			return err
+			return wrapDBError("check dependents", err)
 		}
 	}
 	return nil
@@ -885,7 +885,7 @@ func (s *SQLiteStorage) trackOrphanedIssues(ctx context.Context, tx *sql.Tx, ids
 	orphanSet := make(map[string]bool)
 	for _, id := range ids {
 		if err := s.collectOrphansForID(ctx, tx, id, idSet, orphanSet); err != nil {
-			return err
+			return wrapDBError("collect orphans", err)
 		}
 	}
 	for orphanID := range orphanSet {

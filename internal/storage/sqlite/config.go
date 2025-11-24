@@ -11,7 +11,7 @@ func (s *SQLiteStorage) SetConfig(ctx context.Context, key, value string) error 
 		INSERT INTO config (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value
 	`, key, value)
-	return err
+	return wrapDBError("set config", err)
 }
 
 // GetConfig gets a configuration value
@@ -21,14 +21,14 @@ func (s *SQLiteStorage) GetConfig(ctx context.Context, key string) (string, erro
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return value, err
+	return value, wrapDBError("get config", err)
 }
 
 // GetAllConfig gets all configuration key-value pairs
 func (s *SQLiteStorage) GetAllConfig(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM config ORDER BY key`)
 	if err != nil {
-		return nil, err
+		return nil, wrapDBError("query all config", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -36,17 +36,17 @@ func (s *SQLiteStorage) GetAllConfig(ctx context.Context) (map[string]string, er
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
-			return nil, err
+			return nil, wrapDBError("scan config row", err)
 		}
 		config[key] = value
 	}
-	return config, rows.Err()
+	return config, wrapDBError("iterate config rows", rows.Err())
 }
 
 // DeleteConfig deletes a configuration value
 func (s *SQLiteStorage) DeleteConfig(ctx context.Context, key string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM config WHERE key = ?`, key)
-	return err
+	return wrapDBError("delete config", err)
 }
 
 // OrphanHandling defines how to handle orphan issues during import
@@ -81,7 +81,7 @@ func (s *SQLiteStorage) SetMetadata(ctx context.Context, key, value string) erro
 		INSERT INTO metadata (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value
 	`, key, value)
-	return err
+	return wrapDBError("set metadata", err)
 }
 
 // GetMetadata gets a metadata value (for internal state like import hashes)
@@ -91,5 +91,5 @@ func (s *SQLiteStorage) GetMetadata(ctx context.Context, key string) (string, er
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return value, err
+	return value, wrapDBError("get metadata", err)
 }

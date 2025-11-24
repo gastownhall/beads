@@ -149,7 +149,7 @@ func New(ctx context.Context, path string) (*SQLiteStorage, error) {
 	if err := verifySchemaCompatibility(db); err != nil {
 		// Schema probe failed - retry migrations once
 		if retryErr := RunMigrations(db); retryErr != nil {
-			return nil, fmt.Errorf("migration retry failed after schema probe failure: %w (original: %v)", retryErr, err)
+			return nil, fmt.Errorf("migration retry failed after schema probe failure: %w (original: %w)", retryErr, err)
 		}
 
 		// Probe again after retry
