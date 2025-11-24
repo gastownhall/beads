@@ -502,3 +502,117 @@ func TestMigrateContentHashColumn(t *testing.T) {
 		}
 	})
 }
+
+func TestMigrateOrphanDetection(t *testing.T) {
+	t.Run("detects orphaned child issues", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+		db := store.db
+		ctx := context.Background()
+
+		// Create a parent issue
+		parent := &types.Issue{
+			ID:        "bd-parent",
+			Title:     "Parent Issue",
+			Priority:  1,
+			IssueType: "task",
+			Status:    "open",
+		}
+		if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+			t.Fatalf("failed to create parent issue: %v", err)
+		}
+
+		// Create a valid child issue
+		validChild := &types.Issue{
+			ID:        "bd-parent.1",
+			Title:     "Valid Child",
+			Priority:  1,
+			IssueType: "task",
+			Status:    "open",
+		}
+		if err := store.CreateIssue(ctx, validChild, "test"); err != nil {
+			t.Fatalf("failed to create valid child: %v", err)
+		}
+
+		// Create an orphaned child by directly inserting it into the database
+		// (bypassing CreateIssue validation which checks for parent existence)
+		_, err := db.Exec(`
+			INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+		`, "bd-missing.1", "Orphaned Child", "open", 1, "task")
+		if err != nil {
+			t.Fatalf("failed to create orphan: %v", err)
+		}
+
+		// Run migration - it should detect the orphan and log it
+		if err := migrations.MigrateOrphanDetection(db); err != nil {
+			t.Fatalf("failed to run orphan detection migration: %v", err)
+		}
+
+		// Verify the orphan still exists (migration doesn't delete)
+		got, err := store.GetIssue(ctx, "bd-missing.1")
+		if err != nil {
+			t.Fatalf("orphan should still exist after migration: %v", err)
+		}
+		if got.ID != "bd-missing.1" {
+			t.Errorf("expected orphan ID bd-missing.1, got %s", got.ID)
+		}
+
+		// Verify valid child still exists
+		got, err = store.GetIssue(ctx, "bd-parent.1")
+		if err != nil {
+			t.Fatalf("valid child should still exist: %v", err)
+		}
+		if got.ID != "bd-parent.1" {
+			t.Errorf("expected valid child ID bd-parent.1, got %s", got.ID)
+		}
+	})
+
+	t.Run("no orphans found in clean database", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+		db := store.db
+		ctx := context.Background()
+
+		// Create a parent with valid children
+		parent := &types.Issue{
+			ID:        "bd-p1",
+			Title:     "Parent",
+			Priority:  1,
+			IssueType: "task",
+			Status:    "open",
+		}
+		if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+			t.Fatalf("failed to create parent: %v", err)
+		}
+
+		child := &types.Issue{
+			ID:        "bd-p1.1",
+			Title:     "Child",
+			Priority:  1,
+			IssueType: "task",
+			Status:    "open",
+		}
+		if err := store.CreateIssue(ctx, child, "test"); err != nil {
+			t.Fatalf("failed to create child: %v", err)
+		}
+
+		// Run migration - should succeed with no orphans
+		if err := migrations.MigrateOrphanDetection(db); err != nil {
+			t.Fatalf("migration should succeed with clean data: %v", err)
+		}
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+		db := store.db
+
+		// Run migration multiple times
+		for i := 0; i < 3; i++ {
+			if err := migrations.MigrateOrphanDetection(db); err != nil {
+				t.Fatalf("migration run %d failed: %v", i+1, err)
+			}
+		}
+	})
+}

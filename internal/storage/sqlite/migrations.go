@@ -32,6 +32,7 @@ var migrationsList = []Migration{
 	{"repo_mtimes_table", migrations.MigrateRepoMtimesTable},
 	{"child_counters_table", migrations.MigrateChildCountersTable},
 	{"blocked_issues_cache", migrations.MigrateBlockedIssuesCache},
+	{"orphan_detection", migrations.MigrateOrphanDetection},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -71,6 +72,7 @@ func getMigrationDescription(name string) string {
 		"repo_mtimes_table":            "Adds repo_mtimes table for multi-repo hydration caching",
 		"child_counters_table":         "Adds child_counters table for hierarchical ID generation with ON DELETE CASCADE",
 		"blocked_issues_cache":         "Adds blocked_issues_cache table for GetReadyWork performance optimization (bd-5qim)",
+		"orphan_detection":             "Detects orphaned child issues and logs them for user action (bd-3852)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
