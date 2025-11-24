@@ -169,16 +169,17 @@ type ImportOptions struct {
 
 // ImportResult contains statistics about the import operation
 type ImportResult struct {
-	Created         int               // New issues created
-	Updated         int               // Existing issues updated
-	Unchanged       int               // Existing issues that matched exactly (idempotent)
-	Skipped         int               // Issues skipped (duplicates, errors)
-	Collisions      int               // Collisions detected
-	IDMapping       map[string]string // Mapping of remapped IDs (old -> new)
-	CollisionIDs    []string          // IDs that collided
-	PrefixMismatch  bool              // Prefix mismatch detected
-	ExpectedPrefix  string            // Database configured prefix
-	MismatchPrefixes map[string]int    // Map of mismatched prefixes to count
+	Created             int               // New issues created
+	Updated             int               // Existing issues updated
+	Unchanged           int               // Existing issues that matched exactly (idempotent)
+	Skipped             int               // Issues skipped (duplicates, errors)
+	Collisions          int               // Collisions detected
+	IDMapping           map[string]string // Mapping of remapped IDs (old -> new)
+	CollisionIDs        []string          // IDs that collided
+	PrefixMismatch      bool              // Prefix mismatch detected
+	ExpectedPrefix      string            // Database configured prefix
+	MismatchPrefixes    map[string]int    // Map of mismatched prefixes to count
+	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
 }
 
 // importIssuesCore handles the core import logic used by both manual and auto-import.
@@ -228,16 +229,17 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 
 	// Convert importer.Result to ImportResult
 	return &ImportResult{
-		Created:          result.Created,
-		Updated:          result.Updated,
-		Unchanged:        result.Unchanged,
-		Skipped:          result.Skipped,
-		Collisions:       result.Collisions,
-		IDMapping:        result.IDMapping,
-		CollisionIDs:     result.CollisionIDs,
-		PrefixMismatch:   result.PrefixMismatch,
-		ExpectedPrefix:   result.ExpectedPrefix,
-		MismatchPrefixes: result.MismatchPrefixes,
+		Created:             result.Created,
+		Updated:             result.Updated,
+		Unchanged:           result.Unchanged,
+		Skipped:             result.Skipped,
+		Collisions:          result.Collisions,
+		IDMapping:           result.IDMapping,
+		CollisionIDs:        result.CollisionIDs,
+		PrefixMismatch:      result.PrefixMismatch,
+		ExpectedPrefix:      result.ExpectedPrefix,
+		MismatchPrefixes:    result.MismatchPrefixes,
+		SkippedDependencies: result.SkippedDependencies,
 	}, nil
 }
 

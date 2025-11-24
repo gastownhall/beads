@@ -40,16 +40,17 @@ type Options struct {
 
 // Result contains statistics about the import operation
 type Result struct {
-	Created          int               // New issues created
-	Updated          int               // Existing issues updated
-	Unchanged        int               // Existing issues that matched exactly (idempotent)
-	Skipped          int               // Issues skipped (duplicates, errors)
-	Collisions       int               // Collisions detected
-	IDMapping        map[string]string // Mapping of remapped IDs (old -> new)
-	CollisionIDs     []string          // IDs that collided
-	PrefixMismatch   bool              // Prefix mismatch detected
-	ExpectedPrefix   string            // Database configured prefix
-	MismatchPrefixes map[string]int    // Map of mismatched prefixes to count
+	Created             int               // New issues created
+	Updated             int               // Existing issues updated
+	Unchanged           int               // Existing issues that matched exactly (idempotent)
+	Skipped             int               // Issues skipped (duplicates, errors)
+	Collisions          int               // Collisions detected
+	IDMapping           map[string]string // Mapping of remapped IDs (old -> new)
+	CollisionIDs        []string          // IDs that collided
+	PrefixMismatch      bool              // Prefix mismatch detected
+	ExpectedPrefix      string            // Database configured prefix
+	MismatchPrefixes    map[string]int    // Map of mismatched prefixes to count
+	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
 }
 
 // ImportIssues handles the core import logic used by both manual and auto-import.
@@ -129,7 +130,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	}
 
 	// Import dependencies
-	if err := importDependencies(ctx, sqliteStore, issues, opts); err != nil {
+	if err := importDependencies(ctx, sqliteStore, issues, opts, result); err != nil {
 		return nil, err
 	}
 
@@ -615,7 +616,7 @@ if len(newIssues) > 0 {
 }
 
 // importDependencies imports dependency relationships
-func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options) error {
+func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
 	for _, issue := range issues {
 		if len(issue.Dependencies) == 0 {
 			continue
@@ -643,6 +644,18 @@ func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 
 			// Add dependency
 			if err := sqliteStore.AddDependency(ctx, dep, "import"); err != nil {
+				// Check for FOREIGN KEY constraint violation
+				if sqlite.IsForeignKeyConstraintError(err) {
+					// Log warning and track skipped dependency
+					depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
+					fmt.Fprintf(os.Stderr, "Warning: Skipping dependency due to missing reference: %s\n", depDesc)
+					if result != nil {
+						result.SkippedDependencies = append(result.SkippedDependencies, depDesc)
+					}
+					continue
+				}
+
+				// For non-FK errors, respect strict mode
 				if opts.Strict {
 					return fmt.Errorf("error adding dependency %s → %s: %w", dep.IssueID, dep.DependsOnID, err)
 				}

@@ -366,6 +366,16 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 
+		// Print skipped dependencies summary if any
+		if len(result.SkippedDependencies) > 0 {
+			fmt.Fprintf(os.Stderr, "\n⚠️  Warning: Skipped %d dependencies due to missing references:\n", len(result.SkippedDependencies))
+			for _, dep := range result.SkippedDependencies {
+				fmt.Fprintf(os.Stderr, "  - %s\n", dep)
+			}
+			fmt.Fprintf(os.Stderr, "\nThis can happen after merges that delete issues referenced by other issues.\n")
+			fmt.Fprintf(os.Stderr, "The import continued successfully - you may want to review the skipped dependencies.\n")
+		}
+
 		// Print force message if metadata was updated despite no changes
 		if force && result.Created == 0 && result.Updated == 0 && len(result.IDMapping) == 0 {
 			fmt.Fprintf(os.Stderr, "Metadata updated (database already in sync with JSONL)\n")
