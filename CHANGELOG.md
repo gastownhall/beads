@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **Git Pre-Push Hook**: Better error messaging and auto-sync option
+  - Error message now suggests `bd sync` instead of manual git commands
+  - Interactive prompt offers to run `bd sync` automatically
+  - Falls back to manual instructions in non-interactive terminals or when bd is unavailable
+  - Improves user experience when beads JSONL has uncommitted changes
+
 ## [0.24.2] - 2025-11-22
 
 ### Fixed
