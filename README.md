@@ -780,7 +780,7 @@ For advanced usage, see:
 
 ### Third-Party Tools
 
-- **[Beadster](https://apps.apple.com/us/app/beadster-issue-tracking/id6754286462)** - Native macOS app for viewing and managing bd issues across multiple projects. Features a compact, always-on-top window for quick reference during development. Built by [@podviaznikov](https://github.com/podviaznikov).
+- **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates, kanban board, and keyboard navigation. Zero-setup launch with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni).
 
 Have you built something cool with bd? [Open an issue](https://github.com/steveyegge/beads/issues) to get it featured here!
 

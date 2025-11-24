@@ -48,14 +48,57 @@ if [ -n "$FILES" ]; then
         echo "❌ Error: Beads JSONL has uncommitted changes" >&2
         echo "" >&2
         echo "You made changes to bd issues between your last commit and this push." >&2
-        echo "Please commit the updated JSONL before pushing:" >&2
         echo "" >&2
-        # shellcheck disable=SC2086
-        echo "  git add $FILES" >&2
-        echo '  git commit -m "Update bd JSONL"' >&2
-        echo "  git push" >&2
-        echo "" >&2
-        exit 1
+
+        # Check if bd is available and offer auto-sync
+        if command -v bd >/dev/null 2>&1; then
+            # Check if we're in an interactive terminal
+            if [ -t 0 ]; then
+                echo "Would you like to run 'bd sync' now to commit and push these changes? [y/N]" >&2
+                read -r response
+                case "$response" in
+                    [yY][eE][sS]|[yY])
+                        echo "" >&2
+                        echo "Running: bd sync" >&2
+                        if bd sync; then
+                            echo "" >&2
+                            echo "✓ Sync complete. Continuing with push..." >&2
+                            exit 0
+                        else
+                            echo "" >&2
+                            echo "❌ Sync failed. Push aborted." >&2
+                            exit 1
+                        fi
+                        ;;
+                    *)
+                        echo "" >&2
+                        echo "Push aborted. Run 'bd sync' manually when ready:" >&2
+                        echo "" >&2
+                        echo "  bd sync" >&2
+                        echo "  git push" >&2
+                        echo "" >&2
+                        exit 1
+                        ;;
+                esac
+            else
+                # Non-interactive: just show the message
+                echo "Run 'bd sync' to commit these changes:" >&2
+                echo "" >&2
+                echo "  bd sync" >&2
+                echo "" >&2
+                exit 1
+            fi
+        else
+            # bd not available, fall back to manual git commands
+            echo "Please commit the updated JSONL before pushing:" >&2
+            echo "" >&2
+            # shellcheck disable=SC2086
+            echo "  git add $FILES" >&2
+            echo '  git commit -m "Update bd JSONL"' >&2
+            echo "  git push" >&2
+            echo "" >&2
+            exit 1
+        fi
     fi
 fi
 
