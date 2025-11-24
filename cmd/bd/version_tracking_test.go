@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -306,5 +309,189 @@ func TestMaybeShowUpgradeNotification(t *testing.T) {
 	maybeShowUpgradeNotification()
 	if upgradeAcknowledged != prevAck {
 		t.Error("Should not change acknowledged state on subsequent calls")
+	}
+}
+
+func TestAutoMigrateOnVersionBump_NoUpgrade(t *testing.T) {
+	// Save original state
+	origUpgradeDetected := versionUpgradeDetected
+	defer func() {
+		versionUpgradeDetected = origUpgradeDetected
+	}()
+
+	// Reset state - no upgrade detected
+	versionUpgradeDetected = false
+
+	// Should return early without doing anything
+	autoMigrateOnVersionBump()
+
+	// Test passes if no panic occurs
+}
+
+func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
+	// Create temp .beads directory without a database
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads: %v", err)
+	}
+
+	// Change to temp directory
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change to temp dir: %v", err)
+	}
+
+	// Create metadata.json
+	cfg := configfile.DefaultConfig()
+	cfg.LastBdVersion = "0.22.0"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Save original state
+	origUpgradeDetected := versionUpgradeDetected
+	defer func() {
+		versionUpgradeDetected = origUpgradeDetected
+	}()
+
+	// Simulate version upgrade
+	versionUpgradeDetected = true
+
+	// Should handle gracefully when database doesn't exist
+	autoMigrateOnVersionBump()
+
+	// Test passes if no panic occurs
+}
+
+func TestAutoMigrateOnVersionBump_MigratesVersion(t *testing.T) {
+	// Create temp .beads directory
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads: %v", err)
+	}
+
+	// Change to temp directory
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change to temp dir: %v", err)
+	}
+
+	// Create metadata.json
+	cfg := configfile.DefaultConfig()
+	cfg.LastBdVersion = "0.22.0"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Create database with old version
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+
+	// Set old database version
+	oldVersion := "0.22.0"
+	if err := store.SetMetadata(ctx, "bd_version", oldVersion); err != nil {
+		t.Fatalf("Failed to set old version: %v", err)
+	}
+	_ = store.Close()
+
+	// Save original state
+	origUpgradeDetected := versionUpgradeDetected
+	defer func() {
+		versionUpgradeDetected = origUpgradeDetected
+	}()
+
+	// Simulate version upgrade
+	versionUpgradeDetected = true
+
+	// Call auto-migration
+	autoMigrateOnVersionBump()
+
+	// Verify database version was updated
+	store, err = sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer store.Close()
+
+	newVersion, err := store.GetMetadata(ctx, "bd_version")
+	if err != nil {
+		t.Fatalf("Failed to read database version: %v", err)
+	}
+
+	if newVersion != Version {
+		t.Errorf("Database version not updated: got %q, want %q", newVersion, Version)
+	}
+}
+
+func TestAutoMigrateOnVersionBump_AlreadyMigrated(t *testing.T) {
+	// Create temp .beads directory
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads: %v", err)
+	}
+
+	// Change to temp directory
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change to temp dir: %v", err)
+	}
+
+	// Create metadata.json
+	cfg := configfile.DefaultConfig()
+	cfg.LastBdVersion = Version
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Create database with current version
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+
+	// Set current database version
+	if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
+		t.Fatalf("Failed to set version: %v", err)
+	}
+	_ = store.Close()
+
+	// Save original state
+	origUpgradeDetected := versionUpgradeDetected
+	defer func() {
+		versionUpgradeDetected = origUpgradeDetected
+	}()
+
+	// Simulate version upgrade
+	versionUpgradeDetected = true
+
+	// Call auto-migration - should be a no-op
+	autoMigrateOnVersionBump()
+
+	// Verify database version is still current
+	store, err = sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer store.Close()
+
+	currentVersion, err := store.GetMetadata(ctx, "bd_version")
+	if err != nil {
+		t.Fatalf("Failed to read database version: %v", err)
+	}
+
+	if currentVersion != Version {
+		t.Errorf("Database version changed unexpectedly: got %q, want %q", currentVersion, Version)
 	}
 }

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 // trackBdVersion checks if bd version has changed since last run and updates metadata.json.
@@ -111,4 +115,83 @@ func maybeShowUpgradeNotification() {
 	fmt.Printf("🔄 bd upgraded from v%s to v%s since last use\n", previousVersion, Version)
 	fmt.Println("💡 Run 'bd upgrade review' to see what changed")
 	fmt.Println()
+}
+
+// autoMigrateOnVersionBump automatically migrates the database when CLI version changes.
+// This function is best-effort - failures are silent to avoid disrupting commands.
+// Called from PersistentPreRun after trackBdVersion().
+//
+// bd-jgxi: Auto-migrate database on CLI version bump
+func autoMigrateOnVersionBump() {
+	// Only migrate if version upgrade was detected
+	if !versionUpgradeDetected {
+		return
+	}
+
+	// Find the beads directory
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		// No .beads directory - nothing to migrate
+		return
+	}
+
+	// Load config to get database path
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		// Config load failed or doesn't exist - skip migration
+		debug.Logf("auto-migrate: skipping migration, config load failed: %v", err)
+		return
+	}
+
+	// Get database path
+	dbPath := cfg.DatabasePath(beadsDir)
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// No database file - nothing to migrate
+		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
+		return
+	}
+
+	// Open database to check current version
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		// Failed to open database - skip migration
+		debug.Logf("auto-migrate: failed to open database: %v", err)
+		return
+	}
+
+	// Get current database version
+	dbVersion, err := store.GetMetadata(ctx, "bd_version")
+	if err != nil {
+		// Failed to read version - skip migration
+		debug.Logf("auto-migrate: failed to read database version: %v", err)
+		_ = store.Close()
+		return
+	}
+
+	// Check if migration is needed
+	if dbVersion == Version {
+		// Database is already at current version
+		debug.Logf("auto-migrate: database already at version %s", Version)
+		_ = store.Close()
+		return
+	}
+
+	// Perform migration: update database version
+	debug.Logf("auto-migrate: migrating database from %s to %s", dbVersion, Version)
+	if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
+		// Migration failed - log and continue
+		debug.Logf("auto-migrate: failed to update database version: %v", err)
+		_ = store.Close()
+		return
+	}
+
+	// Close database
+	if err := store.Close(); err != nil {
+		debug.Logf("auto-migrate: warning: failed to close database: %v", err)
+	}
+
+	debug.Logf("auto-migrate: successfully migrated database to version %s", Version)
 }

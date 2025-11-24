@@ -302,6 +302,10 @@ var rootCmd = &cobra.Command{
 		// Best-effort tracking - failures are silent
 		trackBdVersion()
 
+		// Auto-migrate database on version bump (bd-jgxi)
+		// Best-effort migration - failures are silent to avoid disrupting commands
+		autoMigrateOnVersionBump()
+
 		// Initialize daemon status
 		socketPath := getSocketPath()
 		daemonStatus = DaemonStatus{
