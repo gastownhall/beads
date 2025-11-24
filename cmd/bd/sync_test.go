@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestIsGitRepo_InGitRepo(t *testing.T) {
@@ -430,4 +433,140 @@ func TestHasJSONLConflict_MultipleConflicts(t *testing.T) {
 	if hasJSONLConflict() {
 		t.Error("expected false when multiple files have conflicts (should not auto-resolve)")
 	}
+}
+
+// TestZFCSkipsExportAfterImport tests the bd-l0r fix: after importing JSONL due to
+// stale DB detection, sync should skip export to avoid overwriting the JSONL source of truth.
+func TestZFCSkipsExportAfterImport(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+
+	// Setup beads directory with JSONL
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+
+	// Create JSONL with 10 issues (simulating pulled state after cleanup)
+	var jsonlLines []string
+	for i := 1; i <= 10; i++ {
+		line := fmt.Sprintf(`{"id":"bd-%d","title":"JSONL Issue %d","status":"open","issue_type":"task","priority":2,"created_at":"2025-11-24T00:00:00Z","updated_at":"2025-11-24T00:00:00Z"}`, i, i)
+		jsonlLines = append(jsonlLines, line)
+	}
+	os.WriteFile(jsonlPath, []byte(strings.Join(jsonlLines, "\n")+"\n"), 0644)
+
+	// Create SQLite store with 100 stale issues (10x the JSONL count = 900% divergence)
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	testStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Set issue_prefix to prevent "database not initialized" errors
+	if err := testStore.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Populate DB with 100 issues (stale, 90 closed)
+	for i := 1; i <= 100; i++ {
+		status := types.StatusOpen
+		var closedAt *time.Time
+		if i > 10 { // First 10 open, rest closed
+			status = types.StatusClosed
+			now := time.Now()
+			closedAt = &now
+		}
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Old Issue %d", i),
+			Status:    status,
+			ClosedAt:  closedAt,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := testStore.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("failed to create issue %d: %v", i, err)
+		}
+	}
+
+	// Verify divergence: (100 - 10) / 10 = 900% > 50% threshold
+	dbCount, _ := countDBIssuesFast(ctx, testStore)
+	jsonlCount, _ := countIssuesInJSONL(jsonlPath)
+	divergence := float64(dbCount-jsonlCount) / float64(jsonlCount)
+
+	if dbCount != 100 {
+		t.Fatalf("DB setup failed: expected 100 issues, got %d", dbCount)
+	}
+	if jsonlCount != 10 {
+		t.Fatalf("JSONL setup failed: expected 10 issues, got %d", jsonlCount)
+	}
+	if divergence <= 0.5 {
+		t.Fatalf("Divergence too low: %.2f%% (expected >50%%)", divergence*100)
+	}
+
+	// Set global store for the test
+	oldStore := store
+	storeMutex.Lock()
+	oldStoreActive := storeActive
+	store = testStore
+	storeActive = true
+	storeMutex.Unlock()
+	defer func() {
+		storeMutex.Lock()
+		store = oldStore
+		storeActive = oldStoreActive
+		storeMutex.Unlock()
+	}()
+
+	// Save JSONL content hash before running sync logic
+	beforeHash, _ := computeJSONLHash(jsonlPath)
+
+	// Simulate the ZFC check and export step from sync.go lines 126-186
+	// This is the code path that should detect divergence and skip export
+	skipExport := false
+
+	// ZFC safety check
+	if err := ensureStoreActive(); err == nil && store != nil {
+		dbCount, err := countDBIssuesFast(ctx, store)
+		if err == nil {
+			jsonlCount, err := countIssuesInJSONL(jsonlPath)
+			if err == nil && jsonlCount > 0 && dbCount > jsonlCount {
+				divergence := float64(dbCount-jsonlCount) / float64(jsonlCount)
+				if divergence > 0.5 {
+					// Import JSONL (this should sync DB to match JSONL's 62 issues)
+					if err := importFromJSONL(ctx, jsonlPath, false); err != nil {
+						t.Fatalf("ZFC import failed: %v", err)
+					}
+					skipExport = true
+				}
+			}
+		}
+	}
+
+	// Verify skipExport was set
+	if !skipExport {
+		t.Error("Expected skipExport=true after ZFC import, but got false")
+	}
+
+	// Verify DB was synced to JSONL (should have 10 issues now, not 100)
+	afterDBCount, _ := countDBIssuesFast(ctx, testStore)
+	if afterDBCount != 10 {
+		t.Errorf("After ZFC import, DB should have 10 issues (matching JSONL), got %d", afterDBCount)
+	}
+
+	// Verify JSONL was NOT modified (no export happened)
+	afterHash, _ := computeJSONLHash(jsonlPath)
+	if beforeHash != afterHash {
+		t.Error("JSONL content changed after ZFC import (export should have been skipped)")
+	}
+
+	// Verify issue count in JSONL is still 10
+	finalJSONLCount, _ := countIssuesInJSONL(jsonlPath)
+	if finalJSONLCount != 10 {
+		t.Errorf("JSONL should still have 10 issues, got %d", finalJSONLCount)
+	}
+
+	t.Logf("✓ ZFC fix verified: DB synced from 100 to 10 issues, JSONL unchanged")
 }

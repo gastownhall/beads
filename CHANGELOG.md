@@ -83,10 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Now always uses content hash for reliable comparison
   - Prevents bd sync from overwriting pulled JSONL and resurrecting deleted issues
 
-- **ZFC (JSONL First Consistency)**: Enforce source of truth semantics (bd-l0r, 1ba068f, 2e4171a, 949ab42)
-  - bd sync now unconditionally imports JSONL first (source of truth)
-  - Simpler JSONL → DB → JSONL flow ensures consistency
-  - Prevents exporting when DB has significantly more issues than JSONL
+- **ZFC (JSONL First Consistency)**: Fix stale DB overwriting JSONL on sync (bd-l0r, 1ba068f, 2e4171a, 949ab42)
+  - bd sync now detects stale DB (>50% divergence from JSONL) and imports first
+  - After ZFC import, skips export to prevent overwriting JSONL source of truth
+  - Fixes bug where DB with 688 issues would overwrite JSONL with 62 issues after pull
+  - JSONL is source of truth after git pull - DB syncs to match, not vice versa
   - Preserves local uncommitted changes while catching stale DB scenarios
 
 - **Merge Conflict Semantics**: Improved resolution policies (bd-pq5k, d4f9a05)
