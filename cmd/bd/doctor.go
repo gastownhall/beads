@@ -196,6 +196,8 @@ func applyFixes(result doctorResult) {
 			err = fix.SchemaCompatibility(result.Path)
 		case "Git Merge Driver":
 			err = fix.MergeDriver(result.Path)
+		case "Sync Branch Config":
+			err = fix.SyncBranchConfig(result.Path)
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
@@ -347,6 +349,11 @@ func runDiagnostics(path string) doctorResult {
 	metadataCheck := checkMetadataVersionTracking(path)
 	result.Checks = append(result.Checks, metadataCheck)
 	// Don't fail overall check for metadata, just warn
+
+	// Check 17: Sync branch configuration (bd-rsua)
+	syncBranchCheck := checkSyncBranchConfig(path)
+	result.Checks = append(result.Checks, syncBranchCheck)
+	// Don't fail overall check for missing sync.branch, just warn
 
 	return result
 }
@@ -1722,6 +1729,103 @@ func parseVersionParts(version string) []int {
 	}
 
 	return result
+}
+
+func checkSyncBranchConfig(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Skip if .beads doesn't exist
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (no .beads directory)",
+		}
+	}
+
+	// Check if we're in a git repository
+	gitDir := filepath.Join(path, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	// Check metadata.json first for custom database name
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		// Fall back to canonical database name
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// Skip if no database (JSONL-only mode)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (JSONL-only mode)",
+		}
+	}
+
+	// Open database to check config
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "Unable to check sync.branch config",
+			Detail:  err.Error(),
+		}
+	}
+	defer db.Close()
+
+	// Check if sync.branch is configured
+	var syncBranch string
+	err = db.QueryRow("SELECT value FROM config WHERE key = ?", "sync.branch").Scan(&syncBranch)
+	if err != nil && err != sql.ErrNoRows {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "Unable to read sync.branch config",
+			Detail:  err.Error(),
+		}
+	}
+
+	// If sync.branch is already configured, we're good
+	if syncBranch != "" {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: fmt.Sprintf("Configured (%s)", syncBranch),
+		}
+	}
+
+	// sync.branch is not configured - get current branch for the fix message
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "sync.branch not configured",
+			Detail:  "Unable to detect current branch",
+			Fix:     "Run 'bd config set sync.branch <branch-name>' or 'bd doctor --fix' to auto-configure",
+		}
+	}
+
+	currentBranch := strings.TrimSpace(string(output))
+	return doctorCheck{
+		Name:    "Sync Branch Config",
+		Status:  statusWarning,
+		Message: "sync.branch not configured",
+		Detail:  fmt.Sprintf("Current branch: %s", currentBranch),
+		Fix:     fmt.Sprintf("Run 'bd doctor --fix' to auto-configure to '%s', or manually: bd config set sync.branch <branch-name>", currentBranch),
+	}
 }
 
 func init() {
