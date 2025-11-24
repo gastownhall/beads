@@ -476,24 +476,7 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 		t.Error("expected global last_import_hash to not be set when using per-repo keys")
 	}
 
-	// Verify mtime metadata was also set per-repo (bd-web8: keys are sanitized)
-	mtime1Key := "last_import_mtime:" + sanitizeMetadataKey(jsonlPath1)
-	mtime1, err := store.GetMetadata(ctx, mtime1Key)
-	if err != nil {
-		t.Fatalf("failed to get %s: %v", mtime1Key, err)
-	}
-	if mtime1 == "" {
-		t.Errorf("expected %s to be set", mtime1Key)
-	}
-
-	mtime2Key := "last_import_mtime:" + sanitizeMetadataKey(jsonlPath2)
-	mtime2, err := store.GetMetadata(ctx, mtime2Key)
-	if err != nil {
-		t.Fatalf("failed to get %s: %v", mtime2Key, err)
-	}
-	if mtime2 == "" {
-		t.Errorf("expected %s to be set", mtime2Key)
-	}
+	// Note: last_import_mtime removed in bd-v0y fix (git doesn't preserve mtime)
 }
 
 // TestExportWithMultiRepoConfigUpdatesAllMetadata verifies that export with multi-repo
@@ -604,14 +587,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", primaryTimeKey)
 	}
 
-	primaryMtimeKey := "last_import_mtime:" + sanitizeMetadataKey(primaryDir)
-	primaryMtime, err := store.GetMetadata(ctx, primaryMtimeKey)
-	if err != nil {
-		t.Fatalf("failed to get %s: %v", primaryMtimeKey, err)
-	}
-	if primaryMtime == "" {
-		t.Errorf("expected %s to be set after export", primaryMtimeKey)
-	}
+	// Note: last_import_mtime removed in bd-v0y fix (git doesn't preserve mtime)
 
 	// Verify metadata for additional repo (bd-web8: keys are sanitized)
 	additionalHashKey := "last_import_hash:" + sanitizeMetadataKey(additionalDir)
@@ -632,14 +608,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		t.Errorf("expected %s to be set after export", additionalTimeKey)
 	}
 
-	additionalMtimeKey := "last_import_mtime:" + sanitizeMetadataKey(additionalDir)
-	additionalMtime, err := store.GetMetadata(ctx, additionalMtimeKey)
-	if err != nil {
-		t.Fatalf("failed to get %s: %v", additionalMtimeKey, err)
-	}
-	if additionalMtime == "" {
-		t.Errorf("expected %s to be set after export", additionalMtimeKey)
-	}
+	// Note: last_import_mtime removed in bd-v0y fix (git doesn't preserve mtime)
 
 	// Note: In this test both JSONL files have the same content (all issues),
 	// so hashes will be identical. In real multi-repo mode, ExportToMultiRepo

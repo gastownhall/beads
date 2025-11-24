@@ -251,10 +251,11 @@ func sanitizeMetadataKey(key string) string {
 // In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
 //
 // Metadata key format (bd-ar2.12):
-//   - Single-repo mode: "last_import_hash", "last_import_time", "last_import_mtime"
+//   - Single-repo mode: "last_import_hash", "last_import_time"
 //   - Multi-repo mode: "last_import_hash:<repo_key>", "last_import_time:<repo_key>", etc.
 //     where <repo_key> is a stable repo identifier like "." or "../frontend"
 //   - Windows paths: Colons in absolute paths (e.g., C:\...) are replaced with underscores (bd-web8)
+//   - Note: "last_import_mtime" was removed in bd-v0y fix (git doesn't preserve mtime)
 //
 // Transaction boundaries (bd-ar2.6):
 // This function does NOT provide atomicity between JSONL write, metadata updates, and DB mtime.
@@ -279,11 +280,9 @@ func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath 
 	// Build metadata keys with optional suffix for per-repo tracking
 	hashKey := "last_import_hash"
 	timeKey := "last_import_time"
-	mtimeKey := "last_import_mtime"
 	if keySuffix != "" {
 		hashKey += ":" + keySuffix
 		timeKey += ":" + keySuffix
-		mtimeKey += ":" + keySuffix
 	}
 
 	// Note: Metadata update failures are treated as warnings, not errors (bd-ar2.5).
@@ -300,14 +299,7 @@ func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath 
 	if err := store.SetMetadata(ctx, timeKey, exportTime); err != nil {
 		log.log("Warning: failed to update %s: %v", timeKey, err)
 	}
-
-	// Store mtime for fast-path optimization
-	if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
-		mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
-		if err := store.SetMetadata(ctx, mtimeKey, mtimeStr); err != nil {
-			log.log("Warning: failed to update %s: %v", mtimeKey, err)
-		}
-	}
+	// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
 }
 
 // validateDatabaseFingerprint checks that the database belongs to this repository
