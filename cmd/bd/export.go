@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 // countIssuesInJSONL counts the number of issues in a JSONL file
@@ -114,13 +116,30 @@ var exportCmd = &cobra.Command{
 	Long: `Export all issues to JSON Lines format (one JSON object per line).
 Issues are sorted by ID for consistent diffs.
 
-Output to stdout by default, or use -o flag for file output.`,
+Output to stdout by default, or use -o flag for file output.
+
+Examples:
+  bd export --status open -o open-issues.jsonl
+  bd export --type bug --priority-max 1
+  bd export --created-after 2025-01-01 --assignee alice`,
 	Run: func(cmd *cobra.Command, args []string) {
 		format, _ := cmd.Flags().GetString("format")
 		output, _ := cmd.Flags().GetString("output")
 		statusFilter, _ := cmd.Flags().GetString("status")
 		force, _ := cmd.Flags().GetBool("force")
-		
+
+		// Additional filter flags
+		assignee, _ := cmd.Flags().GetString("assignee")
+		issueType, _ := cmd.Flags().GetString("type")
+		labels, _ := cmd.Flags().GetStringSlice("label")
+		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
+		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
+		createdAfter, _ := cmd.Flags().GetString("created-after")
+		createdBefore, _ := cmd.Flags().GetString("created-before")
+		updatedAfter, _ := cmd.Flags().GetString("updated-after")
+		updatedBefore, _ := cmd.Flags().GetString("updated-before")
+
 		debug.Logf("Debug: export flags - output=%q, force=%v\n", output, force)
 
 		if format != "jsonl" {
@@ -155,11 +174,80 @@ Output to stdout by default, or use -o flag for file output.`,
 			defer func() { _ = store.Close() }()
 		}
 
+		// Normalize labels: trim, dedupe, remove empty
+		labels = util.NormalizeLabels(labels)
+		labelsAny = util.NormalizeLabels(labelsAny)
+
 		// Build filter
 		filter := types.IssueFilter{}
 		if statusFilter != "" {
 			status := types.Status(statusFilter)
 			filter.Status = &status
+		}
+		if assignee != "" {
+			filter.Assignee = &assignee
+		}
+		if issueType != "" {
+			t := types.IssueType(issueType)
+			filter.IssueType = &t
+		}
+		if len(labels) > 0 {
+			filter.Labels = labels
+		}
+		if len(labelsAny) > 0 {
+			filter.LabelsAny = labelsAny
+		}
+
+		// Priority ranges
+		if cmd.Flags().Changed("priority-min") {
+			priorityMin, err := validation.ValidatePriority(priorityMinStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-min: %v\n", err)
+				os.Exit(1)
+			}
+			filter.PriorityMin = &priorityMin
+		}
+		if cmd.Flags().Changed("priority-max") {
+			priorityMax, err := validation.ValidatePriority(priorityMaxStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --priority-max: %v\n", err)
+				os.Exit(1)
+			}
+			filter.PriorityMax = &priorityMax
+		}
+
+		// Date ranges
+		if createdAfter != "" {
+			t, err := parseTimeFlag(createdAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedAfter = &t
+		}
+		if createdBefore != "" {
+			t, err := parseTimeFlag(createdBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --created-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.CreatedBefore = &t
+		}
+		if updatedAfter != "" {
+			t, err := parseTimeFlag(updatedAfter)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-after: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedAfter = &t
+		}
+		if updatedBefore != "" {
+			t, err := parseTimeFlag(updatedBefore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --updated-before: %v\n", err)
+				os.Exit(1)
+			}
+			filter.UpdatedBefore = &t
 		}
 
 		// Get all issues
@@ -421,5 +509,22 @@ func init() {
 	exportCmd.Flags().StringP("status", "s", "", "Filter by status")
 	exportCmd.Flags().Bool("force", false, "Force export even if database is empty")
 	exportCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output export statistics in JSON format")
+
+	// Filter flags
+	exportCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
+	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore)")
+	exportCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
+	exportCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
+
+	// Priority filters
+	exportCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
+	exportCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
+
+	// Date filters
+	exportCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
+	exportCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
+	exportCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
+	exportCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
+
 	rootCmd.AddCommand(exportCmd)
 }

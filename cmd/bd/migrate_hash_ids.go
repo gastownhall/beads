@@ -22,17 +22,30 @@ import (
 
 var migrateHashIDsCmd = &cobra.Command{
 	Use:   "migrate-hash-ids",
-	Short: "Migrate sequential IDs to hash-based IDs",
+	Short: "Migrate sequential IDs to hash-based IDs (legacy)",
 	Long: `Migrate database from sequential IDs (bd-1, bd-2) to hash-based IDs (bd-a3f8e9a2).
 
-This command:
+*** LEGACY COMMAND ***
+This is a one-time migration command. Most users do not need this.
+Only use if migrating from an older beads version that used sequential IDs.
+
+What this does:
 - Generates hash IDs for all top-level issues
 - Assigns hierarchical child IDs (bd-a3f8e9a2.1) for epic children
 - Updates all references (dependencies, comments, external refs)
 - Creates mapping file for reference
 - Validates all relationships are intact
+- Automatically creates database backup before migration
 
-Use --dry-run to preview changes before applying.`,
+USE CASES:
+- Upgrading from beads v1.x to v2.x (sequential → hash IDs)
+- One-time migration only - do not run on already-migrated databases
+
+EXAMPLES:
+  bd migrate-hash-ids --dry-run       # Preview changes
+  bd migrate-hash-ids                 # Perform migration (creates backup)
+
+WARNING: Backup your database before running this command, even though it creates one automatically.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		
