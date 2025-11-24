@@ -213,6 +213,40 @@ bd sync  # Force immediate export/commit/push
 
 **For comprehensive CLI documentation**, see [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
+### Import Configuration
+
+bd provides configuration for handling edge cases during import, especially when dealing with hierarchical issues and deleted parents:
+
+```bash
+# Configure orphan handling for imports
+bd config set import.orphan_handling "allow"      # Default: import orphans without validation
+bd config set import.orphan_handling "resurrect"  # Auto-resurrect deleted parents as tombstones
+bd config set import.orphan_handling "skip"       # Skip orphaned children with warning
+bd config set import.orphan_handling "strict"     # Fail if parent is missing
+```
+
+**Modes explained:**
+
+- **`allow` (default)** - Import orphaned children without parent validation. Most permissive, ensures no data loss even if hierarchy is temporarily broken.
+- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data.
+- **`skip`** - Skip orphaned children with a warning. Partial import succeeds but some issues are excluded.
+- **`strict`** - Fail import immediately if a child's parent is missing. Use when database integrity is critical.
+
+**When to use each mode:**
+
+- Use `allow` (default) for daily imports and auto-sync - ensures no data loss
+- Use `resurrect` when importing from another database that had parent deletions
+- Use `strict` only for controlled imports where you need to guarantee parent existence
+- Use `skip` rarely - only when you want to selectively import a subset
+
+**Override per command:**
+```bash
+bd import -i issues.jsonl --orphan-handling resurrect  # One-time override
+bd sync  # Uses import.orphan_handling config setting
+```
+
+See [docs/CONFIG.md](docs/CONFIG.md) for complete configuration documentation.
+
 ### Managing Daemons
 
 bd runs a background daemon per workspace for auto-sync and RPC operations:

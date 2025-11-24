@@ -663,9 +663,27 @@ bd export -o issues.jsonl
 # Import from JSONL (automatic when JSONL is newer)
 bd import -i issues.jsonl
 
+# Handle missing parents during import
+bd import -i issues.jsonl --orphan-handling resurrect  # Auto-recreate deleted parents
+bd import -i issues.jsonl --orphan-handling skip       # Skip orphans with warning
+bd import -i issues.jsonl --orphan-handling strict     # Fail on missing parents
+
 # Manual sync
 bd sync
 ```
+
+**Import Orphan Handling:**
+
+When importing hierarchical issues (e.g., `bd-abc.1`, `bd-abc.2`), bd needs to handle cases where the parent (`bd-abc`) has been deleted:
+
+- **`allow` (default)** - Import orphans without validation. Most permissive, ensures no data loss.
+- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy.
+- **`skip`** - Skip orphaned children with warning. Partial import.
+- **`strict`** - Fail import if parent is missing.
+
+Configure default behavior: `bd config set import.orphan_handling resurrect`
+
+See [docs/CONFIG.md](docs/CONFIG.md) for complete configuration documentation.
 
 **Note:** Auto-sync is enabled by default. Manual export/import is rarely needed.
 

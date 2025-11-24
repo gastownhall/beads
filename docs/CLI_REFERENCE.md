@@ -341,13 +341,31 @@ bd import -i .beads/issues.jsonl --dry-run      # Preview changes
 bd import -i .beads/issues.jsonl                # Import and update issues
 bd import -i .beads/issues.jsonl --dedupe-after # Import + detect duplicates
 
-# Note: Import automatically handles missing parents!
-# - If a hierarchical child's parent is missing (e.g., bd-abc.1 but no bd-abc)
-# - bd will search the JSONL history for the parent
-# - If found, creates a tombstone placeholder (Status=Closed, Priority=4)
-# - Dependencies are also resurrected on best-effort basis
-# - This prevents import failures after parent deletion
+# Handle missing parents during import
+bd import -i issues.jsonl --orphan-handling allow      # Default: import orphans without validation
+bd import -i issues.jsonl --orphan-handling resurrect  # Auto-resurrect deleted parents as tombstones
+bd import -i issues.jsonl --orphan-handling skip       # Skip orphans with warning
+bd import -i issues.jsonl --orphan-handling strict     # Fail if parent is missing
+
+# Configure default orphan handling behavior
+bd config set import.orphan_handling "resurrect"
+bd sync  # Now uses resurrect mode by default
 ```
+
+**Orphan handling modes:**
+
+- **`allow` (default)** - Import orphaned children without parent validation. Most permissive, ensures no data loss even if hierarchy is temporarily broken.
+- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`skip`** - Skip orphaned children with warning. Partial import succeeds but some issues are excluded.
+- **`strict`** - Fail import immediately if a child's parent is missing. Use when database integrity is critical.
+
+**When to use:**
+- Use `allow` (default) for daily imports and auto-sync
+- Use `resurrect` when importing from databases with deleted parents
+- Use `strict` for controlled imports requiring guaranteed parent existence
+- Use `skip` rarely - only for selective imports
+
+See [CONFIG.md](CONFIG.md#example-import-orphan-handling) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#import-fails-with-missing-parent-errors) for more details.
 
 ### Migration
 

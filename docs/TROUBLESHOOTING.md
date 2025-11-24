@@ -160,6 +160,57 @@ rm .beads/*.db
 bd import -i .beads/issues.jsonl
 ```
 
+### Import fails with missing parent errors
+
+If you see errors like `parent issue bd-abc does not exist` when importing hierarchical issues (e.g., `bd-abc.1`, `bd-abc.2`), this means the parent issue was deleted but children still reference it.
+
+**Quick fix using resurrection:**
+
+```bash
+# Auto-resurrect deleted parents from JSONL history
+bd import -i issues.jsonl --orphan-handling resurrect
+
+# Or set as default behavior
+bd config set import.orphan_handling "resurrect"
+bd sync  # Now uses resurrect mode
+```
+
+**What resurrection does:**
+
+1. Searches the full JSONL file for the missing parent issue
+2. Recreates it as a tombstone (Status=Closed, Priority=4)
+3. Preserves the parent's original title and description
+4. Maintains referential integrity for hierarchical children
+5. Also resurrects dependencies on best-effort basis
+
+**Other handling modes:**
+
+```bash
+# Allow orphans (default) - import without validation
+bd config set import.orphan_handling "allow"
+
+# Skip orphans - partial import with warnings
+bd config set import.orphan_handling "skip"
+
+# Strict - fail fast on missing parents
+bd config set import.orphan_handling "strict"
+```
+
+**When this happens:**
+
+- Parent issue was deleted using `bd delete`
+- Branch merge where one side deleted the parent
+- Manual JSONL editing that removed parent entries
+- Database corruption or incomplete import
+
+**Prevention:**
+
+- Use `bd delete --cascade` to also delete children
+- Check for orphans before cleanup: `bd list --id bd-abc.*`
+- Review impact before deleting epic/parent issues
+
+See [docs/CONFIG.md](docs/CONFIG.md#example-import-orphan-handling) for complete configuration documentation.
+
 ### Database corruption
 
 **Important**: Distinguish between **logical consistency issues** (ID collisions, wrong prefixes) and **physical SQLite corruption**.
