@@ -58,9 +58,16 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 					fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", id, err)
 					continue
 				}
-				// TODO(bd-r46): Add reason as a comment once RPC supports AddComment
+				// Add reason as a comment if provided
 				if reason != "" {
-					fmt.Fprintf(os.Stderr, "Warning: reason not supported in daemon mode yet\n")
+					commentArgs := &rpc.CommentAddArgs{
+						ID:     id,
+						Author: actor,
+						Text:   reason,
+					}
+					if _, err := daemonClient.AddComment(commentArgs); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to add comment to %s: %v\n", id, err)
+					}
 				}
 				if jsonOutput {
 					var issue types.Issue
