@@ -49,13 +49,13 @@ func TryConnect(socketPath string) (*Client, error) {
 // Returns nil if no daemon is running or unhealthy.
 func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Client, error) {
 	rpcDebugLog("attempting connection to socket: %s", socketPath)
-	
+
 	// Fast probe: check daemon lock before attempting RPC connection if socket doesn't exist
 	// This eliminates unnecessary connection attempts when no daemon is running
 	// If socket exists, we skip lock check for backwards compatibility and test scenarios
 	socketExists := endpointExists(socketPath)
 	rpcDebugLog("socket exists check: %v", socketExists)
-	
+
 	if !socketExists {
 		beadsDir := filepath.Dir(socketPath)
 		running, _ := lockfile.TryDaemonLock(beadsDir)
@@ -66,13 +66,17 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 			cleanupStaleDaemonArtifacts(beadsDir)
 			return nil, nil
 		}
-		rpcDebugLog("daemon lock held but socket missing (race or cleanup issue)")
-	}
-	
-	if !socketExists {
-		debug.Logf("RPC endpoint does not exist: %s", socketPath)
-		rpcDebugLog("connection aborted: socket does not exist")
-		return nil, nil
+		// Lock is held but socket was missing - re-check socket existence atomically
+		// to handle race where daemon just started between first check and lock check
+		rpcDebugLog("daemon lock held but socket was missing - re-checking socket existence")
+		socketExists = endpointExists(socketPath)
+		if !socketExists {
+			// Lock held but socket still missing after re-check - daemon startup or crash
+			debug.Logf("daemon lock held but socket missing after re-check (startup race or crash): %s", socketPath)
+			rpcDebugLog("connection aborted: socket still missing despite lock being held")
+			return nil, nil
+		}
+		rpcDebugLog("socket now exists after re-check (daemon startup race resolved)")
 	}
 
 	if dialTimeout <= 0 {
