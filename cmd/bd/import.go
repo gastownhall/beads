@@ -36,6 +36,18 @@ Behavior:
 NOTE: Import requires direct database access and does not work with daemon mode.
       The command automatically uses --no-daemon when executed.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Check for positional arguments (common mistake: bd import file.jsonl instead of bd import -i file.jsonl)
+		if len(args) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: Unexpected argument(s): %v\n\n", args)
+			fmt.Fprintf(os.Stderr, "Did you mean: bd import -i %s\n\n", args[0])
+			fmt.Fprintf(os.Stderr, "The import command does not accept positional arguments.\n")
+			fmt.Fprintf(os.Stderr, "Use the -i flag to specify an input file:\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl\n\n")
+			fmt.Fprintf(os.Stderr, "Or pipe data via stdin:\n")
+			fmt.Fprintf(os.Stderr, "  cat data.jsonl | bd import\n")
+			os.Exit(1)
+		}
+
 		// Ensure database directory exists (auto-create if needed)
 		dbDir := filepath.Dir(dbPath)
 		if err := os.MkdirAll(dbDir, 0750); err != nil {
