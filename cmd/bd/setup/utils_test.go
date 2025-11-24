@@ -35,8 +35,8 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 
 	mode := info.Mode()
-	if mode.Perm() != 0644 {
-		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0644)
+	if mode.Perm() != 0600 {
+		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0600)
 	}
 
 	// Test overwriting existing file
