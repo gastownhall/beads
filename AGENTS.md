@@ -226,7 +226,17 @@ bd daemons killall --json       # Restart all daemons
 
 **After upgrading bd**: Run `bd daemons killall` to restart all daemons with new version.
 
-**For complete daemon management**, see [docs/DAEMON.md](docs/DAEMON.md).
+### Event-Driven Daemon Mode (Experimental)
+
+**NEW in v0.16+**: Event-driven mode replaces 5-second polling with instant reactivity (<500ms latency, 60% less CPU).
+
+**Enable globally:**
+```bash
+export BEADS_DAEMON_MODE=events
+bd daemons killall  # Restart daemons to apply
+```
+
+**For configuration, troubleshooting, and complete daemon management**, see [docs/DAEMON.md](docs/DAEMON.md).
 
 ### Web Interface (Monitor)
 
