@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 )
 
 // QueryContext exposes the underlying database QueryContext method for advanced queries
@@ -62,4 +63,73 @@ func IsForeignKeyConstraintError(err error) bool {
 		strings.Contains(errStr, "foreign key constraint failed")
 }
 
+// IsBusyError checks if an error is a database busy/locked error
+func IsBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "database is locked") ||
+		strings.Contains(errStr, "SQLITE_BUSY")
+}
 
+// beginImmediateWithRetry starts an IMMEDIATE transaction with exponential backoff retry
+// on SQLITE_BUSY errors. This addresses bd-ola6: under concurrent write load, BEGIN IMMEDIATE
+// can fail with SQLITE_BUSY, so we retry with exponential backoff instead of failing immediately.
+//
+// Parameters:
+//   - ctx: context for cancellation checking
+//   - conn: dedicated database connection (must use same connection for entire transaction)
+//   - maxRetries: maximum number of retry attempts (default: 5)
+//   - initialDelay: initial backoff delay (default: 10ms)
+//
+// Returns error if:
+//   - Context is cancelled
+//   - BEGIN IMMEDIATE fails with non-busy error
+//   - All retries exhausted with SQLITE_BUSY
+func beginImmediateWithRetry(ctx context.Context, conn *sql.Conn, maxRetries int, initialDelay time.Duration) error {
+	if maxRetries <= 0 {
+		maxRetries = 5
+	}
+	if initialDelay <= 0 {
+		initialDelay = 10 * time.Millisecond
+	}
+
+	var lastErr error
+	delay := initialDelay
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check context cancellation before each attempt
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Attempt to begin transaction
+		_, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE")
+		if err == nil {
+			return nil // Success
+		}
+
+		lastErr = err
+
+		// If not a busy error, fail immediately
+		if !IsBusyError(err) {
+			return err
+		}
+
+		// On last attempt, don't sleep
+		if attempt == maxRetries {
+			break
+		}
+
+		// Exponential backoff: sleep before retry
+		select {
+		case <-time.After(delay):
+			delay *= 2 // Double the delay for next attempt
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return lastErr // Return the last SQLITE_BUSY error after exhausting retries
+}

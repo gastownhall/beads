@@ -208,3 +208,110 @@ func TestQueryContext(t *testing.T) {
 		t.Error("Expected only one row")
 	}
 }
+
+func TestIsBusyError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "database is locked",
+			err:      errors.New("database is locked"),
+			expected: true,
+		},
+		{
+			name:     "SQLITE_BUSY",
+			err:      errors.New("SQLITE_BUSY"),
+			expected: true,
+		},
+		{
+			name:     "SQLITE_BUSY with context",
+			err:      errors.New("failed to begin: SQLITE_BUSY: database is locked"),
+			expected: true,
+		},
+		{
+			name:     "other error",
+			err:      errors.New("some other database error"),
+			expected: false,
+		},
+		{
+			name:     "UNIQUE constraint error",
+			err:      errors.New("UNIQUE constraint failed: issues.id"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsBusyError(tt.err)
+			if result != tt.expected {
+				t.Errorf("IsBusyError(%v) = %v, want %v", tt.err, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBeginImmediateWithRetry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, t.TempDir()+"/test.db")
+	defer store.Close()
+
+	t.Run("successful on first try", func(t *testing.T) {
+		conn, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("Failed to acquire connection: %v", err)
+		}
+		defer conn.Close()
+
+		err = beginImmediateWithRetry(ctx, conn, 5, 10)
+		if err != nil {
+			t.Errorf("beginImmediateWithRetry failed: %v", err)
+		}
+
+		// Rollback to clean up
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		conn, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("Failed to acquire connection: %v", err)
+		}
+		defer conn.Close()
+
+		cancelCtx, cancel := context.WithCancel(ctx)
+		cancel() // Cancel immediately
+
+		err = beginImmediateWithRetry(cancelCtx, conn, 5, 10)
+		if err == nil {
+			t.Error("Expected context cancellation error, got nil")
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("defaults for invalid parameters", func(t *testing.T) {
+		conn, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("Failed to acquire connection: %v", err)
+		}
+		defer conn.Close()
+
+		// Should use defaults (5 retries, 10ms delay) when passed invalid values
+		err = beginImmediateWithRetry(ctx, conn, 0, 0)
+		if err != nil {
+			t.Errorf("beginImmediateWithRetry with invalid params failed: %v", err)
+		}
+
+		// Rollback to clean up
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	})
+}

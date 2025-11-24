@@ -144,7 +144,8 @@ func (s *SQLiteStorage) CreateIssuesWithOptions(ctx context.Context, issues []*t
 	}
 	defer func() { _ = conn.Close() }()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	// Use retry logic with exponential backoff to handle SQLITE_BUSY under concurrent load (bd-ola6)
+	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
 	}
 
