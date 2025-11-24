@@ -338,7 +338,11 @@ get_bd_paths_in_path() {
 }
 
 warn_if_multiple_bd() {
-    mapfile -t bd_paths < <(get_bd_paths_in_path)
+    # Use bash 3.2-compatible approach instead of mapfile (bash 4.0+)
+    bd_paths=()
+    while IFS= read -r line; do
+        bd_paths+=("$line")
+    done < <(get_bd_paths_in_path)
     if [ "${#bd_paths[@]}" -le 1 ]; then
         return 0
     fi
