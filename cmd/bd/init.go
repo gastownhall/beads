@@ -776,9 +776,12 @@ func mergeDriverInstalled() bool {
 		return false
 	}
 
-	// Look for beads JSONL merge attribute
-	return strings.Contains(string(content), ".beads/beads.jsonl") &&
+	// Look for beads JSONL merge attribute (either canonical or legacy filename)
+	hasCanonical := strings.Contains(string(content), ".beads/issues.jsonl") &&
 		strings.Contains(string(content), "merge=beads")
+	hasLegacy := strings.Contains(string(content), ".beads/beads.jsonl") &&
+		strings.Contains(string(content), "merge=beads")
+	return hasCanonical || hasLegacy
 }
 
 // installMergeDriver configures git to use bd merge for JSONL files
