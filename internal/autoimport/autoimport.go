@@ -262,10 +262,16 @@ func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (
 		return false, nil
 	}
 
+	// Empty string means no metadata was set (memory store behavior)
+	if lastImportStr == "" {
+		// No metadata yet - expected for first run
+		return false, nil
+	}
+
 	lastImportTime, err := time.Parse(time.RFC3339, lastImportStr)
 	if err != nil {
-		// Corrupted metadata - not critical, assume not stale
-		return false, nil
+		// Corrupted metadata - this is abnormal and should be reported
+		return false, fmt.Errorf("corrupted last_import_time in metadata (cannot parse as RFC3339): %w", err)
 	}
 
 	// Find JSONL using database directory

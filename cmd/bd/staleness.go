@@ -33,7 +33,8 @@ func ensureDatabaseFresh(ctx context.Context) error {
 	if err != nil {
 		// If we can't determine staleness, allow operation to proceed
 		// (better to show potentially stale data than block user)
-		fmt.Fprintf(os.Stderr, "Warning: could not check database staleness: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Could not verify database freshness: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Proceeding anyway. Data may be stale.\n\n")
 		return nil
 	}
 

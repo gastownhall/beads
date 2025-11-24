@@ -343,6 +343,30 @@ func TestCheckStaleness_NewerJSONL(t *testing.T) {
 	}
 }
 
+func TestCheckStaleness_CorruptedMetadata(t *testing.T) {
+	store := memory.New("")
+	ctx := context.Background()
+
+	tmpDir, err := os.MkdirTemp("", "bd-stale-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "bd.db")
+
+	// Set invalid timestamp format
+	store.SetMetadata(ctx, "last_import_time", "not-a-valid-timestamp")
+
+	_, err = CheckStaleness(ctx, store, dbPath)
+	if err == nil {
+		t.Error("Expected error for corrupted metadata, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "corrupted last_import_time") {
+		t.Errorf("Expected 'corrupted last_import_time' error, got: %v", err)
+	}
+}
+
 func TestCheckForMergeConflicts(t *testing.T) {
 	tests := []struct {
 		name      string
