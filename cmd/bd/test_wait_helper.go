@@ -39,27 +39,27 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 
 	// Initialize git repo
 	if err := exec.Command("git", "init").Run(); err != nil {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
 	// Configure git
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
+	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Create initial commit
-	if err := os.WriteFile("test.txt", []byte("test"), 0644); err != nil {
-		os.Chdir(originalWd)
+	if err := os.WriteFile("test.txt", []byte("test"), 0600); err != nil {
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	exec.Command("git", "add", "test.txt").Run()
+	_ = exec.Command("git", "add", "test.txt").Run()
 	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
 	}
 
 	cleanup = func() {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 	}
 
 	return tmpDir, cleanup
@@ -82,27 +82,27 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 
 	// Initialize git repo with specific branch
 	if err := exec.Command("git", "init", "-b", branch).Run(); err != nil {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
 	// Configure git
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
+	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Create initial commit
-	if err := os.WriteFile("test.txt", []byte("test"), 0644); err != nil {
-		os.Chdir(originalWd)
+	if err := os.WriteFile("test.txt", []byte("test"), 0600); err != nil {
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	exec.Command("git", "add", "test.txt").Run()
+	_ = exec.Command("git", "add", "test.txt").Run()
 	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
 	}
 
 	cleanup = func() {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 	}
 
 	return tmpDir, cleanup
@@ -125,16 +125,16 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 
 	// Initialize git repo
 	if err := exec.Command("git", "init").Run(); err != nil {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
 	// Configure git
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
+	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	cleanup = func() {
-		os.Chdir(originalWd)
+		_ = os.Chdir(originalWd)
 	}
 
 	return tmpDir, cleanup

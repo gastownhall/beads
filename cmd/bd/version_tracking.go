@@ -146,6 +146,7 @@ func checkAndSuggestBDGuideUpdate() {
 	}
 
 	// Read first few lines to check version stamp
+	// #nosec G304 - guidePath is constructed from beadsDir + constant string
 	content, err := os.ReadFile(guidePath)
 	if err != nil {
 		return // Silent failure

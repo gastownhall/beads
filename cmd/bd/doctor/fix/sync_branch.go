@@ -32,6 +32,7 @@ func SyncBranchConfig(path string) error {
 	}
 
 	// Set sync.branch using bd config set
+	// #nosec G204 - bdBinary is controlled by getBdBinary() which returns os.Executable()
 	setCmd := exec.Command(bdBinary, "config", "set", "sync.branch", currentBranch)
 	setCmd.Dir = path
 	if output, err := setCmd.CombinedOutput(); err != nil {

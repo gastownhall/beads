@@ -434,6 +434,7 @@ It is auto-generated and version-stamped to track bd upgrades.
 // generateBDGuide creates a version-stamped BD_GUIDE.md file
 func generateBDGuide(outputPath string) error {
 	// Create output file
+	// #nosec G304 - outputPath is a user-provided flag value for file generation
 	f, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -496,7 +497,7 @@ with bd upgrades) from project-specific instructions in AGENTS.md.`,
 		if outputPath != "" {
 			// Generate BD_GUIDE.md instead of onboarding instructions
 			if err := generateBDGuide(outputPath); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Error generating BD_GUIDE.md: %v\n", err)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error generating BD_GUIDE.md: %v\n", err)
 				os.Exit(1)
 			}
 			fmt.Printf("✓ Generated %s (bd v%s)\n", outputPath, Version)
