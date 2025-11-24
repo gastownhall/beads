@@ -421,6 +421,23 @@ func hooksInstalled() bool {
 		return false
 	}
 
+	// Verify hooks are executable
+	preCommitInfo, err := os.Stat(preCommit)
+	if err != nil {
+		return false
+	}
+	if preCommitInfo.Mode().Perm()&0111 == 0 {
+		return false // Not executable
+	}
+
+	postMergeInfo, err := os.Stat(postMerge)
+	if err != nil {
+		return false
+	}
+	if postMergeInfo.Mode().Perm()&0111 == 0 {
+		return false // Not executable
+	}
+
 	return true
 }
 
