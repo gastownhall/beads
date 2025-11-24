@@ -114,6 +114,10 @@ func outputPrimeContext(mcpMode bool) error {
 func outputMCPContext() error {
 	context := `# Beads Issue Tracker Active
 
+# 🚨 SESSION CLOSE PROTOCOL 🚨
+
+Before saying "done": git status → git add → bd sync → git commit → bd sync → git push
+
 ## Core Rules
 - Track ALL work in beads (no TodoWrite tool, no markdown TODOs)
 - Use bd MCP tools (mcp__plugin_beads_beads__*), not TodoWrite or markdown
@@ -130,6 +134,21 @@ func outputCLIContext() error {
 
 > **Context Recovery**: Run ` + "`bd prime`" + ` after compaction, clear, or new session
 > Hooks auto-call this in Claude Code when .beads/ detected
+
+# 🚨 SESSION CLOSE PROTOCOL 🚨
+
+**CRITICAL**: Before saying "done" or "complete", you MUST run this checklist:
+
+` + "```" + `
+[ ] 1. git status              (check what changed)
+[ ] 2. git add <files>         (stage code changes)
+[ ] 3. bd sync                 (commit beads changes)
+[ ] 4. git commit -m "..."     (commit code)
+[ ] 5. bd sync                 (commit any new beads changes)
+[ ] 6. git push                (push to remote)
+` + "```" + `
+
+**NEVER skip this.** Work is not done until pushed.
 
 ## Core Rules
 - Track ALL work in beads (no TodoWrite tool, no markdown TODOs)
