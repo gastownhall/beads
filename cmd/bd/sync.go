@@ -204,19 +204,49 @@ Use --merge to merge the sync branch back to main branch.`,
 
 				fmt.Println("→ Pulling from remote...")
 				if err := gitPull(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
+					// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
+					if isInRebase() && hasJSONLConflict() {
+						fmt.Println("→ Auto-resolving JSONL merge conflict...")
 
-					// Check if this looks like a merge driver failure
-					errStr := err.Error()
-					if strings.Contains(errStr, "merge driver") ||
-					   strings.Contains(errStr, "no such file or directory") ||
-					   strings.Contains(errStr, "MERGE DRIVER INVOKED") {
-						fmt.Fprintf(os.Stderr, "\nThis may be caused by an incorrect merge driver configuration.\n")
-						fmt.Fprintf(os.Stderr, "Fix: bd doctor --fix\n\n")
+						// Export clean JSONL from DB (database is source of truth)
+						if exportErr := exportToJSONL(ctx, jsonlPath); exportErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to export for conflict resolution: %v\n", exportErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Mark conflict as resolved
+						addCmd := exec.CommandContext(ctx, "git", "add", jsonlPath)
+						if addErr := addCmd.Run(); addErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to mark conflict resolved: %v\n", addErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Continue rebase
+						if continueErr := runGitRebaseContinue(ctx); continueErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to continue rebase: %v\n", continueErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						fmt.Println("✓ Auto-resolved JSONL conflict")
+					} else {
+						// Not an auto-resolvable conflict, fail with original error
+						fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
+
+						// Check if this looks like a merge driver failure
+						errStr := err.Error()
+						if strings.Contains(errStr, "merge driver") ||
+						   strings.Contains(errStr, "no such file or directory") ||
+						   strings.Contains(errStr, "MERGE DRIVER INVOKED") {
+							fmt.Fprintf(os.Stderr, "\nThis may be caused by an incorrect merge driver configuration.\n")
+							fmt.Fprintf(os.Stderr, "Fix: bd doctor --fix\n\n")
+						}
+
+						fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+						os.Exit(1)
 					}
-
-					fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
-					os.Exit(1)
 				}
 
 				// Count issues before import for validation
@@ -437,6 +467,64 @@ func hasGitRemote(ctx context.Context) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(output))) > 0
+}
+
+// isInRebase checks if we're currently in a git rebase state
+func isInRebase() bool {
+	// Check for rebase-merge directory (interactive rebase)
+	if _, err := os.Stat(".git/rebase-merge"); err == nil {
+		return true
+	}
+	// Check for rebase-apply directory (non-interactive rebase)
+	if _, err := os.Stat(".git/rebase-apply"); err == nil {
+		return true
+	}
+	return false
+}
+
+// hasJSONLConflict checks if beads.jsonl has a merge conflict
+// Returns true only if beads.jsonl is the only file in conflict
+func hasJSONLConflict() bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	var hasJSONLConflict bool
+	var hasOtherConflict bool
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+
+		// Check for unmerged status codes (UU = both modified, AA = both added, etc.)
+		status := line[:2]
+		if status == "UU" || status == "AA" || status == "DD" ||
+		   status == "AU" || status == "UA" || status == "DU" || status == "UD" {
+			filepath := strings.TrimSpace(line[3:])
+
+			if strings.HasSuffix(filepath, "beads.jsonl") {
+				hasJSONLConflict = true
+			} else {
+				hasOtherConflict = true
+			}
+		}
+	}
+
+	// Only return true if ONLY beads.jsonl has a conflict
+	return hasJSONLConflict && !hasOtherConflict
+}
+
+// runGitRebaseContinue continues a rebase after resolving conflicts
+func runGitRebaseContinue(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "rebase", "--continue")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git rebase --continue failed: %w\n%s", err, output)
+	}
+	return nil
 }
 
 // gitPull pulls from the current branch's upstream
