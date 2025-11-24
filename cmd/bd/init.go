@@ -350,6 +350,27 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
 		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+
+		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)
+		doctorResult := runDiagnostics(cwd)
+		// Check if there are any warnings or errors (not just critical failures)
+		hasIssues := false
+		for _, check := range doctorResult.Checks {
+			if check.Status != statusOK {
+				hasIssues = true
+				break
+			}
+		}
+		if hasIssues {
+			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", yellow("⚠"))
+			// Show just the warnings/errors, not all checks
+			for _, check := range doctorResult.Checks {
+				if check.Status != statusOK {
+					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+				}
+			}
+			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", cyan("bd doctor --fix"))
+		}
 	},
 }
 
