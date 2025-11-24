@@ -124,11 +124,13 @@ Use --merge to merge the sync branch back to main branch.`,
 		}
 
 		// Step 1: Export pending changes (but check for stale DB first)
+		skipExport := false // Track if we should skip export due to ZFC import
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
 			// ZFC safety check (bd-l0r): if DB significantly diverges from JSONL,
 			// force import first to sync with JSONL source of truth
+			// After import, skip export to prevent overwriting JSONL (JSONL is source of truth)
 			if err := ensureStoreActive(); err == nil && store != nil {
 				dbCount, err := countDBIssuesFast(ctx, store)
 				if err == nil {
@@ -142,32 +144,37 @@ Use --merge to merge the sync branch back to main branch.`,
 								fmt.Fprintf(os.Stderr, "Error importing (ZFC): %v\n", err)
 								os.Exit(1)
 							}
+							// Skip export after ZFC import - JSONL is source of truth
+							skipExport = true
+							fmt.Println("→ Skipping export (JSONL is source of truth after ZFC import)")
 						}
 					}
 				}
 			}
 
-			// Pre-export integrity checks
-			if err := ensureStoreActive(); err == nil && store != nil {
-				if err := validatePreExport(ctx, store, jsonlPath); err != nil {
-					fmt.Fprintf(os.Stderr, "Pre-export validation failed: %v\n", err)
-					os.Exit(1)
+			if !skipExport {
+				// Pre-export integrity checks
+				if err := ensureStoreActive(); err == nil && store != nil {
+					if err := validatePreExport(ctx, store, jsonlPath); err != nil {
+						fmt.Fprintf(os.Stderr, "Pre-export validation failed: %v\n", err)
+						os.Exit(1)
+					}
+					if err := checkDuplicateIDs(ctx, store); err != nil {
+						fmt.Fprintf(os.Stderr, "Database corruption detected: %v\n", err)
+						os.Exit(1)
+					}
+					if orphaned, err := checkOrphanedDeps(ctx, store); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: orphaned dependency check failed: %v\n", err)
+					} else if len(orphaned) > 0 {
+						fmt.Fprintf(os.Stderr, "Warning: found %d orphaned dependencies: %v\n", len(orphaned), orphaned)
+					}
 				}
-				if err := checkDuplicateIDs(ctx, store); err != nil {
-					fmt.Fprintf(os.Stderr, "Database corruption detected: %v\n", err)
-					os.Exit(1)
-				}
-				if orphaned, err := checkOrphanedDeps(ctx, store); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: orphaned dependency check failed: %v\n", err)
-				} else if len(orphaned) > 0 {
-					fmt.Fprintf(os.Stderr, "Warning: found %d orphaned dependencies: %v\n", len(orphaned), orphaned)
-				}
-			}
 
-			fmt.Println("→ Exporting pending changes to JSONL...")
-			if err := exportToJSONL(ctx, jsonlPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
-				os.Exit(1)
+				fmt.Println("→ Exporting pending changes to JSONL...")
+				if err := exportToJSONL(ctx, jsonlPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+					os.Exit(1)
+				}
 			}
 
 			// Capture left snapshot (pre-pull state) for 3-way merge
