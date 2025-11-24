@@ -11,55 +11,184 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Built-in version tracking** (bd-loka): bd now tracks its own version in metadata.json
-- **Auto-migrate database on CLI version bump** (bd-jgxi): Database schema migrations happen automatically when upgrading
-- **metadata.json version tracking validation** in `bd doctor` (bd-u4sb)
-- **Agent upgrade awareness documentation and tooling**
-- **Complete command set standardization** (bd-au0)
-- **--shared flag for bd hooks install**: Install versioned hooks that can be committed to git
-- **Aider integration**: Proper YAML config format for beads issue tracking
-- **BEADS_SYNC_BRANCH environment variable**: Override sync branch configuration
-- **--upgrade-mcp flag** for bump-version.sh script
-- **Monitor Web UI enhancements**: Interactive filters, find-as-you-type, improved UX/UI
+- **BD_GUIDE.md Generation**: Version-stamped documentation for AI agents (bd-woro, 9e16469)
+  - New `--output` flag for `bd onboard` command generates BD_GUIDE.md
+  - Separates bd-specific instructions from project-specific instructions
+  - Auto-generated header with version stamp warns against manual editing
+  - Detects outdated BD_GUIDE.md and suggests regeneration after upgrades
+  - Git-trackable diffs show exactly what changed between versions
+
+- **Configurable Export Error Policies**: Flexible error handling for export operations (bd-exug, e3e0a04)
+  - Four policies: strict (fail-fast), best-effort (skip with warnings), partial (retry then skip), required-core (fail on core data only)
+  - Per-project configuration via `bd config set export.error_policy`
+  - Separate policy for auto-exports via `auto_export.error_policy`
+  - Retry with exponential backoff for transient failures
+  - Optional export manifests documenting completeness
+
+- **Command Set Standardization**: Complete flag and feature consistency overhaul (bd-au0, 273a4d1)
+  - Global verbosity flags: `--verbose/-v` and `--quiet/-q` across all commands
+  - Standardized `--dry-run` flag behavior across all commands
+  - Label operations added to `bd update`: `--add-labels` and `--remove-labels`
+  - Enhanced `bd export` with comprehensive filters (assignee, type, labels, priority, dates)
+  - Enhanced `bd search` with date and priority filters
+  - Improved documentation for `bd clean` vs `bd cleanup` disambiguation
+
+- **Auto-Migration on Version Bump**: Automatic database schema updates (bd-jgxi, 7796f5c)
+  - Database version automatically synced when bd CLI is upgraded
+  - Eliminates recurring "version mismatch" warnings in bd doctor
+  - Best-effort and silent to avoid disrupting commands
+
+- **Version Tracking Validation**: Comprehensive bd doctor checks (bd-u4sb, d8f3eb0)
+  - Validates metadata.json exists with valid LastBdVersion field
+  - Warns if LastBdVersion is very old (>10 minor versions behind)
+  - Ensures version tracking system is working correctly
+
+- **Git Hooks Executable Validation**: Hook reliability improvements (bd-fwul, 1c715bc)
+  - bd doctor now validates git hooks have executable bit set
+  - Prevents silent hook failures from incorrect permissions
+
+- **Socket Cleanup Race Condition Fix**: Daemon reliability improvement (bd-4owj, 18f8105)
+  - Re-checks socket existence after lock check to avoid stale state
+  - Handles daemon startup race conditions gracefully
+
+- **Monitor Web UI Enhancements**: UX/UI improvements (aa2df73)
+  - Interactive stats cards as filters
+  - Multi-select priority filtering with P0 support
+  - Find-as-you-type search functionality
+  - Modern card-based UI design with better mobile responsiveness
+  - Dev mode flag for easier development
+
+- **bump-version.sh Automation**: PyPI integration (0547004)
+  - New `--upgrade-mcp` flag for automatic beads-mcp package upgrades
+  - Tries pip first, falls back to uv tool
+  - Warns about version mismatch before PyPI publish
 
 ### Fixed
 
-- **Handle FOREIGN KEY constraint violations gracefully during import** (bd-koab)
-- **Auto-fix metadata.json jsonl_export mismatch** (bd-afd)
-- **Enforce ZFC (JSONL First Consistency)**: Refuse export when DB >> JSONL (bd-l0r)
-- **Remove mtime fast-path in hasJSONLChanged** (bd-v0y): More reliable change detection
-- **Fix N+1 query pattern in export operations** (bd-rcmg): Performance improvement
-- **Merge conflicts now prefer closed>open and deletion>modification** (bd-pq5k)
-- **Support both canonical and legacy JSONL filenames** in merge driver check
-- **Auto-repair stale merge driver configs** with invalid placeholders
-- **Add executable bit validation for git hooks** (bd-fwul)
-- **Auto-configure sync.branch during bd init** (bd-flil)
-- **bd doctor check and fix for missing sync.branch config** (bd-rsua)
-- **Improve pre-push hook**: Suggest bd sync with auto-sync option
-- **Fix race condition in client socket cleanup** (bd-4owj)
-- **Daemon respects auto-commit/auto-push DB config** (#360)
-- **Use dynamic JSONL path in daemon sync branch operations** (#361)
-- **Improve staleness check error handling** (bd-2q6d, bd-o4qy, bd-n4td)
-- **Change file permissions from 0644 to 0600** for better security
-- **Fix Windows CI test failures** and various cross-platform issues
-- **Fix GH#366**: Encourage descriptions when creating issues
-- **Fix GH#367**: bd import defaulting to stdin is confusing
-- **Fix priority 0 bug display** using nullish coalescing
+- **JSONL Import Foreign Key Violations**: Graceful handling of deletions during merge (bd-koab, d45cff5)
+  - Import now continues when dependencies reference deleted issues
+  - Reports skipped dependencies with clear warnings
+  - Prevents complete import failure from FK constraint violations
+  - Common scenario: merges that delete issues referenced by other issues
 
-### Improved
+- **Metadata JSONL Path Auto-Detection**: Fix configuration mismatches (bd-afd, d1641c7)
+  - Auto-detects actual JSONL file when metadata.json is recreated
+  - bd doctor --fix now includes DatabaseConfig() auto-repair
+  - Prefers beads.jsonl over issues.jsonl (canonical name)
+  - Prevents mismatches after git clean, merge conflicts, or rebases
 
-- **Daemon Log Rotation**: Increased default rotation limits for better production use (bd-t7ds)
-  - Max size increased from 10MB to 50MB per file
-  - Max backups increased from 3 to 7 files
-  - Max age increased from 7 to 30 days
-  - Added comprehensive documentation in CONFIG.md
+- **JSONL Resurrection Bug**: Critical fix for deleted issue resurrection (bd-v0y, c9a2e7a)
+  - Removed mtime fast-path in hasJSONLChanged() causing false negatives
+  - Git doesn't preserve mtime on checkout, causing incorrect change detection
+  - Now always uses content hash for reliable comparison
+  - Prevents bd sync from overwriting pulled JSONL and resurrecting deleted issues
+
+- **ZFC (JSONL First Consistency)**: Enforce source of truth semantics (bd-l0r, 1ba068f, 2e4171a, 949ab42)
+  - bd sync now unconditionally imports JSONL first (source of truth)
+  - Simpler JSONL → DB → JSONL flow ensures consistency
+  - Prevents exporting when DB has significantly more issues than JSONL
+  - Preserves local uncommitted changes while catching stale DB scenarios
+
+- **Merge Conflict Semantics**: Improved resolution policies (bd-pq5k, d4f9a05)
+  - Merge logic now enforces: closed ALWAYS wins over open
+  - Deletion ALWAYS wins over modification
+  - Fixed closed_at handling: only set when status='closed'
+  - Prevents issues from getting stuck in invalid states
+  - Eliminates "zombie issues" that never die
+
+- **JSONL Merge Conflict Auto-Resolution**: Streamlined rebase workflow (bd-cwmt, 3cf5e26)
+  - bd sync now auto-resolves JSONL conflicts during rebase
+  - Detects rebase state and JSONL-only conflicts
+  - Auto-exports from DB and continues rebase automatically
+  - Eliminates manual conflict resolution in common scenarios
+
+- **Staleness Check Error Handling**: Better metadata validation (bd-2q6d, bd-o4qy, bd-n4td, b75914b)
+  - CheckStaleness now returns errors for corrupted last_import_time metadata
+  - Enhanced warning messages when staleness check fails
+  - Handles empty string metadata (memory store behavior)
+  - Prevents silent failures with corrupted metadata
+
+- **N+1 Query Pattern in Export**: Dramatic performance improvement (bd-rcmg, 9c6b375)
+  - Added batch methods: GetCommentsForIssues() and GetLabels() in bulk
+  - Reduced query count from ~201 to ~3-5 for 100 issues
+  - Eliminated per-issue loops in handleExport() and triggerExport()
+
+- **Sync Branch Auto-Configuration**: Prevent bd sync failures after init (bd-flil, bd-rsua, a4c38d5, 83609d5)
+  - bd init now auto-sets sync.branch to current git branch
+  - bd doctor detects missing sync.branch config and provides --fix
+  - All branch detection uses 'git symbolic-ref' to work in fresh repos
+  - Fixes 'bd sync --status' error after fresh bd init
+
+- **Merge Driver Auto-Repair**: Fix stale git configurations (bd-3sz0, bd-tbz3, 1c8dd49)
+  - Detects old bd versions (<0.24.0) with invalid %L/%R placeholders
+  - Auto-repairs during bd init and bd doctor --fix
+  - Git only supports %O (base), %A (current), %B (other) placeholders
+  - Supports both canonical (issues.jsonl) and legacy (beads.jsonl) filenames
+
+- **Unvalidated Dependency Parsing**: Prevent empty ID lookups (bd-ia8r, e8a752e)
+  - Validates dependsOnID is non-empty before setting discoveredFromParentID
+  - Ensures parent issue exists before generating child IDs in direct mode
+
+- **Windows CI Test Failures**: Cross-platform reliability (153f724)
+  - Fixed file locking issue in TestNewSQLiteStorage (added defer store.Close())
+  - Fixed nil slice return in TestFindAllDatabases (explicit empty slice initialization)
+  - Both issues related to stricter Windows file locking behavior
+
+- **Invalid closed_at States**: Data integrity fix (bd-1rh, b428254)
+  - Removed invalid closed_at timestamps for open issues
+  - Prevents inconsistent state from merge conflicts
+
+- **Security**: File permission hardening (b6870de, ae5a4ac)
+  - Changed file permissions from 0644 to 0600 for security (gosec G302)
+  - Config files now owner read/write only (not world readable)
+  - Added comprehensive security tests for WriteFile permissions
+  - Handles read-only files by fixing permissions before writing
+
+### Changed
+
+- **bd init Defaults**: Better out-of-box experience (bd-bxha, ec4117d)
+  - Git hooks and merge driver now installed by default
+  - Removed interactive prompts (simpler workflow)
+  - New opt-out flags: `--skip-hooks` and `--skip-merge-driver`
+  - Shows warning messages on failure with suggestion to run bd doctor --fix
+
+- **bd init Validation**: Automatic setup verification (bd-zwtq, 3a36d0b)
+  - Runs bd doctor diagnostics at end of bd init
+  - Immediately identifies configuration problems before user encounters them
+  - Catches: missing hooks, unconfigured merge driver, missing docs, metadata issues
+
+- **Internal Code Organization**: Improved maintainability (bd-0a43, 58f37d0)
+  - Split monolithic sqlite.go (1050 lines) into focused files
+  - store.go: Database initialization and utilities
+  - queries.go: Issue CRUD operations
+  - config.go: Configuration and metadata
+  - comments.go: Comment operations
+  - Zero functional changes, all tests pass
+
+- **Documentation**: Organization improvements (a930fa3, 62b5f53)
+  - Moved event-driven daemon details to docs/DAEMON.md
+  - Added comprehensive error handling guidelines
+  - Reduced duplication in AGENTS.md
+
+### Testing
+
+- **Blocked Issues Cache Validation**: Comprehensive cache tests (bd-13gm, 0e6ed91)
+  - 8 tests verify cache invalidation behavior
+  - Tests for dependency add/remove, status changes, transitive blocking
+  - Direct cache table queries validate implementation correctness
+
+- **Sync Test Optimization**: Reduced boilerplate (bd-ktng, dfcbb7d)
+  - Added shared git repo setup helpers
+  - Refactored 19 test functions
+  - Reduced duplicate code by ~300 lines
+
+### Performance
+
+- **Daemon Log Rotation**: Production-ready configuration (bd-t7ds, f454b3d)
+  - Max size increased: 10MB → 50MB per file
+  - Max backups increased: 3 → 7 files
+  - Max age increased: 7 → 30 days
   - Better handles long-running daemons with high log output
-
-- **Git Pre-Push Hook**: Better error messaging and auto-sync option
-  - Error message now suggests `bd sync` instead of manual git commands
-  - Interactive prompt offers to run `bd sync` automatically
-  - Falls back to manual instructions in non-interactive terminals or when bd is unavailable
-  - Improves user experience when beads JSONL has uncommitted changes
 
 ## [0.24.2] - 2025-11-22
 
