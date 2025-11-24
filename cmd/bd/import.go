@@ -337,14 +337,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 					// Non-fatal warning (see above comment about graceful degradation)
 					debug.Logf("Warning: failed to update last_import_time: %v", err)
 				}
-				// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
-				if jsonlInfo, statErr := os.Stat(input); statErr == nil {
-					mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
-					if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
-						// Non-fatal warning (see above comment about graceful degradation)
-						debug.Logf("Warning: failed to update last_import_mtime: %v", err)
-					}
-				}
+				// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
 			} else {
 				debug.Logf("Warning: failed to read JSONL for hash update: %v", err)
 			}

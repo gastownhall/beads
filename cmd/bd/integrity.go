@@ -106,32 +106,14 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 
 	// Build metadata keys with optional suffix for per-repo tracking (bd-ar2.10, bd-ar2.11)
 	hashKey := "last_import_hash"
-	mtimeKey := "last_import_mtime"
 	if keySuffix != "" {
 		hashKey += ":" + keySuffix
-		mtimeKey += ":" + keySuffix
 	}
 
-	// Fast-path: Check mtime first to avoid expensive hash computation
-	// Get last known mtime from metadata
-	lastMtimeStr, err := store.GetMetadata(ctx, mtimeKey)
-	if err == nil && lastMtimeStr != "" {
-		// We have a previous mtime - check if file mtime changed
-		jsonlInfo, statErr := os.Stat(jsonlPath)
-		if statErr == nil {
-			currentMtime := jsonlInfo.ModTime().Unix()
-			currentMtimeStr := fmt.Sprintf("%d", currentMtime)
-
-			// If mtime unchanged, content definitely unchanged (filesystem guarantee)
-			// Skip expensive hash computation
-			if currentMtimeStr == lastMtimeStr {
-				return false
-			}
-			// Mtime changed - fall through to hash comparison (could be git operation)
-		}
-	}
-
-	// Slow-path: Compute content hash (either mtime changed or no mtime metadata)
+	// Always compute content hash (bd-v0y fix)
+	// Previous mtime-based fast-path was unsafe: git operations (pull, checkout, rebase)
+	// can change file content without updating mtime, causing false negatives.
+	// Hash computation is fast enough for sync operations (~10-50ms even for large DBs).
 	currentHash, err := computeJSONLHash(jsonlPath)
 	if err != nil {
 		// If we can't read JSONL, assume no change (don't auto-import broken files)

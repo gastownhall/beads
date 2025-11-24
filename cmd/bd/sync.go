@@ -749,14 +749,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 			// Non-fatal warning (see above comment about graceful degradation)
 			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time: %v\n", err)
 		}
-		// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
-		if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
-			mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
-			if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
-				// Non-fatal warning (see above comment about graceful degradation)
-				fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_mtime: %v\n", err)
-			}
-		}
+		// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
 	}
 
 	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
