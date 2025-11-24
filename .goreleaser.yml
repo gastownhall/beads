@@ -14,8 +14,6 @@ builds:
     binary: bd
     env:
       - CGO_ENABLED=1
-      - CC=x86_64-linux-gnu-gcc
-      - CXX=x86_64-linux-gnu-g++
     goos:
       - linux
     goarch:
