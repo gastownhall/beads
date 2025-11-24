@@ -188,13 +188,14 @@ func runTeamWizard(ctx context.Context, store storage.Storage) error {
 }
 
 // getGitBranch returns the current git branch name
+// Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
 func getGitBranch() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
-	
+
 	return strings.TrimSpace(string(output)), nil
 }
 

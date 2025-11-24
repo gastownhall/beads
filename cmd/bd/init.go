@@ -210,7 +210,16 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			os.Exit(1)
 		}
 
-		// Set sync.branch if specified
+		// Set sync.branch: use explicit --branch flag, or auto-detect current branch
+		// This ensures bd sync --status works after bd init (bd-flil)
+		if branch == "" && isGitRepo() {
+			// Auto-detect current branch if not specified
+			currentBranch, err := getGitBranch()
+			if err == nil && currentBranch != "" {
+				branch = currentBranch
+			}
+		}
+
 		if branch != "" {
 			if err := syncbranch.Set(ctx, store, branch); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)

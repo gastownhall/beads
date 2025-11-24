@@ -470,7 +470,8 @@ func gitPull(ctx context.Context) error {
 	}
 	
 	// Get current branch name
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	// Use symbolic-ref to work in fresh repos without commits (bd-flil)
+	branchCmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	branchOutput, err := branchCmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
@@ -678,8 +679,9 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 }
 
 // getCurrentBranch returns the name of the current git branch
+// Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
 func getCurrentBranch(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
