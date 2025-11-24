@@ -127,7 +127,6 @@ func setupBenchDB(tb testing.TB) (*SQLiteStorage, func()) {
 		tb.Fatalf("Failed to create storage: %v", err)
 	}
 
-	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		tb.Fatalf("Failed to set issue_prefix: %v", err)
 	}

@@ -92,13 +92,10 @@ func getCachedOrGenerateDB(b *testing.B, cacheKey string, generateFn func(contex
 
 	ctx := context.Background()
 
-
 	store, err := New(ctx, dbPath)
 	if err != nil {
 		b.Fatalf("Failed to create storage: %v", err)
 	}
-
-	ctx := context.Background()
 
 	// Initialize database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd-"); err != nil {
