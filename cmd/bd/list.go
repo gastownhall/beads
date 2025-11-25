@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -26,14 +27,67 @@ func parseTimeFlag(s string) (time.Time, error) {
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
 	}
-	
+
 	for _, format := range formats {
 		if t, err := time.Parse(format, s); err == nil {
 			return t, nil
 		}
 	}
-	
+
 	return time.Time{}, fmt.Errorf("unable to parse time %q (try formats: 2006-01-02, 2006-01-02T15:04:05, or RFC3339)", s)
+}
+
+// sortIssues sorts a slice of issues by the specified field and direction
+func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
+	if sortBy == "" {
+		return
+	}
+
+	sort.Slice(issues, func(i, j int) bool {
+		var less bool
+
+		switch sortBy {
+		case "priority":
+			// Lower priority numbers come first (P0 > P1 > P2 > P3 > P4)
+			less = issues[i].Priority < issues[j].Priority
+		case "created":
+			// Default: newest first (descending)
+			less = issues[i].CreatedAt.After(issues[j].CreatedAt)
+		case "updated":
+			// Default: newest first (descending)
+			less = issues[i].UpdatedAt.After(issues[j].UpdatedAt)
+		case "closed":
+			// Default: newest first (descending)
+			// Handle nil ClosedAt values
+			if issues[i].ClosedAt == nil && issues[j].ClosedAt == nil {
+				less = false
+			} else if issues[i].ClosedAt == nil {
+				less = false // nil sorts last
+			} else if issues[j].ClosedAt == nil {
+				less = true // non-nil sorts before nil
+			} else {
+				less = issues[i].ClosedAt.After(*issues[j].ClosedAt)
+			}
+		case "status":
+			less = issues[i].Status < issues[j].Status
+		case "id":
+			less = issues[i].ID < issues[j].ID
+		case "title":
+			less = strings.ToLower(issues[i].Title) < strings.ToLower(issues[j].Title)
+		case "type":
+			less = issues[i].IssueType < issues[j].IssueType
+		case "assignee":
+			less = issues[i].Assignee < issues[j].Assignee
+		default:
+			// Unknown sort field, no sorting
+			less = false
+		}
+
+		if reverse {
+			return !less
+		}
+		return less
+	})
 }
 
 var listCmd = &cobra.Command{
@@ -50,6 +104,8 @@ var listCmd = &cobra.Command{
 		titleSearch, _ := cmd.Flags().GetString("title")
 		idFilter, _ := cmd.Flags().GetString("id")
 		longFormat, _ := cmd.Flags().GetBool("long")
+		sortBy, _ := cmd.Flags().GetString("sort")
+		reverse, _ := cmd.Flags().GetBool("reverse")
 		
 		// Pattern matching flags
 		titleContains, _ := cmd.Flags().GetString("title-contains")
@@ -310,6 +366,9 @@ var listCmd = &cobra.Command{
 				os.Exit(1)
 			}
 
+			// Apply sorting
+			sortIssues(issues, sortBy, reverse)
+
 			if longFormat {
 				// Long format: multi-line with details
 				fmt.Printf("\nFound %d issues:\n\n", len(issues))
@@ -362,6 +421,9 @@ var listCmd = &cobra.Command{
 			}
 		}
 	}
+
+		// Apply sorting
+		sortIssues(issues, sortBy, reverse)
 
 		// Handle format flag
 		if formatStr != "" {
@@ -466,6 +528,8 @@ func init() {
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues (default behavior; flag provided for CLI familiarity)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
+	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
+	listCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
 	
 	// Pattern matching
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
