@@ -17,6 +17,10 @@ import (
 // Storage is the interface for beads storage operations
 type Storage = beads.Storage
 
+// Transaction provides atomic multi-operation support within a database transaction.
+// Use Storage.RunInTransaction() to obtain a Transaction instance.
+type Transaction = beads.Transaction
+
 // NewSQLiteStorage creates a new SQLite storage instance at the given path
 func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
 	return beads.NewSQLiteStorage(ctx, dbPath)

@@ -112,6 +112,10 @@ const (
 // Storage provides the minimal interface for extension orchestration
 type Storage = storage.Storage
 
+// Transaction provides atomic multi-operation support within a database transaction.
+// Use Storage.RunInTransaction() to obtain a Transaction instance.
+type Transaction = storage.Transaction
+
 // NewSQLiteStorage opens a bd SQLite database for programmatic access.
 // Most extensions should use this to query ready work and update issue status.
 func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
