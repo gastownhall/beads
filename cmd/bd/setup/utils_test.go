@@ -3,10 +3,14 @@ package setup
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestAtomicWriteFile(t *testing.T) {
+	// Skip permission checks on Windows as it doesn't support Unix-style file permissions
+	skipPermissionChecks := runtime.GOOS == "windows"
+
 	// Create temp directory
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -35,7 +39,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 
 	mode := info.Mode()
-	if mode.Perm() != 0600 {
+	if !skipPermissionChecks && mode.Perm() != 0600 {
 		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0600)
 	}
 
@@ -114,6 +118,9 @@ func TestFileExists(t *testing.T) {
 }
 
 func TestEnsureDir(t *testing.T) {
+	// Skip permission checks on Windows as it doesn't support Unix-style file permissions
+	skipPermissionChecks := runtime.GOOS == "windows"
+
 	tmpDir := t.TempDir()
 
 	// Test creating new directory
@@ -134,7 +141,7 @@ func TestEnsureDir(t *testing.T) {
 	}
 
 	mode := info.Mode()
-	if mode.Perm() != 0755 {
+	if !skipPermissionChecks && mode.Perm() != 0755 {
 		t.Errorf("directory permissions mismatch: got %o, want %o", mode.Perm(), 0755)
 	}
 

@@ -8,6 +8,11 @@ import (
 )
 
 func TestFixGitignore_FilePermissions(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
 	tests := []struct {
 		name           string
 		setupFunc      func(t *testing.T, tmpDir string) // setup before fix
@@ -194,6 +199,11 @@ func TestFixGitignore_FileOwnership(t *testing.T) {
 }
 
 func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
 	tmpDir := t.TempDir()
 
 	// Change to tmpDir for the test
