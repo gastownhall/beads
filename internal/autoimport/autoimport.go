@@ -98,6 +98,12 @@ func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string
 
 	if currentHash == lastHash {
 		notify.Debugf("auto-import skipped, JSONL unchanged (hash match)")
+		// Update last_import_time to prevent repeated staleness warnings
+		// This handles the case where mtime changed but content didn't (e.g., git pull, touch)
+		importTime := time.Now().Format(time.RFC3339)
+		if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
+			notify.Warnf("failed to update last_import_time: %v", err)
+		}
 		return nil
 	}
 
