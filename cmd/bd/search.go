@@ -55,6 +55,8 @@ Examples:
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		longFormat, _ := cmd.Flags().GetBool("long")
+		sortBy, _ := cmd.Flags().GetString("sort")
+		reverse, _ := cmd.Flags().GetBool("reverse")
 
 		// Date range flags
 		createdAfter, _ := cmd.Flags().GetString("created-after")
@@ -241,6 +243,9 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Apply sorting
+			sortIssues(issues, sortBy, reverse)
+
 			outputSearchResults(issues, query, longFormat)
 			return
 		}
@@ -264,6 +269,9 @@ Examples:
 				}
 			}
 		}
+
+		// Apply sorting
+		sortIssues(issues, sortBy, reverse)
 
 		if jsonOutput {
 			// Get labels and dependency counts
@@ -359,6 +367,8 @@ func init() {
 	searchCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	searchCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50)")
 	searchCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
+	searchCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
+	searchCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
 
 	// Date range flags
 	searchCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")

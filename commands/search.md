@@ -33,6 +33,8 @@ Unlike `bd list`, which requires you to specify which field to search, `bd searc
 - **--label, -l**: Filter by labels (must have ALL specified labels)
 - **--label-any**: Filter by labels (must have AT LEAST ONE)
 - **--limit, -n**: Limit number of results (default: 50)
+- **--sort**: Sort by field: priority, created, updated, closed, status, id, title, type, assignee
+- **--reverse, -r**: Reverse sort order
 - **--long**: Show detailed multi-line output for each issue
 - **--json**: Output results in JSON format
 
@@ -60,6 +62,18 @@ bd search refactor --assignee alice --type task
 
 # Find recent bugs (limited to 10 results)
 bd search bug --status open --limit 10
+```
+
+### Sorted Output
+```bash
+# Search bugs sorted by priority (P0 first)
+bd search bug --sort priority
+
+# Search features sorted by most recently updated
+bd search feature --sort updated
+
+# Search issues sorted by priority, lowest first
+bd search refactor --sort priority --reverse
 ```
 
 ### JSON Output
