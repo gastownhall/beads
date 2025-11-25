@@ -1663,3 +1663,192 @@ func TestTransactionSearchIssuesLimit(t *testing.T) {
 		t.Fatalf("RunInTransaction failed: %v", err)
 	}
 }
+
+// TestTransactionSearchIssuesWithPriorityRange tests priority range filters within transaction.
+func TestTransactionSearchIssuesWithPriorityRange(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		// Create issues with different priorities
+		for i := 0; i < 5; i++ {
+			issue := &types.Issue{
+				Title:     "Priority Range Test",
+				Status:    types.StatusOpen,
+				Priority:  i, // P0, P1, P2, P3, P4
+				IssueType: types.TypeTask,
+			}
+			if err := tx.CreateIssue(ctx, issue, "test-actor"); err != nil {
+				return err
+			}
+		}
+
+		// Filter by PriorityMin only (P2 and higher priority = lower number)
+		minPriority := 2
+		results, err := tx.SearchIssues(ctx, "", types.IssueFilter{PriorityMin: &minPriority})
+		if err != nil {
+			return err
+		}
+		// Should get P2, P3, P4
+		if len(results) != 3 {
+			t.Errorf("expected 3 issues with priority >= 2, got %d", len(results))
+		}
+
+		// Filter by PriorityMax only
+		maxPriority := 1
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{PriorityMax: &maxPriority})
+		if err != nil {
+			return err
+		}
+		// Should get P0, P1
+		if len(results) != 2 {
+			t.Errorf("expected 2 issues with priority <= 1, got %d", len(results))
+		}
+
+		// Filter by priority range
+		minP := 1
+		maxP := 3
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{PriorityMin: &minP, PriorityMax: &maxP})
+		if err != nil {
+			return err
+		}
+		// Should get P1, P2, P3
+		if len(results) != 3 {
+			t.Errorf("expected 3 issues with priority 1-3, got %d", len(results))
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("RunInTransaction failed: %v", err)
+	}
+}
+
+// TestTransactionSearchIssuesWithDateRange tests date range filters within transaction.
+func TestTransactionSearchIssuesWithDateRange(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		now := time.Now()
+		past := now.Add(-48 * time.Hour)
+		future := now.Add(24 * time.Hour)
+
+		// Create issues - CreatedAt is set automatically
+		issue1 := &types.Issue{
+			Title:     "Recent Issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		if err := tx.CreateIssue(ctx, issue1, "test-actor"); err != nil {
+			return err
+		}
+
+		// Filter by CreatedAfter (should find the issue created just now)
+		createdAfter := past
+		results, err := tx.SearchIssues(ctx, "", types.IssueFilter{CreatedAfter: &createdAfter})
+		if err != nil {
+			return err
+		}
+		if len(results) != 1 {
+			t.Errorf("expected 1 issue created after past, got %d", len(results))
+		}
+
+		// Filter by CreatedBefore with future time (should find the issue)
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{CreatedBefore: &future})
+		if err != nil {
+			return err
+		}
+		if len(results) != 1 {
+			t.Errorf("expected 1 issue created before future, got %d", len(results))
+		}
+
+		// Filter by CreatedBefore with past time (should find nothing)
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{CreatedBefore: &past})
+		if err != nil {
+			return err
+		}
+		if len(results) != 0 {
+			t.Errorf("expected 0 issues created before past, got %d", len(results))
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("RunInTransaction failed: %v", err)
+	}
+}
+
+// TestTransactionSearchIssuesWithIDs tests IDs filter within transaction.
+func TestTransactionSearchIssuesWithIDs(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		// Create several issues and collect their IDs
+		var issueIDs []string
+		for i := 0; i < 5; i++ {
+			issue := &types.Issue{
+				Title:     "IDs Filter Test",
+				Status:    types.StatusOpen,
+				Priority:  i,
+				IssueType: types.TypeTask,
+			}
+			if err := tx.CreateIssue(ctx, issue, "test-actor"); err != nil {
+				return err
+			}
+			issueIDs = append(issueIDs, issue.ID)
+		}
+
+		// Filter by specific IDs (first 2)
+		results, err := tx.SearchIssues(ctx, "", types.IssueFilter{IDs: issueIDs[:2]})
+		if err != nil {
+			return err
+		}
+		if len(results) != 2 {
+			t.Errorf("expected 2 issues when filtering by 2 IDs, got %d", len(results))
+		}
+
+		// Filter by single ID
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{IDs: []string{issueIDs[0]}})
+		if err != nil {
+			return err
+		}
+		if len(results) != 1 {
+			t.Errorf("expected 1 issue when filtering by 1 ID, got %d", len(results))
+		}
+		if results[0].ID != issueIDs[0] {
+			t.Errorf("expected issue ID %s, got %s", issueIDs[0], results[0].ID)
+		}
+
+		// Filter by non-existent ID
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{IDs: []string{"nonexistent-id"}})
+		if err != nil {
+			return err
+		}
+		if len(results) != 0 {
+			t.Errorf("expected 0 issues for non-existent ID, got %d", len(results))
+		}
+
+		// Empty IDs filter should return all issues
+		results, err = tx.SearchIssues(ctx, "", types.IssueFilter{IDs: []string{}})
+		if err != nil {
+			return err
+		}
+		if len(results) != 5 {
+			t.Errorf("expected 5 issues with empty IDs filter, got %d", len(results))
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("RunInTransaction failed: %v", err)
+	}
+}

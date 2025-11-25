@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -120,13 +121,13 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		// Generate hash-based ID with adaptive length based on database size (bd-ea2a13)
 		generatedID, err := GenerateIssueID(ctx, t.conn, prefix, issue, actor)
 		if err != nil {
-			return wrapDBError("generate issue ID", err)
+			return fmt.Errorf("failed to generate issue ID: %w", err)
 		}
 		issue.ID = generatedID
 	} else {
 		// Validate that explicitly provided ID matches the configured prefix (bd-177)
 		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
-			return wrapDBError("validate issue ID prefix", err)
+			return fmt.Errorf("failed to validate issue ID prefix: %w", err)
 		}
 
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
@@ -147,17 +148,17 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 
 	// Insert issue
 	if err := insertIssue(ctx, t.conn, issue); err != nil {
-		return wrapDBError("insert issue", err)
+		return fmt.Errorf("failed to insert issue: %w", err)
 	}
 
 	// Record creation event
 	if err := recordCreatedEvent(ctx, t.conn, issue, actor); err != nil {
-		return wrapDBError("record creation event", err)
+		return fmt.Errorf("failed to record creation event: %w", err)
 	}
 
 	// Mark issue as dirty for incremental export
 	if err := markDirty(ctx, t.conn, issue.ID); err != nil {
-		return wrapDBError("mark issue dirty", err)
+		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	return nil
@@ -196,12 +197,12 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 		if issue.ID == "" {
 			generatedID, err := GenerateIssueID(ctx, t.conn, prefix, issue, actor)
 			if err != nil {
-				return wrapDBError("generate issue ID", err)
+				return fmt.Errorf("failed to generate issue ID: %w", err)
 			}
 			issue.ID = generatedID
 		} else {
 			if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
-				return wrapDBError("validate issue ID prefix", err)
+				return fmt.Errorf("failed to validate issue ID prefix: %w", err)
 			}
 		}
 	}
@@ -217,17 +218,17 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 
 	// Insert all issues
 	if err := insertIssues(ctx, t.conn, issues); err != nil {
-		return wrapDBError("insert issues", err)
+		return fmt.Errorf("failed to insert issues: %w", err)
 	}
 
 	// Record creation events
 	if err := recordCreatedEvents(ctx, t.conn, issues, actor); err != nil {
-		return wrapDBError("record creation events", err)
+		return fmt.Errorf("failed to record creation events: %w", err)
 	}
 
 	// Mark all issues as dirty
 	if err := markDirtyBatch(ctx, t.conn, issues); err != nil {
-		return wrapDBError("mark issues dirty", err)
+		return fmt.Errorf("failed to mark issues dirty: %w", err)
 	}
 
 	return nil
@@ -236,66 +237,21 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 // GetIssue retrieves an issue within the transaction.
 // This enables read-your-writes semantics within the transaction.
 func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	var issue types.Issue
-	var closedAt sql.NullTime
-	var estimatedMinutes sql.NullInt64
-	var assignee sql.NullString
-	var externalRef sql.NullString
-	var compactedAt sql.NullTime
-	var originalSize sql.NullInt64
-	var sourceRepo sql.NullString
-	var contentHash sql.NullString
-	var compactedAtCommit sql.NullString
-
-	err := t.conn.QueryRowContext(ctx, `
+	row := t.conn.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo
 		FROM issues
 		WHERE id = ?
-	`, id).Scan(
-		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
-		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
-		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo,
-	)
+	`, id)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	issue, err := scanIssueRow(row)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("failed to get issue: %w", err)
-	}
-
-	if contentHash.Valid {
-		issue.ContentHash = contentHash.String
-	}
-	if closedAt.Valid {
-		issue.ClosedAt = &closedAt.Time
-	}
-	if estimatedMinutes.Valid {
-		mins := int(estimatedMinutes.Int64)
-		issue.EstimatedMinutes = &mins
-	}
-	if assignee.Valid {
-		issue.Assignee = assignee.String
-	}
-	if externalRef.Valid {
-		issue.ExternalRef = &externalRef.String
-	}
-	if compactedAt.Valid {
-		issue.CompactedAt = &compactedAt.Time
-	}
-	if compactedAtCommit.Valid {
-		issue.CompactedAtCommit = &compactedAtCommit.String
-	}
-	if originalSize.Valid {
-		issue.OriginalSize = int(originalSize.Int64)
-	}
-	if sourceRepo.Valid {
-		issue.SourceRepo = sourceRepo.String
 	}
 
 	// Fetch labels for this issue using the transaction connection
@@ -305,7 +261,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 	}
 	issue.Labels = labels
 
-	return &issue, nil
+	return issue, nil
 }
 
 // getLabels retrieves labels using the transaction's connection
@@ -335,7 +291,7 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 	// Get old issue for event
 	oldIssue, err := t.GetIssue(ctx, id)
 	if err != nil {
-		return wrapDBError("get issue for update", err)
+		return fmt.Errorf("failed to get issue for update: %w", err)
 	}
 	if oldIssue == nil {
 		return fmt.Errorf("issue %s not found", id)
@@ -353,7 +309,7 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 
 		// Validate field values
 		if err := validateFieldUpdate(key, value); err != nil {
-			return wrapDBError("validate field update", err)
+			return fmt.Errorf("failed to validate field update: %w", err)
 		}
 
 		setClauses = append(setClauses, fmt.Sprintf("%s = ?", key))
@@ -430,34 +386,46 @@ func applyUpdatesToIssue(issue *types.Issue, updates map[string]interface{}) {
 	for key, value := range updates {
 		switch key {
 		case "title":
-			issue.Title = value.(string)
+			if s, ok := value.(string); ok {
+				issue.Title = s
+			}
 		case "description":
-			issue.Description = value.(string)
+			if s, ok := value.(string); ok {
+				issue.Description = s
+			}
 		case "design":
-			issue.Design = value.(string)
+			if s, ok := value.(string); ok {
+				issue.Design = s
+			}
 		case "acceptance_criteria":
-			issue.AcceptanceCriteria = value.(string)
+			if s, ok := value.(string); ok {
+				issue.AcceptanceCriteria = s
+			}
 		case "notes":
-			issue.Notes = value.(string)
+			if s, ok := value.(string); ok {
+				issue.Notes = s
+			}
 		case "status":
 			if s, ok := value.(types.Status); ok {
 				issue.Status = s
-			} else {
-				issue.Status = types.Status(value.(string))
+			} else if s, ok := value.(string); ok {
+				issue.Status = types.Status(s)
 			}
 		case "priority":
-			issue.Priority = value.(int)
+			if p, ok := value.(int); ok {
+				issue.Priority = p
+			}
 		case "issue_type":
 			if t, ok := value.(types.IssueType); ok {
 				issue.IssueType = t
-			} else {
-				issue.IssueType = types.IssueType(value.(string))
+			} else if s, ok := value.(string); ok {
+				issue.IssueType = types.IssueType(s)
 			}
 		case "assignee":
 			if value == nil {
 				issue.Assignee = ""
-			} else {
-				issue.Assignee = value.(string)
+			} else if s, ok := value.(string); ok {
+				issue.Assignee = s
 			}
 		case "external_ref":
 			if value == nil {
@@ -1027,7 +995,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	querySQL := fmt.Sprintf(`
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at, external_ref, source_repo
+		       created_at, updated_at, closed_at, external_ref,
+		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1043,6 +1012,69 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	return t.scanIssues(ctx, rows)
 }
 
+// scanner is an interface that both *sql.Row and *sql.Rows satisfy
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanIssueRow scans a single issue row from the database.
+// This is a shared helper used by both GetIssue and SearchIssues to ensure
+// consistent scanning of issue rows.
+func scanIssueRow(row scanner) (*types.Issue, error) {
+	var issue types.Issue
+	var contentHash sql.NullString
+	var closedAt sql.NullTime
+	var estimatedMinutes sql.NullInt64
+	var assignee sql.NullString
+	var externalRef sql.NullString
+	var compactedAt sql.NullTime
+	var originalSize sql.NullInt64
+	var sourceRepo sql.NullString
+	var compactedAtCommit sql.NullString
+
+	err := row.Scan(
+		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
+		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
+		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
+		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan issue: %w", err)
+	}
+
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
+	if closedAt.Valid {
+		issue.ClosedAt = &closedAt.Time
+	}
+	if estimatedMinutes.Valid {
+		mins := int(estimatedMinutes.Int64)
+		issue.EstimatedMinutes = &mins
+	}
+	if assignee.Valid {
+		issue.Assignee = assignee.String
+	}
+	if externalRef.Valid {
+		issue.ExternalRef = &externalRef.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if compactedAtCommit.Valid {
+		issue.CompactedAtCommit = &compactedAtCommit.String
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
+	}
+	if sourceRepo.Valid {
+		issue.SourceRepo = sourceRepo.String
+	}
+
+	return &issue, nil
+}
+
 // scanIssues scans issue rows and fetches labels using the transaction connection.
 func (t *sqliteTxStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*types.Issue, error) {
 	var issues []*types.Issue
@@ -1050,45 +1082,11 @@ func (t *sqliteTxStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*ty
 
 	// First pass: scan all issues
 	for rows.Next() {
-		var issue types.Issue
-		var contentHash sql.NullString
-		var closedAt sql.NullTime
-		var estimatedMinutes sql.NullInt64
-		var assignee sql.NullString
-		var externalRef sql.NullString
-		var sourceRepo sql.NullString
-
-		err := rows.Scan(
-			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
-			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
-			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
-		)
+		issue, err := scanIssueRow(rows)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan issue: %w", err)
+			return nil, err
 		}
-
-		if contentHash.Valid {
-			issue.ContentHash = contentHash.String
-		}
-		if closedAt.Valid {
-			issue.ClosedAt = &closedAt.Time
-		}
-		if estimatedMinutes.Valid {
-			mins := int(estimatedMinutes.Int64)
-			issue.EstimatedMinutes = &mins
-		}
-		if assignee.Valid {
-			issue.Assignee = assignee.String
-		}
-		if externalRef.Valid {
-			issue.ExternalRef = &externalRef.String
-		}
-		if sourceRepo.Valid {
-			issue.SourceRepo = sourceRepo.String
-		}
-
-		issues = append(issues, &issue)
+		issues = append(issues, issue)
 		issueIDs = append(issueIDs, issue.ID)
 	}
 
