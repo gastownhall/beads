@@ -40,20 +40,15 @@ func formatUptime(seconds float64) string {
 }
 
 // showDaemonStatus displays the current daemon status
-func showDaemonStatus(pidFile string, global bool) {
+func showDaemonStatus(pidFile string) {
 	if isRunning, pid := isDaemonRunning(pidFile); isRunning {
-		scope := "local"
-		if global {
-			scope = "global"
-		}
-		
 		var started string
 		if info, err := os.Stat(pidFile); err == nil {
 			started = info.ModTime().Format("2006-01-02 15:04:05")
 		}
 
 		var logPath string
-		if lp, err := getLogFilePath("", global); err == nil {
+		if lp, err := getLogFilePath(""); err == nil {
 			if _, err := os.Stat(lp); err == nil {
 				logPath = lp
 			}
@@ -63,7 +58,6 @@ func showDaemonStatus(pidFile string, global bool) {
 			status := map[string]interface{}{
 				"running": true,
 				"pid":     pid,
-				"scope":   scope,
 			}
 			if started != "" {
 				status["started"] = started
@@ -75,7 +69,7 @@ func showDaemonStatus(pidFile string, global bool) {
 			return
 		}
 
-		fmt.Printf("Daemon is running (PID %d, %s)\n", pid, scope)
+		fmt.Printf("Daemon is running (PID %d)\n", pid)
 		if started != "" {
 			fmt.Printf("  Started: %s\n", started)
 		}
@@ -92,23 +86,13 @@ func showDaemonStatus(pidFile string, global bool) {
 }
 
 // showDaemonHealth displays daemon health information
-func showDaemonHealth(global bool) {
-	var socketPath string
-	if global {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: cannot get home directory: %v\n", err)
-			os.Exit(1)
-		}
-		socketPath = filepath.Join(home, ".beads", "bd.sock")
-	} else {
-		beadsDir, err := ensureBeadsDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		socketPath = filepath.Join(beadsDir, "bd.sock")
+func showDaemonHealth() {
+	beadsDir, err := ensureBeadsDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
+	socketPath := filepath.Join(beadsDir, "bd.sock")
 
 	client, err := rpc.TryConnect(socketPath)
 	if err != nil {
@@ -159,23 +143,13 @@ func showDaemonHealth(global bool) {
 }
 
 // showDaemonMetrics displays daemon metrics
-func showDaemonMetrics(global bool) {
-	var socketPath string
-	if global {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: cannot get home directory: %v\n", err)
-			os.Exit(1)
-		}
-		socketPath = filepath.Join(home, ".beads", "bd.sock")
-	} else {
-		beadsDir, err := ensureBeadsDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		socketPath = filepath.Join(beadsDir, "bd.sock")
+func showDaemonMetrics() {
+	beadsDir, err := ensureBeadsDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
+	socketPath := filepath.Join(beadsDir, "bd.sock")
 
 	client, err := rpc.TryConnect(socketPath)
 	if err != nil {
@@ -242,71 +216,6 @@ func showDaemonMetrics(global bool) {
 	}
 }
 
-// migrateToGlobalDaemon migrates from local to global daemon
-func migrateToGlobalDaemon() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot get home directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	localPIDFile := filepath.Join(".beads", "daemon.pid")
-	globalPIDFile := filepath.Join(home, ".beads", "daemon.pid")
-
-	// Check if local daemon is running
-	localRunning, localPID := isDaemonRunning(localPIDFile)
-	if !localRunning {
-		fmt.Println("No local daemon is running")
-	} else {
-		fmt.Printf("Stopping local daemon (PID %d)...\n", localPID)
-		stopDaemon(localPIDFile)
-	}
-
-	// Check if global daemon is already running
-	globalRunning, globalPID := isDaemonRunning(globalPIDFile)
-	if globalRunning {
-		fmt.Printf("Global daemon already running (PID %d)\n", globalPID)
-		return
-	}
-
-	// Start global daemon
-	fmt.Println("Starting global daemon...")
-	binPath, err := os.Executable()
-	if err != nil {
-		binPath = os.Args[0]
-	}
-
-	cmd := exec.Command(binPath, "daemon", "--global") // #nosec G204 - bd daemon command from trusted binary
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err == nil {
-		cmd.Stdout = devNull
-		cmd.Stderr = devNull
-		cmd.Stdin = devNull
-		defer func() { _ = devNull.Close() }()
-	}
-
-	configureDaemonProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to start global daemon: %v\n", err)
-		os.Exit(1)
-	}
-
-	go func() { _ = cmd.Wait() }()
-
-	// Wait for daemon to be ready
-	time.Sleep(2 * time.Second)
-
-	if isRunning, pid := isDaemonRunning(globalPIDFile); isRunning {
-		fmt.Printf("Global daemon started successfully (PID %d)\n", pid)
-		fmt.Println()
-		fmt.Println("Migration complete! The global daemon will now serve all your beads repositories.")
-		fmt.Println("Set BEADS_PREFER_GLOBAL_DAEMON=1 in your shell to make this permanent.")
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: global daemon failed to start\n")
-		os.Exit(1)
-	}
-}
-
 // stopDaemon stops a running daemon
 func stopDaemon(pidFile string) {
 	isRunning, pid := isDaemonRunning(pidFile)
@@ -344,9 +253,7 @@ func stopDaemon(pidFile string) {
 		return
 	}
 	
-	// Determine if this is global or local daemon
-	isGlobal := strings.Contains(pidFile, filepath.Join(".beads", "daemon.lock"))
-	socketPath := getSocketPathForPID(pidFile, isGlobal)
+	socketPath := getSocketPathForPID(pidFile)
 	
 	if err := process.Kill(); err != nil {
 		// Ignore "process already finished" errors
@@ -369,15 +276,15 @@ func stopDaemon(pidFile string) {
 }
 
 // startDaemon starts the daemon in background
-func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string, global bool) {
-	logPath, err := getLogFilePath(logFile, global)
+func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string) {
+	logPath, err := getLogFilePath(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	if os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, logPath, pidFile, global)
+		runDaemonLoop(interval, autoCommit, autoPush, logPath, pidFile)
 		return
 	}
 
@@ -398,9 +305,6 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 	}
 	if logFile != "" {
 		args = append(args, "--log", logFile)
-	}
-	if global {
-		args = append(args, "--global")
 	}
 
 	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary

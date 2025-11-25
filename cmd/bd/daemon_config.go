@@ -9,21 +9,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 )
 
-// getGlobalBeadsDir returns the global beads directory (~/.beads)
-func getGlobalBeadsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot get home directory: %w", err)
-	}
-
-	beadsDir := filepath.Join(home, ".beads")
-	if err := os.MkdirAll(beadsDir, 0700); err != nil {
-		return "", fmt.Errorf("cannot create global beads directory: %w", err)
-	}
-
-	return beadsDir, nil
-}
-
 // ensureBeadsDir ensures the local beads directory exists (.beads in the current workspace)
 func ensureBeadsDir() (string, error) {
 	var beadsDir string
@@ -74,26 +59,14 @@ func getEnvBool(key string, defaultValue bool) bool {
 }
 
 // getSocketPathForPID determines the socket path for a given PID file
-func getSocketPathForPID(pidFile string, global bool) string {
-	if global {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".beads", "bd.sock")
-	}
-	// Local daemon: socket is in same directory as PID file
+func getSocketPathForPID(pidFile string) string {
+	// Socket is in same directory as PID file
 	return filepath.Join(filepath.Dir(pidFile), "bd.sock")
 }
 
 // getPIDFilePath returns the path to the daemon PID file
-func getPIDFilePath(global bool) (string, error) {
-	var beadsDir string
-	var err error
-
-	if global {
-		beadsDir, err = getGlobalBeadsDir()
-	} else {
-		beadsDir, err = ensureBeadsDir()
-	}
-
+func getPIDFilePath() (string, error) {
+	beadsDir, err := ensureBeadsDir()
 	if err != nil {
 		return "", err
 	}
@@ -101,20 +74,12 @@ func getPIDFilePath(global bool) (string, error) {
 }
 
 // getLogFilePath returns the path to the daemon log file
-func getLogFilePath(userPath string, global bool) (string, error) {
+func getLogFilePath(userPath string) (string, error) {
 	if userPath != "" {
 		return userPath, nil
 	}
 
-	var beadsDir string
-	var err error
-
-	if global {
-		beadsDir, err = getGlobalBeadsDir()
-	} else {
-		beadsDir, err = ensureBeadsDir()
-	}
-
+	beadsDir, err := ensureBeadsDir()
 	if err != nil {
 		return "", err
 	}

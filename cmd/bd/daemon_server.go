@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/rpc"
@@ -38,39 +37,6 @@ func startRPCServer(ctx context.Context, socketPath string, store storage.Storag
 	}
 
 	return server, serverErrChan, nil
-}
-
-// runGlobalDaemon runs the global routing daemon
-func runGlobalDaemon(ctx context.Context, log daemonLogger) {
-	globalDir, err := getGlobalBeadsDir()
-	if err != nil {
-		log.log("Error: cannot get global beads directory: %v", err)
-		os.Exit(1)
-	}
-	socketPath := filepath.Join(globalDir, "bd.sock")
-
-	serverCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	server, _, err := startRPCServer(serverCtx, socketPath, nil, globalDir, "", log)
-	if err != nil {
-		return
-	}
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, daemonSignals...)
-	defer signal.Stop(sigChan)
-
-	sig := <-sigChan
-	log.log("Received signal: %v", sig)
-	log.log("Shutting down global daemon...")
-
-	cancel()
-	if err := server.Stop(); err != nil {
-		log.log("Error stopping server: %v", err)
-	}
-
-	log.log("Global daemon stopped")
 }
 
 // checkParentProcessAlive checks if the parent process is still running.

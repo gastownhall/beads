@@ -33,22 +33,11 @@ func shouldAutoStartDaemon() bool {
 	return config.GetBool("auto-start-daemon") // Defaults to true
 }
 
-// shouldUseGlobalDaemon determines if global daemon should be preferred
-// based on heuristics (multi-repo detection)
-// Note: Global daemon is deprecated; this always returns false for now
-func shouldUseGlobalDaemon() bool {
-	// Global daemon support is deprecated
-	// Always use local daemon (per-project .beads/ socket)
-	// Previously supported BEADS_PREFER_GLOBAL_DAEMON env var, but global
-	// daemon has issues with multi-workspace git workflows
-	return false
-}
 
 // restartDaemonForVersionMismatch stops the old daemon and starts a new one
 // Returns true if restart was successful
 func restartDaemonForVersionMismatch() bool {
-	// Use local daemon (global is deprecated)
-	pidFile, err := getPIDFilePath(false)
+	pidFile, err := getPIDFilePath()
 	if err != nil {
 		debug.Logf("failed to get PID file path: %v", err)
 		return false
@@ -173,8 +162,8 @@ func tryAutoStartDaemon(socketPath string) bool {
 		return true
 	}
 
-	socketPath, isGlobal := determineSocketMode(socketPath)
-	return startDaemonProcess(socketPath, isGlobal)
+	socketPath = determineSocketPath(socketPath)
+	return startDaemonProcess(socketPath)
 }
 
 func debugLog(msg string, args ...interface{}) {
@@ -242,40 +231,22 @@ func handleExistingSocket(socketPath string) bool {
 	return false
 }
 
-func determineSocketMode(socketPath string) (string, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return socketPath, false
-	}
-
-	globalSocket := filepath.Join(home, ".beads", "bd.sock")
-	if socketPath == globalSocket {
-		return socketPath, true
-	}
-
-	if shouldUseGlobalDaemon() {
-		debugLog("detected multiple repos, auto-starting global daemon")
-		return globalSocket, true
-	}
-
-	return socketPath, false
+func determineSocketPath(socketPath string) string {
+	return socketPath
 }
 
-func startDaemonProcess(socketPath string, isGlobal bool) bool {
+func startDaemonProcess(socketPath string) bool {
 	binPath, err := os.Executable()
 	if err != nil {
 		binPath = os.Args[0]
 	}
 
 	args := []string{"daemon", "--start"}
-	if isGlobal {
-		args = append(args, "--global")
-	}
 
 	cmd := exec.Command(binPath, args...)
 	setupDaemonIO(cmd)
 
-	if !isGlobal && dbPath != "" {
+	if dbPath != "" {
 		cmd.Dir = filepath.Dir(dbPath)
 	}
 
@@ -389,22 +360,9 @@ func recordDaemonStartFailure() {
 }
 
 // getSocketPath returns the daemon socket path based on the database location
-// Always returns local socket path (.beads/bd.sock relative to database)
+// Returns local socket path (.beads/bd.sock relative to database)
 func getSocketPath() string {
-	// Always use local socket (same directory as database: .beads/bd.sock)
-	localSocket := filepath.Join(filepath.Dir(dbPath), "bd.sock")
-
-	// Warn if old global socket exists
-	if home, err := os.UserHomeDir(); err == nil {
-		globalSocket := filepath.Join(home, ".beads", "bd.sock")
-		if _, err := os.Stat(globalSocket); err == nil {
-			fmt.Fprintf(os.Stderr, "Warning: Found old global daemon socket at %s\n", globalSocket)
-			fmt.Fprintf(os.Stderr, "Global sockets are deprecated. Each project now uses its own local daemon.\n")
-			fmt.Fprintf(os.Stderr, "To migrate: Stop the global daemon and restart with 'bd daemon' in each project.\n")
-		}
-	}
-
-	return localSocket
+	return filepath.Join(filepath.Dir(dbPath), "bd.sock")
 }
 
 // emitVerboseWarning prints a one-line warning when falling back to direct mode

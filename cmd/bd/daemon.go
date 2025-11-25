@@ -45,22 +45,20 @@ Run 'bd daemon' with no flags to see available options.`,
 		status, _ := cmd.Flags().GetBool("status")
 		health, _ := cmd.Flags().GetBool("health")
 		metrics, _ := cmd.Flags().GetBool("metrics")
-		migrateToGlobal, _ := cmd.Flags().GetBool("migrate-to-global")
 		interval, _ := cmd.Flags().GetDuration("interval")
 		autoCommit, _ := cmd.Flags().GetBool("auto-commit")
 		autoPush, _ := cmd.Flags().GetBool("auto-push")
 		logFile, _ := cmd.Flags().GetString("log")
-		global, _ := cmd.Flags().GetBool("global")
 
 		// If no operation flags provided, show help
-		if !start && !stop && !status && !health && !metrics && !migrateToGlobal {
+		if !start && !stop && !status && !health && !metrics {
 			_ = cmd.Help()
 			return
 		}
 
 		// If auto-commit/auto-push flags weren't explicitly provided, read from config
-		// (skip if --stop, --status, --health, --metrics, or --migrate-to-global)
-		if start && !stop && !status && !health && !metrics && !migrateToGlobal && !global {
+		// (skip if --stop, --status, --health, --metrics)
+		if start && !stop && !status && !health && !metrics {
 			if !cmd.Flags().Changed("auto-commit") {
 				if dbPath := beads.FindDatabasePath(); dbPath != "" {
 					ctx := context.Background()
@@ -92,29 +90,24 @@ Run 'bd daemon' with no flags to see available options.`,
 			os.Exit(1)
 		}
 
-		pidFile, err := getPIDFilePath(global)
+		pidFile, err := getPIDFilePath()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 		if status {
-			showDaemonStatus(pidFile, global)
+			showDaemonStatus(pidFile)
 			return
 		}
 
 		if health {
-			showDaemonHealth(global)
+			showDaemonHealth()
 			return
 		}
 
 		if metrics {
-			showDaemonMetrics(global)
-			return
-		}
-
-		if migrateToGlobal {
-			migrateToGlobalDaemon()
+			showDaemonMetrics()
 			return
 		}
 
@@ -137,7 +130,7 @@ Run 'bd daemon' with no flags to see available options.`,
 			// Check if daemon is already running
 			if isRunning, pid := isDaemonRunning(pidFile); isRunning {
 				// Check if running daemon has compatible version
-				socketPath := getSocketPathForPID(pidFile, global)
+				socketPath := getSocketPathForPID(pidFile)
 				if client, err := rpc.TryConnectWithTimeout(socketPath, 1*time.Second); err == nil && client != nil {
 					health, healthErr := client.Health()
 					_ = client.Close()
@@ -145,7 +138,7 @@ Run 'bd daemon' with no flags to see available options.`,
 					// If we can check version and it's compatible, exit
 					if healthErr == nil && health.Compatible {
 						fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d, version %s)\n", pid, health.Version)
-						fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop%s' to stop it first\n", boolToFlag(global, " --global"))
+						fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
 						os.Exit(1)
 					}
 
@@ -159,22 +152,14 @@ Run 'bd daemon' with no flags to see available options.`,
 				} else {
 					// Can't check version - assume incompatible
 					fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d)\n", pid)
-					fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop%s' to stop it first\n", boolToFlag(global, " --global"))
+					fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
 					os.Exit(1)
 				}
 			}
 		}
 
-		// Global daemon doesn't support auto-commit/auto-push (no sync loop)
-		if global && (autoCommit || autoPush) {
-			fmt.Fprintf(os.Stderr, "Error: --auto-commit and --auto-push are not supported with --global\n")
-			fmt.Fprintf(os.Stderr, "Hint: global daemon runs in routing mode and doesn't perform background sync\n")
-			fmt.Fprintf(os.Stderr, "      Use local daemon (without --global) for auto-commit/auto-push features\n")
-			os.Exit(1)
-		}
-
-		// Validate we're in a git repo (skip for global daemon)
-		if !global && !isGitRepo() {
+		// Validate we're in a git repo
+		if !isGitRepo() {
 			fmt.Fprintf(os.Stderr, "Error: not in a git repository\n")
 			fmt.Fprintf(os.Stderr, "Hint: run 'git init' to initialize a repository\n")
 			os.Exit(1)
@@ -188,30 +173,24 @@ Run 'bd daemon' with no flags to see available options.`,
 		}
 
 		// Warn if starting daemon in a git worktree
-		if !global {
-			// Ensure dbPath is set for warning
-			if dbPath == "" {
-				if foundDB := beads.FindDatabasePath(); foundDB != "" {
-					dbPath = foundDB
-				}
+		// Ensure dbPath is set for warning
+		if dbPath == "" {
+			if foundDB := beads.FindDatabasePath(); foundDB != "" {
+				dbPath = foundDB
 			}
-			if dbPath != "" {
-				warnWorktreeDaemon(dbPath)
-			}
+		}
+		if dbPath != "" {
+			warnWorktreeDaemon(dbPath)
 		}
 
 		// Start daemon
-		scope := "local"
-		if global {
-			scope = "global"
-		}
-		fmt.Printf("Starting bd daemon (%s, interval: %v, auto-commit: %v, auto-push: %v)\n",
-			scope, interval, autoCommit, autoPush)
+		fmt.Printf("Starting bd daemon (interval: %v, auto-commit: %v, auto-push: %v)\n",
+			interval, autoCommit, autoPush)
 		if logFile != "" {
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, logFile, pidFile, global)
+		startDaemon(interval, autoCommit, autoPush, logFile, pidFile)
 	},
 }
 
@@ -224,9 +203,7 @@ func init() {
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().Bool("health", false, "Check daemon health and metrics")
 	daemonCmd.Flags().Bool("metrics", false, "Show detailed daemon metrics")
-	daemonCmd.Flags().Bool("migrate-to-global", false, "Migrate from local to global daemon")
 	daemonCmd.Flags().String("log", "", "Log file path (default: .beads/daemon.log)")
-	daemonCmd.Flags().Bool("global", false, "Run as global daemon (socket at ~/.beads/bd.sock)")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -243,7 +220,7 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string, global bool) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string) {
 	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
 
@@ -255,16 +232,16 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	defer func() {
 		if r := recover(); r != nil {
 			log.log("PANIC: daemon crashed: %v", r)
-			
+
 			// Capture stack trace
 			stackBuf := make([]byte, 4096)
 			stackSize := runtime.Stack(stackBuf, false)
 			stackTrace := string(stackBuf[:stackSize])
 			log.log("Stack trace:\n%s", stackTrace)
-			
+
 			// Write crash report to daemon-error file for user visibility
 			var beadsDir string
-			if !global && dbPath != "" {
+			if dbPath != "" {
 				beadsDir = filepath.Dir(dbPath)
 			} else if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				beadsDir = filepath.Dir(foundDB)
@@ -288,17 +265,14 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	}()
 
 	// Determine database path first (needed for lock file metadata)
-	daemonDBPath := ""
-	if !global {
-		daemonDBPath = dbPath
-		if daemonDBPath == "" {
-			if foundDB := beads.FindDatabasePath(); foundDB != "" {
-				daemonDBPath = foundDB
-			} else {
-				log.log("Error: no beads database found")
-				log.log("Hint: run 'bd init' to create a database or set BEADS_DB environment variable")
-				return // Use return instead of os.Exit to allow defers to run
-			}
+	daemonDBPath := dbPath
+	if daemonDBPath == "" {
+		if foundDB := beads.FindDatabasePath(); foundDB != "" {
+			daemonDBPath = foundDB
+		} else {
+			log.log("Error: no beads database found")
+			log.log("Hint: run 'bd init' to create a database or set BEADS_DB environment variable")
+			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
 
@@ -310,11 +284,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	defer func() { _ = os.Remove(pidFile) }()
 
 	log.log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
-
-	if global {
-		runGlobalDaemon(ctx, log)
-		return
-	}
 
 	// Check for multiple .db files (ambiguity error)
 	beadsDir := filepath.Dir(daemonDBPath)
