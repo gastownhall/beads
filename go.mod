@@ -12,7 +12,7 @@ require (
 	github.com/ncruces/go-sqlite3 v0.30.1
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.21.0
-	github.com/tetratelabs/wazero v1.10.0
+	github.com/tetratelabs/wazero v1.10.1
 	golang.org/x/mod v0.30.0
 	golang.org/x/sys v0.38.0
 	golang.org/x/term v0.37.0
