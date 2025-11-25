@@ -28,13 +28,20 @@ var initCmd = &cobra.Command{
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
 and database file. Optionally specify a custom issue prefix.
 
-With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.`,
+With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.
+
+With --stealth: configures global git settings for invisible beads usage:
+  • Global gitattributes for beads merge support across all repos
+  • Global gitignore to prevent beads files from being committed
+  • Claude Code settings with bd onboard instruction
+  Perfect for personal use without affecting repo collaborators.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 		branch, _ := cmd.Flags().GetString("branch")
 		contributor, _ := cmd.Flags().GetBool("contributor")
 		team, _ := cmd.Flags().GetBool("team")
+		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 
@@ -42,6 +49,19 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		if err := config.Initialize(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
 			// Non-fatal - continue with defaults
+		}
+
+		// Handle stealth mode setup
+		if stealth {
+			if err := setupStealthMode(!quiet); err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting up stealth mode: %v\n", err)
+				os.Exit(1)
+			}
+
+			// In stealth mode, skip git hooks and merge driver installation
+			// since we handle it globally
+			skipHooks = true
+			skipMergeDriver = true
 		}
 
 		// Check BEADS_DB environment variable if --db flag not set
@@ -400,6 +420,7 @@ func init() {
 	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
+	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup")
 	rootCmd.AddCommand(initCmd)
@@ -1136,4 +1157,281 @@ func readFirstIssueFromJSONL(path string) (*types.Issue, error) {
 	}
 
 	return nil, nil
+}
+
+// setupStealthMode configures global git settings for stealth operation
+func setupStealthMode(verbose bool) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+
+	// Setup global gitattributes
+	if err := setupGlobalGitAttributes(homeDir, verbose); err != nil {
+		return fmt.Errorf("failed to setup global gitattributes: %w", err)
+	}
+
+	// Setup global gitignore
+	if err := setupGlobalGitIgnore(homeDir, verbose); err != nil {
+		return fmt.Errorf("failed to setup global gitignore: %w", err)
+	}
+
+	// Setup claude settings
+	if err := setupClaudeSettings(verbose); err != nil {
+		return fmt.Errorf("failed to setup claude settings: %w", err)
+	}
+
+	if verbose {
+		green := color.New(color.FgGreen).SprintFunc()
+		cyan := color.New(color.FgCyan).SprintFunc()
+		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", green("✓"))
+		fmt.Printf("  Global gitattributes: %s\n", cyan("configured for beads merge"))
+		fmt.Printf("  Global gitignore: %s\n", cyan(".beads/ and .claude/settings.local.json ignored"))
+		fmt.Printf("  Claude settings: %s\n\n", cyan("configured with bd onboard instruction"))
+		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", cyan("invisible"))
+	}
+
+	return nil
+}
+
+// setupGlobalGitAttributes configures global gitattributes for beads merge
+func setupGlobalGitAttributes(homeDir string, verbose bool) error {
+	// Check if user already has a global gitattributes file configured
+	cmd := exec.Command("git", "config", "--global", "core.attributesfile")
+	output, err := cmd.Output()
+
+	var attributesPath string
+
+	if err == nil && len(output) > 0 {
+		// User has already configured a global gitattributes file, use it
+		attributesPath = strings.TrimSpace(string(output))
+		if verbose {
+			fmt.Printf("Using existing configured global gitattributes file: %s\n", attributesPath)
+		}
+	} else {
+		// No global gitattributes file configured, check if standard location exists
+		configDir := filepath.Join(homeDir, ".config", "git")
+		standardAttributesPath := filepath.Join(configDir, "attributes")
+
+		if _, err := os.Stat(standardAttributesPath); err == nil {
+			// Standard global gitattributes file exists, use it
+			// No need to set git config - git automatically uses this standard location
+			attributesPath = standardAttributesPath
+			if verbose {
+				fmt.Printf("Using existing global gitattributes file: %s\n", attributesPath)
+			}
+		} else {
+			// No global gitattributes file exists, create one in standard location
+			// No need to set git config - git automatically uses this standard location
+			attributesPath = standardAttributesPath
+
+			// Ensure config directory exists
+			if err := os.MkdirAll(configDir, 0755); err != nil {
+				return fmt.Errorf("failed to create git config directory: %w", err)
+			}
+
+			if verbose {
+				fmt.Printf("Creating new global gitattributes file: %s\n", attributesPath)
+			}
+		}
+	}
+
+	// Read existing attributes file if it exists
+	var existingContent string
+	if content, err := os.ReadFile(attributesPath); err == nil {
+		existingContent = string(content)
+	}
+
+	// Check if beads merge attribute already exists
+	beadsPattern := "**/.beads/issues.jsonl merge=beads"
+	if strings.Contains(existingContent, beadsPattern) {
+		if verbose {
+			fmt.Printf("Global gitattributes already configured for beads\n")
+		}
+		return nil
+	}
+
+	// Append beads configuration
+	newContent := existingContent
+	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+		newContent += "\n"
+	}
+	newContent += "\n# Beads merge configuration (added by bd init --stealth)\n"
+	newContent += beadsPattern + "\n"
+
+	// Write the updated attributes file
+	if err := os.WriteFile(attributesPath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write global gitattributes: %w", err)
+	}
+
+	// Configure the beads merge driver
+	cmd = exec.Command("git", "config", "--global", "merge.beads.driver", "bd merge %A %O %A %B")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to configure beads merge driver: %w\n%s", err, output)
+	}
+
+	cmd = exec.Command("git", "config", "--global", "merge.beads.name", "bd JSONL merge driver")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		// Non-fatal, the name is just descriptive
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set merge driver name: %v\n%s", err, output)
+		}
+	}
+
+	if verbose {
+		fmt.Printf("Configured global gitattributes for beads merge\n")
+	}
+
+	return nil
+}
+
+// setupGlobalGitIgnore configures global gitignore to ignore beads and claude files
+func setupGlobalGitIgnore(homeDir string, verbose bool) error {
+	// Check if user already has a global gitignore file configured
+	cmd := exec.Command("git", "config", "--global", "core.excludesfile")
+	output, err := cmd.Output()
+
+	var ignorePath string
+
+	if err == nil && len(output) > 0 {
+		// User has already configured a global gitignore file, use it
+		ignorePath = strings.TrimSpace(string(output))
+		if verbose {
+			fmt.Printf("Using existing configured global gitignore file: %s\n", ignorePath)
+		}
+	} else {
+		// No global gitignore file configured, check if standard location exists
+		configDir := filepath.Join(homeDir, ".config", "git")
+		standardIgnorePath := filepath.Join(configDir, "ignore")
+
+		if _, err := os.Stat(standardIgnorePath); err == nil {
+			// Standard global gitignore file exists, use it
+			// No need to set git config - git automatically uses this standard location
+			ignorePath = standardIgnorePath
+			if verbose {
+				fmt.Printf("Using existing global gitignore file: %s\n", ignorePath)
+			}
+		} else {
+			// No global gitignore file exists, create one in standard location
+			// No need to set git config - git automatically uses this standard location
+			ignorePath = standardIgnorePath
+
+			// Ensure config directory exists
+			if err := os.MkdirAll(configDir, 0755); err != nil {
+				return fmt.Errorf("failed to create git config directory: %w", err)
+			}
+
+			if verbose {
+				fmt.Printf("Creating new global gitignore file: %s\n", ignorePath)
+			}
+		}
+	}
+
+	// Read existing ignore file if it exists
+	var existingContent string
+	if content, err := os.ReadFile(ignorePath); err == nil {
+		existingContent = string(content)
+	}
+
+	// Check if beads patterns already exist
+	beadsPattern := "**/.beads/"
+	claudePattern := "**/.claude/settings.local.json"
+
+	hasBeads := strings.Contains(existingContent, beadsPattern)
+	hasClaude := strings.Contains(existingContent, claudePattern)
+
+	if hasBeads && hasClaude {
+		if verbose {
+			fmt.Printf("Global gitignore already configured for stealth mode\n")
+		}
+		return nil
+	}
+
+	// Append missing patterns
+	newContent := existingContent
+	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+		newContent += "\n"
+	}
+
+	if !hasBeads || !hasClaude {
+		newContent += "\n# Beads stealth mode configuration (added by bd init --stealth)\n"
+	}
+
+	if !hasBeads {
+		newContent += beadsPattern + "\n"
+	}
+	if !hasClaude {
+		newContent += claudePattern + "\n"
+	}
+
+	// Write the updated ignore file
+	if err := os.WriteFile(ignorePath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write global gitignore: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("Configured global gitignore for stealth mode\n")
+	}
+
+	return nil
+}
+
+// setupClaudeSettings creates or updates .claude/settings.local.json with onboard instruction
+func setupClaudeSettings(verbose bool) error {
+	claudeDir := ".claude"
+	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+
+	// Create .claude directory if it doesn't exist
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .claude directory: %w", err)
+	}
+
+	// Check if settings.local.json already exists
+	var existingSettings map[string]interface{}
+	if content, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(content, &existingSettings); err != nil {
+			existingSettings = make(map[string]interface{})
+		}
+	} else {
+		existingSettings = make(map[string]interface{})
+	}
+
+	// Add or update the prompt with onboard instruction
+	onboardPrompt := "Before starting any work, run 'bd onboard' to understand the current project state and available issues."
+
+	// Check if prompt already contains onboard instruction
+	if promptValue, exists := existingSettings["prompt"]; exists {
+		if promptStr, ok := promptValue.(string); ok {
+			if strings.Contains(promptStr, "bd onboard") {
+				if verbose {
+					fmt.Printf("Claude settings already configured with bd onboard instruction\n")
+				}
+				return nil
+			}
+			// Update existing prompt to include onboard instruction
+			existingSettings["prompt"] = promptStr + "\n\n" + onboardPrompt
+		} else {
+			// Existing prompt is not a string, replace it
+			existingSettings["prompt"] = onboardPrompt
+		}
+	} else {
+		// Add new prompt with onboard instruction
+		existingSettings["prompt"] = onboardPrompt
+	}
+
+	// Write updated settings
+	updatedContent, err := json.MarshalIndent(existingSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings JSON: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, updatedContent, 0644); err != nil {
+		return fmt.Errorf("failed to write claude settings: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("Configured Claude settings with bd onboard instruction\n")
+	}
+
+	return nil
 }

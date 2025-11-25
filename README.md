@@ -183,6 +183,33 @@ The `.gitignore` entries are automatically created inside `.beads/.gitignore` by
 
 **Using devcontainers?** Open the repository in a devcontainer (GitHub Codespaces or VS Code Remote Containers) and bd will be automatically installed with git hooks configured. See [.devcontainer/README.md](.devcontainer/README.md) for details.
 
+### Stealth Mode (Isolated Usage)
+
+Want to use beads in your local clone without other collaborators seeing any beads-related files? Use **stealth mode**:
+
+```bash
+bd init --stealth
+```
+
+**Stealth mode configures:**
+- **Global gitattributes** (`~/.config/git/attributes`) - Enables beads merge for `**/.beads/issues.jsonl` files across all repos
+- **Global gitignore** (`~/.config/git/ignore`) - Ignores `**/.beads/` and `**/.claude/settings.local.json` globally
+- **Claude Code settings** (`.claude/settings.local.json`) - Adds `bd onboard` instruction for AI agents
+
+**Perfect for:**
+- Personal experimentation with beads
+- Working on repos where not everyone uses beads yet
+- Keeping your issue tracking private while contributing to open source projects
+- AI agents that should use beads without affecting the main repo
+
+**What stays invisible to others:**
+- No `.beads/` directory tracked in git
+- No AGENTS.md or README.md mentions of beads
+- No local `.gitattributes` or `.gitignore` modifications
+- Your beads database and issues remain local-only
+
+**How it works:** The global git configuration handles beads merging automatically, while the global gitignore ensures beads files never get committed to shared repos. Your AI agents get the onboard instruction automatically without exposing beads to other repo collaborators.
+
 Most tasks will be created and managed by agents during conversations. You can check on things with:
 
 ```bash
