@@ -45,6 +45,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		importOnly, _ := cmd.Flags().GetBool("import-only")
 		status, _ := cmd.Flags().GetBool("status")
 		merge, _ := cmd.Flags().GetBool("merge")
+		fromMain, _ := cmd.Flags().GetBool("from-main")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
@@ -65,6 +66,15 @@ Use --merge to merge the sync branch back to main branch.`,
 		// If merge mode, merge sync branch to main
 		if merge {
 			if err := mergeSyncBranch(ctx, dryRun); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		// If from-main mode, one-way sync from main branch (gt-ick9: ephemeral branch support)
+		if fromMain {
+			if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -117,10 +127,18 @@ Use --merge to merge the sync branch back to main branch.`,
 		}
 
 		// Preflight: check for upstream tracking
+		// If no upstream, automatically switch to --from-main mode (gt-ick9: ephemeral branch support)
 		if !noPull && !gitHasUpstream() {
-			fmt.Fprintf(os.Stderr, "Error: no upstream configured for current branch\n")
-			fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name> (then rerun bd sync)\n")
-			os.Exit(1)
+			if hasGitRemote(ctx) {
+				// Remote exists but no upstream - use from-main mode
+				fmt.Println("→ No upstream configured, using --from-main mode")
+				if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+			// If no remote at all, gitPull/gitPush will gracefully skip
 		}
 
 		// Step 1: Export pending changes (but check for stale DB first)
@@ -207,6 +225,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		}
 
 		// Step 3: Pull from remote
+		// Note: If no upstream, we already handled it above with --from-main mode
 		if !noPull {
 			if dryRun {
 				fmt.Println("→ [DRY RUN] Would pull from remote")
@@ -215,7 +234,8 @@ Use --merge to merge the sync branch back to main branch.`,
 				checkMergeDriverConfig()
 
 				fmt.Println("→ Pulling from remote...")
-				if err := gitPull(ctx); err != nil {
+				err := gitPull(ctx)
+				if err != nil {
 					// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
 					if isInRebase() && hasJSONLConflict() {
 						fmt.Println("→ Auto-resolving JSONL merge conflict...")
@@ -404,6 +424,7 @@ func init() {
 	syncCmd.Flags().Bool("import-only", false, "Only import from JSONL (skip git operations, useful after git pull)")
 	syncCmd.Flags().Bool("status", false, "Show diff between sync branch and main branch")
 	syncCmd.Flags().Bool("merge", false, "Merge sync branch back to main branch")
+	syncCmd.Flags().Bool("from-main", false, "One-way sync from main branch (for ephemeral branches without upstream)")
 	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
 	rootCmd.AddCommand(syncCmd)
 }
@@ -517,8 +538,8 @@ func isInRebase() bool {
 	return false
 }
 
-// hasJSONLConflict checks if beads.jsonl has a merge conflict
-// Returns true only if beads.jsonl is the only file in conflict
+// hasJSONLConflict checks if the beads JSONL file has a merge conflict
+// Returns true only if the JSONL file (issues.jsonl or beads.jsonl) is the only file in conflict
 func hasJSONLConflict() bool {
 	cmd := exec.Command("git", "status", "--porcelain")
 	out, err := cmd.Output()
@@ -537,10 +558,11 @@ func hasJSONLConflict() bool {
 		// Check for unmerged status codes (UU = both modified, AA = both added, etc.)
 		status := line[:2]
 		if status == "UU" || status == "AA" || status == "DD" ||
-		   status == "AU" || status == "UA" || status == "DU" || status == "UD" {
+			status == "AU" || status == "UA" || status == "DU" || status == "UD" {
 			filepath := strings.TrimSpace(line[3:])
 
-			if strings.HasSuffix(filepath, "beads.jsonl") {
+			// Check for beads JSONL files (issues.jsonl or beads.jsonl in .beads/)
+			if strings.HasSuffix(filepath, "issues.jsonl") || strings.HasSuffix(filepath, "beads.jsonl") {
 				hasJSONLConflict = true
 			} else {
 				hasOtherConflict = true
@@ -548,7 +570,7 @@ func hasJSONLConflict() bool {
 		}
 	}
 
-	// Only return true if ONLY beads.jsonl has a conflict
+	// Only return true if ONLY the JSONL file has a conflict
 	return hasJSONLConflict && !hasOtherConflict
 }
 
@@ -626,12 +648,89 @@ func gitPush(ctx context.Context) error {
 	if !hasGitRemote(ctx) {
 		return nil // Gracefully skip - local-only mode
 	}
-	
+
 	cmd := exec.CommandContext(ctx, "git", "push")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push failed: %w\n%s", err, output)
 	}
+	return nil
+}
+
+// getDefaultBranch returns the default branch name (main or master)
+// Checks remote HEAD first, then falls back to checking if main/master exist
+func getDefaultBranch(ctx context.Context) string {
+	// Try to get default branch from remote
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	output, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(output))
+		// Extract branch name from refs/remotes/origin/main
+		if strings.HasPrefix(ref, "refs/remotes/origin/") {
+			return strings.TrimPrefix(ref, "refs/remotes/origin/")
+		}
+	}
+
+	// Fallback: check if origin/main exists
+	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", "origin/main").Run() == nil {
+		return "main"
+	}
+
+	// Fallback: check if origin/master exists
+	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", "origin/master").Run() == nil {
+		return "master"
+	}
+
+	// Default to main
+	return "main"
+}
+
+// doSyncFromMain performs a one-way sync from the default branch (main/master)
+// Used for ephemeral branches without upstream tracking (gt-ick9)
+// This fetches beads from main and imports them, discarding local beads changes.
+func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool) error {
+	if dryRun {
+		fmt.Println("→ [DRY RUN] Would sync beads from main branch")
+		fmt.Println("  1. Fetch origin main")
+		fmt.Println("  2. Checkout .beads/ from origin/main")
+		fmt.Println("  3. Import JSONL into database")
+		fmt.Println("\n✓ Dry run complete (no changes made)")
+		return nil
+	}
+
+	// Check if we're in a git repository
+	if !isGitRepo() {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	// Check if remote exists
+	if !hasGitRemote(ctx) {
+		return fmt.Errorf("no git remote configured")
+	}
+
+	defaultBranch := getDefaultBranch(ctx)
+
+	// Step 1: Fetch from main
+	fmt.Printf("→ Fetching from origin/%s...\n", defaultBranch)
+	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", defaultBranch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch origin %s failed: %w\n%s", defaultBranch, err, output)
+	}
+
+	// Step 2: Checkout .beads/ directory from main
+	fmt.Printf("→ Checking out beads from origin/%s...\n", defaultBranch)
+	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", fmt.Sprintf("origin/%s", defaultBranch), "--", ".beads/")
+	if output, err := checkoutCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git checkout .beads/ from origin/%s failed: %w\n%s", defaultBranch, err, output)
+	}
+
+	// Step 3: Import JSONL
+	fmt.Println("→ Importing JSONL...")
+	if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+
+	fmt.Println("\n✓ Sync from main complete")
 	return nil
 }
 
