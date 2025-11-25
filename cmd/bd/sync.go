@@ -300,20 +300,24 @@ Use --merge to merge the sync branch back to main branch.`,
 					}
 				}
 
-				// Post-pull ZFC check (bd-l0r fix): if DB has significantly more issues
-				// than pulled JSONL, trust JSONL as source of truth and skip re-export.
+				// Post-pull ZFC check: if skipExport was set by initial ZFC detection,
+				// or if DB has more issues than JSONL, skip re-export.
 				// This prevents resurrection of deleted issues when syncing stale clones.
-				skipReexport := false
-				if err := ensureStoreActive(); err == nil && store != nil {
-					dbCountPostImport, dbErr := countDBIssuesFast(ctx, store)
-					jsonlCountPostPull, jsonlErr := countIssuesInJSONL(jsonlPath)
-					if dbErr == nil && jsonlErr == nil && jsonlCountPostPull > 0 {
-						if dbCountPostImport > jsonlCountPostPull*2 { // DB has >2x issues
-							fmt.Printf("→ DB (%d) has >2x more issues than JSONL (%d) after pull\n",
-								dbCountPostImport, jsonlCountPostPull)
-							fmt.Println("→ Trusting JSONL as source of truth (skipping re-export)")
-							fmt.Println("  Hint: Run 'bd import --delete-missing' to fully sync DB with JSONL")
-							skipReexport = true
+				skipReexport := skipExport // Carry forward initial ZFC detection
+				fmt.Printf("DEBUG: skipExport=%v, skipReexport=%v\n", skipExport, skipReexport)
+				if !skipReexport {
+					if err := ensureStoreActive(); err == nil && store != nil {
+						dbCountPostImport, dbErr := countDBIssuesFast(ctx, store)
+						jsonlCountPostPull, jsonlErr := countIssuesInJSONL(jsonlPath)
+						if dbErr == nil && jsonlErr == nil && jsonlCountPostPull > 0 {
+							// Skip re-export if DB has more issues than JSONL (any amount)
+							if dbCountPostImport > jsonlCountPostPull {
+								fmt.Printf("→ DB (%d) has more issues than JSONL (%d) after pull\n",
+									dbCountPostImport, jsonlCountPostPull)
+								fmt.Println("→ Trusting JSONL as source of truth (skipping re-export)")
+								fmt.Println("  Hint: Run 'bd import --delete-missing' to fully sync DB with JSONL")
+								skipReexport = true
+							}
 						}
 					}
 				}
