@@ -57,7 +57,7 @@ func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 	committed := false
 	defer func() {
 		if !committed {
-			// Use background context to ensure rollback completes even if ctx is cancelled
+			// Use background context to ensure rollback completes even if ctx is canceled
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
@@ -1123,6 +1123,7 @@ func (t *sqliteTxStorage) getLabelsForIssues(ctx context.Context, issueIDs []str
 		args[i] = id
 	}
 
+	// nolint:gosec // G201: placeholders is only "?" characters, not user input
 	query := fmt.Sprintf(`
 		SELECT issue_id, label FROM labels
 		WHERE issue_id IN (%s)

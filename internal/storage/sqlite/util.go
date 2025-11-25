@@ -84,7 +84,7 @@ func IsBusyError(err error) bool {
 //   - initialDelay: initial backoff delay (default: 10ms)
 //
 // Returns error if:
-//   - Context is cancelled
+//   - Context is canceled
 //   - BEGIN IMMEDIATE fails with non-busy error
 //   - All retries exhausted with SQLITE_BUSY
 func beginImmediateWithRetry(ctx context.Context, conn *sql.Conn, maxRetries int, initialDelay time.Duration) error {

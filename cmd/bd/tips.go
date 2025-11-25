@@ -73,7 +73,7 @@ func maybeShowTip(store storage.Storage) {
 	}
 
 	// Display tip to stdout (informational, not an error)
-	fmt.Fprintf(os.Stdout, "\n💡 Tip: %s\n", tip.Message)
+	_, _ = fmt.Fprintf(os.Stdout, "\n💡 Tip: %s\n", tip.Message)
 
 	// Record that we showed this tip
 	recordTipShown(store, tip.ID)
