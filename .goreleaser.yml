@@ -23,6 +23,22 @@ builds:
       - -X main.Version={{.Version}}
       - -X main.Build={{.ShortCommit}}
 
+  - id: bd-linux-arm64
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+      - CXX=aarch64-linux-gnu-g++
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+
   - id: bd-darwin-amd64
     main: ./cmd/bd
     binary: bd
