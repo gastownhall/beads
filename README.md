@@ -193,7 +193,6 @@ bd init --stealth
 ```
 
 **Stealth mode configures:**
-- **Global gitattributes** (`~/.config/git/attributes`) - Enables beads merge for `**/.beads/issues.jsonl` files across all repos
 - **Global gitignore** (`~/.config/git/ignore`) - Ignores `**/.beads/` and `**/.claude/settings.local.json` globally
 - **Claude Code settings** (`.claude/settings.local.json`) - Adds `bd onboard` instruction for AI agents
 

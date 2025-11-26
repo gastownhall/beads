@@ -31,7 +31,6 @@ and database file. Optionally specify a custom issue prefix.
 With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.
 
 With --stealth: configures global git settings for invisible beads usage:
-  • Global gitattributes for beads merge support across all repos
   • Global gitignore to prevent beads files from being committed
   • Claude Code settings with bd onboard instruction
   Perfect for personal use without affecting repo collaborators.`,
@@ -1166,11 +1165,6 @@ func setupStealthMode(verbose bool) error {
 		return fmt.Errorf("failed to get user home directory: %w", err)
 	}
 
-	// Setup global gitattributes
-	if err := setupGlobalGitAttributes(homeDir, verbose); err != nil {
-		return fmt.Errorf("failed to setup global gitattributes: %w", err)
-	}
-
 	// Setup global gitignore
 	if err := setupGlobalGitIgnore(homeDir, verbose); err != nil {
 		return fmt.Errorf("failed to setup global gitignore: %w", err)
@@ -1185,103 +1179,9 @@ func setupStealthMode(verbose bool) error {
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
 		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", green("✓"))
-		fmt.Printf("  Global gitattributes: %s\n", cyan("configured for beads merge"))
 		fmt.Printf("  Global gitignore: %s\n", cyan(".beads/ and .claude/settings.local.json ignored"))
 		fmt.Printf("  Claude settings: %s\n\n", cyan("configured with bd onboard instruction"))
 		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", cyan("invisible"))
-	}
-
-	return nil
-}
-
-// setupGlobalGitAttributes configures global gitattributes for beads merge
-func setupGlobalGitAttributes(homeDir string, verbose bool) error {
-	// Check if user already has a global gitattributes file configured
-	cmd := exec.Command("git", "config", "--global", "core.attributesfile")
-	output, err := cmd.Output()
-
-	var attributesPath string
-
-	if err == nil && len(output) > 0 {
-		// User has already configured a global gitattributes file, use it
-		attributesPath = strings.TrimSpace(string(output))
-		if verbose {
-			fmt.Printf("Using existing configured global gitattributes file: %s\n", attributesPath)
-		}
-	} else {
-		// No global gitattributes file configured, check if standard location exists
-		configDir := filepath.Join(homeDir, ".config", "git")
-		standardAttributesPath := filepath.Join(configDir, "attributes")
-
-		if _, err := os.Stat(standardAttributesPath); err == nil {
-			// Standard global gitattributes file exists, use it
-			// No need to set git config - git automatically uses this standard location
-			attributesPath = standardAttributesPath
-			if verbose {
-				fmt.Printf("Using existing global gitattributes file: %s\n", attributesPath)
-			}
-		} else {
-			// No global gitattributes file exists, create one in standard location
-			// No need to set git config - git automatically uses this standard location
-			attributesPath = standardAttributesPath
-
-			// Ensure config directory exists
-			if err := os.MkdirAll(configDir, 0755); err != nil {
-				return fmt.Errorf("failed to create git config directory: %w", err)
-			}
-
-			if verbose {
-				fmt.Printf("Creating new global gitattributes file: %s\n", attributesPath)
-			}
-		}
-	}
-
-	// Read existing attributes file if it exists
-	var existingContent string
-	// #nosec G304 - user config path
-	if content, err := os.ReadFile(attributesPath); err == nil {
-		existingContent = string(content)
-	}
-
-	// Check if beads merge attribute already exists
-	beadsPattern := "**/.beads/issues.jsonl merge=beads"
-	if strings.Contains(existingContent, beadsPattern) {
-		if verbose {
-			fmt.Printf("Global gitattributes already configured for beads\n")
-		}
-		return nil
-	}
-
-	// Append beads configuration
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
-		newContent += "\n"
-	}
-	newContent += "\n# Beads merge configuration (added by bd init --stealth)\n"
-	newContent += beadsPattern + "\n"
-
-	// Write the updated attributes file
-	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(attributesPath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write global gitattributes: %w", err)
-	}
-
-	// Configure the beads merge driver
-	cmd = exec.Command("git", "config", "--global", "merge.beads.driver", "bd merge %A %O %A %B")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to configure beads merge driver: %w\n%s", err, output)
-	}
-
-	cmd = exec.Command("git", "config", "--global", "merge.beads.name", "bd JSONL merge driver")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		// Non-fatal, the name is just descriptive
-		if verbose {
-			fmt.Fprintf(os.Stderr, "Warning: failed to set merge driver name: %v\n%s", err, output)
-		}
-	}
-
-	if verbose {
-		fmt.Printf("Configured global gitattributes for beads merge\n")
 	}
 
 	return nil

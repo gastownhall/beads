@@ -879,3 +879,145 @@ func TestClose(t *testing.T) {
 		t.Error("Store should be closed")
 	}
 }
+
+func TestGetIssueByExternalRef(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Create an issue with external ref
+	extRef := "github#123"
+	issue := &types.Issue{
+		Title:       "Test issue with external ref",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+		ExternalRef: &extRef,
+	}
+
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Lookup by external ref should find it
+	found, err := store.GetIssueByExternalRef(ctx, "github#123")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if found == nil {
+		t.Fatal("Expected to find issue by external ref")
+	}
+	if found.ID != issue.ID {
+		t.Errorf("Expected issue ID %s, got %s", issue.ID, found.ID)
+	}
+
+	// Lookup by non-existent ref should return nil
+	notFound, err := store.GetIssueByExternalRef(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if notFound != nil {
+		t.Error("Expected nil for non-existent external ref")
+	}
+
+	// Update external ref and verify index is updated
+	newRef := "github#456"
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"external_ref": newRef,
+	}, "test-user"); err != nil {
+		t.Fatalf("UpdateIssue failed: %v", err)
+	}
+
+	// Old ref should not find anything
+	oldRefResult, err := store.GetIssueByExternalRef(ctx, "github#123")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if oldRefResult != nil {
+		t.Error("Old external ref should not find issue after update")
+	}
+
+	// New ref should find the issue
+	newRefResult, err := store.GetIssueByExternalRef(ctx, "github#456")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if newRefResult == nil {
+		t.Fatal("New external ref should find issue")
+	}
+	if newRefResult.ID != issue.ID {
+		t.Errorf("Expected issue ID %s, got %s", issue.ID, newRefResult.ID)
+	}
+
+	// Delete issue and verify index is cleaned up
+	if err := store.DeleteIssue(ctx, issue.ID); err != nil {
+		t.Fatalf("DeleteIssue failed: %v", err)
+	}
+
+	// External ref should not find anything after delete
+	deletedResult, err := store.GetIssueByExternalRef(ctx, "github#456")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if deletedResult != nil {
+		t.Error("External ref should not find issue after delete")
+	}
+}
+
+func TestGetIssueByExternalRefLoadFromIssues(t *testing.T) {
+	store := New("")
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Load issues with external refs
+	extRef1 := "jira#100"
+	extRef2 := "jira#200"
+	issues := []*types.Issue{
+		{
+			ID:          "bd-1",
+			Title:       "Issue 1",
+			Status:      types.StatusOpen,
+			Priority:    1,
+			IssueType:   types.TypeTask,
+			ExternalRef: &extRef1,
+		},
+		{
+			ID:          "bd-2",
+			Title:       "Issue 2",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeBug,
+			ExternalRef: &extRef2,
+		},
+		{
+			ID:        "bd-3",
+			Title:     "Issue 3 (no external ref)",
+			Status:    types.StatusOpen,
+			Priority:  3,
+			IssueType: types.TypeFeature,
+		},
+	}
+
+	if err := store.LoadFromIssues(issues); err != nil {
+		t.Fatalf("LoadFromIssues failed: %v", err)
+	}
+
+	// Both external refs should be indexed
+	found1, err := store.GetIssueByExternalRef(ctx, "jira#100")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if found1 == nil || found1.ID != "bd-1" {
+		t.Errorf("Expected to find bd-1 by external ref jira#100")
+	}
+
+	found2, err := store.GetIssueByExternalRef(ctx, "jira#200")
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef failed: %v", err)
+	}
+	if found2 == nil || found2.ID != "bd-2" {
+		t.Errorf("Expected to find bd-2 by external ref jira#200")
+	}
+}
