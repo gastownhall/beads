@@ -69,6 +69,34 @@ jobs:
           cd integrations/beads-mcp
           uv tool run twine upload dist/*
 
+  publish-npm:
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN not set - skipping npm publish"
+            echo "To enable automatic npm publishing:"
+            echo "1. Create an npm access token with publish permissions"
+            echo "2. Add it as NPM_TOKEN in repository secrets"
+            exit 0
+          fi
+
+          cd npm-package
+          npm publish --access public
+
   update-homebrew:
     runs-on: ubuntu-latest
     needs: goreleaser
