@@ -573,12 +573,20 @@ class BdCliClient(BdClientBase):
             *self._global_flags(),
         ]
 
+        # Set up environment with database configuration
+        env = os.environ.copy()
+        if self.beads_dir:
+            env["BEADS_DIR"] = self.beads_dir
+        elif self.beads_db:
+            env["BEADS_DB"] = self.beads_db
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._get_working_dir(),
+                env=env,
             )
             _stdout, stderr = await process.communicate()
         except FileNotFoundError as e:

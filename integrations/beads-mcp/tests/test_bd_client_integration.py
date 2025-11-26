@@ -430,11 +430,11 @@ async def test_init_creates_beads_directory(bd_executable):
         assert beads_dir.exists(), f".beads directory not created in {temp_dir}"
         assert beads_dir.is_dir(), ".beads exists but is not a directory"
 
-        # Verify database file was created with correct prefix
+        # Verify database file was created (always named beads.db, prefix is for issue IDs)
         db_files = list(beads_dir.glob("*.db"))
         assert len(db_files) > 0, "No database file created in .beads/"
-        assert any("test" in str(db.name) for db in db_files), (
-            f"Database file doesn't contain prefix 'test': {[db.name for db in db_files]}"
+        assert any("beads.db" == db.name for db in db_files), (
+            f"Expected beads.db database file: {[db.name for db in db_files]}"
         )
 
         # Verify success message
