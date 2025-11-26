@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Zombie Resurrection Prevention**: Stale clones can no longer resurrect deleted issues
+  - New JSONL sanitization step (3.6) after git pull removes deleted issues before import
+  - Prevents git's 3-way merge from re-adding issues that were deleted elsewhere
+  - New `bd doctor` check 18: "Deletions Manifest" detects missing/empty manifest
+  - New `bd doctor --fix` hydrates deletions.jsonl from git history for pre-v0.25.0 deletions
+  - ID validation prevents false positives from non-issue JSON fields
+
+### Fixed
+
+- **bd sync commit scope**: Now commits entire `.beads/` directory before pull
+  - Previously only committed beads.jsonl, leaving metadata.json unstaged
+  - Fixes "You have unstaged changes" error during `git pull --rebase`
+
 ## [0.25.0] - 2025-11-25
 
 ### Added
