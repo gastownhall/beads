@@ -45,9 +45,11 @@ done
 if [ -n "$FILES" ]; then
     # shellcheck disable=SC2086
     if [ -n "$(git status --porcelain -- $FILES 2>/dev/null)" ]; then
-        echo "❌ Error: Beads JSONL has uncommitted changes" >&2
+        echo "❌ Error: Uncommitted changes detected" >&2
         echo "" >&2
-        echo "You made changes to bd issues between your last commit and this push." >&2
+        echo "Before pushing, ensure all changes are committed. This includes:" >&2
+        echo "  • bd JSONL updates (run 'bd sync')" >&2
+        echo "  • any other modified files (run 'git status' to review)" >&2
         echo "" >&2
 
         # Check if bd is available and offer auto-sync
