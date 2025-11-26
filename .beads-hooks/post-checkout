@@ -1,40 +1,50 @@
-#!/usr/bin/env bash
-# bd-hooks-version: 0.24.2
+#!/bin/sh
+# bd-hooks-version: 0.25.1
 #
-# Beads post-checkout hook
-# Automatically imports JSONL to SQLite database after checking out branches
+# bd (beads) post-checkout hook
 #
-# Install: cp examples/git-hooks/post-checkout .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout
-
+# This hook syncs the bd database after a branch checkout:
+# 1. Checks if any .beads/*.jsonl file was updated
+# 2. Runs 'bd sync --import-only' to import changes
+#
 # Arguments provided by git:
 # $1 = ref of previous HEAD
 # $2 = ref of new HEAD
 # $3 = flag (1 if branch checkout, 0 if file checkout)
+#
+# Install: cp examples/git-hooks/post-checkout .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout
 
 # Only run on branch checkouts
-if [[ "$3" != "1" ]]; then
+if [ "$3" != "1" ]; then
     exit 0
 fi
 
-set -e
-
-# Check if bd is installed
-if ! command -v bd &> /dev/null; then
+# Check if bd is available
+if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
-# Check if issues.jsonl exists
-if [[ ! -f .beads/issues.jsonl ]]; then
+# Check if we're in a bd workspace
+if [ ! -d .beads ]; then
     exit 0
 fi
 
-# Import issues from JSONL
-echo "🔗 Importing beads issues from JSONL..."
-
-if bd import -i .beads/issues.jsonl 2>/dev/null; then
-    echo "✓ Beads issues imported successfully"
-else
-    echo "Warning: bd import failed"
+# Check if any JSONL file exists in .beads/
+if ! ls .beads/*.jsonl >/dev/null 2>&1; then
+    exit 0
 fi
+
+# Run bd sync --import-only to import the updated JSONL
+if ! output=$(bd sync --import-only 2>&1); then
+    echo "Warning: Failed to sync bd changes after checkout" >&2
+    echo "$output" >&2
+    echo "" >&2
+    echo "Run 'bd doctor --fix' to diagnose and repair" >&2
+    # Don't fail the checkout, just warn
+fi
+
+# Run quick health check (silent on success, hints if issues found)
+# This catches version mismatches, outdated hooks, etc.
+bd doctor --check-health 2>/dev/null || true
 
 exit 0

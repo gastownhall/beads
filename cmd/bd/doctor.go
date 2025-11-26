@@ -47,9 +47,13 @@ type doctorResult struct {
 }
 
 var (
-	doctorFix bool
-	perfMode  bool
+	doctorFix       bool
+	perfMode        bool
+	checkHealthMode bool
 )
+
+// ConfigKeyHintsDoctor is the config key for suppressing doctor hints
+const ConfigKeyHintsDoctor = "hints.doctor"
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor [path]",
@@ -104,6 +108,12 @@ Examples:
 		// Run performance diagnostics if --perf flag is set
 		if perfMode {
 			doctor.RunPerformanceDiagnostics(absPath)
+			return
+		}
+
+		// Run quick health check if --check-health flag is set
+		if checkHealthMode {
+			runCheckHealth(absPath)
 			return
 		}
 
@@ -223,6 +233,190 @@ func applyFixes(result doctorResult) {
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// runCheckHealth runs lightweight health checks for git hooks.
+// Silent on success, prints a hint if issues detected.
+// Respects hints.doctor config setting.
+func runCheckHealth(path string) {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Check if .beads/ exists
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		// No .beads directory - nothing to check
+		return
+	}
+
+	// Check if hints.doctor is disabled in config
+	if hintsDisabled(beadsDir) {
+		return
+	}
+
+	// Run lightweight checks
+	var issues []string
+
+	// Check 1: Database version mismatch (CLI vs database bd_version)
+	if issue := checkVersionMismatch(beadsDir); issue != "" {
+		issues = append(issues, issue)
+	}
+
+	// Check 2: Sync branch not configured
+	if issue := checkSyncBranchQuick(beadsDir); issue != "" {
+		issues = append(issues, issue)
+	}
+
+	// Check 3: Outdated git hooks
+	if issue := checkHooksQuick(path); issue != "" {
+		issues = append(issues, issue)
+	}
+
+	// If any issues found, print hint
+	if len(issues) > 0 {
+		fmt.Fprintf(os.Stderr, "💡 bd doctor recommends a health check:\n")
+		for _, issue := range issues {
+			fmt.Fprintf(os.Stderr, "   • %s\n", issue)
+		}
+		fmt.Fprintf(os.Stderr, "   Run 'bd doctor' for details, or 'bd doctor --fix' to auto-repair\n")
+		fmt.Fprintf(os.Stderr, "   (Suppress with: bd config set %s false)\n", ConfigKeyHintsDoctor)
+		os.Exit(1)
+	}
+	// Silent exit on success
+}
+
+// hintsDisabled checks if hints.doctor is set to "false" in the database config.
+func hintsDisabled(beadsDir string) bool {
+	// Get database path
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return false // Can't check config, assume hints enabled
+	}
+
+	// Open database read-only to check config
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+
+	var value string
+	err = db.QueryRow("SELECT value FROM config WHERE key = ?", ConfigKeyHintsDoctor).Scan(&value)
+	if err != nil {
+		return false // Key not set, assume hints enabled
+	}
+
+	return strings.ToLower(value) == "false"
+}
+
+// checkVersionMismatch checks if CLI version differs from database bd_version.
+func checkVersionMismatch(beadsDir string) string {
+	// Get database path
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return "" // No database, skip check
+	}
+
+	// Open database read-only
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+
+	var dbVersion string
+	err = db.QueryRow("SELECT value FROM metadata WHERE key = 'bd_version'").Scan(&dbVersion)
+	if err != nil {
+		return "" // Can't read version, skip
+	}
+
+	if dbVersion != "" && dbVersion != Version {
+		return fmt.Sprintf("Version mismatch (CLI: %s, database: %s)", Version, dbVersion)
+	}
+
+	return ""
+}
+
+// checkSyncBranchQuick checks if sync.branch is configured.
+func checkSyncBranchQuick(beadsDir string) string {
+	// Get database path
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return "" // No database, skip check
+	}
+
+	// Open database read-only
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+
+	var value string
+	err = db.QueryRow("SELECT value FROM config WHERE key = 'sync.branch'").Scan(&value)
+	if err != nil || value == "" {
+		return "sync.branch not configured"
+	}
+
+	return ""
+}
+
+// checkHooksQuick does a fast check for outdated git hooks.
+func checkHooksQuick(path string) string {
+	hooksDir := filepath.Join(path, ".git", "hooks")
+
+	// Check if .git/hooks exists
+	if _, err := os.Stat(hooksDir); os.IsNotExist(err) {
+		return "" // No git hooks directory, skip
+	}
+
+	// Check post-merge hook version (most likely to be outdated after merge)
+	hookPath := filepath.Join(hooksDir, "post-merge")
+	content, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
+	if err != nil {
+		return "" // Hook doesn't exist, skip (will be caught by full doctor)
+	}
+
+	// Look for version marker
+	hookContent := string(content)
+	if !strings.Contains(hookContent, "bd-hooks-version:") {
+		return "" // Not a bd hook or old format, skip
+	}
+
+	// Extract version
+	for _, line := range strings.Split(hookContent, "\n") {
+		if strings.Contains(line, "bd-hooks-version:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				hookVersion := strings.TrimSpace(parts[1])
+				if hookVersion != Version {
+					return fmt.Sprintf("Git hooks outdated (%s → %s)", hookVersion, Version)
+				}
+			}
+			break
+		}
+	}
+
+	return ""
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -1933,4 +2127,5 @@ func checkDeletionsManifest(path string) doctorCheck {
 func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
+	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
 }

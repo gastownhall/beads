@@ -38,8 +38,12 @@ if ! output=$(bd sync --import-only 2>&1); then
     echo "Warning: Failed to sync bd changes after merge" >&2
     echo "$output" >&2
     echo "" >&2
-    echo "Run 'bd sync --import-only' manually to resolve" >&2
+    echo "Run 'bd doctor --fix' to diagnose and repair" >&2
     # Don't fail the merge, just warn
 fi
+
+# Run quick health check (silent on success, hints if issues found)
+# This catches version mismatches, outdated hooks, etc.
+bd doctor --check-health 2>/dev/null || true
 
 exit 0
