@@ -6,18 +6,29 @@ Supports two input modes:
 1. GitHub API - Fetch issues directly from a repository
 2. JSON Export - Parse exported GitHub issues JSON
 
+ID Modes:
+1. Sequential - Traditional numeric IDs (bd-1, bd-2, ...)
+2. Hash - Content-based hash IDs (bd-a3f2dd, bd-7k9p1x, ...)
+
 Usage:
-    # From GitHub API
+    # From GitHub API (sequential IDs)
     export GITHUB_TOKEN=ghp_your_token_here
     python gh2jsonl.py --repo owner/repo | bd import
-    
+
+    # Hash-based IDs (matches bd create behavior)
+    python gh2jsonl.py --repo owner/repo --id-mode hash | bd import
+
     # From exported JSON file
     python gh2jsonl.py --file issues.json | bd import
-    
+
+    # Hash IDs with custom length (4-8 chars)
+    python gh2jsonl.py --repo owner/repo --id-mode hash --hash-length 4 | bd import
+
     # Save to file first
     python gh2jsonl.py --repo owner/repo > issues.jsonl
 """
 
+import hashlib
 import json
 import os
 import re
@@ -29,12 +40,104 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 
+def encode_base36(data: bytes, length: int) -> str:
+    """
+    Convert bytes to base36 string of specified length.
+
+    Matches the Go implementation in internal/storage/sqlite/ids.go:encodeBase36
+    Uses lowercase alphanumeric characters (0-9, a-z) for encoding.
+    """
+    # Convert bytes to integer (big-endian)
+    num = int.from_bytes(data, byteorder='big')
+
+    # Base36 alphabet (0-9, a-z)
+    alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
+
+    # Convert to base36
+    if num == 0:
+        result = '0'
+    else:
+        result = ''
+        while num > 0:
+            num, remainder = divmod(num, 36)
+            result = alphabet[remainder] + result
+
+    # Pad with zeros if needed
+    result = result.zfill(length)
+
+    # Truncate to exact length (keep rightmost/least significant digits)
+    if len(result) > length:
+        result = result[-length:]
+
+    return result
+
+
+def generate_hash_id(
+    prefix: str,
+    title: str,
+    description: str,
+    creator: str,
+    timestamp: datetime,
+    length: int = 6,
+    nonce: int = 0
+) -> str:
+    """
+    Generate hash-based ID matching bd's algorithm.
+
+    Matches the Go implementation in internal/storage/sqlite/ids.go:generateHashID
+
+    Args:
+        prefix: Issue prefix (e.g., "bd", "myproject")
+        title: Issue title
+        description: Issue description/body
+        creator: Issue creator username
+        timestamp: Issue creation timestamp
+        length: Hash length in characters (3-8)
+        nonce: Nonce for collision handling (default: 0)
+
+    Returns:
+        Formatted ID like "bd-a3f2dd" or "myproject-7k9p1x"
+    """
+    # Convert timestamp to nanoseconds (matching Go's UnixNano())
+    timestamp_nano = int(timestamp.timestamp() * 1_000_000_000)
+
+    # Combine inputs with pipe delimiter (matching Go format string)
+    content = f"{title}|{description}|{creator}|{timestamp_nano}|{nonce}"
+
+    # SHA256 hash
+    hash_bytes = hashlib.sha256(content.encode('utf-8')).digest()
+
+    # Determine byte count based on length (from ids.go:258-273)
+    num_bytes_map = {
+        3: 2,  # 2 bytes = 16 bits ≈ 3.09 base36 chars
+        4: 3,  # 3 bytes = 24 bits ≈ 4.63 base36 chars
+        5: 4,  # 4 bytes = 32 bits ≈ 6.18 base36 chars
+        6: 4,  # 4 bytes = 32 bits ≈ 6.18 base36 chars
+        7: 5,  # 5 bytes = 40 bits ≈ 7.73 base36 chars
+        8: 5,  # 5 bytes = 40 bits ≈ 7.73 base36 chars
+    }
+    num_bytes = num_bytes_map.get(length, 3)
+
+    # Encode first num_bytes to base36
+    short_hash = encode_base36(hash_bytes[:num_bytes], length)
+
+    return f"{prefix}-{short_hash}"
+
+
 class GitHubToBeads:
     """Convert GitHub Issues to bd JSONL format."""
 
-    def __init__(self, prefix: str = "bd", start_id: int = 1):
+    def __init__(
+        self,
+        prefix: str = "bd",
+        start_id: int = 1,
+        id_mode: str = "sequential",
+        hash_length: int = 6
+    ):
         self.prefix = prefix
         self.issue_counter = start_id
+        self.id_mode = id_mode  # "sequential" or "hash"
+        self.hash_length = hash_length  # 3-8 chars for hash mode
         self.issues: List[Dict[str, Any]] = []
         self.gh_id_to_bd_id: Dict[int, str] = {}
 
@@ -202,8 +305,36 @@ class GitHubToBeads:
     def convert_issue(self, gh_issue: Dict[str, Any]) -> Dict[str, Any]:
         """Convert a single GitHub issue to bd format."""
         gh_id = gh_issue["number"]
-        bd_id = f"{self.prefix}-{self.issue_counter}"
-        self.issue_counter += 1
+
+        # Generate ID based on mode
+        if self.id_mode == "hash":
+            # Extract creator (use "github-import" as fallback)
+            creator = "github-import"
+            if gh_issue.get("user"):
+                if isinstance(gh_issue["user"], dict):
+                    creator = gh_issue["user"].get("login", "github-import")
+
+            # Parse created_at timestamp
+            created_at_str = gh_issue["created_at"]
+            # Handle both ISO format with Z and +00:00
+            if created_at_str.endswith('Z'):
+                created_at_str = created_at_str[:-1] + '+00:00'
+            created_at = datetime.fromisoformat(created_at_str)
+
+            # Generate hash ID
+            bd_id = generate_hash_id(
+                prefix=self.prefix,
+                title=gh_issue["title"],
+                description=gh_issue.get("body") or "",
+                creator=creator,
+                timestamp=created_at,
+                length=self.hash_length,
+                nonce=0
+            )
+        else:
+            # Sequential mode (existing behavior)
+            bd_id = f"{self.prefix}-{self.issue_counter}"
+            self.issue_counter += 1
 
         # Store mapping
         self.gh_id_to_bd_id[gh_id] = bd_id
@@ -307,18 +438,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # From GitHub API
+  # From GitHub API (sequential IDs)
   export GITHUB_TOKEN=ghp_...
   python gh2jsonl.py --repo owner/repo | bd import
-  
+
+  # Hash-based IDs (matches bd create behavior)
+  python gh2jsonl.py --repo owner/repo --id-mode hash | bd import
+
   # From JSON file
   python gh2jsonl.py --file issues.json > issues.jsonl
-  
+
+  # Hash IDs with custom length
+  python gh2jsonl.py --repo owner/repo --id-mode hash --hash-length 4 | bd import
+
   # Fetch only open issues
   python gh2jsonl.py --repo owner/repo --state open
-  
-  # Custom prefix and start ID
-  python gh2jsonl.py --repo owner/repo --prefix myproject --start-id 100
+
+  # Custom prefix with hash IDs
+  python gh2jsonl.py --repo owner/repo --prefix myproject --id-mode hash
         """
     )
 
@@ -352,6 +489,19 @@ Examples:
         default=1,
         help="Starting issue number (default: 1)"
     )
+    parser.add_argument(
+        "--id-mode",
+        choices=["sequential", "hash"],
+        default="sequential",
+        help="ID generation mode: sequential (bd-1, bd-2) or hash (bd-a3f2dd) (default: sequential)"
+    )
+    parser.add_argument(
+        "--hash-length",
+        type=int,
+        default=6,
+        choices=[3, 4, 5, 6, 7, 8],
+        help="Hash ID length in characters when using --id-mode hash (default: 6)"
+    )
 
     args = parser.parse_args()
 
@@ -363,7 +513,12 @@ Examples:
         parser.error("Cannot use both --repo and --file")
 
     # Create converter
-    converter = GitHubToBeads(prefix=args.prefix, start_id=args.start_id)
+    converter = GitHubToBeads(
+        prefix=args.prefix,
+        start_id=args.start_id,
+        id_mode=args.id_mode,
+        hash_length=args.hash_length
+    )
 
     # Load issues
     if args.repo:
