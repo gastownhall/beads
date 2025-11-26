@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Local unpushed work protected from accidental deletion
   - Full documentation in docs/DELETIONS.md
 
+- **Stealth Mode**: New `bd init --stealth` flag for invisible beads usage (#381)
+  - Adds `.beads/` to project's `.gitignore` automatically
+  - Useful for personal issue tracking in shared repos without affecting collaborators
+  - All bd functionality works normally, just not committed to git
+
+- **Ephemeral Branch Sync**: New `bd sync --from-main` flag (gt-ick9)
+  - Syncs from main branch without pushing to remote
+  - Ideal for feature branches that sync issues from main
+  - Prevents pushing local branch changes to origin
+
 ## [0.24.4] - 2025-11-25
 
 ### Added
