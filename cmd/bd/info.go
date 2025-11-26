@@ -294,6 +294,7 @@ var versionChanges = []VersionChange{
 			"Zombie Resurrection Prevention - Stale clones can no longer resurrect deleted issues",
 			"bd sync commit scope fixed - Now commits entire .beads/ directory before pull",
 			"bd prime ephemeral branch detection - Auto-detects ephemeral branches and adjusts workflow",
+			"JSONL Canonicalization (bd-6xd) - Default JSONL filename is now issues.jsonl; legacy beads.jsonl still supported",
 		},
 	},
 	{
