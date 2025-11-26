@@ -206,8 +206,8 @@ Use --merge to merge the sync branch back to main branch.`,
 			}
 		}
 
-		// Step 2: Check if there are changes to commit
-		hasChanges, err := gitHasChanges(ctx, jsonlPath)
+		// Step 2: Check if there are changes to commit (check entire .beads/ directory)
+		hasChanges, err := gitHasBeadsChanges(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error checking git status: %v\n", err)
 			os.Exit(1)
@@ -218,7 +218,7 @@ Use --merge to merge the sync branch back to main branch.`,
 				fmt.Println("→ [DRY RUN] Would commit changes to git")
 			} else {
 				fmt.Println("→ Committing changes to git...")
-				if err := gitCommit(ctx, jsonlPath, message); err != nil {
+				if err := gitCommitBeadsDir(ctx, message); err != nil {
 					fmt.Fprintf(os.Stderr, "Error committing: %v\n", err)
 					os.Exit(1)
 				}
@@ -363,14 +363,14 @@ Use --merge to merge the sync branch back to main branch.`,
 							}
 
 							// Step 4.6: Commit the re-export if it created changes
-							hasPostImportChanges, err := gitHasChanges(ctx, jsonlPath)
+							hasPostImportChanges, err := gitHasBeadsChanges(ctx)
 							if err != nil {
 								fmt.Fprintf(os.Stderr, "Error checking git status after re-export: %v\n", err)
 								os.Exit(1)
 							}
 							if hasPostImportChanges {
 								fmt.Println("→ Committing DB changes from import...")
-								if err := gitCommit(ctx, jsonlPath, "bd sync: apply DB changes after import"); err != nil {
+								if err := gitCommitBeadsDir(ctx, "bd sync: apply DB changes after import"); err != nil {
 									fmt.Fprintf(os.Stderr, "Error committing post-import changes: %v\n", err)
 									os.Exit(1)
 								}
@@ -501,10 +501,52 @@ func gitHasChanges(ctx context.Context, filePath string) (bool, error) {
 	return len(strings.TrimSpace(string(output))) > 0, nil
 }
 
+// gitHasBeadsChanges checks if any tracked files in .beads/ have uncommitted changes
+func gitHasBeadsChanges(ctx context.Context) (bool, error) {
+	beadsDir := findBeadsDir()
+	if beadsDir == "" {
+		return false, fmt.Errorf("no .beads directory found")
+	}
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", beadsDir)
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status failed: %w", err)
+	}
+	return len(strings.TrimSpace(string(output))) > 0, nil
+}
+
 // gitCommit commits the specified file
 func gitCommit(ctx context.Context, filePath string, message string) error {
 	// Stage the file
 	addCmd := exec.CommandContext(ctx, "git", "add", filePath)
+	if err := addCmd.Run(); err != nil {
+		return fmt.Errorf("git add failed: %w", err)
+	}
+
+	// Generate message if not provided
+	if message == "" {
+		message = fmt.Sprintf("bd sync: %s", time.Now().Format("2006-01-02 15:04:05"))
+	}
+
+	// Commit
+	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
+	output, err := commitCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git commit failed: %w\n%s", err, output)
+	}
+
+	return nil
+}
+
+// gitCommitBeadsDir stages and commits all tracked files in .beads/
+func gitCommitBeadsDir(ctx context.Context, message string) error {
+	beadsDir := findBeadsDir()
+	if beadsDir == "" {
+		return fmt.Errorf("no .beads directory found")
+	}
+
+	// Stage all tracked changes in .beads/
+	addCmd := exec.CommandContext(ctx, "git", "add", beadsDir)
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
