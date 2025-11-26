@@ -30,6 +30,9 @@ type MemoryStorage struct {
 	metadata     map[string]string             // Metadata key-value pairs
 	counters     map[string]int                // Prefix -> Last ID
 
+	// Indexes for O(1) lookups
+	externalRefToID map[string]string // ExternalRef -> IssueID
+
 	// For tracking
 	dirty map[string]bool // IssueIDs that have been modified
 
@@ -40,16 +43,17 @@ type MemoryStorage struct {
 // New creates a new in-memory storage backend
 func New(jsonlPath string) *MemoryStorage {
 	return &MemoryStorage{
-		issues:       make(map[string]*types.Issue),
-		dependencies: make(map[string][]*types.Dependency),
-		labels:       make(map[string][]string),
-		events:       make(map[string][]*types.Event),
-		comments:     make(map[string][]*types.Comment),
-		config:       make(map[string]string),
-		metadata:     make(map[string]string),
-		counters:     make(map[string]int),
-		dirty:        make(map[string]bool),
-		jsonlPath:    jsonlPath,
+		issues:          make(map[string]*types.Issue),
+		dependencies:    make(map[string][]*types.Dependency),
+		labels:          make(map[string][]string),
+		events:          make(map[string][]*types.Event),
+		comments:        make(map[string][]*types.Comment),
+		config:          make(map[string]string),
+		metadata:        make(map[string]string),
+		counters:        make(map[string]int),
+		externalRefToID: make(map[string]string),
+		dirty:           make(map[string]bool),
+		jsonlPath:       jsonlPath,
 	}
 }
 
@@ -66,6 +70,11 @@ func (m *MemoryStorage) LoadFromIssues(issues []*types.Issue) error {
 
 		// Store the issue
 		m.issues[issue.ID] = issue
+
+		// Index external ref for O(1) lookup
+		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+			m.externalRefToID[*issue.ExternalRef] = issue.ID
+		}
 
 		// Store dependencies
 		if len(issue.Dependencies) > 0 {
@@ -184,6 +193,11 @@ func (m *MemoryStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	m.issues[issue.ID] = issue
 	m.dirty[issue.ID] = true
 
+	// Index external ref for O(1) lookup
+	if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+		m.externalRefToID[*issue.ExternalRef] = issue.ID
+	}
+
 	// Record event
 	event := &types.Event{
 		IssueID:   issue.ID,
@@ -244,6 +258,11 @@ func (m *MemoryStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 		m.issues[issue.ID] = issue
 		m.dirty[issue.ID] = true
 
+		// Index external ref for O(1) lookup
+		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+			m.externalRefToID[*issue.ExternalRef] = issue.ID
+		}
+
 		// Record event
 		event := &types.Event{
 			IssueID:   issue.ID,
@@ -288,28 +307,31 @@ func (m *MemoryStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Linear search through all issues to find match by external_ref
-	for _, issue := range m.issues {
-		if issue.ExternalRef != nil && *issue.ExternalRef == externalRef {
-			// Return a copy to avoid mutations
-			issueCopy := *issue
-
-			// Attach dependencies
-			if deps, ok := m.dependencies[issue.ID]; ok {
-				issueCopy.Dependencies = deps
-			}
-
-			// Attach labels
-			if labels, ok := m.labels[issue.ID]; ok {
-				issueCopy.Labels = labels
-			}
-
-			return &issueCopy, nil
-		}
+	// O(1) lookup using index
+	issueID, exists := m.externalRefToID[externalRef]
+	if !exists {
+		return nil, nil
 	}
 
-	// Not found
-	return nil, nil
+	issue, exists := m.issues[issueID]
+	if !exists {
+		return nil, nil
+	}
+
+	// Return a copy to avoid mutations
+	issueCopy := *issue
+
+	// Attach dependencies
+	if deps, ok := m.dependencies[issue.ID]; ok {
+		issueCopy.Dependencies = deps
+	}
+
+	// Attach labels
+	if labels, ok := m.labels[issue.ID]; ok {
+		issueCopy.Labels = labels
+	}
+
+	return &issueCopy, nil
 }
 
 // UpdateIssue updates fields on an issue
@@ -375,9 +397,23 @@ func (m *MemoryStorage) UpdateIssue(ctx context.Context, id string, updates map[
 				issue.Assignee = ""
 			}
 		case "external_ref":
+			// Update external ref index
+			oldRef := issue.ExternalRef
 			if v, ok := value.(string); ok {
+				// Remove old index entry if exists
+				if oldRef != nil && *oldRef != "" {
+					delete(m.externalRefToID, *oldRef)
+				}
+				// Add new index entry
+				if v != "" {
+					m.externalRefToID[v] = id
+				}
 				issue.ExternalRef = &v
 			} else if value == nil {
+				// Remove old index entry if exists
+				if oldRef != nil && *oldRef != "" {
+					delete(m.externalRefToID, *oldRef)
+				}
 				issue.ExternalRef = nil
 			}
 		}
@@ -417,8 +453,14 @@ func (m *MemoryStorage) DeleteIssue(ctx context.Context, id string) error {
 	defer m.mu.Unlock()
 
 	// Check if issue exists
-	if _, ok := m.issues[id]; !ok {
+	issue, ok := m.issues[id]
+	if !ok {
 		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	// Remove external ref index entry
+	if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+		delete(m.externalRefToID, *issue.ExternalRef)
 	}
 
 	// Delete the issue
