@@ -50,7 +50,7 @@ func ensureDatabaseFresh(ctx context.Context) error {
 			"hasn't been imported yet. This would cause you to see stale/incomplete data.\n\n"+
 			"To fix:\n"+
 			"  bd sync --import-only            # Import JSONL updates to database\n"+
-			"  bd import -i .beads/beads.jsonl  # Alternative: specify file explicitly\n\n"+
+			"  bd import -i .beads/issues.jsonl  # Alternative: specify file explicitly\n\n"+
 			"If in a sandboxed environment (e.g., Codex) where daemon can't be stopped:\n"+
 			"  bd --sandbox ready               # Use direct mode (no daemon)\n"+
 			"  bd ready --allow-stale           # Skip staleness check (use with caution)\n\n"+

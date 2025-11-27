@@ -169,7 +169,7 @@ Examples:
 	},
 }
 
-// getGitActivity calculates activity stats from git log of beads.jsonl
+// getGitActivity calculates activity stats from git log of issues.jsonl
 func getGitActivity(hours int) *RecentActivitySummary {
 	activity := &RecentActivitySummary{
 		HoursTracked: hours,
@@ -177,7 +177,7 @@ func getGitActivity(hours int) *RecentActivitySummary {
 
 	// Run git log to get patches for the last N hours
 	since := fmt.Sprintf("%d hours ago", hours)
-	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/beads.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -213,7 +213,7 @@ func getGitActivity(hours int) *RecentActivitySummary {
 	}
 
 	// Get detailed diff to analyze changes
-	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/beads.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
 	output, err = cmd.Output()
 	if err != nil {
 		return nil

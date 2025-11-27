@@ -22,11 +22,12 @@ func HydrateDeletionsManifest(path string) error {
 	}
 
 	beadsDir := filepath.Join(path, ".beads")
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	// bd-6xd: issues.jsonl is the canonical filename
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
-	// Also check for legacy issues.jsonl
+	// Also check for legacy beads.jsonl
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		legacyPath := filepath.Join(beadsDir, "issues.jsonl")
+		legacyPath := filepath.Join(beadsDir, "beads.jsonl")
 		if _, err := os.Stat(legacyPath); err == nil {
 			jsonlPath = legacyPath
 		} else {

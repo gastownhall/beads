@@ -168,9 +168,9 @@ func TestFindJSONLPathDefault(t *testing.T) {
 	// Create a fake database path (no .jsonl files exist)
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	// Should return default beads.jsonl
+	// bd-6xd: Should return default issues.jsonl (canonical name)
 	result := FindJSONLPath(dbPath)
-	expected := filepath.Join(tmpDir, "beads.jsonl")
+	expected := filepath.Join(tmpDir, "issues.jsonl")
 	if result != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, result)
 	}

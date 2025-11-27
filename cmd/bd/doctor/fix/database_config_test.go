@@ -9,7 +9,7 @@ import (
 )
 
 // TestDatabaseConfigFix_JSONLMismatch tests that DatabaseConfig fixes JSONL mismatches.
-// bd-afd: Verify auto-fix for metadata.json jsonl_export mismatch
+// bd-6xd: Verify auto-fix for metadata.json jsonl_export mismatch
 func TestDatabaseConfigFix_JSONLMismatch(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
@@ -18,16 +18,16 @@ func TestDatabaseConfigFix_JSONLMismatch(t *testing.T) {
 		t.Fatalf("Failed to create .beads dir: %v", err)
 	}
 
-	// Create beads.jsonl file (actual JSONL)
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	// Create issues.jsonl file (actual JSONL - canonical name)
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if err := os.WriteFile(jsonlPath, []byte(`{"id":"test-123"}`), 0644); err != nil {
-		t.Fatalf("Failed to create beads.jsonl: %v", err)
+		t.Fatalf("Failed to create issues.jsonl: %v", err)
 	}
 
-	// Create metadata.json with wrong JSONL filename (issues.jsonl)
+	// Create metadata.json with wrong JSONL filename (beads.jsonl)
 	cfg := &configfile.Config{
 		Database:    "beads.db",
-		JSONLExport: "issues.jsonl", // Wrong - should be beads.jsonl
+		JSONLExport: "beads.jsonl", // Wrong - should be issues.jsonl
 	}
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("Failed to save config: %v", err)
@@ -44,13 +44,14 @@ func TestDatabaseConfigFix_JSONLMismatch(t *testing.T) {
 		t.Fatalf("Failed to load updated config: %v", err)
 	}
 
-	if updatedCfg.JSONLExport != "beads.jsonl" {
-		t.Errorf("Expected JSONLExport to be 'beads.jsonl', got %q", updatedCfg.JSONLExport)
+	if updatedCfg.JSONLExport != "issues.jsonl" {
+		t.Errorf("Expected JSONLExport to be 'issues.jsonl', got %q", updatedCfg.JSONLExport)
 	}
 }
 
-// TestDatabaseConfigFix_PrefersBeadsJSONL tests that DatabaseConfig prefers beads.jsonl over issues.jsonl.
-func TestDatabaseConfigFix_PrefersBeadsJSONL(t *testing.T) {
+// TestDatabaseConfigFix_PrefersIssuesJSONL tests that DatabaseConfig prefers issues.jsonl over beads.jsonl.
+// bd-6xd: issues.jsonl is the canonical filename
+func TestDatabaseConfigFix_PrefersIssuesJSONL(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -72,7 +73,7 @@ func TestDatabaseConfigFix_PrefersBeadsJSONL(t *testing.T) {
 	// Create metadata.json with wrong JSONL filename (old.jsonl)
 	cfg := &configfile.Config{
 		Database:    "beads.db",
-		JSONLExport: "old.jsonl", // Wrong - should prefer beads.jsonl
+		JSONLExport: "old.jsonl", // Wrong - should prefer issues.jsonl
 	}
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("Failed to save config: %v", err)
@@ -83,30 +84,31 @@ func TestDatabaseConfigFix_PrefersBeadsJSONL(t *testing.T) {
 		t.Fatalf("DatabaseConfig failed: %v", err)
 	}
 
-	// Verify the config was updated to beads.jsonl (not issues.jsonl)
+	// Verify the config was updated to issues.jsonl (canonical name)
 	updatedCfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		t.Fatalf("Failed to load updated config: %v", err)
 	}
 
-	if updatedCfg.JSONLExport != "beads.jsonl" {
-		t.Errorf("Expected JSONLExport to be 'beads.jsonl', got %q", updatedCfg.JSONLExport)
+	if updatedCfg.JSONLExport != "issues.jsonl" {
+		t.Errorf("Expected JSONLExport to be 'issues.jsonl', got %q", updatedCfg.JSONLExport)
 	}
 }
 
 // TestFindActualJSONLFile_SkipsBackups tests that backup files are skipped.
+// bd-6xd: issues.jsonl is the canonical filename
 func TestFindActualJSONLFile_SkipsBackups(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
 
-	// Create beads.jsonl and various backup files
+	// Create issues.jsonl and various backup files
 	files := []string{
-		"beads.jsonl",
-		"beads.jsonl.backup",
-		"backup_beads.jsonl",
-		"beads.jsonl.orig",
-		"beads.jsonl.bak",
-		"beads.jsonl~",
+		"issues.jsonl",
+		"issues.jsonl.backup",
+		"backup_issues.jsonl",
+		"issues.jsonl.orig",
+		"issues.jsonl.bak",
+		"issues.jsonl~",
 	}
 
 	for _, name := range files {
@@ -116,9 +118,105 @@ func TestFindActualJSONLFile_SkipsBackups(t *testing.T) {
 		}
 	}
 
-	// findActualJSONLFile should return beads.jsonl (not backups)
+	// findActualJSONLFile should return issues.jsonl (not backups)
 	result := findActualJSONLFile(tmpDir)
-	if result != "beads.jsonl" {
-		t.Errorf("Expected 'beads.jsonl', got %q", result)
+	if result != "issues.jsonl" {
+		t.Errorf("Expected 'issues.jsonl', got %q", result)
+	}
+}
+
+// TestLegacyJSONLConfig_MigratesBeadsToIssues tests migration from beads.jsonl to issues.jsonl.
+// bd-6xd: issues.jsonl is the canonical filename
+func TestLegacyJSONLConfig_MigratesBeadsToIssues(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create beads.jsonl file (legacy name)
+	legacyPath := filepath.Join(beadsDir, "beads.jsonl")
+	if err := os.WriteFile(legacyPath, []byte(`{"id":"test-123"}`), 0644); err != nil {
+		t.Fatalf("Failed to create beads.jsonl: %v", err)
+	}
+
+	// Create metadata.json with legacy filename
+	cfg := &configfile.Config{
+		Database:    "beads.db",
+		JSONLExport: "beads.jsonl",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Run the fix
+	if err := LegacyJSONLConfig(tmpDir); err != nil {
+		t.Fatalf("LegacyJSONLConfig failed: %v", err)
+	}
+
+	// Verify the file was renamed
+	canonicalPath := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := os.Stat(canonicalPath); os.IsNotExist(err) {
+		t.Error("Expected issues.jsonl to exist after migration")
+	}
+	if _, err := os.Stat(legacyPath); err == nil {
+		t.Error("Expected beads.jsonl to be removed after migration")
+	}
+
+	// Verify the config was updated
+	updatedCfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("Failed to load updated config: %v", err)
+	}
+
+	if updatedCfg.JSONLExport != "issues.jsonl" {
+		t.Errorf("Expected JSONLExport to be 'issues.jsonl', got %q", updatedCfg.JSONLExport)
+	}
+}
+
+// TestLegacyJSONLConfig_UpdatesGitattributes tests that .gitattributes is updated during migration.
+func TestLegacyJSONLConfig_UpdatesGitattributes(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create beads.jsonl file (legacy name)
+	legacyPath := filepath.Join(beadsDir, "beads.jsonl")
+	if err := os.WriteFile(legacyPath, []byte(`{"id":"test-123"}`), 0644); err != nil {
+		t.Fatalf("Failed to create beads.jsonl: %v", err)
+	}
+
+	// Create .gitattributes with legacy reference
+	gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
+	if err := os.WriteFile(gitattrsPath, []byte(".beads/beads.jsonl merge=beads\n"), 0644); err != nil {
+		t.Fatalf("Failed to create .gitattributes: %v", err)
+	}
+
+	// Create metadata.json with legacy filename
+	cfg := &configfile.Config{
+		Database:    "beads.db",
+		JSONLExport: "beads.jsonl",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Run the fix
+	if err := LegacyJSONLConfig(tmpDir); err != nil {
+		t.Fatalf("LegacyJSONLConfig failed: %v", err)
+	}
+
+	// Verify .gitattributes was updated
+	content, err := os.ReadFile(gitattrsPath)
+	if err != nil {
+		t.Fatalf("Failed to read .gitattributes: %v", err)
+	}
+
+	if string(content) != ".beads/issues.jsonl merge=beads\n" {
+		t.Errorf("Expected .gitattributes to reference issues.jsonl, got: %q", string(content))
 	}
 }

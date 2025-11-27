@@ -21,7 +21,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Database:    "beads.db",
-		JSONLExport: "beads.jsonl", // Default to canonical name (was issues.jsonl)
+		JSONLExport: "issues.jsonl", // Canonical name (bd-6xd)
 	}
 }
 

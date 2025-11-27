@@ -93,7 +93,7 @@ Vendored into bd with permission.`,
 
 func cleanupMergeArtifacts(outputPath string, debug bool) {
 	// Determine the .beads directory from the output path
-	// outputPath is typically .beads/beads.jsonl
+	// outputPath is typically .beads/issues.jsonl
 	beadsDir := filepath.Dir(outputPath)
 
 	if debug {

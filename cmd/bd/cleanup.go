@@ -16,7 +16,7 @@ var cleanupCmd = &cobra.Command{
 	Short: "Delete closed issues from database to free up space",
 	Long: `Delete closed issues from the database to reduce database size.
 
-This command permanently removes closed issues from beads.db and beads.jsonl.
+This command permanently removes closed issues from beads.db and issues.jsonl.
 It does NOT remove temporary files - use 'bd clean' for that.
 
 By default, deletes ALL closed issues. Use --older-than to only delete

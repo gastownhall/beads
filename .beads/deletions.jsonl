@@ -49,3 +49,4 @@
 {"id":"bd-z3s3","ts":"2025-11-25T22:40:41.19109Z","by":"stevey","reason":"cleanup"}
 {"id":"bd-5a90","ts":"2025-11-25T22:40:41.19621Z","by":"stevey","reason":"cleanup"}
 {"id":"bd-5b6e","ts":"2025-11-25T22:40:41.201204Z","by":"stevey","reason":"cleanup"}
+{"id":"bd-98c4e1fa.1","ts":"2025-11-27T04:17:14.657783Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}

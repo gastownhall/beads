@@ -120,8 +120,8 @@ func runContributorWizard(ctx context.Context, store storage.Storage) error {
 			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
 		}
 
-		// Create issues.jsonl
-		jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+		// Create issues.jsonl (canonical name, bd-6xd)
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 		// #nosec G306 -- planning repo JSONL must be shareable across collaborators
 		if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
 			return fmt.Errorf("failed to create issues.jsonl: %w", err)
@@ -183,8 +183,8 @@ Created by: bd init --contributor
 	fmt.Printf("\n%s %s\n\n", green("✓"), bold("Contributor setup complete!"))
 
 	fmt.Println("Configuration:")
-	fmt.Printf("  Current repo issues: %s\n", cyan(".beads/beads.jsonl"))
-	fmt.Printf("  Planning repo issues: %s\n", cyan(filepath.Join(planningPath, ".beads/beads.jsonl")))
+	fmt.Printf("  Current repo issues: %s\n", cyan(".beads/issues.jsonl"))
+	fmt.Printf("  Planning repo issues: %s\n", cyan(filepath.Join(planningPath, ".beads/issues.jsonl")))
 	fmt.Println()
 	fmt.Println("How it works:")
 	fmt.Println("  • Issues you create will route to the planning repo")

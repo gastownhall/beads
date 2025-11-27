@@ -1045,9 +1045,9 @@ func showSyncStatus(ctx context.Context) error {
 		fmt.Print(string(logOutput))
 	}
 
-	// Show file diff for .beads/beads.jsonl
-	fmt.Println("\nFile differences in .beads/beads.jsonl:")
-	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/beads.jsonl")
+	// Show file diff for .beads/issues.jsonl
+	fmt.Println("\nFile differences in .beads/issues.jsonl:")
+	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/issues.jsonl")
 	diffOutput, err := diffCmd.CombinedOutput()
 	if err != nil {
 		// diff returns non-zero when there are differences, which is fine

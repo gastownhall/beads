@@ -261,3 +261,86 @@ func TestCheckLegacyJSONLFilename(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckLegacyJSONLConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		configJSONL    string   // what metadata.json says
+		existingFiles  []string // which files actually exist
+		expectedStatus string
+		expectWarning  bool
+	}{
+		{
+			name:           "no config (defaults)",
+			configJSONL:    "",
+			existingFiles:  []string{},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "using canonical issues.jsonl",
+			configJSONL:    "issues.jsonl",
+			existingFiles:  []string{"issues.jsonl"},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "using custom name",
+			configJSONL:    "my-project.jsonl",
+			existingFiles:  []string{"my-project.jsonl"},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "using legacy beads.jsonl",
+			configJSONL:    "beads.jsonl",
+			existingFiles:  []string{"beads.jsonl"},
+			expectedStatus: "warning",
+			expectWarning:  true,
+		},
+		{
+			name:           "config says beads.jsonl but issues.jsonl exists",
+			configJSONL:    "beads.jsonl",
+			existingFiles:  []string{"issues.jsonl"},
+			expectedStatus: "warning",
+			expectWarning:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create test files
+			for _, file := range tt.existingFiles {
+				filePath := filepath.Join(beadsDir, file)
+				if err := os.WriteFile(filePath, []byte(`{"id":"test"}`), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Create metadata.json if configJSONL is set
+			if tt.configJSONL != "" {
+				metadataPath := filepath.Join(beadsDir, "metadata.json")
+				content := `{"database":"beads.db","jsonl_export":"` + tt.configJSONL + `"}`
+				if err := os.WriteFile(metadataPath, []byte(content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			check := CheckLegacyJSONLConfig(tmpDir)
+
+			if check.Status != tt.expectedStatus {
+				t.Errorf("Expected status %s, got %s (message: %s)", tt.expectedStatus, check.Status, check.Message)
+			}
+
+			if tt.expectWarning && check.Fix == "" {
+				t.Error("Expected fix message for warning, got empty string")
+			}
+		})
+	}
+}

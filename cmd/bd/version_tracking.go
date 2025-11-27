@@ -186,10 +186,10 @@ func findSubstring(haystack, needle string) int {
 }
 
 // findActualJSONLFile scans .beads/ for the actual JSONL file in use.
-// Prefers beads.jsonl over issues.jsonl, skips backups and merge artifacts.
+// Prefers issues.jsonl over beads.jsonl (canonical name), skips backups and merge artifacts.
 // Returns empty string if no JSONL file is found.
 //
-// bd-afd: Auto-detect JSONL file to prevent metadata.json mismatches
+// bd-6xd: Auto-detect JSONL file to prevent metadata.json mismatches
 func findActualJSONLFile(beadsDir string) string {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
@@ -225,14 +225,14 @@ func findActualJSONLFile(beadsDir string) string {
 		return ""
 	}
 
-	// Prefer beads.jsonl over issues.jsonl (canonical name)
+	// bd-6xd: Prefer issues.jsonl over beads.jsonl (canonical name)
 	for _, name := range candidates {
-		if name == "beads.jsonl" {
+		if name == "issues.jsonl" {
 			return name
 		}
 	}
 
-	// Fall back to first candidate (including issues.jsonl if present)
+	// Fall back to first candidate (including beads.jsonl as legacy)
 	return candidates[0]
 }
 

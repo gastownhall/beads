@@ -25,7 +25,7 @@ Files removed:
 - Git merge driver temp files (*.json[0-9], *.jsonl[0-9])
 
 Files preserved:
-- beads.jsonl (source of truth)
+- issues.jsonl (source of truth)
 - beads.db (SQLite database)
 - metadata.json
 - config.yaml

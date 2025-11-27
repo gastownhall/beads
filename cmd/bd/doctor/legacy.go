@@ -177,6 +177,73 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 	}
 }
 
+// CheckLegacyJSONLConfig detects if metadata.json is configured to use the legacy
+// beads.jsonl filename and recommends migrating to the canonical issues.jsonl.
+// bd-6xd: issues.jsonl is the canonical filename
+func CheckLegacyJSONLConfig(repoPath string) DoctorCheck {
+	beadsDir := filepath.Join(repoPath, ".beads")
+
+	// Load config
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		// No config - using defaults, which are now issues.jsonl
+		return DoctorCheck{
+			Name:    "JSONL Config",
+			Status:  "ok",
+			Message: "Using default configuration (issues.jsonl)",
+		}
+	}
+
+	// Check if using legacy beads.jsonl
+	if cfg.JSONLExport == "beads.jsonl" {
+		// Check if beads.jsonl actually exists
+		legacyPath := filepath.Join(beadsDir, "beads.jsonl")
+		canonicalPath := filepath.Join(beadsDir, "issues.jsonl")
+
+		legacyExists := false
+		if _, err := os.Stat(legacyPath); err == nil {
+			legacyExists = true
+		}
+
+		canonicalExists := false
+		if _, err := os.Stat(canonicalPath); err == nil {
+			canonicalExists = true
+		}
+
+		if legacyExists && !canonicalExists {
+			return DoctorCheck{
+				Name:    "JSONL Config",
+				Status:  "warning",
+				Message: "Using legacy beads.jsonl filename",
+				Detail:  "The canonical filename is now issues.jsonl (bd-6xd).\n" +
+					"  Legacy beads.jsonl is still supported but should be migrated.",
+				Fix: "Run 'bd doctor --fix' to auto-migrate, or manually:\n" +
+					"  1. git mv .beads/beads.jsonl .beads/issues.jsonl\n" +
+					"  2. Update metadata.json: jsonl_export: \"issues.jsonl\"\n" +
+					"  3. Update .gitattributes if present",
+			}
+		}
+
+		if !legacyExists && canonicalExists {
+			// Config says beads.jsonl but issues.jsonl exists - just update config
+			return DoctorCheck{
+				Name:    "JSONL Config",
+				Status:  "warning",
+				Message: "Config references beads.jsonl but issues.jsonl exists",
+				Detail:  "metadata.json says beads.jsonl but the actual file is issues.jsonl",
+				Fix: "Run 'bd doctor --fix' to update the configuration",
+			}
+		}
+	}
+
+	// Using issues.jsonl or custom name - all good
+	return DoctorCheck{
+		Name:    "JSONL Config",
+		Status:  "ok",
+		Message: fmt.Sprintf("Using %s", cfg.JSONLExport),
+	}
+}
+
 // CheckDatabaseConfig verifies that the configured database and JSONL paths
 // match what actually exists on disk.
 func CheckDatabaseConfig(repoPath string) DoctorCheck {

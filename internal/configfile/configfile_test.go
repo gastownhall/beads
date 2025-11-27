@@ -13,9 +13,9 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Database = %q, want beads.db", cfg.Database)
 	}
 
-	// bd-afd: Default changed from issues.jsonl to beads.jsonl (canonical name)
-	if cfg.JSONLExport != "beads.jsonl" {
-		t.Errorf("JSONLExport = %q, want beads.jsonl", cfg.JSONLExport)
+	// bd-6xd: issues.jsonl is the canonical name
+	if cfg.JSONLExport != "issues.jsonl" {
+		t.Errorf("JSONLExport = %q, want issues.jsonl", cfg.JSONLExport)
 	}
 }
 

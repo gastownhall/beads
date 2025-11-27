@@ -73,7 +73,8 @@ func DatabaseConfig(path string) error {
 }
 
 // findActualJSONLFile scans .beads/ for the actual JSONL file in use.
-// Prefers beads.jsonl over issues.jsonl, skips backups and merge artifacts.
+// Prefers issues.jsonl over beads.jsonl (canonical name), skips backups and merge artifacts.
+// bd-6xd: issues.jsonl is the canonical filename
 func findActualJSONLFile(beadsDir string) string {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
@@ -109,15 +110,85 @@ func findActualJSONLFile(beadsDir string) string {
 		return ""
 	}
 
-	// Prefer beads.jsonl over issues.jsonl (canonical name)
+	// bd-6xd: Prefer issues.jsonl over beads.jsonl (canonical name)
 	for _, name := range candidates {
-		if name == "beads.jsonl" {
+		if name == "issues.jsonl" {
 			return name
 		}
 	}
 
-	// Fall back to first candidate
+	// Fall back to first candidate (including beads.jsonl as legacy)
 	return candidates[0]
+}
+
+// LegacyJSONLConfig migrates from legacy beads.jsonl to canonical issues.jsonl.
+// This renames the file, updates metadata.json, and updates .gitattributes if present.
+// bd-6xd: issues.jsonl is the canonical filename
+func LegacyJSONLConfig(path string) error {
+	if err := validateBeadsWorkspace(path); err != nil {
+		return err
+	}
+
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Load existing config
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if cfg == nil {
+		return fmt.Errorf("no metadata.json found")
+	}
+
+	legacyPath := filepath.Join(beadsDir, "beads.jsonl")
+	canonicalPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	legacyExists := false
+	if _, err := os.Stat(legacyPath); err == nil {
+		legacyExists = true
+	}
+
+	canonicalExists := false
+	if _, err := os.Stat(canonicalPath); err == nil {
+		canonicalExists = true
+	}
+
+	// Case 1: Config says beads.jsonl, file exists, issues.jsonl doesn't exist -> rename
+	if cfg.JSONLExport == "beads.jsonl" && legacyExists && !canonicalExists {
+		fmt.Printf("  Renaming beads.jsonl → issues.jsonl\n")
+		if err := os.Rename(legacyPath, canonicalPath); err != nil {
+			return fmt.Errorf("failed to rename file: %w", err)
+		}
+		cfg.JSONLExport = "issues.jsonl"
+
+		// Update .gitattributes if it references beads.jsonl
+		gitattrsPath := filepath.Join(path, ".gitattributes")
+		if content, err := os.ReadFile(gitattrsPath); err == nil {
+			if strings.Contains(string(content), ".beads/beads.jsonl") {
+				newContent := strings.ReplaceAll(string(content), ".beads/beads.jsonl", ".beads/issues.jsonl")
+				// #nosec G306 -- .gitattributes should be world-readable
+				if err := os.WriteFile(gitattrsPath, []byte(newContent), 0644); err != nil {
+					fmt.Printf("  Warning: failed to update .gitattributes: %v\n", err)
+				} else {
+					fmt.Printf("  Updated .gitattributes\n")
+				}
+			}
+		}
+	}
+
+	// Case 2: Config says beads.jsonl but issues.jsonl exists -> just update config
+	if cfg.JSONLExport == "beads.jsonl" && canonicalExists {
+		fmt.Printf("  Updating config: beads.jsonl → issues.jsonl\n")
+		cfg.JSONLExport = "issues.jsonl"
+	}
+
+	// Save updated config
+	if err := cfg.Save(beadsDir); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Printf("  Updated metadata.json\n")
+	return nil
 }
 
 // findActualDBFile scans .beads/ for the actual database file in use.

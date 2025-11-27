@@ -49,7 +49,8 @@ func TestFindJSONLPath(t *testing.T) {
 	}
 
 	jsonlPath := beads.FindJSONLPath(dbPath)
-	expectedPath := filepath.Join(tmpDir, ".beads", "beads.jsonl")
+	// bd-6xd: Default is now issues.jsonl (canonical name)
+	expectedPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 
 	if jsonlPath != expectedPath {
 		t.Errorf("FindJSONLPath returned %s, expected %s", jsonlPath, expectedPath)

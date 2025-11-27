@@ -177,8 +177,8 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 
 	dbPath = filepath.Join(tmpDir, "test.db")
 	// The actual JSONL path - findJSONLPath() will determine this
-	// but in tests it appears to be issues.jsonl in the same directory as the db
-	expectedJSONLPath := filepath.Join(tmpDir, "beads.jsonl")
+	// bd-6xd: Default is now issues.jsonl (canonical name)
+	expectedJSONLPath := filepath.Join(tmpDir, "issues.jsonl")
 
 	// Create store
 	testStore := newTestStore(t, dbPath)

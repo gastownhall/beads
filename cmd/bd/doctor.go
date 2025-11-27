@@ -210,6 +210,8 @@ func applyFixes(result doctorResult) {
 			err = fix.SyncBranchConfig(result.Path)
 		case "Database Config":
 			err = fix.DatabaseConfig(result.Path)
+		case "JSONL Config":
+			err = fix.LegacyJSONLConfig(result.Path)
 		case "Deletions Manifest":
 			err = fix.HydrateDeletionsManifest(result.Path)
 		case "Untracked Files":
@@ -484,6 +486,11 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 6a: Legacy JSONL config (bd-6xd: migrate beads.jsonl to issues.jsonl)
+	legacyConfigCheck := convertDoctorCheck(doctor.CheckLegacyJSONLConfig(path))
+	result.Checks = append(result.Checks, legacyConfigCheck)
+	// Don't fail overall check for legacy config, just warn
+
 	// Check 7: Database/JSONL configuration mismatch
 	configCheck := convertDoctorCheck(doctor.CheckDatabaseConfig(path))
 	result.Checks = append(result.Checks, configCheck)
@@ -625,20 +632,20 @@ func checkDatabaseVersion(path string) doctorCheck {
 	// Check if database file exists
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Check if JSONL exists (--no-db mode)
-		// Check both canonical (beads.jsonl) and legacy (issues.jsonl) names
-		beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
+		// Check canonical (issues.jsonl) first, then legacy (beads.jsonl)
 		issuesJSONL := filepath.Join(beadsDir, "issues.jsonl")
+		beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
 
-		if _, err := os.Stat(beadsJSONL); err == nil {
+		if _, err := os.Stat(issuesJSONL); err == nil {
 			return doctorCheck{
 				Name:    "Database",
 				Status:  statusOK,
 				Message: "JSONL-only mode",
-				Detail:  "Using beads.jsonl (no SQLite database)",
+				Detail:  "Using issues.jsonl (no SQLite database)",
 			}
 		}
 
-		if _, err := os.Stat(issuesJSONL); err == nil {
+		if _, err := os.Stat(beadsJSONL); err == nil {
 			return doctorCheck{
 				Name:    "Database",
 				Status:  statusOK,
@@ -2095,9 +2102,10 @@ func checkDeletionsManifest(path string) doctorCheck {
 
 	// deletions.jsonl doesn't exist or is empty
 	// Check if there's git history that might have deletions
-	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	// bd-6xd: Check canonical issues.jsonl first, then legacy beads.jsonl
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+		jsonlPath = filepath.Join(beadsDir, "beads.jsonl")
 		if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
 			return doctorCheck{
 				Name:    "Deletions Manifest",

@@ -877,7 +877,7 @@ func checkGitHistoryForDeletions(beadsDir string, ids []string) []string {
 	}
 	repoRoot := strings.TrimSpace(string(output))
 
-	// Compute relative path from repo root to beads.jsonl
+	// Compute relative path from repo root to issues.jsonl
 	// beadsDir is absolute, compute its path relative to repoRoot
 	absBeadsDir, err := filepath.Abs(beadsDir)
 	if err != nil {
@@ -889,8 +889,8 @@ func checkGitHistoryForDeletions(beadsDir string, ids []string) []string {
 		return nil
 	}
 
-	// Build JSONL path relative to repo root
-	jsonlPath := filepath.Join(relBeadsDir, "beads.jsonl")
+	// Build JSONL path relative to repo root (bd-6xd: issues.jsonl is canonical)
+	jsonlPath := filepath.Join(relBeadsDir, "issues.jsonl")
 
 	var deleted []string
 
@@ -921,7 +921,7 @@ const gitHistoryTimeout = 30 * time.Second
 // The caller is responsible for confirming the ID is NOT currently in JSONL
 // to determine that it was deleted (vs still present).
 func wasEverInJSONL(repoRoot, jsonlPath, id string) bool {
-	// git log --all -S "\"id\":\"bd-xxx\"" --oneline -- .beads/beads.jsonl
+	// git log --all -S "\"id\":\"bd-xxx\"" --oneline -- .beads/issues.jsonl
 	// This searches for commits that added or removed the ID string
 	// Note: -S uses literal string matching, not regex, so no escaping needed
 	searchPattern := fmt.Sprintf(`"id":"%s"`, id)
