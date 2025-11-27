@@ -554,7 +554,8 @@ func gitCommit(ctx context.Context, filePath string, message string) error {
 	return nil
 }
 
-// gitCommitBeadsDir stages and commits all tracked files in .beads/
+// gitCommitBeadsDir stages and commits only files in .beads/ (bd-red fix)
+// This ensures bd sync doesn't accidentally commit other staged files.
 func gitCommitBeadsDir(ctx context.Context, message string) error {
 	beadsDir := findBeadsDir()
 	if beadsDir == "" {
@@ -572,8 +573,10 @@ func gitCommitBeadsDir(ctx context.Context, message string) error {
 		message = fmt.Sprintf("bd sync: %s", time.Now().Format("2006-01-02 15:04:05"))
 	}
 
-	// Commit
-	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
+	// Commit only .beads/ files using -- pathspec (bd-red)
+	// This prevents accidentally committing other staged files that the user
+	// may have staged but wasn't ready to commit yet.
+	commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", message, "--", beadsDir)
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed: %w\n%s", err, output)
