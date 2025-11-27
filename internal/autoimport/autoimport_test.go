@@ -517,3 +517,79 @@ func TestStderrNotifier(t *testing.T) {
 		notify.Infof("test info")
 	})
 }
+
+// TestFindJSONLInDir tests that FindJSONLInDir correctly prefers issues.jsonl
+// and avoids deletions.jsonl and merge artifacts (bd-tqo fix)
+func TestFindJSONLInDir(t *testing.T) {
+	tests := []struct {
+		name     string
+		files    []string
+		expected string
+	}{
+		{
+			name:     "only issues.jsonl",
+			files:    []string{"issues.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "issues.jsonl and deletions.jsonl - prefers issues",
+			files:    []string{"deletions.jsonl", "issues.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "issues.jsonl with merge artifacts - prefers issues",
+			files:    []string{"beads.base.jsonl", "beads.left.jsonl", "beads.right.jsonl", "issues.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "beads.jsonl as legacy fallback",
+			files:    []string{"beads.jsonl"},
+			expected: "beads.jsonl",
+		},
+		{
+			name:     "issues.jsonl preferred over beads.jsonl",
+			files:    []string{"beads.jsonl", "issues.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "only deletions.jsonl - returns default issues.jsonl",
+			files:    []string{"deletions.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "only merge artifacts - returns default issues.jsonl",
+			files:    []string{"beads.base.jsonl", "beads.left.jsonl", "beads.right.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "no files - returns default issues.jsonl",
+			files:    []string{},
+			expected: "issues.jsonl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "bd-findjsonl-test-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			// Create test files
+			for _, file := range tt.files {
+				path := filepath.Join(tmpDir, file)
+				if err := os.WriteFile(path, []byte("{}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			result := FindJSONLInDir(tmpDir)
+			got := filepath.Base(result)
+
+			if got != tt.expected {
+				t.Errorf("FindJSONLInDir() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}

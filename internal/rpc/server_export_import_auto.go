@@ -441,15 +441,9 @@ func hasUncommittedBeadsFiles(workspacePath string) bool {
 // CRITICAL: Must populate all issue data (deps, labels, comments) to prevent data loss
 func (s *Server) triggerExport(ctx context.Context, store storage.Storage, dbPath string) error {
 	// Find JSONL path using database directory
+	// Use FindJSONLInDir to prefer issues.jsonl over other .jsonl files (bd-tqo fix)
 	dbDir := filepath.Dir(dbPath)
-	pattern := filepath.Join(dbDir, "*.jsonl")
-	matches, err := filepath.Glob(pattern)
-	var jsonlPath string
-	if err == nil && len(matches) > 0 {
-		jsonlPath = matches[0]
-	} else {
-		jsonlPath = filepath.Join(dbDir, "issues.jsonl")
-	}
+	jsonlPath := autoimport.FindJSONLInDir(dbDir)
 
 	// Get all issues from storage
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)

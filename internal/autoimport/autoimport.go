@@ -67,14 +67,7 @@ func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string
 
 	// Find JSONL using database directory (same logic as beads.FindJSONLPath)
 	dbDir := filepath.Dir(dbPath)
-	pattern := filepath.Join(dbDir, "*.jsonl")
-	matches, err := filepath.Glob(pattern)
-	var jsonlPath string
-	if err == nil && len(matches) > 0 {
-		jsonlPath = matches[0]
-	} else {
-		jsonlPath = filepath.Join(dbDir, "issues.jsonl")
-	}
+	jsonlPath := FindJSONLInDir(dbDir)
 	if jsonlPath == "" {
 		notify.Debugf("auto-import skipped, JSONL not found")
 		return nil
@@ -287,19 +280,7 @@ func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (
 
 	// Find JSONL using database directory
 	dbDir := filepath.Dir(dbPath)
-	pattern := filepath.Join(dbDir, "*.jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		// Glob failed - this is abnormal
-		return false, fmt.Errorf("failed to find JSONL file: %w", err)
-	}
-
-	var jsonlPath string
-	if len(matches) > 0 {
-		jsonlPath = matches[0]
-	} else {
-		jsonlPath = filepath.Join(dbDir, "issues.jsonl")
-	}
+	jsonlPath := FindJSONLInDir(dbDir)
 
 	stat, err := os.Stat(jsonlPath)
 	if err != nil {
@@ -312,4 +293,48 @@ func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (
 	}
 
 	return stat.ModTime().After(lastImportTime), nil
+}
+
+// FindJSONLInDir finds the JSONL file in the given directory.
+// It prefers issues.jsonl over other .jsonl files to prevent accidentally
+// reading/writing to deletions.jsonl or merge artifacts (bd-tqo fix).
+// Returns empty string if no suitable JSONL file is found.
+func FindJSONLInDir(dbDir string) string {
+	pattern := filepath.Join(dbDir, "*.jsonl")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		// Default to issues.jsonl if glob fails or no matches
+		return filepath.Join(dbDir, "issues.jsonl")
+	}
+
+	// Prefer issues.jsonl over other .jsonl files (bd-tqo fix)
+	// This prevents accidentally using deletions.jsonl or merge artifacts
+	for _, match := range matches {
+		if filepath.Base(match) == "issues.jsonl" {
+			return match
+		}
+	}
+
+	// Fall back to beads.jsonl for legacy support
+	for _, match := range matches {
+		if filepath.Base(match) == "beads.jsonl" {
+			return match
+		}
+	}
+
+	// Last resort: use first match (but skip deletions.jsonl and merge artifacts)
+	for _, match := range matches {
+		base := filepath.Base(match)
+		// Skip deletions manifest and merge artifacts
+		if base == "deletions.jsonl" ||
+			base == "beads.base.jsonl" ||
+			base == "beads.left.jsonl" ||
+			base == "beads.right.jsonl" {
+			continue
+		}
+		return match
+	}
+
+	// If only deletions/merge files exist, default to issues.jsonl
+	return filepath.Join(dbDir, "issues.jsonl")
 }
