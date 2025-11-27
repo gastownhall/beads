@@ -282,8 +282,9 @@ func TestWriteDeletions_CreatesDirectory(t *testing.T) {
 }
 
 func TestDefaultPath(t *testing.T) {
-	path := DefaultPath("/home/user/project/.beads")
-	expected := "/home/user/project/.beads/deletions.jsonl"
+	beadsDir := filepath.Join("home", "user", "project", ".beads")
+	path := DefaultPath(beadsDir)
+	expected := filepath.Join(beadsDir, "deletions.jsonl")
 	if path != expected {
 		t.Errorf("expected %s, got %s", expected, path)
 	}

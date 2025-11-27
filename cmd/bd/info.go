@@ -293,6 +293,7 @@ var versionChanges = []VersionChange{
 		Changes: []string{
 			"Zombie Resurrection Prevention - Stale clones can no longer resurrect deleted issues",
 			"bd sync commit scope fixed - Now commits entire .beads/ directory before pull",
+			"bd prime ephemeral branch detection - Auto-detects ephemeral branches and adjusts workflow",
 		},
 	},
 	{

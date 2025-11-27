@@ -80,7 +80,8 @@ func TestDebouncer_CancelWithNoPendingAction(t *testing.T) {
 	debouncer.Cancel()
 
 	debouncer.Trigger()
-	time.Sleep(60 * time.Millisecond)
+	// Use longer wait to account for Windows timer imprecision
+	time.Sleep(100 * time.Millisecond)
 	if got := atomic.LoadInt32(&count); got != 1 {
 		t.Errorf("action should fire normally after cancel with no pending action: got %d, want 1", got)
 	}
