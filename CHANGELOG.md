@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2025-11-27
+
+## [0.26.0] - 2025-11-27
+
+### Added
+
+- **bd doctor --check-health**: Lightweight health checks for startup hooks (3fe94f2)
+  - Quick, silent health checks (exit 0 on success, non-zero on issues)
+  - Checks: version mismatch, sync.branch config, outdated hooks
+  - New `hints.doctor` config option to suppress doctor hints globally
+  - Git hooks now call `bd doctor --check-health` in post-merge/post-checkout
+
+- **--no-git-history Flag**: Prevent spurious deletions during import/sync (5506486)
+  - Use when git history is unreliable (shallow clones, squash merges)
+  - Prevents deletion manifest from removing issues based on stale history
+
+- **gh2jsonl Hash ID Mode**: Content-based ID generation for GitHub imports (#383 by @deangiberson)
+  - `--id-mode {sequential|hash}` flag (default: sequential for backward compatibility)
+  - `--hash-length {3,4,5,6,7,8}` for configurable hash length (default: 6)
+  - Hash IDs are deterministic using title, description, creator, timestamp
+
+- **CI Provenance Attestation**: npm publish now includes provenance attestation (03d62d0)
+
+- **bdui**: Added to Third-Party Tools ecosystem (#384)
+
+### Fixed
+
+- **Critical: MCP Protocol Stdin Fix** (PR #400 by @cleak)
+  - Subprocess stdin inheritance was breaking MCP JSON-RPC protocol
+  - All subprocess calls now use `stdin=subprocess.DEVNULL`
+  - Fixes hanging/blocking issues in Claude Desktop MCP integration
+
+- **Git Worktree Staleness** (#399)
+  - Staleness check was failing after writes in git worktrees
+  - Now uses RFC3339Nano precision for `last_import_time` metadata
+
+- **Multi-Part Prefix Support** (#398)
+  - Issue ID extraction now correctly handles multi-part prefixes
+  - Example: `my-app-123` correctly extracts prefix `my-app`
+
+- **bd sync Commit Scope** (bd-red)
+  - `bd sync` now only commits `.beads/` files, not other staged files
+  - Prevents accidental commits of unrelated staged changes
+
+- **Auto-Import to Wrong File** (bd-tqo)
+  - Fixed auto-import exporting to wrong JSONL file
+  - FindJSONLPath now correctly skips deletions.jsonl
+
+- **Deletions.jsonl Handling**
+  - Git hooks now properly stage deletions.jsonl for cross-clone propagation
+  - bd doctor no longer warns about deletions.jsonl
+  - Prevent rebase failures from deletions.jsonl writes
+
+- **Defense-in-Depth** (bd-4t7)
+  - Added additional check for --no-auto-import flag
+
+- **Tilde Expansion**: Global gitignore path now expands `~` correctly
+
+- **beads-mcp Type Checking**: Resolved all mypy type checking errors
+
+- **CI Test Stability**: Fixed Windows test failures
+
+### Changed
+
+- **Stealth Mode**: Removed global gitattributes setup from `bd init --stealth` (#391)
+  - Stealth mode now purely local with no global git configuration
+
+- **Pre-Push Hook Error Message**: Improved clarity when sync fails (#390)
+
+### Refactoring
+
+- Extract path canonicalization and database search helpers (7d765c2)
+- Consolidate check-health DB access and expand hook checks (3458956)
+
+### Documentation
+
+- Sync skill CLI reference with current docs (62d1dc9)
+
+### Community
+
+- PR #400: MCP stdin fix (@cleak)
+- PR #398: Multi-part prefix support
+- PR #391: Stealth mode gitattributes removal
+- PR #390: Pre-push hook error message (@jonathanpberger)
+- PR #384: bdui ecosystem addition
+- PR #383: gh2jsonl hash ID support (@deangiberson)
+
 ## [0.25.1] - 2025-11-25
 
 ### Added

@@ -288,6 +288,19 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.26.0",
+		Date:    "2025-11-27",
+		Changes: []string{
+			"bd doctor --check-health - Lightweight health checks for startup hooks (exit 0 on success)",
+			"--no-git-history flag - Prevent spurious deletions when git history is unreliable",
+			"gh2jsonl --id-mode hash - Hash-based ID generation for GitHub imports",
+			"MCP Protocol Fix (PR #400) - Subprocess stdin no longer breaks MCP JSON-RPC",
+			"Git Worktree Staleness Fix (#399) - Staleness check works after writes in worktrees",
+			"Multi-Part Prefix Support (#398) - Handles prefixes like 'my-app-123' correctly",
+			"bd sync Commit Scope Fixed - Only commits .beads/ files, not other staged files",
+		},
+	},
+	{
 		Version: "0.25.1",
 		Date:    "2025-11-25",
 		Changes: []string{
