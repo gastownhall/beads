@@ -1198,6 +1198,14 @@ func setupGlobalGitIgnore(homeDir string, verbose bool) error {
 	if err == nil && len(output) > 0 {
 		// User has already configured a global gitignore file, use it
 		ignorePath = strings.TrimSpace(string(output))
+
+		// Expand tilde if present (git config may return ~/... which Go doesn't expand)
+		if strings.HasPrefix(ignorePath, "~/") {
+			ignorePath = filepath.Join(homeDir, ignorePath[2:])
+		} else if ignorePath == "~" {
+			ignorePath = homeDir
+		}
+
 		if verbose {
 			fmt.Printf("Using existing configured global gitignore file: %s\n", ignorePath)
 		}
