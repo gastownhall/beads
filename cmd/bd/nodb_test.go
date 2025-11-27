@@ -18,7 +18,9 @@ func TestExtractIssuePrefix(t *testing.T) {
 		{"standard ID", "bd-123", "bd"},
 		{"custom prefix", "myproject-456", "myproject"},
 		{"hash ID", "bd-abc123def", "bd"},
-		{"multi-part suffix", "alpha-beta-1", "alpha"}, // Only first hyphen (bd-fasa)
+		{"multi-part prefix with numeric suffix", "alpha-beta-1", "alpha-beta"},
+		{"multi-part non-numeric suffix", "vc-baseline-test", "vc"}, // Falls back to first hyphen
+		{"beads-vscode style", "beads-vscode-42", "beads-vscode"},
 		{"no hyphen", "nohyphen", ""},
 		{"empty", "", ""},
 	}

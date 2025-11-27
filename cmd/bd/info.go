@@ -249,13 +249,33 @@ Examples:
 }
 
 // extractPrefix extracts the prefix from an issue ID (e.g., "bd-123" -> "bd")
-// Only considers the first hyphen, so "vc-baseline-test" -> "vc"
+// Uses the last hyphen before a numeric suffix, so "beads-vscode-1" -> "beads-vscode"
 func extractPrefix(issueID string) string {
-	idx := strings.Index(issueID, "-")
-	if idx <= 0 {
+	// Try last hyphen first (handles multi-part prefixes like "beads-vscode-1")
+	lastIdx := strings.LastIndex(issueID, "-")
+	if lastIdx <= 0 {
 		return ""
 	}
-	return issueID[:idx]
+
+	suffix := issueID[lastIdx+1:]
+	// Check if suffix is numeric
+	if len(suffix) > 0 {
+		numPart := suffix
+		if dotIdx := strings.Index(suffix, "."); dotIdx > 0 {
+			numPart = suffix[:dotIdx]
+		}
+		var num int
+		if _, err := fmt.Sscanf(numPart, "%d", &num); err == nil {
+			return issueID[:lastIdx]
+		}
+	}
+
+	// Suffix is not numeric, fall back to first hyphen
+	firstIdx := strings.Index(issueID, "-")
+	if firstIdx <= 0 {
+		return ""
+	}
+	return issueID[:firstIdx]
 }
 
 // VersionChange represents agent-relevant changes for a specific version

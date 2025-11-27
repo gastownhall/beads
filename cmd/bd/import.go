@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/term"
 )
 
@@ -335,8 +336,9 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
 		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
-		// When --force is true, ALWAYS update metadata even if no changes were made
-		if input != "" && (result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 || force) {
+		// ALWAYS update metadata after successful import, even if no changes were made (fixes staleness check)
+		// This ensures that running `bd import` marks the database as fresh for staleness detection
+		if input != "" {
 			if currentHash, err := computeJSONLHash(input); err == nil {
 				if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
 					// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
@@ -694,7 +696,7 @@ func attemptAutoMerge(conflictedPath string) error {
 }
 
 // detectPrefixFromIssues extracts the common prefix from issue IDs
-// Only considers the first hyphen, so "vc-baseline-test" -> "vc"
+// Uses utils.ExtractIssuePrefix which handles multi-part prefixes correctly
 func detectPrefixFromIssues(issues []*types.Issue) string {
 	if len(issues) == 0 {
 		return ""
@@ -703,10 +705,9 @@ func detectPrefixFromIssues(issues []*types.Issue) string {
 	// Count prefix occurrences
 	prefixCounts := make(map[string]int)
 	for _, issue := range issues {
-		// Extract prefix from issue ID using first hyphen only
-		idx := strings.Index(issue.ID, "-")
-		if idx > 0 {
-			prefixCounts[issue.ID[:idx]]++
+		prefix := utils.ExtractIssuePrefix(issue.ID)
+		if prefix != "" {
+			prefixCounts[prefix]++
 		}
 	}
 

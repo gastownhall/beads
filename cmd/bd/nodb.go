@@ -177,12 +177,33 @@ func detectPrefix(_ string, memStore *memory.MemoryStorage) (string, error) {
 }
 
 // extractIssuePrefix extracts the prefix from an issue ID like "bd-123" -> "bd"
+// Uses the last hyphen before a numeric suffix, so "beads-vscode-1" -> "beads-vscode"
 func extractIssuePrefix(issueID string) string {
-	idx := strings.Index(issueID, "-")
-	if idx <= 0 {
+	// Try last hyphen first (handles multi-part prefixes like "beads-vscode-1")
+	lastIdx := strings.LastIndex(issueID, "-")
+	if lastIdx <= 0 {
 		return ""
 	}
-	return issueID[:idx]
+
+	suffix := issueID[lastIdx+1:]
+	// Check if suffix is numeric
+	if len(suffix) > 0 {
+		numPart := suffix
+		if dotIdx := strings.Index(suffix, "."); dotIdx > 0 {
+			numPart = suffix[:dotIdx]
+		}
+		var num int
+		if _, err := fmt.Sscanf(numPart, "%d", &num); err == nil {
+			return issueID[:lastIdx]
+		}
+	}
+
+	// Suffix is not numeric, fall back to first hyphen
+	firstIdx := strings.Index(issueID, "-")
+	if firstIdx <= 0 {
+		return ""
+	}
+	return issueID[:firstIdx]
 }
 
 // writeIssuesToJSONL writes all issues from memory storage to JSONL file atomically
