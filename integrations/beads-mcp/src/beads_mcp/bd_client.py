@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
@@ -290,6 +291,7 @@ class BdCliClient(BdClientBase):
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
@@ -333,6 +335,7 @@ class BdCliClient(BdClientBase):
             process = await asyncio.create_subprocess_exec(
                 self.bd_path,
                 "version",
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._get_working_dir(),
@@ -583,6 +586,7 @@ class BdCliClient(BdClientBase):
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._get_working_dir(),
@@ -610,6 +614,7 @@ class BdCliClient(BdClientBase):
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._get_working_dir(),
@@ -754,6 +759,7 @@ class BdCliClient(BdClientBase):
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._get_working_dir(),
