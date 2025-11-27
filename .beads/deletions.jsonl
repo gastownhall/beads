@@ -17742,3 +17742,7 @@
 {"id":"test-604","ts":"2025-11-27T00:24:57.793661-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
 {"id":"worker2-500","ts":"2025-11-27T00:22:34.278448-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
 {"id":"worker2-500","ts":"2025-11-27T00:24:57.793661-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
+{"id":"bd-red","ts":"2025-11-27T09:06:53.944922Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
+{"id":"bd-pbj","ts":"2025-11-27T09:06:53.957369Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
+{"id":"bd-6xd","ts":"2025-11-27T09:06:53.963627Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
+{"id":"bd-055","ts":"2025-11-27T09:06:53.968681Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
