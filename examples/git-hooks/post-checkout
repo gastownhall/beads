@@ -1,11 +1,11 @@
 #!/bin/sh
-# bd-hooks-version: 0.25.1
+# bd-hooks-version: 0.26.0
 #
 # bd (beads) post-checkout hook
 #
 # This hook syncs the bd database after a branch checkout:
 # 1. Checks if any .beads/*.jsonl file was updated
-# 2. Runs 'bd sync --import-only' to import changes
+# 2. Runs 'bd sync --import-only --no-git-history' to import changes
 #
 # Arguments provided by git:
 # $1 = ref of previous HEAD
@@ -16,6 +16,12 @@
 
 # Only run on branch checkouts
 if [ "$3" != "1" ]; then
+    exit 0
+fi
+
+# Skip during rebase - git checks out commits during rebase and we must not
+# modify working tree files (like deletions.jsonl) or the rebase will fail
+if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
     exit 0
 fi
 
@@ -34,8 +40,9 @@ if ! ls .beads/*.jsonl >/dev/null 2>&1; then
     exit 0
 fi
 
-# Run bd sync --import-only to import the updated JSONL
-if ! output=$(bd sync --import-only 2>&1); then
+# Run bd sync --import-only --no-git-history to import the updated JSONL
+# --no-git-history prevents writes to deletions.jsonl (critical during rebase)
+if ! output=$(bd sync --import-only --no-git-history 2>&1); then
     echo "Warning: Failed to sync bd changes after checkout" >&2
     echo "$output" >&2
     echo "" >&2
