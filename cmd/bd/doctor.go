@@ -2078,10 +2078,17 @@ func checkDeletionsManifest(path string) doctorCheck {
 
 	deletionsPath := filepath.Join(beadsDir, "deletions.jsonl")
 
-	// Check if deletions.jsonl exists and has content
+	// Check if deletions.jsonl exists
 	info, err := os.Stat(deletionsPath)
-	if err == nil && info.Size() > 0 {
-		// Count entries
+	if err == nil {
+		// File exists - count entries (empty file is valid, means no deletions)
+		if info.Size() == 0 {
+			return doctorCheck{
+				Name:    "Deletions Manifest",
+				Status:  statusOK,
+				Message: "Present (0 entries)",
+			}
+		}
 		file, err := os.Open(deletionsPath) // #nosec G304 - controlled path
 		if err == nil {
 			defer file.Close()

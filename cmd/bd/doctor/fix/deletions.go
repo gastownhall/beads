@@ -67,7 +67,12 @@ func HydrateDeletionsManifest(path string) error {
 	}
 
 	if len(deletedIDs) == 0 {
-		fmt.Println("  No new deleted issues found in git history")
+		// Create empty deletions manifest to signal hydration is complete
+		// This prevents the check from re-warning after --fix runs
+		if err := deletions.WriteDeletions(deletionsPath, nil); err != nil {
+			return fmt.Errorf("failed to create empty deletions manifest: %w", err)
+		}
+		fmt.Println("  No deleted issues found in git history (created empty manifest)")
 		return nil
 	}
 
