@@ -218,6 +218,7 @@ def _resolve_workspace_root(path: str) -> str:
             text=True,
             check=False,
             shell=sys.platform == "win32",
+            stdin=subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
         )
         if result.returncode == 0:
             return result.stdout.strip()
