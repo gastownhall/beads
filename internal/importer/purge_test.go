@@ -80,7 +80,7 @@ func TestPurgeDeletedIssues(t *testing.T) {
 	}
 
 	// Call purgeDeletedIssues
-	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, result); err != nil {
+	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, Options{}, result); err != nil {
 		t.Fatalf("purgeDeletedIssues failed: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestPurgeDeletedIssues_NoDeletionsManifest(t *testing.T) {
 	}
 
 	// Call purgeDeletedIssues - should succeed with no errors
-	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, result); err != nil {
+	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, Options{}, result); err != nil {
 		t.Fatalf("purgeDeletedIssues failed: %v", err)
 	}
 
@@ -222,7 +222,7 @@ func TestPurgeDeletedIssues_EmptyDeletionsManifest(t *testing.T) {
 	}
 
 	// Call purgeDeletedIssues - should succeed with no errors
-	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, result); err != nil {
+	if err := purgeDeletedIssues(ctx, store, dbPath, jsonlIssues, Options{}, result); err != nil {
 		t.Fatalf("purgeDeletedIssues failed: %v", err)
 	}
 

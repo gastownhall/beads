@@ -165,6 +165,7 @@ type ImportOptions struct {
 	SkipPrefixValidation       bool   // Skip prefix validation (for auto-import)
 	ClearDuplicateExternalRefs bool   // Clear duplicate external_ref values instead of erroring
 	OrphanHandling             string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
+	NoGitHistory               bool   // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
 }
 
 // ImportResult contains statistics about the import operation
@@ -221,6 +222,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		SkipPrefixValidation:       opts.SkipPrefixValidation,
 		ClearDuplicateExternalRefs: opts.ClearDuplicateExternalRefs,
 		OrphanHandling:             importer.OrphanHandling(orphanHandling),
+		NoGitHistory:               opts.NoGitHistory,
 	}
 
 	// Delegate to the importer package

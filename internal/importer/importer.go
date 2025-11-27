@@ -42,6 +42,7 @@ type Options struct {
 	SkipPrefixValidation       bool           // Skip prefix validation (for auto-import)
 	OrphanHandling             OrphanHandling // How to handle missing parent issues (default: allow)
 	ClearDuplicateExternalRefs bool           // Clear duplicate external_ref values instead of erroring
+	NoGitHistory               bool           // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
 }
 
 // Result contains statistics about the import operation
@@ -155,7 +156,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	// Purge deleted issues from DB based on deletions manifest
 	// Issues that are in the manifest but not in JSONL should be deleted from DB
 	if !opts.DryRun {
-		if err := purgeDeletedIssues(ctx, sqliteStore, dbPath, issues, result); err != nil {
+		if err := purgeDeletedIssues(ctx, sqliteStore, dbPath, issues, opts, result); err != nil {
 			// Non-fatal - just log warning
 			fmt.Fprintf(os.Stderr, "Warning: failed to purge deleted issues: %v\n", err)
 		}
@@ -757,8 +758,9 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 
 // purgeDeletedIssues removes issues from the DB that are in the deletions manifest
 // but not in the incoming JSONL. This enables deletion propagation across clones.
-// Also uses git history fallback for deletions that were pruned from the manifest.
-func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, dbPath string, jsonlIssues []*types.Issue, result *Result) error {
+// Also uses git history fallback for deletions that were pruned from the manifest,
+// unless opts.NoGitHistory is set (useful during JSONL filename migrations).
+func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, dbPath string, jsonlIssues []*types.Issue, opts Options, result *Result) error {
 	// Get deletions manifest path (same directory as database)
 	beadsDir := filepath.Dir(dbPath)
 	deletionsPath := deletions.DefaultPath(beadsDir)
@@ -824,7 +826,8 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 	}
 
 	// Git history fallback for potential pruned deletions
-	if len(needGitCheck) > 0 {
+	// Skip if --no-git-history flag is set (prevents spurious deletions during JSONL migrations)
+	if len(needGitCheck) > 0 && !opts.NoGitHistory {
 		deletedViaGit := checkGitHistoryForDeletions(beadsDir, needGitCheck)
 		for _, id := range deletedViaGit {
 			// Backfill the deletions manifest (self-healing)
@@ -848,6 +851,9 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 			result.Purged++
 			result.PurgedIDs = append(result.PurgedIDs, id)
 		}
+	} else if len(needGitCheck) > 0 && opts.NoGitHistory {
+		// Log that we skipped git history check due to flag
+		fmt.Fprintf(os.Stderr, "Skipped git history check for %d issue(s) (--no-git-history flag set)\n", len(needGitCheck))
 	}
 
 	return nil

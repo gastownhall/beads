@@ -51,6 +51,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		status, _ := cmd.Flags().GetBool("status")
 		merge, _ := cmd.Flags().GetBool("merge")
 		fromMain, _ := cmd.Flags().GetBool("from-main")
+		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
@@ -79,7 +80,7 @@ Use --merge to merge the sync branch back to main branch.`,
 
 		// If from-main mode, one-way sync from main branch (gt-ick9: ephemeral branch support)
 		if fromMain {
-			if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun); err != nil {
+			if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, noGitHistory); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -92,7 +93,7 @@ Use --merge to merge the sync branch back to main branch.`,
 				fmt.Println("→ [DRY RUN] Would import from JSONL")
 			} else {
 				fmt.Println("→ Importing from JSONL...")
-				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+				if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
 					fmt.Fprintf(os.Stderr, "Error importing: %v\n", err)
 					os.Exit(1)
 				}
@@ -137,7 +138,7 @@ Use --merge to merge the sync branch back to main branch.`,
 			if hasGitRemote(ctx) {
 				// Remote exists but no upstream - use from-main mode
 				fmt.Println("→ No upstream configured, using --from-main mode")
-				if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun); err != nil {
+				if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, noGitHistory); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -163,7 +164,7 @@ Use --merge to merge the sync branch back to main branch.`,
 						if divergence > 0.5 { // >50% more issues in DB than JSONL
 							fmt.Printf("→ DB has %d issues but JSONL has %d (stale DB detected)\n", dbCount, jsonlCount)
 							fmt.Println("→ Importing JSONL first (ZFC)...")
-							if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+							if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
 								fmt.Fprintf(os.Stderr, "Error importing (ZFC): %v\n", err)
 								os.Exit(1)
 							}
@@ -319,7 +320,7 @@ Use --merge to merge the sync branch back to main branch.`,
 
 				// Step 4: Import updated JSONL after pull
 				fmt.Println("→ Importing updated JSONL...")
-				if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+				if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
 					fmt.Fprintf(os.Stderr, "Error importing: %v\n", err)
 					os.Exit(1)
 				}
@@ -450,6 +451,7 @@ func init() {
 	syncCmd.Flags().Bool("status", false, "Show diff between sync branch and main branch")
 	syncCmd.Flags().Bool("merge", false, "Merge sync branch back to main branch")
 	syncCmd.Flags().Bool("from-main", false, "One-way sync from main branch (for ephemeral branches without upstream)")
+	syncCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
 	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
 	rootCmd.AddCommand(syncCmd)
 }
@@ -758,7 +760,7 @@ func getDefaultBranch(ctx context.Context) string {
 // doSyncFromMain performs a one-way sync from the default branch (main/master)
 // Used for ephemeral branches without upstream tracking (gt-ick9)
 // This fetches beads from main and imports them, discarding local beads changes.
-func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool) error {
+func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool, noGitHistory bool) error {
 	if dryRun {
 		fmt.Println("→ [DRY RUN] Would sync beads from main branch")
 		fmt.Println("  1. Fetch origin main")
@@ -796,7 +798,7 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 
 	// Step 3: Import JSONL
 	fmt.Println("→ Importing JSONL...")
-	if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+	if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
 		return fmt.Errorf("import failed: %w", err)
 	}
 
@@ -1156,7 +1158,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 }
 
 // importFromJSONL imports the JSONL file by running the import command
-func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool) error {
+func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool, noGitHistory ...bool) error {
 	// Get current executable path to avoid "./bd" path issues
 	exe, err := os.Executable()
 	if err != nil {
@@ -1167,6 +1169,10 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool)
 	args := []string{"import", "-i", jsonlPath}
 	if renameOnImport {
 		args = append(args, "--rename-on-import")
+	}
+	// Handle optional noGitHistory parameter
+	if len(noGitHistory) > 0 && noGitHistory[0] {
+		args = append(args, "--no-git-history")
 	}
 
 	// Run import command
