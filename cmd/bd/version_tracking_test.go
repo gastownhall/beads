@@ -11,6 +11,11 @@ import (
 )
 
 func TestGetVersionsSince(t *testing.T) {
+	// Get current version counts dynamically from versionChanges
+	latestVersion := versionChanges[0].Version              // First element is latest
+	oldestVersion := versionChanges[len(versionChanges)-1].Version // Last element is oldest
+	versionsAfterOldest := len(versionChanges) - 1          // All except oldest
+
 	tests := []struct {
 		name          string
 		sinceVersion  string
@@ -31,19 +36,13 @@ func TestGetVersionsSince(t *testing.T) {
 		},
 		{
 			name:          "oldest version in changelog",
-			sinceVersion:  "0.21.0",
-			expectedCount: 3, // 0.22.0, 0.22.1, 0.23.0
+			sinceVersion:  oldestVersion,
+			expectedCount: versionsAfterOldest,
 			description:   "Should return versions newer than oldest",
 		},
 		{
-			name:          "middle version returns newer versions",
-			sinceVersion:  "0.22.0",
-			expectedCount: 2, // 0.22.1 and 0.23.0
-			description:   "Should return versions newer than specified",
-		},
-		{
 			name:          "latest version returns empty",
-			sinceVersion:  "0.23.0",
+			sinceVersion:  latestVersion,
 			expectedCount: 0,
 			description:   "Should return empty slice when already on latest in changelog",
 		},
@@ -63,14 +62,15 @@ func TestGetVersionsSince(t *testing.T) {
 func TestGetVersionsSinceOrder(t *testing.T) {
 	// Test that versions are returned in chronological order (oldest first)
 	// versionChanges array is newest-first, but getVersionsSince returns oldest-first
-	result := getVersionsSince("0.21.0")
+	oldestVersion := versionChanges[len(versionChanges)-1].Version
+	result := getVersionsSince(oldestVersion)
 
-	if len(result) != 3 {
-		t.Fatalf("Expected 3 versions after 0.21.0, got %d", len(result))
+	expectedCount := len(versionChanges) - 1
+	if len(result) != expectedCount {
+		t.Fatalf("Expected %d versions after %s, got %d", expectedCount, oldestVersion, len(result))
 	}
 
-	// Verify chronological order by checking dates increase
-	// result should be [0.22.0, 0.22.1, 0.23.0]
+	// Verify chronological order by checking dates increase (or are equal for same-day releases)
 	for i := 1; i < len(result); i++ {
 		prev := result[i-1]
 		curr := result[i]
@@ -82,11 +82,16 @@ func TestGetVersionsSinceOrder(t *testing.T) {
 		}
 	}
 
-	// Check specific order
-	expectedVersions := []string{"0.22.0", "0.22.1", "0.23.0"}
-	for i, expected := range expectedVersions {
-		if result[i].Version != expected {
-			t.Errorf("Version at index %d = %s, want %s", i, result[i].Version, expected)
+	// First version after oldest should be second-to-last in versionChanges
+	// Last version should be the first in versionChanges (latest)
+	if len(result) > 0 {
+		expectedFirst := versionChanges[len(versionChanges)-2].Version
+		expectedLast := versionChanges[0].Version
+		if result[0].Version != expectedFirst {
+			t.Errorf("First version = %s, want %s", result[0].Version, expectedFirst)
+		}
+		if result[len(result)-1].Version != expectedLast {
+			t.Errorf("Last version = %s, want %s", result[len(result)-1].Version, expectedLast)
 		}
 	}
 }

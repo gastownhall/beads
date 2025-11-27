@@ -438,6 +438,9 @@ func TestHasJSONLConflict_MultipleConflicts(t *testing.T) {
 // TestZFCSkipsExportAfterImport tests the bd-l0r fix: after importing JSONL due to
 // stale DB detection, sync should skip export to avoid overwriting the JSONL source of truth.
 func TestZFCSkipsExportAfterImport(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping test that spawns subprocess in short mode")
+	}
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()

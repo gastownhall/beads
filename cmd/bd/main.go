@@ -221,6 +221,11 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
+		// Also skip for --version flag on root command (cmdName would be "bd")
+		if v, _ := cmd.Flags().GetBool("version"); v {
+			return
+		}
+
 		// Auto-detect sandboxed environment (bd-u3t: Phase 2 for GH #353)
 		// Only auto-enable if user hasn't explicitly set --sandbox or --no-daemon
 		if !cmd.Flags().Changed("sandbox") && !cmd.Flags().Changed("no-daemon") {
