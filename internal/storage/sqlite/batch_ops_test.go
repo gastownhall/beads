@@ -270,7 +270,7 @@ func TestGenerateBatchIDs(t *testing.T) {
 			{Title: "Issue 3", Description: "Third", CreatedAt: time.Now()},
 		}
 
-		err = s.generateBatchIDs(ctx, conn, issues, "test-actor", OrphanAllow)
+		err = s.generateBatchIDs(ctx, conn, issues, "test-actor", OrphanAllow, false)
 		if err != nil {
 			t.Fatalf("failed to generate IDs: %v", err)
 		}
@@ -299,9 +299,27 @@ func TestGenerateBatchIDs(t *testing.T) {
 			{ID: "wrong-prefix-123", Title: "Wrong", CreatedAt: time.Now()},
 		}
 
-		err = s.generateBatchIDs(ctx, conn, issues, "test-actor", OrphanAllow)
+		err = s.generateBatchIDs(ctx, conn, issues, "test-actor", OrphanAllow, false)
 		if err == nil {
 			t.Fatal("expected error for wrong prefix")
+		}
+	})
+
+	t.Run("skips prefix validation when flag is set", func(t *testing.T) {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get connection: %v", err)
+		}
+		defer conn.Close()
+
+		issues := []*types.Issue{
+			{ID: "wrong-prefix-123", Title: "Wrong", CreatedAt: time.Now()},
+		}
+
+		// With skipPrefixValidation=true, should not error
+		err = s.generateBatchIDs(ctx, conn, issues, "test-actor", OrphanAllow, true)
+		if err != nil {
+			t.Fatalf("should not error with skipPrefixValidation=true: %v", err)
 		}
 	})
 }

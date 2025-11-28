@@ -187,15 +187,19 @@ func tryResurrectParent(parentID string, issues []*types.Issue) bool {
 // For issues with empty IDs, generates unique hash-based IDs
 // For issues with existing IDs, validates they match the prefix and parent exists (if hierarchical)
 // For hierarchical IDs with missing parents, behavior depends on orphanHandling mode
-func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string, orphanHandling OrphanHandling) error {
+// When skipPrefixValidation is true, existing IDs are not validated against the prefix (used during import)
+func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string, orphanHandling OrphanHandling, skipPrefixValidation bool) error {
 	usedIDs := make(map[string]bool)
-	
+
 	// First pass: record explicitly provided IDs
 	for i := range issues {
 		if issues[i].ID != "" {
 			// Validate that explicitly provided ID matches the configured prefix (bd-177)
-			if err := ValidateIssueIDPrefix(issues[i].ID, prefix); err != nil {
-				return wrapDBErrorf(err, "validate ID prefix for %s", issues[i].ID)
+			// Skip validation during import to allow issues with different prefixes (e.g., from renamed repos)
+			if !skipPrefixValidation {
+				if err := ValidateIssueIDPrefix(issues[i].ID, prefix); err != nil {
+					return wrapDBErrorf(err, "validate ID prefix for %s", issues[i].ID)
+				}
 			}
 			
 			// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists

@@ -33,7 +33,7 @@ func validateBatchIssues(issues []*types.Issue) error {
 }
 
 // generateBatchIDs generates IDs for all issues that need them atomically
-func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue, actor string, orphanHandling OrphanHandling) error {
+func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, issues []*types.Issue, actor string, orphanHandling OrphanHandling, skipPrefixValidation bool) error {
 	// Get prefix from config (needed for both generation and validation)
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
@@ -45,7 +45,7 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	}
 
 	// Generate or validate IDs for all issues
-	if err := EnsureIDs(ctx, conn, prefix, issues, actor, orphanHandling); err != nil {
+	if err := EnsureIDs(ctx, conn, prefix, issues, actor, orphanHandling, skipPrefixValidation); err != nil {
 		return wrapDBError("ensure IDs", err)
 	}
 	
@@ -126,8 +126,22 @@ func (s *SQLiteStorage) CreateIssues(ctx context.Context, issues []*types.Issue,
 	return s.CreateIssuesWithOptions(ctx, issues, actor, OrphanResurrect)
 }
 
+// BatchCreateOptions contains options for batch issue creation
+type BatchCreateOptions struct {
+	OrphanHandling       OrphanHandling // How to handle missing parent issues
+	SkipPrefixValidation bool           // Skip prefix validation for existing IDs (used during import)
+}
+
 // CreateIssuesWithOptions creates multiple issues with configurable orphan handling
 func (s *SQLiteStorage) CreateIssuesWithOptions(ctx context.Context, issues []*types.Issue, actor string, orphanHandling OrphanHandling) error {
+	return s.CreateIssuesWithFullOptions(ctx, issues, actor, BatchCreateOptions{
+		OrphanHandling:       orphanHandling,
+		SkipPrefixValidation: false,
+	})
+}
+
+// CreateIssuesWithFullOptions creates multiple issues with full options control
+func (s *SQLiteStorage) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts BatchCreateOptions) error {
 	if len(issues) == 0 {
 		return nil
 	}
@@ -157,7 +171,7 @@ func (s *SQLiteStorage) CreateIssuesWithOptions(ctx context.Context, issues []*t
 	}()
 
 	// Phase 3: Generate IDs for issues that need them
-	if err := s.generateBatchIDs(ctx, conn, issues, actor, orphanHandling); err != nil {
+	if err := s.generateBatchIDs(ctx, conn, issues, actor, opts.OrphanHandling, opts.SkipPrefixValidation); err != nil {
 		return wrapDBError("generate batch IDs", err)
 	}
 

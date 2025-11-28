@@ -620,7 +620,11 @@ if len(newIssues) > 0 {
 				}
 			}
 			if len(batchForDepth) > 0 {
-				if err := sqliteStore.CreateIssuesWithOptions(ctx, batchForDepth, "import", opts.OrphanHandling); err != nil {
+				batchOpts := sqlite.BatchCreateOptions{
+					OrphanHandling:       opts.OrphanHandling,
+					SkipPrefixValidation: opts.SkipPrefixValidation,
+				}
+				if err := sqliteStore.CreateIssuesWithFullOptions(ctx, batchForDepth, "import", batchOpts); err != nil {
 					return fmt.Errorf("error creating depth-%d issues: %w", depth, err)
 				}
 				result.Created += len(batchForDepth)
