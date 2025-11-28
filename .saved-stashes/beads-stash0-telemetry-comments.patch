@@ -1,0 +1,301 @@
+diff --git a/.beads/issues.jsonl b/.beads/issues.jsonl
+index 7510ce0..9e1b63a 100644
+--- a/.beads/issues.jsonl
++++ b/.beads/issues.jsonl
+@@ -68,6 +68,7 @@
+ {"id":"bd-16","title":"Add EXPLAIN QUERY PLAN tests for ready work query","description":"Verify that the hierarchical blocking query uses proper indexes and doesn't do full table scans.\n\n**Queries to analyze:**\n1. The recursive CTE (both base case and recursive case)\n2. The final SELECT with NOT EXISTS\n3. Impact of various filters (status, priority, assignee)\n\n**Implementation:**\nAdd test function that:\n- Runs EXPLAIN QUERY PLAN on GetReadyWork query\n- Parses output to verify no SCAN TABLE operations\n- Documents expected query plan in comments\n- Fails if query plan degrades\n\n**Benefits:**\n- Catch performance regressions in tests\n- Document expected query behavior\n- Ensure indexes are being used\n\nRelated to: bd-77 (composite index on depends_on_id, type)","status":"closed","priority":3,"issue_type":"task","created_at":"2025-10-16T20:46:08.971822-07:00","updated_at":"2025-10-18T18:35:11.755001-07:00","closed_at":"2025-10-18T12:47:44.284846-07:00"}
+ {"id":"bd-160","title":"Fix race condition in TestSocketCleanup","description":"Race condition detected in internal/rpc/rpc_test.go:195 in TestSocketCleanup. This is causing CI test failures.\n\nThe race appears to be between goroutines accessing shared state during server startup/shutdown in the socket cleanup test.\n\nLocation: internal/rpc/rpc_test.go:195\nTest output shows DATA RACE between goroutines 83 and 85.","status":"closed","priority":1,"issue_type":"bug","created_at":"2025-10-19T09:11:34.766584-07:00","updated_at":"2025-10-19T09:14:37.781034-07:00","closed_at":"2025-10-19T09:14:37.781034-07:00"}
+ {"id":"bd-161","title":"Fix SQL timestamp scanning error on macOS (GH-88)","description":"User reported 'Scan error on column index 11, name created_at: unsupported Scan, storing driver.Value type string into type *time.Time' on macOS 13.5. \n\nRoot cause: modernc.org/sqlite driver doesn't recognize mattn-style DSN parameters like _journal_mode=WAL and _foreign_keys=ON. When these are present, it ignores _time_format=sqlite on some platforms, causing DATETIME columns to be returned as strings instead of time.Time.\n\nFix: Use modernc's native _pragma syntax for all options:\n- Changed _journal_mode=WAL to _pragma=journal_mode(WAL)\n- Changed _foreign_keys=ON to _pragma=foreign_keys(ON)\n\nThis ensures _time_format=sqlite is properly recognized and DATETIME columns are automatically parsed to time.Time.","status":"closed","priority":0,"issue_type":"bug","created_at":"2025-10-19T14:35:47.467251-07:00","updated_at":"2025-10-19T14:35:52.806252-07:00","closed_at":"2025-10-19T14:35:52.806252-07:00"}
++{"id":"bd-162","title":"Add 'bd comments' command to view and manage issue comments","description":"Add support for commenting on issues with a new 'bd comments' command.\n\nCommands:\n- bd comments \u003cissue-id\u003e                    # List all comments on an issue\n- bd comments add \u003cissue-id\u003e \"text\"         # Add a comment\n- bd comments add \u003cissue-id\u003e -f file.txt    # Add comment from file\n- bd comments \u003cissue-id\u003e --json             # JSON output for agents\n\nUse cases:\n- Track discussion/decisions on issues\n- Add context without cluttering description\n- Record why work was paused/resumed\n- Multi-person collaboration notes\n- Agent can leave progress updates\n\nImplementation:\n- Add comments table to schema (id, issue_id, author, text, timestamp)\n- Store in JSONL as nested array in issue objects\n- Show chronologically with timestamps\n- Include in 'bd show' output (collapsed by default?)\n\nQuestions:\n- Should comments be editable/deletable?\n- Include author field (env var or git config)?\n- Threading/replies to comments?","status":"in_progress","priority":2,"issue_type":"feature","created_at":"2025-10-19T15:58:07.483312-07:00","updated_at":"2025-10-19T16:01:29.473696-07:00"}
+ {"id":"bd-17","title":"Make auto-flush debounce duration configurable","description":"flushDebounce is hardcoded to 5 seconds. Make it configurable via environment variable BEADS_FLUSH_DEBOUNCE (e.g., '500ms', '10s'). Current 5-second value is reasonable for interactive use, but CI/automated scenarios might want faster flush. Add getDebounceDuration() helper function. Located in cmd/bd/main.go:31.","status":"closed","priority":3,"issue_type":"feature","created_at":"2025-10-16T20:46:08.971822-07:00","updated_at":"2025-10-18T18:35:11.755588-07:00","closed_at":"2025-10-18T09:47:43.22126-07:00"}
+ {"id":"bd-18","title":"Optimize auto-flush to use incremental updates","description":"Every flush exports ALL issues and ALL dependencies, even if only one issue changed. For large projects (1000+ issues), this could be expensive. Current approach guarantees consistency, which is fine for MVP, but future optimization could track which issues changed and use incremental updates. Located in cmd/bd/main.go:255-276.","status":"closed","priority":3,"issue_type":"feature","created_at":"2025-10-16T20:46:08.971822-07:00","updated_at":"2025-10-18T18:35:11.755965-07:00","closed_at":"2025-10-14T02:51:52.200141-07:00"}
+ {"id":"bd-19","title":"Refactor duplicate flush logic in PersistentPostRun","description":"PersistentPostRun contains a complete copy of the flush logic instead of calling flushToJSONL(). This violates DRY principle and makes maintenance harder. Refactor to use flushToJSONL() with a force parameter to bypass isDirty check, or extract shared logic into a helper function. Located in cmd/bd/main.go:104-138.","status":"closed","priority":3,"issue_type":"task","created_at":"2025-10-16T20:46:08.971822-07:00","updated_at":"2025-10-18T18:35:11.756336-07:00","closed_at":"2025-10-18T09:44:24.167574-07:00"}
+diff --git a/cmd/bd/daemon.go b/cmd/bd/daemon.go
+index 9ac52bf..1756915 100644
+--- a/cmd/bd/daemon.go
++++ b/cmd/bd/daemon.go
+@@ -664,6 +664,15 @@ func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
+ 		issue.Labels = labels
+ 	}
+ 
++	// Populate comments for all issues
++	for _, issue := range issues {
++		comments, err := store.GetIssueComments(ctx, issue.ID)
++		if err != nil {
++			return fmt.Errorf("failed to get comments for %s: %w", issue.ID, err)
++		}
++		issue.Comments = comments
++	}
++
+ 	// Create temp file for atomic write
+ 	dir := filepath.Dir(jsonlPath)
+ 	base := filepath.Base(jsonlPath)
+diff --git a/cmd/bd/import_shared.go b/cmd/bd/import_shared.go
+index 3ae2cf3..049b8df 100644
+--- a/cmd/bd/import_shared.go
++++ b/cmd/bd/import_shared.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 	"fmt"
++	"time"
+ 
+ 	"github.com/steveyegge/beads/internal/storage"
+ 	"github.com/steveyegge/beads/internal/storage/sqlite"
+@@ -275,5 +276,39 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
+ 		}
+ 	}
+ 
++	// Phase 7: Import comments
++	for _, issue := range issues {
++		if len(issue.Comments) == 0 {
++			continue
++		}
++
++		// Get current comments to avoid duplicates
++		currentComments, err := sqliteStore.GetIssueComments(ctx, issue.ID)
++		if err != nil {
++			return nil, fmt.Errorf("error getting comments for %s: %w", issue.ID, err)
++		}
++
++		// Build a set of existing comments (by author+text+timestamp)
++		existingComments := make(map[string]bool)
++		for _, c := range currentComments {
++			key := fmt.Sprintf("%s:%s:%s", c.Author, c.Text, c.CreatedAt.Format(time.RFC3339))
++			existingComments[key] = true
++		}
++
++		// Add missing comments
++		for _, comment := range issue.Comments {
++			key := fmt.Sprintf("%s:%s:%s", comment.Author, comment.Text, comment.CreatedAt.Format(time.RFC3339))
++			if !existingComments[key] {
++				if _, err := sqliteStore.AddIssueComment(ctx, issue.ID, comment.Author, comment.Text); err != nil {
++					if opts.Strict {
++						return nil, fmt.Errorf("error adding comment to %s: %w", issue.ID, err)
++					}
++					// Non-strict mode: skip this comment
++					continue
++				}
++			}
++		}
++	}
++
+ 	return result, nil
+ }
+diff --git a/cmd/bd/main.go b/cmd/bd/main.go
+index a5288c0..49a0e60 100644
+--- a/cmd/bd/main.go
++++ b/cmd/bd/main.go
+@@ -1731,17 +1731,19 @@ var showCmd = &cobra.Command{
+ 		}
+ 
+ 		if jsonOutput {
+-			// Include labels and dependencies in JSON output
++			// Include labels, dependencies, and comments in JSON output
+ 			type IssueDetails struct {
+ 				*types.Issue
+-				Labels      []string       `json:"labels,omitempty"`
+-				Dependencies []*types.Issue `json:"dependencies,omitempty"`
+-				Dependents   []*types.Issue `json:"dependents,omitempty"`
++				Labels       []string         `json:"labels,omitempty"`
++				Dependencies []*types.Issue   `json:"dependencies,omitempty"`
++				Dependents   []*types.Issue   `json:"dependents,omitempty"`
++				Comments     []*types.Comment `json:"comments,omitempty"`
+ 			}
+ 			details := &IssueDetails{Issue: issue}
+ 			details.Labels, _ = store.GetLabels(ctx, issue.ID)
+ 			details.Dependencies, _ = store.GetDependencies(ctx, issue.ID)
+ 			details.Dependents, _ = store.GetDependents(ctx, issue.ID)
++			details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
+ 			outputJSON(details)
+ 			return
+ 		}
+@@ -1835,6 +1837,15 @@ var showCmd = &cobra.Command{
+ 			}
+ 		}
+ 
++		// Show comments
++		comments, _ := store.GetIssueComments(ctx, issue.ID)
++		if len(comments) > 0 {
++			fmt.Printf("\nComments (%d):\n", len(comments))
++			for _, comment := range comments {
++				fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
++			}
++		}
++
+ 		fmt.Println()
+ 	},
+ }
+diff --git a/cmd/bd/sync.go b/cmd/bd/sync.go
+index a65be6c..051572f 100644
+--- a/cmd/bd/sync.go
++++ b/cmd/bd/sync.go
+@@ -270,6 +270,15 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
+ 		issue.Labels = labels
+ 	}
+ 
++	// Populate comments for all issues
++	for _, issue := range issues {
++		comments, err := store.GetIssueComments(ctx, issue.ID)
++		if err != nil {
++			return fmt.Errorf("failed to get comments for %s: %w", issue.ID, err)
++		}
++		issue.Comments = comments
++	}
++
+ 	// Create temp file for atomic write
+ 	dir := filepath.Dir(jsonlPath)
+ 	base := filepath.Base(jsonlPath)
+diff --git a/internal/storage/sqlite/schema.go b/internal/storage/sqlite/schema.go
+index 44d6d57..d390e10 100644
+--- a/internal/storage/sqlite/schema.go
++++ b/internal/storage/sqlite/schema.go
+@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS labels (
+ 
+ CREATE INDEX IF NOT EXISTS idx_labels_label ON labels(label);
+ 
++-- Comments table
++CREATE TABLE IF NOT EXISTS comments (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    issue_id TEXT NOT NULL,
++    author TEXT NOT NULL,
++    text TEXT NOT NULL,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
++);
++
++CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id);
++CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at);
++
+ -- Events table (audit trail)
+ CREATE TABLE IF NOT EXISTS events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+diff --git a/internal/storage/sqlite/sqlite.go b/internal/storage/sqlite/sqlite.go
+index 8bd72a2..867f95a 100644
+--- a/internal/storage/sqlite/sqlite.go
++++ b/internal/storage/sqlite/sqlite.go
+@@ -1716,6 +1716,81 @@ func (s *SQLiteStorage) GetMetadata(ctx context.Context, key string) (string, er
+ 	return value, err
+ }
+ 
++// AddIssueComment adds a comment to an issue
++func (s *SQLiteStorage) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
++	// Verify issue exists
++	var exists bool
++	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists)
++	if err != nil {
++		return nil, fmt.Errorf("failed to check issue existence: %w", err)
++	}
++	if !exists {
++		return nil, fmt.Errorf("issue %s not found", issueID)
++	}
++
++	// Insert comment
++	result, err := s.db.ExecContext(ctx, `
++		INSERT INTO comments (issue_id, author, text, created_at)
++		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
++	`, issueID, author, text)
++	if err != nil {
++		return nil, fmt.Errorf("failed to insert comment: %w", err)
++	}
++
++	// Get the inserted comment ID
++	commentID, err := result.LastInsertId()
++	if err != nil {
++		return nil, fmt.Errorf("failed to get comment ID: %w", err)
++	}
++
++	// Fetch the complete comment
++	comment := &types.Comment{}
++	err = s.db.QueryRowContext(ctx, `
++		SELECT id, issue_id, author, text, created_at
++		FROM comments WHERE id = ?
++	`, commentID).Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt)
++	if err != nil {
++		return nil, fmt.Errorf("failed to fetch comment: %w", err)
++	}
++
++	// Mark issue as dirty for JSONL export
++	if err := s.MarkIssueDirty(ctx, issueID); err != nil {
++		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
++	}
++
++	return comment, nil
++}
++
++// GetIssueComments retrieves all comments for an issue
++func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
++	rows, err := s.db.QueryContext(ctx, `
++		SELECT id, issue_id, author, text, created_at
++		FROM comments
++		WHERE issue_id = ?
++		ORDER BY created_at ASC
++	`, issueID)
++	if err != nil {
++		return nil, fmt.Errorf("failed to query comments: %w", err)
++	}
++	defer rows.Close()
++
++	var comments []*types.Comment
++	for rows.Next() {
++		comment := &types.Comment{}
++		err := rows.Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt)
++		if err != nil {
++			return nil, fmt.Errorf("failed to scan comment: %w", err)
++		}
++		comments = append(comments, comment)
++	}
++
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("error iterating comments: %w", err)
++	}
++
++	return comments, nil
++}
++
+ // Close closes the database connection
+ func (s *SQLiteStorage) Close() error {
+ 	return s.db.Close()
+diff --git a/internal/storage/storage.go b/internal/storage/storage.go
+index c928353..e3a8809 100644
+--- a/internal/storage/storage.go
++++ b/internal/storage/storage.go
+@@ -42,6 +42,10 @@ type Storage interface {
+ 	AddComment(ctx context.Context, issueID, actor, comment string) error
+ 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
+ 
++	// Comments
++	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)
++	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
++
+ 	// Statistics
+ 	GetStatistics(ctx context.Context) (*types.Statistics, error)
+ 
+diff --git a/internal/types/types.go b/internal/types/types.go
+index bd7fb2c..31184aa 100644
+--- a/internal/types/types.go
++++ b/internal/types/types.go
+@@ -29,6 +29,7 @@ type Issue struct {
+ 	OriginalSize       int            `json:"original_size,omitempty"`
+ 	Labels             []string       `json:"labels,omitempty"`       // Populated only for export/import
+ 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
++	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import
+ }
+ 
+ // Validate checks if the issue has valid field values
+@@ -137,6 +138,15 @@ type Label struct {
+ 	Label   string `json:"label"`
+ }
+ 
++// Comment represents a comment on an issue
++type Comment struct {
++	ID        int64     `json:"id"`
++	IssueID   string    `json:"issue_id"`
++	Author    string    `json:"author"`
++	Text      string    `json:"text"`
++	CreatedAt time.Time `json:"created_at"`
++}
++
+ // Event represents an audit trail entry
+ type Event struct {
+ 	ID        int64      `json:"id"`
