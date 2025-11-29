@@ -342,13 +342,13 @@ func TestExportUpdatesMetadata(t *testing.T) {
 	}
 	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
-	// Verify metadata was set
-	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
+	// Verify metadata was set (renamed from last_import_hash to jsonl_content_hash - bd-39o)
+	lastHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
 	if err != nil {
-		t.Fatalf("failed to get last_import_hash: %v", err)
+		t.Fatalf("failed to get jsonl_content_hash: %v", err)
 	}
 	if lastHash == "" {
-		t.Error("expected last_import_hash to be set after export")
+		t.Error("expected jsonl_content_hash to be set after export")
 	}
 
 	lastTime, err := store.GetMetadata(ctx, "last_import_time")
@@ -449,7 +449,8 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 	updateExportMetadata(ctx, store, jsonlPath2, mockLogger, jsonlPath2)
 
 	// Verify per-repo metadata was set with correct keys (bd-web8: keys are sanitized)
-	hash1Key := "last_import_hash:" + sanitizeMetadataKey(jsonlPath1)
+	// Renamed from last_import_hash to jsonl_content_hash (bd-39o)
+	hash1Key := "jsonl_content_hash:" + sanitizeMetadataKey(jsonlPath1)
 	hash1, err := store.GetMetadata(ctx, hash1Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", hash1Key, err)
@@ -458,7 +459,7 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 		t.Errorf("expected %s to be set", hash1Key)
 	}
 
-	hash2Key := "last_import_hash:" + sanitizeMetadataKey(jsonlPath2)
+	hash2Key := "jsonl_content_hash:" + sanitizeMetadataKey(jsonlPath2)
 	hash2, err := store.GetMetadata(ctx, hash2Key)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", hash2Key, err)
@@ -468,12 +469,12 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 	}
 
 	// Verify that single-repo metadata key is NOT set (we're using per-repo keys)
-	globalHash, err := store.GetMetadata(ctx, "last_import_hash")
+	globalHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
 	if err != nil {
-		t.Fatalf("failed to get last_import_hash: %v", err)
+		t.Fatalf("failed to get jsonl_content_hash: %v", err)
 	}
 	if globalHash != "" {
-		t.Error("expected global last_import_hash to not be set when using per-repo keys")
+		t.Error("expected global jsonl_content_hash to not be set when using per-repo keys")
 	}
 
 	// Note: last_import_mtime removed in bd-v0y fix (git doesn't preserve mtime)
@@ -568,8 +569,8 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 		updateExportMetadata(ctx, store, path, mockLogger, repoKey)
 	}
 
-	// Verify metadata for primary repo (bd-web8: keys are sanitized)
-	primaryHashKey := "last_import_hash:" + sanitizeMetadataKey(primaryDir)
+	// Verify metadata for primary repo (bd-web8: keys are sanitized, bd-39o: renamed key)
+	primaryHashKey := "jsonl_content_hash:" + sanitizeMetadataKey(primaryDir)
 	primaryHash, err := store.GetMetadata(ctx, primaryHashKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", primaryHashKey, err)
@@ -589,8 +590,8 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 
 	// Note: last_import_mtime removed in bd-v0y fix (git doesn't preserve mtime)
 
-	// Verify metadata for additional repo (bd-web8: keys are sanitized)
-	additionalHashKey := "last_import_hash:" + sanitizeMetadataKey(additionalDir)
+	// Verify metadata for additional repo (bd-web8: keys are sanitized, bd-39o: renamed key)
+	additionalHashKey := "jsonl_content_hash:" + sanitizeMetadataKey(additionalDir)
 	additionalHash, err := store.GetMetadata(ctx, additionalHashKey)
 	if err != nil {
 		t.Fatalf("failed to get %s: %v", additionalHashKey, err)
@@ -616,12 +617,12 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 	// metadata is set with correct per-repo keys.
 
 	// Verify global metadata keys are NOT set (multi-repo mode uses suffixed keys)
-	globalHash, err := store.GetMetadata(ctx, "last_import_hash")
+	globalHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
 	if err != nil {
-		t.Fatalf("failed to get last_import_hash: %v", err)
+		t.Fatalf("failed to get jsonl_content_hash: %v", err)
 	}
 	if globalHash != "" {
-		t.Error("expected global last_import_hash to not be set in multi-repo mode")
+		t.Error("expected global jsonl_content_hash to not be set in multi-repo mode")
 	}
 
 	// Test that subsequent exports don't fail with "content has changed" error
@@ -687,8 +688,9 @@ func TestUpdateExportMetadataInvalidKeySuffix(t *testing.T) {
 	updateExportMetadata(ctx, store, jsonlPath, mockLogger, keySuffixWithColon)
 
 	// Verify metadata WAS set with sanitized key (colons replaced with underscores)
+	// bd-39o: renamed from last_import_hash to jsonl_content_hash
 	sanitized := sanitizeMetadataKey(keySuffixWithColon)
-	sanitizedKey := "last_import_hash:" + sanitized
+	sanitizedKey := "jsonl_content_hash:" + sanitized
 	hash, err := store.GetMetadata(ctx, sanitizedKey)
 	if err != nil {
 		t.Fatalf("failed to get metadata: %v", err)
@@ -698,7 +700,7 @@ func TestUpdateExportMetadataInvalidKeySuffix(t *testing.T) {
 	}
 
 	// Verify that the original unsanitized key was NOT used
-	unsanitizedKey := "last_import_hash:" + keySuffixWithColon
+	unsanitizedKey := "jsonl_content_hash:" + keySuffixWithColon
 	unsanitizedHash, err := store.GetMetadata(ctx, unsanitizedKey)
 	if err != nil {
 		t.Fatalf("failed to check unsanitized key: %v", err)

@@ -83,14 +83,17 @@ func autoImportIfNewer() {
 	hasher.Write(jsonlData)
 	currentHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Get last import hash from DB metadata
+	// Get content hash from DB metadata (try new key first, fall back to old for migration - bd-39o)
 	ctx := rootCtx
-	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
-	if err != nil {
-		// Metadata error - treat as first import rather than skipping (bd-663)
-		// This allows auto-import to recover from corrupt/missing metadata
-		debug.Logf("metadata read failed (%v), treating as first import", err)
-		lastHash = ""
+	lastHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
+	if err != nil || lastHash == "" {
+		lastHash, err = store.GetMetadata(ctx, "last_import_hash")
+		if err != nil {
+			// Metadata error - treat as first import rather than skipping (bd-663)
+			// This allows auto-import to recover from corrupt/missing metadata
+			debug.Logf("metadata read failed (%v), treating as first import", err)
+			lastHash = ""
+		}
 	}
 
 	// Compare hashes
@@ -232,9 +235,9 @@ func autoImportIfNewer() {
 		}
 	}
 
-	// Store new hash after successful import
-	if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after import: %v\n", err)
+	// Store new hash after successful import (renamed from last_import_hash - bd-39o)
+	if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_content_hash after import: %v\n", err)
 		fmt.Fprintf(os.Stderr, "This may cause auto-import to retry the same import on next operation.\n")
 	}
 
@@ -699,13 +702,14 @@ func flushToJSONLWithState(state flushState) {
 	}
 
 	// Store hash of exported JSONL (fixes bd-84: enables hash-based auto-import)
+	// Renamed from last_import_hash to jsonl_content_hash (bd-39o)
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err == nil {
 		hasher := sha256.New()
 		hasher.Write(jsonlData)
 		exportedHash := hex.EncodeToString(hasher.Sum(nil))
-		if err := store.SetMetadata(ctx, "last_import_hash", exportedHash); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash after export: %v\n", err)
+		if err := store.SetMetadata(ctx, "jsonl_content_hash", exportedHash); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_content_hash after export: %v\n", err)
 		}
 
 		// Store JSONL file hash for integrity validation (bd-160)

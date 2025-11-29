@@ -247,16 +247,17 @@ func sanitizeMetadataKey(key string) string {
 	return strings.ReplaceAll(key, ":", "_")
 }
 
-// updateExportMetadata updates last_import_hash and related metadata after a successful export.
+// updateExportMetadata updates jsonl_content_hash and related metadata after a successful export.
 // This prevents "JSONL content has changed since last import" errors on subsequent exports (bd-ymj fix).
 // In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
 //
-// Metadata key format (bd-ar2.12):
-//   - Single-repo mode: "last_import_hash", "last_import_time"
-//   - Multi-repo mode: "last_import_hash:<repo_key>", "last_import_time:<repo_key>", etc.
+// Metadata key format (bd-ar2.12, bd-39o):
+//   - Single-repo mode: "jsonl_content_hash", "last_import_time"
+//   - Multi-repo mode: "jsonl_content_hash:<repo_key>", "last_import_time:<repo_key>", etc.
 //     where <repo_key> is a stable repo identifier like "." or "../frontend"
 //   - Windows paths: Colons in absolute paths (e.g., C:\...) are replaced with underscores (bd-web8)
 //   - Note: "last_import_mtime" was removed in bd-v0y fix (git doesn't preserve mtime)
+//   - Note: "last_import_hash" renamed to "jsonl_content_hash" (bd-39o) - more accurate name
 //
 // Transaction boundaries (bd-ar2.6):
 // This function does NOT provide atomicity between JSONL write, metadata updates, and DB mtime.
@@ -279,7 +280,8 @@ func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath 
 	}
 
 	// Build metadata keys with optional suffix for per-repo tracking
-	hashKey := "last_import_hash"
+	// Renamed from last_import_hash to jsonl_content_hash (bd-39o)
+	hashKey := "jsonl_content_hash"
 	timeKey := "last_import_time"
 	if keySuffix != "" {
 		hashKey += ":" + keySuffix

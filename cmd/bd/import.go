@@ -350,17 +350,18 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			flushToJSONL()
 		}
 
-		// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+		// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)
 		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
 		// ALWAYS update metadata after successful import, even if no changes were made (fixes staleness check)
 		// This ensures that running `bd import` marks the database as fresh for staleness detection
+		// Renamed from last_import_hash (bd-39o) - more accurate since updated on both import AND export
 		if input != "" {
 			if currentHash, err := computeJSONLHash(input); err == nil {
-				if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+				if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
 					// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
 					// successful imports. System degrades gracefully to mtime-based staleness detection if metadata
 					// is unavailable. This ensures import operations always succeed even if metadata storage fails.
-					debug.Logf("Warning: failed to update last_import_hash: %v", err)
+					debug.Logf("Warning: failed to update jsonl_content_hash: %v", err)
 				}
 				// Use RFC3339Nano for nanosecond precision to avoid race with file mtime (fixes #399)
 				importTime := time.Now().Format(time.RFC3339Nano)

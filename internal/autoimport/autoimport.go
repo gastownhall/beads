@@ -84,10 +84,14 @@ func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string
 	hasher.Write(jsonlData)
 	currentHash := hex.EncodeToString(hasher.Sum(nil))
 
-	lastHash, err := store.GetMetadata(ctx, "last_import_hash")
-	if err != nil {
-		notify.Debugf("metadata read failed (%v), treating as first import", err)
-		lastHash = ""
+	// Try new key first, fall back to old key for migration (bd-39o)
+	lastHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
+	if err != nil || lastHash == "" {
+		lastHash, err = store.GetMetadata(ctx, "last_import_hash")
+		if err != nil {
+			notify.Debugf("metadata read failed (%v), treating as first import", err)
+			lastHash = ""
+		}
 	}
 
 	if currentHash == lastHash {
@@ -130,8 +134,8 @@ func AutoImportIfNewer(ctx context.Context, store storage.Storage, dbPath string
 		onChanged(needsFullExport)
 	}
 
-	if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
-		notify.Warnf("failed to update last_import_hash after import: %v", err)
+	if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
+		notify.Warnf("failed to update jsonl_content_hash after import: %v", err)
 		notify.Warnf("This may cause auto-import to retry the same import on next operation.")
 	}
 

@@ -63,11 +63,12 @@ func TestValidatePreExportSuite(t *testing.T) {
 		}
 
 		// Store hash metadata to indicate JSONL and DB are in sync
+		// bd-39o: renamed from last_import_hash to jsonl_content_hash
 		hash, err := computeJSONLHash(jsonlPath)
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash", hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash", hash); err != nil {
 			t.Fatalf("Failed to set hash metadata: %v", err)
 		}
 
@@ -135,12 +136,12 @@ func TestValidatePreExportSuite(t *testing.T) {
 			t.Fatalf("Failed to write JSONL: %v", err)
 		}
 
-		// Store hash of original content
+		// Store hash of original content (bd-39o: renamed to jsonl_content_hash)
 		hash, err := computeJSONLHash(jsonlPath)
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash", hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash", hash); err != nil {
 			t.Fatalf("Failed to set hash: %v", err)
 		}
 
@@ -402,7 +403,7 @@ func TestHasJSONLChangedSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash:"+keySuffix, hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash:"+keySuffix, hash); err != nil {
 			t.Fatalf("Failed to set metadata: %v", err)
 		}
 
@@ -437,7 +438,7 @@ func TestHasJSONLChangedSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash:"+keySuffix, hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash:"+keySuffix, hash); err != nil {
 			t.Fatalf("Failed to set metadata: %v", err)
 		}
 
@@ -522,7 +523,7 @@ func TestHasJSONLChangedSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash:"+keySuffix, hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash:"+keySuffix, hash); err != nil {
 			t.Fatalf("Failed to set hash: %v", err)
 		}
 
@@ -560,7 +561,7 @@ func TestHasJSONLChangedSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to compute hash: %v", err)
 		}
-		if err := s.SetMetadata(ctx, "last_import_hash:"+keySuffix, hash); err != nil {
+		if err := s.SetMetadata(ctx, "jsonl_content_hash:"+keySuffix, hash); err != nil {
 			t.Fatalf("Failed to set hash: %v", err)
 		}
 

@@ -986,14 +986,15 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	// Clear auto-flush state
 	clearAutoFlushState()
 
-	// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+	// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)
 	// After export, database and JSONL are in sync, so update hash to prevent unnecessary auto-import
+	// Renamed from last_import_hash (bd-39o) - more accurate since updated on both import AND export
 	if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
-		if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+		if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
 			// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
 			// successful exports. System degrades gracefully to mtime-based staleness detection if metadata
 			// is unavailable. This ensures export operations always succeed even if metadata storage fails.
-			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_content_hash: %v\n", err)
 		}
 		// Use RFC3339Nano for nanosecond precision to avoid race with file mtime (fixes #399)
 		exportTime := time.Now().Format(time.RFC3339Nano)

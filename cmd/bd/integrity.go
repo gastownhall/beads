@@ -106,9 +106,13 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 	}
 
 	// Build metadata keys with optional suffix for per-repo tracking (bd-ar2.10, bd-ar2.11)
-	hashKey := "last_import_hash"
+	// Renamed from last_import_hash to jsonl_content_hash (bd-39o) - more accurate name
+	// since this hash is updated on both import AND export
+	hashKey := "jsonl_content_hash"
+	oldHashKey := "last_import_hash" // Migration: check old key if new key missing
 	if keySuffix != "" {
 		hashKey += ":" + keySuffix
+		oldHashKey += ":" + keySuffix
 	}
 
 	// Always compute content hash (bd-v0y fix)
@@ -121,12 +125,16 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 		return false
 	}
 
-	// Get last import hash from metadata
+	// Get content hash from metadata (try new key first, fall back to old for migration)
 	lastHash, err := store.GetMetadata(ctx, hashKey)
-	if err != nil {
-		// No previous import hash - this is the first run or metadata is missing
-		// Assume changed to trigger import
-		return true
+	if err != nil || lastHash == "" {
+		// Try old key for migration (bd-39o)
+		lastHash, err = store.GetMetadata(ctx, oldHashKey)
+		if err != nil || lastHash == "" {
+			// No previous hash - this is the first run or metadata is missing
+			// Assume changed to trigger import
+			return true
+		}
 	}
 
 	// Compare hashes
