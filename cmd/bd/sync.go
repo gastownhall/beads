@@ -440,6 +440,14 @@ Use --merge to merge the sync branch back to main branch.`,
 				fmt.Fprintf(os.Stderr, "Warning: auto-compact deletions failed: %v\n", err)
 			}
 
+			// Clean up snapshot files after successful sync (bd-0io fix)
+			// This ensures snapshots are removed even when --no-pull is used,
+			// since captureLeftSnapshot is called before the pull block.
+			sm := NewSnapshotManager(jsonlPath)
+			if err := sm.Cleanup(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up snapshots: %v\n", err)
+			}
+
 			fmt.Println("\n✓ Sync complete")
 		}
 	},
