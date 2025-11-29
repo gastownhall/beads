@@ -296,7 +296,8 @@ var rootCmd = &cobra.Command{
 					}
 
 					isNoDbMode := false
-					if configData, err := os.ReadFile(configPath); err == nil {
+					// configPath is safe: constructed from filepath.Join(beadsDir, hardcoded name)
+					if configData, err := os.ReadFile(configPath); err == nil { //nolint:gosec
 						isNoDbMode = strings.Contains(string(configData), "no-db: true")
 					}
 
