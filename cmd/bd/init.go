@@ -43,11 +43,21 @@ With --stealth: configures global git settings for invisible beads usage:
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
+		force, _ := cmd.Flags().GetBool("force")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
 			// Non-fatal - continue with defaults
+		}
+
+		// Safety guard: check for existing JSONL with issues (bd-emg)
+		// This prevents accidental re-initialization in fresh clones
+		if !force {
+			if err := checkExistingBeadsData(prefix); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		// Handle stealth mode setup
@@ -443,6 +453,7 @@ func init() {
 	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup")
+	initCmd.Flags().Bool("force", false, "Force re-initialization even if JSONL already has issues (may cause data loss)")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -1307,6 +1318,113 @@ func setupGlobalGitIgnore(homeDir string, verbose bool) error {
 	}
 
 	return nil
+}
+
+// checkExistingBeadsData checks for existing JSONL or database files
+// and returns an error if found (safety guard for bd-emg)
+func checkExistingBeadsData(prefix string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil // Can't determine CWD, allow init to proceed
+	}
+
+	beadsDir := filepath.Join(cwd, ".beads")
+
+	// Check if .beads directory exists
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return nil // No .beads directory, safe to init
+	}
+
+	// Check for existing database file
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	if _, err := os.Stat(dbPath); err == nil {
+		yellow := color.New(color.FgYellow).SprintFunc()
+		cyan := color.New(color.FgCyan).SprintFunc()
+
+		return fmt.Errorf(`
+%s Found existing database: %s
+
+This workspace is already initialized.
+
+To use the existing database:
+  Just run bd commands normally (e.g., %s)
+
+To completely reinitialize (data loss warning):
+  rm -rf .beads && bd init --prefix %s
+
+Aborting.`, yellow("⚠"), dbPath, cyan("bd list"), prefix)
+	}
+
+	// Check for existing JSONL files with issues
+	jsonlCandidates := []string{
+		filepath.Join(beadsDir, "issues.jsonl"),
+		filepath.Join(beadsDir, "beads.jsonl"),
+	}
+
+	for _, jsonlPath := range jsonlCandidates {
+		if _, err := os.Stat(jsonlPath); err == nil {
+			// JSONL exists, count issues
+			issueCount := countIssuesInJSONLFile(jsonlPath)
+
+			if issueCount > 0 {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				cyan := color.New(color.FgCyan).SprintFunc()
+
+				prefixHint := prefix
+				if prefixHint == "" {
+					prefixHint = "<prefix>"
+				}
+
+				return fmt.Errorf(`
+%s Found existing %s with %d issues.
+
+This appears to be a fresh clone, not a new project.
+
+To hydrate the database from existing JSONL:
+  %s
+
+To force re-initialization (may cause data loss):
+  bd init --prefix %s --force
+
+Aborting.`, yellow("⚠"), filepath.Base(jsonlPath), issueCount, cyan("bd doctor --fix"), prefixHint)
+			}
+			// Empty JSONL (0 issues) is OK - likely a new project
+		}
+	}
+
+	return nil // No existing data found, safe to init
+}
+
+// countIssuesInJSONLFile counts valid issue lines in a JSONL file
+func countIssuesInJSONLFile(path string) int {
+	// #nosec G304 -- helper reads JSONL file in .beads directory
+	file, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(file)
+	// Use larger buffer for potentially large JSONL lines
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		// Quick validation: check if it's valid JSON with an "id" field
+		var issue struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(line), &issue); err == nil && issue.ID != "" {
+			count++
+		}
+	}
+
+	return count
 }
 
 // setupClaudeSettings creates or updates .claude/settings.local.json with onboard instruction

@@ -196,7 +196,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
 	dbPath = ""
-	
+
 	tmpDir := t.TempDir()
 	originalWd, err := os.Getwd()
 	if err != nil {
@@ -215,11 +215,12 @@ func TestInitAlreadyInitialized(t *testing.T) {
 		t.Fatalf("First init failed: %v", err)
 	}
 
-	// Initialize again with same prefix - should succeed (overwrites)
-	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	// Initialize again with same prefix and --force flag (bd-emg: safety guard)
+	// Without --force, init should refuse when database already exists
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
 
 	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("Second init failed: %v", err)
+		t.Fatalf("Second init with --force failed: %v", err)
 	}
 
 	// Verify database still works (always beads.db now)
