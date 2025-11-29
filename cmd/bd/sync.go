@@ -34,6 +34,7 @@ var syncCmd = &cobra.Command{
 
 This command wraps the entire git-based sync workflow for multi-device use.
 
+Use --squash to accumulate changes without committing (reduces commit noise).
 Use --flush-only to just export pending changes to JSONL (useful for pre-commit hooks).
 Use --import-only to just import from JSONL (useful after git pull).
 Use --status to show diff between sync branch and main branch.
@@ -52,6 +53,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		merge, _ := cmd.Flags().GetBool("merge")
 		fromMain, _ := cmd.Flags().GetBool("from-main")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
+		squash, _ := cmd.Flags().GetBool("squash")
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
@@ -111,6 +113,23 @@ Use --merge to merge the sync branch back to main branch.`,
 					fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
 					os.Exit(1)
 				}
+			}
+			return
+		}
+
+		// If squash mode, export to JSONL but skip git operations (bd-o2e)
+		// This accumulates changes for a single commit later
+		if squash {
+			if dryRun {
+				fmt.Println("→ [DRY RUN] Would export pending changes to JSONL (squash mode)")
+			} else {
+				fmt.Println("→ Exporting pending changes to JSONL (squash mode)...")
+				if err := exportToJSONL(ctx, jsonlPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("✓ Changes accumulated in JSONL")
+				fmt.Println("  Run 'bd sync' (without --squash) to commit all accumulated changes")
 			}
 			return
 		}
@@ -453,6 +472,7 @@ func init() {
 	syncCmd.Flags().Bool("no-pull", false, "Skip pulling from remote")
 	syncCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	syncCmd.Flags().Bool("flush-only", false, "Only export pending changes to JSONL (skip git operations)")
+	syncCmd.Flags().Bool("squash", false, "Accumulate changes in JSONL without committing (run 'bd sync' later to commit all)")
 	syncCmd.Flags().Bool("import-only", false, "Only import from JSONL (skip git operations, useful after git pull)")
 	syncCmd.Flags().Bool("status", false, "Show diff between sync branch and main branch")
 	syncCmd.Flags().Bool("merge", false, "Merge sync branch back to main branch")

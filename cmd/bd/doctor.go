@@ -2258,11 +2258,7 @@ func checkUntrackedBeadsFiles(path string) doctorCheck {
 	}
 }
 
-// countIssuesInJSONLFile counts the number of issues in a JSONL file
-func countIssuesInJSONLFile(jsonlPath string) int {
-	count, _, _ := countJSONLIssues(jsonlPath)
-	return count
-}
+// NOTE: countIssuesInJSONLFile is defined in init.go
 
 // detectPrefixFromJSONL detects the most common issue prefix from a JSONL file
 func detectPrefixFromJSONL(jsonlPath string) string {
