@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -231,6 +232,7 @@ func FindDatabasePath() string {
 
 // FindBeadsDir finds the .beads/ directory in the current directory tree
 // Returns empty string if not found. Supports both database and JSONL-only mode.
+// Stops at the git repository root to avoid finding unrelated directories (bd-c8x).
 // This is useful for commands that need to detect beads projects without requiring a database.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
@@ -247,10 +249,18 @@ func FindBeadsDir() string {
 		return ""
 	}
 
+	// Find git root to limit the search (bd-c8x)
+	gitRoot := findGitRoot()
+
 	for dir := cwd; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
+		}
+
+		// Stop at git root to avoid finding unrelated directories (bd-c8x)
+		if gitRoot != "" && dir == gitRoot {
+			break
 		}
 	}
 
@@ -312,7 +322,20 @@ type DatabaseInfo struct {
 	IssueCount int   // Number of issues (-1 if unknown)
 }
 
+// findGitRoot returns the root directory of the current git repository,
+// or empty string if not in a git repository. Used to limit directory
+// tree walking to within the current git repo (bd-c8x).
+func findGitRoot() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 // findDatabaseInTree walks up the directory tree looking for .beads/*.db
+// Stops at the git repository root to avoid finding unrelated databases (bd-c8x).
 // Prefers config.json, falls back to beads.db, and warns if multiple .db files exist
 func findDatabaseInTree() string {
 	dir, err := os.Getwd()
@@ -325,6 +348,9 @@ func findDatabaseInTree() string {
 	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolvedDir
 	}
+
+	// Find git root to limit the search (bd-c8x)
+	gitRoot := findGitRoot()
 
 	// Walk up directory tree
 	for {
@@ -342,6 +368,12 @@ func findDatabaseInTree() string {
 			// Reached filesystem root
 			break
 		}
+
+		// Stop at git root to avoid finding unrelated databases (bd-c8x)
+		if gitRoot != "" && dir == gitRoot {
+			break
+		}
+
 		dir = parent
 	}
 
@@ -351,6 +383,7 @@ func findDatabaseInTree() string {
 // FindAllDatabases scans the directory hierarchy for all .beads directories
 // Returns a slice of DatabaseInfo for each database found, starting from the
 // closest to CWD (most relevant) to the furthest (least relevant).
+// Stops at the git repository root to avoid finding unrelated databases (bd-c8x).
 func FindAllDatabases() []DatabaseInfo {
 	databases := []DatabaseInfo{} // Initialize to empty slice, never return nil
 	seen := make(map[string]bool) // Track canonical paths to avoid duplicates
@@ -359,6 +392,9 @@ func FindAllDatabases() []DatabaseInfo {
 	if err != nil {
 		return databases
 	}
+
+	// Find git root to limit the search (bd-c8x)
+	gitRoot := findGitRoot()
 
 	// Walk up directory tree
 	for {
@@ -414,6 +450,12 @@ func FindAllDatabases() []DatabaseInfo {
 			// Reached filesystem root
 			break
 		}
+
+		// Stop at git root to avoid finding unrelated databases (bd-c8x)
+		if gitRoot != "" && dir == gitRoot {
+			break
+		}
+
 		dir = parent
 	}
 

@@ -383,6 +383,13 @@ func TestCheckDatabaseVersionJSONLMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create config.yaml with no-db: true to indicate intentional JSONL-only mode
+	// Without this, doctor treats it as a fresh clone needing 'bd init' (bd-4ew)
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("no-db: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	check := checkDatabaseVersion(tmpDir)
 
 	if check.Status != statusOK {
@@ -393,6 +400,34 @@ func TestCheckDatabaseVersionJSONLMode(t *testing.T) {
 	}
 	if check.Detail == "" {
 		t.Error("Expected detail field to be set for JSONL mode")
+	}
+}
+
+func TestCheckDatabaseVersionFreshClone(t *testing.T) {
+	// Create temporary directory with .beads and JSONL but no database
+	// This simulates a fresh clone that needs 'bd init'
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create issues.jsonl with an issue (no config.yaml = not no-db mode)
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"test-1","title":"Test"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkDatabaseVersion(tmpDir)
+
+	if check.Status != statusWarning {
+		t.Errorf("Expected warning status for fresh clone, got %s", check.Status)
+	}
+	if check.Message != "Fresh clone detected (no database)" {
+		t.Errorf("Expected fresh clone message, got %s", check.Message)
+	}
+	if check.Fix == "" {
+		t.Error("Expected fix field to recommend 'bd init'")
 	}
 }
 
