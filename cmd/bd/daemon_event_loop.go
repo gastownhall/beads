@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"runtime"
 	"time"
 
 	"github.com/steveyegge/beads/internal/rpc"
@@ -168,8 +169,9 @@ func runEventDrivenLoop(
 // Separate from sync operations - just validates state.
 //
 // Implements bd-e0o: Phase 3 daemon robustness for GH #353
+// Implements bd-gqo: Additional health checks
 func checkDaemonHealth(ctx context.Context, store storage.Storage, log daemonLogger) {
-	// Health check: Verify metadata is accessible
+	// Health check 1: Verify metadata is accessible
 	// This helps detect if external operations (like bd import --force) have modified metadata
 	// Without this, daemon may continue operating with stale metadata cache
 	if _, err := store.GetMetadata(ctx, "last_import_hash"); err != nil {
@@ -178,8 +180,38 @@ func checkDaemonHealth(ctx context.Context, store storage.Storage, log daemonLog
 		// This helps diagnose stuck states in sandboxed environments
 	}
 
-	// TODO(bd-gqo): Add additional health checks:
-	// - Database integrity check
-	// - Disk space check
-	// - Memory usage check
+	// Health check 2: Database integrity check
+	// Verify the database is accessible and structurally sound
+	if db := store.UnderlyingDB(); db != nil {
+		// Quick integrity check - just verify we can query
+		var result string
+		if err := db.QueryRowContext(ctx, "PRAGMA quick_check(1)").Scan(&result); err != nil {
+			log.log("Health check: database integrity check failed: %v", err)
+		} else if result != "ok" {
+			log.log("Health check: database integrity issue: %s", result)
+		}
+	}
+
+	// Health check 3: Disk space check (platform-specific)
+	// Uses checkDiskSpace helper which is implemented per-platform
+	dbPath := store.Path()
+	if dbPath != "" {
+		if availableMB, ok := checkDiskSpace(dbPath); ok {
+			// Warn if less than 100MB available
+			if availableMB < 100 {
+				log.log("Health check: low disk space warning: %dMB available", availableMB)
+			}
+		}
+	}
+
+	// Health check 4: Memory usage check
+	// Log warning if memory usage is unusually high
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	heapMB := memStats.HeapAlloc / (1024 * 1024)
+
+	// Warn if heap exceeds 500MB (daemon should be lightweight)
+	if heapMB > 500 {
+		log.log("Health check: high memory usage warning: %dMB heap allocated", heapMB)
+	}
 }
