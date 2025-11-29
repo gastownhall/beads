@@ -408,12 +408,6 @@ Use --merge to merge the sync branch back to main branch.`,
 				if err := updateBaseSnapshot(jsonlPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to update base snapshot: %v\n", err)
 				}
-
-				// Clean up temporary snapshot files after successful merge
-				sm := NewSnapshotManager(jsonlPath)
-				if err := sm.Cleanup(); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to clean up snapshots: %v\n", err)
-				}
 			}
 		}
 
