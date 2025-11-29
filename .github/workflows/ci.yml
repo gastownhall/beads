@@ -101,6 +101,7 @@ jobs:
         run: |
           export BEADS_DB="$PWD/.ci-beads/beads.db"
           mkdir -p "$(dirname "$BEADS_DB")"
+          rm -rf .beads
           nix run .#default -- --db "$BEADS_DB" init --quiet --prefix ci
           nix run .#default -- --db "$BEADS_DB" > help.txt
       - name: Verify help text
