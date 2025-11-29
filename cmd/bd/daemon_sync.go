@@ -762,6 +762,22 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 			}
 		}
 
+		// Clean up temporary snapshot files after successful merge (bd-upd)
+		// In multi-repo mode, clean up snapshots for all JSONL files
+		if multiRepoPaths != nil {
+			for _, path := range multiRepoPaths {
+				sm := NewSnapshotManager(path)
+				if err := sm.Cleanup(); err != nil {
+					log.log("Warning: failed to clean up snapshots for %s: %v", path, err)
+				}
+			}
+		} else {
+			sm := NewSnapshotManager(jsonlPath)
+			if err := sm.Cleanup(); err != nil {
+				log.log("Warning: failed to clean up snapshots: %v", err)
+			}
+		}
+
 		if autoPush && autoCommit {
 			if err := gitPush(syncCtx); err != nil {
 				log.log("Push failed: %v", err)
