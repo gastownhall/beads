@@ -48,6 +48,7 @@ type doctorResult struct {
 
 var (
 	doctorFix       bool
+	doctorYes       bool
 	perfMode        bool
 	checkHealthMode bool
 )
@@ -87,7 +88,8 @@ Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
   bd doctor --json       # Machine-readable output
-  bd doctor --fix        # Automatically fix issues
+  bd doctor --fix        # Automatically fix issues (with confirmation)
+  bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --perf       # Performance diagnostics`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
@@ -143,6 +145,7 @@ Examples:
 
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Automatically fix issues where possible")
+	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
 }
 
 func applyFixes(result doctorResult) {
@@ -165,19 +168,21 @@ func applyFixes(result doctorResult) {
 		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
 	}
 
-	// Ask for confirmation
-	fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixableIssues))
-	reader := bufio.NewReader(os.Stdin)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-		return
-	}
+	// Ask for confirmation (skip if --yes flag is set)
+	if !doctorYes {
+		fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixableIssues))
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			return
+		}
 
-	response = strings.TrimSpace(strings.ToLower(response))
-	if response != "" && response != "y" && response != "yes" {
-		fmt.Println("Fix canceled.")
-		return
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "" && response != "y" && response != "yes" {
+			fmt.Println("Fix canceled.")
+			return
+		}
 	}
 
 	// Apply fixes
