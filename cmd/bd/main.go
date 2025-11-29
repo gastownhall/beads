@@ -92,11 +92,11 @@ var (
 )
 
 var (
-	noAutoFlush  bool
-	noAutoImport bool
-	sandboxMode  bool
-	allowStale   bool // Use --allow-stale: skip staleness check (emergency escape hatch)
-	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
+	noAutoFlush    bool
+	noAutoImport   bool
+	sandboxMode    bool
+	allowStale     bool // Use --allow-stale: skip staleness check (emergency escape hatch)
+	noDb           bool // Use --no-db mode: load from JSONL, write back after each command
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
@@ -590,8 +590,14 @@ var rootCmd = &cobra.Command{
 		if store != nil {
 			_ = store.Close()
 		}
-		if profileFile != nil { pprof.StopCPUProfile(); _ = profileFile.Close() }
-		if traceFile != nil { trace.Stop(); _ = traceFile.Close() }
+		if profileFile != nil {
+			pprof.StopCPUProfile()
+			_ = profileFile.Close()
+		}
+		if traceFile != nil {
+			trace.Stop()
+			_ = traceFile.Close()
+		}
 
 		// Cancel the signal context to clean up resources
 		if rootCancel != nil {
@@ -623,6 +629,24 @@ func isFreshCloneError(err error) bool {
 		strings.Contains(errStr, "required config key missing: issue_prefix")
 }
 
+// isPathWithinDir reports whether candidate resides within baseDir (or is the same path).
+// Paths are cleaned before comparison to defend against directory traversal.
+func isPathWithinDir(baseDir, candidate string) bool {
+	cleanBase := filepath.Clean(baseDir)
+	cleanCandidate := filepath.Clean(candidate)
+
+	rel, err := filepath.Rel(cleanBase, cleanCandidate)
+	if err != nil {
+		return false
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+
+	return true
+}
+
 // handleFreshCloneError displays a helpful message when a fresh clone is detected
 // and returns true if the error was handled (so caller should exit).
 // If not a fresh clone error, returns false and does nothing.
@@ -636,12 +660,20 @@ func handleFreshCloneError(err error, beadsDir string) bool {
 	issueCount := 0
 
 	if beadsDir != "" {
+		if absBeadsDir, err := filepath.Abs(beadsDir); err == nil {
+			beadsDir = absBeadsDir
+		}
+
 		// Check for issues.jsonl (canonical) first, then beads.jsonl (legacy)
 		for _, name := range []string{"issues.jsonl", "beads.jsonl"} {
 			candidate := filepath.Join(beadsDir, name)
+			if !isPathWithinDir(beadsDir, candidate) {
+				continue
+			}
 			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 				jsonlPath = candidate
 				// Count lines (approximately = issue count)
+				// #nosec G304 -- candidate limited to known JSONL files inside .beads
 				if data, readErr := os.ReadFile(candidate); readErr == nil {
 					for _, line := range strings.Split(string(data), "\n") {
 						if strings.TrimSpace(line) != "" {

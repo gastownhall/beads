@@ -16,7 +16,16 @@ func UntrackedJSONL(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid workspace path: %w", err)
+	}
+	path = absPath
+
+	beadsDir, err := safeWorkspacePath(path, ".beads")
+	if err != nil {
+		return err
+	}
 
 	// Find untracked JSONL files
 	cmd := exec.Command("git", "status", "--porcelain", ".beads/")
@@ -49,21 +58,31 @@ func UntrackedJSONL(path string) error {
 
 	// Stage the untracked files
 	for _, file := range untrackedFiles {
-		fullPath := filepath.Join(path, file)
-		// Verify file exists in .beads directory (security check)
-		if !strings.HasPrefix(fullPath, beadsDir) {
+		cleanFile := filepath.Clean(file)
+		if filepath.IsAbs(cleanFile) || cleanFile == ".." || strings.HasPrefix(cleanFile, ".."+string(os.PathSeparator)) {
+			continue
+		}
+
+		// Only allow files inside .beads/
+		slashFile := filepath.ToSlash(cleanFile)
+		if !strings.HasPrefix(slashFile, ".beads/") {
+			continue
+		}
+
+		fullPath, err := safeWorkspacePath(path, cleanFile)
+		if err != nil || !isWithinWorkspace(beadsDir, fullPath) {
 			continue
 		}
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 			continue
 		}
 
-		addCmd := exec.Command("git", "add", file)
+		addCmd := exec.Command("git", "add", cleanFile) // #nosec G204 -- cleanFile constrained to .beads/*.jsonl within the validated workspace
 		addCmd.Dir = path
 		if err := addCmd.Run(); err != nil {
-			return fmt.Errorf("failed to stage %s: %w", file, err)
+			return fmt.Errorf("failed to stage %s: %w", cleanFile, err)
 		}
-		fmt.Printf("  Staged %s\n", filepath.Base(file))
+		fmt.Printf("  Staged %s\n", filepath.Base(cleanFile))
 	}
 
 	// Commit the staged files

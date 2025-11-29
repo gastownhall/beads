@@ -18,7 +18,16 @@ func DatabaseConfig(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid workspace path: %w", err)
+	}
+	path = absPath
+
+	beadsDir, err := safeWorkspacePath(path, ".beads")
+	if err != nil {
+		return err
+	}
 
 	// Load existing config
 	cfg, err := configfile.Load(beadsDir)
@@ -129,7 +138,16 @@ func LegacyJSONLConfig(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid workspace path: %w", err)
+	}
+	path = absPath
+
+	beadsDir, err := safeWorkspacePath(path, ".beads")
+	if err != nil {
+		return err
+	}
 
 	// Load existing config
 	cfg, err := configfile.Load(beadsDir)
@@ -162,8 +180,11 @@ func LegacyJSONLConfig(path string) error {
 		cfg.JSONLExport = "issues.jsonl"
 
 		// Update .gitattributes if it references beads.jsonl
-		gitattrsPath := filepath.Join(path, ".gitattributes")
-		if content, err := os.ReadFile(gitattrsPath); err == nil {
+		gitattrsPath, err := safeWorkspacePath(path, ".gitattributes")
+		if err != nil {
+			fmt.Printf("  Skipping .gitattributes update: %v\n", err)
+			// #nosec G304 -- gitattrsPath constrained to workspace root
+		} else if content, err := os.ReadFile(gitattrsPath); err == nil {
 			if strings.Contains(string(content), ".beads/beads.jsonl") {
 				newContent := strings.ReplaceAll(string(content), ".beads/beads.jsonl", ".beads/issues.jsonl")
 				// #nosec G306 -- .gitattributes should be world-readable
