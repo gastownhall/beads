@@ -338,3 +338,254 @@ func TestSparseCheckoutConfiguration(t *testing.T) {
 		}
 	})
 }
+
+func TestRemoveBeadsWorktreeManualCleanup(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+
+	// Create worktree
+	if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
+		t.Fatalf("CreateBeadsWorktree failed: %v", err)
+	}
+
+	// Manually corrupt the worktree to force manual cleanup path
+	// Remove the .git file which will cause git worktree remove to fail
+	gitFile := filepath.Join(worktreePath, ".git")
+	if err := os.Remove(gitFile); err != nil {
+		t.Fatalf("Failed to remove .git file: %v", err)
+	}
+
+	// Now remove should use the manual cleanup path
+	err := wm.RemoveBeadsWorktree(worktreePath)
+	if err != nil {
+		t.Errorf("RemoveBeadsWorktree should succeed with manual cleanup: %v", err)
+	}
+
+	// Verify directory is gone
+	if _, err := os.Stat(worktreePath); err == nil {
+		t.Error("Worktree directory should be removed")
+	}
+}
+
+func TestRemoveBeadsWorktreeNonExistent(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
+
+	// Removing a non-existent worktree should succeed (no-op)
+	err := wm.RemoveBeadsWorktree(nonExistentPath)
+	if err != nil {
+		t.Errorf("RemoveBeadsWorktree should succeed for non-existent path: %v", err)
+	}
+}
+
+func TestSyncJSONLToWorktreeErrors(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+
+	// Create worktree
+	if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
+		t.Fatalf("CreateBeadsWorktree failed: %v", err)
+	}
+
+	t.Run("fails when source file does not exist", func(t *testing.T) {
+		err := wm.SyncJSONLToWorktree(worktreePath, ".beads/nonexistent.jsonl")
+		if err == nil {
+			t.Error("SyncJSONLToWorktree should fail when source file does not exist")
+		}
+		if !strings.Contains(err.Error(), "failed to read source JSONL") {
+			t.Errorf("Expected 'failed to read source JSONL' error, got: %v", err)
+		}
+	})
+}
+
+func TestCreateBeadsWorktreeWithExistingBranch(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+
+	// Create a branch first
+	branchName := "existing-branch"
+	cmd := exec.Command("git", "branch", branchName)
+	cmd.Dir = repoPath
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to create branch: %v\nOutput: %s", err, string(output))
+	}
+
+	// Now create worktree with this existing branch
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+	if err := wm.CreateBeadsWorktree(branchName, worktreePath); err != nil {
+		t.Fatalf("CreateBeadsWorktree failed with existing branch: %v", err)
+	}
+
+	// Verify worktree was created
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		t.Error("Worktree directory was not created")
+	}
+
+	// Verify .beads exists
+	beadsDir := filepath.Join(worktreePath, ".beads")
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		t.Error(".beads directory not found in worktree")
+	}
+}
+
+func TestCreateBeadsWorktreeInvalidPath(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+
+	// Create a file where the worktree directory should be (but not a valid worktree)
+	if err := os.WriteFile(worktreePath, []byte("not a worktree"), 0644); err != nil {
+		t.Fatalf("Failed to create blocking file: %v", err)
+	}
+
+	// CreateBeadsWorktree should handle this - it should remove the invalid path
+	err := wm.CreateBeadsWorktree("beads-metadata", worktreePath)
+	if err != nil {
+		t.Fatalf("CreateBeadsWorktree should handle invalid path: %v", err)
+	}
+
+	// Verify worktree was created
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		t.Error("Worktree directory was not created")
+	}
+
+	// Verify it's now a valid worktree (directory, not file)
+	info, err := os.Stat(worktreePath)
+	if err != nil {
+		t.Fatalf("Failed to stat worktree path: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("Worktree path should be a directory")
+	}
+}
+
+func TestCheckWorktreeHealthWithBrokenSparseCheckout(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+
+	// Create worktree
+	if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
+		t.Fatalf("CreateBeadsWorktree failed: %v", err)
+	}
+
+	// Read the .git file to find the git directory
+	gitFile := filepath.Join(worktreePath, ".git")
+	gitContent, err := os.ReadFile(gitFile)
+	if err != nil {
+		t.Fatalf("Failed to read .git file: %v", err)
+	}
+
+	// Parse "gitdir: /path/to/git/dir"
+	gitDirLine := strings.TrimSpace(string(gitContent))
+	gitDir := strings.TrimPrefix(gitDirLine, "gitdir: ")
+
+	// Corrupt the sparse-checkout file
+	sparseFile := filepath.Join(gitDir, "info", "sparse-checkout")
+	if err := os.WriteFile(sparseFile, []byte("invalid\n"), 0644); err != nil {
+		t.Fatalf("Failed to corrupt sparse-checkout: %v", err)
+	}
+
+	// CheckWorktreeHealth should detect the problem and attempt to fix it
+	err = wm.CheckWorktreeHealth(worktreePath)
+	if err != nil {
+		t.Errorf("CheckWorktreeHealth should repair broken sparse checkout: %v", err)
+	}
+
+	// Verify sparse checkout was repaired
+	if err := wm.verifySparseCheckout(worktreePath); err != nil {
+		t.Errorf("Sparse checkout should be repaired: %v", err)
+	}
+}
+
+func TestVerifySparseCheckoutErrors(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+
+	t.Run("fails with missing .git file", func(t *testing.T) {
+		invalidPath := filepath.Join(t.TempDir(), "no-git-file")
+		if err := os.MkdirAll(invalidPath, 0750); err != nil {
+			t.Fatalf("Failed to create test directory: %v", err)
+		}
+
+		err := wm.verifySparseCheckout(invalidPath)
+		if err == nil {
+			t.Error("verifySparseCheckout should fail with missing .git file")
+		}
+	})
+
+	t.Run("fails with invalid .git file format", func(t *testing.T) {
+		invalidPath := filepath.Join(t.TempDir(), "invalid-git-file")
+		if err := os.MkdirAll(invalidPath, 0750); err != nil {
+			t.Fatalf("Failed to create test directory: %v", err)
+		}
+
+		// Create an invalid .git file (missing "gitdir: " prefix)
+		gitFile := filepath.Join(invalidPath, ".git")
+		if err := os.WriteFile(gitFile, []byte("invalid format"), 0644); err != nil {
+			t.Fatalf("Failed to create invalid .git file: %v", err)
+		}
+
+		err := wm.verifySparseCheckout(invalidPath)
+		if err == nil {
+			t.Error("verifySparseCheckout should fail with invalid .git file format")
+		}
+		if !strings.Contains(err.Error(), "invalid .git file format") {
+			t.Errorf("Expected 'invalid .git file format' error, got: %v", err)
+		}
+	})
+}
+
+func TestConfigureSparseCheckoutErrors(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+
+	t.Run("fails with missing .git file", func(t *testing.T) {
+		invalidPath := filepath.Join(t.TempDir(), "no-git-file")
+		if err := os.MkdirAll(invalidPath, 0750); err != nil {
+			t.Fatalf("Failed to create test directory: %v", err)
+		}
+
+		err := wm.configureSparseCheckout(invalidPath)
+		if err == nil {
+			t.Error("configureSparseCheckout should fail with missing .git file")
+		}
+	})
+
+	t.Run("fails with invalid .git file format", func(t *testing.T) {
+		invalidPath := filepath.Join(t.TempDir(), "invalid-git-file")
+		if err := os.MkdirAll(invalidPath, 0750); err != nil {
+			t.Fatalf("Failed to create test directory: %v", err)
+		}
+
+		// Create an invalid .git file
+		gitFile := filepath.Join(invalidPath, ".git")
+		if err := os.WriteFile(gitFile, []byte("invalid format"), 0644); err != nil {
+			t.Fatalf("Failed to create invalid .git file: %v", err)
+		}
+
+		err := wm.configureSparseCheckout(invalidPath)
+		if err == nil {
+			t.Error("configureSparseCheckout should fail with invalid .git file format")
+		}
+	})
+}
