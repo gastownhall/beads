@@ -736,6 +736,19 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		}
 	}
 
+	// Third pass: batch-load close reasons for closed issues
+	closeReasonsMap, err := s.GetCloseReasonsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch get close reasons: %w", err)
+	}
+
+	// Assign close reasons to issues
+	for _, issue := range issues {
+		if reason, ok := closeReasonsMap[issue.ID]; ok {
+			issue.CloseReason = reason
+		}
+	}
+
 	return issues, nil
 }
 

@@ -123,6 +123,9 @@ var showCmd = &cobra.Command{
 
 					fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
 					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
+					if issue.CloseReason != "" {
+						fmt.Printf("Close reason: %s\n", issue.CloseReason)
+					}
 					fmt.Printf("Priority: P%d\n", issue.Priority)
 					fmt.Printf("Type: %s\n", issue.IssueType)
 					if issue.Assignee != "" {
@@ -264,6 +267,9 @@ var showCmd = &cobra.Command{
 
 			fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
 			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
+			if issue.CloseReason != "" {
+				fmt.Printf("Close reason: %s\n", issue.CloseReason)
+			}
 			fmt.Printf("Priority: P%d\n", issue.Priority)
 			fmt.Printf("Type: %s\n", issue.IssueType)
 			if issue.Assignee != "" {

@@ -212,7 +212,91 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	issue.Labels = labels
 
+	// Fetch close reason if issue is closed
+	if issue.Status == types.StatusClosed {
+		closeReason, err := s.GetCloseReason(ctx, issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get close reason: %w", err)
+		}
+		issue.CloseReason = closeReason
+	}
+
 	return &issue, nil
+}
+
+// GetCloseReason retrieves the close reason from the most recent closed event for an issue
+func (s *SQLiteStorage) GetCloseReason(ctx context.Context, issueID string) (string, error) {
+	var comment sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT comment FROM events
+		WHERE issue_id = ? AND event_type = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, issueID, types.EventClosed).Scan(&comment)
+
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get close reason: %w", err)
+	}
+	if comment.Valid {
+		return comment.String, nil
+	}
+	return "", nil
+}
+
+// GetCloseReasonsForIssues retrieves close reasons for multiple issues in a single query
+func (s *SQLiteStorage) GetCloseReasonsForIssues(ctx context.Context, issueIDs []string) (map[string]string, error) {
+	result := make(map[string]string)
+	if len(issueIDs) == 0 {
+		return result, nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(issueIDs))
+	args := make([]interface{}, len(issueIDs)+1)
+	args[0] = types.EventClosed
+	for i, id := range issueIDs {
+		placeholders[i] = "?"
+		args[i+1] = id
+	}
+
+	// Use a subquery to get the most recent closed event for each issue
+	// #nosec G201 - safe SQL with controlled formatting
+	query := fmt.Sprintf(`
+		SELECT e.issue_id, e.comment
+		FROM events e
+		INNER JOIN (
+			SELECT issue_id, MAX(created_at) as max_created_at
+			FROM events
+			WHERE event_type = ? AND issue_id IN (%s)
+			GROUP BY issue_id
+		) latest ON e.issue_id = latest.issue_id AND e.created_at = latest.max_created_at
+		WHERE e.event_type = ?
+	`, strings.Join(placeholders, ", "))
+
+	// Append event_type again for the outer WHERE clause
+	args = append(args, types.EventClosed)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get close reasons: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var issueID string
+		var comment sql.NullString
+		if err := rows.Scan(&issueID, &comment); err != nil {
+			return nil, fmt.Errorf("failed to scan close reason: %w", err)
+		}
+		if comment.Valid && comment.String != "" {
+			result[issueID] = comment.String
+		}
+	}
+
+	return result, nil
 }
 
 // GetIssueByExternalRef retrieves an issue by external reference
@@ -281,6 +365,15 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		return nil, fmt.Errorf("failed to get labels: %w", err)
 	}
 	issue.Labels = labels
+
+	// Fetch close reason if issue is closed
+	if issue.Status == types.StatusClosed {
+		closeReason, err := s.GetCloseReason(ctx, issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get close reason: %w", err)
+		}
+		issue.CloseReason = closeReason
+	}
 
 	return &issue, nil
 }

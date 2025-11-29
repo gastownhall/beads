@@ -24,6 +24,7 @@ type Issue struct {
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	ClosedAt           *time.Time     `json:"closed_at,omitempty"`
+	CloseReason        string         `json:"close_reason,omitempty"` // Reason provided when closing the issue
 	ExternalRef        *string        `json:"external_ref,omitempty"` // e.g., "gh-9", "jira-ABC"
 	CompactionLevel    int            `json:"compaction_level,omitempty"`
 	CompactedAt        *time.Time     `json:"compacted_at,omitempty"`
