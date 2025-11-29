@@ -1514,6 +1514,13 @@ func countJSONLIssues(jsonlPath string) (int, map[string]int, error) {
 	return count, prefixes, nil
 }
 
+// countIssuesInJSONLFile counts the number of valid issues in a JSONL file.
+// This is a wrapper around countJSONLIssues that returns only the count.
+func countIssuesInJSONLFile(jsonlPath string) int {
+	count, _, _ := countJSONLIssues(jsonlPath)
+	return count
+}
+
 func checkPermissions(path string) doctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
 
