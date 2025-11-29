@@ -428,18 +428,17 @@ Use --merge to merge the sync branch back to main branch.`,
 		if dryRun {
 			fmt.Println("\n✓ Dry run complete (no changes made)")
 		} else {
+			// Clean up temporary snapshot files after successful sync (bd-0io)
+			// This runs regardless of whether pull was performed
+			sm := NewSnapshotManager(jsonlPath)
+			if err := sm.Cleanup(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up snapshots: %v\n", err)
+			}
+
 			// Auto-compact deletions manifest if enabled and threshold exceeded
 			if err := maybeAutoCompactDeletions(ctx, jsonlPath); err != nil {
 				// Non-fatal - just log warning
 				fmt.Fprintf(os.Stderr, "Warning: auto-compact deletions failed: %v\n", err)
-			}
-
-			// Clean up snapshot files after successful sync (bd-0io fix)
-			// This ensures snapshots are removed even when --no-pull is used,
-			// since captureLeftSnapshot is called before the pull block.
-			sm := NewSnapshotManager(jsonlPath)
-			if err := sm.Cleanup(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clean up snapshots: %v\n", err)
 			}
 
 			fmt.Println("\n✓ Sync complete")
