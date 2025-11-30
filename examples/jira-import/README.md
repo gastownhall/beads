@@ -1,15 +1,31 @@
-# Jira Issues to bd Importer
+# Jira Integration for bd
 
-Import issues from Jira Cloud or Jira Server/Data Center into `bd`.
+Two-way synchronization between Jira and bd (beads).
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `jira2jsonl.py` | **Import** - Fetch Jira issues into bd |
+| `jsonl2jira.py` | **Export** - Push bd issues to Jira |
 
 ## Overview
 
-This tool converts Jira Issues to bd's JSONL format, supporting:
+These tools enable bidirectional sync between Jira and bd:
+
+**Import (Jira → bd):**
 1. **Jira REST API** - Fetch issues directly from any Jira instance
 2. **JSON Export** - Parse exported Jira issues JSON
 3. **bd config integration** - Read credentials and mappings from `bd config`
 
+**Export (bd → Jira):**
+1. **Create issues** - Push new bd issues to Jira
+2. **Update issues** - Sync changes to existing Jira issues
+3. **Status transitions** - Handle Jira workflow transitions automatically
+
 ## Features
+
+### Import (jira2jsonl.py)
 
 - Fetch from Jira Cloud or Server/Data Center
 - JQL query support for flexible filtering
@@ -18,6 +34,15 @@ This tool converts Jira Issues to bd's JSONL format, supporting:
 - Extract issue links as dependencies
 - Set `external_ref` for re-sync capability
 - Hash-based or sequential ID generation
+
+### Export (jsonl2jira.py)
+
+- Create new Jira issues from bd issues
+- Update existing Jira issues (matched by `external_ref`)
+- Handle Jira workflow transitions for status changes
+- Reverse field mappings (bd → Jira)
+- Dry-run mode for previewing changes
+- Auto-update `external_ref` after creation
 
 ## Installation
 
@@ -350,6 +375,164 @@ Jira Cloud has rate limits. For large imports:
 - **Jira Server/DC**: Depends on configuration
 
 This script fetches 100 issues per request, so a 1000-issue project requires ~10 API calls.
+
+---
+
+# Export: jsonl2jira.py
+
+Push bd issues to Jira.
+
+## Export Quick Start
+
+```bash
+# Export all issues (create new, update existing)
+bd export | python jsonl2jira.py --from-config
+
+# Create only (don't update existing Jira issues)
+bd export | python jsonl2jira.py --from-config --create-only
+
+# Dry run (preview what would happen)
+bd export | python jsonl2jira.py --from-config --dry-run
+
+# Auto-update bd with new external_refs
+bd export | python jsonl2jira.py --from-config --update-refs
+```
+
+## Export Modes
+
+### Create Only
+
+Only create new Jira issues for bd issues that don't have an `external_ref`:
+
+```bash
+bd export | python jsonl2jira.py --from-config --create-only
+```
+
+### Create and Update
+
+Create new issues AND update existing ones (matched by `external_ref`):
+
+```bash
+bd export | python jsonl2jira.py --from-config
+```
+
+### Dry Run
+
+Preview what would happen without making any changes:
+
+```bash
+bd export | python jsonl2jira.py --from-config --dry-run
+```
+
+## Workflow Transitions
+
+Jira often requires workflow transitions to change issue status (you can't just set `status=Done`). The export script automatically:
+
+1. Fetches available transitions for each issue
+2. Finds a transition that leads to the target status
+3. Executes the transition
+
+If no valid transition is found, the status change is skipped with a warning.
+
+## Reverse Field Mappings
+
+For export, you need mappings from bd → Jira (reverse of import):
+
+```bash
+# Status: bd status -> Jira status name
+bd config set jira.reverse_status_map.open "To Do"
+bd config set jira.reverse_status_map.in_progress "In Progress"
+bd config set jira.reverse_status_map.blocked "Blocked"
+bd config set jira.reverse_status_map.closed "Done"
+
+# Type: bd type -> Jira issue type name
+bd config set jira.reverse_type_map.bug "Bug"
+bd config set jira.reverse_type_map.feature "Story"
+bd config set jira.reverse_type_map.task "Task"
+bd config set jira.reverse_type_map.epic "Epic"
+bd config set jira.reverse_type_map.chore "Task"
+
+# Priority: bd priority (0-4) -> Jira priority name
+bd config set jira.reverse_priority_map.0 "Highest"
+bd config set jira.reverse_priority_map.1 "High"
+bd config set jira.reverse_priority_map.2 "Medium"
+bd config set jira.reverse_priority_map.3 "Low"
+bd config set jira.reverse_priority_map.4 "Lowest"
+```
+
+If not configured, sensible defaults are used.
+
+## Updating external_ref
+
+After creating a Jira issue, you'll want to link it back to the bd issue:
+
+```bash
+# Option 1: Auto-update with --update-refs flag
+bd export | python jsonl2jira.py --from-config --update-refs
+
+# Option 2: Manual update from script output
+bd export | python jsonl2jira.py --from-config | while read line; do
+  bd_id=$(echo "$line" | jq -r '.bd_id')
+  ext_ref=$(echo "$line" | jq -r '.external_ref')
+  bd update "$bd_id" --external-ref="$ext_ref"
+done
+```
+
+## Export Examples
+
+### Example 1: Initial Export to Jira
+
+```bash
+# First, export all open issues
+bd list --status open --json | python jsonl2jira.py --from-config --update-refs
+
+# Now those issues have external_ref set
+bd list --status open
+```
+
+### Example 2: Sync Changes Back to Jira
+
+```bash
+# Export issues modified today
+bd list --json | python jsonl2jira.py --from-config
+```
+
+### Example 3: Preview Before Export
+
+```bash
+# See what would happen
+bd export | python jsonl2jira.py --from-config --dry-run
+
+# If it looks good, run for real
+bd export | python jsonl2jira.py --from-config --update-refs
+```
+
+## Export Limitations
+
+- **Assignee**: Not set (requires Jira account ID lookup)
+- **Dependencies**: Not synced to Jira issue links
+- **Comments**: Not exported
+- **Custom fields**: design, acceptance_criteria, notes not exported
+- **Attachments**: Not exported
+
+## Bidirectional Sync Workflow
+
+For ongoing synchronization between Jira and bd:
+
+```bash
+# 1. Pull changes from Jira
+python jira2jsonl.py --from-config --jql "project=PROJ AND updated >= -1d" | bd import
+
+# 2. Do local work in bd
+bd update bd-xxx --status in_progress
+# ... work ...
+bd close bd-xxx
+
+# 3. Push changes to Jira
+bd export | python jsonl2jira.py --from-config
+
+# 4. Repeat daily/weekly
+```
 
 ## See Also
 
