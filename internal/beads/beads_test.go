@@ -410,6 +410,55 @@ func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 	}
 }
 
+// TestFindBeadsDirValidatesBeadsDirEnv verifies that BEADS_DIR env var
+// is validated for project files (bd-420)
+func TestFindBeadsDirValidatesBeadsDirEnv(t *testing.T) {
+	// Save original state
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+
+	// Create temp directory with only daemon registry files
+	tmpDir, err := os.MkdirTemp("", "beads-env-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "registry.json"), []byte("[]"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set BEADS_DIR to daemon-only directory
+	os.Setenv("BEADS_DIR", tmpDir)
+
+	// Should NOT return the daemon-only directory
+	result := FindBeadsDir()
+	if result != "" {
+		resultResolved, _ := filepath.EvalSymlinks(result)
+		tmpDirResolved, _ := filepath.EvalSymlinks(tmpDir)
+		if resultResolved == tmpDirResolved {
+			t.Errorf("FindBeadsDir() should skip BEADS_DIR with only daemon files, got %q", result)
+		}
+	}
+
+	// Now add a project file
+	if err := os.WriteFile(filepath.Join(tmpDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should now return the directory
+	result = FindBeadsDir()
+	if result == "" {
+		t.Error("FindBeadsDir() should return BEADS_DIR with project files")
+	}
+}
+
 func TestFindDatabasePathHomeDefault(t *testing.T) {
 	// This test verifies that if no database is found, it falls back to home directory
 	// We can't reliably test this without modifying the home directory, so we'll skip

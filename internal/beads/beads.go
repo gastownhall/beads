@@ -275,7 +275,10 @@ func FindBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		absBeadsDir := utils.CanonicalizePath(beadsDir)
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
-			return absBeadsDir
+			// Validate directory contains actual project files (bd-420)
+			if hasBeadsProjectFiles(absBeadsDir) {
+				return absBeadsDir
+			}
 		}
 	}
 
