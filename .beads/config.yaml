@@ -37,6 +37,13 @@ issue-prefix: "bd"
 # Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
 # flush-debounce: "5s"
 
+# Sync branch for multi-clone setups
+# When set, .beads changes are committed to this branch via worktree
+# instead of the current branch. This allows multiple clones to sync
+# beads data without polluting main branch commits.
+# Can also be set via BEADS_SYNC_BRANCH environment variable.
+sync-branch: "beads-sync"
+
 # Integration settings (access with 'bd config get/set')
 # These are stored in the database, not in this file:
 # - jira.url
@@ -45,4 +52,3 @@ issue-prefix: "bd"
 # - linear.api-key
 # - github.org
 # - github.repo
-# - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)

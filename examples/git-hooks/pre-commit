@@ -29,12 +29,15 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
-# Check if sync.branch is configured - if so, .beads changes go to a separate
-# branch via worktree, not the current branch
-# Use --json to get clean output (human-readable format prints "(not set)")
-SYNC_BRANCH=$(bd config get sync.branch --json 2>/dev/null | grep -o '"value": *"[^"]*"' | sed 's/"value": *"\([^"]*\)"/\1/')
+# Check if sync-branch is configured in config.yaml or env var
+# If so, .beads changes go to a separate branch via worktree, not the current branch
+SYNC_BRANCH="${BEADS_SYNC_BRANCH:-}"
+if [ -z "$SYNC_BRANCH" ] && [ -f .beads/config.yaml ]; then
+    # Extract sync-branch value from YAML (handles quoted and unquoted values)
+    SYNC_BRANCH=$(grep -E '^sync-branch:' .beads/config.yaml 2>/dev/null | sed 's/^sync-branch:[[:space:]]*//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//')
+fi
 if [ -n "$SYNC_BRANCH" ]; then
-    # sync.branch is configured, skip flush and auto-staging
+    # sync-branch is configured, skip flush and auto-staging
     # Changes are synced to the separate branch via 'bd sync'
     exit 0
 fi

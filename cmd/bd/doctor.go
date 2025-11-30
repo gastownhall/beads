@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // Status constants for doctor checks
@@ -212,7 +213,9 @@ func applyFixes(result doctorResult) {
 		case "Git Merge Driver":
 			err = fix.MergeDriver(result.Path)
 		case "Sync Branch Config":
-			err = fix.SyncBranchConfig(result.Path)
+			// No auto-fix: sync-branch should be added to config.yaml (version controlled)
+			fmt.Printf("  ⚠ Add 'sync-branch: beads-sync' to .beads/config.yaml\n")
+			continue
 		case "Database Config":
 			err = fix.DatabaseConfig(result.Path)
 		case "JSONL Config":
@@ -292,8 +295,8 @@ func runCheckHealth(path string) {
 		issues = append(issues, issue)
 	}
 
-	// Check 2: Sync branch not configured
-	if issue := checkSyncBranchQuickDB(db); issue != "" {
+	// Check 2: Sync branch not configured (now reads from config.yaml, not DB)
+	if issue := checkSyncBranchQuick(); issue != "" {
 		issues = append(issues, issue)
 	}
 
@@ -356,16 +359,13 @@ func checkVersionMismatchDB(db *sql.DB) string {
 	return ""
 }
 
-// checkSyncBranchQuickDB checks if sync.branch is configured.
-// Uses an existing DB connection (bd-xyc).
-func checkSyncBranchQuickDB(db *sql.DB) string {
-	var value string
-	err := db.QueryRow("SELECT value FROM config WHERE key = 'sync.branch'").Scan(&value)
-	if err != nil || value == "" {
-		return "sync.branch not configured"
+// checkSyncBranchQuick checks if sync-branch is configured in config.yaml.
+// Fast check that doesn't require database access.
+func checkSyncBranchQuick() string {
+	if syncbranch.IsConfigured() {
+		return ""
 	}
-
-	return ""
+	return "sync-branch not configured in config.yaml"
 }
 
 // checkHooksQuick does a fast check for outdated git hooks.
@@ -2041,49 +2041,10 @@ func checkSyncBranchConfig(path string) doctorCheck {
 		}
 	}
 
-	// Check metadata.json first for custom database name
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
+	// Check sync-branch from config.yaml or environment variable
+	// This is the source of truth for multi-clone setups
+	syncBranch := syncbranch.GetFromYAML()
 
-	// Skip if no database (JSONL-only mode)
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return doctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  statusOK,
-			Message: "N/A (JSONL-only mode)",
-		}
-	}
-
-	// Open database to check config
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return doctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  statusWarning,
-			Message: "Unable to check sync.branch config",
-			Detail:  err.Error(),
-		}
-	}
-	defer db.Close()
-
-	// Check if sync.branch is configured
-	var syncBranch string
-	err = db.QueryRow("SELECT value FROM config WHERE key = ?", "sync.branch").Scan(&syncBranch)
-	if err != nil && err != sql.ErrNoRows {
-		return doctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  statusWarning,
-			Message: "Unable to read sync.branch config",
-			Detail:  err.Error(),
-		}
-	}
-
-	// If sync.branch is already configured, we're good
 	if syncBranch != "" {
 		return doctorCheck{
 			Name:    "Sync Branch Config",
@@ -2092,27 +2053,30 @@ func checkSyncBranchConfig(path string) doctorCheck {
 		}
 	}
 
-	// sync.branch is not configured - get current branch for the fix message
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	// Not configured - this is optional but recommended for multi-clone setups
+	// Check if this looks like a multi-clone setup (has remote)
+	hasRemote := false
+	cmd := exec.Command("git", "remote")
 	cmd.Dir = path
-	output, err := cmd.Output()
-	if err != nil {
+	if output, err := cmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		hasRemote = true
+	}
+
+	if hasRemote {
 		return doctorCheck{
 			Name:    "Sync Branch Config",
 			Status:  statusWarning,
-			Message: "sync.branch not configured",
-			Detail:  "Unable to detect current branch",
-			Fix:     "Run 'bd config set sync.branch <branch-name>' or 'bd doctor --fix' to auto-configure",
+			Message: "sync-branch not configured",
+			Detail:  "Multi-clone setups should configure sync-branch in config.yaml",
+			Fix:     "Add 'sync-branch: beads-sync' to .beads/config.yaml",
 		}
 	}
 
-	currentBranch := strings.TrimSpace(string(output))
+	// No remote - probably a local-only repo, sync-branch not needed
 	return doctorCheck{
 		Name:    "Sync Branch Config",
-		Status:  statusWarning,
-		Message: "sync.branch not configured",
-		Detail:  fmt.Sprintf("Current branch: %s", currentBranch),
-		Fix:     fmt.Sprintf("Run 'bd doctor --fix' to auto-configure to '%s', or manually: bd config set sync.branch <branch-name>", currentBranch),
+		Status:  statusOK,
+		Message: "N/A (no remote configured)",
 	}
 }
 
