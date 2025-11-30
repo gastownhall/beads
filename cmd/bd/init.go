@@ -1038,6 +1038,13 @@ func createConfigYaml(beadsDir string, noDbMode bool) error {
 # Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
 # flush-debounce: "5s"
 
+# Git branch for beads commits (bd sync will commit to this branch)
+# IMPORTANT: Set this for team projects so all clones use the same sync branch.
+# This setting persists across clones (unlike database config which is gitignored).
+# Can also use BEADS_SYNC_BRANCH env var for local override.
+# If not set, bd sync will require you to run 'bd config set sync.branch <branch>'.
+# sync-branch: "beads-sync"
+
 # Multi-repo configuration (experimental - bd-307)
 # Allows hydrating from multiple repositories and routing writes to the correct JSONL
 # repos:
@@ -1054,7 +1061,6 @@ func createConfigYaml(beadsDir string, noDbMode bool) error {
 # - linear.api-key
 # - github.org
 # - github.repo
-# - sync.branch - Git branch for beads commits (use BEADS_SYNC_BRANCH env var or bd config set)
 `, noDbLine)
 
 	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {

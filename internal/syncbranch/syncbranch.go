@@ -74,6 +74,7 @@ func Get(ctx context.Context, store storage.Storage) (string, error) {
 	}
 
 	// Check config.yaml (version controlled, shared across clones)
+	// This is the recommended way to configure sync branch for teams
 	if yamlBranch := config.GetString(ConfigYAMLKey); yamlBranch != "" {
 		if err := ValidateBranchName(yamlBranch); err != nil {
 			return "", fmt.Errorf("invalid %s in config.yaml: %w", ConfigYAMLKey, err)
