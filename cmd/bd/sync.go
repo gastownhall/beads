@@ -223,6 +223,33 @@ Use --merge to merge the sync branch back to main branch.`,
 						}
 					}
 				}
+
+				// Case 3 (bd-f2f): JSONL content differs from DB (hash mismatch)
+				// This catches the case where counts match but STATUS/content differs.
+				// A stale DB exporting wrong status values over correct JSONL values
+				// causes corruption that the 3-way merge propagates.
+				//
+				// Example: Remote has status=open, stale DB has status=closed (count=5 both)
+				// Without this check: export writes status=closed → git merge keeps it → corruption
+				// With this check: detect hash mismatch → import first → get correct status
+				//
+				// Note: Auto-import in autoflush.go also checks for hash changes during store
+				// initialization, so this check may be redundant in most cases. However, it
+				// provides defense-in-depth for cases where auto-import is disabled or bypassed.
+				if !skipExport {
+					repoKey := getRepoKeyForPath(jsonlPath)
+					if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
+						fmt.Println("→ JSONL content differs from last sync (bd-f2f)")
+						fmt.Println("→ Importing JSONL first to prevent stale DB from overwriting changes...")
+						if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
+							fmt.Fprintf(os.Stderr, "Error importing (bd-f2f hash mismatch): %v\n", err)
+							os.Exit(1)
+						}
+						// Don't skip export - we still want to export any remaining local dirty issues
+						// The import updated DB with JSONL content, and export will write merged state
+						fmt.Println("→ Import complete, continuing with export of merged state")
+					}
+				}
 			}
 
 			if !skipExport {
