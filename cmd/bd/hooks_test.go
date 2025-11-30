@@ -32,17 +32,20 @@ func TestGetEmbeddedHooks(t *testing.T) {
 }
 
 func TestInstallHooks(t *testing.T) {
-	// Create temp directory with fake .git
+	// Create temp directory and init git repo
 	tmpDir := t.TempDir()
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create test git dir: %v", err)
-	}
 
 	// Change to temp directory
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
+	gitDir := filepath.Join(tmpDir, ".git", "hooks")
 
 	// Get embedded hooks
 	hooks, err := getEmbeddedHooks()
@@ -78,17 +81,20 @@ func TestInstallHooks(t *testing.T) {
 }
 
 func TestInstallHooksBackup(t *testing.T) {
-	// Create temp directory with fake .git
+	// Create temp directory and init git repo
 	tmpDir := t.TempDir()
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create test git dir: %v", err)
-	}
 
 	// Change to temp directory
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
+	gitDir := filepath.Join(tmpDir, ".git", "hooks")
 
 	// Create an existing hook
 	existingHook := filepath.Join(gitDir, "pre-commit")
@@ -125,17 +131,20 @@ func TestInstallHooksBackup(t *testing.T) {
 }
 
 func TestInstallHooksForce(t *testing.T) {
-	// Create temp directory with fake .git
+	// Create temp directory and init git repo
 	tmpDir := t.TempDir()
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create test git dir: %v", err)
-	}
 
-	// Change to temp directory
+	// Change to temp directory first, then init
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
+	gitDir := filepath.Join(tmpDir, ".git", "hooks")
 
 	// Create an existing hook
 	existingHook := filepath.Join(gitDir, "pre-commit")
@@ -162,17 +171,20 @@ func TestInstallHooksForce(t *testing.T) {
 }
 
 func TestUninstallHooks(t *testing.T) {
-	// Create temp directory with fake .git
+	// Create temp directory and init git repo
 	tmpDir := t.TempDir()
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create test git dir: %v", err)
-	}
 
-	// Change to temp directory
+	// Change to temp directory first, then init
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
+	gitDir := filepath.Join(tmpDir, ".git", "hooks")
 
 	// Get embedded hooks and install them
 	hooks, err := getEmbeddedHooks()
@@ -199,17 +211,18 @@ func TestUninstallHooks(t *testing.T) {
 }
 
 func TestHooksCheckGitHooks(t *testing.T) {
-	// Create temp directory with fake .git
+	// Create temp directory and init git repo
 	tmpDir := t.TempDir()
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create test git dir: %v", err)
-	}
 
-	// Change to temp directory
+	// Change to temp directory first, then init
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
 
 	// Initially no hooks installed
 	statuses := CheckGitHooks()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,12 +21,13 @@ func TestDetectExistingHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Initialize a git repository
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
 	gitDir := filepath.Join(tmpDir, ".git")
 	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0750); err != nil {
-		t.Fatal(err)
-	}
 
 	tests := []struct {
 		name            string
@@ -118,12 +120,13 @@ func TestInstallGitHooks_NoExistingHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Initialize a git repository
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
 	gitDir := filepath.Join(tmpDir, ".git")
 	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0750); err != nil {
-		t.Fatal(err)
-	}
 
 	// Note: Can't fully test interactive prompt in automated tests
 	// This test verifies the logic works when no existing hooks present
@@ -164,12 +167,13 @@ func TestInstallGitHooks_ExistingHookBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Initialize a git repository
+	// Initialize a real git repo (required for git rev-parse)
+	if err := exec.Command("git", "init").Run(); err != nil {
+		t.Skipf("Skipping test: git init failed: %v", err)
+	}
+
 	gitDir := filepath.Join(tmpDir, ".git")
 	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0750); err != nil {
-		t.Fatal(err)
-	}
 
 	// Create an existing pre-commit hook
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")

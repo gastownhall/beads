@@ -371,9 +371,21 @@ func checkSyncBranchQuickDB(db *sql.DB) string {
 // checkHooksQuick does a fast check for outdated git hooks.
 // Checks all beads hooks: pre-commit, post-merge, pre-push, post-checkout (bd-2em).
 func checkHooksQuick(path string) string {
-	hooksDir := filepath.Join(path, ".git", "hooks")
+	// Get actual git directory (handles worktrees where .git is a file)
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return "" // Not a git repo, skip
+	}
+	gitDir := strings.TrimSpace(string(output))
+	// Make absolute if relative
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(path, gitDir)
+	}
+	hooksDir := filepath.Join(gitDir, "hooks")
 
-	// Check if .git/hooks exists
+	// Check if hooks dir exists
 	if _, err := os.Stat(hooksDir); os.IsNotExist(err) {
 		return "" // No git hooks directory, skip
 	}

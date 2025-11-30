@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 )
 
 // GitHooks fixes missing or broken git hooks by calling bd hooks install
@@ -14,9 +13,11 @@ func GitHooks(path string) error {
 		return err
 	}
 
-	// Check if we're in a git repository
-	gitDir := filepath.Join(path, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+	// Check if we're in a git repository using git rev-parse
+	// This handles worktrees where .git is a file, not a directory
+	checkCmd := exec.Command("git", "rev-parse", "--git-dir")
+	checkCmd.Dir = path
+	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("not a git repository")
 	}
 
