@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.2] - 2025-11-29
+
+### Fixed
+
+- **Hash-Based Staleness Detection (bd-f2f)**: Prevents stale DB from corrupting JSONL when counts match
+  - Previous count-based check (0.26.1) missed cases where DB and JSONL had similar issue counts
+  - New detection computes SHA256 hash of JSONL content and stores it after import
+  - On export, compares current JSONL hash against stored hash to detect modifications
+  - If JSONL was modified externally (e.g., by git pull), triggers re-import before export
+  - Ensures database is always synchronized with JSONL before exporting changes
+
 ## [0.26.1] - 2025-11-29
 
 ### Fixed
