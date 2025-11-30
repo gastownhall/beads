@@ -68,6 +68,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			daemonClient = nil
 		}
 
+		// Resolve noGitHistory based on fromMain (fixes #417)
+		noGitHistory = resolveNoGitHistoryForFromMain(fromMain, noGitHistory)
+
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
@@ -170,7 +173,8 @@ Use --merge to merge the sync branch back to main branch.`,
 			if hasGitRemote(ctx) {
 				// Remote exists but no upstream - use from-main mode
 				fmt.Println("→ No upstream configured, using --from-main mode")
-				if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, noGitHistory); err != nil {
+				// Force noGitHistory=true for auto-detected from-main mode (fixes #417)
+				if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, true); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -1494,4 +1498,15 @@ func sanitizeJSONLWithDeletions(jsonlPath string) (*SanitizeResult, error) {
 	}
 
 	return result, nil
+}
+
+// resolveNoGitHistoryForFromMain returns the resolved noGitHistory value for sync operations.
+// When syncing from main (--from-main), noGitHistory is forced to true to prevent creating
+// incorrect deletion records for locally-created beads that don't exist on main.
+// See: https://github.com/steveyegge/beads/issues/417
+func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
+	if fromMain {
+		return true
+	}
+	return noGitHistory
 }

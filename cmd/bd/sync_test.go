@@ -1105,3 +1105,50 @@ func TestHashBasedStalenessDetection_bd_f2f(t *testing.T) {
 		t.Error("hasJSONLChanged should return false after hash is updated to match JSONL")
 	}
 }
+
+// TestResolveNoGitHistoryForFromMain tests that --from-main forces noGitHistory=true
+// to prevent creating incorrect deletion records for locally-created beads.
+// See: https://github.com/steveyegge/beads/issues/417
+func TestResolveNoGitHistoryForFromMain(t *testing.T) {
+	tests := []struct {
+		name         string
+		fromMain     bool
+		noGitHistory bool
+		want         bool
+	}{
+		{
+			name:         "fromMain=true forces noGitHistory=true regardless of flag",
+			fromMain:     true,
+			noGitHistory: false,
+			want:         true,
+		},
+		{
+			name:         "fromMain=true with noGitHistory=true stays true",
+			fromMain:     true,
+			noGitHistory: true,
+			want:         true,
+		},
+		{
+			name:         "fromMain=false preserves noGitHistory=false",
+			fromMain:     false,
+			noGitHistory: false,
+			want:         false,
+		},
+		{
+			name:         "fromMain=false preserves noGitHistory=true",
+			fromMain:     false,
+			noGitHistory: true,
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveNoGitHistoryForFromMain(tt.fromMain, tt.noGitHistory)
+			if got != tt.want {
+				t.Errorf("resolveNoGitHistoryForFromMain(%v, %v) = %v, want %v",
+					tt.fromMain, tt.noGitHistory, got, tt.want)
+			}
+		})
+	}
+}
