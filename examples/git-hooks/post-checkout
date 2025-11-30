@@ -35,6 +35,38 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
+# Detect git worktree: compare --git-dir and --git-common-dir
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ -n "$GIT_DIR" ] && [ -n "$GIT_COMMON_DIR" ]; then
+    GIT_DIR_ABS=$(cd "$GIT_DIR" 2>/dev/null && pwd || echo "$GIT_DIR")
+    GIT_COMMON_DIR_ABS=$(cd "$GIT_COMMON_DIR" 2>/dev/null && pwd || echo "$GIT_COMMON_DIR")
+    
+    if [ "$GIT_DIR_ABS" != "$GIT_COMMON_DIR_ABS" ]; then
+        # We're in a git worktree
+        cat >&2 <<'EOF'
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║ Welcome to beads in git worktree!                                        ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║ Note: Daemon mode is not recommended with git worktrees.                 ║
+║ Worktrees share the same database, and the daemon may commit changes     ║
+║ to the wrong branch.                                                      ║
+║                                                                          ║
+║ RECOMMENDED: Disable daemon for this session:                            ║
+║   export BEADS_NO_DAEMON=1                                               ║
+║                                                                          ║
+║ For more information:                                                     ║
+║   - Run: bd doctor                                                        ║
+║   - Read: docs/GIT_INTEGRATION.md (lines 10-53)                          ║
+║                                                                          ║
+║ Issue tracking: bd-dc9                                                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+EOF
+    fi
+fi
+
 # Check if any JSONL file exists in .beads/
 if ! ls .beads/*.jsonl >/dev/null 2>&1; then
     exit 0
