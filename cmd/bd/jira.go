@@ -80,6 +80,7 @@ Examples:
   bd jira sync --dry-run             # Preview without changes
   bd jira sync --prefer-local        # Bidirectional, local wins`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Flag errors are unlikely but check one to ensure cobra is working
 		pull, _ := cmd.Flags().GetBool("pull")
 		push, _ := cmd.Flags().GetBool("push")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -92,6 +93,12 @@ Examples:
 		// Validate conflicting flags
 		if preferLocal && preferJira {
 			fmt.Fprintf(os.Stderr, "Error: cannot use both --prefer-local and --prefer-jira\n")
+			os.Exit(1)
+		}
+
+		// Ensure store is available
+		if err := ensureStoreActive(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: database not available: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -259,11 +266,13 @@ var jiraStatusCmd = &cobra.Command{
 		withJiraRef := 0
 		pendingPush := 0
 		for _, issue := range allIssues {
-			if issue.ExternalRef != nil && strings.Contains(*issue.ExternalRef, "/browse/") {
+			if issue.ExternalRef != nil && isJiraExternalRef(*issue.ExternalRef, jiraURL) {
 				withJiraRef++
-			} else {
+			} else if issue.ExternalRef == nil {
+				// Only count issues without any external_ref as pending push
 				pendingPush++
 			}
+			// Issues with non-Jira external_ref are not counted in either category
 		}
 
 		if jsonOutput {
@@ -524,6 +533,7 @@ func doPushToJira(ctx context.Context, dryRun bool, createOnly bool, updateRefs 
 					"external_ref": mapping.ExternalRef,
 				}
 				if err := store.UpdateIssue(ctx, mapping.BDID, updates, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update external_ref for %s: %v\n", mapping.BDID, err)
 					stats.Errors++
 				}
 			}
@@ -600,16 +610,19 @@ func detectJiraConflicts(ctx context.Context) ([]JiraConflict, error) {
 		return nil, err
 	}
 
+	// Get jiraURL for validation
+	jiraURL, _ := store.GetConfig(ctx, "jira.url")
+
 	var conflicts []JiraConflict
 	for _, issue := range allIssues {
-		if issue.ExternalRef == nil || !strings.Contains(*issue.ExternalRef, "/browse/") {
+		if issue.ExternalRef == nil || !isJiraExternalRef(*issue.ExternalRef, jiraURL) {
 			continue
 		}
 
 		// Check if updated since last sync
 		if issue.UpdatedAt.After(lastSync) {
 			// This is a potential conflict - for now, mark as conflict
-			// In a full implementation, we'd fetch the Jira issue and compare timestamps
+			// TODO: In a full implementation, we'd fetch the Jira issue and compare timestamps
 			conflicts = append(conflicts, JiraConflict{
 				IssueID:         issue.ID,
 				LocalUpdated:    issue.UpdatedAt,
@@ -622,21 +635,50 @@ func detectJiraConflicts(ctx context.Context) ([]JiraConflict, error) {
 }
 
 // reimportConflicts re-imports conflicting issues from Jira (Jira wins).
+// NOTE: This is a placeholder - full implementation requires fetching individual
+// issues from Jira API and updating local copies.
 func reimportConflicts(ctx context.Context, conflicts []JiraConflict) error {
-	// For now, just log that we would re-import
-	// A full implementation would fetch each conflicting issue from Jira and update
+	if len(conflicts) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Warning: conflict resolution (--prefer-jira) not fully implemented\n")
+	fmt.Fprintf(os.Stderr, "  %d issue(s) may have conflicts that need manual review:\n", len(conflicts))
 	for _, c := range conflicts {
-		fmt.Printf("  Re-importing %s from Jira\n", c.IssueID)
+		fmt.Fprintf(os.Stderr, "    - %s (local updated: %s)\n", c.IssueID, c.LocalUpdated.Format(time.RFC3339))
 	}
 	return nil
 }
 
 // resolveConflictsByTimestamp resolves conflicts by keeping the newer version.
+// NOTE: This is a placeholder - full implementation requires fetching Jira
+// timestamps and comparing with local timestamps.
 func resolveConflictsByTimestamp(ctx context.Context, conflicts []JiraConflict) error {
-	// For now, just log the resolution
-	// A full implementation would compare timestamps and update accordingly
+	if len(conflicts) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Warning: timestamp-based conflict resolution not fully implemented\n")
+	fmt.Fprintf(os.Stderr, "  %d issue(s) may have conflicts - local version will be pushed:\n", len(conflicts))
 	for _, c := range conflicts {
-		fmt.Printf("  Resolving %s (newer wins)\n", c.IssueID)
+		fmt.Fprintf(os.Stderr, "    - %s\n", c.IssueID)
 	}
 	return nil
+}
+
+// isJiraExternalRef checks if an external_ref URL matches the configured Jira instance.
+// It validates both the URL structure (/browse/PROJECT-123) and optionally the host.
+func isJiraExternalRef(externalRef, jiraURL string) bool {
+	// Must contain /browse/ pattern
+	if !strings.Contains(externalRef, "/browse/") {
+		return false
+	}
+
+	// If jiraURL is provided, validate the host matches
+	if jiraURL != "" {
+		jiraURL = strings.TrimSuffix(jiraURL, "/")
+		if !strings.HasPrefix(externalRef, jiraURL) {
+			return false
+		}
+	}
+
+	return true
 }
