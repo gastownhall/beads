@@ -186,9 +186,13 @@ func New(ctx context.Context, path string) (*SQLiteStorage, error) {
 	return storage, nil
 }
 
-// Close closes the database connection
+// Close closes the database connection.
+// It checkpoints the WAL to ensure all writes are flushed to the main database file.
 func (s *SQLiteStorage) Close() error {
 	s.closed.Store(true)
+	// Checkpoint WAL to ensure all writes are persisted to the main database file.
+	// Without this, writes may be stranded in the WAL and lost between CLI invocations.
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return s.db.Close()
 }
 
