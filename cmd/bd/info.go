@@ -288,6 +288,24 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.26.2",
+		Date:    "2025-11-29",
+		Changes: []string{
+			"FIX (bd-f2f): Hash-based staleness detection prevents stale DB from corrupting JSONL",
+			"Detects content differences even when issue counts match between DB and JSONL",
+			"Computes SHA256 hash of JSONL content to detect mismatches missed by count-based checks",
+		},
+	},
+	{
+		Version: "0.26.1",
+		Date:    "2025-11-29",
+		Changes: []string{
+			"CRITICAL FIX (bd-53c): Reverse ZFC check prevents stale DB from corrupting JSONL",
+			"bd sync now detects when JSONL has more issues than DB and imports first",
+			"Prevents fresh/stale clones from exporting incomplete database state",
+		},
+	},
+	{
 		Version: "0.26.0",
 		Date:    "2025-11-27",
 		Changes: []string{

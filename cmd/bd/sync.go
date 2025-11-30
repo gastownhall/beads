@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/deletions"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -54,6 +55,18 @@ Use --merge to merge the sync branch back to main branch.`,
 		fromMain, _ := cmd.Flags().GetBool("from-main")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 		squash, _ := cmd.Flags().GetBool("squash")
+
+		// bd-sync-corruption fix: Force direct mode for sync operations.
+		// This prevents stale daemon SQLite connections from corrupting exports.
+		// If the daemon was running but its database file was deleted and recreated
+		// (e.g., during recovery), the daemon's SQLite connection points to the old
+		// (deleted) file, causing export to return incomplete/corrupt data.
+		// Using direct mode ensures we always read from the current database file.
+		if daemonClient != nil {
+			debug.Logf("sync: forcing direct mode for consistency")
+			_ = daemonClient.Close()
+			daemonClient = nil
+		}
 
 		// Find JSONL path
 		jsonlPath := findJSONLPath()
@@ -171,26 +184,83 @@ Use --merge to merge the sync branch back to main branch.`,
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
-			// ZFC safety check (bd-l0r): if DB significantly diverges from JSONL,
-			// force import first to sync with JSONL source of truth
-			// After import, skip export to prevent overwriting JSONL (JSONL is source of truth)
+			// ZFC safety check (bd-l0r, bd-53c): if DB significantly diverges from JSONL,
+			// force import first to sync with JSONL source of truth.
+			// After import, skip export to prevent overwriting JSONL (JSONL is source of truth).
+			//
+			// bd-53c fix: Added REVERSE ZFC check - if JSONL has MORE issues than DB,
+			// this indicates the DB is stale and exporting would cause data loss.
+			// This catches the case where a fresh/stale clone tries to export an
+			// empty or outdated database over a JSONL with many issues.
 			if err := ensureStoreActive(); err == nil && store != nil {
 				dbCount, err := countDBIssuesFast(ctx, store)
 				if err == nil {
 					jsonlCount, err := countIssuesInJSONL(jsonlPath)
-					if err == nil && jsonlCount > 0 && dbCount > jsonlCount {
-						divergence := float64(dbCount-jsonlCount) / float64(jsonlCount)
-						if divergence > 0.5 { // >50% more issues in DB than JSONL
-							fmt.Printf("→ DB has %d issues but JSONL has %d (stale DB detected)\n", dbCount, jsonlCount)
-							fmt.Println("→ Importing JSONL first (ZFC)...")
-							if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
-								fmt.Fprintf(os.Stderr, "Error importing (ZFC): %v\n", err)
-								os.Exit(1)
+					if err == nil && jsonlCount > 0 {
+						// Case 1: DB has significantly more issues than JSONL
+						// (original ZFC check - DB is ahead of JSONL)
+						if dbCount > jsonlCount {
+							divergence := float64(dbCount-jsonlCount) / float64(jsonlCount)
+							if divergence > 0.5 { // >50% more issues in DB than JSONL
+								fmt.Printf("→ DB has %d issues but JSONL has %d (stale JSONL detected)\n", dbCount, jsonlCount)
+								fmt.Println("→ Importing JSONL first (ZFC)...")
+								if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
+									fmt.Fprintf(os.Stderr, "Error importing (ZFC): %v\n", err)
+									os.Exit(1)
+								}
+								// Skip export after ZFC import - JSONL is source of truth
+								skipExport = true
+								fmt.Println("→ Skipping export (JSONL is source of truth after ZFC import)")
 							}
-							// Skip export after ZFC import - JSONL is source of truth
-							skipExport = true
-							fmt.Println("→ Skipping export (JSONL is source of truth after ZFC import)")
 						}
+
+						// Case 2 (bd-53c): JSONL has significantly more issues than DB
+						// This is the DANGEROUS case - exporting would lose issues!
+						// A stale/empty DB exporting over a populated JSONL causes data loss.
+						if jsonlCount > dbCount && !skipExport {
+							divergence := float64(jsonlCount-dbCount) / float64(jsonlCount)
+							// Use stricter threshold for this dangerous case:
+							// - Any loss > 20% is suspicious
+							// - Complete loss (DB empty) is always blocked
+							if dbCount == 0 || divergence > 0.2 {
+								fmt.Printf("→ JSONL has %d issues but DB has only %d (stale DB detected - bd-53c)\n", jsonlCount, dbCount)
+								fmt.Println("→ Importing JSONL first to prevent data loss...")
+								if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
+									fmt.Fprintf(os.Stderr, "Error importing (reverse ZFC): %v\n", err)
+									os.Exit(1)
+								}
+								// Skip export after import - JSONL is source of truth
+								skipExport = true
+								fmt.Println("→ Skipping export (JSONL is source of truth after reverse ZFC import)")
+							}
+						}
+					}
+				}
+
+				// Case 3 (bd-f2f): JSONL content differs from DB (hash mismatch)
+				// This catches the case where counts match but STATUS/content differs.
+				// A stale DB exporting wrong status values over correct JSONL values
+				// causes corruption that the 3-way merge propagates.
+				//
+				// Example: Remote has status=open, stale DB has status=closed (count=5 both)
+				// Without this check: export writes status=closed → git merge keeps it → corruption
+				// With this check: detect hash mismatch → import first → get correct status
+				//
+				// Note: Auto-import in autoflush.go also checks for hash changes during store
+				// initialization, so this check may be redundant in most cases. However, it
+				// provides defense-in-depth for cases where auto-import is disabled or bypassed.
+				if !skipExport {
+					repoKey := getRepoKeyForPath(jsonlPath)
+					if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
+						fmt.Println("→ JSONL content differs from last sync (bd-f2f)")
+						fmt.Println("→ Importing JSONL first to prevent stale DB from overwriting changes...")
+						if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
+							fmt.Fprintf(os.Stderr, "Error importing (bd-f2f hash mismatch): %v\n", err)
+							os.Exit(1)
+						}
+						// Don't skip export - we still want to export any remaining local dirty issues
+						// The import updated DB with JSONL content, and export will write merged state
+						fmt.Println("→ Import complete, continuing with export of merged state")
 					}
 				}
 			}
@@ -886,6 +956,9 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	}
 
 	// Safety check: prevent exporting empty database over non-empty JSONL
+	// Note: The main bd-53c protection is the reverse ZFC check earlier in sync.go
+	// which runs BEFORE export. Here we only block the most catastrophic case (empty DB)
+	// to allow legitimate deletions.
 	if len(issues) == 0 {
 		existingCount, countErr := countIssuesInJSONL(jsonlPath)
 		if countErr != nil {
@@ -895,16 +968,6 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 			}
 		} else if existingCount > 0 {
 			return fmt.Errorf("refusing to export empty database over non-empty JSONL file (database: 0 issues, JSONL: %d issues)", existingCount)
-		}
-	}
-
-	// Warning: check if export would lose >50% of issues
-	existingCount, err := countIssuesInJSONL(jsonlPath)
-	if err == nil && existingCount > 0 {
-		lossPercent := float64(existingCount-len(issues)) / float64(existingCount) * 100
-		if lossPercent > 50 {
-			fmt.Fprintf(os.Stderr, "WARNING: Export would lose %.1f%% of issues (existing: %d, database: %d)\n",
-				lossPercent, existingCount, len(issues))
 		}
 	}
 
@@ -1218,7 +1281,8 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 	}
 
 	// Build args for import command
-	args := []string{"import", "-i", jsonlPath}
+	// Use --no-daemon to ensure subprocess uses direct mode, avoiding daemon connection issues
+	args := []string{"--no-daemon", "import", "-i", jsonlPath}
 	if renameOnImport {
 		args = append(args, "--rename-on-import")
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // getBdBinary returns the path to the bd binary to use for fix operations.
@@ -46,4 +47,44 @@ func validateBeadsWorkspace(path string) error {
 	}
 
 	return nil
+}
+
+// safeWorkspacePath resolves relPath within the workspace root and ensures it
+// cannot escape the workspace via path traversal.
+func safeWorkspacePath(root, relPath string) (string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("invalid workspace path: %w", err)
+	}
+
+	cleanRel := filepath.Clean(relPath)
+	if filepath.IsAbs(cleanRel) {
+		return "", fmt.Errorf("expected relative path, got absolute: %s", relPath)
+	}
+
+	joined := filepath.Join(absRoot, cleanRel)
+	rel, err := filepath.Rel(absRoot, joined)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes workspace: %s", relPath)
+	}
+
+	return joined, nil
+}
+
+// isWithinWorkspace reports whether candidate resides within the workspace root.
+func isWithinWorkspace(root, candidate string) bool {
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	cleanCandidate := filepath.Clean(candidate)
+	rel, err := filepath.Rel(cleanRoot, cleanCandidate)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !(rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }

@@ -152,6 +152,52 @@ func TestAutoFlushOnExit(t *testing.T) {
 	}
 }
 
+func TestIsPathWithinDir(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, ".beads", "issues.jsonl")
+	sibling := filepath.Join(filepath.Dir(root), "other", "issues.jsonl")
+	traversal := filepath.Join(root, "..", "etc", "passwd")
+	tests := []struct {
+		name      string
+		base      string
+		candidate string
+		want      bool
+	}{
+		{
+			name:      "same path",
+			base:      root,
+			candidate: root,
+			want:      true,
+		},
+		{
+			name:      "nested path",
+			base:      root,
+			candidate: nested,
+			want:      true,
+		},
+		{
+			name:      "sibling path",
+			base:      root,
+			candidate: sibling,
+			want:      false,
+		},
+		{
+			name:      "traversal outside base",
+			base:      root,
+			candidate: traversal,
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPathWithinDir(tt.base, tt.candidate); got != tt.want {
+				t.Fatalf("isPathWithinDir(%q, %q) = %v, want %v", tt.base, tt.candidate, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestAutoFlushConcurrency tests that concurrent operations don't cause races
 // TestAutoFlushStoreInactive tests that flush doesn't run when store is inactive
 // TestAutoFlushJSONLContent tests that flushed JSONL has correct content
@@ -339,7 +385,7 @@ func TestAutoImportIfNewer(t *testing.T) {
 	}
 
 	// Wait a moment to ensure different timestamps
-	time.Sleep(10 * time.Millisecond)  // 10x faster
+	time.Sleep(10 * time.Millisecond) // 10x faster
 
 	// Create a JSONL file with different content (simulating a git pull)
 	jsonlIssue := &types.Issue{

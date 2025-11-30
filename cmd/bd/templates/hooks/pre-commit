@@ -1,5 +1,5 @@
 #!/bin/sh
-# bd-hooks-version: 0.26.0
+# bd-hooks-version: 0.26.2
 #
 # bd (beads) pre-commit hook
 #

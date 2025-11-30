@@ -180,8 +180,9 @@ func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath str
 		return fmt.Errorf("refusing to export empty DB over %d issues in JSONL (would cause data loss)", jsonlCount)
 	}
 
-	// Note: ZFC (JSONL First Consistency - bd-l0r) is now enforced in sync.go
-	// by always importing before export. This validation is kept for direct bd export calls.
+	// Note: The main bd-53c protection is the reverse ZFC check in sync.go
+	// which runs BEFORE this validation. Here we only block empty DB.
+	// This allows legitimate deletions while sync.go catches stale DBs.
 
 	return nil
 }

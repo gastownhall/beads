@@ -58,6 +58,12 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		// Import requires direct database access due to complex transaction handling
 		// and collision detection. Force direct mode regardless of daemon state.
+		//
+		// NOTE: We only close the daemon client connection here, not stop the daemon
+		// process. This is because import may be called as a subprocess from sync,
+		// and stopping the daemon would break the parent sync's connection.
+		// The daemon-stale-DB issue (bd-sync-corruption) is addressed separately by
+		// having sync use --no-daemon mode for consistency.
 		if daemonClient != nil {
 			debug.Logf("Debug: import command forcing direct mode (closes daemon connection)\n")
 			_ = daemonClient.Close()
