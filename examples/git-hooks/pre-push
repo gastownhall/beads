@@ -8,8 +8,8 @@
 # 2. Checking for uncommitted changes (staged, unstaged, untracked, deleted)
 # 3. Failing the push with clear instructions if changes found
 #
-# When sync.branch is configured, .beads changes are committed to a separate
-# branch via worktree, so the uncommitted check is skipped for the main branch.
+# When sync-branch is configured in config.yaml, .beads changes are committed
+# to a separate branch via worktree, so the uncommitted check is skipped.
 #
 # The pre-commit hook already exports changes, but this catches:
 # - Changes made between commit and push
@@ -33,7 +33,8 @@ fi
 SYNC_BRANCH="${BEADS_SYNC_BRANCH:-}"
 if [ -z "$SYNC_BRANCH" ] && [ -f .beads/config.yaml ]; then
     # Extract sync-branch value from YAML (handles quoted and unquoted values)
-    SYNC_BRANCH=$(grep -E '^sync-branch:' .beads/config.yaml 2>/dev/null | sed 's/^sync-branch:[[:space:]]*//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//')
+    # Use head -1 to only take first match if file is malformed
+    SYNC_BRANCH=$(grep -E '^sync-branch:' .beads/config.yaml 2>/dev/null | head -1 | sed 's/^sync-branch:[[:space:]]*//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//')
 fi
 if [ -n "$SYNC_BRANCH" ]; then
     # sync-branch is configured, skip .beads uncommitted check
