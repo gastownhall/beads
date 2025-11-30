@@ -117,6 +117,7 @@ func (s *SQLiteStorage) hydrateFromRepo(ctx context.Context, repoPath, sourceRep
 }
 
 // importJSONLFile imports issues from a JSONL file, setting the source_repo field.
+// Disables FK checks during import to handle out-of-order dependencies.
 func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRepo string) (int, error) {
 	file, err := os.Open(jsonlPath) // #nosec G304 -- jsonlPath is from trusted source
 	if err != nil {
@@ -138,8 +139,22 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 	count := 0
 	lineNum := 0
 
+	// Get exclusive connection to ensure PRAGMA applies
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Disable foreign keys on this connection to handle out-of-order deps
+	// (issue A may depend on issue B that appears later in the file)
+	_, err = conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to disable foreign keys: %w", err)
+	}
+
 	// Begin transaction for bulk import
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -179,6 +194,28 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 		return 0, fmt.Errorf("failed to read JSONL file: %w", err)
 	}
 
+	// Re-enable foreign keys before commit to validate data integrity
+	_, err = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to re-enable foreign keys: %w", err)
+	}
+
+	// Validate FK constraints on imported data
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var table, rowid, parent, fkid string
+		_ = rows.Scan(&table, &rowid, &parent, &fkid)
+		return 0, fmt.Errorf(
+			"foreign key violation in imported data: table=%s rowid=%s parent=%s",
+			table, rowid, parent,
+		)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
@@ -197,7 +234,7 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 	// Check if issue exists
 	var existingID string
 	err := tx.QueryRowContext(ctx, `SELECT id FROM issues WHERE id = ?`, issue.ID).Scan(&existingID)
-	
+
 	if err == sql.ErrNoRows {
 		// Issue doesn't exist - insert it
 		_, err = tx.ExecContext(ctx, `

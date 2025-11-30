@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,14 +73,14 @@ func TestHydrateFromMultiRepo(t *testing.T) {
 
 		// Create test issue
 		issue := types.Issue{
-			ID:          "test-1",
-			Title:       "Test Issue",
-			Status:      types.StatusOpen,
-			Priority:    1,
-			IssueType:   types.TypeTask,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
-			SourceRepo:  ".",
+			ID:         "test-1",
+			Title:      "Test Issue",
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: ".",
 		}
 		issue.ContentHash = issue.ComputeContentHash()
 
@@ -143,14 +144,14 @@ func TestHydrateFromMultiRepo(t *testing.T) {
 
 		// Create test issue
 		issue := types.Issue{
-			ID:          "test-2",
-			Title:       "Test Issue 2",
-			Status:      types.StatusOpen,
-			Priority:    1,
-			IssueType:   types.TypeTask,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
-			SourceRepo:  ".",
+			ID:         "test-2",
+			Title:      "Test Issue 2",
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: ".",
 		}
 		issue.ContentHash = issue.ComputeContentHash()
 
@@ -370,6 +371,131 @@ func TestImportJSONLFile(t *testing.T) {
 		}
 		if len(deps) > 0 && deps[0].ID != "test-1" {
 			t.Errorf("expected dependency on test-1, got %s", deps[0].ID)
+		}
+	})
+}
+
+func TestImportJSONLFileOutOfOrderDeps(t *testing.T) {
+	t.Run("handles out-of-order dependencies", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+
+		// Create test JSONL file with dependency BEFORE its target
+		tmpDir := t.TempDir()
+		jsonlPath := filepath.Join(tmpDir, "test.jsonl")
+		f, err := os.Create(jsonlPath)
+		if err != nil {
+			t.Fatalf("failed to create JSONL file: %v", err)
+		}
+
+		// Issue 1 depends on Issue 2, but Issue 1 comes FIRST in the file
+		// This would fail with FK constraint if not handled properly
+		issue1 := types.Issue{
+			ID:        "test-1",
+			Title:     "Issue 1 (depends on Issue 2)",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Dependencies: []*types.Dependency{
+				{
+					IssueID:     "test-1",
+					DependsOnID: "test-2", // test-2 doesn't exist yet!
+					Type:        types.DepBlocks,
+					CreatedAt:   time.Now(),
+					CreatedBy:   "test",
+				},
+			},
+			SourceRepo: "test",
+		}
+		issue1.ContentHash = issue1.ComputeContentHash()
+
+		issue2 := types.Issue{
+			ID:         "test-2",
+			Title:      "Issue 2 (dependency target)",
+			Status:     types.StatusOpen,
+			Priority:   2,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: "test",
+		}
+		issue2.ContentHash = issue2.ComputeContentHash()
+
+		enc := json.NewEncoder(f)
+		enc.Encode(issue1) // Dependent first
+		enc.Encode(issue2) // Dependency target second
+		f.Close()
+
+		// Import should succeed despite out-of-order dependencies
+		ctx := context.Background()
+		count, err := store.importJSONLFile(ctx, jsonlPath, "test")
+		if err != nil {
+			t.Fatalf("importJSONLFile() error = %v", err)
+		}
+		if count != 2 {
+			t.Errorf("expected 2 issues imported, got %d", count)
+		}
+
+		// Verify dependency was created
+		deps, err := store.GetDependencies(ctx, "test-1")
+		if err != nil {
+			t.Fatalf("failed to get dependencies: %v", err)
+		}
+		if len(deps) != 1 {
+			t.Errorf("expected 1 dependency, got %d", len(deps))
+		}
+		if len(deps) > 0 && deps[0].ID != "test-2" {
+			t.Errorf("expected dependency on test-2, got %s", deps[0].ID)
+		}
+	})
+
+	t.Run("detects orphaned dependencies in corrupted data", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+
+		// Create test JSONL with orphaned dependency (target doesn't exist)
+		tmpDir := t.TempDir()
+		jsonlPath := filepath.Join(tmpDir, "test.jsonl")
+		f, err := os.Create(jsonlPath)
+		if err != nil {
+			t.Fatalf("failed to create JSONL file: %v", err)
+		}
+
+		issue := types.Issue{
+			ID:        "test-orphan",
+			Title:     "Issue with orphaned dependency",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Dependencies: []*types.Dependency{
+				{
+					IssueID:     "test-orphan",
+					DependsOnID: "nonexistent-issue", // This issue doesn't exist
+					Type:        types.DepBlocks,
+					CreatedAt:   time.Now(),
+					CreatedBy:   "test",
+				},
+			},
+			SourceRepo: "test",
+		}
+		issue.ContentHash = issue.ComputeContentHash()
+
+		enc := json.NewEncoder(f)
+		enc.Encode(issue)
+		f.Close()
+
+		// Import should fail due to FK violation
+		ctx := context.Background()
+		_, err = store.importJSONLFile(ctx, jsonlPath, "test")
+		if err == nil {
+			t.Error("expected error for orphaned dependency, got nil")
+		}
+		if err != nil && !strings.Contains(err.Error(), "foreign key violation") {
+			t.Errorf("expected foreign key violation error, got: %v", err)
 		}
 	})
 }
