@@ -288,21 +288,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
-		Version: "0.26.2",
+		Version: "0.27.0",
 		Date:    "2025-11-29",
 		Changes: []string{
-			"FIX (bd-f2f): Hash-based staleness detection prevents stale DB from corrupting JSONL",
-			"Detects content differences even when issue counts match between DB and JSONL",
-			"Computes SHA256 hash of JSONL content to detect mismatches missed by count-based checks",
-		},
-	},
-	{
-		Version: "0.26.1",
-		Date:    "2025-11-29",
-		Changes: []string{
-			"CRITICAL FIX (bd-53c): Reverse ZFC check prevents stale DB from corrupting JSONL",
-			"bd sync now detects when JSONL has more issues than DB and imports first",
-			"Prevents fresh/stale clones from exporting incomplete database state",
+			"Custom Status States - Define project-specific statuses via config (testing, blocked, review)",
+			"Contributor Fork Workflows - `bd init --contributor` auto-configures sync.remote=upstream",
+			"Git Worktree Support - Full support for worktrees in hooks and detection",
+			"CRITICAL: Sync corruption prevention - Hash-based staleness + reverse ZFC checks",
+			"Out-of-Order Dependencies (#414) - JSONL import handles deps before targets exist",
+			"--from-main defaults to noGitHistory=true - Prevents spurious deletions",
+			"bd sync --squash - Batch multiple sync commits into one",
+			"Fresh Clone Detection - bd doctor suggests 'bd init' when JSONL exists but no DB",
 		},
 	},
 	{

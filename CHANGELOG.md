@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2025-11-29
+
+### Added
+
+- **Custom Status States**: Define custom issue statuses via config (bd-1pj6)
+  - Configure project-specific statuses like `testing`, `blocked`, `review`
+  - Status validation ensures only configured statuses are used
+  - Backwards compatible: open/in_progress/closed always work
+
+- **Contributor Fork Workflows**: `bd init --contributor` now auto-configures `sync.remote=upstream` (bd-bx9)
+  - Syncs issues from upstream rather than origin
+  - Ideal for contributors working on forks
+
+- **Git Worktree Support**: Full support for git worktrees (#416)
+  - `bd hooks install` now works correctly in worktrees
+  - Helpful message when entering worktree repo without beads initialized
+  - Hooks properly detect worktree vs main repository
+
+- **Daemon Health Checks**: Health monitoring in daemon event loop (bd-gqo)
+  - Periodic health checks detect stale database state
+  - Auto-recovery from detected inconsistencies
+
+- **Fresh Clone Detection**: `bd doctor` now detects fresh clones (bd-4ew)
+  - Suggests `bd init` when JSONL exists but no database
+  - Improved onboarding experience for new contributors
+
+- **bd sync --squash**: Batch multiple sync commits into one (bd-o2e)
+  - Reduces commit noise when syncing frequently
+  - Optional flag for cleaner git history
+
+- **Error Handling Helpers**: Extracted FatalError/WarnError utilities (bd-s0z)
+  - Consistent error formatting across codebase
+  - Better error messages for users
+
+### Fixed
+
+- **CRITICAL: Sync Corruption Prevention**: Multiple fixes prevent stale database from corrupting JSONL
+  - **Hash-based staleness detection** (bd-f2f): SHA256 hash comparison catches content mismatches
+  - **Reverse ZFC check** (bd-53c): Detects when JSONL has more issues than DB
+  - **Stale daemon connection** (eb4b81d): Prevents corruption from stale SQLite connections
+  - Combined, these fixes eliminate the sync corruption bugs that affected v0.26.x
+
+- **Multi-Hyphen Prefix Support** (#419): Hash IDs with multi-part prefixes now handled correctly
+  - Example: `my-app-abc123` correctly parsed as prefix `my-app`
+
+- **Out-of-Order Dependencies** (#414): JSONL import handles dependencies before their targets exist
+  - Fixes import failures when issues reference not-yet-imported dependencies
+
+- **--from-main Sync Mode** (#418): Now defaults to `noGitHistory=true`
+  - Prevents spurious deletions when syncing from main branch
+
+- **JSONL-Only Mode Detection**: Auto-detects when config has `no-db: true` (bd-5kj)
+  - Properly handles repositories using JSONL without SQLite
+
+- **Init Safety Guard**: Prevents overwriting existing JSONL data on init
+  - Warns user when data already exists, requires confirmation
+
+- **Snapshot Cleanup** (bd-0io): Properly cleans up snapshot files after sync
+  - Removes `.beads/*.snapshot` files that could cause conflicts
+
+- **Daemon Registry Locking** (bd-5bj): Cross-process locking prevents registry corruption
+  - Fixes race conditions when multiple processes access daemon registry
+
+- **Doctor Merge Artifacts**: Excludes merge artifacts from "multiple JSONL" warning
+  - Reduces false positives during merge resolution
+
+### Changed
+
+- **Documentation**: Fixed birthday paradox threshold explanation in README
+- **Documentation**: Corrected `bd dep add` syntax and semantics
+
+### Community
+
+- PR #419: Multi-hyphen prefix support
+- PR #418: --from-main noGitHistory default
+- PR #416: Git worktree hooks support
+- PR #415: CI fixes
+- PR #414: Out-of-order dependency handling
+- PR #404: Error on invalid JSON during init (@joelklabo)
+
 ## [0.26.2] - 2025-11-29
 
 ### Fixed
