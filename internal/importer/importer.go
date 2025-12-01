@@ -859,6 +859,33 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 	// Skip if --no-git-history flag is set (prevents spurious deletions during JSONL migrations)
 	if len(needGitCheck) > 0 && !opts.NoGitHistory {
 		deletedViaGit := checkGitHistoryForDeletions(beadsDir, needGitCheck)
+
+		// Safety guard (bd-21a): Prevent mass deletion when JSONL appears reset
+		// If git-history-backfill would delete a large percentage of issues,
+		// this likely indicates the JSONL was reset (git reset, branch switch, etc.)
+		// rather than intentional deletions
+		totalDBIssues := len(dbIssues)
+		deleteCount := len(deletedViaGit)
+
+		if deleteCount > 0 && totalDBIssues > 0 {
+			deletePercent := float64(deleteCount) / float64(totalDBIssues) * 100
+
+			// Abort if would delete >50% of issues - this is almost certainly a reset
+			if deletePercent > 50 {
+				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill would delete %d of %d issues (%.1f%%) - aborting\n",
+					deleteCount, totalDBIssues, deletePercent)
+				fmt.Fprintf(os.Stderr, "This usually means the JSONL was reset (git reset, branch switch, etc.)\n")
+				fmt.Fprintf(os.Stderr, "If these are legitimate deletions, add them to deletions.jsonl manually\n")
+				// Don't delete anything - abort the backfill
+				deleteCount = 0
+				deletedViaGit = nil
+			} else if deleteCount > 10 {
+				// Warn (but proceed) if deleting >10 issues
+				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill will delete %d issues (%.1f%% of %d total)\n",
+					deleteCount, deletePercent, totalDBIssues)
+			}
+		}
+
 		for _, id := range deletedViaGit {
 			// Backfill the deletions manifest (self-healing)
 			backfillRecord := deletions.DeletionRecord{

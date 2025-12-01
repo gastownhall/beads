@@ -542,3 +542,187 @@ func TestAutoImportWithNoGitHistoryFlag(t *testing.T) {
 		t.Errorf("Expected 0 purged issues, got %d", result.Purged)
 	}
 }
+
+// TestMassDeletionSafetyGuard tests the fix for bd-21a where git-history-backfill
+// would incorrectly purge the entire database when a JSONL was reset.
+// The safety guard should abort if >50% of issues would be deleted.
+func TestMassDeletionSafetyGuard(t *testing.T) {
+	// Create a temp directory for a test git repo
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	beadsDir := filepath.Join(repoDir, ".beads")
+
+	// Initialize git repo
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatalf("failed to create repo dir: %v", err)
+	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to init git repo: %v\n%s", err, out)
+	}
+
+	// Configure git user for commits
+	cmd = exec.Command("git", "config", "user.email", "test@test.com")
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to config git email: %v", err)
+	}
+	cmd = exec.Command("git", "config", "user.name", "Test User")
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to config git name: %v", err)
+	}
+
+	// Create .beads directory
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	// Create initial issues.jsonl with 10 issues
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	initialContent := `{"id":"bd-mass01","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass02","title":"Issue 2","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass03","title":"Issue 3","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass04","title":"Issue 4","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass05","title":"Issue 5","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass06","title":"Issue 6","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass07","title":"Issue 7","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass08","title":"Issue 8","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass09","title":"Issue 9","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass10","title":"Issue 10","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+	if err := os.WriteFile(jsonlPath, []byte(initialContent), 0644); err != nil {
+		t.Fatalf("failed to write initial JSONL: %v", err)
+	}
+
+	// Also create a deletions.jsonl (empty)
+	deletionsPath := deletions.DefaultPath(beadsDir)
+	if err := os.WriteFile(deletionsPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write deletions: %v", err)
+	}
+
+	// Commit the initial state
+	cmd = exec.Command("git", "add", ".beads/")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to git add: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "Initial issues with 10 entries")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to git commit: %v\n%s", err, out)
+	}
+
+	ctx := context.Background()
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set up prefix
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("failed to set prefix: %v", err)
+	}
+
+	// First, import all 10 issues to the database
+	now := time.Now()
+	allIssues := []*types.Issue{
+		{ID: "bd-mass01", Title: "Issue 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass02", Title: "Issue 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass03", Title: "Issue 3", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass04", Title: "Issue 4", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass05", Title: "Issue 5", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass06", Title: "Issue 6", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass07", Title: "Issue 7", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass08", Title: "Issue 8", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass09", Title: "Issue 9", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass10", Title: "Issue 10", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+
+	// Initial import - NoGitHistory to just populate the DB
+	opts := Options{
+		DryRun:               false,
+		SkipUpdate:           false,
+		SkipPrefixValidation: true,
+		NoGitHistory:         true,
+	}
+
+	_, err = ImportIssues(ctx, dbPath, store, allIssues, opts)
+	if err != nil {
+		t.Fatalf("initial import failed: %v", err)
+	}
+
+	// Verify all 10 issues are in DB
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("failed to search issues: %v", err)
+	}
+	if len(dbIssues) != 10 {
+		t.Fatalf("Expected 10 issues after initial import, got %d", len(dbIssues))
+	}
+
+	// Now simulate a "reset" scenario:
+	// JSONL is reset to only have 2 issues (80% would be deleted)
+	resetContent := `{"id":"bd-mass01","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"bd-mass02","title":"Issue 2","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+	if err := os.WriteFile(jsonlPath, []byte(resetContent), 0644); err != nil {
+		t.Fatalf("failed to write reset JSONL: %v", err)
+	}
+
+	// Commit the reset state
+	cmd = exec.Command("git", "add", ".beads/issues.jsonl")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to git add reset: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "Reset JSONL to 2 issues")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to git commit reset: %v\n%s", err, out)
+	}
+
+	// Now try to import the reset JSONL WITH git history enabled
+	// This should trigger the safety guard since 8/10 = 80% > 50%
+	resetIssues := []*types.Issue{
+		{ID: "bd-mass01", Title: "Issue 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "bd-mass02", Title: "Issue 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+
+	opts = Options{
+		DryRun:               false,
+		SkipUpdate:           false,
+		SkipPrefixValidation: true,
+		NoGitHistory:         false, // Enable git history - this is the test!
+	}
+
+	result, err := ImportIssues(ctx, dbPath, store, resetIssues, opts)
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+
+	// The safety guard should have prevented any purges
+	// because 8/10 = 80% > 50% threshold
+	t.Logf("Import result: created=%d, updated=%d, unchanged=%d, purged=%d",
+		result.Created, result.Updated, result.Unchanged, result.Purged)
+
+	// Verify all 10 issues are STILL in DB (safety guard prevented deletion)
+	dbIssues, err = store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("failed to search issues after reset import: %v", err)
+	}
+
+	t.Logf("Issues in DB after reset import: %d", len(dbIssues))
+
+	if len(dbIssues) != 10 {
+		t.Errorf("Expected 10 issues in DB (safety guard should prevent purge), got %d", len(dbIssues))
+	}
+
+	if result.Purged != 0 {
+		t.Errorf("Expected 0 purged issues (safety guard), got %d (IDs: %v)", result.Purged, result.PurgedIDs)
+	}
+}
