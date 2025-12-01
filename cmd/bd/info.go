@@ -288,6 +288,16 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.27.2",
+		Date:    "2025-11-30",
+		Changes: []string{
+			"CRITICAL: Mass database deletion protection - Safety guard prevents purging entire DB on JSONL reset (bd-t5m)",
+			"Fresh Clone Initialization - bd init auto-detects prefix from existing JSONL, works without --prefix flag (bd-4h9)",
+			"3-Character Hash Support - ExtractIssuePrefix now handles base36 hashes 3+ chars (#425)",
+			"Import Warnings - New warning when issues skipped due to deletions manifest (bd-4zy)",
+		},
+	},
+	{
 		Version: "0.27.1",
 		Date:    "2025-11-30",
 		Changes: []string{
