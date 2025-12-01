@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.2] - 2025-11-30
+
+### Fixed
+
+- **CRITICAL: Prevent Mass Database Deletion on JSONL Reset (bd-t5m)**
+  - git-history-backfill now includes safety guard to prevent purging entire database
+  - If >50% of issues would be deleted via git history, operation is aborted with warning
+  - Threshold prevents accidental deletion when JSONL is reset (git reset, branch switch, etc.)
+  - If 10-50% would be deleted, operation proceeds but shows warning message
+  - Fixes bug where `git reset --hard origin/main` would lose all issues
+
+- **Fix Fresh Clone Initialization (bd-4h9)**
+  - `bd init` now works on fresh clones that have JSONL but no database
+  - Auto-detects issue prefix from existing JSONL (no `--prefix` flag needed)
+  - Prevents "database not found" errors on first run in a cloned repository
+  
+- **Import Warning for Deleted Issues (bd-4zy)**
+  - New warning message when issues are skipped due to deletions manifest
+  - Helps users understand why expected issues aren't being imported
+  - Warns user to check `bd deleted` for history of removed issues
+
+- **Extract Issue Prefix for 3-char Hashes (#425)**
+  - `ExtractIssuePrefix()` now handles base36 hashes as short as 3 characters
+  - Previously required 4+ chars, breaking hyphenated prefixes (e.g., `document-intelligence-0sa`)
+  - Updated hash validation to accept base36 (0-9, a-z) instead of just hex
+  - Requires at least one digit to distinguish hashes from English words
+
 ## [0.27.0] - 2025-11-29
 
 ### Added
