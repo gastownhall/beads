@@ -51,19 +51,24 @@ func ExtractIssuePrefix(issueID string) string {
 }
 
 // isLikelyHash checks if a string looks like a hash ID suffix.
-// Returns true for hexadecimal strings of 4-8 characters.
-// Hash IDs in beads are typically 4-6 characters (progressive length scaling).
+// Returns true for base36 strings of 3-8 characters (0-9, a-z) that contain at least one digit.
+// Requires a digit to distinguish hashes from English words (e.g., accept "0sa" but reject "test").
+// Hash IDs in beads use adaptive length scaling from 3-8 characters.
 func isLikelyHash(s string) bool {
-	if len(s) < 4 || len(s) > 8 {
+	if len(s) < 3 || len(s) > 8 {
 		return false
 	}
-	// Check if all characters are hexadecimal
+	hasDigit := false
+	// Check if all characters are base36 (0-9, a-z) and at least one is a digit
 	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
 			return false
 		}
 	}
-	return true
+	return hasDigit
 }
 
 // ExtractIssueNumber extracts the number from an issue ID like "bd-123" -> 123

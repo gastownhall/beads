@@ -402,6 +402,21 @@ func TestExtractIssuePrefix(t *testing.T) {
 			issueID:  "proj-AbCd12",
 			expected: "proj", // Mixed case hash should work
 		},
+		{
+			name:     "3-char hash with hyphenated prefix",
+			issueID:  "document-intelligence-0sa",
+			expected: "document-intelligence", // 3-char hash (base36) should use last hyphen
+		},
+		{
+			name:     "3-char hash with multi-part prefix",
+			issueID:  "my-cool-app-1x7",
+			expected: "my-cool-app", // 3-char base36 hash
+		},
+		{
+			name:     "3-char all-letters suffix (should fall back to first hyphen)",
+			issueID:  "test-proj-abc",
+			expected: "test", // All letters = not a hash, falls back to first hyphen
+		},
 	}
 
 	for _, tt := range tests {
