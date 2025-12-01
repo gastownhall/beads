@@ -166,6 +166,7 @@ type ImportOptions struct {
 	ClearDuplicateExternalRefs bool   // Clear duplicate external_ref values instead of erroring
 	OrphanHandling             string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
 	NoGitHistory               bool   // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
+	IgnoreDeletions            bool   // Import issues even if they're in the deletions manifest
 }
 
 // ImportResult contains statistics about the import operation
@@ -183,6 +184,8 @@ type ImportResult struct {
 	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
 	Purged              int               // Issues purged from DB (found in deletions manifest)
 	PurgedIDs           []string          // IDs that were purged
+	SkippedDeleted      int               // Issues skipped because they're in deletions manifest
+	SkippedDeletedIDs   []string          // IDs that were skipped due to deletions manifest
 }
 
 // importIssuesCore handles the core import logic used by both manual and auto-import.
@@ -223,6 +226,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		ClearDuplicateExternalRefs: opts.ClearDuplicateExternalRefs,
 		OrphanHandling:             importer.OrphanHandling(orphanHandling),
 		NoGitHistory:               opts.NoGitHistory,
+		IgnoreDeletions:            opts.IgnoreDeletions,
 	}
 
 	// Delegate to the importer package
@@ -246,6 +250,8 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		SkippedDependencies: result.SkippedDependencies,
 		Purged:              result.Purged,
 		PurgedIDs:           result.PurgedIDs,
+		SkippedDeleted:      result.SkippedDeleted,
+		SkippedDeletedIDs:   result.SkippedDeletedIDs,
 	}, nil
 }
 

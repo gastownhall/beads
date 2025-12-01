@@ -96,6 +96,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 		force, _ := cmd.Flags().GetBool("force")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
+		ignoreDeletions, _ := cmd.Flags().GetBool("ignore-deletions")
 
 		// Check if stdin is being used interactively (not piped)
 		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
@@ -255,6 +256,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			ClearDuplicateExternalRefs: clearDuplicateExternalRefs,
 			OrphanHandling:             orphanHandling,
 			NoGitHistory:               noGitHistory,
+			IgnoreDeletions:            ignoreDeletions,
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -402,7 +404,17 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		if len(result.IDMapping) > 0 {
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
+		if result.SkippedDeleted > 0 {
+			fmt.Fprintf(os.Stderr, ", %d skipped (deleted)", result.SkippedDeleted)
+		}
 		fmt.Fprintf(os.Stderr, "\n")
+
+		// Print skipped deleted issues summary if any (bd-4zy)
+		if result.SkippedDeleted > 0 {
+			fmt.Fprintf(os.Stderr, "\n⚠️  Skipped %d issue(s) found in deletions manifest\n", result.SkippedDeleted)
+			fmt.Fprintf(os.Stderr, "   These issues were previously deleted and will not be resurrected.\n")
+			fmt.Fprintf(os.Stderr, "   Use --ignore-deletions to force import anyway.\n")
+		}
 
 		// Print skipped dependencies summary if any
 		if len(result.SkippedDependencies) > 0 {
@@ -759,6 +771,7 @@ func init() {
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
 	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
+	importCmd.Flags().Bool("ignore-deletions", false, "Import issues even if they're in the deletions manifest")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }
