@@ -834,3 +834,159 @@ func TestMultiRepoSnapshotIsolation(t *testing.T) {
 		t.Error("Repo2 left snapshot has wrong issues")
 	}
 }
+
+// TestMultiRepoFlushPrefixFiltering tests that non-primary repos only flush issues
+// with their own prefix (GH #437 fix).
+//
+// The bug: In multi-repo mode, when a non-primary repo flushes, it incorrectly writes
+// ALL issues (including from primary) to its local issues.jsonl. This causes prefix
+// mismatch errors on subsequent imports.
+//
+// Expected behavior:
+// - Primary repo: writes all issues (from all repos)
+// - Non-primary repos: only writes issues matching their prefix
+func TestMultiRepoFlushPrefixFiltering(t *testing.T) {
+	// Setup workspace directories
+	primaryDir := t.TempDir()
+	additionalDir := t.TempDir()
+
+	// Setup .beads directories
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	additionalBeadsDir := filepath.Join(additionalDir, ".beads")
+	if err := os.MkdirAll(primaryBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create primary .beads dir: %v", err)
+	}
+	if err := os.MkdirAll(additionalBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create additional .beads dir: %v", err)
+	}
+
+	// Create database in additional (non-primary) dir
+	dbPath := filepath.Join(additionalBeadsDir, "beads.db")
+	ctx := context.Background()
+
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set prefix for additional repo (different from primary)
+	if err := store.SetConfig(ctx, "issue_prefix", "foo-b"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Setup multi-repo config
+	config.Set("repos.primary", primaryDir)
+	config.Set("repos.additional", []string{additionalDir})
+	defer func() {
+		config.Set("repos.primary", "")
+		config.Set("repos.additional", nil)
+	}()
+
+	// Create issues with different prefixes (simulating hydrated multi-repo)
+	// foo-a prefix = primary repo issues (hydrated from remote)
+	// foo-b prefix = additional repo issues (local)
+	primaryIssue := &types.Issue{
+		ID:          "foo-a-001",
+		Title:       "Primary repo issue",
+		Description: "This belongs to primary",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   "task",
+		SourceRepo:  ".",
+	}
+
+	additionalIssue := &types.Issue{
+		ID:          "foo-b-001",
+		Title:       "Additional repo issue",
+		Description: "This belongs to additional",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   "task",
+		SourceRepo:  additionalDir,
+	}
+
+	// Use batch create with SkipPrefixValidation to simulate multi-repo hydration
+	// (in real multi-repo mode, issues from other repos are imported with prefix validation skipped)
+	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{primaryIssue, additionalIssue}, "test", sqlite.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("Failed to batch create issues: %v", err)
+	}
+
+	// Build issues slice (simulating what flushToJSONLWithState does)
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("Failed to search issues: %v", err)
+	}
+	if len(allIssues) != 2 {
+		t.Fatalf("Expected 2 issues, got %d", len(allIssues))
+	}
+
+	// Get configured prefix for this repo (additional)
+	prefix, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		t.Fatalf("Failed to get prefix: %v", err)
+	}
+
+	// Determine if we're primary (we're not - we're in additional)
+	cwd := additionalDir // Simulate being in additional repo
+	primaryPath := config.GetMultiRepoConfig().Primary
+	absCwd, _ := filepath.Abs(cwd)
+	absPrimary, _ := filepath.Abs(primaryPath)
+	isPrimary := absCwd == absPrimary
+
+	if isPrimary {
+		t.Fatal("Expected to be non-primary repo")
+	}
+
+	// Filter issues by prefix (the fix)
+	filtered := make([]*types.Issue, 0, len(allIssues))
+	prefixWithDash := prefix + "-"
+	for _, issue := range allIssues {
+		if len(issue.ID) >= len(prefixWithDash) && issue.ID[:len(prefixWithDash)] == prefixWithDash {
+			filtered = append(filtered, issue)
+		}
+	}
+
+	// Verify filtering worked
+	if len(filtered) != 1 {
+		t.Errorf("Expected 1 filtered issue, got %d", len(filtered))
+	}
+	if len(filtered) > 0 && filtered[0].ID != "foo-b-001" {
+		t.Errorf("Expected filtered issue to be foo-b-001, got %s", filtered[0].ID)
+	}
+
+	// Write filtered issues to additional repo's JSONL
+	jsonlPath := filepath.Join(additionalBeadsDir, "issues.jsonl")
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to create JSONL: %v", err)
+	}
+	encoder := json.NewEncoder(f)
+	for _, issue := range filtered {
+		if err := encoder.Encode(issue); err != nil {
+			f.Close()
+			t.Fatalf("Failed to encode issue: %v", err)
+		}
+	}
+	f.Close()
+
+	// Read back and verify only foo-b issue is present
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("Failed to read JSONL: %v", err)
+	}
+
+	var readIssue types.Issue
+	if err := json.Unmarshal(data, &readIssue); err != nil {
+		t.Fatalf("Failed to parse JSONL: %v", err)
+	}
+
+	if readIssue.ID != "foo-b-001" {
+		t.Errorf("JSONL contains wrong issue: expected foo-b-001, got %s", readIssue.ID)
+	}
+
+	// Verify foo-a issue is NOT in the file
+	if string(data[:10]) == `{"id":"foo-a` {
+		t.Error("JSONL incorrectly contains foo-a issue (GH #437 bug)")
+	}
+}

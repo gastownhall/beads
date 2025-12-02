@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -683,6 +685,46 @@ func flushToJSONLWithState(state flushState) {
 	issues := make([]*types.Issue, 0, len(issueMap))
 	for _, issue := range issueMap {
 		issues = append(issues, issue)
+	}
+
+	// Filter issues by prefix in multi-repo mode for non-primary repos (fixes GH #437)
+	// In multi-repo mode, non-primary repos should only export issues that match
+	// their own prefix. Issues from other repos (hydrated for unified view) should
+	// NOT be written to the local JSONL.
+	multiRepo := config.GetMultiRepoConfig()
+	if multiRepo != nil {
+		// Get our configured prefix
+		prefix, prefixErr := store.GetConfig(ctx, "issue_prefix")
+		if prefixErr == nil && prefix != "" {
+			// Determine if we're the primary repo
+			cwd, _ := os.Getwd()
+			primaryPath := multiRepo.Primary
+			if primaryPath == "" || primaryPath == "." {
+				primaryPath = cwd
+			}
+
+			// Normalize paths for comparison
+			absCwd, _ := filepath.Abs(cwd)
+			absPrimary, _ := filepath.Abs(primaryPath)
+
+			isPrimary := absCwd == absPrimary
+
+			if !isPrimary {
+				// Filter to only issues matching our prefix
+				filtered := make([]*types.Issue, 0, len(issues))
+				prefixWithDash := prefix
+				if !strings.HasSuffix(prefixWithDash, "-") {
+					prefixWithDash = prefix + "-"
+				}
+				for _, issue := range issues {
+					if strings.HasPrefix(issue.ID, prefixWithDash) {
+						filtered = append(filtered, issue)
+					}
+				}
+				debug.Logf("multi-repo filter: %d issues -> %d (prefix %s)", len(issues), len(filtered), prefix)
+				issues = filtered
+			}
+		}
 	}
 
 	// Write atomically using common helper
