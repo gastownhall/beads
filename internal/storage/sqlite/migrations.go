@@ -33,6 +33,7 @@ var migrationsList = []Migration{
 	{"child_counters_table", migrations.MigrateChildCountersTable},
 	{"blocked_issues_cache", migrations.MigrateBlockedIssuesCache},
 	{"orphan_detection", migrations.MigrateOrphanDetection},
+	{"close_reason_column", migrations.MigrateCloseReasonColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -73,6 +74,7 @@ func getMigrationDescription(name string) string {
 		"child_counters_table":         "Adds child_counters table for hierarchical ID generation with ON DELETE CASCADE",
 		"blocked_issues_cache":         "Adds blocked_issues_cache table for GetReadyWork performance optimization (bd-5qim)",
 		"orphan_detection":             "Detects orphaned child issues and logs them for user action (bd-3852)",
+		"close_reason_column":          "Adds close_reason column to issues table for storing closure explanations (bd-uyu)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {

@@ -157,6 +157,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var compactedAt sql.NullTime
 	var originalSize sql.NullInt64
 	var sourceRepo sql.NullString
+	var closeReason sql.NullString
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -164,7 +165,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
-		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo
+		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -172,7 +173,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 	)
 
 	if err == sql.ErrNoRows {
@@ -209,6 +210,9 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if sourceRepo.Valid {
 		issue.SourceRepo = sourceRepo.String
+	}
+	if closeReason.Valid {
+		issue.CloseReason = closeReason.String
 	}
 
 	// Fetch labels for this issue
@@ -1263,7 +1267,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	querySQL := fmt.Sprintf(`
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at, external_ref, source_repo
+		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

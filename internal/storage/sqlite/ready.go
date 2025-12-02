@@ -99,7 +99,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	query := fmt.Sprintf(`
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo
+		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -126,7 +126,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo,
-			compaction_level, compacted_at, compacted_at_commit, original_size
+			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason
 		FROM issues
 		WHERE status != 'closed'
 		  AND datetime(updated_at) < datetime('now', '-' || ? || ' days')
@@ -167,18 +167,19 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var compactedAt sql.NullTime
 		var compactedAtCommit sql.NullString
 		var originalSize sql.NullInt64
-		
+		var closeReason sql.NullString
+
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
-			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize,
+			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
 		}
-		
+
 		if contentHash.Valid {
 			issue.ContentHash = contentHash.String
 		}
@@ -210,10 +211,13 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if originalSize.Valid {
 			issue.OriginalSize = int(originalSize.Int64)
 		}
-		
+		if closeReason.Valid {
+			issue.CloseReason = closeReason.String
+		}
+
 		issues = append(issues, &issue)
 	}
-	
+
 	return issues, rows.Err()
 }
 

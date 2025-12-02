@@ -678,7 +678,7 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*types.Issue, error) {
 	var issues []*types.Issue
 	var issueIDs []string
-	
+
 	// First pass: scan all issues
 	for rows.Next() {
 		var issue types.Issue
@@ -688,12 +688,13 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var assignee sql.NullString
 		var externalRef sql.NullString
 		var sourceRepo sql.NullString
+		var closeReason sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -718,6 +719,9 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if sourceRepo.Valid {
 			issue.SourceRepo = sourceRepo.String
 		}
+		if closeReason.Valid {
+			issue.CloseReason = closeReason.String
+		}
 
 		issues = append(issues, &issue)
 		issueIDs = append(issueIDs, issue.ID)
@@ -733,19 +737,6 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 	for _, issue := range issues {
 		if labels, ok := labelsMap[issue.ID]; ok {
 			issue.Labels = labels
-		}
-	}
-
-	// Third pass: batch-load close reasons for closed issues
-	closeReasonsMap, err := s.GetCloseReasonsForIssues(ctx, issueIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to batch get close reasons: %w", err)
-	}
-
-	// Assign close reasons to issues
-	for _, issue := range issues {
-		if reason, ok := closeReasonsMap[issue.ID]; ok {
-			issue.CloseReason = reason
 		}
 	}
 

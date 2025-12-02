@@ -1780,7 +1780,7 @@ func checkSchemaCompatibility(path string) doctorCheck {
 	// This is a simplified version since we can't import the internal package directly
 	// Check all critical tables and columns
 	criticalChecks := map[string][]string{
-		"issues":         {"id", "title", "content_hash", "external_ref", "compacted_at"},
+		"issues":         {"id", "title", "content_hash", "external_ref", "compacted_at", "close_reason"},
 		"dependencies":   {"issue_id", "depends_on_id", "type"},
 		"child_counters": {"parent_id", "last_child"},
 		"export_hashes":  {"issue_id", "content_hash"},
