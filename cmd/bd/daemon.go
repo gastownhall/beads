@@ -48,6 +48,7 @@ Run 'bd daemon' with no flags to see available options.`,
 		interval, _ := cmd.Flags().GetDuration("interval")
 		autoCommit, _ := cmd.Flags().GetBool("auto-commit")
 		autoPush, _ := cmd.Flags().GetBool("auto-push")
+		localMode, _ := cmd.Flags().GetBool("local")
 		logFile, _ := cmd.Flags().GetString("log")
 
 		// If no operation flags provided, show help
@@ -158,10 +159,24 @@ Run 'bd daemon' with no flags to see available options.`,
 			}
 		}
 
-		// Validate we're in a git repo
-		if !isGitRepo() {
+		// Validate --local mode constraints
+		if localMode {
+			if autoCommit {
+				fmt.Fprintf(os.Stderr, "Error: --auto-commit cannot be used with --local mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: --local mode runs without git, so commits are not possible\n")
+				os.Exit(1)
+			}
+			if autoPush {
+				fmt.Fprintf(os.Stderr, "Error: --auto-push cannot be used with --local mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: --local mode runs without git, so pushes are not possible\n")
+				os.Exit(1)
+			}
+		}
+
+		// Validate we're in a git repo (skip in local mode)
+		if !localMode && !isGitRepo() {
 			fmt.Fprintf(os.Stderr, "Error: not in a git repository\n")
-			fmt.Fprintf(os.Stderr, "Hint: run 'git init' to initialize a repository\n")
+			fmt.Fprintf(os.Stderr, "Hint: run 'git init' to initialize a repository, or use --local for local-only mode\n")
 			os.Exit(1)
 		}
 
@@ -184,13 +199,17 @@ Run 'bd daemon' with no flags to see available options.`,
 		}
 
 		// Start daemon
-		fmt.Printf("Starting bd daemon (interval: %v, auto-commit: %v, auto-push: %v)\n",
-			interval, autoCommit, autoPush)
+		if localMode {
+			fmt.Printf("Starting bd daemon in LOCAL mode (interval: %v, no git sync)\n", interval)
+		} else {
+			fmt.Printf("Starting bd daemon (interval: %v, auto-commit: %v, auto-push: %v)\n",
+				interval, autoCommit, autoPush)
+		}
 		if logFile != "" {
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, logFile, pidFile)
+		startDaemon(interval, autoCommit, autoPush, localMode, logFile, pidFile)
 	},
 }
 
@@ -199,6 +218,7 @@ func init() {
 	daemonCmd.Flags().Duration("interval", 5*time.Second, "Sync check interval")
 	daemonCmd.Flags().Bool("auto-commit", false, "Automatically commit changes")
 	daemonCmd.Flags().Bool("auto-push", false, "Automatically push commits")
+	daemonCmd.Flags().Bool("local", false, "Run in local-only mode (no git required, no sync)")
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().Bool("health", false, "Check daemon health and metrics")
@@ -220,7 +240,7 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush, localMode bool, logPath, pidFile string) {
 	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
 
@@ -283,7 +303,11 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	defer func() { _ = lock.Close() }()
 	defer func() { _ = os.Remove(pidFile) }()
 
-	log.log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
+	if localMode {
+		log.log("Daemon started in LOCAL mode (interval: %v, no git sync)", interval)
+	} else {
+		log.log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
+	}
 
 	// Check for multiple .db files (ambiguity error)
 	beadsDir := filepath.Dir(daemonDBPath)
@@ -368,8 +392,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 		}
 	}
 
-	// Validate database fingerprint
-	if err := validateDatabaseFingerprint(ctx, store, &log); err != nil {
+	// Validate database fingerprint (skip in local mode - no git available)
+	if localMode {
+		log.log("Skipping fingerprint validation (local mode)")
+	} else if err := validateDatabaseFingerprint(ctx, store, &log); err != nil {
 		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
 			log.log("Error: %v", err)
 			return // Use return instead of os.Exit to allow defers to run
@@ -454,7 +480,13 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	doSync := createSyncFunc(ctx, store, autoCommit, autoPush, log)
+	// Create sync function based on mode
+	var doSync func()
+	if localMode {
+		doSync = createLocalSyncFunc(ctx, store, log)
+	} else {
+		doSync = createSyncFunc(ctx, store, autoCommit, autoPush, log)
+	}
 	doSync()
 
 	// Get parent PID for monitoring (exit if parent dies)
@@ -477,8 +509,14 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 			runEventLoop(ctx, cancel, ticker, doSync, server, serverErrChan, parentPID, log)
 		} else {
 			// Event-driven mode uses separate export-only and import-only functions
-			doExport := createExportFunc(ctx, store, autoCommit, autoPush, log)
-			doAutoImport := createAutoImportFunc(ctx, store, log)
+			var doExport, doAutoImport func()
+			if localMode {
+				doExport = createLocalExportFunc(ctx, store, log)
+				doAutoImport = createLocalAutoImportFunc(ctx, store, log)
+			} else {
+				doExport = createExportFunc(ctx, store, autoCommit, autoPush, log)
+				doAutoImport = createAutoImportFunc(ctx, store, log)
+			}
 			runEventDrivenLoop(ctx, cancel, server, serverErrChan, store, jsonlPath, doExport, doAutoImport, parentPID, log)
 		}
 	case "poll":

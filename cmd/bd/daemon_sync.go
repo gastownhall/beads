@@ -793,3 +793,211 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		log.log("Sync cycle complete")
 	}
 }
+
+// createLocalSyncFunc creates a function that performs local-only sync (export only, no git).
+// Used when daemon is started with --local flag.
+func createLocalSyncFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return func() {
+		syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer syncCancel()
+
+		log.log("Starting local sync cycle...")
+
+		jsonlPath := findJSONLPath()
+		if jsonlPath == "" {
+			log.log("Error: JSONL path not found")
+			return
+		}
+
+		// Check for exclusive lock before processing database
+		beadsDir := filepath.Dir(jsonlPath)
+		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
+		if skip {
+			if err != nil {
+				log.log("Skipping database (lock check failed: %v)", err)
+			} else {
+				log.log("Skipping database (locked by %s)", holder)
+			}
+			return
+		}
+		if holder != "" {
+			log.log("Removed stale lock (%s), proceeding with sync", holder)
+		}
+
+		// Integrity check: validate before export
+		if err := validatePreExport(syncCtx, store, jsonlPath); err != nil {
+			log.log("Pre-export validation failed: %v", err)
+			return
+		}
+
+		// Check for duplicate IDs (database corruption)
+		if err := checkDuplicateIDs(syncCtx, store); err != nil {
+			log.log("Duplicate ID check failed: %v", err)
+			return
+		}
+
+		// Check for orphaned dependencies (warns but doesn't fail)
+		if orphaned, err := checkOrphanedDeps(syncCtx, store); err != nil {
+			log.log("Orphaned dependency check failed: %v", err)
+		} else if len(orphaned) > 0 {
+			log.log("Found %d orphaned dependencies: %v", len(orphaned), orphaned)
+		}
+
+		if err := exportToJSONLWithStore(syncCtx, store, jsonlPath); err != nil {
+			log.log("Export failed: %v", err)
+			return
+		}
+		log.log("Exported to JSONL")
+
+		// Update export metadata
+		multiRepoPaths := getMultiRepoJSONLPaths()
+		if multiRepoPaths != nil {
+			for _, path := range multiRepoPaths {
+				repoKey := getRepoKeyForPath(path)
+				updateExportMetadata(syncCtx, store, path, log, repoKey)
+			}
+		} else {
+			updateExportMetadata(syncCtx, store, jsonlPath, log, "")
+		}
+
+		// Update database mtime to be >= JSONL mtime
+		dbPath := filepath.Join(beadsDir, "beads.db")
+		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+			log.log("Warning: failed to update database mtime: %v", err)
+		}
+
+		log.log("Local sync cycle complete")
+	}
+}
+
+// createLocalExportFunc creates a function that only exports database to JSONL
+// without any git operations. Used for local-only mode with mutation events.
+func createLocalExportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return func() {
+		exportCtx, exportCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer exportCancel()
+
+		log.log("Starting local export...")
+
+		jsonlPath := findJSONLPath()
+		if jsonlPath == "" {
+			log.log("Error: JSONL path not found")
+			return
+		}
+
+		// Check for exclusive lock
+		beadsDir := filepath.Dir(jsonlPath)
+		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
+		if skip {
+			if err != nil {
+				log.log("Skipping export (lock check failed: %v)", err)
+			} else {
+				log.log("Skipping export (locked by %s)", holder)
+			}
+			return
+		}
+		if holder != "" {
+			log.log("Removed stale lock (%s), proceeding", holder)
+		}
+
+		// Pre-export validation
+		if err := validatePreExport(exportCtx, store, jsonlPath); err != nil {
+			log.log("Pre-export validation failed: %v", err)
+			return
+		}
+
+		// Export to JSONL
+		if err := exportToJSONLWithStore(exportCtx, store, jsonlPath); err != nil {
+			log.log("Export failed: %v", err)
+			return
+		}
+		log.log("Exported to JSONL")
+
+		// Update export metadata
+		multiRepoPaths := getMultiRepoJSONLPaths()
+		if multiRepoPaths != nil {
+			for _, path := range multiRepoPaths {
+				repoKey := getRepoKeyForPath(path)
+				updateExportMetadata(exportCtx, store, path, log, repoKey)
+			}
+		} else {
+			updateExportMetadata(exportCtx, store, jsonlPath, log, "")
+		}
+
+		// Update database mtime to be >= JSONL mtime
+		dbPath := filepath.Join(beadsDir, "beads.db")
+		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+			log.log("Warning: failed to update database mtime: %v", err)
+		}
+
+		log.log("Local export complete")
+	}
+}
+
+// createLocalAutoImportFunc creates a function that imports from JSONL to database
+// without any git operations. Used for local-only mode with file system change events.
+func createLocalAutoImportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return func() {
+		importCtx, importCancel := context.WithTimeout(ctx, 1*time.Minute)
+		defer importCancel()
+
+		log.log("Starting local auto-import...")
+
+		jsonlPath := findJSONLPath()
+		if jsonlPath == "" {
+			log.log("Error: JSONL path not found")
+			return
+		}
+
+		// Check for exclusive lock
+		beadsDir := filepath.Dir(jsonlPath)
+		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
+		if skip {
+			if err != nil {
+				log.log("Skipping import (lock check failed: %v)", err)
+			} else {
+				log.log("Skipping import (locked by %s)", holder)
+			}
+			return
+		}
+		if holder != "" {
+			log.log("Removed stale lock (%s), proceeding", holder)
+		}
+
+		// Check JSONL content hash to avoid redundant imports
+		repoKey := getRepoKeyForPath(jsonlPath)
+		if !hasJSONLChanged(importCtx, store, jsonlPath, repoKey) {
+			log.log("Skipping import: JSONL content unchanged")
+			return
+		}
+		log.log("JSONL content changed, proceeding with import...")
+
+		// Count issues before import
+		beforeCount, err := countDBIssues(importCtx, store)
+		if err != nil {
+			log.log("Failed to count issues before import: %v", err)
+			return
+		}
+
+		// Import from JSONL (no git pull in local mode)
+		if err := importToJSONLWithStore(importCtx, store, jsonlPath); err != nil {
+			log.log("Import failed: %v", err)
+			return
+		}
+		log.log("Imported from JSONL")
+
+		// Validate import
+		afterCount, err := countDBIssues(importCtx, store)
+		if err != nil {
+			log.log("Failed to count issues after import: %v", err)
+			return
+		}
+
+		if err := validatePostImport(beforeCount, afterCount, jsonlPath); err != nil {
+			log.log("Post-import validation failed: %v", err)
+			return
+		}
+
+		log.log("Local auto-import complete")
+	}
+}

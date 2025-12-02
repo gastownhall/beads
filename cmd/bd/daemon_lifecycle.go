@@ -276,7 +276,7 @@ func stopDaemon(pidFile string) {
 }
 
 // startDaemon starts the daemon in background
-func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string) {
+func startDaemon(interval time.Duration, autoCommit, autoPush, localMode bool, logFile, pidFile string) {
 	logPath, err := getLogFilePath(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -284,7 +284,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 	}
 
 	if os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, logPath, pidFile)
+		runDaemonLoop(interval, autoCommit, autoPush, localMode, logPath, pidFile)
 		return
 	}
 
@@ -302,6 +302,9 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 	}
 	if autoPush {
 		args = append(args, "--auto-push")
+	}
+	if localMode {
+		args = append(args, "--local")
 	}
 	if logFile != "" {
 		args = append(args, "--log", logFile)
