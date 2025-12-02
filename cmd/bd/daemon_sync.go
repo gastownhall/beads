@@ -375,11 +375,27 @@ Solutions:
 // createExportFunc creates a function that only exports database to JSONL
 // and optionally commits/pushes (no git pull or import). Used for mutation events.
 func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, autoPush bool, log daemonLogger) func() {
+	return performExport(ctx, store, autoCommit, autoPush, false, log)
+}
+
+// createLocalExportFunc creates a function that only exports database to JSONL
+// without any git operations. Used for local-only mode with mutation events.
+func createLocalExportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return performExport(ctx, store, false, false, true, log)
+}
+
+// performExport is the shared implementation for export-only functions.
+// skipGit: if true, skips all git operations (commits, pushes).
+func performExport(ctx context.Context, store storage.Storage, autoCommit, autoPush, skipGit bool, log daemonLogger) func() {
 	return func() {
 		exportCtx, exportCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer exportCancel()
 
-		log.log("Starting export...")
+		mode := "export"
+		if skipGit {
+			mode = "local export"
+		}
+		log.log("Starting %s...", mode)
 
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
@@ -392,9 +408,9 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
 		if skip {
 			if err != nil {
-				log.log("Skipping export (lock check failed: %v)", err)
+				log.log("Skipping %s (lock check failed: %v)", mode, err)
 			} else {
-				log.log("Skipping export (locked by %s)", holder)
+				log.log("Skipping %s (locked by %s)", mode, holder)
 			}
 			return
 		}
@@ -436,8 +452,8 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 			log.log("Warning: failed to update database mtime: %v", err)
 		}
 
-		// Auto-commit if enabled
-		if autoCommit {
+		// Auto-commit if enabled (skip in git-free mode)
+		if autoCommit && !skipGit {
 			// Try sync branch commit first
 			committed, err := syncBranchCommitAndPush(exportCtx, store, autoPush, log)
 			if err != nil {
@@ -473,18 +489,38 @@ func createExportFunc(ctx context.Context, store storage.Storage, autoCommit, au
 			}
 		}
 
-		log.log("Export complete")
+		if skipGit {
+			log.log("Local export complete")
+		} else {
+			log.log("Export complete")
+		}
 	}
 }
 
 // createAutoImportFunc creates a function that pulls from git and imports JSONL
 // to database (no export). Used for file system change events.
 func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return performAutoImport(ctx, store, false, log)
+}
+
+// createLocalAutoImportFunc creates a function that imports from JSONL to database
+// without any git operations. Used for local-only mode with file system change events.
+func createLocalAutoImportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return performAutoImport(ctx, store, true, log)
+}
+
+// performAutoImport is the shared implementation for import-only functions.
+// skipGit: if true, skips git pull operations.
+func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool, log daemonLogger) func() {
 	return func() {
 		importCtx, importCancel := context.WithTimeout(ctx, 1*time.Minute)
 		defer importCancel()
 
-		log.log("Starting auto-import...")
+		mode := "auto-import"
+		if skipGit {
+			mode = "local auto-import"
+		}
+		log.log("Starting %s...", mode)
 
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
@@ -497,9 +533,9 @@ func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemon
 		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
 		if skip {
 			if err != nil {
-				log.log("Skipping import (lock check failed: %v)", err)
+				log.log("Skipping %s (lock check failed: %v)", mode, err)
 			} else {
-				log.log("Skipping import (locked by %s)", holder)
+				log.log("Skipping %s (locked by %s)", mode, holder)
 			}
 			return
 		}
@@ -512,25 +548,28 @@ func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemon
 		// Use getRepoKeyForPath for multi-repo support (bd-ar2.10, bd-ar2.11)
 		repoKey := getRepoKeyForPath(jsonlPath)
 		if !hasJSONLChanged(importCtx, store, jsonlPath, repoKey) {
-			log.log("Skipping import: JSONL content unchanged")
+			log.log("Skipping %s: JSONL content unchanged", mode)
 			return
 		}
-		log.log("JSONL content changed, proceeding with import...")
+		log.log("JSONL content changed, proceeding with %s...", mode)
 
-		// Pull from git (try sync branch first)
-		pulled, err := syncBranchPull(importCtx, store, log)
-		if err != nil {
-			log.log("Sync branch pull failed: %v", err)
-			return
-		}
-
-		// If sync branch not configured, use regular pull
-		if !pulled {
-			if err := gitPull(importCtx); err != nil {
-				log.log("Pull failed: %v", err)
+		// Pull from git if not in git-free mode
+		if !skipGit {
+			// Try sync branch first
+			pulled, err := syncBranchPull(importCtx, store, log)
+			if err != nil {
+				log.log("Sync branch pull failed: %v", err)
 				return
 			}
-			log.log("Pulled from remote")
+
+			// If sync branch not configured, use regular pull
+			if !pulled {
+				if err := gitPull(importCtx); err != nil {
+					log.log("Pull failed: %v", err)
+					return
+				}
+				log.log("Pulled from remote")
+			}
 		}
 
 		// Count issues before import
@@ -559,7 +598,11 @@ func createAutoImportFunc(ctx context.Context, store storage.Storage, log daemon
 			return
 		}
 
-		log.log("Auto-import complete")
+		if skipGit {
+			log.log("Local auto-import complete")
+		} else {
+			log.log("Auto-import complete")
+		}
 	}
 }
 
@@ -867,137 +910,5 @@ func createLocalSyncFunc(ctx context.Context, store storage.Storage, log daemonL
 		}
 
 		log.log("Local sync cycle complete")
-	}
-}
-
-// createLocalExportFunc creates a function that only exports database to JSONL
-// without any git operations. Used for local-only mode with mutation events.
-func createLocalExportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
-	return func() {
-		exportCtx, exportCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer exportCancel()
-
-		log.log("Starting local export...")
-
-		jsonlPath := findJSONLPath()
-		if jsonlPath == "" {
-			log.log("Error: JSONL path not found")
-			return
-		}
-
-		// Check for exclusive lock
-		beadsDir := filepath.Dir(jsonlPath)
-		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
-		if skip {
-			if err != nil {
-				log.log("Skipping export (lock check failed: %v)", err)
-			} else {
-				log.log("Skipping export (locked by %s)", holder)
-			}
-			return
-		}
-		if holder != "" {
-			log.log("Removed stale lock (%s), proceeding", holder)
-		}
-
-		// Pre-export validation
-		if err := validatePreExport(exportCtx, store, jsonlPath); err != nil {
-			log.log("Pre-export validation failed: %v", err)
-			return
-		}
-
-		// Export to JSONL
-		if err := exportToJSONLWithStore(exportCtx, store, jsonlPath); err != nil {
-			log.log("Export failed: %v", err)
-			return
-		}
-		log.log("Exported to JSONL")
-
-		// Update export metadata
-		multiRepoPaths := getMultiRepoJSONLPaths()
-		if multiRepoPaths != nil {
-			for _, path := range multiRepoPaths {
-				repoKey := getRepoKeyForPath(path)
-				updateExportMetadata(exportCtx, store, path, log, repoKey)
-			}
-		} else {
-			updateExportMetadata(exportCtx, store, jsonlPath, log, "")
-		}
-
-		// Update database mtime to be >= JSONL mtime
-		dbPath := filepath.Join(beadsDir, "beads.db")
-		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
-			log.log("Warning: failed to update database mtime: %v", err)
-		}
-
-		log.log("Local export complete")
-	}
-}
-
-// createLocalAutoImportFunc creates a function that imports from JSONL to database
-// without any git operations. Used for local-only mode with file system change events.
-func createLocalAutoImportFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
-	return func() {
-		importCtx, importCancel := context.WithTimeout(ctx, 1*time.Minute)
-		defer importCancel()
-
-		log.log("Starting local auto-import...")
-
-		jsonlPath := findJSONLPath()
-		if jsonlPath == "" {
-			log.log("Error: JSONL path not found")
-			return
-		}
-
-		// Check for exclusive lock
-		beadsDir := filepath.Dir(jsonlPath)
-		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
-		if skip {
-			if err != nil {
-				log.log("Skipping import (lock check failed: %v)", err)
-			} else {
-				log.log("Skipping import (locked by %s)", holder)
-			}
-			return
-		}
-		if holder != "" {
-			log.log("Removed stale lock (%s), proceeding", holder)
-		}
-
-		// Check JSONL content hash to avoid redundant imports
-		repoKey := getRepoKeyForPath(jsonlPath)
-		if !hasJSONLChanged(importCtx, store, jsonlPath, repoKey) {
-			log.log("Skipping import: JSONL content unchanged")
-			return
-		}
-		log.log("JSONL content changed, proceeding with import...")
-
-		// Count issues before import
-		beforeCount, err := countDBIssues(importCtx, store)
-		if err != nil {
-			log.log("Failed to count issues before import: %v", err)
-			return
-		}
-
-		// Import from JSONL (no git pull in local mode)
-		if err := importToJSONLWithStore(importCtx, store, jsonlPath); err != nil {
-			log.log("Import failed: %v", err)
-			return
-		}
-		log.log("Imported from JSONL")
-
-		// Validate import
-		afterCount, err := countDBIssues(importCtx, store)
-		if err != nil {
-			log.log("Failed to count issues after import: %v", err)
-			return
-		}
-
-		if err := validatePostImport(beforeCount, afterCount, jsonlPath); err != nil {
-			log.log("Post-import validation failed: %v", err)
-			return
-		}
-
-		log.log("Local auto-import complete")
 	}
 }
