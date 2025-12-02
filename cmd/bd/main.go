@@ -82,6 +82,10 @@ var (
 	// Auto-flush manager (replaces timer-based approach to fix bd-52)
 	flushManager *FlushManager
 
+	// skipFinalFlush is set by sync command when sync.branch mode completes successfully.
+	// This prevents PersistentPostRun from re-exporting and dirtying the working directory.
+	skipFinalFlush = false
+
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
 
@@ -613,7 +617,8 @@ var rootCmd = &cobra.Command{
 
 		// Otherwise, handle direct mode cleanup
 		// Shutdown flush manager (performs final flush if needed)
-		if flushManager != nil {
+		// Skip if sync command already handled export and restore (sync.branch mode)
+		if flushManager != nil && !skipFinalFlush {
 			if err := flushManager.Shutdown(); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: flush manager shutdown error: %v\n", err)
 			}

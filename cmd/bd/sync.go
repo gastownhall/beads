@@ -577,8 +577,10 @@ Use --merge to merge the sync branch back to main branch.`,
 			}
 		}
 
-		// Step 5: Push to remote (skip if already pushed via sync branch worktree)
-		if !noPush && hasChanges && !pushedViaSyncBranch {
+		// Step 5: Push to remote (skip if using sync branch - all pushes go via worktree)
+		// When sync.branch is configured, we don't push the main branch at all.
+		// The sync branch worktree handles all pushes.
+		if !noPush && hasChanges && !pushedViaSyncBranch && !useSyncBranch {
 			if dryRun {
 				fmt.Println("→ [DRY RUN] Would push to remote")
 			} else {
@@ -616,6 +618,9 @@ Use --merge to merge the sync branch back to main branch.`,
 					// Non-fatal - just means git status will show modified files
 					debug.Logf("sync: failed to restore .beads/ from branch: %v", err)
 				}
+				// Skip final flush in PersistentPostRun - we've already exported to sync branch
+				// and restored the working directory to match the current branch
+				skipFinalFlush = true
 			}
 
 			fmt.Println("\n✓ Sync complete")
