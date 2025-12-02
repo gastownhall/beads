@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2025-12-01
+
+### Added
+
+- **`bd daemon --local` flag (#433)** - Run daemon without git operations
+  - Ideal for multi-repo setups where git sync happens externally
+  - Prevents daemon from triggering git commits/pushes
+  - Use with worktrees or when beads sync is handled by another process
+
+- **`bd daemon --foreground` flag** - Run daemon in foreground mode
+  - For systemd/supervisord/launchd integration
+  - Logs to stdout instead of background file
+  - Process stays attached to terminal
+
+- **`bd migrate-sync` command (bd-epn)** - Migrate to sync.branch workflow
+  - Moves beads data to a dedicated sync branch
+  - Keeps main branch clean of .beads/ commits
+  - Automated setup of sync.branch configuration
+
+- **`--estimate` flag for `bd create` and `bd update`** - Add time estimates to issues
+  - Track estimated effort for planning
+  - Supports formats like "2h", "1d", "1w"
+
+### Fixed
+
+- **Database Migration: close_reason column (bd-uyu)**
+  - Added missing database column for close_reason field
+  - Fixes sync loops where close_reason was lost on import/export
+  - Automatic migration on first run
+
+- **Multi-repo Prefix Filtering (GH #437)**
+  - Issues now filtered by prefix when flushing from non-primary repos
+  - Prevents issues from other projects appearing in exports
+
+- **Parent-Child Dependency UX (GH #440)**
+  - Fixed backwards documentation in DEPENDENCIES.md
+  - `bd show` now displays epic children under "Children" not "Blocks"
+  - Clearer UI labels for dependency relationships
+
+- **sync.branch Workflow Fixes (bd-epn)**
+  - Fixed .beads/ restoration from branch after sync
+  - Prevents final flush after sync.branch restore
+  - `bd doctor` now detects when on sync branch
+
+- **Jira API Migration**
+  - Updated from deprecated Jira API v2 to v3
+  - Fixes authentication issues with newer Jira instances
+
+- **Redundant Database Queries (bd-bbh)**
+  - Removed extra GetCloseReason() calls after column migration
+  - Improves query performance for issue retrieval
+
+### Documentation
+
+- Added go install fallback instructions for Claude Code web (GH #439)
+- Added uninstall documentation (GH #445)
+
+### Internal
+
+- Refactored daemon sync functions to reduce ~200 lines of duplication (bd-73u)
+- Consolidated local-only sync functions into shared implementation
+
 ## [0.27.2] - 2025-11-30
 
 ### Fixed
