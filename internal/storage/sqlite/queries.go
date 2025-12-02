@@ -222,15 +222,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	issue.Labels = labels
 
-	// Fetch close reason if issue is closed
-	if issue.Status == types.StatusClosed {
-		closeReason, err := s.GetCloseReason(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get close reason: %w", err)
-		}
-		issue.CloseReason = closeReason
-	}
-
 	return &issue, nil
 }
 
@@ -375,15 +366,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		return nil, fmt.Errorf("failed to get labels: %w", err)
 	}
 	issue.Labels = labels
-
-	// Fetch close reason if issue is closed
-	if issue.Status == types.StatusClosed {
-		closeReason, err := s.GetCloseReason(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get close reason: %w", err)
-		}
-		issue.CloseReason = closeReason
-	}
 
 	return &issue, nil
 }
