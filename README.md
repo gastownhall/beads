@@ -91,6 +91,12 @@ go build -o bd ./cmd/bd
 npm install -g @beads/bd
 ```
 
+**Claude Code web fallback** (if npm postinstall fails due to network restrictions):
+```bash
+go install github.com/steveyegge/beads/cmd/bd@latest
+export PATH="$PATH:$HOME/go/bin"  # Required each session
+```
+
 **Quick install (macOS / Linux):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash

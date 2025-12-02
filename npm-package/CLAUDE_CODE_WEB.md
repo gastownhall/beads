@@ -145,6 +145,62 @@ The SessionStart hook didn't run or installation failed. Manually run:
 npm install -g @beads/bd
 ```
 
+### npm postinstall fails with DNS or 403 errors
+
+Some Claude Code web environments have network restrictions that prevent the npm postinstall script from downloading the binary. You'll see errors like:
+
+```
+Error installing bd: getaddrinfo EAI_AGAIN github.com
+```
+
+or
+
+```
+curl: (22) The requested URL returned error: 403
+```
+
+**Workaround: Use go install**
+
+If Go is available (it usually is in Claude Code web), use the `go install` fallback:
+
+```bash
+# Install via go
+go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Add to PATH (required each session)
+export PATH="$PATH:$HOME/go/bin"
+
+# Verify installation
+bd version
+```
+
+**SessionStart hook with go install fallback:**
+
+```bash
+#!/bin/bash
+# .claude/hooks/session-start.sh
+
+echo "🔗 Setting up bd (beads issue tracker)..."
+
+# Try npm first, fall back to go install
+if ! command -v bd &> /dev/null; then
+    if npm install -g @beads/bd --quiet 2>/dev/null && command -v bd &> /dev/null; then
+        echo "✓ Installed via npm"
+    elif command -v go &> /dev/null; then
+        echo "npm install failed, trying go install..."
+        go install github.com/steveyegge/beads/cmd/bd@latest
+        export PATH="$PATH:$HOME/go/bin"
+        echo "✓ Installed via go install"
+    else
+        echo "✗ Installation failed - neither npm nor go available"
+        exit 1
+    fi
+fi
+
+# Verify and show version
+bd version
+```
+
 ### "Error installing bd: HTTP 404"
 
 The version in package.json doesn't match a GitHub release. This shouldn't happen with published npm packages, but if it does, check:
