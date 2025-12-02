@@ -608,11 +608,27 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 
 // createSyncFunc creates a function that performs full sync cycle (export, commit, pull, import, push)
 func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, autoPush bool, log daemonLogger) func() {
+	return performSync(ctx, store, autoCommit, autoPush, false, log)
+}
+
+// createLocalSyncFunc creates a function that performs local-only sync (export only, no git).
+// Used when daemon is started with --local flag.
+func createLocalSyncFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
+	return performSync(ctx, store, false, false, true, log)
+}
+
+// performSync is the shared implementation for sync functions.
+// skipGit: if true, skips all git operations (commits, pulls, pushes, 3-way merge).
+func performSync(ctx context.Context, store storage.Storage, autoCommit, autoPush, skipGit bool, log daemonLogger) func() {
 	return func() {
 		syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer syncCancel()
 
-		log.log("Starting sync cycle...")
+		mode := "sync cycle"
+		if skipGit {
+			mode = "local sync cycle"
+		}
+		log.log("Starting %s...", mode)
 
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
@@ -680,6 +696,12 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		dbPath := filepath.Join(beadsDir, "beads.db")
 		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
 			log.log("Warning: failed to update database mtime: %v", err)
+		}
+
+		// Skip git operations and 3-way merge in local mode
+		if skipGit {
+			log.log("Local %s complete", mode)
+			return
 		}
 
 		// Capture left snapshot (pre-pull state) for 3-way merge
@@ -755,8 +777,8 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		// Perform 3-way merge and prune deletions
 		// In multi-repo mode, apply deletions for each JSONL file
 		if multiRepoPaths != nil {
-		 // Multi-repo mode: merge/prune for each JSONL
-		for _, path := range multiRepoPaths {
+			// Multi-repo mode: merge/prune for each JSONL
+			for _, path := range multiRepoPaths {
 				if err := applyDeletionsFromMerge(syncCtx, store, path); err != nil {
 					log.log("Error during 3-way merge for %s: %v", path, err)
 					return
@@ -798,7 +820,7 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		// Update base snapshot after successful import
 		// In multi-repo mode, update snapshots for all JSONL files
 		if multiRepoPaths != nil {
-		 for _, path := range multiRepoPaths {
+			for _, path := range multiRepoPaths {
 				if err := updateBaseSnapshot(path); err != nil {
 					log.log("Warning: failed to update base snapshot for %s: %v", path, err)
 				}
@@ -834,81 +856,5 @@ func createSyncFunc(ctx context.Context, store storage.Storage, autoCommit, auto
 		}
 
 		log.log("Sync cycle complete")
-	}
-}
-
-// createLocalSyncFunc creates a function that performs local-only sync (export only, no git).
-// Used when daemon is started with --local flag.
-func createLocalSyncFunc(ctx context.Context, store storage.Storage, log daemonLogger) func() {
-	return func() {
-		syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer syncCancel()
-
-		log.log("Starting local sync cycle...")
-
-		jsonlPath := findJSONLPath()
-		if jsonlPath == "" {
-			log.log("Error: JSONL path not found")
-			return
-		}
-
-		// Check for exclusive lock before processing database
-		beadsDir := filepath.Dir(jsonlPath)
-		skip, holder, err := types.ShouldSkipDatabase(beadsDir)
-		if skip {
-			if err != nil {
-				log.log("Skipping database (lock check failed: %v)", err)
-			} else {
-				log.log("Skipping database (locked by %s)", holder)
-			}
-			return
-		}
-		if holder != "" {
-			log.log("Removed stale lock (%s), proceeding with sync", holder)
-		}
-
-		// Integrity check: validate before export
-		if err := validatePreExport(syncCtx, store, jsonlPath); err != nil {
-			log.log("Pre-export validation failed: %v", err)
-			return
-		}
-
-		// Check for duplicate IDs (database corruption)
-		if err := checkDuplicateIDs(syncCtx, store); err != nil {
-			log.log("Duplicate ID check failed: %v", err)
-			return
-		}
-
-		// Check for orphaned dependencies (warns but doesn't fail)
-		if orphaned, err := checkOrphanedDeps(syncCtx, store); err != nil {
-			log.log("Orphaned dependency check failed: %v", err)
-		} else if len(orphaned) > 0 {
-			log.log("Found %d orphaned dependencies: %v", len(orphaned), orphaned)
-		}
-
-		if err := exportToJSONLWithStore(syncCtx, store, jsonlPath); err != nil {
-			log.log("Export failed: %v", err)
-			return
-		}
-		log.log("Exported to JSONL")
-
-		// Update export metadata
-		multiRepoPaths := getMultiRepoJSONLPaths()
-		if multiRepoPaths != nil {
-			for _, path := range multiRepoPaths {
-				repoKey := getRepoKeyForPath(path)
-				updateExportMetadata(syncCtx, store, path, log, repoKey)
-			}
-		} else {
-			updateExportMetadata(syncCtx, store, jsonlPath, log, "")
-		}
-
-		// Update database mtime to be >= JSONL mtime
-		dbPath := filepath.Join(beadsDir, "beads.db")
-		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
-			log.log("Warning: failed to update database mtime: %v", err)
-		}
-
-		log.log("Local sync cycle complete")
 	}
 }
