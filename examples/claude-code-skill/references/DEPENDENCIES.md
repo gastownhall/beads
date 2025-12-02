@@ -332,10 +332,10 @@ Effect: Can track progress across all investigations
 ### Creating parent-child Dependencies
 
 ```bash
-bd dep add parent-epic-id child-task-id --type parent-child
+bd dep add child-task-id parent-epic-id --type parent-child
 ```
 
-**Direction matters**: `from_id` is parent, `to_id` is child.
+**Direction matters**: The child depends on the parent. Think: "child depends on parent" or "task is part of epic".
 
 ### Combining with blocks
 

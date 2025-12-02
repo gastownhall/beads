@@ -185,9 +185,46 @@ var showCmd = &cobra.Command{
 					}
 
 					if len(details.Dependents) > 0 {
-						fmt.Printf("\nBlocks (%d):\n", len(details.Dependents))
+						// Group by dependency type for clarity
+						var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
 						for _, dep := range details.Dependents {
-							fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+							switch dep.DependencyType {
+							case types.DepBlocks:
+								blocks = append(blocks, dep)
+							case types.DepParentChild:
+								children = append(children, dep)
+							case types.DepRelated:
+								related = append(related, dep)
+							case types.DepDiscoveredFrom:
+								discovered = append(discovered, dep)
+							default:
+								blocks = append(blocks, dep)
+							}
+						}
+
+						if len(children) > 0 {
+							fmt.Printf("\nChildren (%d):\n", len(children))
+							for _, dep := range children {
+								fmt.Printf("  ↳ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+							}
+						}
+						if len(blocks) > 0 {
+							fmt.Printf("\nBlocks (%d):\n", len(blocks))
+							for _, dep := range blocks {
+								fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+							}
+						}
+						if len(related) > 0 {
+							fmt.Printf("\nRelated (%d):\n", len(related))
+							for _, dep := range related {
+								fmt.Printf("  ↔ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+							}
+						}
+						if len(discovered) > 0 {
+							fmt.Printf("\nDiscovered (%d):\n", len(discovered))
+							for _, dep := range discovered {
+								fmt.Printf("  ◊ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+							}
 						}
 					}
 
@@ -334,12 +371,62 @@ var showCmd = &cobra.Command{
 				}
 			}
 
-			// Show dependents
-			dependents, _ := store.GetDependents(ctx, issue.ID)
-			if len(dependents) > 0 {
-				fmt.Printf("\nBlocks (%d):\n", len(dependents))
-				for _, dep := range dependents {
-					fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+			// Show dependents - grouped by dependency type for clarity
+			// Use GetDependentsWithMetadata to get the dependency type
+			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+			if ok {
+				dependentsWithMeta, _ := sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
+				if len(dependentsWithMeta) > 0 {
+					// Group by dependency type
+					var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
+					for _, dep := range dependentsWithMeta {
+						switch dep.DependencyType {
+						case types.DepBlocks:
+							blocks = append(blocks, dep)
+						case types.DepParentChild:
+							children = append(children, dep)
+						case types.DepRelated:
+							related = append(related, dep)
+						case types.DepDiscoveredFrom:
+							discovered = append(discovered, dep)
+						default:
+							blocks = append(blocks, dep) // Default to blocks
+						}
+					}
+
+					if len(children) > 0 {
+						fmt.Printf("\nChildren (%d):\n", len(children))
+						for _, dep := range children {
+							fmt.Printf("  ↳ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
+					}
+					if len(blocks) > 0 {
+						fmt.Printf("\nBlocks (%d):\n", len(blocks))
+						for _, dep := range blocks {
+							fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
+					}
+					if len(related) > 0 {
+						fmt.Printf("\nRelated (%d):\n", len(related))
+						for _, dep := range related {
+							fmt.Printf("  ↔ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
+					}
+					if len(discovered) > 0 {
+						fmt.Printf("\nDiscovered (%d):\n", len(discovered))
+						for _, dep := range discovered {
+							fmt.Printf("  ◊ %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
+					}
+				}
+			} else {
+				// Fallback for non-SQLite storage
+				dependents, _ := store.GetDependents(ctx, issue.ID)
+				if len(dependents) > 0 {
+					fmt.Printf("\nBlocks (%d):\n", len(dependents))
+					for _, dep := range dependents {
+						fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+					}
 				}
 			}
 
