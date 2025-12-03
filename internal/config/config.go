@@ -99,6 +99,9 @@ func Initialize() error {
 	v.SetDefault("routing.maintainer", ".")
 	v.SetDefault("routing.contributor", "~/.beads-planning")
 
+	// Sync configuration defaults (bd-4u8)
+	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
+
 	// Read config file if it was found
 	if configFileSet {
 		if err := v.ReadInConfig(); err != nil {

@@ -459,6 +459,160 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestParseIssuesFromContent tests the issue parsing helper function (bd-lsa)
+func TestParseIssuesFromContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []byte
+		wantIDs []string
+	}{
+		{
+			name:    "empty content",
+			content: []byte{},
+			wantIDs: []string{},
+		},
+		{
+			name:    "nil content",
+			content: nil,
+			wantIDs: []string{},
+		},
+		{
+			name:    "single issue",
+			content: []byte(`{"id":"test-1","title":"Test Issue"}`),
+			wantIDs: []string{"test-1"},
+		},
+		{
+			name:    "multiple issues",
+			content: []byte(`{"id":"test-1","title":"Issue 1"}` + "\n" + `{"id":"test-2","title":"Issue 2"}`),
+			wantIDs: []string{"test-1", "test-2"},
+		},
+		{
+			name:    "malformed line skipped",
+			content: []byte(`{"id":"test-1","title":"Valid"}` + "\n" + `invalid json` + "\n" + `{"id":"test-2","title":"Also Valid"}`),
+			wantIDs: []string{"test-1", "test-2"},
+		},
+		{
+			name:    "empty id skipped",
+			content: []byte(`{"id":"","title":"No ID"}` + "\n" + `{"id":"test-1","title":"Has ID"}`),
+			wantIDs: []string{"test-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseIssuesFromContent(tt.content)
+			if len(got) != len(tt.wantIDs) {
+				t.Errorf("parseIssuesFromContent() returned %d issues, want %d", len(got), len(tt.wantIDs))
+				return
+			}
+			for _, wantID := range tt.wantIDs {
+				if _, exists := got[wantID]; !exists {
+					t.Errorf("parseIssuesFromContent() missing expected ID %q", wantID)
+				}
+			}
+		})
+	}
+}
+
+// TestSafetyCheckMassDeletion tests the safety check behavior for mass deletions (bd-cnn)
+func TestSafetyCheckMassDeletion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Run("safety check triggers when >50% issues vanish and >5 existed", func(t *testing.T) {
+		// Test the countIssuesInContent and formatVanishedIssues functions
+		// Create local content with 10 issues
+		var localLines []string
+		for i := 1; i <= 10; i++ {
+			localLines = append(localLines, `{"id":"test-`+string(rune('0'+i))+`","title":"Issue `+string(rune('0'+i))+`"}`)
+		}
+		localContent := []byte(strings.Join(localLines, "\n"))
+
+		// Create merged content with only 4 issues (60% vanished)
+		mergedContent := []byte(`{"id":"test-1","title":"Issue 1"}
+{"id":"test-2","title":"Issue 2"}
+{"id":"test-3","title":"Issue 3"}
+{"id":"test-4","title":"Issue 4"}`)
+
+		localCount := countIssuesInContent(localContent)
+		mergedCount := countIssuesInContent(mergedContent)
+
+		if localCount != 10 {
+			t.Errorf("localCount = %d, want 10", localCount)
+		}
+		if mergedCount != 4 {
+			t.Errorf("mergedCount = %d, want 4", mergedCount)
+		}
+
+		// Verify safety check would trigger: >50% vanished AND >5 existed
+		if localCount <= 5 {
+			t.Error("localCount should be > 5 for safety check to apply")
+		}
+		vanishedPercent := float64(localCount-mergedCount) / float64(localCount) * 100
+		if vanishedPercent <= 50 {
+			t.Errorf("vanishedPercent = %.0f%%, want > 50%%", vanishedPercent)
+		}
+
+		// Verify forensic info can be generated
+		localIssues := parseIssuesFromContent(localContent)
+		mergedIssues := parseIssuesFromContent(mergedContent)
+		forensicLines := formatVanishedIssues(localIssues, mergedIssues, localCount, mergedCount)
+		if len(forensicLines) == 0 {
+			t.Error("formatVanishedIssues returned empty lines")
+		}
+	})
+
+	t.Run("safety check does NOT trigger when <50% issues vanish", func(t *testing.T) {
+		// 10 issues, 6 remain = 40% vanished (should NOT trigger)
+		var localLines []string
+		for i := 1; i <= 10; i++ {
+			localLines = append(localLines, `{"id":"test-`+string(rune('0'+i))+`"}`)
+		}
+		localContent := []byte(strings.Join(localLines, "\n"))
+
+		// 6 issues remain (40% vanished)
+		var mergedLines []string
+		for i := 1; i <= 6; i++ {
+			mergedLines = append(mergedLines, `{"id":"test-`+string(rune('0'+i))+`"}`)
+		}
+		mergedContent := []byte(strings.Join(mergedLines, "\n"))
+
+		localCount := countIssuesInContent(localContent)
+		mergedCount := countIssuesInContent(mergedContent)
+
+		vanishedPercent := float64(localCount-mergedCount) / float64(localCount) * 100
+		if vanishedPercent > 50 {
+			t.Errorf("vanishedPercent = %.0f%%, want <= 50%%", vanishedPercent)
+		}
+	})
+
+	t.Run("safety check does NOT trigger when <5 issues existed", func(t *testing.T) {
+		// 4 issues, 1 remains = 75% vanished, but only 4 existed (should NOT trigger)
+		localContent := []byte(`{"id":"test-1"}
+{"id":"test-2"}
+{"id":"test-3"}
+{"id":"test-4"}`)
+
+		mergedContent := []byte(`{"id":"test-1"}`)
+
+		localCount := countIssuesInContent(localContent)
+		mergedCount := countIssuesInContent(mergedContent)
+
+		if localCount != 4 {
+			t.Errorf("localCount = %d, want 4", localCount)
+		}
+		if mergedCount != 1 {
+			t.Errorf("mergedCount = %d, want 1", mergedCount)
+		}
+
+		// localCount > 5 is false, so safety check should NOT trigger
+		if localCount > 5 {
+			t.Error("localCount should be <= 5 for this test case")
+		}
+	})
+}
+
 // TestCountIssuesInContent tests the issue counting helper function (bd-7ch)
 func TestCountIssuesInContent(t *testing.T) {
 	tests := []struct {

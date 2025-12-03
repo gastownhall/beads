@@ -2,6 +2,7 @@ package syncbranch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,15 @@ type PullResult struct {
 	Merged        bool   // True if divergent histories were merged
 	FastForwarded bool   // True if fast-forward was possible
 	Pushed        bool   // True if changes were pushed after merge (bd-7ch)
+
+	// SafetyCheckTriggered indicates mass deletion was detected during merge (bd-4u8)
+	// When true, callers should check config option sync.require_confirmation_on_mass_delete
+	SafetyCheckTriggered bool
+	// SafetyCheckDetails contains human-readable details about the mass deletion (bd-4u8)
+	SafetyCheckDetails string
+	// SafetyWarnings contains warning messages from the safety check (bd-7z4)
+	// Caller should display these to the user as appropriate for their output format
+	SafetyWarnings []string
 }
 
 // CommitToSyncBranch commits JSONL changes to the sync branch using a git worktree.
@@ -187,6 +197,10 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 // Includes safety check: warns (but doesn't block) if >50% issues vanished AND >5 existed.
 // "Vanished" means removed from issues.jsonl entirely, NOT status=closed.
 //
+// IMPORTANT (bd-4u8): If requireMassDeleteConfirmation is true and the safety check triggers,
+// the function will NOT auto-push. Instead, it sets SafetyCheckTriggered=true in the result
+// and the caller should prompt for confirmation then call PushSyncBranch.
+//
 // This ensures sync never fails due to git merge conflicts, as we handle merging at the
 // JSONL content level where we have semantic understanding of the data.
 //
@@ -196,9 +210,16 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //   - jsonlPath: Absolute path to the JSONL file in the main repo
 //   - push: If true, push to remote after merge (bd-7ch)
+//   - requireMassDeleteConfirmation: If true and mass deletion detected, skip push (bd-4u8)
 //
 // Returns PullResult with details about what was done, or error if failed.
-func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath string, push bool) (*PullResult, error) {
+func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath string, push bool, requireMassDeleteConfirmation ...bool) (*PullResult, error) {
+	// bd-4u8: Extract optional confirmation requirement parameter
+	requireConfirmation := false
+	if len(requireMassDeleteConfirmation) > 0 {
+		requireConfirmation = requireMassDeleteConfirmation[0]
+	}
+
 	result := &PullResult{
 		Branch:    syncBranch,
 		JSONLPath: jsonlPath,
@@ -278,7 +299,11 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// 4. Commit merged content on top
 
 	// bd-7ch: Extract local content before merge for safety check
-	localContent, _ := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
+	localContent, extractErr := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
+	if extractErr != nil {
+		// bd-feh: Log warning so users know safety check may be skipped
+		fmt.Fprintf(os.Stderr, "⚠️  Warning: Could not extract local content for safety check: %v\n", extractErr)
+	}
 
 	mergedContent, err := performContentMerge(ctx, worktreePath, syncBranch, remote, jsonlRelPath)
 	if err != nil {
@@ -345,23 +370,50 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		localCount := countIssuesInContent(localContent)
 		mergedCount := countIssuesInContent(mergedContent)
 
+		// Track if we should skip push due to safety check requiring confirmation
+		skipPushForConfirmation := false
+
 		// Warn if >50% issues vanished AND >5 existed before
 		// "Vanished" = removed from JSONL entirely (not status=closed)
 		if localCount > 5 && mergedCount < localCount {
 			vanishedPercent := float64(localCount-mergedCount) / float64(localCount) * 100
 			if vanishedPercent > 50 {
-				fmt.Fprintf(os.Stderr, "⚠️  Warning: %.0f%% of issues vanished during merge (%d → %d issues)\n",
+				// bd-4u8: Set safety check fields for caller to handle confirmation
+				result.SafetyCheckTriggered = true
+				result.SafetyCheckDetails = fmt.Sprintf("%.0f%% of issues vanished during merge (%d → %d issues)",
 					vanishedPercent, localCount, mergedCount)
-				fmt.Fprintf(os.Stderr, "   This may indicate accidental mass deletion. Pushing anyway.\n")
-				fmt.Fprintf(os.Stderr, "   If this was unintended, use 'git reflog' on the sync branch to recover.\n")
+
+				// bd-7z4: Return warnings in result instead of printing directly to stderr
+				result.SafetyWarnings = append(result.SafetyWarnings,
+					fmt.Sprintf("⚠️  Warning: %.0f%% of issues vanished during merge (%d → %d issues)",
+						vanishedPercent, localCount, mergedCount))
+
+				// bd-lsa: Add forensic info to warnings
+				localIssues := parseIssuesFromContent(localContent)
+				mergedIssues := parseIssuesFromContent(mergedContent)
+				forensicLines := formatVanishedIssues(localIssues, mergedIssues, localCount, mergedCount)
+				result.SafetyWarnings = append(result.SafetyWarnings, forensicLines...)
+
+				// bd-4u8: Check if confirmation is required before pushing
+				if requireConfirmation {
+					result.SafetyWarnings = append(result.SafetyWarnings,
+						"   Push skipped - confirmation required (sync.require_confirmation_on_mass_delete=true)")
+					skipPushForConfirmation = true
+				} else {
+					result.SafetyWarnings = append(result.SafetyWarnings,
+						"   This may indicate accidental mass deletion. Pushing anyway.",
+						"   If this was unintended, use 'git reflog' on the sync branch to recover.")
+				}
 			}
 		}
 
-		// Push regardless of safety check (don't block happy path)
-		if err := pushFromWorktree(ctx, worktreePath, syncBranch); err != nil {
-			return nil, fmt.Errorf("failed to push after merge: %w", err)
+		// Push unless safety check requires confirmation
+		if !skipPushForConfirmation {
+			if err := pushFromWorktree(ctx, worktreePath, syncBranch); err != nil {
+				return nil, fmt.Errorf("failed to push after merge: %w", err)
+			}
+			result.Pushed = true
 		}
-		result.Pushed = true
 	}
 
 	return result, nil
@@ -650,6 +702,28 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 	return nil
 }
 
+// PushSyncBranch pushes the sync branch to remote. (bd-4u8)
+// This is used after confirmation when sync.require_confirmation_on_mass_delete is enabled
+// and a mass deletion was detected during merge.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - repoRoot: Path to the git repository root
+//   - syncBranch: Name of the sync branch (e.g., "beads-sync")
+//
+// Returns error if push fails.
+func PushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Verify worktree exists
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		return fmt.Errorf("sync branch worktree not found at %s", worktreePath)
+	}
+
+	return pushFromWorktree(ctx, worktreePath, syncBranch)
+}
+
 // getRemoteForBranch gets the remote name for a branch, defaulting to "origin"
 func getRemoteForBranch(ctx context.Context, worktreePath, branch string) string {
 	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", branch))
@@ -683,6 +757,62 @@ func countIssuesInContent(content []byte) int {
 		}
 	}
 	return count
+}
+
+// issueSummary holds minimal issue info for forensic logging (bd-lsa)
+type issueSummary struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// parseIssuesFromContent extracts issue IDs and titles from JSONL content.
+// Used for forensic logging of vanished issues (bd-lsa).
+func parseIssuesFromContent(content []byte) map[string]issueSummary {
+	result := make(map[string]issueSummary)
+	if len(content) == 0 {
+		return result
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var summary issueSummary
+		if err := json.Unmarshal([]byte(line), &summary); err != nil {
+			continue // Skip malformed lines
+		}
+		if summary.ID != "" {
+			result[summary.ID] = summary
+		}
+	}
+	return result
+}
+
+// formatVanishedIssues returns forensic info lines when issues vanish during merge (bd-lsa, bd-7z4).
+// Returns string slices for caller to display as appropriate for their output format.
+func formatVanishedIssues(localIssues, mergedIssues map[string]issueSummary, localCount, mergedCount int) []string {
+	var lines []string
+	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
+
+	lines = append(lines, fmt.Sprintf("\n📋 Mass deletion forensic log [%s]", timestamp))
+	lines = append(lines, fmt.Sprintf("   Before merge: %d issues", localCount))
+	lines = append(lines, fmt.Sprintf("   After merge:  %d issues", mergedCount))
+	lines = append(lines, "   Vanished issues:")
+
+	vanishedCount := 0
+	for id, summary := range localIssues {
+		if _, exists := mergedIssues[id]; !exists {
+			vanishedCount++
+			title := summary.Title
+			if len(title) > 60 {
+				title = title[:57] + "..."
+			}
+			lines = append(lines, fmt.Sprintf("     - %s: %s", id, title))
+		}
+	}
+	lines = append(lines, fmt.Sprintf("   Total vanished: %d\n", vanishedCount))
+
+	return lines
 }
 
 // HasGitRemote checks if any git remote exists

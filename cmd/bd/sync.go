@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/deletions"
@@ -378,7 +379,11 @@ Use --merge to merge the sync branch back to main branch.`,
 				if useSyncBranch {
 					// Pull from sync branch via worktree (bd-e3w)
 					fmt.Printf("→ Pulling from sync branch '%s'...\n", syncBranchName)
-					pullResult, err := syncbranch.PullFromSyncBranch(ctx, repoRoot, syncBranchName, jsonlPath, !noPush)
+
+					// bd-4u8: Check if confirmation is required for mass deletion
+					requireMassDeleteConfirmation := config.GetBool("sync.require_confirmation_on_mass_delete")
+
+					pullResult, err := syncbranch.PullFromSyncBranch(ctx, repoRoot, syncBranchName, jsonlPath, !noPush, requireMassDeleteConfirmation)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error pulling from sync branch: %v\n", err)
 						os.Exit(1)
@@ -387,8 +392,37 @@ Use --merge to merge the sync branch back to main branch.`,
 						if pullResult.Merged {
 							// bd-3s8 fix: divergent histories were merged at content level
 							fmt.Printf("✓ Merged divergent histories from %s\n", syncBranchName)
-							// bd-7ch: auto-push after merge
-							if pullResult.Pushed {
+
+							// bd-7z4: Print safety warnings from result
+							for _, warning := range pullResult.SafetyWarnings {
+								fmt.Fprintln(os.Stderr, warning)
+							}
+
+							// bd-4u8: Handle safety check with confirmation requirement
+							if pullResult.SafetyCheckTriggered && !pullResult.Pushed {
+								// Prompt for confirmation
+								fmt.Fprintf(os.Stderr, "\n⚠️  Mass deletion detected: %s\n", pullResult.SafetyCheckDetails)
+								fmt.Fprintf(os.Stderr, "Push these changes to remote? [y/N]: ")
+
+								var response string
+								reader := bufio.NewReader(os.Stdin)
+								response, _ = reader.ReadString('\n')
+								response = strings.TrimSpace(strings.ToLower(response))
+
+								if response == "y" || response == "yes" {
+									fmt.Printf("→ Pushing to %s...\n", syncBranchName)
+									if err := syncbranch.PushSyncBranch(ctx, repoRoot, syncBranchName); err != nil {
+										fmt.Fprintf(os.Stderr, "Error pushing to sync branch: %v\n", err)
+										os.Exit(1)
+									}
+									fmt.Printf("✓ Pushed merged changes to %s\n", syncBranchName)
+									pushedViaSyncBranch = true
+								} else {
+									fmt.Println("Push cancelled. Run 'bd sync' again to retry.")
+									fmt.Println("If this was unintended, use 'git reflog' on the sync branch to recover.")
+								}
+							} else if pullResult.Pushed {
+								// bd-7ch: auto-push after merge
 								fmt.Printf("✓ Pushed merged changes to %s\n", syncBranchName)
 								pushedViaSyncBranch = true
 							}

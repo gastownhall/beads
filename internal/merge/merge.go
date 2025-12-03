@@ -426,6 +426,8 @@ func mergeNotes(base, left, right string) string {
 }
 
 // mergePriority handles priority merging - on conflict, higher priority wins (lower number)
+// Special case: 0 is treated as "unset/no priority" due to Go's zero value.
+// Any explicitly set priority (>0) wins over 0. (bd-d0t fix)
 func mergePriority(base, left, right int) int {
 	// Standard 3-way merge for non-conflict cases
 	if base == left && base != right {
@@ -438,7 +440,16 @@ func mergePriority(base, left, right int) int {
 		return left
 	}
 	// True conflict: both sides changed to different values
-	// Higher priority wins (lower number = more urgent)
+
+	// bd-d0t fix: Treat 0 as "unset" - explicitly set priority wins over unset
+	if left == 0 && right > 0 {
+		return right // right has explicit priority, left is unset
+	}
+	if right == 0 && left > 0 {
+		return left // left has explicit priority, right is unset
+	}
+
+	// Both have explicit priorities (or both are 0) - higher priority wins (lower number = more urgent)
 	if left < right {
 		return left
 	}
@@ -477,9 +488,9 @@ func isTimeAfter(t1, t2 string) bool {
 		return true // t1 valid, t2 invalid - t1 wins
 	}
 
-	// Both valid - compare. On exact tie, return false (right wins for now)
-	// TODO: Consider preferring left on tie for consistency with IssueType rule
-	return time1.After(time2)
+	// Both valid - compare. On exact tie, left wins for consistency with IssueType rule (bd-8nz)
+	// Using !time2.After(time1) returns true when t1 > t2 OR t1 == t2
+	return !time2.After(time1)
 }
 
 func maxTime(t1, t2 string) string {

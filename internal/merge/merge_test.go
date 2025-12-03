@@ -337,10 +337,10 @@ func TestIsTimeAfter(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "identical timestamps - right wins (false)",
+			name:     "identical timestamps - left wins (bd-8nz)",
 			t1:       "2024-01-01T00:00:00Z",
 			t2:       "2024-01-01T00:00:00Z",
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "t1 invalid, t2 valid - t2 wins",
@@ -481,6 +481,99 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 			t.Errorf("expected status 'in_progress', got %q", result[0].Status)
 		}
 	})
+}
+
+// TestMergePriority tests priority merging including bd-d0t fix
+func TestMergePriority(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     int
+		left     int
+		right    int
+		expected int
+	}{
+		{
+			name:     "no changes",
+			base:     2,
+			left:     2,
+			right:    2,
+			expected: 2,
+		},
+		{
+			name:     "left changed",
+			base:     2,
+			left:     1,
+			right:    2,
+			expected: 1,
+		},
+		{
+			name:     "right changed",
+			base:     2,
+			left:     2,
+			right:    3,
+			expected: 3,
+		},
+		{
+			name:     "both changed to same value",
+			base:     2,
+			left:     1,
+			right:    1,
+			expected: 1,
+		},
+		{
+			name:     "conflict - higher priority wins (lower number)",
+			base:     2,
+			left:     3,
+			right:    1,
+			expected: 1,
+		},
+		// bd-d0t fix: 0 is treated as "unset"
+		{
+			name:     "bd-d0t: left unset (0), right has explicit priority",
+			base:     2,
+			left:     0,
+			right:    3,
+			expected: 3, // explicit priority wins over unset
+		},
+		{
+			name:     "bd-d0t: left has explicit priority, right unset (0)",
+			base:     2,
+			left:     3,
+			right:    0,
+			expected: 3, // explicit priority wins over unset
+		},
+		{
+			name:     "bd-d0t: both unset (0)",
+			base:     2,
+			left:     0,
+			right:    0,
+			expected: 0,
+		},
+		{
+			name:     "bd-d0t: base unset, left sets priority, right unchanged",
+			base:     0,
+			left:     1,
+			right:    0,
+			expected: 1, // left changed from 0 to 1
+		},
+		{
+			name:     "bd-d0t: base unset, right sets priority, left unchanged",
+			base:     0,
+			left:     0,
+			right:    2,
+			expected: 2, // right changed from 0 to 2
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mergePriority(tt.base, tt.left, tt.right)
+			if result != tt.expected {
+				t.Errorf("mergePriority(%d, %d, %d) = %d, want %d",
+					tt.base, tt.left, tt.right, result, tt.expected)
+			}
+		})
+	}
 }
 
 // TestMerge3Way_AutoResolve tests auto-resolution of conflicts
