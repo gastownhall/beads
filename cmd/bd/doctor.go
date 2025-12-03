@@ -581,6 +581,11 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 7a: Configuration value validation (bd-alz)
+	configValuesCheck := convertDoctorCheck(doctor.CheckConfigValues(path))
+	result.Checks = append(result.Checks, configValuesCheck)
+	// Don't fail overall check for config value warnings, just warn
+
 	// Check 8: Daemon health
 	daemonCheck := checkDaemonStatus(path)
 	result.Checks = append(result.Checks, daemonCheck)
