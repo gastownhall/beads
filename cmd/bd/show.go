@@ -506,6 +506,14 @@ var updateCmd = &cobra.Command{
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
 		}
+		if cmd.Flags().Changed("estimate") {
+			estimate, _ := cmd.Flags().GetInt("estimate")
+			if estimate < 0 {
+				fmt.Fprintf(os.Stderr, "Error: estimate must be a non-negative number of minutes\n")
+				os.Exit(1)
+			}
+			updates["estimated_minutes"] = estimate
+		}
 		if cmd.Flags().Changed("add-label") {
 			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
 			updates["add_labels"] = addLabels
@@ -583,8 +591,11 @@ var updateCmd = &cobra.Command{
 				if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
 					updateArgs.AcceptanceCriteria = &acceptanceCriteria
 				}
-				if externalRef, ok := updates["external_ref"].(string); ok { // NEW: Map external_ref
+				if externalRef, ok := updates["external_ref"].(string); ok {
 					updateArgs.ExternalRef = &externalRef
+				}
+				if estimate, ok := updates["estimated_minutes"].(int); ok {
+					updateArgs.EstimatedMinutes = &estimate
 				}
 				if addLabels, ok := updates["add_labels"].([]string); ok {
 					updateArgs.AddLabels = addLabels
@@ -1012,6 +1023,7 @@ func init() {
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
+	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")

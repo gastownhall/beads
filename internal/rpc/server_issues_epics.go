@@ -70,6 +70,9 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.ExternalRef != nil {
 		u["external_ref"] = *a.ExternalRef
 	}
+	if a.EstimatedMinutes != nil {
+		u["estimated_minutes"] = *a.EstimatedMinutes
+	}
 	return u
 }
 
@@ -142,6 +145,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		AcceptanceCriteria: strValue(acceptance),
 		Assignee:           strValue(assignee),
 		ExternalRef:        externalRef,
+		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
 	}
 	

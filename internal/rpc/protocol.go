@@ -68,6 +68,7 @@ type CreateArgs struct {
 	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"`
 	Assignee           string   `json:"assignee,omitempty"`
 	ExternalRef        string   `json:"external_ref,omitempty"`  // Link to external issue trackers
+	EstimatedMinutes   *int     `json:"estimated_minutes,omitempty"` // Time estimate in minutes
 	Labels             []string `json:"labels,omitempty"`
 	Dependencies       []string `json:"dependencies,omitempty"`
 }
@@ -84,6 +85,7 @@ type UpdateArgs struct {
 	Notes              *string  `json:"notes,omitempty"`
 	Assignee           *string  `json:"assignee,omitempty"`
 	ExternalRef        *string  `json:"external_ref,omitempty"` // Link to external issue trackers
+	EstimatedMinutes   *int     `json:"estimated_minutes,omitempty"` // Time estimate in minutes
 	AddLabels          []string `json:"add_labels,omitempty"`
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`

@@ -128,6 +128,16 @@ var createCmd = &cobra.Command{
 		deps, _ := cmd.Flags().GetStringSlice("deps")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
+
+		// Get estimate if provided
+		var estimatedMinutes *int
+		if cmd.Flags().Changed("estimate") {
+			est, _ := cmd.Flags().GetInt("estimate")
+			if est < 0 {
+				FatalError("estimate must be a non-negative number of minutes")
+			}
+			estimatedMinutes = &est
+		}
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Determine target repository using routing logic
@@ -227,6 +237,7 @@ var createCmd = &cobra.Command{
 				AcceptanceCriteria: acceptance,
 				Assignee:           assignee,
 				ExternalRef:        externalRef,
+				EstimatedMinutes:   estimatedMinutes,
 				Labels:             labels,
 				Dependencies:       deps,
 			}
@@ -264,6 +275,7 @@ var createCmd = &cobra.Command{
 			IssueType:          types.IssueType(issueType),
 			Assignee:           assignee,
 			ExternalRef:        externalRefPtr,
+			EstimatedMinutes:   estimatedMinutes,
 		}
 
 		ctx := rootCtx
@@ -402,6 +414,7 @@ func init() {
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
+	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }
