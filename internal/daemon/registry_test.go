@@ -240,13 +240,46 @@ func TestRegistryCorruptedFile(t *testing.T) {
 	os.MkdirAll(filepath.Dir(registryPath), 0755)
 	os.WriteFile(registryPath, []byte("invalid json{{{"), 0644)
 
-	// Reading should return an error
+	// bd-qn5: Corrupted registry should be treated as empty, not an error
+	// This allows bd doctor to work gracefully when registry is corrupted
 	entries, err := registry.readEntries()
-	if err == nil {
-		t.Error("Expected error when reading corrupted registry")
+	if err != nil {
+		t.Errorf("Expected corrupted registry to be treated as empty, got error: %v", err)
 	}
-	if entries != nil {
-		t.Errorf("Expected nil entries on error, got %v", entries)
+	if len(entries) != 0 {
+		t.Errorf("Expected empty entries for corrupted registry, got %v", entries)
+	}
+}
+
+// bd-qn5: Test for the specific null bytes case that was reported
+func TestRegistryNullBytesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	registryPath := filepath.Join(tmpDir, ".beads", "registry.json")
+
+	homeEnv := "HOME"
+	if runtime.GOOS == "windows" {
+		homeEnv = "USERPROFILE"
+	}
+	oldHome := os.Getenv(homeEnv)
+	os.Setenv(homeEnv, tmpDir)
+	defer os.Setenv(homeEnv, oldHome)
+
+	registry, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("Failed to create registry: %v", err)
+	}
+
+	// Create a file with null bytes (the reported error case)
+	os.MkdirAll(filepath.Dir(registryPath), 0755)
+	os.WriteFile(registryPath, []byte{0, 0, 0, 0}, 0644)
+
+	// Should treat as empty, not error
+	entries, err := registry.readEntries()
+	if err != nil {
+		t.Errorf("Expected null-byte registry to be treated as empty, got error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Expected empty entries for null-byte registry, got %v", entries)
 	}
 }
 

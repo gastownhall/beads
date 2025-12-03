@@ -50,6 +50,7 @@ type doctorResult struct {
 var (
 	doctorFix       bool
 	doctorYes       bool
+	doctorDryRun    bool // bd-a5z: preview fixes without applying
 	perfMode        bool
 	checkHealthMode bool
 )
@@ -91,6 +92,7 @@ Examples:
   bd doctor --json       # Machine-readable output
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
+  bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
@@ -123,8 +125,10 @@ Examples:
 		// Run diagnostics
 		result := runDiagnostics(absPath)
 
-		// Apply fixes if requested
-		if doctorFix {
+		// bd-a5z: Preview fixes (dry-run) or apply fixes if requested
+		if doctorDryRun {
+			previewFixes(result)
+		} else if doctorFix {
 			applyFixes(result)
 			// Re-run diagnostics to show results
 			result = runDiagnostics(absPath)
@@ -147,6 +151,45 @@ Examples:
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Automatically fix issues where possible")
 	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
+	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes (bd-a5z)")
+}
+
+// previewFixes shows what would be fixed without applying changes (bd-a5z)
+func previewFixes(result doctorResult) {
+	// Collect all fixable issues
+	var fixableIssues []doctorCheck
+	for _, check := range result.Checks {
+		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
+			fixableIssues = append(fixableIssues, check)
+		}
+	}
+
+	if len(fixableIssues) == 0 {
+		fmt.Println("\n✓ No fixable issues found (dry-run)")
+		return
+	}
+
+	fmt.Println("\n[DRY-RUN] The following issues would be fixed with --fix:")
+	fmt.Println()
+
+	for i, issue := range fixableIssues {
+		// Show the issue details
+		fmt.Printf("  %d. %s\n", i+1, issue.Name)
+		if issue.Status == statusError {
+			color.Red("     Status: ERROR\n")
+		} else {
+			color.Yellow("     Status: WARNING\n")
+		}
+		fmt.Printf("     Issue:  %s\n", issue.Message)
+		if issue.Detail != "" {
+			fmt.Printf("     Detail: %s\n", issue.Detail)
+		}
+		fmt.Printf("     Fix:    %s\n", issue.Fix)
+		fmt.Println()
+	}
+
+	fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(fixableIssues))
+	fmt.Println("Run 'bd doctor --fix' to apply these fixes")
 }
 
 func applyFixes(result doctorResult) {
