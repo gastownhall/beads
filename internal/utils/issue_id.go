@@ -51,15 +51,25 @@ func ExtractIssuePrefix(issueID string) string {
 }
 
 // isLikelyHash checks if a string looks like a hash ID suffix.
-// Returns true for base36 strings of 3-8 characters (0-9, a-z) that contain at least one digit.
-// Requires a digit to distinguish hashes from English words (e.g., accept "0sa" but reject "test").
+// Returns true for base36 strings of 3-8 characters (0-9, a-z).
+//
+// For 3-char suffixes: accepts all base36 (including all-letter like "bat", "dev").
+// For 4+ char suffixes: requires at least one digit to distinguish from English words.
+//
+// Rationale (word collision probability):
+//   - 3-char: 36³ = 46K hashes, ~1000 common words = ~2% (accept false positives)
+//   - 4-char: 36⁴ = 1.6M hashes, ~3000 words = ~0.2% (digit requirement is safe)
+//   - 5+ char: collision rate negligible
+//
 // Hash IDs in beads use adaptive length scaling from 3-8 characters.
 func isLikelyHash(s string) bool {
 	if len(s) < 3 || len(s) > 8 {
 		return false
 	}
-	hasDigit := false
-	// Check if all characters are base36 (0-9, a-z) and at least one is a digit
+	// 3-char suffixes get a free pass (word collision acceptable)
+	// 4+ char suffixes require at least one digit
+	hasDigit := len(s) == 3
+	// Check if all characters are base36 (0-9, a-z)
 	for _, c := range s {
 		if c >= '0' && c <= '9' {
 			hasDigit = true

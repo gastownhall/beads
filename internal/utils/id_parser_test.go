@@ -413,9 +413,9 @@ func TestExtractIssuePrefix(t *testing.T) {
 			expected: "my-cool-app", // 3-char base36 hash
 		},
 		{
-			name:     "3-char all-letters suffix (should fall back to first hyphen)",
+			name:     "3-char all-letters suffix (now treated as hash, GH #446)",
 			issueID:  "test-proj-abc",
-			expected: "test", // All letters = not a hash, falls back to first hyphen
+			expected: "test-proj", // 3-char all-letter now accepted as hash (GH #446)
 		},
 	}
 
