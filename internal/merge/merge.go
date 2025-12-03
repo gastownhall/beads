@@ -33,8 +33,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/google/go-cmp/cmp"
 )
 
 // Issue represents a beads issue with all possible fields
@@ -289,12 +287,14 @@ func merge3Way(base, left, right []Issue) ([]Issue, []string) {
 				result = append(result, merged)
 			}
 		} else if !inBase && inLeft && inRight {
-			// Added in both - check if identical
-			if issuesEqual(leftIssue, rightIssue) {
-				result = append(result, leftIssue)
-			} else {
-				conflicts = append(conflicts, makeConflict(leftIssue.RawLine, rightIssue.RawLine))
+			// Added in both - merge using deterministic rules with empty base
+			emptyBase := Issue{
+				ID:        leftIssue.ID,
+				CreatedAt: leftIssue.CreatedAt,
+				CreatedBy: leftIssue.CreatedBy,
 			}
+			merged, _ := mergeIssue(emptyBase, leftIssue, rightIssue)
+			result = append(result, merged)
 		} else if inBase && inLeft && !inRight {
 			// Deleted in right, maybe modified in left
 			// RULE 2: deletion always wins over modification
@@ -324,31 +324,22 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 		CreatedBy: base.CreatedBy,
 	}
 
-	// Merge title
-	result.Title = mergeField(base.Title, left.Title, right.Title)
+	// Merge title - on conflict, side with latest updated_at wins
+	result.Title = mergeFieldByUpdatedAt(base.Title, left.Title, right.Title, left.UpdatedAt, right.UpdatedAt)
 
-	// Merge description
-	result.Description = mergeField(base.Description, left.Description, right.Description)
+	// Merge description - on conflict, side with latest updated_at wins
+	result.Description = mergeFieldByUpdatedAt(base.Description, left.Description, right.Description, left.UpdatedAt, right.UpdatedAt)
 
-	// Merge notes
-	result.Notes = mergeField(base.Notes, left.Notes, right.Notes)
+	// Merge notes - on conflict, concatenate both sides
+	result.Notes = mergeNotes(base.Notes, left.Notes, right.Notes)
 
 	// Merge status - SPECIAL RULE: closed always wins over open
 	result.Status = mergeStatus(base.Status, left.Status, right.Status)
 
-	// Merge priority (as int)
-	if base.Priority == left.Priority && base.Priority != right.Priority {
-		result.Priority = right.Priority
-	} else if base.Priority == right.Priority && base.Priority != left.Priority {
-		result.Priority = left.Priority
-	} else if left.Priority == right.Priority {
-		result.Priority = left.Priority
-	} else {
-		// Conflict - take left for now
-		result.Priority = left.Priority
-	}
+	// Merge priority - on conflict, higher priority wins (lower number = more urgent)
+	result.Priority = mergePriority(base.Priority, left.Priority, right.Priority)
 
-	// Merge issue_type
+	// Merge issue_type - on conflict, local (left) wins
 	result.IssueType = mergeField(base.IssueType, left.IssueType, right.IssueType)
 
 	// Merge updated_at - take the max
@@ -365,11 +356,7 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	// Merge dependencies - combine and deduplicate
 	result.Dependencies = mergeDependencies(left.Dependencies, right.Dependencies)
 
-	// Check if we have a real conflict
-	if hasConflict(base, left, right) {
-		return result, makeConflictWithBase(base.RawLine, left.RawLine, right.RawLine)
-	}
-
+	// All field conflicts are now auto-resolved deterministically
 	return result, ""
 }
 
@@ -391,8 +378,108 @@ func mergeField(base, left, right string) string {
 	if base == right && base != left {
 		return left
 	}
-	// Both changed to same value or no change
+	// Both changed to same value or no change - left wins
 	return left
+}
+
+// mergeFieldByUpdatedAt resolves conflicts by picking the value from the side
+// with the latest updated_at timestamp
+func mergeFieldByUpdatedAt(base, left, right, leftUpdatedAt, rightUpdatedAt string) string {
+	// Standard 3-way merge for non-conflict cases
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	if left == right {
+		return left
+	}
+	// True conflict: both sides changed to different values
+	// Pick the value from the side with the latest updated_at
+	if isTimeAfter(leftUpdatedAt, rightUpdatedAt) {
+		return left
+	}
+	return right
+}
+
+// mergeNotes handles notes merging - on conflict, concatenate both sides
+func mergeNotes(base, left, right string) string {
+	// Standard 3-way merge for non-conflict cases
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	if left == right {
+		return left
+	}
+	// True conflict: both sides changed to different values - concatenate
+	if left == "" {
+		return right
+	}
+	if right == "" {
+		return left
+	}
+	return left + "\n\n---\n\n" + right
+}
+
+// mergePriority handles priority merging - on conflict, higher priority wins (lower number)
+func mergePriority(base, left, right int) int {
+	// Standard 3-way merge for non-conflict cases
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	if left == right {
+		return left
+	}
+	// True conflict: both sides changed to different values
+	// Higher priority wins (lower number = more urgent)
+	if left < right {
+		return left
+	}
+	return right
+}
+
+// isTimeAfter returns true if t1 is after t2
+func isTimeAfter(t1, t2 string) bool {
+	if t1 == "" {
+		return false
+	}
+	if t2 == "" {
+		return true
+	}
+
+	time1, err1 := time.Parse(time.RFC3339Nano, t1)
+	if err1 != nil {
+		time1, err1 = time.Parse(time.RFC3339, t1)
+	}
+
+	time2, err2 := time.Parse(time.RFC3339Nano, t2)
+	if err2 != nil {
+		time2, err2 = time.Parse(time.RFC3339, t2)
+	}
+
+	// Handle parse errors consistently with maxTime:
+	// - Valid timestamp beats invalid
+	// - If both invalid, prefer left (t1) for consistency
+	if err1 != nil && err2 != nil {
+		return true // both invalid, prefer left
+	}
+	if err1 != nil {
+		return false // t1 invalid, t2 valid - t2 wins
+	}
+	if err2 != nil {
+		return true // t1 valid, t2 invalid - t1 wins
+	}
+
+	// Both valid - compare. On exact tie, return false (right wins for now)
+	// TODO: Consider preferring left on tie for consistency with IssueType rule
+	return time1.After(time2)
 }
 
 func maxTime(t1, t2 string) string {
@@ -459,62 +546,3 @@ func mergeDependencies(left, right []Dependency) []Dependency {
 	return result
 }
 
-func hasConflict(base, left, right Issue) bool {
-	// Check if any field has conflicting changes
-	if base.Title != left.Title && base.Title != right.Title && left.Title != right.Title {
-		return true
-	}
-	if base.Description != left.Description && base.Description != right.Description && left.Description != right.Description {
-		return true
-	}
-	if base.Notes != left.Notes && base.Notes != right.Notes && left.Notes != right.Notes {
-		return true
-	}
-	if base.Status != left.Status && base.Status != right.Status && left.Status != right.Status {
-		return true
-	}
-	if base.Priority != left.Priority && base.Priority != right.Priority && left.Priority != right.Priority {
-		return true
-	}
-	if base.IssueType != left.IssueType && base.IssueType != right.IssueType && left.IssueType != right.IssueType {
-		return true
-	}
-	return false
-}
-
-func issuesEqual(a, b Issue) bool {
-	// Use go-cmp for deep equality comparison, ignoring RawLine field
-	return cmp.Equal(a, b, cmp.FilterPath(func(p cmp.Path) bool {
-		return p.String() == "RawLine"
-	}, cmp.Ignore()))
-}
-
-func makeConflict(left, right string) string {
-	conflict := "<<<<<<< left\n"
-	if left != "" {
-		conflict += left + "\n"
-	}
-	conflict += "=======\n"
-	if right != "" {
-		conflict += right + "\n"
-	}
-	conflict += ">>>>>>> right\n"
-	return conflict
-}
-
-func makeConflictWithBase(base, left, right string) string {
-	conflict := "<<<<<<< left\n"
-	if left != "" {
-		conflict += left + "\n"
-	}
-	conflict += "||||||| base\n"
-	if base != "" {
-		conflict += base + "\n"
-	}
-	conflict += "=======\n"
-	if right != "" {
-		conflict += right + "\n"
-	}
-	conflict += ">>>>>>> right\n"
-	return conflict
-}

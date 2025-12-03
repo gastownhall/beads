@@ -298,6 +298,80 @@ func TestMaxTime(t *testing.T) {
 	}
 }
 
+// TestIsTimeAfter tests timestamp comparison including error handling
+func TestIsTimeAfter(t *testing.T) {
+	tests := []struct {
+		name     string
+		t1       string
+		t2       string
+		expected bool
+	}{
+		{
+			name:     "both empty - prefer left",
+			t1:       "",
+			t2:       "",
+			expected: false,
+		},
+		{
+			name:     "t1 empty - t2 wins",
+			t1:       "",
+			t2:       "2024-01-02T00:00:00Z",
+			expected: false,
+		},
+		{
+			name:     "t2 empty - t1 wins",
+			t1:       "2024-01-01T00:00:00Z",
+			t2:       "",
+			expected: true,
+		},
+		{
+			name:     "t1 newer",
+			t1:       "2024-01-02T00:00:00Z",
+			t2:       "2024-01-01T00:00:00Z",
+			expected: true,
+		},
+		{
+			name:     "t2 newer",
+			t1:       "2024-01-01T00:00:00Z",
+			t2:       "2024-01-02T00:00:00Z",
+			expected: false,
+		},
+		{
+			name:     "identical timestamps - right wins (false)",
+			t1:       "2024-01-01T00:00:00Z",
+			t2:       "2024-01-01T00:00:00Z",
+			expected: false,
+		},
+		{
+			name:     "t1 invalid, t2 valid - t2 wins",
+			t1:       "not-a-timestamp",
+			t2:       "2024-01-01T00:00:00Z",
+			expected: false,
+		},
+		{
+			name:     "t1 valid, t2 invalid - t1 wins",
+			t1:       "2024-01-01T00:00:00Z",
+			t2:       "not-a-timestamp",
+			expected: true,
+		},
+		{
+			name:     "both invalid - prefer left",
+			t1:       "invalid1",
+			t2:       "invalid2",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isTimeAfter(tt.t1, tt.t2)
+			if result != tt.expected {
+				t.Errorf("isTimeAfter(%q, %q) = %v, want %v", tt.t1, tt.t2, result, tt.expected)
+			}
+		})
+	}
+}
+
 // TestMerge3Way_SimpleUpdates tests simple field update scenarios
 func TestMerge3Way_SimpleUpdates(t *testing.T) {
 	base := []Issue{
@@ -409,52 +483,54 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 	})
 }
 
-// TestMerge3Way_Conflicts tests conflict detection
-func TestMerge3Way_Conflicts(t *testing.T) {
-	t.Run("conflicting title changes", func(t *testing.T) {
+// TestMerge3Way_AutoResolve tests auto-resolution of conflicts
+func TestMerge3Way_AutoResolve(t *testing.T) {
+	t.Run("conflicting title changes - latest updated_at wins", func(t *testing.T) {
 		base := []Issue{
 			{
 				ID:        "bd-abc123",
 				Title:     "Original",
+				UpdatedAt: "2024-01-01T00:00:00Z",
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","title":"Original","updated_at":"2024-01-01T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 		left := []Issue{
 			{
 				ID:        "bd-abc123",
 				Title:     "Left version",
+				UpdatedAt: "2024-01-02T00:00:00Z", // Older
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Left version","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 		right := []Issue{
 			{
 				ID:        "bd-abc123",
 				Title:     "Right version",
+				UpdatedAt: "2024-01-03T00:00:00Z", // Newer - this should win
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Right version","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 
 		result, conflicts := merge3Way(base, left, right)
-		if len(conflicts) == 0 {
-			t.Error("expected conflict for divergent title changes")
+		if len(conflicts) != 0 {
+			t.Errorf("expected no conflicts with auto-resolution, got %d", len(conflicts))
 		}
-		if len(result) != 0 {
-			t.Errorf("expected no merged issues with conflict, got %d", len(result))
+		if len(result) != 1 {
+			t.Fatalf("expected 1 merged issue, got %d", len(result))
 		}
-		if len(conflicts) > 0 {
-			if conflicts[0] == "" {
-				t.Error("conflict marker should not be empty")
-			}
+		// Right has newer updated_at, so right's title wins
+		if result[0].Title != "Right version" {
+			t.Errorf("expected title 'Right version' (newer updated_at), got %q", result[0].Title)
 		}
 	})
 
-	t.Run("conflicting priority changes", func(t *testing.T) {
+	t.Run("conflicting priority changes - higher priority wins (lower number)", func(t *testing.T) {
 		base := []Issue{
 			{
 				ID:        "bd-abc123",
@@ -467,16 +543,16 @@ func TestMerge3Way_Conflicts(t *testing.T) {
 		left := []Issue{
 			{
 				ID:        "bd-abc123",
-				Priority:  0,
+				Priority:  3, // Lower priority (higher number)
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","priority":0,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","priority":3,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 		right := []Issue{
 			{
 				ID:        "bd-abc123",
-				Priority:  1,
+				Priority:  1, // Higher priority (lower number) - this should win
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
 				RawLine:   `{"id":"bd-abc123","priority":1,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
@@ -484,11 +560,100 @@ func TestMerge3Way_Conflicts(t *testing.T) {
 		}
 
 		result, conflicts := merge3Way(base, left, right)
-		if len(conflicts) == 0 {
-			t.Error("expected conflict for divergent priority changes")
+		if len(conflicts) != 0 {
+			t.Errorf("expected no conflicts with auto-resolution, got %d", len(conflicts))
 		}
-		if len(result) != 0 {
-			t.Errorf("expected no merged issues with conflict, got %d", len(result))
+		if len(result) != 1 {
+			t.Fatalf("expected 1 merged issue, got %d", len(result))
+		}
+		// Lower priority number wins
+		if result[0].Priority != 1 {
+			t.Errorf("expected priority 1 (higher priority), got %d", result[0].Priority)
+		}
+	})
+
+	t.Run("conflicting notes - concatenated", func(t *testing.T) {
+		base := []Issue{
+			{
+				ID:        "bd-abc123",
+				Notes:     "Original notes",
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","notes":"Original notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+		left := []Issue{
+			{
+				ID:        "bd-abc123",
+				Notes:     "Left notes",
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","notes":"Left notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+		right := []Issue{
+			{
+				ID:        "bd-abc123",
+				Notes:     "Right notes",
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","notes":"Right notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+
+		result, conflicts := merge3Way(base, left, right)
+		if len(conflicts) != 0 {
+			t.Errorf("expected no conflicts with auto-resolution, got %d", len(conflicts))
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 merged issue, got %d", len(result))
+		}
+		// Notes should be concatenated
+		expectedNotes := "Left notes\n\n---\n\nRight notes"
+		if result[0].Notes != expectedNotes {
+			t.Errorf("expected notes %q, got %q", expectedNotes, result[0].Notes)
+		}
+	})
+
+	t.Run("conflicting issue_type - local (left) wins", func(t *testing.T) {
+		base := []Issue{
+			{
+				ID:        "bd-abc123",
+				IssueType: "task",
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","issue_type":"task","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+		left := []Issue{
+			{
+				ID:        "bd-abc123",
+				IssueType: "bug", // Local change - should win
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","issue_type":"bug","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+		right := []Issue{
+			{
+				ID:        "bd-abc123",
+				IssueType: "feature",
+				CreatedAt: "2024-01-01T00:00:00Z",
+				CreatedBy: "user1",
+				RawLine:   `{"id":"bd-abc123","issue_type":"feature","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+			},
+		}
+
+		result, conflicts := merge3Way(base, left, right)
+		if len(conflicts) != 0 {
+			t.Errorf("expected no conflicts with auto-resolution, got %d", len(conflicts))
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 merged issue, got %d", len(result))
+		}
+		// Local (left) wins for issue_type
+		if result[0].IssueType != "bug" {
+			t.Errorf("expected issue_type 'bug' (local wins), got %q", result[0].IssueType)
 		}
 	})
 }
@@ -679,33 +844,39 @@ func TestMerge3Way_Additions(t *testing.T) {
 		}
 	})
 
-	t.Run("added in both with different content - conflict", func(t *testing.T) {
+	t.Run("added in both with different content - auto-resolved", func(t *testing.T) {
 		base := []Issue{}
 		left := []Issue{
 			{
 				ID:        "bd-abc123",
 				Title:     "Left version",
+				UpdatedAt: "2024-01-02T00:00:00Z", // Older
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Left version","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 		right := []Issue{
 			{
 				ID:        "bd-abc123",
 				Title:     "Right version",
+				UpdatedAt: "2024-01-03T00:00:00Z", // Newer - should win
 				CreatedAt: "2024-01-01T00:00:00Z",
 				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Right version","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
+				RawLine:   `{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
 			},
 		}
 
 		result, conflicts := merge3Way(base, left, right)
-		if len(conflicts) == 0 {
-			t.Error("expected conflict for different additions")
+		if len(conflicts) != 0 {
+			t.Errorf("expected no conflicts with auto-resolution, got %d", len(conflicts))
 		}
-		if len(result) != 0 {
-			t.Errorf("expected no merged issues with conflict, got %d", len(result))
+		if len(result) != 1 {
+			t.Fatalf("expected 1 merged issue, got %d", len(result))
+		}
+		// Right has newer updated_at, so right's title wins
+		if result[0].Title != "Right version" {
+			t.Errorf("expected title 'Right version' (newer updated_at), got %q", result[0].Title)
 		}
 	})
 }
