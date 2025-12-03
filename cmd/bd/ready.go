@@ -83,9 +83,23 @@ var readyCmd = &cobra.Command{
 			maybeShowUpgradeNotification()
 
 			if len(issues) == 0 {
+				// Check if there are any open issues at all (bd-r4n)
+				statsResp, statsErr := daemonClient.Stats()
+				hasOpenIssues := false
+				if statsErr == nil {
+					var stats types.Statistics
+					if json.Unmarshal(statsResp.Data, &stats) == nil {
+						hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
+					}
+				}
 				yellow := color.New(color.FgYellow).SprintFunc()
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					yellow("✨"))
+				if hasOpenIssues {
+					fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+						yellow("✨"))
+				} else {
+					green := color.New(color.FgGreen).SprintFunc()
+					fmt.Printf("\n%s No open issues\n\n", green("✨"))
+				}
 				return
 			}
 			cyan := color.New(color.FgCyan).SprintFunc()
@@ -142,9 +156,19 @@ var readyCmd = &cobra.Command{
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				yellow("✨"))
+			// Check if there are any open issues at all (bd-r4n)
+			hasOpenIssues := false
+			if stats, statsErr := store.GetStatistics(ctx); statsErr == nil {
+				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
+			}
+			if hasOpenIssues {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+					yellow("✨"))
+			} else {
+				green := color.New(color.FgGreen).SprintFunc()
+				fmt.Printf("\n%s No open issues\n\n", green("✨"))
+			}
 			// Show tip even when no ready work found
 			maybeShowTip(store)
 			return
