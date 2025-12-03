@@ -29,6 +29,7 @@ type PullResult struct {
 	JSONLPath     string // Path to the synced JSONL in main repo
 	Merged        bool   // True if divergent histories were merged
 	FastForwarded bool   // True if fast-forward was possible
+	Pushed        bool   // True if changes were pushed after merge (bd-7ch)
 }
 
 // CommitToSyncBranch commits JSONL changes to the sync branch using a git worktree.
@@ -182,6 +183,10 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //  5. Reset to remote's history (adopt remote commit graph)
 //  6. Commit merged content on top
 //
+// IMPORTANT (bd-7ch): After successful content merge, auto-pushes to remote by default.
+// Includes safety check: warns (but doesn't block) if >50% issues vanished AND >5 existed.
+// "Vanished" means removed from issues.jsonl entirely, NOT status=closed.
+//
 // This ensures sync never fails due to git merge conflicts, as we handle merging at the
 // JSONL content level where we have semantic understanding of the data.
 //
@@ -190,9 +195,10 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //   - repoRoot: Path to the git repository root
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //   - jsonlPath: Absolute path to the JSONL file in the main repo
+//   - push: If true, push to remote after merge (bd-7ch)
 //
 // Returns PullResult with details about what was done, or error if failed.
-func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath string) (*PullResult, error) {
+func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath string, push bool) (*PullResult, error) {
 	result := &PullResult{
 		Branch:    syncBranch,
 		JSONLPath: jsonlPath,
@@ -271,6 +277,9 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// 3. Reset to remote's commit history
 	// 4. Commit merged content on top
 
+	// bd-7ch: Extract local content before merge for safety check
+	localContent, _ := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
+
 	mergedContent, err := performContentMerge(ctx, worktreePath, syncBranch, remote, jsonlRelPath)
 	if err != nil {
 		return nil, fmt.Errorf("content merge failed: %w", err)
@@ -328,6 +337,31 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// Copy merged JSONL to main repo
 	if err := copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath); err != nil {
 		return nil, err
+	}
+
+	// bd-7ch: Auto-push after successful content merge
+	if push && hasChanges {
+		// Safety check: count issues before and after merge to detect mass deletion
+		localCount := countIssuesInContent(localContent)
+		mergedCount := countIssuesInContent(mergedContent)
+
+		// Warn if >50% issues vanished AND >5 existed before
+		// "Vanished" = removed from JSONL entirely (not status=closed)
+		if localCount > 5 && mergedCount < localCount {
+			vanishedPercent := float64(localCount-mergedCount) / float64(localCount) * 100
+			if vanishedPercent > 50 {
+				fmt.Fprintf(os.Stderr, "⚠️  Warning: %.0f%% of issues vanished during merge (%d → %d issues)\n",
+					vanishedPercent, localCount, mergedCount)
+				fmt.Fprintf(os.Stderr, "   This may indicate accidental mass deletion. Pushing anyway.\n")
+				fmt.Fprintf(os.Stderr, "   If this was unintended, use 'git reflog' on the sync branch to recover.\n")
+			}
+		}
+
+		// Push regardless of safety check (don't block happy path)
+		if err := pushFromWorktree(ctx, worktreePath, syncBranch); err != nil {
+			return nil, fmt.Errorf("failed to push after merge: %w", err)
+		}
+		result.Pushed = true
 	}
 
 	return result, nil
@@ -634,6 +668,21 @@ func GetRepoRoot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to get git root: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// countIssuesInContent counts the number of non-empty lines in JSONL content.
+// Each non-empty line represents one issue. Used for safety checks (bd-7ch).
+func countIssuesInContent(content []byte) int {
+	if len(content) == 0 {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 // HasGitRemote checks if any git remote exists

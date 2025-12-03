@@ -458,3 +458,52 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("Failed to write file %s: %v", path, err)
 	}
 }
+
+// TestCountIssuesInContent tests the issue counting helper function (bd-7ch)
+func TestCountIssuesInContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []byte
+		want    int
+	}{
+		{
+			name:    "empty content",
+			content: []byte{},
+			want:    0,
+		},
+		{
+			name:    "nil content",
+			content: nil,
+			want:    0,
+		},
+		{
+			name:    "single issue",
+			content: []byte(`{"id":"test-1"}`),
+			want:    1,
+		},
+		{
+			name:    "multiple issues",
+			content: []byte(`{"id":"test-1"}` + "\n" + `{"id":"test-2"}` + "\n" + `{"id":"test-3"}`),
+			want:    3,
+		},
+		{
+			name:    "trailing newline",
+			content: []byte(`{"id":"test-1"}` + "\n" + `{"id":"test-2"}` + "\n"),
+			want:    2,
+		},
+		{
+			name:    "empty lines ignored",
+			content: []byte(`{"id":"test-1"}` + "\n" + "\n" + `{"id":"test-2"}` + "\n" + "   " + "\n"),
+			want:    2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := countIssuesInContent(tt.content)
+			if got != tt.want {
+				t.Errorf("countIssuesInContent() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

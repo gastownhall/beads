@@ -378,7 +378,7 @@ Use --merge to merge the sync branch back to main branch.`,
 				if useSyncBranch {
 					// Pull from sync branch via worktree (bd-e3w)
 					fmt.Printf("→ Pulling from sync branch '%s'...\n", syncBranchName)
-					pullResult, err := syncbranch.PullFromSyncBranch(ctx, repoRoot, syncBranchName, jsonlPath)
+					pullResult, err := syncbranch.PullFromSyncBranch(ctx, repoRoot, syncBranchName, jsonlPath, !noPush)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error pulling from sync branch: %v\n", err)
 						os.Exit(1)
@@ -387,6 +387,11 @@ Use --merge to merge the sync branch back to main branch.`,
 						if pullResult.Merged {
 							// bd-3s8 fix: divergent histories were merged at content level
 							fmt.Printf("✓ Merged divergent histories from %s\n", syncBranchName)
+							// bd-7ch: auto-push after merge
+							if pullResult.Pushed {
+								fmt.Printf("✓ Pushed merged changes to %s\n", syncBranchName)
+								pushedViaSyncBranch = true
+							}
 						} else if pullResult.FastForwarded {
 							fmt.Printf("✓ Fast-forwarded from %s\n", syncBranchName)
 						} else {
