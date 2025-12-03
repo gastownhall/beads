@@ -536,6 +536,13 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 2b: Database integrity (bd-2au)
+	integrityCheck := checkDatabaseIntegrity(path)
+	result.Checks = append(result.Checks, integrityCheck)
+	if integrityCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 3: ID format (hash vs sequential)
 	idCheck := checkIDFormat(path)
 	result.Checks = append(result.Checks, idCheck)
@@ -1882,6 +1889,80 @@ func checkSchemaCompatibility(path string) doctorCheck {
 		Name:    "Schema Compatibility",
 		Status:  statusOK,
 		Message: "All required tables and columns present",
+	}
+}
+
+// checkDatabaseIntegrity runs SQLite's PRAGMA integrity_check (bd-2au)
+func checkDatabaseIntegrity(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Get database path (same logic as checkSchemaCompatibility)
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// If no database, skip this check
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Database Integrity",
+			Status:  statusOK,
+			Message: "N/A (no database)",
+		}
+	}
+
+	// Open database in read-only mode for integrity check
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(30000)")
+	if err != nil {
+		return doctorCheck{
+			Name:    "Database Integrity",
+			Status:  statusError,
+			Message: "Failed to open database for integrity check",
+			Detail:  err.Error(),
+		}
+	}
+	defer db.Close()
+
+	// Run PRAGMA integrity_check
+	// This checks the entire database for corruption
+	rows, err := db.Query("PRAGMA integrity_check")
+	if err != nil {
+		return doctorCheck{
+			Name:    "Database Integrity",
+			Status:  statusError,
+			Message: "Failed to run integrity check",
+			Detail:  err.Error(),
+		}
+	}
+	defer rows.Close()
+
+	var results []string
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			continue
+		}
+		results = append(results, result)
+	}
+
+	// "ok" means no corruption detected
+	if len(results) == 1 && results[0] == "ok" {
+		return doctorCheck{
+			Name:    "Database Integrity",
+			Status:  statusOK,
+			Message: "No corruption detected",
+		}
+	}
+
+	// Any other result indicates corruption
+	return doctorCheck{
+		Name:    "Database Integrity",
+		Status:  statusError,
+		Message: "Database corruption detected",
+		Detail:  strings.Join(results, "; "),
+		Fix:     "Database may need recovery. Export with 'bd export' if possible, then restore from backup or reinitialize",
 	}
 }
 
