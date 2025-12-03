@@ -384,7 +384,14 @@ Use --merge to merge the sync branch back to main branch.`,
 						os.Exit(1)
 					}
 					if pullResult.Pulled {
-						fmt.Printf("✓ Pulled from %s\n", syncBranchName)
+						if pullResult.Merged {
+							// bd-3s8 fix: divergent histories were merged at content level
+							fmt.Printf("✓ Merged divergent histories from %s\n", syncBranchName)
+						} else if pullResult.FastForwarded {
+							fmt.Printf("✓ Fast-forwarded from %s\n", syncBranchName)
+						} else {
+							fmt.Printf("✓ Pulled from %s\n", syncBranchName)
+						}
 					}
 					// JSONL is already copied to main repo by PullFromSyncBranch
 				} else {
