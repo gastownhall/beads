@@ -41,16 +41,19 @@ type doctorCheck struct {
 }
 
 type doctorResult struct {
-	Path       string        `json:"path"`
-	Checks     []doctorCheck `json:"checks"`
-	OverallOK  bool          `json:"overall_ok"`
-	CLIVersion string        `json:"cli_version"`
+	Path       string            `json:"path"`
+	Checks     []doctorCheck     `json:"checks"`
+	OverallOK  bool              `json:"overall_ok"`
+	CLIVersion string            `json:"cli_version"`
+	Timestamp  string            `json:"timestamp,omitempty"`  // bd-9cc: ISO8601 timestamp for historical tracking
+	Platform   map[string]string `json:"platform,omitempty"`   // bd-9cc: platform info for debugging
 }
 
 var (
 	doctorFix       bool
 	doctorYes       bool
-	doctorDryRun    bool // bd-a5z: preview fixes without applying
+	doctorDryRun    bool   // bd-a5z: preview fixes without applying
+	doctorOutput    string // bd-9cc: export diagnostics to file
 	perfMode        bool
 	checkHealthMode bool
 )
@@ -86,6 +89,10 @@ Performance Mode (--perf):
   - Generates CPU profile for analysis
   - Outputs shareable report for bug reports
 
+Export Mode (--output):
+  Save diagnostics to a JSON file for historical analysis and bug reporting.
+  Includes timestamp and platform info for tracking intermittent issues.
+
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
@@ -93,7 +100,8 @@ Examples:
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --dry-run    # Preview what --fix would do without making changes
-  bd doctor --perf       # Performance diagnostics`,
+  bd doctor --perf       # Performance diagnostics
+  bd doctor --output diagnostics.json  # Export diagnostics to file`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -134,10 +142,26 @@ Examples:
 			result = runDiagnostics(absPath)
 		}
 
+		// bd-9cc: Add timestamp and platform info for export
+		if doctorOutput != "" || jsonOutput {
+			result.Timestamp = time.Now().UTC().Format(time.RFC3339)
+			result.Platform = doctor.CollectPlatformInfo(absPath)
+		}
+
+		// bd-9cc: Export to file if --output specified
+		if doctorOutput != "" {
+			if err := exportDiagnostics(result, doctorOutput); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to export diagnostics: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("✓ Diagnostics exported to %s\n", doctorOutput)
+		}
+
 		// Output results
 		if jsonOutput {
 			outputJSON(result)
-		} else {
+		} else if doctorOutput == "" {
+			// Only print to console if not exporting (to avoid duplicate output)
 			printDiagnostics(result)
 		}
 
@@ -1164,6 +1188,24 @@ func fetchLatestGitHubRelease() (string, error) {
 	version := strings.TrimPrefix(release.TagName, "v")
 
 	return version, nil
+}
+
+// exportDiagnostics writes the doctor result to a JSON file (bd-9cc)
+func exportDiagnostics(result doctorResult, outputPath string) error {
+	// #nosec G304 - outputPath is a user-provided flag value for file generation
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer f.Close()
+
+	encoder := json.NewEncoder(f)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(result); err != nil {
+		return fmt.Errorf("failed to write JSON: %w", err)
+	}
+
+	return nil
 }
 
 func printDiagnostics(result doctorResult) {
@@ -2590,4 +2632,5 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
+	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file (bd-9cc)")
 }

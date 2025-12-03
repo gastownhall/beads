@@ -36,7 +36,7 @@ func RunPerformanceDiagnostics(path string) {
 	}
 
 	// Collect platform info
-	platformInfo := collectPlatformInfo(dbPath)
+	platformInfo := CollectPlatformInfo(path)
 	fmt.Printf("\nPlatform: %s\n", platformInfo["os_arch"])
 	fmt.Printf("Go: %s\n", platformInfo["go_version"])
 	fmt.Printf("SQLite: %s\n", platformInfo["sqlite_version"])
@@ -95,7 +95,9 @@ func RunPerformanceDiagnostics(path string) {
 	fmt.Printf("  go tool pprof -http=:8080 %s\n\n", profilePath)
 }
 
-func collectPlatformInfo(dbPath string) map[string]string {
+// CollectPlatformInfo gathers platform information for diagnostics.
+// bd-9cc: Exported for use by --output flag.
+func CollectPlatformInfo(path string) map[string]string {
 	info := make(map[string]string)
 
 	// OS and architecture
@@ -104,7 +106,9 @@ func collectPlatformInfo(dbPath string) map[string]string {
 	// Go version
 	info["go_version"] = runtime.Version()
 
-	// SQLite version
+	// SQLite version - try to find database
+	beadsDir := filepath.Join(path, ".beads")
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 	if err == nil {
 		defer db.Close()
