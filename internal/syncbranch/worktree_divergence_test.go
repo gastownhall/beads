@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -523,9 +524,10 @@ func TestSafetyCheckMassDeletion(t *testing.T) {
 	t.Run("safety check triggers when >50% issues vanish and >5 existed", func(t *testing.T) {
 		// Test the countIssuesInContent and formatVanishedIssues functions
 		// Create local content with 10 issues
+		// bd-c5m: Use strconv.Itoa instead of string(rune()) which only works for single digits
 		var localLines []string
 		for i := 1; i <= 10; i++ {
-			localLines = append(localLines, `{"id":"test-`+string(rune('0'+i))+`","title":"Issue `+string(rune('0'+i))+`"}`)
+			localLines = append(localLines, `{"id":"test-`+strconv.Itoa(i)+`","title":"Issue `+strconv.Itoa(i)+`"}`)
 		}
 		localContent := []byte(strings.Join(localLines, "\n"))
 
@@ -561,20 +563,40 @@ func TestSafetyCheckMassDeletion(t *testing.T) {
 		if len(forensicLines) == 0 {
 			t.Error("formatVanishedIssues returned empty lines")
 		}
+
+		// bd-8uk: Verify SafetyWarnings would be populated correctly
+		// Simulate what PullFromSyncBranch does when safety check triggers
+		var safetyWarnings []string
+		safetyWarnings = append(safetyWarnings,
+			"⚠️  Warning: "+strconv.FormatFloat(vanishedPercent, 'f', 0, 64)+"% of issues vanished during merge ("+
+				strconv.Itoa(localCount)+" → "+strconv.Itoa(mergedCount)+" issues)")
+		safetyWarnings = append(safetyWarnings, forensicLines...)
+
+		// Verify warnings contains expected content
+		if len(safetyWarnings) < 2 {
+			t.Errorf("SafetyWarnings should have at least 2 entries (warning + forensics), got %d", len(safetyWarnings))
+		}
+		if !strings.Contains(safetyWarnings[0], "Warning") {
+			t.Error("First SafetyWarning should contain 'Warning'")
+		}
+		if !strings.Contains(safetyWarnings[0], "60%") {
+			t.Errorf("First SafetyWarning should contain '60%%', got: %s", safetyWarnings[0])
+		}
 	})
 
 	t.Run("safety check does NOT trigger when <50% issues vanish", func(t *testing.T) {
 		// 10 issues, 6 remain = 40% vanished (should NOT trigger)
+		// bd-c5m: Use strconv.Itoa instead of string(rune()) which only works for single digits
 		var localLines []string
 		for i := 1; i <= 10; i++ {
-			localLines = append(localLines, `{"id":"test-`+string(rune('0'+i))+`"}`)
+			localLines = append(localLines, `{"id":"test-`+strconv.Itoa(i)+`"}`)
 		}
 		localContent := []byte(strings.Join(localLines, "\n"))
 
 		// 6 issues remain (40% vanished)
 		var mergedLines []string
 		for i := 1; i <= 6; i++ {
-			mergedLines = append(mergedLines, `{"id":"test-`+string(rune('0'+i))+`"}`)
+			mergedLines = append(mergedLines, `{"id":"test-`+strconv.Itoa(i)+`"}`)
 		}
 		mergedContent := []byte(strings.Join(mergedLines, "\n"))
 

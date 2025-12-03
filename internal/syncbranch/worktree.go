@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -301,8 +302,9 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// bd-7ch: Extract local content before merge for safety check
 	localContent, extractErr := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
 	if extractErr != nil {
-		// bd-feh: Log warning so users know safety check may be skipped
-		fmt.Fprintf(os.Stderr, "⚠️  Warning: Could not extract local content for safety check: %v\n", extractErr)
+		// bd-feh: Add warning to result so callers can display appropriately (bd-dtm fix)
+		result.SafetyWarnings = append(result.SafetyWarnings,
+			fmt.Sprintf("⚠️  Warning: Could not extract local content for safety check: %v", extractErr))
 	}
 
 	mergedContent, err := performContentMerge(ctx, worktreePath, syncBranch, remote, jsonlRelPath)
@@ -716,9 +718,10 @@ func PushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
 	// Worktree path is under .git/beads-worktrees/<branch>
 	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
 
-	// Verify worktree exists
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		return fmt.Errorf("sync branch worktree not found at %s", worktreePath)
+	// bd-k2n: Recreate worktree if it was cleaned up, using the same pattern as CommitToSyncBranch
+	wtMgr := git.NewWorktreeManager(repoRoot)
+	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
+		return fmt.Errorf("failed to ensure worktree exists: %w", err)
 	}
 
 	return pushFromWorktree(ctx, worktreePath, syncBranch)
@@ -799,18 +802,23 @@ func formatVanishedIssues(localIssues, mergedIssues map[string]issueSummary, loc
 	lines = append(lines, fmt.Sprintf("   After merge:  %d issues", mergedCount))
 	lines = append(lines, "   Vanished issues:")
 
-	vanishedCount := 0
-	for id, summary := range localIssues {
+	// bd-ciu: Collect vanished IDs first, then sort for deterministic output
+	var vanishedIDs []string
+	for id := range localIssues {
 		if _, exists := mergedIssues[id]; !exists {
-			vanishedCount++
-			title := summary.Title
-			if len(title) > 60 {
-				title = title[:57] + "..."
-			}
-			lines = append(lines, fmt.Sprintf("     - %s: %s", id, title))
+			vanishedIDs = append(vanishedIDs, id)
 		}
 	}
-	lines = append(lines, fmt.Sprintf("   Total vanished: %d\n", vanishedCount))
+	sort.Strings(vanishedIDs)
+
+	for _, id := range vanishedIDs {
+		title := localIssues[id].Title
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+		lines = append(lines, fmt.Sprintf("     - %s: %s", id, title))
+	}
+	lines = append(lines, fmt.Sprintf("   Total vanished: %d\n", len(vanishedIDs)))
 
 	return lines
 }

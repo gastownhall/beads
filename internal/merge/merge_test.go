@@ -563,6 +563,35 @@ func TestMergePriority(t *testing.T) {
 			right:    2,
 			expected: 2, // right changed from 0 to 2
 		},
+		// bd-1kf fix: negative priorities should be handled consistently
+		{
+			name:     "bd-1kf: negative priority should win over unset (0)",
+			base:     2,
+			left:     0,
+			right:    -1,
+			expected: -1, // negative priority is explicit, should win over unset
+		},
+		{
+			name:     "bd-1kf: negative priority on left should win over unset (0) on right",
+			base:     2,
+			left:     -1,
+			right:    0,
+			expected: -1, // negative priority is explicit, should win over unset
+		},
+		{
+			name:     "bd-1kf: conflict between negative priorities - lower wins",
+			base:     2,
+			left:     -2,
+			right:    -1,
+			expected: -2, // -2 is higher priority (more urgent) than -1
+		},
+		{
+			name:     "bd-1kf: negative vs positive priority conflict",
+			base:     2,
+			left:     -1,
+			right:    1,
+			expected: -1, // -1 is higher priority (lower number) than 1
+		},
 	}
 
 	for _, tt := range tests {

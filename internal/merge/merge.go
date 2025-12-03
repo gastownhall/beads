@@ -427,7 +427,7 @@ func mergeNotes(base, left, right string) string {
 
 // mergePriority handles priority merging - on conflict, higher priority wins (lower number)
 // Special case: 0 is treated as "unset/no priority" due to Go's zero value.
-// Any explicitly set priority (>0) wins over 0. (bd-d0t fix)
+// Any explicitly set priority (!=0) wins over 0. (bd-d0t fix, bd-1kf fix)
 func mergePriority(base, left, right int) int {
 	// Standard 3-way merge for non-conflict cases
 	if base == left && base != right {
@@ -442,10 +442,11 @@ func mergePriority(base, left, right int) int {
 	// True conflict: both sides changed to different values
 
 	// bd-d0t fix: Treat 0 as "unset" - explicitly set priority wins over unset
-	if left == 0 && right > 0 {
+	// bd-1kf fix: Use != 0 instead of > 0 to handle negative priorities
+	if left == 0 && right != 0 {
 		return right // right has explicit priority, left is unset
 	}
-	if right == 0 && left > 0 {
+	if right == 0 && left != 0 {
 		return left // left has explicit priority, right is unset
 	}
 

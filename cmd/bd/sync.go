@@ -400,8 +400,8 @@ Use --merge to merge the sync branch back to main branch.`,
 
 							// bd-4u8: Handle safety check with confirmation requirement
 							if pullResult.SafetyCheckTriggered && !pullResult.Pushed {
+								// bd-dmd: Don't duplicate SafetyCheckDetails - it's already in SafetyWarnings
 								// Prompt for confirmation
-								fmt.Fprintf(os.Stderr, "\n⚠️  Mass deletion detected: %s\n", pullResult.SafetyCheckDetails)
 								fmt.Fprintf(os.Stderr, "Push these changes to remote? [y/N]: ")
 
 								var response string

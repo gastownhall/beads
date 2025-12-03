@@ -186,6 +186,8 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `export.skip_encoding_errors` - Skip issues that fail JSON encoding (default: false)
 - `export.write_manifest` - Write .manifest.json with export metadata (default: false)
 - `auto_export.error_policy` - Override error policy for auto-exports (default: `best-effort`)
+- `sync.branch` - Name of the dedicated sync branch for beads data (see docs/PROTECTED_BRANCHES.md)
+- `sync.require_confirmation_on_mass_delete` - Require interactive confirmation before pushing when >50% of issues vanish during a merge (default: `false`)
 
 ### Integration Namespaces
 
@@ -324,6 +326,33 @@ bd sync  # Respects import.orphan_handling setting
 - Use `resurrect` when importing from another database that had parent deletions
 - Use `strict` only for controlled imports where you need to guarantee parent existence
 - Use `skip` rarely - only when you want to selectively import a subset
+
+### Example: Sync Safety Options
+
+Controls for the sync branch workflow (see docs/PROTECTED_BRANCHES.md):
+
+```bash
+# Configure sync branch (required for protected branch workflow)
+bd config set sync.branch beads-metadata
+
+# Enable mass deletion protection (optional, default: false)
+# When enabled, if >50% of issues vanish during a merge, bd sync will:
+# 1. Show forensic info about vanished issues
+# 2. Prompt for confirmation before pushing
+bd config set sync.require_confirmation_on_mass_delete "true"
+```
+
+**When to enable `sync.require_confirmation_on_mass_delete`:**
+
+- Multi-user workflows where accidental mass deletions could propagate
+- Critical projects where data loss prevention is paramount
+- When you want manual review before pushing large changes
+
+**When to keep it disabled (default):**
+
+- Single-user workflows where you trust your local changes
+- CI/CD pipelines that need non-interactive sync
+- When you want hands-free automation
 
 ### Example: Jira Integration
 
