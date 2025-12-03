@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -112,9 +113,9 @@ func BenchmarkCheckEligibility(b *testing.B) {
 	}
 }
 
-func generateID(b testing.TB, prefix string, n int) string{
+func generateID(b testing.TB, prefix string, n int) string {
 	b.Helper()
-	return prefix + string(rune('0'+n/10)) + string(rune('0'+n%10))
+	return prefix + strconv.Itoa(n)
 }
 
 func setupBenchDB(tb testing.TB) (*SQLiteStorage, func()) {

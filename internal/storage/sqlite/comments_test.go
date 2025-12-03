@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -143,7 +144,7 @@ func TestGetIssueCommentsOrdering(t *testing.T) {
 
 	// Add comments with identifiable ordering
 	for i := 1; i <= 5; i++ {
-		text := "Comment " + string(rune('0'+i))
+		text := "Comment " + strconv.Itoa(i)
 		_, err := store.AddIssueComment(ctx, issue.ID, "alice", text)
 		if err != nil {
 			t.Fatalf("AddIssueComment failed: %v", err)
@@ -162,7 +163,7 @@ func TestGetIssueCommentsOrdering(t *testing.T) {
 	}
 
 	for i := 0; i < len(comments); i++ {
-		expectedText := "Comment " + string(rune('0'+i+1))
+		expectedText := "Comment " + strconv.Itoa(i+1)
 		if comments[i].Text != expectedText {
 			t.Errorf("Comment %d: expected text %s, got %s", i, expectedText, comments[i].Text)
 		}

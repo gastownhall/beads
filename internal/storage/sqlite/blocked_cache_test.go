@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -289,7 +290,7 @@ func TestDeepHierarchyCacheCorrectness(t *testing.T) {
 	var issues []*types.Issue
 	for i := 0; i < 4; i++ {
 		issue := &types.Issue{
-			Title:     "Level " + string(rune('0'+i)),
+			Title:     "Level " + strconv.Itoa(i),
 			Status:    types.StatusOpen,
 			Priority:  1,
 			IssueType: types.TypeEpic,

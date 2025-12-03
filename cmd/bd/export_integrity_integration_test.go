@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -42,9 +43,9 @@ func TestExportIntegrityAfterJSONLTruncation(t *testing.T) {
 	var allIssues []*types.Issue
 	for i := 1; i <= numIssues; i++ {
 		issue := &types.Issue{
-			ID:          "bd-" + string(rune('0'+i)),
-			Title:       "Test issue " + string(rune('0'+i)),
-			Description: "Description " + string(rune('0'+i)),
+			ID:          "bd-" + strconv.Itoa(i),
+			Title:       "Test issue " + strconv.Itoa(i),
+			Description: "Description " + strconv.Itoa(i),
 			Status:      types.StatusOpen,
 			Priority:    1,
 			IssueType:   types.TypeTask,
@@ -276,8 +277,8 @@ func TestMultipleExportsStayConsistent(t *testing.T) {
 	var issues []*types.Issue
 	for i := 1; i <= 5; i++ {
 		issue := &types.Issue{
-			ID:        "bd-" + string(rune('0'+i)),
-			Title:     "Issue " + string(rune('0'+i)),
+			ID:        "bd-" + strconv.Itoa(i),
+			Title:     "Issue " + strconv.Itoa(i),
 			Status:    types.StatusOpen,
 			Priority:  1,
 			IssueType: types.TypeTask,

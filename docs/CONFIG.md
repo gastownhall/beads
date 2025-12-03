@@ -187,7 +187,7 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `export.write_manifest` - Write .manifest.json with export metadata (default: false)
 - `auto_export.error_policy` - Override error policy for auto-exports (default: `best-effort`)
 - `sync.branch` - Name of the dedicated sync branch for beads data (see docs/PROTECTED_BRANCHES.md)
-- `sync.require_confirmation_on_mass_delete` - Require interactive confirmation before pushing when >50% of issues vanish during a merge (default: `false`)
+- `sync.require_confirmation_on_mass_delete` - Require interactive confirmation before pushing when >50% of issues vanish during a merge AND more than 5 issues existed before (default: `false`)
 
 ### Integration Namespaces
 
@@ -336,7 +336,8 @@ Controls for the sync branch workflow (see docs/PROTECTED_BRANCHES.md):
 bd config set sync.branch beads-metadata
 
 # Enable mass deletion protection (optional, default: false)
-# When enabled, if >50% of issues vanish during a merge, bd sync will:
+# When enabled, if >50% of issues vanish during a merge AND more than 5
+# issues existed before the merge, bd sync will:
 # 1. Show forensic info about vanished issues
 # 2. Prompt for confirmation before pushing
 bd config set sync.require_confirmation_on_mass_delete "true"

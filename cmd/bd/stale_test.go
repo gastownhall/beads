@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -215,7 +216,7 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		updatedAt := oldTime.Add(time.Duration(i) * time.Hour) // Slightly different times for sorting
 		issue := &types.Issue{
-			ID:        "test-stale-limit-" + string(rune('0'+i)),
+			ID:        "test-stale-limit-" + strconv.Itoa(i),
 			Title:     "Stale issue",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -231,7 +232,7 @@ func TestStaleIssuesWithLimit(t *testing.T) {
 	// Update timestamps directly in DB using datetime() function
 	db := s.UnderlyingDB()
 	for i := 1; i <= 5; i++ {
-		id := "test-stale-limit-" + string(rune('0'+i))
+		id := "test-stale-limit-" + strconv.Itoa(i)
 		// Make each slightly different (40 days ago + i hours)
 		_, err := db.ExecContext(ctx, "UPDATE issues SET updated_at = datetime('now', '-40 days', '+' || ? || ' hours') WHERE id = ?", i, id)
 		if err != nil {

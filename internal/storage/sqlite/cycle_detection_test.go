@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -415,7 +416,7 @@ func TestDetectCyclesLongCycle(t *testing.T) {
 	issues := make([]*types.Issue, cycleLength)
 	for i := 0; i < cycleLength; i++ {
 		issues[i] = &types.Issue{
-			Title:     "Issue " + string(rune('0'+i)),
+			Title:     "Issue " + strconv.Itoa(i),
 			Status:    types.StatusOpen,
 			Priority:  1,
 			IssueType: types.TypeTask,
