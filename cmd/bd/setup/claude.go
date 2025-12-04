@@ -8,7 +8,7 @@ import (
 )
 
 // InstallClaude installs Claude Code hooks
-func InstallClaude(project bool) {
+func InstallClaude(project bool, stealth bool) {
 	var settingsPath string
 
 	if project {
@@ -49,13 +49,19 @@ func InstallClaude(project bool) {
 		settings["hooks"] = hooks
 	}
 
+	// Determine which command to use
+	command := "bd prime"
+	if stealth {
+		command = "bd prime --stealth"
+	}
+
 	// Add SessionStart hook
-	if addHookCommand(hooks, "SessionStart", "bd prime") {
+	if addHookCommand(hooks, "SessionStart", command) {
 		fmt.Println("✓ Registered SessionStart hook")
 	}
 
 	// Add PreCompact hook
-	if addHookCommand(hooks, "PreCompact", "bd prime") {
+	if addHookCommand(hooks, "PreCompact", command) {
 		fmt.Println("✓ Registered PreCompact hook")
 	}
 
@@ -137,9 +143,11 @@ func RemoveClaude(project bool) {
 		return
 	}
 
-	// Remove bd prime hooks
+	// Remove bd prime hooks (both variants for backwards compatibility)
 	removeHookCommand(hooks, "SessionStart", "bd prime")
 	removeHookCommand(hooks, "PreCompact", "bd prime")
+	removeHookCommand(hooks, "SessionStart", "bd prime --stealth")
+	removeHookCommand(hooks, "PreCompact", "bd prime --stealth")
 
 	// Write back
 	data, err = json.MarshalIndent(settings, "", "  ")
@@ -284,7 +292,9 @@ func hasBeadsHooks(settingsPath string) bool {
 				if !ok {
 					continue
 				}
-				if cmdMap["command"] == "bd prime" {
+				// Check for either variant
+				cmd := cmdMap["command"]
+				if cmd == "bd prime" || cmd == "bd prime --stealth" {
 					return true
 				}
 			}

@@ -9,6 +9,7 @@ var (
 	setupProject bool
 	setupCheck   bool
 	setupRemove  bool
+	setupStealth bool
 )
 
 var setupCmd = &cobra.Command{
@@ -86,7 +87,7 @@ agents from forgetting bd workflow after context compaction.`,
 			return
 		}
 
-		setup.InstallClaude(setupProject)
+		setup.InstallClaude(setupProject, setupStealth)
 	},
 }
 
@@ -94,6 +95,7 @@ func init() {
 	setupClaudeCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (not globally)")
 	setupClaudeCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Claude integration is installed")
 	setupClaudeCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd hooks from Claude settings")
+	setupClaudeCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use 'bd prime --stealth' (flush only, no git operations)")
 
 	setupCursorCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Cursor integration is installed")
 	setupCursorCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd rules from Cursor")

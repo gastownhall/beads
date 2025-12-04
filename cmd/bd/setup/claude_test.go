@@ -23,6 +23,13 @@ func TestAddHookCommand(t *testing.T) {
 			wantAdded:     true,
 		},
 		{
+			name:          "add stealth hook to empty hooks",
+			existingHooks: make(map[string]interface{}),
+			event:         "SessionStart",
+			command:       "bd prime --stealth",
+			wantAdded:     true,
+		},
+		{
 			name: "hook already exists",
 			existingHooks: map[string]interface{}{
 				"SessionStart": []interface{}{
@@ -39,6 +46,25 @@ func TestAddHookCommand(t *testing.T) {
 			},
 			event:     "SessionStart",
 			command:   "bd prime",
+			wantAdded: false,
+		},
+		{
+			name: "stealth hook already exists",
+			existingHooks: map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{
+								"type":    "command",
+								"command": "bd prime --stealth",
+							},
+						},
+					},
+				},
+			},
+			event:     "SessionStart",
+			command:   "bd prime --stealth",
 			wantAdded: false,
 		},
 		{
@@ -123,6 +149,25 @@ func TestRemoveHookCommand(t *testing.T) {
 			wantRemaining: 0,
 		},
 		{
+			name: "remove stealth hook",
+			existingHooks: map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{
+								"type":    "command",
+								"command": "bd prime --stealth",
+							},
+						},
+					},
+				},
+			},
+			event:         "SessionStart",
+			command:       "bd prime --stealth",
+			wantRemaining: 0,
+		},
+		{
 			name: "remove one of multiple hooks",
 			existingHooks: map[string]interface{}{
 				"SessionStart": []interface{}{
@@ -184,9 +229,9 @@ func TestHasBeadsHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	tests := []struct {
-		name        string
+		name         string
 		settingsData map[string]interface{}
-		want        bool
+		want         bool
 	}{
 		{
 			name: "has bd prime hook",
@@ -208,9 +253,66 @@ func TestHasBeadsHooks(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "no hooks",
+			name: "has bd prime --stealth hook",
+			settingsData: map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"SessionStart": []interface{}{
+						map[string]interface{}{
+							"matcher": "",
+							"hooks": []interface{}{
+								map[string]interface{}{
+									"type":    "command",
+									"command": "bd prime --stealth",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "has bd prime in PreCompact",
+			settingsData: map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"PreCompact": []interface{}{
+						map[string]interface{}{
+							"matcher": "",
+							"hooks": []interface{}{
+								map[string]interface{}{
+									"type":    "command",
+									"command": "bd prime",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "has bd prime --stealth in PreCompact",
+			settingsData: map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"PreCompact": []interface{}{
+						map[string]interface{}{
+							"matcher": "",
+							"hooks": []interface{}{
+								map[string]interface{}{
+									"type":    "command",
+									"command": "bd prime --stealth",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name:         "no hooks",
 			settingsData: map[string]interface{}{},
-			want:        false,
+			want:         false,
 		},
 		{
 			name: "has other hooks but not bd prime",
@@ -242,7 +344,7 @@ func TestHasBeadsHooks(t *testing.T) {
 				t.Fatalf("Failed to marshal test data: %v", err)
 			}
 
-			if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+			if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 				t.Fatalf("Failed to write test file: %v", err)
 			}
 
@@ -274,5 +376,33 @@ func TestIdempotency(t *testing.T) {
 	eventHooks := hooks["SessionStart"].([]interface{})
 	if len(eventHooks) != 1 {
 		t.Errorf("Expected 1 hook, got %d", len(eventHooks))
+	}
+}
+
+// Test that running addHookCommand twice with stealth doesn't duplicate hooks
+func TestIdempotencyWithStealth(t *testing.T) {
+	hooks := make(map[string]any)
+
+	if !addHookCommand(hooks, "SessionStart", "bd prime --stealth") {
+		t.Error("First call should have added the stealth hook")
+	}
+
+	// Second add (should detect existing)
+	if addHookCommand(hooks, "SessionStart", "bd prime --stealth") {
+		t.Error("Second call should have detected existing stealth hook")
+	}
+
+	// Verify only one hook exists
+	eventHooks := hooks["SessionStart"].([]any)
+	if len(eventHooks) != 1 {
+		t.Errorf("Expected 1 hook, got %d", len(eventHooks))
+	}
+
+	// and that it's the correct one
+	hookMap := eventHooks[0].(map[string]any)
+	commands := hookMap["hooks"].([]any)
+	cmdMap := commands[0].(map[string]any)
+	if cmdMap["command"] != "bd prime --stealth" {
+		t.Errorf("Expected 'bd prime --stealth', got %v", cmdMap["command"])
 	}
 }
