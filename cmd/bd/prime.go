@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,9 @@ import (
 )
 
 var (
-	primeFullMode bool
-	primeMCPMode  bool
+	primeFullMode    bool
+	primeMCPMode     bool
+	primeStealthMode bool
 )
 
 var primeCmd = &cobra.Command{
@@ -47,8 +49,8 @@ agents from forgetting bd workflow after context compaction.`,
 			mcpMode = true
 		}
 
-		// Output workflow context (adaptive based on MCP)
-		if err := outputPrimeContext(mcpMode); err != nil {
+		// Output workflow context (adaptive based on MCP and stealth mode)
+		if err := outputPrimeContext(os.Stdout, mcpMode, primeStealthMode); err != nil {
 			// Suppress all errors - silent exit with success
 			// Never write to stderr (breaks Windows compatibility)
 			os.Exit(0)
@@ -59,6 +61,7 @@ agents from forgetting bd workflow after context compaction.`,
 func init() {
 	primeCmd.Flags().BoolVar(&primeFullMode, "full", false, "Force full CLI output (ignore MCP detection)")
 	primeCmd.Flags().BoolVar(&primeMCPMode, "mcp", false, "Force MCP mode (minimal output)")
+	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -104,7 +107,7 @@ func isMCPActive() bool {
 }
 
 // isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only)
-func isEphemeralBranch() bool {
+var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
@@ -113,19 +116,22 @@ func isEphemeralBranch() bool {
 }
 
 // outputPrimeContext outputs workflow context in markdown format
-func outputPrimeContext(mcpMode bool) error {
+func outputPrimeContext(w io.Writer, mcpMode bool, stealthMode bool) error {
 	if mcpMode {
-		return outputMCPContext()
+		return outputMCPContext(w, stealthMode)
 	}
-	return outputCLIContext()
+	return outputCLIContext(w, stealthMode)
 }
 
 // outputMCPContext outputs minimal context for MCP users
-func outputMCPContext() error {
+func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 
 	var closeProtocol string
-	if ephemeral {
+	if stealthMode {
+		// Stealth mode: only flush to JSONL as there's nothing to commit.
+		closeProtocol = "Before saying \"done\": bd sync --flush-only"
+	} else if ephemeral {
 		closeProtocol = "Before saying \"done\": git status → git add → bd sync --from-main → git commit (no push - ephemeral branch)"
 	} else {
 		closeProtocol = "Before saying \"done\": git status → git add → bd sync → git commit → bd sync → git push"
@@ -143,12 +149,12 @@ func outputMCPContext() error {
 
 Start: Check ` + "`ready`" + ` tool for available work.
 `
-	fmt.Print(context)
+	_, _ = fmt.Fprint(w, context)
 	return nil
 }
 
 // outputCLIContext outputs full CLI reference for non-MCP users
-func outputCLIContext() error {
+func outputCLIContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 
 	var closeProtocol string
@@ -156,7 +162,17 @@ func outputCLIContext() error {
 	var syncSection string
 	var completingWorkflow string
 
-	if ephemeral {
+	if stealthMode {
+		// Stealth mode: only flush to JSONL, no git operations
+		closeProtocol = `[ ] bd sync --flush-only    (export beads to JSONL only)`
+		syncSection = `### Sync & Collaboration
+- ` + "`bd sync --flush-only`" + ` - Export to JSONL`
+		completingWorkflow = `**Completing work:**
+` + "```bash" + `
+bd close <id1> <id2> ...    # Close all completed issues at once
+bd sync --flush-only        # Export to JSONL
+` + "```"
+	} else if ephemeral {
 		closeProtocol = `[ ] 1. git status              (check what changed)
 [ ] 2. git add <files>         (stage code changes)
 [ ] 3. bd sync --from-main     (pull beads updates from main)
@@ -258,6 +274,6 @@ bd create --title="Write tests for X" --type=task
 bd dep add beads-yyy beads-xxx  # Tests depend on Feature (Feature blocks tests)
 ` + "```" + `
 `
-	fmt.Print(context)
+	_, _ = fmt.Fprint(w, context)
 	return nil
 }
