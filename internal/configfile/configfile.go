@@ -14,7 +14,7 @@ type Config struct {
 	JSONLExport string `json:"jsonl_export,omitempty"`
 
 	// Deletions configuration
-	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (7 days)
+	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
 	// Deprecated: LastBdVersion is no longer used for version tracking.
 	// Version is now stored in .local_version (gitignored) to prevent
@@ -104,7 +104,7 @@ func (c *Config) JSONLPath(beadsDir string) string {
 }
 
 // DefaultDeletionsRetentionDays is the default retention period for deletion records.
-const DefaultDeletionsRetentionDays = 7
+const DefaultDeletionsRetentionDays = 3
 
 // GetDeletionsRetentionDays returns the configured retention days, or the default if not set.
 func (c *Config) GetDeletionsRetentionDays() int {

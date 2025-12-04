@@ -53,7 +53,7 @@ Tiers:
 
 Deletions Pruning:
   All modes also prune old deletion records from deletions.jsonl to prevent
-  unbounded growth. Default retention is 7 days (configurable via --retention
+  unbounded growth. Default retention is 3 days (configurable via --retention
   or deletions_retention_days in metadata.json).
 
 Examples:
