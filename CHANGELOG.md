@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.29.0] - 2025-12-03
 
+## [0.29.0] - 2025-12-03
+
 ### Added
 
 - **`--estimate` / `-e` flag for `bd create` and `bd update` (GH #443)**

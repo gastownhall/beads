@@ -1,5 +1,5 @@
 #!/bin/sh
-# bd-hooks-version: 0.28.0
+# bd-hooks-version: 0.29.0
 #
 # bd (beads) post-checkout hook
 #
