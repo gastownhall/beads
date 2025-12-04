@@ -118,10 +118,7 @@ incomplete line without brace
 
 func TestGitHasUncommittedChanges_NotInGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Should error when not in a git repo
 	_, err := gitHasUncommittedChanges()
@@ -132,10 +129,7 @@ func TestGitHasUncommittedChanges_NotInGitRepo(t *testing.T) {
 
 func TestGetCurrentGitHead_NotInGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Should error when not in a git repo
 	_, err := getCurrentGitHead()

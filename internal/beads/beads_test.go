@@ -30,16 +30,14 @@ func TestFindDatabasePathEnvVar(t *testing.T) {
 }
 
 func TestFindDatabasePathInTree(t *testing.T) {
-	// Save original env var and working directory
+	// Save original env var
 	originalEnv := os.Getenv("BEADS_DB")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DB", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DB")
 		}
-		os.Chdir(originalWd)
 	}()
 
 	// Clear env var
@@ -73,10 +71,7 @@ func TestFindDatabasePathInTree(t *testing.T) {
 		t.Fatalf("Failed to create subdirectory: %v", err)
 	}
 
-	err = os.Chdir(subDir)
-	if err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(subDir)
 
 	// Should find the database in the parent directory tree
 	result := FindDatabasePath()
@@ -97,16 +92,14 @@ func TestFindDatabasePathInTree(t *testing.T) {
 }
 
 func TestFindDatabasePathNotFound(t *testing.T) {
-	// Save original env var and working directory
+	// Save original env var
 	originalEnv := os.Getenv("BEADS_DB")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DB", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DB")
 		}
-		os.Chdir(originalWd)
 	}()
 
 	// Clear env var
@@ -119,10 +112,7 @@ func TestFindDatabasePathNotFound(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	err = os.Chdir(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Should return empty string (no database found)
 	result := FindDatabasePath()
@@ -366,14 +356,12 @@ func TestHasBeadsProjectFiles(t *testing.T) {
 func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DIR", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DIR")
 		}
-		os.Chdir(originalWd)
 	}()
 	os.Unsetenv("BEADS_DIR")
 
@@ -394,9 +382,7 @@ func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 	}
 
 	// Change to temp dir
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	// Should NOT find the daemon-only directory
 	result := FindBeadsDir()
@@ -465,14 +451,12 @@ func TestFindDatabasePathHomeDefault(t *testing.T) {
 	// creating the file and just verify the function doesn't crash
 
 	originalEnv := os.Getenv("BEADS_DB")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DB", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DB")
 		}
-		os.Chdir(originalWd)
 	}()
 
 	os.Unsetenv("BEADS_DB")
@@ -484,10 +468,7 @@ func TestFindDatabasePathHomeDefault(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	err = os.Chdir(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Call FindDatabasePath - it might return home dir default or empty string
 	result := FindDatabasePath()
@@ -691,14 +672,12 @@ func TestFollowRedirect(t *testing.T) {
 func TestFindDatabasePathWithRedirect(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DIR", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DIR")
 		}
-		os.Chdir(originalWd)
 	}()
 	os.Unsetenv("BEADS_DIR")
 
@@ -733,9 +712,7 @@ func TestFindDatabasePathWithRedirect(t *testing.T) {
 
 	// Change to project directory
 	projectDir := filepath.Join(tmpDir, "project")
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(projectDir)
 
 	// FindDatabasePath should follow the redirect
 	result := FindDatabasePath()
@@ -753,14 +730,12 @@ func TestFindDatabasePathWithRedirect(t *testing.T) {
 func TestFindBeadsDirWithRedirect(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
-	originalWd, _ := os.Getwd()
 	defer func() {
 		if originalEnv != "" {
 			os.Setenv("BEADS_DIR", originalEnv)
 		} else {
 			os.Unsetenv("BEADS_DIR")
 		}
-		os.Chdir(originalWd)
 	}()
 	os.Unsetenv("BEADS_DIR")
 
@@ -794,9 +769,7 @@ func TestFindBeadsDirWithRedirect(t *testing.T) {
 
 	// Change to project directory
 	projectDir := filepath.Join(tmpDir, "project")
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(projectDir)
 
 	// FindBeadsDir should follow the redirect
 	result := FindBeadsDir()

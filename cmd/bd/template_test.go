@@ -77,9 +77,7 @@ func TestLoadBuiltinTemplateNotFound(t *testing.T) {
 func TestLoadCustomTemplate(t *testing.T) {
 	// Create temporary directory for test
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Create .beads/templates directory
 	templatesDir := filepath.Join(".beads", "templates")
@@ -129,9 +127,7 @@ acceptance_criteria: Test acceptance
 func TestLoadTemplate_PreferCustomOverBuiltin(t *testing.T) {
 	// Create temporary directory for test
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Create .beads/templates directory
 	templatesDir := filepath.Join(".beads", "templates")

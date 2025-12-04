@@ -76,22 +76,8 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		}
 	}
 
-	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	// Change to tmpDir so client's os.Getwd() finds the test database.
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
@@ -118,7 +104,6 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		cancel()
 		server.Stop()
 		store.Close()
-		os.Chdir(originalWd) // Restore original working directory
 		os.RemoveAll(tmpDir)
 	}
 
@@ -445,9 +430,6 @@ func TestConcurrentRequests(t *testing.T) {
 }
 
 func TestDatabaseHandshake(t *testing.T) {
-	// Save original directory and change to a temp directory for test isolation
-	origDir, _ := os.Getwd()
-	
 	// Create two separate databases and daemons
 	tmpDir1, err := os.MkdirTemp("", "bd-test-db1-*")
 	if err != nil {
@@ -492,9 +474,8 @@ func TestDatabaseHandshake(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Test 1: Client with correct ExpectedDB should succeed
-	// Change to tmpDir1 so cwd resolution doesn't find other databases
-	os.Chdir(tmpDir1)
-	defer os.Chdir(origDir)
+	// Change to tmpDir1 so cwd resolution doesn't find other databases.
+	t.Chdir(tmpDir1)
 	
 	client1, err := TryConnect(socketPath1)
 	if err != nil {

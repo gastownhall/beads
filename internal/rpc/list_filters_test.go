@@ -68,21 +68,7 @@ func setupTestServerWithStore(t *testing.T) (*Server, *Client, *sqlitestorage.SQ
 		}
 	}
 
-	originalWd, err := os.Getwd()
-	if err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
@@ -108,7 +94,6 @@ func setupTestServerWithStore(t *testing.T) (*Server, *Client, *sqlitestorage.SQ
 		cancel()
 		server.Stop()
 		store.Close()
-		os.Chdir(originalWd)
 		os.RemoveAll(tmpDir)
 	}
 

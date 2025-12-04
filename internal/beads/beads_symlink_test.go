@@ -61,17 +61,8 @@ func TestFindAllDatabases_SymlinkDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save original working directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
 	// Change to subdir (which is inside the symlinked directory)
-	if err := os.Chdir(subdir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(subdir)
 
 	// Call FindAllDatabases
 	databases := FindAllDatabases()
@@ -150,16 +141,8 @@ func TestFindAllDatabases_MultipleSymlinksToSameDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save and change directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := os.Chdir(workdir); err != nil {
-		t.Fatal(err)
-	}
+	// Change to working directory
+	t.Chdir(workdir)
 
 	// Find databases
 	databases := FindAllDatabases()

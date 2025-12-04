@@ -297,28 +297,13 @@ func setupBenchServer(b *testing.B) (*Server, *Client, func(), string) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		b.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		cancel()
-		server.Stop()
-		store.Close()
-		os.RemoveAll(tmpDir)
-		b.Fatalf("Failed to change directory: %v", err)
-	}
+	b.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
 		cancel()
 		server.Stop()
 		store.Close()
-		os.Chdir(originalWd)
 		os.RemoveAll(tmpDir)
 		b.Fatalf("Failed to connect client: %v", err)
 	}
@@ -331,7 +316,6 @@ func setupBenchServer(b *testing.B) (*Server, *Client, func(), string) {
 		cancel()
 		server.Stop()
 		store.Close()
-		os.Chdir(originalWd) // Restore original working directory
 		os.RemoveAll(tmpDir)
 	}
 

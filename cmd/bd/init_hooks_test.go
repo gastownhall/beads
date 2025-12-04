@@ -11,15 +11,7 @@ import (
 func TestDetectExistingHooks(t *testing.T) {
 	// Create a temporary directory
 	tmpDir := t.TempDir()
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldDir)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -110,15 +102,7 @@ func TestDetectExistingHooks(t *testing.T) {
 func TestInstallGitHooks_NoExistingHooks(t *testing.T) {
 	// Create a temporary directory
 	tmpDir := t.TempDir()
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldDir)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -157,15 +141,7 @@ func TestInstallGitHooks_NoExistingHooks(t *testing.T) {
 func TestInstallGitHooks_ExistingHookBackup(t *testing.T) {
 	// Create a temporary directory
 	tmpDir := t.TempDir()
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldDir)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {

@@ -369,10 +369,6 @@ func TestBatchCreateIssues(t *testing.T) {
 
 // TestFindDatabasePathIntegration tests the database discovery
 func TestFindDatabasePathIntegration(t *testing.T) {
-	// Save original working directory
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
 	// Create temporary directory with .beads
 	tmpDir, err := os.MkdirTemp("", "beads-find-*")
 	if err != nil {
@@ -388,7 +384,7 @@ func TestFindDatabasePathIntegration(t *testing.T) {
 	f.Close()
 
 	// Change to temp directory
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Should find the database
 	found := beads.FindDatabasePath()

@@ -24,10 +24,7 @@ func TestIsGitRepo_InGitRepo(t *testing.T) {
 
 func TestIsGitRepo_NotInGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	if isGitRepo() {
 		t.Error("expected false when not in git repo")
@@ -451,9 +448,7 @@ func TestZFCSkipsExportAfterImport(t *testing.T) {
 	}
 	ctx := context.Background()
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Setup beads directory with JSONL
 	beadsDir := filepath.Join(tmpDir, ".beads")

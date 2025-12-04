@@ -172,9 +172,7 @@ func TestCheckAndAutoImport_EmptyDatabaseNoGit(t *testing.T) {
 	}()
 
 	// Change to temp dir (no git repo)
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	result := checkAndAutoImport(ctx, store)
 	if result {
@@ -191,9 +189,7 @@ func TestFindBeadsDir(t *testing.T) {
 	}
 
 	// Change to tmpDir
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	found := findBeadsDir()
 	if found == "" {
@@ -211,9 +207,7 @@ func TestFindBeadsDir_NotFound(t *testing.T) {
 	// Create temp directory without .beads
 	tmpDir := t.TempDir()
 
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	found := findBeadsDir()
 	// findBeadsDir walks up to root, so it might find .beads in parent dirs
@@ -237,9 +231,7 @@ func TestFindBeadsDir_ParentDirectory(t *testing.T) {
 	}
 
 	// Change to subdir
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(subDir)
+	t.Chdir(subDir)
 
 	found := findBeadsDir()
 	if found == "" {
@@ -256,9 +248,7 @@ func TestFindBeadsDir_ParentDirectory(t *testing.T) {
 func TestCheckGitForIssues_NoGitRepo(t *testing.T) {
 	// Change to temp dir (not a git repo)
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	count, path := checkGitForIssues()
 	if count != 0 {
@@ -272,9 +262,7 @@ func TestCheckGitForIssues_NoGitRepo(t *testing.T) {
 func TestCheckGitForIssues_NoBeadsDir(t *testing.T) {
 	// Use current directory which has git but change to somewhere without .beads
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	count, path := checkGitForIssues()
 	if count != 0 || path != "" {

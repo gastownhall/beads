@@ -66,15 +66,7 @@ func TestSyncBranchCommitAndPush_NotConfigured(t *testing.T) {
 	}
 
 	// Change to temp directory for git operations
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Test with no sync.branch configured
 	log, logMsgs := newTestSyncBranchLogger()
@@ -124,15 +116,7 @@ func TestSyncBranchCommitAndPush_Success(t *testing.T) {
 	}
 
 	// Initial commit on main branch (before creating JSONL)
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	initMainBranch(t, tmpDir)
 
@@ -238,15 +222,7 @@ func TestSyncBranchCommitAndPush_EnvOverridesDB(t *testing.T) {
 	t.Setenv(syncbranch.EnvVar, "env-branch")
 
 	// Initial commit on main branch
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	initMainBranch(t, tmpDir)
 
@@ -343,15 +319,7 @@ func TestSyncBranchCommitAndPush_NoChanges(t *testing.T) {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	log, logMsgs := newTestSyncBranchLogger()
 
@@ -428,15 +396,7 @@ func TestSyncBranchCommitAndPush_WorktreeHealthCheck(t *testing.T) {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	log, logMsgs := newTestSyncBranchLogger()
 
@@ -510,15 +470,7 @@ func TestSyncBranchPull_NotConfigured(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	log, logMsgs := newTestSyncBranchLogger()
 	_ = logMsgs // unused in this test
@@ -597,15 +549,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 	runGitCmd(t, clone1Dir, "push", "origin", "master")
 
 	// Change to clone1 directory for sync branch operations
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(clone1Dir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(clone1Dir)
 
 	// Push to sync branch using syncBranchCommitAndPush
 	log, logMsgs := newTestSyncBranchLogger()
@@ -640,9 +584,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 	}
 
 	// Change to clone2 directory
-	if err := os.Chdir(clone2Dir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(clone2Dir)
 
 	// Pull from sync branch
 	log2, logMsgs2 := newTestSyncBranchLogger()
@@ -736,9 +678,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	runGitCmd(t, clone1Dir, "push", "origin", "master")
 
 	// Change to clone1 directory
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(clone1Dir)
+	t.Chdir(clone1Dir)
 
 	// Agent A commits to sync branch
 	log, logMsgs := newTestSyncBranchLogger()
@@ -765,7 +705,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	store2.SetConfig(ctx, "sync.branch", syncBranch)
 
 	// Change to clone2 directory
-	os.Chdir(clone2Dir)
+	t.Chdir(clone2Dir)
 
 	// Agent B pulls from sync branch
 	log2, logMsgs2 := newTestSyncBranchLogger()
@@ -807,7 +747,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	}
 
 	// Agent A pulls the update
-	os.Chdir(clone1Dir)
+	t.Chdir(clone1Dir)
 	pulled, err = syncBranchPull(ctx, store1, log)
 	if err != nil {
 		t.Fatalf("syncBranchPull failed for clone1: %v", err)
@@ -891,15 +831,7 @@ func TestSyncBranchConfigChange(t *testing.T) {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	log, _ := newTestSyncBranchLogger()
 
@@ -1020,11 +952,8 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	initMainBranch(t, clone1Dir)
 	runGitCmd(t, clone1Dir, "push", "origin", "master")
 
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-
 	// Clone1: Create and push issue A
-	os.Chdir(clone1Dir)
+	t.Chdir(clone1Dir)
 	issueA := &types.Issue{
 		Title:     "Issue A from clone1",
 		Status:    types.StatusOpen,
@@ -1044,7 +973,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	}
 
 	// Clone2: Fetch, pull, create issue B, push
-	os.Chdir(clone2Dir)
+	t.Chdir(clone2Dir)
 	runGitCmd(t, clone2Dir, "fetch", "origin")
 	log2, _ := newTestSyncBranchLogger()
 	syncBranchPull(ctx, store2, log2)
@@ -1067,7 +996,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	}
 
 	// Clone3: Fetch, pull, create issue C, push
-	os.Chdir(clone3Dir)
+	t.Chdir(clone3Dir)
 	runGitCmd(t, clone3Dir, "fetch", "origin")
 	log3, _ := newTestSyncBranchLogger()
 	syncBranchPull(ctx, store3, log3)
@@ -1090,11 +1019,11 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	}
 
 	// All clones pull final state
-	os.Chdir(clone1Dir)
+	t.Chdir(clone1Dir)
 	syncBranchPull(ctx, store1, log1)
 	importToJSONLWithStore(ctx, store1, jsonlPath1)
 
-	os.Chdir(clone2Dir)
+	t.Chdir(clone2Dir)
 	syncBranchPull(ctx, store2, log2)
 	importToJSONLWithStore(ctx, store2, jsonlPath2)
 
@@ -1164,9 +1093,7 @@ func TestSyncBranchPerformance(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	exportToJSONLWithStore(ctx, store, jsonlPath)
 
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	log, _ := newTestSyncBranchLogger()
 
@@ -1255,9 +1182,7 @@ func TestSyncBranchNetworkFailure(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	exportToJSONLWithStore(ctx, store, jsonlPath)
 
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	log, logMsgs := newTestSyncBranchLogger()
 

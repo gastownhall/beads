@@ -56,15 +56,7 @@ func TestInitCommand(t *testing.T) {
 			initCmd.Flags().Set("quiet", "false")
 
 			tmpDir := t.TempDir()
-			originalWd, err := os.Getwd()
-			if err != nil {
-				t.Fatalf("Failed to get working directory: %v", err)
-			}
-			defer os.Chdir(originalWd)
-
-			if err := os.Chdir(tmpDir); err != nil {
-				t.Fatalf("Failed to change to temp directory: %v", err)
-			}
+			t.Chdir(tmpDir)
 
 			// Capture output
 			var buf bytes.Buffer
@@ -87,6 +79,7 @@ func TestInitCommand(t *testing.T) {
 			rootCmd.SetArgs(args)
 
 			// Run command
+			var err error
 			err = rootCmd.Execute()
 
 			// Restore stdout and read output
@@ -198,15 +191,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	dbPath = ""
 
 	tmpDir := t.TempDir()
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize once
 	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
@@ -256,15 +241,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		t.Fatalf("Failed to create work directory: %v", err)
 	}
 
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(workDir); err != nil {
-		t.Fatalf("Failed to change to work directory: %v", err)
-	}
+	t.Chdir(workDir)
 
 	customDBPath := filepath.Join(customDBDir, "test.db")
 
@@ -407,15 +384,7 @@ func TestInitNoDbMode(t *testing.T) {
 	noDb = false
 	
 	tmpDir := t.TempDir()
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize with --no-db flag
 	rootCmd.SetArgs([]string{"init", "--no-db", "--no-daemon", "--prefix", "test", "--quiet"})
@@ -491,15 +460,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo first
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -539,15 +500,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo first
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -561,7 +514,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Verify git config was NOT set locally (use --local to avoid picking up global config)
-		_, err = runCommandInDirWithOutput(tmpDir, "git", "config", "--local", "merge.beads.driver")
+		_, err := runCommandInDirWithOutput(tmpDir, "git", "config", "--local", "merge.beads.driver")
 		if err == nil {
 			t.Error("Expected git config to not be set with --skip-merge-driver")
 		}
@@ -580,15 +533,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// DON'T initialize git repo
 
@@ -612,15 +557,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -683,15 +620,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		initCmd.Flags().Set("skip-merge-driver", "false")
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -750,15 +679,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		initCmd.Flags().Set("skip-merge-driver", "false")
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -800,15 +721,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -857,15 +770,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		dbPath = ""
 
 		tmpDir := t.TempDir()
-		originalWd, err := os.Getwd()
-		if err != nil {
-			t.Fatalf("Failed to get working directory: %v", err)
-		}
-		defer os.Chdir(originalWd)
-
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to change to temp directory: %v", err)
-		}
+		t.Chdir(tmpDir)
 
 		// Initialize git repo
 		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
@@ -1003,15 +908,7 @@ func TestReadFirstIssueFromJSONL_EmptyFile(t *testing.T) {
 // This is a regression test for bd-5bj where user settings were lost.
 func TestSetupClaudeSettings_InvalidJSON(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Create .claude directory
 	claudeDir := filepath.Join(tmpDir, ".claude")
@@ -1037,6 +934,7 @@ func TestSetupClaudeSettings_InvalidJSON(t *testing.T) {
 	}
 
 	// Call setupClaudeSettings - should return an error
+	var err error
 	err = setupClaudeSettings(false)
 	if err == nil {
 		t.Fatal("Expected error for invalid JSON, got nil")
@@ -1065,15 +963,7 @@ func TestSetupClaudeSettings_InvalidJSON(t *testing.T) {
 // TestSetupClaudeSettings_ValidJSON verifies that valid JSON is properly updated
 func TestSetupClaudeSettings_ValidJSON(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Create .claude directory
 	claudeDir := filepath.Join(tmpDir, ".claude")
@@ -1098,6 +988,7 @@ func TestSetupClaudeSettings_ValidJSON(t *testing.T) {
 	}
 
 	// Call setupClaudeSettings - should succeed
+	var err error
 	err = setupClaudeSettings(false)
 	if err != nil {
 		t.Fatalf("Expected no error for valid JSON, got: %v", err)
@@ -1134,19 +1025,12 @@ func TestSetupClaudeSettings_ValidJSON(t *testing.T) {
 // TestSetupClaudeSettings_NoExistingFile verifies behavior when no file exists
 func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Don't create .claude directory - setupClaudeSettings should create it
 
 	// Call setupClaudeSettings - should succeed
+	var err error
 	err = setupClaudeSettings(false)
 	if err != nil {
 		t.Fatalf("Expected no error when no file exists, got: %v", err)

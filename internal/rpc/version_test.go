@@ -6,7 +6,6 @@ package rpc
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
@@ -117,14 +116,7 @@ func TestVersionCompatibility(t *testing.T) {
 			defer func() { ClientVersion = originalClientVersion }()
 
 			// Change to tmpDir so client's os.Getwd() finds the test database
-			originalWd, err := os.Getwd()
-			if err != nil {
-				t.Fatalf("Failed to get working directory: %v", err)
-			}
-			if err := os.Chdir(tmpDir); err != nil {
-				t.Fatalf("Failed to change directory: %v", err)
-			}
-			defer os.Chdir(originalWd)
+			t.Chdir(tmpDir)
 
 			client, err := TryConnect(socketPath)
 			if err != nil {
@@ -202,14 +194,7 @@ func TestHealthCheckIncludesVersionInfo(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
@@ -266,14 +251,7 @@ func TestIncompatibleVersionInHealth(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
@@ -386,14 +364,7 @@ func TestPingAndHealthBypassVersionCheck(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {
@@ -460,14 +431,7 @@ func TestMetricsOperation(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Change to tmpDir so client's os.Getwd() finds the test database
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change directory: %v", err)
-	}
-	defer os.Chdir(originalWd)
+	t.Chdir(tmpDir)
 
 	client, err := TryConnect(socketPath)
 	if err != nil {

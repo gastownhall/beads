@@ -106,12 +106,7 @@ func TestTrackBdVersion_NoBeadsDir(t *testing.T) {
 
 	// Change to temp directory with no .beads
 	tmpDir := t.TempDir()
-	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp dir: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// trackBdVersion should silently succeed
 	trackBdVersion()
@@ -137,11 +132,7 @@ func TestTrackBdVersion_FirstRun(t *testing.T) {
 	}
 
 	// Change to temp directory
-	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp dir: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Save original state
 	origUpgradeDetected := versionUpgradeDetected
@@ -180,11 +171,7 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 	}
 
 	// Change to temp directory
-	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp dir: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Create minimal metadata.json so FindBeadsDir can find the directory (bd-420)
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
@@ -238,11 +225,7 @@ func TestTrackBdVersion_SameVersion(t *testing.T) {
 	}
 
 	// Change to temp directory
-	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to change to temp dir: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Create .local_version with current version
 	localVersionPath := filepath.Join(beadsDir, localVersionFile)

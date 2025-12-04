@@ -26,15 +26,7 @@ func TestLocalOnlyMode(t *testing.T) {
 	runGitCmd(t, tempDir, "config", "user.name", "Test User")
 	
 	// Change to temp directory so git commands run in the test repo
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working dir: %v", err)
-	}
-	defer os.Chdir(oldDir)
-	
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("Failed to change to temp dir: %v", err)
-	}
+	t.Chdir(tempDir)
 	
 	// Verify no remote exists
 	cmd := exec.Command("git", "remote")
@@ -112,15 +104,7 @@ func TestWithRemote(t *testing.T) {
 	runGitCmd(t, tempDir, "clone", remoteDir, cloneDir)
 	
 	// Change to clone directory
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get working dir: %v", err)
-	}
-	defer os.Chdir(oldDir)
-	
-	if err := os.Chdir(cloneDir); err != nil {
-		t.Fatalf("Failed to change to clone dir: %v", err)
-	}
+	t.Chdir(cloneDir)
 
 	ctx := context.Background()
 

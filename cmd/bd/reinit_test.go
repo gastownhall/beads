@@ -89,9 +89,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 	}
 
 	// Test checkGitForIssues detects issues.jsonl
-	originalDir, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(originalDir)
+	t.Chdir(dir)
 
 	count, path := checkGitForIssues()
 	if count != 1 {
@@ -165,9 +163,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	os.MkdirAll(beadsDir, 0755)
 
 	// Change to test directory
-	originalDir, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(originalDir)
+	t.Chdir(dir)
 
 	// Test checkGitForIssues finds issues.jsonl (canonical name)
 	count, path := checkGitForIssues()
@@ -245,9 +241,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 	runCmd(t, dir, "git", "commit", "-m", "Add legacy issue")
 
 	// Change to test directory
-	originalDir, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(originalDir)
+	t.Chdir(dir)
 
 	// Test checkGitForIssues finds issues.jsonl
 	count, path := checkGitForIssues()
@@ -323,9 +317,7 @@ func testPrecedenceTest(t *testing.T) {
 	runCmd(t, dir, "git", "commit", "-m", "Add both files")
 
 	// Change to test directory
-	originalDir, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(originalDir)
+	t.Chdir(dir)
 
 	// Test checkGitForIssues prefers issues.jsonl
 	count, path := checkGitForIssues()
@@ -371,9 +363,7 @@ func testInitSafetyCheck(t *testing.T) {
 	runCmd(t, dir, "git", "commit", "-m", "Add issue")
 
 	// Change to test directory
-	originalDir, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(originalDir)
+	t.Chdir(dir)
 
 	// Create empty database (simulating failed import)
 	dbPath := filepath.Join(beadsDir, "test.db")

@@ -36,9 +36,7 @@ func TestInstallHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -85,9 +83,7 @@ func TestInstallHooksBackup(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -135,9 +131,7 @@ func TestInstallHooksForce(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory first, then init
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -175,9 +169,7 @@ func TestUninstallHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory first, then init
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -215,9 +207,7 @@ func TestHooksCheckGitHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory first, then init
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (required for git rev-parse)
 	if err := exec.Command("git", "init").Run(); err != nil {
@@ -263,9 +253,7 @@ func TestInstallHooksShared(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Change to temp directory
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	t.Chdir(tmpDir)
 
 	// Initialize a real git repo (needed for git config command)
 	if err := exec.Command("git", "init").Run(); err != nil {

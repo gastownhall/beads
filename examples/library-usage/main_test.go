@@ -152,12 +152,7 @@ func TestFindDatabasePath(t *testing.T) {
 	f.Close()
 
 	// Change to temp directory
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Test FindDatabasePath
 	found := beads.FindDatabasePath()

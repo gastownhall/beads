@@ -141,15 +141,11 @@ func TestDetectPrefix(t *testing.T) {
 
 	t.Run("empty database defaults to dir name", func(t *testing.T) {
 		// Change to temp dir so we can control directory name
-		origWd, _ := os.Getwd()
 		namedDir := filepath.Join(tempDir, "myproject")
 		if err := os.MkdirAll(namedDir, 0o755); err != nil {
 			t.Fatalf("Failed to create named dir: %v", err)
 		}
-		if err := os.Chdir(namedDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
-		defer func() { _ = os.Chdir(origWd) }()
+		t.Chdir(namedDir)
 
 		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
 		prefix, err := detectPrefix(beadsDir, memStore)

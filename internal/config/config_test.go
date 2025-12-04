@@ -105,30 +105,23 @@ flush-debounce: 15s
 		t.Fatalf("failed to write config file: %v", err)
 	}
 	
-	// Change to tmp directory so config file is discovered
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	defer os.Chdir(origDir)
-	
 	// Create .beads directory
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
-	
+
 	// Move config to .beads directory
 	beadsConfigPath := filepath.Join(beadsDir, "config.yaml")
 	if err := os.Rename(configPath, beadsConfigPath); err != nil {
 		t.Fatalf("failed to move config file: %v", err)
 	}
-	
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change directory: %v", err)
-	}
-	
+
+	// Change to tmp directory so config file is discovered
+	t.Chdir(tmpDir)
+
 	// Initialize viper
+	var err error
 	err = Initialize()
 	if err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)
@@ -169,17 +162,10 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 	
 	// Change to tmp directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	defer os.Chdir(origDir)
-	
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change directory: %v", err)
-	}
-	
+	t.Chdir(tmpDir)
+
 	// Test 1: Config file value (json: false)
+	var err error
 	err = Initialize()
 	if err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)
@@ -288,17 +274,10 @@ repos:
 	}
 
 	// Change to tmp directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize viper
+	var err error
 	err = Initialize()
 	if err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)
@@ -365,17 +344,10 @@ repos:
 	}
 
 	// Change to tmp directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change directory: %v", err)
-	}
+	t.Chdir(tmpDir)
 
 	// Initialize viper
+	var err error
 	err = Initialize()
 	if err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)

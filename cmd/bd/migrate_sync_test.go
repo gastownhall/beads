@@ -95,11 +95,7 @@ func TestMigrateSyncDryRun(t *testing.T) {
 	// Test that branchExistsLocal returns false for non-existent branch
 	// Note: We need to run this from tmpDir context since branchExistsLocal uses git in cwd
 	ctx := context.Background()
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
-	}
-	defer os.Chdir(origDir)
+	t.Chdir(tmpDir)
 
 	if branchExistsLocal(ctx, "beads-sync") {
 		t.Error("branchExistsLocal should return false for non-existent branch")

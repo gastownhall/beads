@@ -58,17 +58,8 @@ func TestFindAllDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save original working directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
 	// Change to subdir and test FindAllDatabases
-	if err := os.Chdir(subdir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(subdir)
 
 	databases := FindAllDatabases()
 
@@ -118,17 +109,8 @@ func TestFindAllDatabases_Single(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save original working directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
 	// Change to tmpDir and test
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	databases := FindAllDatabases()
 
@@ -150,17 +132,8 @@ func TestFindAllDatabases_None(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Save original working directory
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
 	// Change to tmpDir and test
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
 
 	databases := FindAllDatabases()
 
