@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.28.0] - 2025-12-01
+## [0.29.0] - 2025-12-03
+
+### Added
+
+- **`--estimate` / `-e` flag for `bd create` and `bd update` (GH #443)**
+  - Add time estimates to issues in minutes
+  - Example: `bd create "My task" --estimate 120` (2 hours)
+  - Example: `bd update bd-xyz --estimate 60` (1 hour)
+  - Enables planning and prioritization features in vscode-beads
+
+- **`bd doctor` improvements**
+  - SQLite integrity check (bd-2au) - Detects database corruption
+  - Configuration value validation (bd-alz) - Validates config settings
+  - Stale sync branch detection (bd-6rf) - Warns about abandoned beads-sync branches
+  - `--output` flag (bd-9cc) - Export diagnostics to file for sharing
+  - `--dry-run` flag (bd-qn5) - Preview fixes without applying
+  - Per-fix confirmation mode (bd-3xl) - Approve each fix individually
+
+- **`--readonly` flag (bd-ymo)** - Read-only mode for worker sandboxes
+  - Blocks all write operations
+  - Useful for parallel worker processes that should only read
+
+### Fixed
+
+- **`bd sync` safety improvements**
+  - Auto-push after merge with safety check (bd-7ch)
+  - Handle diverged histories with content-based merge (bd-3s8)
+  - Multiple safety check enhancements
+
+- **Auto-resolve merge conflicts deterministically (bd-6l8)**
+  - All field conflicts resolved without prompts
+  - Uses consistent rules for field-level merging
+
+- **3-char all-letter base36 hash support (GH #446)**
+  - Fixes prefix extraction for edge case hashes like "bd-abc"
+
+- **`bd ready` message fix (bd-r4n)**
+  - Shows correct message when all issues are closed
+
+- **Version notification spam fix (bd-tok)**
+  - Store version in gitignored .local_version file
+
+- **Nix flake vendorHash update (bd-gmf)**
+  - Fixed build after dependency bumps
+
+### Documentation
+
+- Added perles and vscode-beads to Third-Party Tools
+- Encourage batch close and parallel creation in `bd prime` output
 
 ## [0.28.0] - 2025-12-01
 
@@ -27,10 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Moves beads data to a dedicated sync branch
   - Keeps main branch clean of .beads/ commits
   - Automated setup of sync.branch configuration
-
-- **`--estimate` flag for `bd create` and `bd update`** - Add time estimates to issues
-  - Track estimated effort for planning
-  - Supports formats like "2h", "1d", "1w"
 
 ### Fixed
 

@@ -288,13 +288,27 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.29.0",
+		Date:    "2025-12-03",
+		Changes: []string{
+			"--estimate flag for bd create/update (GH #443) - Add time estimates to issues in minutes",
+			"bd doctor improvements - SQLite integrity check, config validation, stale sync branch detection",
+			"bd doctor --output flag (bd-9cc) - Export diagnostics to file for sharing/debugging",
+			"bd doctor --dry-run flag (bd-qn5) - Preview fixes without applying them",
+			"bd doctor per-fix confirmation mode (bd-3xl) - Approve each fix individually",
+			"--readonly flag (bd-ymo) - Read-only mode for worker sandboxes",
+			"bd sync safety improvements - Auto-push after merge, diverged history handling (bd-3s8)",
+			"Auto-resolve merge conflicts deterministically (bd-6l8) - All field conflicts resolved without prompts",
+			"3-char all-letter base36 hash support (GH #446) - Fixes prefix extraction edge case",
+		},
+	},
+	{
 		Version: "0.28.0",
 		Date:    "2025-12-01",
 		Changes: []string{
 			"bd daemon --local flag (#433) - Run daemon without git operations for multi-repo/worktree setups",
 			"bd daemon --foreground flag - Run in foreground for systemd/supervisord integration",
 			"bd migrate-sync command (bd-epn) - Migrate to sync.branch workflow for cleaner main branch",
-			"--estimate flag for bd create/update - Add time estimates to issues",
 			"Database migration: close_reason column (bd-uyu) - Fixes sync loops with close_reason",
 			"Multi-repo prefix filtering (GH #437) - Issues filtered by prefix when flushing from non-primary repos",
 			"Parent-child dependency UX (GH #440) - Fixed documentation and UI labels for dependencies",
