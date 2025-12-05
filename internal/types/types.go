@@ -112,6 +112,13 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 	if i.Status != StatusClosed && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
+	// Enforce tombstone invariants (bd-md2): deleted_at must be set for tombstones, and only for tombstones
+	if i.Status == StatusTombstone && i.DeletedAt == nil {
+		return fmt.Errorf("tombstone issues must have deleted_at timestamp")
+	}
+	if i.Status != StatusTombstone && i.DeletedAt != nil {
+		return fmt.Errorf("non-tombstone issues cannot have deleted_at timestamp")
+	}
 	return nil
 }
 
