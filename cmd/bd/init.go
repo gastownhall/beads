@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -89,9 +90,9 @@ With --stealth: configures global git settings for invisible beads usage:
 
 		// auto-detect prefix from first issue in JSONL file
 		if prefix == "" {
-			issueCount, jsonlPath := checkGitForIssues()
+			issueCount, jsonlPath, gitRef := checkGitForIssues()
 			if issueCount > 0 {
-				firstIssue, err := readFirstIssueFromJSONL(jsonlPath)
+				firstIssue, err := readFirstIssueFromGit(jsonlPath, gitRef)
 				if firstIssue != nil && err == nil {
 					prefix = utils.ExtractIssuePrefix(firstIssue.ID)
 				}
@@ -347,16 +348,16 @@ With --stealth: configures global git settings for invisible beads usage:
 		}
 
 		// Check if git has existing issues to import (fresh clone scenario)
-		issueCount, jsonlPath := checkGitForIssues()
+		issueCount, jsonlPath, gitRef := checkGitForIssues()
 		if issueCount > 0 {
 			if !quiet {
 				fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
 			}
 
-			if err := importFromGit(ctx, initDBPath, store, jsonlPath); err != nil {
+			if err := importFromGit(ctx, initDBPath, store, jsonlPath, gitRef); err != nil {
 				if !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
-					fmt.Fprintf(os.Stderr, "Try manually: git show HEAD:%s | bd import -i /dev/stdin\n", jsonlPath)
+					fmt.Fprintf(os.Stderr, "Try manually: git show %s:%s | bd import -i /dev/stdin\n", gitRef, jsonlPath)
 				}
 				// Non-fatal - continue with empty database
 			} else if !quiet {
@@ -1203,6 +1204,41 @@ func readFirstIssueFromJSONL(path string) (*types.Issue, error) {
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading JSONL file: %w", err)
+	}
+
+	return nil, nil
+}
+
+// readFirstIssueFromGit reads the first issue from a git ref (bd-0is: supports sync-branch)
+func readFirstIssueFromGit(jsonlPath, gitRef string) (*types.Issue, error) {
+	// Get content from git (use ToSlash for Windows compatibility)
+	gitPath := filepath.ToSlash(jsonlPath)
+	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", gitRef, gitPath)) // #nosec G204
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from git: %w", err)
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+
+		// skip empty lines
+		if line == "" {
+			continue
+		}
+
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err == nil {
+			return &issue, nil
+		}
+		// Skip malformed lines silently (called during auto-detection)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning git content: %w", err)
 	}
 
 	return nil, nil

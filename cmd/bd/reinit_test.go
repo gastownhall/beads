@@ -91,7 +91,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 	// Test checkGitForIssues detects issues.jsonl
 	t.Chdir(dir)
 
-	count, path := checkGitForIssues()
+	count, path, gitRef := checkGitForIssues()
 	if count != 1 {
 		t.Errorf("Expected 1 issue in git, got %d", count)
 	}
@@ -102,7 +102,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 	}
 
 	// Import from git
-	if err := importFromGit(ctx, dbPath, store, path); err != nil {
+	if err := importFromGit(ctx, dbPath, store, path, gitRef); err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	t.Chdir(dir)
 
 	// Test checkGitForIssues finds issues.jsonl (canonical name)
-	count, path := checkGitForIssues()
+	count, path, gitRef := checkGitForIssues()
 	if count != 2 {
 		t.Errorf("Expected 2 issues in git, got %d", count)
 	}
@@ -188,7 +188,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	if err := importFromGit(ctx, dbPath, store, path); err != nil {
+	if err := importFromGit(ctx, dbPath, store, path, gitRef); err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 	t.Chdir(dir)
 
 	// Test checkGitForIssues finds issues.jsonl
-	count, path := checkGitForIssues()
+	count, path, gitRef := checkGitForIssues()
 	if count != 1 {
 		t.Errorf("Expected 1 issue in git, got %d", count)
 	}
@@ -266,7 +266,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	if err := importFromGit(ctx, dbPath, store, path); err != nil {
+	if err := importFromGit(ctx, dbPath, store, path, gitRef); err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func testPrecedenceTest(t *testing.T) {
 	t.Chdir(dir)
 
 	// Test checkGitForIssues prefers issues.jsonl
-	count, path := checkGitForIssues()
+	count, path, _ := checkGitForIssues()
 	if count != 2 {
 		t.Errorf("Expected 2 issues (from issues.jsonl), got %d", count)
 	}
@@ -384,7 +384,7 @@ func testInitSafetyCheck(t *testing.T) {
 
 	if stats.TotalIssues == 0 {
 		// Database is empty - check if git has issues
-		recheck, recheckPath := checkGitForIssues()
+		recheck, recheckPath, _ := checkGitForIssues()
 		if recheck == 0 {
 			t.Error("Safety check should have detected issues in git")
 		}

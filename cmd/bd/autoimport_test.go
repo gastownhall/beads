@@ -250,12 +250,15 @@ func TestCheckGitForIssues_NoGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	count, path := checkGitForIssues()
+	count, path, gitRef := checkGitForIssues()
 	if count != 0 {
 		t.Errorf("Expected 0 issues, got %d", count)
 	}
 	if path != "" {
 		t.Errorf("Expected empty path, got %s", path)
+	}
+	if gitRef != "" {
+		t.Errorf("Expected empty gitRef, got %s", gitRef)
 	}
 }
 
@@ -264,7 +267,7 @@ func TestCheckGitForIssues_NoBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	count, path := checkGitForIssues()
+	count, path, _ := checkGitForIssues()
 	if count != 0 || path != "" {
 		t.Logf("No .beads dir: count=%d, path=%s (expected 0, empty)", count, path)
 	}
