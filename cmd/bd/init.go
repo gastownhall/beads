@@ -1220,9 +1220,7 @@ func readFirstIssueFromGit(jsonlPath, gitRef string) (*types.Issue, error) {
 	}
 
 	scanner := bufio.NewScanner(bytes.NewReader(output))
-	lineNum := 0
 	for scanner.Scan() {
-		lineNum++
 		line := scanner.Text()
 
 		// skip empty lines
