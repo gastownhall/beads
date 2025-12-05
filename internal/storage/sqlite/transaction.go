@@ -919,6 +919,10 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
+	} else if !filter.IncludeTombstones {
+		// Exclude tombstones by default unless explicitly filtering for them (bd-1bu)
+		whereClauses = append(whereClauses, "status != ?")
+		args = append(args, types.StatusTombstone)
 	}
 
 	if filter.Priority != nil {

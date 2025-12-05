@@ -297,6 +297,7 @@ type Statistics struct {
 	ClosedIssues             int     `json:"closed_issues"`
 	BlockedIssues            int     `json:"blocked_issues"`
 	ReadyIssues              int     `json:"ready_issues"`
+	TombstoneIssues          int     `json:"tombstone_issues"` // Soft-deleted issues (bd-nyt)
 	EpicsEligibleForClosure  int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime          float64 `json:"average_lead_time_hours"`
 }
@@ -334,6 +335,9 @@ type IssueFilter struct {
 	// Numeric ranges
 	PriorityMin *int
 	PriorityMax *int
+
+	// Tombstone filtering (bd-1bu)
+	IncludeTombstones bool // If false (default), exclude tombstones from results
 }
 
 // SortPolicy determines how ready work is ordered

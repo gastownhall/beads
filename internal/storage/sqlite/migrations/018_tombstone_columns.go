@@ -43,5 +43,12 @@ func MigrateTombstoneColumns(db *sql.DB) error {
 		}
 	}
 
+	// Add partial index on deleted_at for efficient TTL queries (bd-saa)
+	// Only indexes non-NULL values, making it very efficient for tombstone filtering
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_deleted_at ON issues(deleted_at) WHERE deleted_at IS NOT NULL`)
+	if err != nil {
+		return fmt.Errorf("failed to create deleted_at index: %w", err)
+	}
+
 	return nil
 }

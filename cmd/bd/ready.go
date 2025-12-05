@@ -269,6 +269,9 @@ var statsCmd = &cobra.Command{
 			fmt.Printf("Closed:            %d\n", stats.ClosedIssues)
 			fmt.Printf("Blocked:           %d\n", stats.BlockedIssues)
 			fmt.Printf("Ready:             %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
+			if stats.TombstoneIssues > 0 {
+				fmt.Printf("Deleted:           %d (tombstones)\n", stats.TombstoneIssues)
+			}
 			if stats.AverageLeadTime > 0 {
 				fmt.Printf("Avg Lead Time:     %.1f hours\n", stats.AverageLeadTime)
 			}
@@ -307,6 +310,9 @@ var statsCmd = &cobra.Command{
 		fmt.Printf("Closed:                 %d\n", stats.ClosedIssues)
 		fmt.Printf("Blocked:                %d\n", stats.BlockedIssues)
 		fmt.Printf("Ready:                  %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
+		if stats.TombstoneIssues > 0 {
+			fmt.Printf("Deleted:                %d (tombstones)\n", stats.TombstoneIssues)
+		}
 		if stats.EpicsEligibleForClosure > 0 {
 			fmt.Printf("Epics Ready to Close:   %s\n", green(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
 		}
