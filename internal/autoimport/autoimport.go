@@ -289,7 +289,11 @@ func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (
 	dbDir := filepath.Dir(dbPath)
 	jsonlPath := utils.FindJSONLInDir(dbDir)
 
-	stat, err := os.Stat(jsonlPath)
+	// Use Lstat to get the symlink's own mtime, not the target's.
+	// This is critical for NixOS and other systems where JSONL may be symlinked.
+	// Using Stat would follow symlinks and return the target's mtime, which can
+	// cause false staleness detection when symlinks are recreated (e.g., by home-manager).
+	stat, err := os.Lstat(jsonlPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// JSONL doesn't exist - expected for new repo

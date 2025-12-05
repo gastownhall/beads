@@ -498,8 +498,9 @@ func TouchDatabaseFile(dbPath, jsonlPath string) error {
 	targetTime := time.Now()
 
 	// If we have the JSONL path, use max(JSONL mtime, now) to handle clock skew
+	// Use Lstat to get the symlink's own mtime, not the target's (NixOS fix).
 	if jsonlPath != "" {
-		if info, err := os.Stat(jsonlPath); err == nil {
+		if info, err := os.Lstat(jsonlPath); err == nil {
 			jsonlTime := info.ModTime()
 			if jsonlTime.After(targetTime) {
 				targetTime = jsonlTime.Add(time.Nanosecond)

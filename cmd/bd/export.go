@@ -455,8 +455,12 @@ Examples:
 			}
 
 			// Set appropriate file permissions (0600: rw-------)
-			if err := os.Chmod(finalPath, 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
+			// Skip chmod for symlinks - os.Chmod follows symlinks and would change the target's
+			// permissions, which may be in a read-only location (e.g., /nix/store on NixOS).
+			if info, err := os.Lstat(finalPath); err == nil && info.Mode()&os.ModeSymlink == 0 {
+				if err := os.Chmod(finalPath, 0600); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
+				}
 			}
 
 		// Verify JSONL file integrity after export

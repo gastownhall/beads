@@ -162,13 +162,18 @@ func (s *SQLiteStorage) exportToRepo(ctx context.Context, repoPath string, issue
 	}
 
 	// Set file permissions
-	if err := os.Chmod(jsonlPath, 0644); err != nil { // nolint:gosec // G302: 0644 intentional for git-tracked files
-		// Non-fatal
-		debug.Logf("Debug: failed to set permissions on %s: %v\n", jsonlPath, err)
+	// Skip chmod for symlinks - os.Chmod follows symlinks and would change the target's
+	// permissions, which may be in a read-only location (e.g., /nix/store on NixOS).
+	if info, statErr := os.Lstat(jsonlPath); statErr == nil && info.Mode()&os.ModeSymlink == 0 {
+		if err := os.Chmod(jsonlPath, 0644); err != nil { // nolint:gosec // G302: 0644 intentional for git-tracked files
+			// Non-fatal
+			debug.Logf("Debug: failed to set permissions on %s: %v\n", jsonlPath, err)
+		}
 	}
 
 	// Update mtime cache for this repo
-	fileInfo, err := os.Stat(jsonlPath)
+	// Use Lstat to get the symlink's own mtime, not the target's (NixOS fix).
+	fileInfo, err := os.Lstat(jsonlPath)
 	if err == nil {
 		_, err = s.db.ExecContext(ctx, `
 			INSERT OR REPLACE INTO repo_mtimes (repo_path, jsonl_path, mtime_ns, last_checked)

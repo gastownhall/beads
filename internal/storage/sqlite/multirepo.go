@@ -71,7 +71,8 @@ func (s *SQLiteStorage) hydrateFromRepo(ctx context.Context, repoPath, sourceRep
 	jsonlPath := filepath.Join(absRepoPath, ".beads", "issues.jsonl")
 
 	// Check if file exists
-	fileInfo, err := os.Stat(jsonlPath)
+	// Use Lstat to get the symlink's own mtime, not the target's (NixOS fix).
+	fileInfo, err := os.Lstat(jsonlPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No JSONL file - skip this repo

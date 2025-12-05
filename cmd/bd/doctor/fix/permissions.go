@@ -16,9 +16,16 @@ func Permissions(path string) error {
 	beadsDir := filepath.Join(path, ".beads")
 
 	// Check if .beads/ directory exists
-	info, err := os.Stat(beadsDir)
+	// Use Lstat to detect symlinks - we shouldn't chmod symlinked directories
+	// as this would change the target's permissions (problematic on NixOS).
+	info, err := os.Lstat(beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to stat .beads directory: %w", err)
+	}
+
+	// Skip permission fixes for symlinked .beads directories (common on NixOS with home-manager)
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil // Symlink permissions are not meaningful on Unix
 	}
 
 	// Ensure .beads directory has exactly 0700 permissions (owner rwx only)
@@ -30,8 +37,14 @@ func Permissions(path string) error {
 	}
 
 	// Fix permissions on database file if it exists
+	// Use Lstat to detect symlinks - skip chmod for symlinked database files
 	dbPath := filepath.Join(beadsDir, "beads.db")
-	if dbInfo, err := os.Stat(dbPath); err == nil {
+	if dbInfo, err := os.Lstat(dbPath); err == nil {
+		// Skip permission fixes for symlinked database files (NixOS)
+		if dbInfo.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
 		// Ensure database has exactly 0600 permissions (owner rw only)
 		expectedFileMode := os.FileMode(0600)
 		currentPerms := dbInfo.Mode().Perm()

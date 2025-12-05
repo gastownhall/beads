@@ -31,6 +31,22 @@
             type = "app";
             program = "${self.packages.${system}.default}/bin/bd";
           };
+
+          devShells.default = pkgs.mkShell {
+            buildInputs = with pkgs; [
+              go
+              git
+              gopls
+              gotools
+              golangci-lint
+              sqlite
+            ];
+
+            shellHook = ''
+              echo "beads development shell"
+              echo "Go version: $(go version)"
+            '';
+          };
         }
       );
 }
