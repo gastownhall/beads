@@ -74,9 +74,45 @@ func (i *Issue) ComputeContentHash() string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// DefaultTombstoneTTL is the default time-to-live for tombstones (30 days)
+const DefaultTombstoneTTL = 30 * 24 * time.Hour
+
+// MinTombstoneTTL is the minimum allowed TTL (7 days) to prevent data loss
+const MinTombstoneTTL = 7 * 24 * time.Hour
+
+// ClockSkewGrace is added to TTL to handle clock drift between machines
+const ClockSkewGrace = 1 * time.Hour
+
 // IsTombstone returns true if the issue has been soft-deleted (bd-vw8)
 func (i *Issue) IsTombstone() bool {
 	return i.Status == StatusTombstone
+}
+
+// IsExpired returns true if the tombstone has exceeded its TTL.
+// Non-tombstone issues always return false.
+// ttl is the configured TTL duration; if zero, DefaultTombstoneTTL is used.
+func (i *Issue) IsExpired(ttl time.Duration) bool {
+	// Non-tombstones never expire
+	if !i.IsTombstone() {
+		return false
+	}
+
+	// Tombstones without DeletedAt are not expired (safety: shouldn't happen in valid data)
+	if i.DeletedAt == nil {
+		return false
+	}
+
+	// Use default TTL if not specified
+	if ttl == 0 {
+		ttl = DefaultTombstoneTTL
+	}
+
+	// Add clock skew grace period to the TTL
+	effectiveTTL := ttl + ClockSkewGrace
+
+	// Check if the tombstone has exceeded its TTL
+	expirationTime := i.DeletedAt.Add(effectiveTTL)
+	return time.Now().After(expirationTime)
 }
 
 // Validate checks if the issue has valid field values (built-in statuses only)

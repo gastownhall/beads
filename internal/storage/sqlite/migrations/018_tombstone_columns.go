@@ -16,7 +16,7 @@ func MigrateTombstoneColumns(db *sql.DB) error {
 		name         string
 		definition   string
 	}{
-		{"deleted_at", "TEXT"},
+		{"deleted_at", "DATETIME"},
 		{"deleted_by", "TEXT DEFAULT ''"},
 		{"delete_reason", "TEXT DEFAULT ''"},
 		{"original_type", "TEXT DEFAULT ''"},

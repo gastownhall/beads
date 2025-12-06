@@ -227,15 +227,13 @@ Force: Delete and orphan dependents
 				inboundRemoved++
 			}
 		}
-		// 4. Delete the issue itself from database
-		if err := deleteIssue(ctx, issueID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting issue: %v\n", err)
+		// 4. Create tombstone (instead of deleting from database)
+		// Phase 1 dual-write: still writes to deletions.jsonl (step 0), now also creates tombstone
+		if err := createTombstone(ctx, issueID, deleteActor, "manual delete"); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating tombstone: %v\n", err)
 			os.Exit(1)
 		}
-		// 5. Remove from JSONL (auto-flush can't see deletions)
-		if err := removeIssueFromJSONL(issueID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to remove from JSONL: %v\n", err)
-		}
+		// Note: No longer call removeIssueFromJSONL - tombstone will be exported to JSONL
 		// Schedule auto-flush to update neighbors
 		markDirtyAndScheduleFlush()
 		totalDepsRemoved := outgoingRemoved + inboundRemoved
@@ -253,6 +251,20 @@ Force: Delete and orphan dependents
 		}
 	},
 }
+// createTombstone converts an issue to a tombstone record
+// Note: This is a direct database operation since Storage interface doesn't have CreateTombstone
+func createTombstone(ctx context.Context, issueID string, actor string, reason string) error {
+	// We need to access the SQLite storage directly
+	// Check if store is SQLite storage
+	type tombstoner interface {
+		CreateTombstone(ctx context.Context, id string, actor string, reason string) error
+	}
+	if t, ok := store.(tombstoner); ok {
+		return t.CreateTombstone(ctx, issueID, actor, reason)
+	}
+	return fmt.Errorf("tombstone operation not supported by this storage backend")
+}
+
 // deleteIssue removes an issue from the database
 // Note: This is a direct database operation since Storage interface doesn't have Delete
 func deleteIssue(ctx context.Context, issueID string) error {
@@ -443,12 +455,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	}
 	// Update text references in connected issues (using pre-collected issues)
 	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
-	// Remove from JSONL
-	for _, id := range issueIDs {
-		if err := removeIssueFromJSONL(id); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to remove %s from JSONL: %v\n", id, err)
-		}
-	}
+	// Note: No longer remove from JSONL - tombstones will be exported to JSONL (bd-3b4)
 	// Schedule auto-flush
 	markDirtyAndScheduleFlush()
 	// Output results

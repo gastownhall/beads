@@ -579,6 +579,213 @@ func TestSortPolicyIsValid(t *testing.T) {
 	}
 }
 
+func TestIsExpired(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name    string
+		issue   Issue
+		ttl     time.Duration
+		expired bool
+	}{
+		{
+			name: "non-tombstone issue never expires",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Open issue",
+				Status:    StatusOpen,
+				Priority:  2,
+				IssueType: TypeTask,
+			},
+			ttl:     0,
+			expired: false,
+		},
+		{
+			name: "closed issue never expires",
+			issue: Issue{
+				ID:        "test-2",
+				Title:     "Closed issue",
+				Status:    StatusClosed,
+				Priority:  2,
+				IssueType: TypeTask,
+				ClosedAt:  timePtr(now),
+			},
+			ttl:     0,
+			expired: false,
+		},
+		{
+			name: "tombstone without DeletedAt does not expire",
+			issue: Issue{
+				ID:        "test-3",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: nil,
+			},
+			ttl:     0,
+			expired: false,
+		},
+		{
+			name: "tombstone within default TTL (30 days)",
+			issue: Issue{
+				ID:        "test-4",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-15 * 24 * time.Hour)), // 15 days ago
+			},
+			ttl:     0, // Use default TTL
+			expired: false,
+		},
+		{
+			name: "tombstone past default TTL (30 days)",
+			issue: Issue{
+				ID:        "test-5",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-35 * 24 * time.Hour)), // 35 days ago (past 30 days + 1 hour grace)
+			},
+			ttl:     0, // Use default TTL
+			expired: true,
+		},
+		{
+			name: "tombstone within custom TTL (7 days)",
+			issue: Issue{
+				ID:        "test-6",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-3 * 24 * time.Hour)), // 3 days ago
+			},
+			ttl:     7 * 24 * time.Hour,
+			expired: false,
+		},
+		{
+			name: "tombstone past custom TTL (7 days)",
+			issue: Issue{
+				ID:        "test-7",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-9 * 24 * time.Hour)), // 9 days ago (past 7 days + 1 hour grace)
+			},
+			ttl:     7 * 24 * time.Hour,
+			expired: true,
+		},
+		{
+			name: "tombstone at exact TTL boundary (within grace period)",
+			issue: Issue{
+				ID:        "test-8",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-30 * 24 * time.Hour)), // Exactly 30 days ago
+			},
+			ttl:     0, // Use default TTL (30 days + 1 hour grace)
+			expired: false,
+		},
+		{
+			name: "tombstone just past TTL boundary (beyond grace period)",
+			issue: Issue{
+				ID:        "test-9",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-(30*24*time.Hour + 2*time.Hour))), // 30 days + 2 hours ago
+			},
+			ttl:     0, // Use default TTL (30 days + 1 hour grace)
+			expired: true,
+		},
+		{
+			name: "tombstone within grace period",
+			issue: Issue{
+				ID:        "test-10",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-(30*24*time.Hour + 30*time.Minute))), // 30 days + 30 minutes ago
+			},
+			ttl:     0, // Use default TTL (30 days + 1 hour grace)
+			expired: false,
+		},
+		{
+			name: "tombstone with MinTombstoneTTL (7 days)",
+			issue: Issue{
+				ID:        "test-11",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-10 * 24 * time.Hour)), // 10 days ago
+			},
+			ttl:     MinTombstoneTTL, // 7 days
+			expired: true,
+		},
+		{
+			name: "tombstone with very short TTL (1 hour)",
+			issue: Issue{
+				ID:        "test-12",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(-3 * time.Hour)), // 3 hours ago
+			},
+			ttl:     1 * time.Hour, // 1 hour + 1 hour grace = 2 hours total
+			expired: true,
+		},
+		{
+			name: "tombstone deleted in the future (clock skew)",
+			issue: Issue{
+				ID:        "test-13",
+				Title:     "(deleted)",
+				Status:    StatusTombstone,
+				Priority:  0,
+				IssueType: TypeTask,
+				DeletedAt: timePtr(now.Add(1 * time.Hour)), // 1 hour in the future
+			},
+			ttl:     7 * 24 * time.Hour,
+			expired: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.issue.IsExpired(tt.ttl)
+			if got != tt.expired {
+				t.Errorf("Issue.IsExpired(%v) = %v, want %v", tt.ttl, got, tt.expired)
+			}
+		})
+	}
+}
+
+func TestTombstoneTTLConstants(t *testing.T) {
+	// Test that constants have expected values
+	if DefaultTombstoneTTL != 30*24*time.Hour {
+		t.Errorf("DefaultTombstoneTTL = %v, want %v", DefaultTombstoneTTL, 30*24*time.Hour)
+	}
+	if MinTombstoneTTL != 7*24*time.Hour {
+		t.Errorf("MinTombstoneTTL = %v, want %v", MinTombstoneTTL, 7*24*time.Hour)
+	}
+	if ClockSkewGrace != 1*time.Hour {
+		t.Errorf("ClockSkewGrace = %v, want %v", ClockSkewGrace, 1*time.Hour)
+	}
+
+	// Test that MinTombstoneTTL is less than DefaultTombstoneTTL
+	if MinTombstoneTTL >= DefaultTombstoneTTL {
+		t.Errorf("MinTombstoneTTL (%v) should be less than DefaultTombstoneTTL (%v)", MinTombstoneTTL, DefaultTombstoneTTL)
+	}
+}
+
 // Helper functions
 
 func intPtr(i int) *int {

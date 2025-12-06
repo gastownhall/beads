@@ -46,12 +46,12 @@ func TestDeleteIssues(t *testing.T) {
 
 	t.Run("delete with cascade - should delete all dependents", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
-		
+
 		// Create chain: bd-1 -> bd-2 -> bd-3
 		issue1 := &types.Issue{ID: "bd-1", Title: "Cascade Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue2 := &types.Issue{ID: "bd-2", Title: "Cascade Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue3 := &types.Issue{ID: "bd-3", Title: "Cascade Grandchild", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-		
+
 		if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 			t.Fatalf("Failed to create issue1: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestDeleteIssues(t *testing.T) {
 		if err := store.CreateIssue(ctx, issue3, "test"); err != nil {
 			t.Fatalf("Failed to create issue3: %v", err)
 		}
-		
+
 		dep1 := &types.Dependency{IssueID: "bd-2", DependsOnID: "bd-1", Type: types.DepBlocks}
 		if err := store.AddDependency(ctx, dep1, "test"); err != nil {
 			t.Fatalf("Failed to add dependency: %v", err)
@@ -79,26 +79,26 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected 3 deletions (cascade), got %d", result.DeletedCount)
 		}
 
-		// Verify all deleted
-		if issue, _ := store.GetIssue(ctx, "bd-1"); issue != nil {
-			t.Error("bd-1 should be deleted")
+		// Verify all converted to tombstones (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-1"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-1 should be tombstone")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-2"); issue != nil {
-			t.Error("bd-2 should be deleted")
+		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-2 should be tombstone")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-3"); issue != nil {
-			t.Error("bd-3 should be deleted")
+		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-3 should be tombstone")
 		}
 	})
 
 	t.Run("delete with force - should orphan dependents", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
-		
+
 		// Create chain: bd-1 -> bd-2 -> bd-3
 		issue1 := &types.Issue{ID: "bd-1", Title: "Force Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue2 := &types.Issue{ID: "bd-2", Title: "Force Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue3 := &types.Issue{ID: "bd-3", Title: "Force Grandchild", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-		
+
 		if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 			t.Fatalf("Failed to create issue1: %v", err)
 		}
@@ -108,7 +108,7 @@ func TestDeleteIssues(t *testing.T) {
 		if err := store.CreateIssue(ctx, issue3, "test"); err != nil {
 			t.Fatalf("Failed to create issue3: %v", err)
 		}
-		
+
 		dep1 := &types.Dependency{IssueID: "bd-2", DependsOnID: "bd-1", Type: types.DepBlocks}
 		if err := store.AddDependency(ctx, dep1, "test"); err != nil {
 			t.Fatalf("Failed to add dependency: %v", err)
@@ -129,15 +129,15 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected bd-2 to be orphaned, got %v", result.OrphanedIssues)
 		}
 
-		// Verify bd-1 deleted, bd-2 and bd-3 still exist
-		if issue, _ := store.GetIssue(ctx, "bd-1"); issue != nil {
-			t.Error("bd-1 should be deleted")
+		// Verify bd-1 is tombstone, bd-2 and bd-3 still active (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-1"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-1 should be tombstone")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil {
-			t.Error("bd-2 should still exist")
+		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil || issue.Status == types.StatusTombstone {
+			t.Error("bd-2 should still be active")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil {
-			t.Error("bd-3 should still exist")
+		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil || issue.Status == types.StatusTombstone {
+			t.Error("bd-3 should still be active")
 		}
 	})
 
@@ -175,7 +175,7 @@ func TestDeleteIssues(t *testing.T) {
 
 	t.Run("delete multiple issues at once", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
-		
+
 		independent1 := &types.Issue{ID: "bd-10", Title: "Independent 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		independent2 := &types.Issue{ID: "bd-11", Title: "Independent 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 
@@ -194,12 +194,12 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected 2 deletions, got %d", result.DeletedCount)
 		}
 
-		// Verify both deleted
-		if issue, _ := store.GetIssue(ctx, "bd-10"); issue != nil {
-			t.Error("bd-10 should be deleted")
+		// Verify both converted to tombstones (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-10"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-10 should be tombstone")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-11"); issue != nil {
-			t.Error("bd-11 should be deleted")
+		if issue, _ := store.GetIssue(ctx, "bd-11"); issue == nil || issue.Status != types.StatusTombstone {
+			t.Error("bd-11 should be tombstone")
 		}
 	})
 }
