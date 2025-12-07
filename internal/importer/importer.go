@@ -117,17 +117,38 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		opts.OrphanHandling = sqliteStore.GetOrphanHandling(ctx)
 	}
 
-	// Filter out issues that are in the deletions manifest (bd-4zy)
-	// Unless IgnoreDeletions is set, skip importing deleted issues
+	// Handle deletions manifest and tombstones (bd-dve)
+	//
+	// Phase 1 (Dual-Write):
+	// - Tombstones in JSONL are imported as-is (they're issues with status=tombstone)
+	// - Legacy deletions.jsonl entries are converted to tombstones
+	// - Non-tombstone issues in deletions manifest are skipped (backwards compat)
+	//
+	// Note: Tombstones from JSONL take precedence over legacy deletions.jsonl
 	if !opts.IgnoreDeletions && dbPath != "" {
 		beadsDir := filepath.Dir(dbPath)
 		deletionsPath := deletions.DefaultPath(beadsDir)
 		loadResult, err := deletions.LoadDeletions(deletionsPath)
 		if err == nil && len(loadResult.Records) > 0 {
+			// Build a map of existing tombstones from JSONL for quick lookup
+			tombstoneIDs := make(map[string]bool)
+			for _, issue := range issues {
+				if issue.IsTombstone() {
+					tombstoneIDs[issue.ID] = true
+				}
+			}
+
 			var filteredIssues []*types.Issue
 			for _, issue := range issues {
+				// Tombstones are always imported (they represent deletions in the new format)
+				if issue.IsTombstone() {
+					filteredIssues = append(filteredIssues, issue)
+					continue
+				}
+
 				if del, found := loadResult.Records[issue.ID]; found {
-					// Issue is in deletions manifest - skip it
+					// Non-tombstone issue is in deletions manifest - skip it
+					// (this maintains backward compatibility during transition)
 					result.SkippedDeleted++
 					result.SkippedDeletedIDs = append(result.SkippedDeletedIDs, issue.ID)
 					fmt.Fprintf(os.Stderr, "Skipping %s (in deletions manifest: deleted %s by %s)\n",
@@ -136,6 +157,19 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 					filteredIssues = append(filteredIssues, issue)
 				}
 			}
+
+			// Convert legacy deletions.jsonl entries to tombstones if not already in JSONL
+			for id, del := range loadResult.Records {
+				if tombstoneIDs[id] {
+					// Already have a tombstone for this ID in JSONL, skip
+					continue
+				}
+				// Check if we skipped this issue above (it was in JSONL but filtered out)
+				// If so, we should create a tombstone for it
+				tombstone := convertDeletionToTombstone(id, del)
+				filteredIssues = append(filteredIssues, tombstone)
+			}
+
 			issues = filteredIssues
 		}
 	}
@@ -786,10 +820,15 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 	return nil
 }
 
-// purgeDeletedIssues removes issues from the DB that are in the deletions manifest
-// but not in the incoming JSONL. This enables deletion propagation across clones.
+// purgeDeletedIssues converts DB issues to tombstones if they are in the deletions
+// manifest but not in the incoming JSONL. This enables deletion propagation across clones.
 // Also uses git history fallback for deletions that were pruned from the manifest,
 // unless opts.NoGitHistory is set (useful during JSONL filename migrations).
+//
+// Note (bd-dve): With inline tombstones, most deletions are now handled during import
+// via convertDeletionToTombstone. This function primarily handles:
+// 1. DB-only issues that need to be tombstoned (not in JSONL at all)
+// 2. Git history fallback for pruned deletions
 func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, dbPath string, jsonlIssues []*types.Issue, opts Options, result *Result) error {
 	// Get deletions manifest path (same directory as database)
 	beadsDir := filepath.Dir(dbPath)
@@ -812,7 +851,7 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 		jsonlIDs[issue.ID] = true
 	}
 
-	// Get all DB issues
+	// Get all DB issues (exclude existing tombstones - they're already deleted)
 	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
@@ -824,21 +863,22 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 	// Find DB issues that:
 	// 1. Are NOT in the JSONL (not synced from remote)
 	// 2. ARE in the deletions manifest (were deleted elsewhere)
+	// 3. Are NOT already tombstones
 	for _, dbIssue := range dbIssues {
 		if jsonlIDs[dbIssue.ID] {
-			// Issue is in JSONL, keep it
+			// Issue is in JSONL, keep it (tombstone or not)
 			continue
 		}
 
 		if del, found := loadResult.Records[dbIssue.ID]; found {
-			// Issue is in deletions manifest - purge it from DB
-			if err := sqliteStore.DeleteIssue(ctx, dbIssue.ID); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to purge %s: %v\n", dbIssue.ID, err)
+			// Issue is in deletions manifest - convert to tombstone (bd-dve)
+			if err := sqliteStore.CreateTombstone(ctx, dbIssue.ID, del.Actor, del.Reason); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create tombstone for %s: %v\n", dbIssue.ID, err)
 				continue
 			}
 
-			// Log the purge with metadata
-			fmt.Fprintf(os.Stderr, "Purged %s (deleted %s by %s", dbIssue.ID, del.Timestamp.Format("2006-01-02 15:04:05"), del.Actor)
+			// Log the tombstone creation with metadata
+			fmt.Fprintf(os.Stderr, "Tombstoned %s (deleted %s by %s", dbIssue.ID, del.Timestamp.Format("2006-01-02 15:04:05"), del.Actor)
 			if del.Reason != "" {
 				fmt.Fprintf(os.Stderr, ", reason: %s", del.Reason)
 			}
@@ -872,7 +912,7 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 
 			// Abort if would delete >50% of issues - this is almost certainly a reset
 			if deletePercent > 50 {
-				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill would delete %d of %d issues (%.1f%%) - aborting\n",
+				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill would tombstone %d of %d issues (%.1f%%) - aborting\n",
 					deleteCount, totalDBIssues, deletePercent)
 				fmt.Fprintf(os.Stderr, "This usually means the JSONL was reset (git reset, branch switch, etc.)\n")
 				fmt.Fprintf(os.Stderr, "If these are legitimate deletions, add them to deletions.jsonl manually\n")
@@ -881,7 +921,7 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 				deletedViaGit = nil
 			} else if deleteCount > 10 {
 				// Warn (but proceed) if deleting >10 issues
-				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill will delete %d issues (%.1f%% of %d total)\n",
+				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill will tombstone %d issues (%.1f%% of %d total)\n",
 					deleteCount, deletePercent, totalDBIssues)
 			}
 		}
@@ -898,13 +938,13 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 				fmt.Fprintf(os.Stderr, "Warning: failed to backfill deletion record for %s: %v\n", id, err)
 			}
 
-			// Delete from DB
-			if err := sqliteStore.DeleteIssue(ctx, id); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to purge %s (git-recovered): %v\n", id, err)
+			// Convert to tombstone (bd-dve)
+			if err := sqliteStore.CreateTombstone(ctx, id, "git-history-backfill", "recovered from git history (pruned from manifest)"); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create tombstone for %s (git-recovered): %v\n", id, err)
 				continue
 			}
 
-			fmt.Fprintf(os.Stderr, "Purged %s (recovered from git history, pruned from manifest)\n", id)
+			fmt.Fprintf(os.Stderr, "Tombstoned %s (recovered from git history, pruned from manifest)\n", id)
 			result.Purged++
 			result.PurgedIDs = append(result.PurgedIDs, id)
 		}
@@ -1068,6 +1108,26 @@ func batchCheckGitHistory(repoRoot, jsonlPath string, ids []string) []string {
 }
 
 // Helper functions
+
+// convertDeletionToTombstone converts a legacy DeletionRecord to a tombstone Issue.
+// This is used during import to migrate from deletions.jsonl to inline tombstones (bd-dve).
+func convertDeletionToTombstone(id string, del deletions.DeletionRecord) *types.Issue {
+	deletedAt := del.Timestamp
+	return &types.Issue{
+		ID:           id,
+		Title:        "(deleted)",
+		Description:  "",
+		Status:       types.StatusTombstone,
+		Priority:     2, // Default priority
+		IssueType:    types.TypeTask, // Default type (original_type unknown from deletions.jsonl)
+		CreatedAt:    del.Timestamp,
+		UpdatedAt:    del.Timestamp,
+		DeletedAt:    &deletedAt,
+		DeletedBy:    del.Actor,
+		DeleteReason: del.Reason,
+		OriginalType: "", // Not available in legacy deletions.jsonl
+	}
+}
 
 func GetPrefixList(prefixes map[string]int) []string {
 	var result []string

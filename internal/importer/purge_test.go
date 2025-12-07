@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestPurgeDeletedIssues tests that issues in the deletions manifest are purged during import
+// TestPurgeDeletedIssues tests that issues in the deletions manifest are converted to tombstones during import
 func TestPurgeDeletedIssues(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -84,7 +84,7 @@ func TestPurgeDeletedIssues(t *testing.T) {
 		t.Fatalf("purgeDeletedIssues failed: %v", err)
 	}
 
-	// Verify issue2 was purged
+	// Verify issue2 was tombstoned (bd-dve: now converts to tombstone instead of hard-delete)
 	if result.Purged != 1 {
 		t.Errorf("expected 1 purged issue, got %d", result.Purged)
 	}
@@ -92,13 +92,23 @@ func TestPurgeDeletedIssues(t *testing.T) {
 		t.Errorf("expected PurgedIDs to contain 'test-def', got %v", result.PurgedIDs)
 	}
 
-	// Verify issue2 is gone from database
-	iss2, err := store.GetIssue(ctx, "test-def")
+	// Verify issue2 is now a tombstone (not hard-deleted)
+	// GetIssue returns nil for tombstones by default, so use IncludeTombstones filter
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
-		t.Fatalf("GetIssue failed: %v", err)
+		t.Fatalf("SearchIssues failed: %v", err)
 	}
-	if iss2 != nil {
-		t.Errorf("expected issue2 to be deleted, but it still exists")
+	var iss2 *types.Issue
+	for _, iss := range issues {
+		if iss.ID == "test-def" {
+			iss2 = iss
+			break
+		}
+	}
+	if iss2 == nil {
+		t.Errorf("expected issue2 to exist as tombstone, but it was hard-deleted")
+	} else if iss2.Status != types.StatusTombstone {
+		t.Errorf("expected issue2 to be a tombstone, got status %q", iss2.Status)
 	}
 
 	// Verify issue1 still exists (in JSONL)

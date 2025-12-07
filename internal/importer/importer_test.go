@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/deletions"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1105,5 +1106,163 @@ func TestBatchCheckGitHistory_NonGitDir(t *testing.T) {
 	result := batchCheckGitHistory(tmpDir, ".beads/beads.jsonl", []string{"bd-test1", "bd-test2"})
 	if len(result) != 0 {
 		t.Errorf("Expected empty result for non-git dir, got %v", result)
+	}
+}
+
+func TestConvertDeletionToTombstone(t *testing.T) {
+	ts := time.Date(2025, 12, 5, 14, 30, 0, 0, time.UTC)
+	del := deletions.DeletionRecord{
+		ID:        "bd-test",
+		Timestamp: ts,
+		Actor:     "alice",
+		Reason:    "no longer needed",
+	}
+
+	tombstone := convertDeletionToTombstone("bd-test", del)
+
+	if tombstone.ID != "bd-test" {
+		t.Errorf("Expected ID 'bd-test', got %q", tombstone.ID)
+	}
+	if tombstone.Status != types.StatusTombstone {
+		t.Errorf("Expected status 'tombstone', got %q", tombstone.Status)
+	}
+	if tombstone.Title != "(deleted)" {
+		t.Errorf("Expected title '(deleted)', got %q", tombstone.Title)
+	}
+	if tombstone.DeletedAt == nil || !tombstone.DeletedAt.Equal(ts) {
+		t.Errorf("Expected DeletedAt to be %v, got %v", ts, tombstone.DeletedAt)
+	}
+	if tombstone.DeletedBy != "alice" {
+		t.Errorf("Expected DeletedBy 'alice', got %q", tombstone.DeletedBy)
+	}
+	if tombstone.DeleteReason != "no longer needed" {
+		t.Errorf("Expected DeleteReason 'no longer needed', got %q", tombstone.DeleteReason)
+	}
+	if tombstone.OriginalType != "" {
+		t.Errorf("Expected empty OriginalType, got %q", tombstone.OriginalType)
+	}
+}
+
+func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDB := t.TempDir() + "/test.db"
+	store, err := sqlite.New(context.Background(), tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Create a tombstone issue (as it would appear in JSONL)
+	deletedAt := time.Now().Add(-time.Hour)
+	tombstone := &types.Issue{
+		ID:           "test-abc123",
+		Title:        "(deleted)",
+		Status:       types.StatusTombstone,
+		Priority:     2,
+		IssueType:    types.TypeTask,
+		CreatedAt:    time.Now().Add(-24 * time.Hour),
+		UpdatedAt:    deletedAt,
+		DeletedAt:    &deletedAt,
+		DeletedBy:    "bob",
+		DeleteReason: "test deletion",
+		OriginalType: "bug",
+	}
+
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{tombstone}, Options{})
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+
+	if result.Created != 1 {
+		t.Errorf("Expected 1 created, got %d", result.Created)
+	}
+
+	// Verify tombstone was imported with all fields
+	// Need to use IncludeTombstones filter to retrieve it
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	if err != nil {
+		t.Fatalf("Failed to search issues: %v", err)
+	}
+
+	var retrieved *types.Issue
+	for _, i := range issues {
+		if i.ID == "test-abc123" {
+			retrieved = i
+			break
+		}
+	}
+
+	if retrieved == nil {
+		t.Fatal("Tombstone issue not found after import")
+	}
+	if retrieved.Status != types.StatusTombstone {
+		t.Errorf("Expected status 'tombstone', got %q", retrieved.Status)
+	}
+	if retrieved.DeletedBy != "bob" {
+		t.Errorf("Expected DeletedBy 'bob', got %q", retrieved.DeletedBy)
+	}
+	if retrieved.DeleteReason != "test deletion" {
+		t.Errorf("Expected DeleteReason 'test deletion', got %q", retrieved.DeleteReason)
+	}
+}
+
+func TestImportIssues_TombstoneNotFilteredByDeletionsManifest(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	tmpDB := tmpDir + "/test.db"
+	store, err := sqlite.New(context.Background(), tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Create a deletions manifest entry
+	deletionsPath := deletions.DefaultPath(tmpDir)
+	delRecord := deletions.DeletionRecord{
+		ID:        "test-abc123",
+		Timestamp: time.Now().Add(-time.Hour),
+		Actor:     "alice",
+		Reason:    "old deletion",
+	}
+	if err := deletions.AppendDeletion(deletionsPath, delRecord); err != nil {
+		t.Fatalf("Failed to write deletion record: %v", err)
+	}
+
+	// Create a tombstone in JSONL for the same issue
+	deletedAt := time.Now()
+	tombstone := &types.Issue{
+		ID:           "test-abc123",
+		Title:        "(deleted)",
+		Status:       types.StatusTombstone,
+		Priority:     2,
+		IssueType:    types.TypeTask,
+		CreatedAt:    time.Now().Add(-24 * time.Hour),
+		UpdatedAt:    deletedAt,
+		DeletedAt:    &deletedAt,
+		DeletedBy:    "bob",
+		DeleteReason: "JSONL tombstone",
+	}
+
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{tombstone}, Options{})
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+
+	// The tombstone should be imported (not filtered by deletions manifest)
+	if result.Created != 1 {
+		t.Errorf("Expected 1 created (tombstone), got %d", result.Created)
+	}
+	if result.SkippedDeleted != 0 {
+		t.Errorf("Expected 0 skipped deleted (tombstone should not be filtered), got %d", result.SkippedDeleted)
 	}
 }

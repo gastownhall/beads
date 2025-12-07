@@ -179,7 +179,8 @@ Examples:
 		labelsAny = util.NormalizeLabels(labelsAny)
 
 		// Build filter
-		filter := types.IssueFilter{}
+		// Include tombstones in export for sync propagation (bd-dve)
+		filter := types.IssueFilter{IncludeTombstones: true}
 		if statusFilter != "" {
 			status := types.Status(statusFilter)
 			filter.Status = &status
