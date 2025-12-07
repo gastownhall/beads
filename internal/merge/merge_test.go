@@ -1905,3 +1905,156 @@ func TestMergeIssue_TombstoneFields(t *testing.T) {
 		}
 	})
 }
+
+// TestIsExpiredTombstone tests edge cases for the IsExpiredTombstone function (bd-fmo)
+func TestIsExpiredTombstone(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		issue    Issue
+		ttl      time.Duration
+		expected bool
+	}{
+		{
+			name: "non-tombstone returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    "open",
+				DeletedAt: now.Add(-100 * 24 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "closed status returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    "closed",
+				DeletedAt: now.Add(-100 * 24 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "tombstone with empty deleted_at returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: "",
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "tombstone with invalid timestamp returns false (safety)",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: "not-a-valid-date",
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "tombstone with malformed RFC3339 returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: "2024-13-45T99:99:99Z",
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "recent tombstone (within TTL) returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-1 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "old tombstone (beyond TTL) returns true",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-48 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: true,
+		},
+		{
+			name: "tombstone just inside TTL boundary (with clock skew grace) returns false",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-24 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: false,
+		},
+		{
+			name: "tombstone just past TTL boundary (with clock skew grace) returns true",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-26 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      24 * time.Hour,
+			expected: true,
+		},
+		{
+			name: "ttl=0 falls back to DefaultTombstoneTTL (30 days)",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-20 * 24 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      0,
+			expected: false,
+		},
+		{
+			name: "ttl=0 with old tombstone (beyond default TTL) returns true",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-60 * 24 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      0,
+			expected: true,
+		},
+		{
+			name: "RFC3339Nano format is supported",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-48 * time.Hour).Format(time.RFC3339Nano),
+			},
+			ttl:      24 * time.Hour,
+			expected: true,
+		},
+		{
+			name: "very short TTL (1 minute) works correctly",
+			issue: Issue{
+				ID:        "bd-test",
+				Status:    StatusTombstone,
+				DeletedAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
+			},
+			ttl:      1 * time.Minute,
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsExpiredTombstone(tt.issue, tt.ttl)
+			if result != tt.expected {
+				t.Errorf("IsExpiredTombstone() = %v, want %v (deleted_at=%q, ttl=%v)",
+					result, tt.expected, tt.issue.DeletedAt, tt.ttl)
+			}
+		})
+	}
+}

@@ -1266,3 +1266,116 @@ func TestImportIssues_TombstoneNotFilteredByDeletionsManifest(t *testing.T) {
 		t.Errorf("Expected 0 skipped deleted (tombstone should not be filtered), got %d", result.SkippedDeleted)
 	}
 }
+
+// TestImportIssues_LegacyDeletionsConvertedToTombstones tests that entries in
+// deletions.jsonl are converted to tombstones during import (bd-hp0m)
+func TestImportIssues_LegacyDeletionsConvertedToTombstones(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	tmpDB := tmpDir + "/test.db"
+	store, err := sqlite.New(context.Background(), tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Create a deletions manifest with one entry
+	deletionsPath := deletions.DefaultPath(tmpDir)
+	deleteTime := time.Now().Add(-time.Hour)
+
+	del := deletions.DeletionRecord{
+		ID:        "test-abc",
+		Timestamp: deleteTime,
+		Actor:     "alice",
+		Reason:    "duplicate of test-xyz",
+	}
+	if err := deletions.AppendDeletion(deletionsPath, del); err != nil {
+		t.Fatalf("Failed to write deletion record: %v", err)
+	}
+
+	// Create a regular issue (not in deletions)
+	regularIssue := &types.Issue{
+		ID:        "test-def",
+		Title:     "Regular issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now().Add(-24 * time.Hour),
+		UpdatedAt: time.Now(),
+	}
+
+	// Create an issue that's in the deletions manifest (non-tombstone)
+	deletedIssue := &types.Issue{
+		ID:        "test-abc",
+		Title:     "This will be skipped and converted",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeBug,
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+		UpdatedAt: time.Now().Add(-2 * time.Hour),
+	}
+
+	// Import both issues
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{regularIssue, deletedIssue}, Options{})
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+
+	// Regular issue should be created
+	// The deleted issue is skipped (in deletions manifest), but a tombstone is created from deletions.jsonl
+	// So we expect: 1 regular + 1 tombstone = 2 created
+	if result.Created != 2 {
+		t.Errorf("Expected 2 created (1 regular + 1 tombstone from deletions.jsonl), got %d", result.Created)
+	}
+	if result.SkippedDeleted != 1 {
+		t.Errorf("Expected 1 skipped deleted (issue in deletions.jsonl), got %d", result.SkippedDeleted)
+	}
+
+	// Verify regular issue was imported
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("Failed to search issues: %v", err)
+	}
+	foundRegular := false
+	for _, i := range issues {
+		if i.ID == "test-def" {
+			foundRegular = true
+		}
+	}
+	if !foundRegular {
+		t.Error("Regular issue not found after import")
+	}
+
+	// Verify tombstone was created from deletions.jsonl
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	if err != nil {
+		t.Fatalf("Failed to search all issues: %v", err)
+	}
+
+	var tombstone *types.Issue
+	for _, i := range allIssues {
+		if i.ID == "test-abc" {
+			tombstone = i
+			break
+		}
+	}
+
+	// test-abc should be a tombstone (was in JSONL and deletions)
+	if tombstone == nil {
+		t.Fatal("Expected tombstone for test-abc not found")
+	}
+	if tombstone.Status != types.StatusTombstone {
+		t.Errorf("Expected test-abc to be tombstone, got status %q", tombstone.Status)
+	}
+	if tombstone.DeletedBy != "alice" {
+		t.Errorf("Expected DeletedBy 'alice', got %q", tombstone.DeletedBy)
+	}
+	if tombstone.DeleteReason != "duplicate of test-xyz" {
+		t.Errorf("Expected DeleteReason 'duplicate of test-xyz', got %q", tombstone.DeleteReason)
+	}
+}
