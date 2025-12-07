@@ -971,3 +971,100 @@ func TestInteractiveFlagParsing(t *testing.T) {
 		t.Errorf("Expected default value 'false', got %q", flag.DefValue)
 	}
 }
+
+// TestOutputFlagParsing verifies the --output flag is registered (bd-9cc)
+func TestOutputFlagParsing(t *testing.T) {
+	flag := doctorCmd.Flags().Lookup("output")
+	if flag == nil {
+		t.Fatal("--output flag not found")
+	}
+	if flag.Shorthand != "o" {
+		t.Errorf("Expected shorthand 'o', got %q", flag.Shorthand)
+	}
+	if flag.DefValue != "" {
+		t.Errorf("Expected default value '', got %q", flag.DefValue)
+	}
+}
+
+// TestExportDiagnostics verifies the export functionality (bd-9cc)
+func TestExportDiagnostics(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "diagnostics.json")
+
+	// Create a test result
+	result := doctorResult{
+		Path:       "/test/path",
+		CLIVersion: "0.29.0",
+		OverallOK:  true,
+		Timestamp:  "2025-01-01T00:00:00Z",
+		Platform: map[string]string{
+			"os_arch":        "darwin/arm64",
+			"go_version":     "go1.21.0",
+			"sqlite_version": "3.42.0",
+		},
+		Checks: []doctorCheck{
+			{
+				Name:    "Installation",
+				Status:  "ok",
+				Message: ".beads/ directory found",
+			},
+			{
+				Name:    "Git Hooks",
+				Status:  "warning",
+				Message: "No hooks installed",
+				Fix:     "Run 'bd hooks install'",
+			},
+		},
+	}
+
+	// Export to file
+	if err := exportDiagnostics(result, outputPath); err != nil {
+		t.Fatalf("exportDiagnostics failed: %v", err)
+	}
+
+	// Read the file back
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("Failed to read exported file: %v", err)
+	}
+
+	// Parse the JSON
+	var decoded doctorResult
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Failed to parse exported JSON: %v", err)
+	}
+
+	// Verify fields
+	if decoded.Path != result.Path {
+		t.Errorf("Path mismatch: got %q, want %q", decoded.Path, result.Path)
+	}
+	if decoded.CLIVersion != result.CLIVersion {
+		t.Errorf("CLIVersion mismatch: got %q, want %q", decoded.CLIVersion, result.CLIVersion)
+	}
+	if decoded.OverallOK != result.OverallOK {
+		t.Errorf("OverallOK mismatch: got %v, want %v", decoded.OverallOK, result.OverallOK)
+	}
+	if decoded.Timestamp != result.Timestamp {
+		t.Errorf("Timestamp mismatch: got %q, want %q", decoded.Timestamp, result.Timestamp)
+	}
+	if decoded.Platform["os_arch"] != result.Platform["os_arch"] {
+		t.Errorf("Platform.os_arch mismatch: got %q, want %q", decoded.Platform["os_arch"], result.Platform["os_arch"])
+	}
+	if len(decoded.Checks) != len(result.Checks) {
+		t.Errorf("Checks length mismatch: got %d, want %d", len(decoded.Checks), len(result.Checks))
+	}
+}
+
+// TestExportDiagnosticsInvalidPath verifies error handling (bd-9cc)
+func TestExportDiagnosticsInvalidPath(t *testing.T) {
+	result := doctorResult{
+		Path:      "/test/path",
+		OverallOK: true,
+	}
+
+	// Try to export to an invalid path
+	err := exportDiagnostics(result, "/nonexistent/directory/diagnostics.json")
+	if err == nil {
+		t.Error("Expected error for invalid path, got nil")
+	}
+}
