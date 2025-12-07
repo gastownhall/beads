@@ -1335,6 +1335,13 @@ func TestImportIssues_LegacyDeletionsConvertedToTombstones(t *testing.T) {
 	if result.SkippedDeleted != 1 {
 		t.Errorf("Expected 1 skipped deleted (issue in deletions.jsonl), got %d", result.SkippedDeleted)
 	}
+	// Verify ConvertedToTombstone counter (bd-wucl)
+	if result.ConvertedToTombstone != 1 {
+		t.Errorf("Expected 1 converted to tombstone, got %d", result.ConvertedToTombstone)
+	}
+	if len(result.ConvertedTombstoneIDs) != 1 || result.ConvertedTombstoneIDs[0] != "test-abc" {
+		t.Errorf("Expected ConvertedTombstoneIDs [test-abc], got %v", result.ConvertedTombstoneIDs)
+	}
 
 	// Verify regular issue was imported
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})

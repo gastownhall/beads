@@ -59,10 +59,12 @@ type Result struct {
 	ExpectedPrefix      string            // Database configured prefix
 	MismatchPrefixes    map[string]int    // Map of mismatched prefixes to count
 	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
-	Purged              int               // Issues purged from DB (found in deletions manifest)
-	PurgedIDs           []string          // IDs that were purged
-	SkippedDeleted      int               // Issues skipped because they're in deletions manifest
-	SkippedDeletedIDs   []string          // IDs that were skipped due to deletions manifest
+	Purged                int               // Issues purged from DB (found in deletions manifest)
+	PurgedIDs             []string          // IDs that were purged
+	SkippedDeleted        int               // Issues skipped because they're in deletions manifest
+	SkippedDeletedIDs     []string          // IDs that were skipped due to deletions manifest
+	ConvertedToTombstone  int               // Legacy deletions.jsonl entries converted to tombstones (bd-wucl)
+	ConvertedTombstoneIDs []string          // IDs that were converted to tombstones
 }
 
 // ImportIssues handles the core import logic used by both manual and auto-import.
@@ -164,10 +166,11 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 					// Already have a tombstone for this ID in JSONL, skip
 					continue
 				}
-				// Check if we skipped this issue above (it was in JSONL but filtered out)
-				// If so, we should create a tombstone for it
+				// Convert this deletion record to a tombstone (bd-wucl)
 				tombstone := convertDeletionToTombstone(id, del)
 				filteredIssues = append(filteredIssues, tombstone)
+				result.ConvertedToTombstone++
+				result.ConvertedTombstoneIDs = append(result.ConvertedTombstoneIDs, id)
 			}
 
 			issues = filteredIssues
