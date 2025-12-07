@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -382,5 +384,180 @@ func TestCompactInitCommand(t *testing.T) {
 	jsonFlag := compactCmd.Flags().Lookup("json")
 	if jsonFlag == nil {
 		t.Error("compact command should have --json flag")
+	}
+}
+
+func TestPruneExpiredTombstones(t *testing.T) {
+	// Setup: create a temp .beads directory with issues.jsonl
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create issues.jsonl with mix of live issues, fresh tombstones, and expired tombstones
+	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
+	now := time.Now()
+
+	freshTombstoneTime := now.Add(-10 * 24 * time.Hour)  // 10 days ago - NOT expired
+	expiredTombstoneTime := now.Add(-60 * 24 * time.Hour) // 60 days ago - expired (> 30 day TTL)
+
+	issues := []*types.Issue{
+		{
+			ID:        "test-live",
+			Title:     "Live issue",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-5 * 24 * time.Hour),
+			UpdatedAt: now,
+		},
+		{
+			ID:           "test-fresh-tombstone",
+			Title:        "(deleted)",
+			Status:       types.StatusTombstone,
+			Priority:     0,
+			IssueType:    types.TypeTask,
+			CreatedAt:    now.Add(-20 * 24 * time.Hour),
+			UpdatedAt:    freshTombstoneTime,
+			DeletedAt:    &freshTombstoneTime,
+			DeletedBy:    "alice",
+			DeleteReason: "duplicate",
+		},
+		{
+			ID:           "test-expired-tombstone",
+			Title:        "(deleted)",
+			Status:       types.StatusTombstone,
+			Priority:     0,
+			IssueType:    types.TypeTask,
+			CreatedAt:    now.Add(-90 * 24 * time.Hour),
+			UpdatedAt:    expiredTombstoneTime,
+			DeletedAt:    &expiredTombstoneTime,
+			DeletedBy:    "bob",
+			DeleteReason: "obsolete",
+		},
+	}
+
+	// Write issues to JSONL
+	file, err := os.Create(issuesPath)
+	if err != nil {
+		t.Fatalf("Failed to create issues.jsonl: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	for _, issue := range issues {
+		if err := encoder.Encode(issue); err != nil {
+			file.Close()
+			t.Fatalf("Failed to write issue: %v", err)
+		}
+	}
+	file.Close()
+
+	// Save original dbPath and restore after test
+	originalDBPath := dbPath
+	defer func() { dbPath = originalDBPath }()
+	dbPath = filepath.Join(beadsDir, "beads.db")
+
+	// Run pruning
+	result, err := pruneExpiredTombstones()
+	if err != nil {
+		t.Fatalf("pruneExpiredTombstones failed: %v", err)
+	}
+
+	// Verify results
+	if result.PrunedCount != 1 {
+		t.Errorf("Expected 1 pruned tombstone, got %d", result.PrunedCount)
+	}
+	if len(result.PrunedIDs) != 1 || result.PrunedIDs[0] != "test-expired-tombstone" {
+		t.Errorf("Expected PrunedIDs [test-expired-tombstone], got %v", result.PrunedIDs)
+	}
+	if result.TTLDays != 30 {
+		t.Errorf("Expected TTLDays 30, got %d", result.TTLDays)
+	}
+
+	// Verify the file was updated correctly
+	file, err = os.Open(issuesPath)
+	if err != nil {
+		t.Fatalf("Failed to reopen issues.jsonl: %v", err)
+	}
+	defer file.Close()
+
+	var remaining []*types.Issue
+	decoder := json.NewDecoder(file)
+	for {
+		var issue types.Issue
+		if err := decoder.Decode(&issue); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			t.Fatalf("Failed to decode issue: %v", err)
+		}
+		remaining = append(remaining, &issue)
+	}
+
+	if len(remaining) != 2 {
+		t.Fatalf("Expected 2 remaining issues, got %d", len(remaining))
+	}
+
+	// Verify live issue and fresh tombstone remain
+	ids := make(map[string]bool)
+	for _, issue := range remaining {
+		ids[issue.ID] = true
+	}
+	if !ids["test-live"] {
+		t.Error("Live issue should remain")
+	}
+	if !ids["test-fresh-tombstone"] {
+		t.Error("Fresh tombstone should remain")
+	}
+	if ids["test-expired-tombstone"] {
+		t.Error("Expired tombstone should have been pruned")
+	}
+}
+
+func TestPruneExpiredTombstones_NoTombstones(t *testing.T) {
+	// Setup: create a temp .beads directory with only live issues
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
+	now := time.Now()
+
+	issue := &types.Issue{
+		ID:        "test-live",
+		Title:     "Live issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	file, err := os.Create(issuesPath)
+	if err != nil {
+		t.Fatalf("Failed to create issues.jsonl: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(issue); err != nil {
+		file.Close()
+		t.Fatalf("Failed to write issue: %v", err)
+	}
+	file.Close()
+
+	// Save original dbPath and restore after test
+	originalDBPath := dbPath
+	defer func() { dbPath = originalDBPath }()
+	dbPath = filepath.Join(beadsDir, "beads.db")
+
+	// Run pruning - should return zero pruned
+	result, err := pruneExpiredTombstones()
+	if err != nil {
+		t.Fatalf("pruneExpiredTombstones failed: %v", err)
+	}
+
+	if result.PrunedCount != 0 {
+		t.Errorf("Expected 0 pruned tombstones, got %d", result.PrunedCount)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/deletions"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 var (
@@ -55,6 +56,11 @@ Deletions Pruning:
   All modes also prune old deletion records from deletions.jsonl to prevent
   unbounded growth. Default retention is 3 days (configurable via --retention
   or deletions_retention_days in metadata.json).
+
+Tombstone Pruning:
+  All modes also prune expired tombstones from issues.jsonl. Tombstones are
+  soft-delete markers that prevent resurrection of deleted issues. After the
+  TTL expires (default 30 days), tombstones are removed to save space.
 
 Examples:
   # Agent-driven workflow (recommended)
@@ -306,6 +312,14 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	// Prune old deletion records
 	pruneDeletionsManifest()
 
+	// Prune expired tombstones (bd-okh)
+	if tombstonePruneResult, err := pruneExpiredTombstones(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", err)
+	} else if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
+		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
+			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
+	}
+
 	// Schedule auto-flush to export changes
 	markDirtyAndScheduleFlush()
 }
@@ -432,6 +446,14 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 
 	// Prune old deletion records
 	pruneDeletionsManifest()
+
+	// Prune expired tombstones (bd-okh)
+	if tombstonePruneResult, err := pruneExpiredTombstones(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", err)
+	} else if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
+		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
+			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
+	}
 
 	// Schedule auto-flush to export changes
 	if successCount > 0 {
@@ -871,6 +893,12 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	// Prune old deletion records (do this before JSON output so we can include results)
 	pruneResult, retentionDays := pruneDeletionsManifest()
 
+	// Prune expired tombstones from issues.jsonl (bd-okh)
+	tombstonePruneResult, tombstoneErr := pruneExpiredTombstones()
+	if tombstoneErr != nil && !jsonOutput {
+		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", tombstoneErr)
+	}
+
 	if jsonOutput {
 		output := map[string]interface{}{
 			"success":        true,
@@ -889,6 +917,13 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 				"retention_days": retentionDays,
 			}
 		}
+		// Include tombstone pruning results (bd-okh)
+		if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
+			output["tombstones_pruned"] = map[string]interface{}{
+				"count":    tombstonePruneResult.PrunedCount,
+				"ttl_days": tombstonePruneResult.TTLDays,
+			}
+		}
 		outputJSON(output)
 		return
 	}
@@ -900,6 +935,12 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	// Report pruning results for human-readable output
 	if pruneResult != nil && pruneResult.PrunedCount > 0 {
 		fmt.Printf("\nDeletions pruned: %d records older than %d days removed\n", pruneResult.PrunedCount, retentionDays)
+	}
+
+	// Report tombstone pruning results (bd-okh)
+	if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
+		fmt.Printf("\nTombstones pruned: %d expired tombstones (older than %d days) removed\n",
+			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
 
 	// Schedule auto-flush to export changes
@@ -938,6 +979,101 @@ func pruneDeletionsManifest() (*deletions.PruneResult, int) {
 	}
 
 	return result, retentionDays
+}
+
+// TombstonePruneResult contains the results of tombstone pruning
+type TombstonePruneResult struct {
+	PrunedCount int
+	PrunedIDs   []string
+	TTLDays     int
+}
+
+// pruneExpiredTombstones reads issues.jsonl, removes expired tombstones,
+// and writes back the pruned file. Returns the prune result.
+func pruneExpiredTombstones() (*TombstonePruneResult, error) {
+	beadsDir := filepath.Dir(dbPath)
+	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	// Check if issues.jsonl exists
+	if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
+		return &TombstonePruneResult{}, nil
+	}
+
+	// Read all issues
+	// nolint:gosec // G304: issuesPath is controlled from beadsDir
+	file, err := os.Open(issuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open issues.jsonl: %w", err)
+	}
+
+	var allIssues []*types.Issue
+	decoder := json.NewDecoder(file)
+	for {
+		var issue types.Issue
+		if err := decoder.Decode(&issue); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			// Skip corrupt lines
+			continue
+		}
+		allIssues = append(allIssues, &issue)
+	}
+	file.Close()
+
+	// Determine TTL
+	ttl := types.DefaultTombstoneTTL
+	ttlDays := int(ttl.Hours() / 24)
+
+	// Filter out expired tombstones
+	var kept []*types.Issue
+	var prunedIDs []string
+	for _, issue := range allIssues {
+		if issue.IsExpired(ttl) {
+			prunedIDs = append(prunedIDs, issue.ID)
+		} else {
+			kept = append(kept, issue)
+		}
+	}
+
+	if len(prunedIDs) == 0 {
+		return &TombstonePruneResult{TTLDays: ttlDays}, nil
+	}
+
+	// Write back the pruned file atomically
+	dir := filepath.Dir(issuesPath)
+	base := filepath.Base(issuesPath)
+	tempFile, err := os.CreateTemp(dir, base+".prune.*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+
+	encoder := json.NewEncoder(tempFile)
+	for _, issue := range kept {
+		if err := encoder.Encode(issue); err != nil {
+			tempFile.Close()
+			os.Remove(tempPath)
+			return nil, fmt.Errorf("failed to write issue %s: %w", issue.ID, err)
+		}
+	}
+
+	if err := tempFile.Close(); err != nil {
+		os.Remove(tempPath)
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Atomically replace
+	if err := os.Rename(tempPath, issuesPath); err != nil {
+		os.Remove(tempPath)
+		return nil, fmt.Errorf("failed to replace issues.jsonl: %w", err)
+	}
+
+	return &TombstonePruneResult{
+		PrunedCount: len(prunedIDs),
+		PrunedIDs:   prunedIDs,
+		TTLDays:     ttlDays,
+	}, nil
 }
 
 func init() {

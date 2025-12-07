@@ -2058,3 +2058,147 @@ func TestIsExpiredTombstone(t *testing.T) {
 		})
 	}
 }
+
+// TestMerge3Way_TombstoneBaseBothLiveResurrection tests the scenario where
+// the base version is a tombstone but both left and right have live versions.
+// This can happen if Clone A deletes an issue, Clones B and C sync (getting tombstone),
+// then both B and C independently recreate an issue with same ID. (bd-bob)
+func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
+	// Base is a tombstone (issue was deleted)
+	baseTombstone := Issue{
+		ID:           "bd-abc123",
+		Title:        "Original title",
+		Status:       StatusTombstone,
+		Priority:     2,
+		CreatedAt:    "2024-01-01T00:00:00Z",
+		UpdatedAt:    "2024-01-05T00:00:00Z",
+		CreatedBy:    "user1",
+		DeletedAt:    time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339), // 10 days ago
+		DeletedBy:    "user2",
+		DeleteReason: "Obsolete",
+		OriginalType: "task",
+	}
+
+	// Left resurrects the issue with new content
+	leftLive := Issue{
+		ID:        "bd-abc123",
+		Title:     "Resurrected by left",
+		Status:    "open",
+		Priority:  2,
+		IssueType: "task",
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-10T00:00:00Z", // Left is older
+		CreatedBy: "user1",
+	}
+
+	// Right also resurrects with different content
+	rightLive := Issue{
+		ID:        "bd-abc123",
+		Title:     "Resurrected by right",
+		Status:    "in_progress",
+		Priority:  1, // Higher priority (lower number)
+		IssueType: "bug",
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-15T00:00:00Z", // Right is newer
+		CreatedBy: "user1",
+	}
+
+	t.Run("both sides resurrect with different content - standard merge applies", func(t *testing.T) {
+		base := []Issue{baseTombstone}
+		left := []Issue{leftLive}
+		right := []Issue{rightLive}
+
+		result, conflicts := merge3Way(base, left, right)
+
+		// Should not have conflicts - merge rules apply
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+
+		merged := result[0]
+
+		// Issue should be live (not tombstone)
+		if merged.Status == StatusTombstone {
+			t.Error("expected live issue after both sides resurrected, got tombstone")
+		}
+
+		// Title: right wins because it has later UpdatedAt
+		if merged.Title != "Resurrected by right" {
+			t.Errorf("expected title from right (later UpdatedAt), got %q", merged.Title)
+		}
+
+		// Priority: higher priority wins (lower number = more urgent)
+		if merged.Priority != 1 {
+			t.Errorf("expected priority 1 (higher), got %d", merged.Priority)
+		}
+
+		// Status: standard 3-way merge applies. When both sides changed from base,
+		// left wins (standard merge conflict resolution). Note: status does NOT use
+		// UpdatedAt tiebreaker like title does - it uses mergeField which picks left.
+		if merged.Status != "open" {
+			t.Errorf("expected status 'open' from left (both changed from base), got %q", merged.Status)
+		}
+
+		// Tombstone fields should NOT be present on merged result
+		if merged.DeletedAt != "" {
+			t.Errorf("expected empty DeletedAt on resurrected issue, got %q", merged.DeletedAt)
+		}
+		if merged.DeletedBy != "" {
+			t.Errorf("expected empty DeletedBy on resurrected issue, got %q", merged.DeletedBy)
+		}
+	})
+
+	t.Run("both resurrect with same status - no conflict", func(t *testing.T) {
+		leftOpen := leftLive
+		leftOpen.Status = "open"
+		rightOpen := rightLive
+		rightOpen.Status = "open"
+
+		base := []Issue{baseTombstone}
+		left := []Issue{leftOpen}
+		right := []Issue{rightOpen}
+
+		result, conflicts := merge3Way(base, left, right)
+
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+		if result[0].Status != "open" {
+			t.Errorf("expected status 'open', got %q", result[0].Status)
+		}
+	})
+
+	t.Run("one side closes after resurrection", func(t *testing.T) {
+		// Left resurrects and keeps open
+		leftOpen := leftLive
+		leftOpen.Status = "open"
+
+		// Right resurrects and then closes
+		rightClosed := rightLive
+		rightClosed.Status = "closed"
+		rightClosed.ClosedAt = "2024-01-16T00:00:00Z"
+
+		base := []Issue{baseTombstone}
+		left := []Issue{leftOpen}
+		right := []Issue{rightClosed}
+
+		result, conflicts := merge3Way(base, left, right)
+
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+		// Closed should win over open
+		if result[0].Status != "closed" {
+			t.Errorf("expected closed to win over open, got %q", result[0].Status)
+		}
+	})
+}
