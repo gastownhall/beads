@@ -1114,6 +1114,8 @@ func batchCheckGitHistory(repoRoot, jsonlPath string, ids []string) []string {
 
 // convertDeletionToTombstone converts a legacy DeletionRecord to a tombstone Issue.
 // This is used during import to migrate from deletions.jsonl to inline tombstones (bd-dve).
+// Note: We use zero for priority to indicate unknown (bd-9auw).
+// IssueType must be a valid type for validation, so we use TypeTask as default.
 func convertDeletionToTombstone(id string, del deletions.DeletionRecord) *types.Issue {
 	deletedAt := del.Timestamp
 	return &types.Issue{
@@ -1121,8 +1123,8 @@ func convertDeletionToTombstone(id string, del deletions.DeletionRecord) *types.
 		Title:        "(deleted)",
 		Description:  "",
 		Status:       types.StatusTombstone,
-		Priority:     2, // Default priority
-		IssueType:    types.TypeTask, // Default type (original_type unknown from deletions.jsonl)
+		Priority:     0,              // Unknown priority (0 = unset, distinguishes from user-set values)
+		IssueType:    types.TypeTask, // Default type (must be valid for validation)
 		CreatedAt:    del.Timestamp,
 		UpdatedAt:    del.Timestamp,
 		DeletedAt:    &deletedAt,

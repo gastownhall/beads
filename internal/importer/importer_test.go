@@ -1141,6 +1141,14 @@ func TestConvertDeletionToTombstone(t *testing.T) {
 	if tombstone.OriginalType != "" {
 		t.Errorf("Expected empty OriginalType, got %q", tombstone.OriginalType)
 	}
+	// Verify priority uses zero to indicate unknown (bd-9auw)
+	if tombstone.Priority != 0 {
+		t.Errorf("Expected Priority 0 (unknown), got %d", tombstone.Priority)
+	}
+	// IssueType must be valid for validation, so it defaults to task
+	if tombstone.IssueType != types.TypeTask {
+		t.Errorf("Expected IssueType 'task', got %q", tombstone.IssueType)
+	}
 }
 
 func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
