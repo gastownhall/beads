@@ -1,5 +1,8 @@
 # bd - Beads Issue Tracker 🔗
 
+[![Run in Smithery](https://smithery.ai/badge/skills/steveyegge)](https://smithery.ai/skills?ns=steveyegge&utm_source=github&utm_medium=badge)
+
+
 [![Go Version](https://img.shields.io/github/go-mod/go-version/steveyegge/beads)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/steveyegge/beads)](https://github.com/steveyegge/beads/releases)
 [![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
