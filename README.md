@@ -113,6 +113,11 @@ brew tap steveyegge/beads
 brew install bd
 ```
 
+**mise (polyglot runtime manager):**
+```bash
+mise use -g ubi:steveyegge/beads[exe=bd]
+```
+
 For full, platform-specific instructions (Windows, Arch Linux, manual builds, IDE integrations, etc.) see the canonical guide in [docs/INSTALLING.md](docs/INSTALLING.md).
 
 **Claude Code for Web:** See [npm-package/CLAUDE_CODE_WEB.md](npm-package/CLAUDE_CODE_WEB.md) for SessionStart hook setup.
