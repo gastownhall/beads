@@ -1243,6 +1243,181 @@ func TestSyncBranchNetworkFailure(t *testing.T) {
 	}
 }
 
+// TestSyncBranchCommitAndPush_WithPreCommitHook is a regression test for the bug where
+// daemon auto-sync failed when pre-commit hooks were installed.
+//
+// Bug: The gitCommitInWorktree function was missing --no-verify flag, causing
+// pre-commit hooks to execute in the worktree context. The bd pre-commit hook
+// runs "bd sync --flush-only" which fails in a worktree because:
+// 1. The worktree's .beads directory triggers hook execution
+// 2. But bd sync fails in the worktree context (wrong database path)
+// 3. This causes the hook to exit 1, failing the commit
+//
+// Fix: Add --no-verify to gitCommitInWorktree to skip hooks, matching the
+// behavior of the library function in internal/syncbranch/worktree.go
+//
+// This test verifies that sync branch commits succeed even when a failing
+// pre-commit hook is present.
+func TestSyncBranchCommitAndPush_WithPreCommitHook(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	initTestGitRepo(t, tmpDir)
+	initMainBranch(t, tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	testDBPath := filepath.Join(beadsDir, "test.db")
+	store, err := sqlite.New(context.Background(), testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set global dbPath so findJSONLPath() works
+	oldDBPath := dbPath
+	defer func() { dbPath = oldDBPath }()
+	dbPath = testDBPath
+
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	syncBranch := "beads-sync"
+	if err := store.SetConfig(ctx, "sync.branch", syncBranch); err != nil {
+		t.Fatalf("Failed to set sync.branch: %v", err)
+	}
+
+	// Create a pre-commit hook that simulates the bd pre-commit hook behavior.
+	// The actual bd hook runs "bd sync --flush-only" which fails in worktree context.
+	// We simulate this by creating a hook that:
+	// 1. Checks if .beads directory exists (like bd hook does)
+	// 2. If yes, exits with error 1 (simulating bd sync failure)
+	// Without --no-verify, this would cause gitCommitInWorktree to fail.
+	hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("Failed to create hooks dir: %v", err)
+	}
+
+	preCommitHook := filepath.Join(hooksDir, "pre-commit")
+	hookScript := `#!/bin/sh
+# Simulates bd pre-commit hook behavior that fails in worktree context
+# The real hook runs "bd sync --flush-only" which fails in worktrees
+if [ -d .beads ]; then
+    echo "Error: Simulated pre-commit hook failure (bd sync would fail here)" >&2
+    exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(preCommitHook, []byte(hookScript), 0755); err != nil {
+		t.Fatalf("Failed to write pre-commit hook: %v", err)
+	}
+
+	// Add a dummy remote so hasGitRemote() returns true
+	// (syncBranchCommitAndPush skips if no remote is configured)
+	runGitCmd(t, tmpDir, "remote", "add", "origin", "https://example.com/dummy.git")
+
+	// Create a test issue
+	issue := &types.Issue{
+		Title:     "Test with pre-commit hook",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	// Export to JSONL
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
+		t.Fatalf("Failed to export: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	log, logMsgs := newTestSyncBranchLogger()
+
+	// This is the critical test: with the fix (--no-verify), this should succeed.
+	// Without the fix, this would fail because the pre-commit hook exits 1.
+	committed, err := syncBranchCommitAndPush(ctx, store, false, log)
+
+	if err != nil {
+		t.Fatalf("syncBranchCommitAndPush failed with pre-commit hook present: %v\n"+
+			"This indicates the --no-verify flag is missing from gitCommitInWorktree.\n"+
+			"Logs: %s", err, *logMsgs)
+	}
+	if !committed {
+		t.Error("Expected committed=true with pre-commit hook present")
+	}
+
+	// Verify worktree was created
+	worktreePath := filepath.Join(tmpDir, ".git", "beads-worktrees", syncBranch)
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		t.Errorf("Worktree not created at %s", worktreePath)
+	}
+
+	// Verify JSONL was synced to worktree
+	worktreeJSONL := filepath.Join(worktreePath, ".beads", "issues.jsonl")
+	if _, err := os.Stat(worktreeJSONL); os.IsNotExist(err) {
+		t.Error("JSONL not synced to worktree")
+	}
+
+	// Verify commit was made in worktree
+	cmd := exec.Command("git", "-C", worktreePath, "log", "--oneline", "-1")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to get log: %v", err)
+	}
+	if !strings.Contains(string(output), "bd daemon sync") {
+		t.Errorf("Expected commit message with 'bd daemon sync', got: %s", string(output))
+	}
+
+	// Test multiple commits to ensure hook is consistently bypassed
+	for i := 0; i < 3; i++ {
+		// Update issue to create new changes
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"priority": (i % 4) + 1,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to update issue on iteration %d: %v", i, err)
+		}
+
+		if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
+			t.Fatalf("Failed to export on iteration %d: %v", i, err)
+		}
+
+		committed, err = syncBranchCommitAndPush(ctx, store, false, log)
+		if err != nil {
+			t.Fatalf("syncBranchCommitAndPush failed on iteration %d: %v", i, err)
+		}
+		if !committed {
+			t.Errorf("Expected committed=true on iteration %d", i)
+		}
+	}
+
+	// Verify we have multiple commits (initial sync branch commit + 1 initial + 3 updates)
+	cmd = exec.Command("git", "-C", worktreePath, "rev-list", "--count", "HEAD")
+	output, err = cmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to count commits: %v", err)
+	}
+	commitCount := strings.TrimSpace(string(output))
+	// At least 4 commits expected (may be more due to sync branch initialization)
+	if commitCount == "0" || commitCount == "1" {
+		t.Errorf("Expected multiple commits, got %s", commitCount)
+	}
+
+	t.Log("Pre-commit hook regression test passed: --no-verify correctly bypasses hooks")
+}
+
 // initMainBranch creates an initial commit on main branch
 // The JSONL file should not exist yet when this is called
 func initMainBranch(t *testing.T, dir string) {

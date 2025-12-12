@@ -23,7 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-const windowsOS = "windows"
+// windowsOS constant moved to test_helpers_test.go
 
 func initTestGitRepo(t testing.TB, dir string) {
 	t.Helper()
@@ -70,7 +70,7 @@ func TestGetPIDFilePath(t *testing.T) {
 	defer func() { dbPath = oldDBPath }()
 
 	dbPath = filepath.Join(tmpDir, ".beads", "test.db")
-	pidFile, err := getPIDFilePath(false) // test local daemon
+	pidFile, err := getPIDFilePath()
 	if err != nil {
 		t.Fatalf("getPIDFilePath failed: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestGetLogFilePath(t *testing.T) {
 			defer func() { dbPath = oldDBPath }()
 			dbPath = dbFile
 
-			result, err := getLogFilePath(userPath, false) // test local daemon
+			result, err := getLogFilePath(userPath)
 			if err != nil {
 				t.Fatalf("getLogFilePath failed: %v", err)
 			}

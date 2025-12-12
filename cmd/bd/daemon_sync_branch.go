@@ -151,8 +151,9 @@ func gitCommitInWorktree(ctx context.Context, worktreePath, filePath, message st
 		return fmt.Errorf("git add failed in worktree: %w", err)
 	}
 	
-	// Commit
-	commitCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "commit", "-m", message)
+	// Commit with --no-verify to skip hooks (pre-commit hook would fail in worktree context)
+	// The worktree is internal to bd sync, so we don't need to run bd's pre-commit hook
+	commitCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "commit", "--no-verify", "-m", message)
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed in worktree: %w\n%s", err, output)

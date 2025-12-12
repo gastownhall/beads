@@ -4,7 +4,6 @@
 package main
 
 import (
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -39,10 +38,4 @@ func mustAbs(t *testing.T, path string) string {
 	return abs
 }
 
-func runGitCmd(t *testing.T, dir string, args ...string) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git %v failed: %v", args, err)
-	}
-}
+// runGitCmd is defined in git_sync_test.go
