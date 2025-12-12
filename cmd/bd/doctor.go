@@ -1318,6 +1318,7 @@ func printDiagnostics(result doctorResult) {
 
 	// Print warnings/errors with fixes
 	hasIssues := false
+	unfixableErrors := 0
 	for _, check := range result.Checks {
 		if check.Status != statusOK && check.Fix != "" {
 			if !hasIssues {
@@ -1332,11 +1333,26 @@ func printDiagnostics(result doctorResult) {
 			}
 
 			fmt.Printf("  Fix: %s\n\n", check.Fix)
+		} else if check.Status == statusError && check.Fix == "" {
+			// Count unfixable errors
+			unfixableErrors++
 		}
 	}
 
 	if !hasIssues {
 		color.Green("✓ All checks passed\n")
+	}
+
+	// Suggest reset if there are multiple unfixable errors
+	if unfixableErrors >= 3 {
+		fmt.Println()
+		color.Yellow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		color.Yellow("⚠ Found %d unfixable errors\n", unfixableErrors)
+		fmt.Println()
+		fmt.Println("  Your beads state may be too corrupted to repair automatically.")
+		fmt.Println("  Consider running 'bd reset' to start fresh.")
+		fmt.Println("  (Use 'bd reset --backup' to save current state first)")
+		color.Yellow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	}
 }
 
