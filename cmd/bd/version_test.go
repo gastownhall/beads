@@ -77,6 +77,127 @@ func TestVersionCommand(t *testing.T) {
 	jsonOutput = false
 }
 
+func TestResolveCommitHash(t *testing.T) {
+	// Save original Commit value
+	origCommit := Commit
+	defer func() { Commit = origCommit }()
+
+	t.Run("returns ldflag value when set", func(t *testing.T) {
+		testCommit := "abc123def456"
+		Commit = testCommit
+		result := resolveCommitHash()
+		if result != testCommit {
+			t.Errorf("Expected %q, got %q", testCommit, result)
+		}
+	})
+
+	t.Run("returns empty string when not set", func(t *testing.T) {
+		Commit = ""
+		result := resolveCommitHash()
+		// Result could be from git or empty - just verify it doesn't panic
+		if result == "" || len(result) >= 7 {
+			// Either empty or looks like a git hash
+			return
+		}
+		t.Errorf("Unexpected result format: %q", result)
+	})
+}
+
+func TestResolveBranch(t *testing.T) {
+	// Save original Branch value
+	origBranch := Branch
+	defer func() { Branch = origBranch }()
+
+	t.Run("returns ldflag value when set", func(t *testing.T) {
+		testBranch := "main"
+		Branch = testBranch
+		result := resolveBranch()
+		if result != testBranch {
+			t.Errorf("Expected %q, got %q", testBranch, result)
+		}
+	})
+
+	t.Run("returns empty string or git branch when not set", func(t *testing.T) {
+		Branch = ""
+		result := resolveBranch()
+		// Result could be from git or empty - just verify it doesn't panic
+		if result == "" || result == "main" || strings.Contains(result, "detached") {
+			return
+		}
+		t.Logf("Got branch: %q", result)
+	})
+}
+
+func TestVersionOutputWithCommitAndBranch(t *testing.T) {
+	// Save original values
+	oldStdout := os.Stdout
+	origCommit := Commit
+	origBranch := Branch
+	defer func() {
+		os.Stdout = oldStdout
+		Commit = origCommit
+		Branch = origBranch
+	}()
+
+	t.Run("text output includes commit and branch when available", func(t *testing.T) {
+		Commit = "7e709405b38c472d8cbc996c7cd26df7e3b438d0"
+		Branch = "main"
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("Failed to create pipe: %v", err)
+		}
+		os.Stdout = w
+		jsonOutput = false
+
+		versionCmd.Run(versionCmd, []string{})
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		// Should contain both branch and commit
+		if !strings.Contains(output, "main@") {
+			t.Errorf("Expected output to contain 'main@', got: %s", output)
+		}
+		if !strings.Contains(output, "7e70940") { // first 7 chars of commit
+			t.Errorf("Expected output to contain commit hash, got: %s", output)
+		}
+	})
+
+	t.Run("json output includes commit and branch when available", func(t *testing.T) {
+		Commit = "7e709405b38c472d8cbc996c7cd26df7e3b438d0"
+		Branch = "main"
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("Failed to create pipe: %v", err)
+		}
+		os.Stdout = w
+		jsonOutput = true
+
+		versionCmd.Run(versionCmd, []string{})
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		var result map[string]string
+		if err := json.Unmarshal([]byte(output), &result); err != nil {
+			t.Fatalf("Failed to parse JSON output: %v", err)
+		}
+
+		if result["commit"] != Commit {
+			t.Errorf("Expected commit %q, got %q", Commit, result["commit"])
+		}
+		if result["branch"] != Branch {
+			t.Errorf("Expected branch %q, got %q", Branch, result["branch"])
+		}
+	})
+}
+
 func TestVersionFlag(t *testing.T) {
 	// Save original stdout
 	oldStdout := os.Stdout

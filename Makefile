@@ -34,9 +34,11 @@ bench-quick:
 	go test -bench=. -benchtime=100ms -tags=bench -run=^$$ ./internal/storage/sqlite/ -timeout=15m
 
 # Install bd to GOPATH/bin
-install: build
+install:
 	@echo "Installing bd to $$(go env GOPATH)/bin..."
-	go install ./cmd/bd
+	@bash -c 'commit=$$(git rev-parse HEAD 2>/dev/null || echo ""); \
+		branch=$$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""); \
+		go install -ldflags="-X main.Commit=$$commit -X main.Branch=$$branch" ./cmd/bd'
 
 # Clean build artifacts and benchmark profiles
 clean:
