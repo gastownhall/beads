@@ -3,6 +3,7 @@ package fix
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,6 +14,9 @@ import (
 // - When .beads is a symlink, Permissions() should return nil without changing anything
 // - This prevents attempts to chmod symlink targets (which may be read-only like /nix/store)
 func TestPermissions_SkipsSymlinkedBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping symlink test on Windows - requires elevated privileges")
+	}
 	tmpDir := t.TempDir()
 
 	// Create target .beads directory with wrong permissions
@@ -62,6 +66,9 @@ func TestPermissions_SkipsSymlinkedBeadsDir(t *testing.T) {
 // TestPermissions_SkipsSymlinkedDatabase verifies that chmod is skipped for
 // symlinked database files, but .beads directory permissions are still fixed.
 func TestPermissions_SkipsSymlinkedDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping symlink test on Windows - requires elevated privileges")
+	}
 	tmpDir := t.TempDir()
 
 	// Create real .beads directory with wrong permissions
@@ -125,6 +132,9 @@ func TestPermissions_SkipsSymlinkedDatabase(t *testing.T) {
 // TestPermissions_FixesRegularFiles verifies that permissions ARE fixed for
 // regular (non-symlinked) files.
 func TestPermissions_FixesRegularFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping permissions test on Windows - Unix-style permissions don't apply")
+	}
 	tmpDir := t.TempDir()
 
 	// Create .beads directory with wrong permissions
