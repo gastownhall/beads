@@ -98,6 +98,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		force, _ := cmd.Flags().GetBool("force")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 		ignoreDeletions, _ := cmd.Flags().GetBool("ignore-deletions")
+		protectLeftSnapshot, _ := cmd.Flags().GetBool("protect-left-snapshot")
 
 		// Check if stdin is being used interactively (not piped)
 		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
@@ -258,6 +259,23 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			OrphanHandling:             orphanHandling,
 			NoGitHistory:               noGitHistory,
 			IgnoreDeletions:            ignoreDeletions,
+		}
+
+		// If --protect-left-snapshot is set, read the left snapshot and build ID set
+		// This protects locally exported issues from git-history-backfill (bd-sync-deletion fix)
+		if protectLeftSnapshot && input != "" {
+			beadsDir := filepath.Dir(input)
+			leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
+			if _, err := os.Stat(leftSnapshotPath); err == nil {
+				sm := NewSnapshotManager(input)
+				leftIDs, err := sm.BuildIDSet(leftSnapshotPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to read left snapshot: %v\n", err)
+				} else if len(leftIDs) > 0 {
+					opts.ProtectLocalExportIDs = leftIDs
+					fmt.Fprintf(os.Stderr, "Protecting %d issue(s) from left snapshot\n", len(leftIDs))
+				}
+			}
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -774,6 +792,7 @@ func init() {
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
 	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
 	importCmd.Flags().Bool("ignore-deletions", false, "Import issues even if they're in the deletions manifest")
+	importCmd.Flags().Bool("protect-left-snapshot", false, "Protect issues in left snapshot from git-history-backfill (bd-sync-deletion fix)")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }

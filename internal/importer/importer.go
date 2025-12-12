@@ -44,6 +44,7 @@ type Options struct {
 	ClearDuplicateExternalRefs bool           // Clear duplicate external_ref values instead of erroring
 	NoGitHistory               bool           // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
 	IgnoreDeletions            bool           // Import issues even if they're in the deletions manifest
+	ProtectLocalExportIDs      map[string]bool // IDs from left snapshot to protect from git-history-backfill (bd-sync-deletion fix)
 }
 
 // Result contains statistics about the import operation
@@ -65,6 +66,8 @@ type Result struct {
 	SkippedDeletedIDs     []string          // IDs that were skipped due to deletions manifest
 	ConvertedToTombstone  int               // Legacy deletions.jsonl entries converted to tombstones (bd-wucl)
 	ConvertedTombstoneIDs []string          // IDs that were converted to tombstones
+	PreservedLocalExport  int               // Issues preserved because they were in local export (bd-sync-deletion fix)
+	PreservedLocalIDs     []string          // IDs that were preserved from local export
 }
 
 // ImportIssues handles the core import logic used by both manual and auto-import.
@@ -894,6 +897,17 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 			// This could be:
 			// 1. Local work (new issue not yet exported)
 			// 2. Deletion was pruned from manifest (check git history)
+			// 3. Issue was in local export but lost during pull/merge (bd-sync-deletion fix)
+
+			// Check if this issue was in our local export (left snapshot)
+			// If so, it's local work that got lost during merge - preserve it!
+			if opts.ProtectLocalExportIDs != nil && opts.ProtectLocalExportIDs[dbIssue.ID] {
+				fmt.Fprintf(os.Stderr, "Preserving %s (was in local export, lost during merge)\n", dbIssue.ID)
+				result.PreservedLocalExport++
+				result.PreservedLocalIDs = append(result.PreservedLocalIDs, dbIssue.ID)
+				continue
+			}
+
 			needGitCheck = append(needGitCheck, dbIssue.ID)
 		}
 	}
