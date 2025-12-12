@@ -74,7 +74,7 @@ func CountImpact() (*ImpactSummary, error) {
 		ctx := context.Background()
 		store, err := sqlite.New(ctx, dbPath)
 		if err == nil {
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 
 			// Count all issues including tombstones
 			allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})

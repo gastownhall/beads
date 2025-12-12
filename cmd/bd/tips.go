@@ -256,6 +256,7 @@ func isClaudeSetupComplete() bool {
 
 	// Check if beads plugin is installed - plugin now provides hooks automatically
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	// #nosec G304 -- settingsPath is constructed from user home dir, not user input
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		var settings map[string]interface{}
 		if err := json.Unmarshal(data, &settings); err == nil {
@@ -287,7 +288,7 @@ func isClaudeSetupComplete() bool {
 
 // hasBeadsPrimeHooks checks if a settings file has bd prime hooks configured
 func hasBeadsPrimeHooks(settingsPath string) bool {
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- path is either from home dir or relative project path
 	if err != nil {
 		return false
 	}

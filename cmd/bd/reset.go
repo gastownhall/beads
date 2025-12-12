@@ -139,7 +139,7 @@ EXAMPLES:
 
 			response = strings.TrimSpace(strings.ToLower(response))
 			if response != "y" && response != "yes" {
-				fmt.Printf("Reset cancelled.\n")
+				fmt.Printf("Reset canceled.\n")
 				return
 			}
 		}
