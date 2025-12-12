@@ -58,6 +58,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # RAM disk provides ~1750x faster IOPS than Windows C: drive
+      # This dramatically speeds up SQLite tests and temp file operations
+      - name: Setup RAM Disk
+        uses: chad-golden/setup-ramdisk@v1
+        with:
+          size-in-mb: 4096
+          drive-letter: 'R'
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -72,7 +80,15 @@ jobs:
         run: go build -v ./cmd/bd
 
       - name: Test cmd package
-        run: go test -v -short -timeout=30m -parallel=4 ./cmd/...
+        env:
+          TMPDIR: R:\tmp
+          TEMP: R:\tmp
+          TMP: R:\tmp
+          GOCACHE: R:\go-cache
+          GOMODCACHE: R:\go-mod
+        run: |
+          New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
+          go test -v -short -timeout=30m -parallel=4 ./cmd/...
 
   test-windows-internal:
     name: Test (Windows - internal)
@@ -80,6 +96,14 @@ jobs:
     continue-on-error: true  # Windows filesystem is slow; don't block PRs
     steps:
       - uses: actions/checkout@v6
+
+      # RAM disk provides ~1750x faster IOPS than Windows C: drive
+      # This dramatically speeds up SQLite tests and temp file operations
+      - name: Setup RAM Disk
+        uses: chad-golden/setup-ramdisk@v1
+        with:
+          size-in-mb: 4096
+          drive-letter: 'R'
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -92,7 +116,15 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Test internal packages
-        run: go test -v -short -timeout=30m -parallel=4 ./internal/...
+        env:
+          TMPDIR: R:\tmp
+          TEMP: R:\tmp
+          TMP: R:\tmp
+          GOCACHE: R:\go-cache
+          GOMODCACHE: R:\go-mod
+        run: |
+          New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
+          go test -v -short -timeout=30m -parallel=4 ./internal/...
 
   lint:
     name: Lint
