@@ -35,6 +35,9 @@ beads.left.meta.json
 beads.right.jsonl
 beads.right.meta.json
 
+# Backup directories created by bd reset --backup
+.beads-backup-*/
+
 # Keep JSONL exports and config (source of truth for git)
 !issues.jsonl
 !metadata.json
