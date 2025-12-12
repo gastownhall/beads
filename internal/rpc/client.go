@@ -293,6 +293,11 @@ func (c *Client) CloseIssue(args *CloseArgs) (*Response, error) {
 	return c.Execute(OpClose, args)
 }
 
+// Delete deletes one or more issues via the daemon.
+func (c *Client) Delete(args *DeleteArgs) (*Response, error) {
+	return c.Execute(OpDelete, args)
+}
+
 // List lists issues via the daemon
 func (c *Client) List(args *ListArgs) (*Response, error) {
 	return c.Execute(OpList, args)

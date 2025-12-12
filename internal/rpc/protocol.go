@@ -36,6 +36,7 @@ const (
 	OpEpicStatus      = "epic_status"
 	OpGetMutations    = "get_mutations"
 	OpShutdown        = "shutdown"
+	OpDelete          = "delete"
 )
 
 // Request represents an RPC request from client to daemon
@@ -95,6 +96,15 @@ type UpdateArgs struct {
 type CloseArgs struct {
 	ID     string `json:"id"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// DeleteArgs represents arguments for the delete operation
+type DeleteArgs struct {
+	IDs     []string `json:"ids"`               // Issue IDs to delete
+	Force   bool     `json:"force,omitempty"`   // Force deletion without confirmation
+	DryRun  bool     `json:"dry_run,omitempty"` // Preview mode
+	Cascade bool     `json:"cascade,omitempty"` // Recursively delete dependents
+	Reason  string   `json:"reason,omitempty"`  // Reason for deletion
 }
 
 // ListArgs represents arguments for the list operation

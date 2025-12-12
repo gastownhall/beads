@@ -176,6 +176,8 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleUpdate(req)
 	case OpClose:
 		resp = s.handleClose(req)
+	case OpDelete:
+		resp = s.handleDelete(req)
 	case OpList:
 		resp = s.handleList(req)
 	case OpCount:

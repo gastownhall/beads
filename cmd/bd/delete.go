@@ -15,9 +15,78 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/deletions"
+	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// deleteViaDaemon uses the RPC daemon to delete issues
+func deleteViaDaemon(issueIDs []string, force, dryRun, cascade bool, jsonOutput bool, reason string) {
+	// NOTE: The daemon's delete handler implements the core deletion logic.
+	// cascade and detailed dependency handling are not yet implemented in the RPC layer.
+	// For now, we pass force=true to the daemon and rely on its simpler deletion logic.
+	
+	deleteArgs := &rpc.DeleteArgs{
+		IDs:     issueIDs,
+		Force:   force,
+		DryRun:  dryRun,
+		Cascade: cascade,
+		Reason:  reason,
+	}
+	
+	resp, err := daemonClient.Delete(deleteArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+	
+	// Parse response
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if jsonOutput {
+		outputJSON(result)
+		return
+	}
+	
+	// Pretty print for human output
+	if dryRun {
+		fmt.Printf("Dry run - would delete %v issue(s)\n", result["issue_count"])
+		return
+	}
+	
+	deletedCount := int(result["deleted_count"].(float64))
+	totalCount := int(result["total_count"].(float64))
+	
+	green := color.New(color.FgGreen).SprintFunc()
+	if deletedCount > 0 {
+		if deletedCount == 1 {
+			fmt.Printf("%s Deleted %s\n", green("✓"), issueIDs[0])
+		} else {
+			fmt.Printf("%s Deleted %d issue(s)\n", green("✓"), deletedCount)
+		}
+	}
+	
+	if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
+		yellow := color.New(color.FgYellow).SprintFunc()
+		fmt.Printf("\n%s Warnings:\n", yellow("⚠"))
+		for _, e := range errors {
+			fmt.Printf("  %s\n", e)
+		}
+		if deletedCount < totalCount {
+			os.Exit(1)
+		}
+	}
+}
+
 var deleteCmd = &cobra.Command{
 	Use:   "delete <issue-id> [issue-id...]",
 	Short: "Delete one or more issues and clean up references",
@@ -67,25 +136,29 @@ Force: Delete and orphan dependents
 		}
 		// Remove duplicates
 		issueIDs = uniqueStrings(issueIDs)
-		// Handle batch deletion
-		if len(issueIDs) > 1 {
-			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, "batch delete")
+		
+		// Use daemon if available, otherwise use direct mode
+		if daemonClient != nil {
+			deleteViaDaemon(issueIDs, force, dryRun, cascade, jsonOutput, "delete")
 			return
 		}
-		// Single issue deletion (legacy behavior)
-		issueID := issueIDs[0]
-		// Ensure we have a direct store when daemon lacks delete support
-		if daemonClient != nil {
-			if err := ensureDirectMode("daemon does not support delete command"); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else if store == nil {
+		
+		// Direct mode - ensure store is available
+		if store == nil {
 			if err := ensureStoreActive(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 		}
+		
+		// Handle batch deletion in direct mode
+		if len(issueIDs) > 1 {
+			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, "batch delete")
+			return
+		}
+		
+		// Single issue deletion (legacy behavior)
+		issueID := issueIDs[0]
 		ctx := rootCtx
 		// Get the issue to be deleted
 		issue, err := store.GetIssue(ctx, issueID)
@@ -346,13 +419,8 @@ func removeIssueFromJSONL(issueID string) error {
 // deleteBatch handles deletion of multiple issues
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, reason string) {
-	// Ensure we have a direct store when daemon lacks delete support
-	if daemonClient != nil {
-		if err := ensureDirectMode("daemon does not support delete command"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-	} else if store == nil {
+	// Ensure we have a direct store
+	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

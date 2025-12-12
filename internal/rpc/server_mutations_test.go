@@ -275,3 +275,153 @@ func TestEmitMutation_NonBlocking(t *testing.T) {
 		t.Errorf("expected at most 100 mutations in buffer, got %d", len(mutations))
 	}
 }
+
+// TestHandleDelete_EmitsMutation verifies that delete operations emit mutation events
+// This is a regression test for the issue where delete operations bypass the daemon
+// and don't trigger auto-sync. The delete RPC handler should emit MutationDelete events.
+func TestHandleDelete_EmitsMutation(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create an issue first
+	createArgs := CreateArgs{
+		Title:     "Test Issue for Deletion",
+		IssueType: "bug",
+		Priority:  1,
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-user",
+	}
+
+	createResp := server.handleCreate(createReq)
+	if !createResp.Success {
+		t.Fatalf("failed to create test issue: %s", createResp.Error)
+	}
+
+	// Parse the created issue to get its ID
+	var createdIssue map[string]interface{}
+	if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse created issue: %v", err)
+	}
+	issueID := createdIssue["id"].(string)
+
+	// Clear mutation buffer to isolate delete event
+	_ = server.GetRecentMutations(time.Now().UnixMilli())
+
+	// Now delete the issue via RPC
+	deleteArgs := DeleteArgs{
+		IDs:    []string{issueID},
+		Force:  true,
+		Reason: "test deletion",
+	}
+	deleteJSON, _ := json.Marshal(deleteArgs)
+	deleteReq := &Request{
+		Operation: OpDelete,
+		Args:      deleteJSON,
+		Actor:     "test-user",
+	}
+
+	deleteResp := server.handleDelete(deleteReq)
+	if !deleteResp.Success {
+		t.Fatalf("delete operation failed: %s", deleteResp.Error)
+	}
+
+	// Verify mutation event was emitted
+	mutations := server.GetRecentMutations(0)
+	if len(mutations) == 0 {
+		t.Fatal("expected delete mutation event, but no mutations were emitted")
+	}
+
+	// Find the delete mutation
+	var deleteMutation *MutationEvent
+	for _, m := range mutations {
+		if m.Type == MutationDelete && m.IssueID == issueID {
+			deleteMutation = &m
+			break
+		}
+	}
+
+	if deleteMutation == nil {
+		t.Errorf("expected MutationDelete event for issue %s, but none found in mutations: %+v", issueID, mutations)
+	}
+}
+
+// TestHandleDelete_BatchEmitsMutations verifies batch delete emits mutation for each issue
+func TestHandleDelete_BatchEmitsMutations(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create multiple issues
+	issueIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		createArgs := CreateArgs{
+			Title:     "Test Issue " + string(rune('A'+i)),
+			IssueType: "bug",
+			Priority:  1,
+		}
+		createJSON, _ := json.Marshal(createArgs)
+		createReq := &Request{
+			Operation: OpCreate,
+			Args:      createJSON,
+			Actor:     "test-user",
+		}
+
+		createResp := server.handleCreate(createReq)
+		if !createResp.Success {
+			t.Fatalf("failed to create test issue %d: %s", i, createResp.Error)
+		}
+
+		var createdIssue map[string]interface{}
+		if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+			t.Fatalf("failed to parse created issue %d: %v", i, err)
+		}
+		issueIDs[i] = createdIssue["id"].(string)
+	}
+
+	// Clear mutation buffer
+	_ = server.GetRecentMutations(time.Now().UnixMilli())
+
+	// Batch delete all issues
+	deleteArgs := DeleteArgs{
+		IDs:    issueIDs,
+		Force:  true,
+		Reason: "batch test deletion",
+	}
+	deleteJSON, _ := json.Marshal(deleteArgs)
+	deleteReq := &Request{
+		Operation: OpDelete,
+		Args:      deleteJSON,
+		Actor:     "test-user",
+	}
+
+	deleteResp := server.handleDelete(deleteReq)
+	if !deleteResp.Success {
+		t.Fatalf("batch delete operation failed: %s", deleteResp.Error)
+	}
+
+	// Verify mutation events were emitted for each deleted issue
+	mutations := server.GetRecentMutations(0)
+	deleteMutations := 0
+	deletedIDs := make(map[string]bool)
+
+	for _, m := range mutations {
+		if m.Type == MutationDelete {
+			deleteMutations++
+			deletedIDs[m.IssueID] = true
+		}
+	}
+
+	if deleteMutations != len(issueIDs) {
+		t.Errorf("expected %d delete mutations, got %d", len(issueIDs), deleteMutations)
+	}
+
+	// Verify all issue IDs have corresponding mutations
+	for _, id := range issueIDs {
+		if !deletedIDs[id] {
+			t.Errorf("no delete mutation found for issue %s", id)
+		}
+	}
+}
