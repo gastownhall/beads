@@ -43,7 +43,11 @@ func TestInstallHooks(t *testing.T) {
 		t.Skipf("Skipping test: git init failed: %v", err)
 	}
 
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
+	gitDirPath, err := getGitDir()
+	if err != nil {
+		t.Fatalf("getGitDir() failed: %v", err)
+	}
+	gitDir := filepath.Join(gitDirPath, "hooks")
 
 	// Get embedded hooks
 	hooks, err := getEmbeddedHooks()
@@ -90,7 +94,16 @@ func TestInstallHooksBackup(t *testing.T) {
 		t.Skipf("Skipping test: git init failed: %v", err)
 	}
 
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
+	gitDirPath, err := getGitDir()
+	if err != nil {
+		t.Fatalf("getGitDir() failed: %v", err)
+	}
+	gitDir := filepath.Join(gitDirPath, "hooks")
+
+	// Ensure hooks directory exists
+	if err := os.MkdirAll(gitDir, 0750); err != nil {
+		t.Fatalf("Failed to create hooks directory: %v", err)
+	}
 
 	// Create an existing hook
 	existingHook := filepath.Join(gitDir, "pre-commit")
@@ -138,7 +151,16 @@ func TestInstallHooksForce(t *testing.T) {
 		t.Skipf("Skipping test: git init failed: %v", err)
 	}
 
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
+	gitDirPath, err := getGitDir()
+	if err != nil {
+		t.Fatalf("getGitDir() failed: %v", err)
+	}
+	gitDir := filepath.Join(gitDirPath, "hooks")
+
+	// Ensure hooks directory exists
+	if err := os.MkdirAll(gitDir, 0750); err != nil {
+		t.Fatalf("Failed to create hooks directory: %v", err)
+	}
 
 	// Create an existing hook
 	existingHook := filepath.Join(gitDir, "pre-commit")
@@ -176,7 +198,11 @@ func TestUninstallHooks(t *testing.T) {
 		t.Skipf("Skipping test: git init failed: %v", err)
 	}
 
-	gitDir := filepath.Join(tmpDir, ".git", "hooks")
+	gitDirPath, err := getGitDir()
+	if err != nil {
+		t.Fatalf("getGitDir() failed: %v", err)
+	}
+	gitDir := filepath.Join(gitDirPath, "hooks")
 
 	// Get embedded hooks and install them
 	hooks, err := getEmbeddedHooks()
@@ -294,7 +320,11 @@ func TestInstallHooksShared(t *testing.T) {
 	}
 
 	// Verify hooks were NOT installed to .git/hooks/
-	standardHooksDir := filepath.Join(".git", "hooks")
+	gitDirPath, err := getGitDir()
+	if err != nil {
+		t.Fatalf("getGitDir() failed: %v", err)
+	}
+	standardHooksDir := filepath.Join(gitDirPath, "hooks")
 	for hookName := range hooks {
 		hookPath := filepath.Join(standardHooksDir, hookName)
 		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
