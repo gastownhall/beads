@@ -38,33 +38,32 @@ bd init --branch beads-metadata
 
 This creates a `.beads/` directory and configures beads to commit to `beads-metadata` instead of `main`.
 
-**Important:** After initialization, you'll see some untracked files that should be committed to your protected branch:
+**Important:** After initialization, commit the beads configuration to your protected branch:
 
 ```bash
-# Check what files were created
-git status
-
-# Commit the beads configuration to your protected branch
-git add .beads/.gitignore .gitattributes
+# The .beads/.gitignore uses a whitelist - only tracked files show up
+git add .beads/ .gitattributes
 git commit -m "Initialize beads issue tracker"
 git push origin main  # Or create a PR if required
 ```
 
 **Files created by `bd init --branch`:**
 
-Files that should be committed to your protected branch (main):
-- `.beads/.gitignore` - Tells git what to ignore in .beads/ directory
+Files committed to your **protected branch** (main):
+- `.beads/.gitignore` - Whitelist of tracked files (everything else ignored)
 - `.gitattributes` - Configures merge driver for intelligent JSONL conflict resolution
 
-Files that are automatically gitignored (do NOT commit):
-- `.beads/beads.db` - SQLite database (local only, regenerated from JSONL)
-- `.beads/daemon.lock`, `daemon.log`, `daemon.pid` - Runtime files
-- `.beads/beads.left.jsonl`, `beads.right.jsonl` - Temporary merge artifacts
-
-The sync branch (beads-metadata) will contain:
-- `.beads/beads.jsonl` - Issue data in JSONL format (committed automatically by daemon)
+Files committed to your **sync branch** (beads-metadata) by the daemon:
+- `.beads/issues.jsonl` - Issue data in JSONL format
 - `.beads/metadata.json` - Metadata about the beads installation
-- `.beads/config.yaml` - Configuration template (optional)
+- `.beads/config.yaml` - Configuration settings
+- `.beads/README.md` - Documentation for contributors
+
+Files that are **automatically ignored** (local only, never committed):
+- `.beads/beads.db` - SQLite database (regenerated from JSONL)
+- `.beads/daemon.*` - Runtime files (lock, log, pid, socket)
+- `.beads/beads.*.jsonl` - Temporary merge artifacts
+- Everything else in `.beads/` not explicitly whitelisted
 
 **2. Start the daemon with auto-commit:**
 
@@ -112,17 +111,19 @@ your-project/
 **What lives in each branch:**
 
 Main branch (protected):
-- `.beads/.gitignore` - Tells git what to ignore
+- `.beads/.gitignore` - Whitelist of tracked files
 - `.gitattributes` - Merge driver configuration
 
 Sync branch (beads-metadata):
-- `.beads/beads.jsonl` - Issue data (committed by daemon)
+- `.beads/issues.jsonl` - Issue data (committed by daemon)
 - `.beads/metadata.json` - Repository metadata
-- `.beads/config.yaml` - Configuration template
+- `.beads/config.yaml` - Configuration settings
+- `.beads/README.md` - Documentation
 
-Not tracked (gitignored):
+Not tracked (gitignored via whitelist):
 - `.beads/beads.db` - SQLite database (local only)
 - `.beads/daemon.*` - Runtime files
+- Everything else not in the whitelist
 
 **Key points:**
 - The worktree is in `.git/beads-worktrees/` (hidden from your workspace)

@@ -7,52 +7,38 @@ import (
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
-const GitignoreTemplate = `# SQLite databases
-*.db
-*.db?*
-*.db-journal
-*.db-wal
-*.db-shm
+// Uses whitelist approach: ignore everything by default, explicitly allow tracked files.
+// This prevents confusion about which files to commit (fixes GitHub #473).
+const GitignoreTemplate = `# Ignore all .beads/ contents by default (local workspace files)
+# Only files explicitly whitelisted below will be tracked in git
+*
 
-# Daemon runtime files
-daemon.lock
-daemon.log
-daemon.pid
-bd.sock
+# === Files tracked in git (shared across clones) ===
 
-# Local version tracking (prevents upgrade notification spam after git ops)
-.local_version
+# This gitignore file itself
+!.gitignore
 
-# Legacy database files
-db.sqlite
-bd.db
-
-# Merge artifacts (temporary files from 3-way merge)
-beads.base.jsonl
-beads.base.meta.json
-beads.left.jsonl
-beads.left.meta.json
-beads.right.jsonl
-beads.right.meta.json
-
-# Backup directories created by bd reset --backup
-.beads-backup-*/
-
-# Keep JSONL exports and config (source of truth for git)
+# Issue data in JSONL format (the main data file)
 !issues.jsonl
+
+# Repository metadata (database name, JSONL filename)
 !metadata.json
-!config.json
+
+# Configuration template (sync branch, integrations)
+!config.yaml
+
+# Documentation for contributors
+!README.md
 `
 
 // requiredPatterns are patterns that MUST be in .beads/.gitignore
+// With the whitelist approach, we check for the blanket ignore and whitelisted files
 var requiredPatterns = []string{
-	"beads.base.jsonl",
-	"beads.left.jsonl",
-	"beads.right.jsonl",
-	"beads.base.meta.json",
-	"beads.left.meta.json",
-	"beads.right.meta.json",
-	"*.db?*",
+	"*",            // Blanket ignore (whitelist approach)
+	"!.gitignore",  // Whitelist the gitignore itself
+	"!issues.jsonl",
+	"!metadata.json",
+	"!config.yaml", // Fixed: was incorrectly !config.json before #473
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date
@@ -83,7 +69,7 @@ func CheckGitignore() DoctorCheck {
 		return DoctorCheck{
 			Name:    "Gitignore",
 			Status:  "warning",
-			Message: "Outdated .beads/.gitignore (missing merge artifact patterns)",
+			Message: "Outdated .beads/.gitignore (needs whitelist patterns)",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
 			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
 		}

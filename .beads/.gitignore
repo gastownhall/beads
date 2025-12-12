@@ -1,33 +1,20 @@
-# SQLite databases
-*.db
-*.db?*
-*.db-journal
-*.db-wal
-*.db-shm
+# Ignore all .beads/ contents by default (local workspace files)
+# Only files explicitly whitelisted below will be tracked in git
+*
 
-# Daemon runtime files
-daemon.lock
-daemon.log
-daemon.pid
-bd.sock
+# === Files tracked in git (shared across clones) ===
 
-# Local version tracking (prevents upgrade notification spam after git operations)
-# bd-tok: Store version locally instead of in tracked metadata.json
-.local_version
+# This gitignore file itself
+!.gitignore
 
-# Legacy database files
-db.sqlite
-bd.db
-
-# Merge artifacts (temporary files from 3-way merge)
-beads.base.jsonl
-beads.base.meta.json
-beads.left.jsonl
-beads.left.meta.json
-beads.right.jsonl
-beads.right.meta.json
-
-# Keep JSONL exports and config (source of truth for git)
+# Issue data in JSONL format (the main data file)
 !issues.jsonl
+
+# Repository metadata (database name, JSONL filename)
 !metadata.json
-!config.json
+
+# Configuration template (sync branch, integrations)
+!config.yaml
+
+# Documentation for contributors
+!README.md
