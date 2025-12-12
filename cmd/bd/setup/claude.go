@@ -66,7 +66,7 @@ func InstallClaude(project bool, stealth bool) {
 	}
 
 	// Add bd to allowedTools so commands don't require per-command approval
-	if addAllowedTool(settings, "Bash(bd:*)") {
+	if addAllowedTool(settings, "Bash(bd *)") {
 		fmt.Println("✓ Added bd to allowedTools (no per-command approval needed)")
 	}
 
@@ -155,7 +155,7 @@ func RemoveClaude(project bool) {
 	removeHookCommand(hooks, "PreCompact", "bd prime --stealth")
 
 	// Remove bd from allowedTools
-	removeAllowedTool(settings, "Bash(bd:*)")
+	removeAllowedTool(settings, "Bash(bd *)")
 
 	// Write back
 	data, err = json.MarshalIndent(settings, "", "  ")

@@ -418,25 +418,25 @@ func TestAddAllowedTool(t *testing.T) {
 		{
 			name:             "add tool to empty settings",
 			existingSettings: make(map[string]interface{}),
-			tool:             "Bash(bd:*)",
+			tool:             "Bash(bd *)",
 			wantAdded:        true,
 			wantLen:          1,
 		},
 		{
 			name: "add tool to existing allowedTools",
 			existingSettings: map[string]interface{}{
-				"allowedTools": []interface{}{"Bash(git:*)"},
+				"allowedTools": []interface{}{"Bash(git *)"},
 			},
-			tool:      "Bash(bd:*)",
+			tool:      "Bash(bd *)",
 			wantAdded: true,
 			wantLen:   2,
 		},
 		{
 			name: "tool already exists",
 			existingSettings: map[string]interface{}{
-				"allowedTools": []interface{}{"Bash(bd:*)"},
+				"allowedTools": []interface{}{"Bash(bd *)"},
 			},
-			tool:      "Bash(bd:*)",
+			tool:      "Bash(bd *)",
 			wantAdded: false,
 			wantLen:   1,
 		},
@@ -483,31 +483,31 @@ func TestRemoveAllowedTool(t *testing.T) {
 		{
 			name: "remove only tool",
 			existingSettings: map[string]interface{}{
-				"allowedTools": []interface{}{"Bash(bd:*)"},
+				"allowedTools": []interface{}{"Bash(bd *)"},
 			},
-			tool:    "Bash(bd:*)",
+			tool:    "Bash(bd *)",
 			wantLen: 0,
 		},
 		{
 			name: "remove one of multiple tools",
 			existingSettings: map[string]interface{}{
-				"allowedTools": []interface{}{"Bash(git:*)", "Bash(bd:*)", "Bash(npm:*)"},
+				"allowedTools": []interface{}{"Bash(git *)", "Bash(bd *)", "Bash(npm *)"},
 			},
-			tool:    "Bash(bd:*)",
+			tool:    "Bash(bd *)",
 			wantLen: 2,
 		},
 		{
 			name: "remove non-existent tool",
 			existingSettings: map[string]interface{}{
-				"allowedTools": []interface{}{"Bash(git:*)"},
+				"allowedTools": []interface{}{"Bash(git *)"},
 			},
-			tool:    "Bash(bd:*)",
+			tool:    "Bash(bd *)",
 			wantLen: 1,
 		},
 		{
 			name:             "remove from empty settings",
 			existingSettings: make(map[string]interface{}),
-			tool:             "Bash(bd:*)",
+			tool:             "Bash(bd *)",
 			wantLen:          0,
 		},
 	}
