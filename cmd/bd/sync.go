@@ -666,6 +666,15 @@ Use --merge to merge the sync branch back to main branch.`,
 				if err := restoreBeadsDirFromBranch(ctx); err != nil {
 					// Non-fatal - just means git status will show modified files
 					debug.Logf("sync: failed to restore .beads/ from branch: %v", err)
+				} else {
+					// Update jsonl_content_hash to match the restored file
+					// This prevents daemon/CLI from seeing a hash mismatch and re-importing
+					// which would trigger re-export and dirty the working directory (bd-c83r race fix)
+					if restoredHash, err := computeJSONLHash(jsonlPath); err == nil {
+						if err := store.SetMetadata(ctx, "jsonl_content_hash", restoredHash); err != nil {
+							debug.Logf("sync: failed to update hash after restore: %v", err)
+						}
+					}
 				}
 				// Skip final flush in PersistentPostRun - we've already exported to sync branch
 				// and restored the working directory to match the current branch

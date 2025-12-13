@@ -598,6 +598,18 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 			return
 		}
 
+		// Update jsonl_content_hash after successful import to prevent repeated imports
+		// Uses repoKey for multi-repo support (bd-ar2.10, bd-ar2.11)
+		hashKey := "jsonl_content_hash"
+		if repoKey != "" {
+			hashKey += ":" + repoKey
+		}
+		if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
+			if err := store.SetMetadata(importCtx, hashKey, currentHash); err != nil {
+				log.log("Warning: failed to update %s after import: %v", hashKey, err)
+			}
+		}
+
 		if skipGit {
 			log.log("Local auto-import complete")
 		} else {
