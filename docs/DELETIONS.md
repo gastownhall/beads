@@ -6,131 +6,116 @@ This document describes how bd tracks and propagates deletions across repository
 
 When issues are deleted in one clone, those deletions need to propagate to other clones. Without this mechanism, deleted issues would "resurrect" when another clone's database is imported.
 
-The **deletions manifest** (`.beads/deletions.jsonl`) is an append-only log that records every deletion. This file is committed to git and synced across all clones.
+**Beads uses inline tombstones** - deleted issues are converted to a special `tombstone` status and remain in `issues.jsonl`. This provides:
 
-## File Format
+- Full audit trail (who, when, why)
+- Atomic sync with issue data (no separate manifest to merge)
+- TTL-based expiration (default 30 days)
+- Proper 3-way merge conflict resolution
 
-The deletions manifest is a JSON Lines file where each line is a deletion record:
+## How Tombstones Work
 
-```jsonl
-{"id":"bd-abc","ts":"2025-01-15T10:00:00Z","by":"stevey","reason":"duplicate of bd-xyz"}
-{"id":"bd-def","ts":"2025-01-15T10:05:00Z","by":"claude","reason":"cleanup"}
+When you delete an issue:
+
+1. The issue's status changes to `tombstone`
+2. Deletion metadata is recorded (`deleted_at`, `deleted_by`, `delete_reason`)
+3. The original issue type is preserved in `original_type`
+4. All dependencies are removed (tombstones don't block anything)
+5. The tombstone syncs via git like any other issue
+
+### Tombstone Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Always `"tombstone"` |
+| `deleted_at` | ISO 8601 | When the issue was deleted |
+| `deleted_by` | string | Actor who performed the deletion |
+| `delete_reason` | string | Optional context (e.g., "duplicate", "cleanup") |
+| `original_type` | string | Issue type before deletion (task, bug, etc.) |
+
+### Example Tombstone in JSONL
+
+```json
+{"id":"bd-42","status":"tombstone","title":"Original title","deleted_at":"2025-01-15T10:00:00Z","deleted_by":"stevey","delete_reason":"duplicate of bd-xyz","original_type":"task"}
 ```
-
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Issue ID that was deleted |
-| `ts` | string | Yes | ISO 8601 UTC timestamp |
-| `by` | string | Yes | Actor who performed the deletion |
-| `reason` | string | No | Optional context (e.g., "duplicate", "cleanup") |
 
 ## Commands
 
 ### Deleting Issues
 
 ```bash
-bd delete bd-42                    # Delete single issue
-bd delete bd-42 bd-43 bd-44        # Delete multiple issues
-bd cleanup -f                      # Delete all closed issues
+bd delete bd-42                    # Delete single issue (preview mode)
+bd delete bd-42 --force            # Actually delete
+bd delete bd-42 bd-43 bd-44 -f     # Delete multiple issues
+bd delete bd-42 --cascade -f       # Delete with all dependents
+bd delete --from-file ids.txt -f   # Delete from file (one ID per line)
+bd delete bd-42 --dry-run          # Preview what would be deleted
 ```
 
-All deletions are automatically recorded to the manifest.
-
-### Viewing Deletions
+### Viewing Deleted Issues
 
 ```bash
-bd deleted                         # Recent deletions (last 7 days)
-bd deleted --since=30d             # Deletions in last 30 days
-bd deleted --all                   # All tracked deletions
-bd deleted bd-xxx                  # Lookup specific issue
-bd deleted --json                  # Machine-readable output
+bd list --status=tombstone         # List all tombstones
+bd show bd-42                      # View tombstone details (if you know the ID)
 ```
 
-## Propagation Mechanism
+## TTL and Expiration
 
-### Export (Local Delete)
+Tombstones expire after a configurable TTL (default: 30 days). This prevents unbounded growth while ensuring deletions propagate to all clones.
 
-1. `bd delete` removes issue from SQLite
-2. Deletion record appended to `deletions.jsonl`
-3. `bd sync` commits and pushes the manifest
+### How Expiration Works
 
-### Import (Remote Delete)
+1. Tombstones older than TTL + 1 hour grace period are eligible for pruning
+2. `bd compact` removes expired tombstones from `issues.jsonl`
+3. Git history fallback handles edge cases where pruned tombstones are needed
 
-1. `bd sync` pulls updated manifest
-2. Import checks each DB issue against manifest
-3. If issue ID is in manifest, it's deleted from local DB
-4. If issue ID is NOT in manifest and NOT in JSONL:
-   - Check git history (see fallback below)
-   - If found in history → deleted upstream, remove locally
-   - If not found → local unpushed work, keep it
-
-## Git History Fallback
-
-The manifest is pruned periodically to prevent unbounded growth. When a deletion record is pruned but the issue still exists in some clone's DB:
-
-1. Import detects: "DB issue not in JSONL, not in manifest"
-2. Falls back to git history search
-3. Uses `git log -S` to check if issue ID was ever in JSONL
-4. If found in history → it was deleted, remove from DB
-5. **Backfill**: Re-append the deletion to manifest (self-healing)
-
-This fallback ensures deletions propagate even after manifest pruning.
-
-## Configuration
-
-### Retention Period
-
-By default, deletion records are kept for 7 days. Configure via:
-
-```bash
-bd config set deletions.retention_days 30
-```
-
-Or in `.beads/config.yaml`:
+### Configuration
 
 ```yaml
-deletions:
-  retention_days: 30
+# .beads/config.yaml
+tombstone:
+  ttl_days: 30        # Default: 30 days
 ```
 
-### Auto-Compact Threshold
-
-Auto-compaction during `bd sync` is opt-in:
-
+Or via CLI:
 ```bash
-bd config set deletions.auto_compact_threshold 100
+bd config set tombstone.ttl_days 60
 ```
-
-When the manifest exceeds this threshold, old records are pruned during sync. Set to 0 to disable (default).
 
 ### Manual Pruning
 
 ```bash
-bd compact --retention 7           # Prune records older than 7 days
-bd compact --retention 0           # Prune all records (use git fallback)
+bd compact                         # Prune expired tombstones (and other compaction)
 ```
-
-## Size Estimates
-
-- Each record: ~80 bytes
-- 7-day retention with 100 deletions/day: ~56KB
-- Git compressed: ~10KB
-
-The manifest stays small even with heavy deletion activity.
 
 ## Conflict Resolution
 
-When multiple clones delete issues simultaneously:
+When the same issue is modified in one clone and deleted in another:
 
-1. Both append their deletion records
-2. Git merges (append-only = no conflicts)
-3. Result: duplicate entries for same ID (different timestamps)
-4. `LoadDeletions` deduplicates by ID (keeps any entry)
-5. Result: deletion propagates correctly
+1. Both changes sync via git
+2. 3-way merge detects the conflict
+3. Resolution rules:
+   - If tombstone is expired → live issue wins (resurrection)
+   - If tombstone is fresh → tombstone wins (deletion propagates)
+   - `updated_at` timestamps break ties
 
-Duplicate records are harmless and cleaned up during pruning.
+This ensures deletions propagate reliably while handling clock skew and delayed syncs.
+
+## Migration from Legacy Format
+
+Prior to v0.30, beads used a separate `deletions.jsonl` manifest. To migrate:
+
+```bash
+bd migrate-tombstones              # Convert deletions.jsonl to inline tombstones
+bd migrate-tombstones --dry-run    # Preview changes first
+```
+
+The migration:
+1. Reads existing deletions from `deletions.jsonl`
+2. Creates tombstone entries in `issues.jsonl`
+3. Archives the old file as `deletions.jsonl.migrated`
+
+After migration, run `bd sync` to propagate tombstones to other clones.
 
 ## Troubleshooting
 
@@ -139,70 +124,81 @@ Duplicate records are harmless and cleaned up during pruning.
 If a deleted issue reappears after sync:
 
 ```bash
-# Check if in manifest
-bd deleted bd-xxx
+# Check if it's a tombstone
+bd list --status=tombstone | grep bd-xxx
 
-# Force re-import
+# Check tombstone details
+bd show bd-xxx
+
+# Force re-import from JSONL
 bd import --force
-
-# If still appearing, check git history
-git log -S '"id":"bd-xxx"' -- .beads/beads.jsonl
 ```
 
-### Manifest Not Being Committed
-
-Ensure deletions.jsonl is tracked:
+If the issue keeps reappearing, the tombstone may have expired. Re-delete it:
 
 ```bash
-git add .beads/deletions.jsonl
+bd delete bd-xxx --force
+bd sync
 ```
 
-And NOT in .gitignore.
+### Tombstones Not Syncing
 
-### Large Manifest
-
-If the manifest is growing too large:
+Ensure tombstones are being exported:
 
 ```bash
-# Check size
-wc -l .beads/deletions.jsonl
+# Check if tombstone is in JSONL
+grep '"id":"bd-xxx"' .beads/issues.jsonl
 
-# Manual prune
-bd compact --retention 7
+# Force export
+bd export --force
+bd sync
+```
 
-# Enable auto-compact
-bd config set deletions.auto_compact_threshold 100
+### Too Many Tombstones
+
+If you have many old tombstones:
+
+```bash
+# Check tombstone count
+bd list --status=tombstone | wc -l
+
+# Prune expired tombstones
+bd compact
 ```
 
 ## Design Rationale
 
-### Why JSONL?
+### Why Inline Tombstones?
 
-- Append-only: natural for deletion logs
-- Human-readable: easy to audit
-- Git-friendly: line-based diffs
-- No merge conflicts: append = trivial merge
+The previous `deletions.jsonl` manifest had issues:
 
-### Why Not Delete from JSONL?
+- **Wild poisoning**: Stale clone's manifest could delete issues incorrectly
+- **Merge inconsistency**: Separate file meant separate merge logic
+- **Two sources of truth**: Issue data and deletion data could diverge
 
-Removing lines from `beads.jsonl` would work but:
-- Loses audit trail (who deleted what when)
-- Harder to merge (line deletions can conflict)
-- Can't distinguish "deleted" from "never existed"
+Inline tombstones solve these by:
 
-### Why Time-Based Pruning?
+- Single source of truth (`issues.jsonl`)
+- Same merge semantics as regular issues
+- Atomic with issue data
+- Full audit trail preserved
 
-- Bounds manifest size
+### Why TTL-Based Expiration?
+
+- Bounds storage growth (tombstones eventually pruned)
 - Git history fallback handles edge cases
-- 7-day default handles most sync scenarios
+- 30-day default handles typical sync scenarios
 - Configurable for teams with longer sync cycles
 
-### Why Git Fallback?
+### Why 1-Hour Grace Period?
 
-- Handles pruned records gracefully
-- Self-healing via backfill
-- Works with shallow clones (partial fallback)
-- No data loss from aggressive pruning
+Clock skew between machines can cause issues:
+
+- Machine A deletes issue at 10:00 (its clock)
+- Machine B's clock is 30 minutes ahead
+- Without grace period, B might see tombstone as expired immediately
+
+The 1-hour grace period ensures tombstones propagate even with minor clock drift.
 
 ## Related
 
