@@ -51,12 +51,11 @@ jobs:
           file: ./coverage.out
           fail_ci_if_error: false
 
-  # TODO: Replace with smoke tests (see bd-bmev)
-  # Full test suite times out; RAM disk experiments didn't help enough
-  test-windows-cmd:
-    name: Test (Windows - cmd)
+  # Windows smoke tests only - full test suite times out (see bd-bmev)
+  # Linux runs comprehensive tests; Windows just verifies binary works
+  test-windows:
+    name: Test (Windows - smoke)
     runs-on: windows-latest
-    continue-on-error: true  # Windows tests timeout; don't block PRs
     steps:
       - uses: actions/checkout@v6
 
@@ -71,30 +70,22 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Build
-        run: go build -v ./cmd/bd
+        run: go build -v -o bd.exe ./cmd/bd
 
-      - name: Test cmd package
-        run: go test -v -short -timeout=30m -parallel=4 ./cmd/...
+      - name: Smoke test - version
+        run: ./bd.exe version
 
-  test-windows-internal:
-    name: Test (Windows - internal)
-    runs-on: windows-latest
-    continue-on-error: true  # Windows tests timeout; don't block PRs
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Configure Git
+      - name: Smoke test - init and CRUD
         run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-
-      - name: Test internal packages
-        run: go test -v -short -timeout=30m -parallel=4 ./internal/...
+          ./bd.exe init --quiet --prefix smoke
+          $output = ./bd.exe create --title "Windows smoke test" --type task
+          $id = ($output | Select-String -Pattern "smoke-\w+").Matches.Value
+          echo "Created issue: $id"
+          ./bd.exe list
+          ./bd.exe show $id
+          ./bd.exe update $id --status in_progress
+          ./bd.exe close $id
+          echo "All smoke tests passed!"
 
   lint:
     name: Lint
