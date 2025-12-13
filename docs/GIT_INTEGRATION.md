@@ -164,7 +164,7 @@ During `git merge`, beads-merge:
 **If you prefer the standalone binary (same algorithm):**
 
 ```bash
-# Install (requires Go 1.21+)
+# Install (requires Go 1.24+)
 git clone https://github.com/neongreen/mono.git
 cd mono/beads-merge
 go install

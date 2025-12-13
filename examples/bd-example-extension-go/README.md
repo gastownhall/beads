@@ -59,7 +59,7 @@ GROUP BY i.id, e.id
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.24 or later
 - bd initialized in a directory (run `bd init --prefix demo`)
 
 ### Install
