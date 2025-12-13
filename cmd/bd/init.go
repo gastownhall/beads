@@ -1249,8 +1249,14 @@ func setupStealthMode(verbose bool) error {
 		return fmt.Errorf("failed to get user home directory: %w", err)
 	}
 
-	// Setup global gitignore
-	if err := setupGlobalGitIgnore(homeDir, verbose); err != nil {
+	// Get the absolute path of the current project
+	projectPath, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current working directory: %w", err)
+	}
+
+	// Setup global gitignore with project-specific paths
+	if err := setupGlobalGitIgnore(homeDir, projectPath, verbose); err != nil {
 		return fmt.Errorf("failed to setup global gitignore: %w", err)
 	}
 
@@ -1263,7 +1269,7 @@ func setupStealthMode(verbose bool) error {
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
 		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", green("✓"))
-		fmt.Printf("  Global gitignore: %s\n", cyan(".beads/ and .claude/settings.local.json ignored"))
+		fmt.Printf("  Global gitignore: %s\n", cyan(projectPath+"/.beads/ ignored"))
 		fmt.Printf("  Claude settings: %s\n\n", cyan("configured with bd onboard instruction"))
 		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", cyan("invisible"))
 	}
@@ -1271,8 +1277,8 @@ func setupStealthMode(verbose bool) error {
 	return nil
 }
 
-// setupGlobalGitIgnore configures global gitignore to ignore beads and claude files
-func setupGlobalGitIgnore(homeDir string, verbose bool) error {
+// setupGlobalGitIgnore configures global gitignore to ignore beads and claude files for a specific project
+func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) error {
 	// Check if user already has a global gitignore file configured
 	cmd := exec.Command("git", "config", "--global", "core.excludesfile")
 	output, err := cmd.Output()
@@ -1328,16 +1334,17 @@ func setupGlobalGitIgnore(homeDir string, verbose bool) error {
 		existingContent = string(content)
 	}
 
-	// Check if beads patterns already exist
-	beadsPattern := "**/.beads/"
-	claudePattern := "**/.claude/settings.local.json"
+	// Use absolute paths for this specific project (fixes GitHub #538)
+	// This allows other projects to use beads openly while this one stays stealth
+	beadsPattern := projectPath + "/.beads/"
+	claudePattern := projectPath + "/.claude/settings.local.json"
 
 	hasBeads := strings.Contains(existingContent, beadsPattern)
 	hasClaude := strings.Contains(existingContent, claudePattern)
 
 	if hasBeads && hasClaude {
 		if verbose {
-			fmt.Printf("Global gitignore already configured for stealth mode\n")
+			fmt.Printf("Global gitignore already configured for stealth mode in %s\n", projectPath)
 		}
 		return nil
 	}
@@ -1349,7 +1356,7 @@ func setupGlobalGitIgnore(homeDir string, verbose bool) error {
 	}
 
 	if !hasBeads || !hasClaude {
-		newContent += "\n# Beads stealth mode configuration (added by bd init --stealth)\n"
+		newContent += fmt.Sprintf("\n# Beads stealth mode: %s (added by bd init --stealth)\n", projectPath)
 	}
 
 	if !hasBeads {
@@ -1366,7 +1373,7 @@ func setupGlobalGitIgnore(homeDir string, verbose bool) error {
 	}
 
 	if verbose {
-		fmt.Printf("Configured global gitignore for stealth mode\n")
+		fmt.Printf("Configured global gitignore for stealth mode in %s\n", projectPath)
 	}
 
 	return nil
