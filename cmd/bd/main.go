@@ -329,8 +329,25 @@ var rootCmd = &cobra.Command{
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
 				if cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - error out instead of falling back to ~/.beads
+					// No database found - provide context-aware error message (bd-534)
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
+
+					// Check if JSONL exists without no-db mode configured
+					if beadsDir != "" {
+						jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+						if _, err := os.Stat(jsonlPath); err == nil {
+							// JSONL exists but no-db mode not configured
+							fmt.Fprintf(os.Stderr, "\nFound JSONL file: %s\n", jsonlPath)
+							fmt.Fprintf(os.Stderr, "This looks like a fresh clone or JSONL-only project.\n\n")
+							fmt.Fprintf(os.Stderr, "Options:\n")
+							fmt.Fprintf(os.Stderr, "  • Run 'bd init' to create database and import issues\n")
+							fmt.Fprintf(os.Stderr, "  • Use 'bd --no-db %s' for JSONL-only mode\n", cmd.Name())
+							fmt.Fprintf(os.Stderr, "  • Add 'no-db: true' to .beads/config.yaml for permanent JSONL-only mode\n")
+							os.Exit(1)
+						}
+					}
+
+					// Generic error - no beads directory or JSONL found
 					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
 					fmt.Fprintf(os.Stderr, "      or use 'bd --no-db' to work with JSONL only (no SQLite)\n")
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")

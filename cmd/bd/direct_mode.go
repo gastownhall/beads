@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -62,7 +63,25 @@ func ensureStoreActive() error {
 		if found := beads.FindDatabasePath(); found != "" {
 			dbPath = found
 		} else {
-			return fmt.Errorf("no beads database found. Hint: run 'bd init' in this directory")
+			// Check if this is a JSONL-only project (bd-534)
+			beadsDir := beads.FindBeadsDir()
+			if beadsDir != "" {
+				jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+				if _, err := os.Stat(jsonlPath); err == nil {
+					// JSONL exists - check if no-db mode is configured
+					if isNoDbModeConfigured(beadsDir) {
+						return fmt.Errorf("this project uses JSONL-only mode (no SQLite database).\n" +
+							"Hint: use 'bd --no-db <command>' or set 'no-db: true' in config.yaml")
+					}
+					// JSONL exists but no-db not configured - fresh clone scenario
+					return fmt.Errorf("found JSONL file but no database: %s\n"+
+						"Hint: run 'bd init' to create the database and import issues,\n"+
+						"      or use 'bd --no-db' for JSONL-only mode", jsonlPath)
+				}
+			}
+			return fmt.Errorf("no beads database found.\n" +
+				"Hint: run 'bd init' to create a database in the current directory,\n" +
+				"      or use 'bd --no-db' for JSONL-only mode")
 		}
 	}
 

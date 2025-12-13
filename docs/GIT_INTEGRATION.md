@@ -100,7 +100,7 @@ bd automatically detects worktrees and shows prominent warnings if daemon mode i
 
 ### When Conflicts Occur
 
-Git conflicts in `.beads/beads.jsonl` happen when:
+Git conflicts in `.beads/issues.jsonl` happen when:
 - **Same issue modified on both branches** (different timestamps/fields)
 - This is a **same-issue update conflict**, not an ID collision
 - Conflicts are rare in practice since hash IDs prevent structural collisions
@@ -111,9 +111,9 @@ bd automatically detects conflict markers and shows clear resolution steps:
 
 ```bash
 # bd import rejects files with conflict markers
-bd import -i .beads/beads.jsonl
+bd import -i .beads/issues.jsonl
 # Error: JSONL file contains git conflict markers
-# Resolve with: git checkout --theirs .beads/beads.jsonl
+# Resolve with: git checkout --theirs .beads/issues.jsonl
 
 # Validate for conflicts
 bd validate --checks=conflicts
@@ -124,22 +124,22 @@ Conflict markers detected: `<<<<<<<`, `=======`, `>>>>>>>`
 ### Resolution Workflow
 
 ```bash
-# After git merge creates conflict in .beads/beads.jsonl
+# After git merge creates conflict in .beads/issues.jsonl
 
 # Option 1: Accept their version (remote)
-git checkout --theirs .beads/beads.jsonl
-bd import -i .beads/beads.jsonl
+git checkout --theirs .beads/issues.jsonl
+bd import -i .beads/issues.jsonl
 
 # Option 2: Keep our version (local)
-git checkout --ours .beads/beads.jsonl
-bd import -i .beads/beads.jsonl
+git checkout --ours .beads/issues.jsonl
+bd import -i .beads/issues.jsonl
 
 # Option 3: Manual resolution in editor
-# Edit .beads/beads.jsonl to remove conflict markers
-bd import -i .beads/beads.jsonl
+# Edit .beads/issues.jsonl to remove conflict markers
+bd import -i .beads/issues.jsonl
 
 # Commit the merge
-git add .beads/beads.jsonl
+git add .beads/issues.jsonl
 git commit
 ```
 
@@ -170,7 +170,7 @@ git config merge.beads.driver "bd merge %A %O %A %B"
 git config merge.beads.name "bd JSONL merge driver"
 
 # .gitattributes entry added:
-# .beads/beads.jsonl merge=beads
+# .beads/issues.jsonl merge=beads
 ```
 
 ### Manual Setup
@@ -180,7 +180,7 @@ git config merge.beads.name "bd JSONL merge driver"
 ```bash
 git config merge.beads.driver "bd merge %A %O %A %B"
 git config merge.beads.name "bd JSONL merge driver"
-echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+echo ".beads/issues.jsonl merge=beads" >> .gitattributes
 ```
 
 ### How It Works
@@ -532,20 +532,20 @@ export BEADS_NO_DAEMON=1  # Direct mode
 
 ```
 # Intelligent merge driver for JSONL (auto-configured by bd init)
-.beads/beads.jsonl merge=beads
+.beads/issues.jsonl merge=beads
 
 # Treat JSONL as text for diffs
 .beads/*.jsonl text diff
 ```
 
 This file is automatically created by `bd init` and is essential for:
-- Preventing spurious merge conflicts in `.beads/beads.jsonl`
+- Preventing spurious merge conflicts in `.beads/issues.jsonl`
 - Enabling field-level 3-way merging instead of line-by-line
 - Ensuring all team members get intelligent JSONL merging
 
 ### Git LFS Considerations
 
-**Do NOT use Git LFS for `.beads/beads.jsonl`:**
+**Do NOT use Git LFS for `.beads/issues.jsonl`:**
 - JSONL needs intelligent merge (doesn't work with LFS)
 - File size stays reasonable (<1MB per 10K issues)
 - Text diffs are valuable for review
@@ -563,7 +563,7 @@ WARN Database timestamp older than JSONL, importing...
 ```bash
 # Normal after git pull - auto-import handles it
 # If stuck, force import:
-bd import -i .beads/beads.jsonl
+bd import -i .beads/issues.jsonl
 ```
 
 ### Issue: "Database is ahead of JSONL"
@@ -583,7 +583,7 @@ bd sync
 ### Issue: Merge conflicts every time
 
 **Symptoms:**
-- Git merge always creates conflicts in `.beads/beads.jsonl`
+- Git merge always creates conflicts in `.beads/issues.jsonl`
 - Merge driver not being used
 
 **Solutions:**
@@ -596,7 +596,7 @@ bd init --skip-db  # Only reconfigure git, don't touch database
 
 # Verify .gitattributes
 grep "beads.jsonl" .gitattributes
-# Expected: .beads/beads.jsonl merge=beads
+# Expected: .beads/issues.jsonl merge=beads
 ```
 
 ### Issue: Changes not syncing to other workspaces
@@ -613,7 +613,7 @@ git push
 
 # Agent B: Force import
 git pull
-bd import -i .beads/beads.jsonl
+bd import -i .beads/issues.jsonl
 
 # Check git hooks installed (prevent future issues)
 ./examples/git-hooks/install.sh

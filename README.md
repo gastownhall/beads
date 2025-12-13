@@ -166,7 +166,7 @@ echo -e "\nBEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions" >
 ```bash
 git config merge.beads.driver "bd merge %A %O %A %B"
 git config merge.beads.name "bd JSONL merge driver"
-echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+echo ".beads/issues.jsonl merge=beads" >> .gitattributes
 ```
 
 ### Files Created by `bd init`
@@ -175,7 +175,7 @@ echo ".beads/beads.jsonl merge=beads" >> .gitattributes
 
 **Should be committed to git:**
 - `.gitattributes` - Configures git merge driver for intelligent JSONL merging (critical for team collaboration)
-- `.beads/beads.jsonl` - Issue data in JSONL format (source of truth, synced via git)
+- `.beads/issues.jsonl` - Issue data in JSONL format (source of truth, synced via git)
 - `.beads/deletions.jsonl` - Deletion manifest for cross-clone propagation (tracks deleted issues)
 - `.beads/config.yaml` - Repository configuration template
 - `.beads/README.md` - Documentation about beads for repository visitors

@@ -4,7 +4,7 @@
 # bd (beads) pre-commit hook
 #
 # This hook ensures that any pending bd issue changes are flushed to
-# .beads/beads.jsonl before the commit is created, preventing the
+# .beads/issues.jsonl before the commit is created, preventing the
 # race condition where daemon auto-flush fires after the commit.
 #
 # When sync-branch is configured in config.yaml, .beads changes are committed
@@ -52,7 +52,7 @@ if ! bd sync --flush-only >/dev/null 2>&1; then
     exit 1
 fi
 
-# Stage all tracked JSONL files (beads.jsonl, issues.jsonl for backward compat, deletions.jsonl for deletion propagation)
+# Stage all tracked JSONL files (issues.jsonl is canonical, beads.jsonl for backward compat, deletions.jsonl for deletion propagation)
 # For worktrees, .beads is in the main repo's working tree, not the worktree,
 # so we can't use git add. Skip staging for worktrees.
 if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then

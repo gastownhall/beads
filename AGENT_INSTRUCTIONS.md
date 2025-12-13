@@ -79,7 +79,7 @@ The 30-second debounce provides a **transaction window** for batch operations - 
 
 **Git worktrees**: Enhanced support with shared database architecture. Use `bd --no-daemon` if daemon warnings appear. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
 
-**Merge conflicts**: Rare with hash IDs. If conflicts occur, use `git checkout --theirs/.beads/beads.jsonl` and `bd import`. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
+**Merge conflicts**: Rare with hash IDs. If conflicts occur, use `git checkout --theirs/.beads/issues.jsonl` and `bd import`. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
 
 ## Landing the Plane
 
@@ -95,9 +95,9 @@ The 30-second debounce provides a **transaction window** for batch operations - 
    # Pull first to catch any remote changes
    git pull --rebase
 
-   # If conflicts in .beads/beads.jsonl, resolve thoughtfully:
-   #   - git checkout --theirs .beads/beads.jsonl (accept remote)
-   #   - bd import -i .beads/beads.jsonl (re-import)
+   # If conflicts in .beads/issues.jsonl, resolve thoughtfully:
+   #   - git checkout --theirs .beads/issues.jsonl (accept remote)
+   #   - bd import -i .beads/issues.jsonl (re-import)
    #   - Or manual merge, then import
 
    # Sync the database (exports to JSONL, commits)
@@ -145,9 +145,9 @@ bd close bd-42 bd-43 --reason "Completed" --json
 
 # 4. PUSH TO REMOTE - MANDATORY, NO STOPPING BEFORE THIS IS DONE
 git pull --rebase
-# If conflicts in .beads/beads.jsonl, resolve thoughtfully:
-#   - git checkout --theirs .beads/beads.jsonl (accept remote)
-#   - bd import -i .beads/beads.jsonl (re-import)
+# If conflicts in .beads/issues.jsonl, resolve thoughtfully:
+#   - git checkout --theirs .beads/issues.jsonl (accept remote)
+#   - bd import -i .beads/issues.jsonl (re-import)
 #   - Or manual merge, then import
 bd sync        # Export/import/commit
 git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
