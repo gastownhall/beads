@@ -496,8 +496,9 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
-	// Get all DB issues once
-	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{})
+	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
+	// when trying to create issues that were previously deleted (bd-sync-tombstone-fix)
+	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
@@ -612,6 +613,11 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 		// Phase 2: New content - check for ID collision
 		if existingWithID, found := dbByID[incoming.ID]; found {
+			// Skip tombstones - don't try to update or resurrect deleted issues (bd-sync-tombstone-fix)
+			if existingWithID.Status == types.StatusTombstone {
+				result.Skipped++
+				continue
+			}
 			// ID exists but different content - this is a collision
 			// The update should have been detected earlier by detectUpdates
 			// If we reach here, it means collision wasn't resolved - treat as update
