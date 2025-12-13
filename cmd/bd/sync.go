@@ -1597,9 +1597,14 @@ type SanitizeResult struct {
 	RemovedIDs   []string // IDs that were removed
 }
 
-// sanitizeJSONLWithDeletions removes any issues from the JSONL file that are
-// in the deletions manifest. This prevents zombie resurrection when git's
-// 3-way merge re-adds deleted issues to the JSONL during pull.
+// sanitizeJSONLWithDeletions removes non-tombstone issues from the JSONL file
+// if they are in the deletions manifest. This prevents zombie resurrection when
+// git's 3-way merge re-adds deleted issues to the JSONL during pull.
+//
+// IMPORTANT (bd-kzxd fix): Tombstones are NOT removed. Tombstones are the proper
+// representation of deletions in the JSONL format. Removing them would cause
+// the importer to re-create tombstones from deletions.jsonl, leading to
+// UNIQUE constraint errors when the tombstone already exists in the database.
 //
 // This should be called after git pull but before import.
 func sanitizeJSONLWithDeletions(jsonlPath string) (*SanitizeResult, error) {
@@ -1643,10 +1648,10 @@ func sanitizeJSONLWithDeletions(jsonlPath string) (*SanitizeResult, error) {
 			continue
 		}
 
-		// Quick extraction of ID without full unmarshal
-		// Look for "id":"..." pattern
+		// Extract ID and status to check for tombstones
 		var issue struct {
-			ID string `json:"id"`
+			ID     string `json:"id"`
+			Status string `json:"status"`
 		}
 		if err := json.Unmarshal(line, &issue); err != nil {
 			// Keep malformed lines (let import handle them)
@@ -1656,8 +1661,16 @@ func sanitizeJSONLWithDeletions(jsonlPath string) (*SanitizeResult, error) {
 
 		// Check if this ID is in deletions manifest
 		if _, deleted := loadResult.Records[issue.ID]; deleted {
-			result.RemovedCount++
-			result.RemovedIDs = append(result.RemovedIDs, issue.ID)
+			// bd-kzxd fix: Keep tombstones! They are the proper representation of deletions.
+			// Only remove non-tombstone issues that were resurrected by git merge.
+			if issue.Status == string(types.StatusTombstone) {
+				// Keep the tombstone - it's the authoritative deletion record
+				keptLines = append(keptLines, append([]byte{}, line...))
+			} else {
+				// Remove non-tombstone issue that was resurrected
+				result.RemovedCount++
+				result.RemovedIDs = append(result.RemovedIDs, issue.ID)
+			}
 		} else {
 			keptLines = append(keptLines, append([]byte{}, line...))
 		}

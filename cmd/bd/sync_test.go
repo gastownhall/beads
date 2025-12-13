@@ -1013,6 +1013,81 @@ func TestSanitizeJSONLWithDeletions_NonexistentJSONL(t *testing.T) {
 	}
 }
 
+// TestSanitizeJSONLWithDeletions_PreservesTombstones tests the bd-kzxd fix:
+// Tombstones should NOT be removed by sanitize, even if their ID is in deletions.jsonl.
+// Tombstones ARE the proper representation of deletions. Removing them would cause
+// the importer to re-create tombstones from deletions.jsonl, leading to UNIQUE
+// constraint errors when the tombstone already exists in the database.
+func TestSanitizeJSONLWithDeletions_PreservesTombstones(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+
+	jsonlPath := filepath.Join(beadsDir, "beads.jsonl")
+	deletionsPath := filepath.Join(beadsDir, "deletions.jsonl")
+
+	now := time.Now().Format(time.RFC3339)
+
+	// JSONL with:
+	// - bd-1: regular issue (should be kept)
+	// - bd-2: tombstone (should be kept even though it's in deletions.jsonl)
+	// - bd-3: regular issue that's in deletions.jsonl (should be removed)
+	jsonlContent := fmt.Sprintf(`{"id":"bd-1","title":"Issue 1","status":"open"}
+{"id":"bd-2","title":"(deleted)","status":"tombstone","deleted_at":"%s","deleted_by":"user"}
+{"id":"bd-3","title":"Issue 3","status":"open"}
+`, now)
+	os.WriteFile(jsonlPath, []byte(jsonlContent), 0644)
+
+	// Deletions manifest marks bd-2 and bd-3 as deleted
+	deletionsContent := fmt.Sprintf(`{"id":"bd-2","ts":"%s","by":"user","reason":"cleanup"}
+{"id":"bd-3","ts":"%s","by":"user","reason":"duplicate"}
+`, now, now)
+	os.WriteFile(deletionsPath, []byte(deletionsContent), 0644)
+
+	result, err := sanitizeJSONLWithDeletions(jsonlPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only bd-3 should be removed (non-tombstone issue in deletions)
+	// bd-2 should be kept (it's a tombstone)
+	if result.RemovedCount != 1 {
+		t.Errorf("expected 1 removed (only non-tombstone), got %d", result.RemovedCount)
+	}
+	if len(result.RemovedIDs) != 1 || result.RemovedIDs[0] != "bd-3" {
+		t.Errorf("expected only bd-3 to be removed, got %v", result.RemovedIDs)
+	}
+
+	// Verify JSONL content
+	afterContent, _ := os.ReadFile(jsonlPath)
+	afterStr := string(afterContent)
+
+	// bd-1 should still be present (not in deletions)
+	if !strings.Contains(afterStr, `"id":"bd-1"`) {
+		t.Error("JSONL should still contain bd-1")
+	}
+
+	// bd-2 should still be present (tombstone - preserved!)
+	if !strings.Contains(afterStr, `"id":"bd-2"`) {
+		t.Error("JSONL should still contain bd-2 (tombstone should be preserved)")
+	}
+	if !strings.Contains(afterStr, `"status":"tombstone"`) {
+		t.Error("JSONL should contain tombstone status")
+	}
+
+	// bd-3 should be removed (non-tombstone in deletions)
+	if strings.Contains(afterStr, `"id":"bd-3"`) {
+		t.Error("JSONL should NOT contain bd-3 (non-tombstone in deletions)")
+	}
+
+	// Verify we have exactly 2 issues left (bd-1 and bd-2)
+	afterCount, _ := countIssuesInJSONL(jsonlPath)
+	if afterCount != 2 {
+		t.Errorf("expected 2 issues in JSONL after sanitize, got %d", afterCount)
+	}
+}
+
 // TestHashBasedStalenessDetection_bd_f2f tests the bd-f2f fix:
 // When JSONL content differs from stored hash (e.g., remote changed status),
 // hasJSONLChanged should detect the mismatch even if counts are equal.
