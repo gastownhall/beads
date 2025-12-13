@@ -873,9 +873,12 @@ func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor st
 	originalType := string(issue.IssueType)
 
 	// Convert issue to tombstone
+	// Note: closed_at must be set to NULL because of CHECK constraint:
+	// (status = 'closed') = (closed_at IS NOT NULL)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE issues
 		SET status = ?,
+		    closed_at = NULL,
 		    deleted_at = ?,
 		    deleted_by = ?,
 		    delete_reason = ?,

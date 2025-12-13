@@ -54,6 +54,58 @@ func TestCreateTombstone(t *testing.T) {
 		}
 	})
 
+	t.Run("create tombstone for closed issue", func(t *testing.T) {
+		// Regression test: closed issues have closed_at set, which must be
+		// cleared when creating tombstone due to CHECK constraint:
+		// (status = 'closed') = (closed_at IS NOT NULL)
+		issue := &types.Issue{
+			ID:        "bd-closed-1",
+			Title:     "Closed Issue",
+			Status:    types.StatusOpen, // Create as open first
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		// Close the issue to set closed_at
+		if err := store.CloseIssue(ctx, "bd-closed-1", "closing for test", "tester"); err != nil {
+			t.Fatalf("Failed to close issue: %v", err)
+		}
+
+		// Verify closed_at is set
+		closedIssue, err := store.GetIssue(ctx, "bd-closed-1")
+		if err != nil {
+			t.Fatalf("Failed to get closed issue: %v", err)
+		}
+		if closedIssue.ClosedAt == nil {
+			t.Fatal("closed_at should be set for closed issue")
+		}
+
+		// Create tombstone - this should work without constraint violation
+		if err := store.CreateTombstone(ctx, "bd-closed-1", "tester", "testing tombstone from closed"); err != nil {
+			t.Fatalf("CreateTombstone from closed issue failed: %v", err)
+		}
+
+		// Verify tombstone was created correctly
+		tombstone, err := store.GetIssue(ctx, "bd-closed-1")
+		if err != nil {
+			t.Fatalf("Failed to get tombstone: %v", err)
+		}
+		if tombstone.Status != types.StatusTombstone {
+			t.Errorf("Expected status=tombstone, got %s", tombstone.Status)
+		}
+		// closed_at should be nil for tombstone
+		if tombstone.ClosedAt != nil {
+			t.Error("closed_at should be nil for tombstone")
+		}
+		if tombstone.DeletedAt == nil {
+			t.Error("deleted_at should be set for tombstone")
+		}
+	})
+
 	t.Run("create tombstone for non-existent issue", func(t *testing.T) {
 		err := store.CreateTombstone(ctx, "bd-999", "tester", "testing")
 		if err == nil {
