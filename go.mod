@@ -9,7 +9,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ncruces/go-sqlite3 v0.30.1
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/tetratelabs/wazero v1.10.1
 	golang.org/x/mod v0.30.0
