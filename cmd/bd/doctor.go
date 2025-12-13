@@ -766,12 +766,17 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, syncBranchHealthCheck)
 	// Don't fail overall check for sync branch health, just warn
 
-	// Check 18: Deletions manifest (prevents zombie resurrection)
+	// Check 18: Deletions manifest (legacy, now replaced by tombstones)
 	deletionsCheck := checkDeletionsManifest(path)
 	result.Checks = append(result.Checks, deletionsCheck)
 	// Don't fail overall check for missing deletions manifest, just warn
 
-	// Check 19: Untracked .beads/*.jsonl files (bd-pbj)
+	// Check 19: Tombstones health (bd-s3v)
+	tombstonesCheck := checkTombstones(path)
+	result.Checks = append(result.Checks, tombstonesCheck)
+	// Don't fail overall check for tombstone issues, just warn
+
+	// Check 20: Untracked .beads/*.jsonl files (bd-pbj)
 	untrackedCheck := checkUntrackedBeadsFiles(path)
 	result.Checks = append(result.Checks, untrackedCheck)
 	// Don't fail overall check for untracked files, just warn
@@ -2557,7 +2562,7 @@ func checkDeletionsManifest(path string) doctorCheck {
 			return doctorCheck{
 				Name:    "Deletions Manifest",
 				Status:  statusOK,
-				Message: "Present (0 entries)",
+				Message: "Empty (no legacy deletions)",
 			}
 		}
 		file, err := os.Open(deletionsPath) // #nosec G304 - controlled path
@@ -2570,17 +2575,36 @@ func checkDeletionsManifest(path string) doctorCheck {
 					count++
 				}
 			}
+			// bd-s3v: Suggest migration to inline tombstones
+			if count > 0 {
+				return doctorCheck{
+					Name:    "Deletions Manifest",
+					Status:  statusWarning,
+					Message: fmt.Sprintf("Legacy format (%d entries)", count),
+					Detail:  "deletions.jsonl is deprecated in favor of inline tombstones",
+					Fix:     "Run 'bd migrate-tombstones' to convert to inline tombstones",
+				}
+			}
 			return doctorCheck{
 				Name:    "Deletions Manifest",
 				Status:  statusOK,
-				Message: fmt.Sprintf("Present (%d entries)", count),
+				Message: "Empty (no legacy deletions)",
 			}
 		}
 	}
 
-	// deletions.jsonl doesn't exist or is empty
-	// Check if there's git history that might have deletions
-	// bd-6xd: Check canonical issues.jsonl first, then legacy beads.jsonl
+	// bd-s3v: deletions.jsonl doesn't exist - this is the expected state with tombstones
+	// Check for .migrated file to confirm migration happened
+	migratedPath := filepath.Join(beadsDir, "deletions.jsonl.migrated")
+	if _, err := os.Stat(migratedPath); err == nil {
+		return doctorCheck{
+			Name:    "Deletions Manifest",
+			Status:  statusOK,
+			Message: "Migrated to tombstones",
+		}
+	}
+
+	// No deletions.jsonl and no .migrated file - check if JSONL exists
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
 		jsonlPath = filepath.Join(beadsDir, "beads.jsonl")
@@ -2593,26 +2617,110 @@ func checkDeletionsManifest(path string) doctorCheck {
 		}
 	}
 
-	// Check if JSONL has any git history
-	relPath, _ := filepath.Rel(path, jsonlPath)
-	cmd := exec.Command("git", "log", "--oneline", "-1", "--", relPath) // #nosec G204 - args are controlled
-	cmd.Dir = path
-	if output, err := cmd.Output(); err != nil || len(output) == 0 {
-		// No git history for JSONL
+	// JSONL exists but no deletions tracking - this is fine for new repos using tombstones
+	return doctorCheck{
+		Name:    "Deletions Manifest",
+		Status:  statusOK,
+		Message: "Using inline tombstones",
+	}
+}
+
+// checkTombstones checks the health of tombstone records (bd-s3v)
+// Reports: total tombstones, expiring soon (within 7 days), already expired
+func checkTombstones(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+
+	// Skip if database doesn't exist
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return doctorCheck{
-			Name:    "Deletions Manifest",
+			Name:    "Tombstones",
 			Status:  statusOK,
-			Message: "Not yet created (no deletions recorded)",
+			Message: "N/A (no database)",
 		}
 	}
 
-	// There's git history but no deletions manifest - recommend hydration
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Tombstones",
+			Status:  statusWarning,
+			Message: "Unable to open database",
+			Detail:  err.Error(),
+		}
+	}
+	defer db.Close()
+
+	// Query tombstone statistics
+	var totalTombstones int
+	err = db.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'tombstone'").Scan(&totalTombstones)
+	if err != nil {
+		// Might be old schema without tombstone support
+		return doctorCheck{
+			Name:    "Tombstones",
+			Status:  statusOK,
+			Message: "N/A (schema may not support tombstones)",
+		}
+	}
+
+	if totalTombstones == 0 {
+		return doctorCheck{
+			Name:    "Tombstones",
+			Status:  statusOK,
+			Message: "None (no deleted issues)",
+		}
+	}
+
+	// Check for tombstones expiring within 7 days
+	// Default TTL is 30 days, so expiring soon means deleted_at older than 23 days ago
+	expiringThreshold := time.Now().Add(-23 * 24 * time.Hour).Format(time.RFC3339)
+	expiredThreshold := time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+
+	var expiringSoon, alreadyExpired int
+	err = db.QueryRow(`
+		SELECT COUNT(*) FROM issues
+		WHERE status = 'tombstone'
+		AND deleted_at IS NOT NULL
+		AND deleted_at < ?
+		AND deleted_at >= ?
+	`, expiringThreshold, expiredThreshold).Scan(&expiringSoon)
+	if err != nil {
+		expiringSoon = 0
+	}
+
+	err = db.QueryRow(`
+		SELECT COUNT(*) FROM issues
+		WHERE status = 'tombstone'
+		AND deleted_at IS NOT NULL
+		AND deleted_at < ?
+	`, expiredThreshold).Scan(&alreadyExpired)
+	if err != nil {
+		alreadyExpired = 0
+	}
+
+	// Build status message
+	if alreadyExpired > 0 {
+		return doctorCheck{
+			Name:    "Tombstones",
+			Status:  statusWarning,
+			Message: fmt.Sprintf("%d total, %d expired", totalTombstones, alreadyExpired),
+			Detail:  "Expired tombstones will be removed on next compact",
+			Fix:     "Run 'bd compact' to prune expired tombstones",
+		}
+	}
+
+	if expiringSoon > 0 {
+		return doctorCheck{
+			Name:    "Tombstones",
+			Status:  statusOK,
+			Message: fmt.Sprintf("%d total, %d expiring within 7 days", totalTombstones, expiringSoon),
+		}
+	}
+
 	return doctorCheck{
-		Name:    "Deletions Manifest",
-		Status:  statusWarning,
-		Message: "Missing or empty (may have pre-v0.25.0 deletions)",
-		Detail:  "Deleted issues from before v0.25.0 are not tracked and may resurrect on sync",
-		Fix:     "Run 'bd doctor --fix' to hydrate deletions manifest from git history",
+		Name:    "Tombstones",
+		Status:  statusOK,
+		Message: fmt.Sprintf("%d total", totalTombstones),
 	}
 }
 
