@@ -72,12 +72,7 @@ jobs:
           copy-workspace: true
 
       - name: Prepare RAM disk directories
-        run: |
-          New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
-          Write-Host "Files on R: drive:"
-          Get-ChildItem R:\ -ErrorAction SilentlyContinue | Select-Object Name
-          Write-Host "Looking for go.mod:"
-          Get-ChildItem R:\ -Filter "go.mod" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+        run: New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -90,8 +85,8 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Build and Test cmd package
+        working-directory: R:\workspace
         run: |
-          cd R:\
           go build -v ./cmd/bd
           go test -v -short -timeout=30m -parallel=4 ./cmd/...
 
@@ -116,10 +111,7 @@ jobs:
           copy-workspace: true
 
       - name: Prepare RAM disk directories
-        run: |
-          New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
-          Write-Host "Files on R: drive:"
-          Get-ChildItem R:\ -ErrorAction SilentlyContinue | Select-Object Name
+        run: New-Item -ItemType Directory -Force -Path R:\tmp, R:\go-cache, R:\go-mod
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -132,9 +124,8 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Test internal packages
-        run: |
-          cd R:\
-          go test -v -short -timeout=30m -parallel=4 ./internal/...
+        working-directory: R:\workspace
+        run: go test -v -short -timeout=30m -parallel=4 ./internal/...
 
   lint:
     name: Lint
