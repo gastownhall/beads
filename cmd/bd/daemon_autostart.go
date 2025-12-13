@@ -183,7 +183,18 @@ func acquireStartLock(lockPath, socketPath string) bool {
 	// nolint:gosec // G304: lockPath is derived from secure beads directory
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		debugLog("another process is starting daemon, waiting for readiness")
+		// Lock file exists - check if it's from a dead process (stale) or alive daemon
+		lockPID, pidErr := readPIDFromFile(lockPath)
+		if pidErr != nil || !isPIDAlive(lockPID) {
+			// Stale lock from crashed process - clean up immediately (avoids 5s wait)
+			debugLog("startlock is stale (PID %d dead or unreadable), cleaning up", lockPID)
+			_ = os.Remove(lockPath)
+			// Retry lock acquisition after cleanup
+			return acquireStartLock(lockPath, socketPath)
+		}
+
+		// PID is alive - daemon is legitimately starting, wait for socket to be ready
+		debugLog("another process (PID %d) is starting daemon, waiting for readiness", lockPID)
 		if waitForSocketReadiness(socketPath, 5*time.Second) {
 			return true
 		}

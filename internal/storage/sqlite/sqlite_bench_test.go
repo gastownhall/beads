@@ -139,6 +139,103 @@ func BenchmarkGetReadyWork_FromJSONL(b *testing.B) {
 	})
 }
 
+// BenchmarkLargeDescription benchmarks handling of issues with very large descriptions (100KB+)
+func BenchmarkLargeDescription(b *testing.B) {
+	runBenchmark(b, setupLargeBenchDB, func(store *SQLiteStorage, ctx context.Context) error {
+		// Create issue with 100KB description
+		largeDesc := make([]byte, 100*1024)
+		for i := range largeDesc {
+			largeDesc[i] = byte('a' + (i % 26))
+		}
+
+		issue := &types.Issue{
+			Title:       "Issue with large description",
+			Description: string(largeDesc),
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}
+		return store.CreateIssue(ctx, issue, "bench")
+	})
+}
+
+// BenchmarkBulkCloseIssues benchmarks closing 100 issues in sequence
+func BenchmarkBulkCloseIssues(b *testing.B) {
+	store, cleanup := setupLargeBenchDB(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Get 100 open issues to close
+	openStatus := types.StatusOpen
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		Status: &openStatus,
+		Limit:  100,
+	})
+	if err != nil || len(issues) < 100 {
+		b.Fatalf("Failed to get 100 issues for bulk close test: got %d, err %v", len(issues), err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		for j, issue := range issues {
+			if err := store.CloseIssue(ctx, issue.ID, "Bulk closed", "bench"); err != nil {
+				b.Fatalf("CloseIssue failed: %v", err)
+			}
+			// Re-open for next iteration (except last one)
+			if j < len(issues)-1 {
+				updates := map[string]interface{}{"status": types.StatusOpen}
+				if err := store.UpdateIssue(ctx, issue.ID, updates, "bench"); err != nil {
+					b.Fatalf("UpdateIssue failed: %v", err)
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkSyncMerge benchmarks JSONL merge operations (simulating full sync cycle)
+func BenchmarkSyncMerge(b *testing.B) {
+	store, cleanup := setupLargeBenchDB(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	// For each iteration, simulate a sync by creating and updating issues
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Simulate incoming changes: create 10 new issues, update 10 existing
+		for j := 0; j < 10; j++ {
+			issue := &types.Issue{
+				Title:       "Synced issue",
+				Description: "Incoming change",
+				Status:      types.StatusOpen,
+				Priority:    2,
+				IssueType:   types.TypeTask,
+			}
+			if err := store.CreateIssue(ctx, issue, "sync"); err != nil {
+				b.Fatalf("CreateIssue failed: %v", err)
+			}
+		}
+
+		// Update 10 existing issues
+		openStatus := types.StatusOpen
+		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			Status: &openStatus,
+			Limit:  10,
+		})
+		if err == nil && len(issues) > 0 {
+			for _, issue := range issues {
+				updates := map[string]interface{}{
+					"title": "Updated from sync",
+				}
+				_ = store.UpdateIssue(ctx, issue.ID, updates, "sync")
+			}
+		}
+	}
+}
+
 // Helper function
 func intPtr(i int) *int {
 	return &i
