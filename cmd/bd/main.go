@@ -96,12 +96,13 @@ var (
 )
 
 var (
-	noAutoFlush  bool
-	noAutoImport bool
-	sandboxMode  bool
-	allowStale   bool // Use --allow-stale: skip staleness check (emergency escape hatch)
-	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
-	readonlyMode bool // Read-only mode: block write operations (for worker sandboxes)
+	noAutoFlush    bool
+	noAutoImport   bool
+	sandboxMode    bool
+	allowStale     bool          // Use --allow-stale: skip staleness check (emergency escape hatch)
+	noDb           bool          // Use --no-db mode: load from JSONL, write back after each command
+	readonlyMode   bool          // Read-only mode: block write operations (for worker sandboxes)
+	lockTimeout    time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
@@ -126,6 +127,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
+	rootCmd.PersistentFlags().DurationVar(&lockTimeout, "lock-timeout", 30*time.Second, "SQLite busy timeout (0 = fail immediately if locked)")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
@@ -177,6 +179,9 @@ var rootCmd = &cobra.Command{
 		}
 		if !cmd.Flags().Changed("readonly") {
 			readonlyMode = config.GetBool("readonly")
+		}
+		if !cmd.Flags().Changed("lock-timeout") {
+			lockTimeout = config.GetDuration("lock-timeout")
 		}
 		if !cmd.Flags().Changed("db") && dbPath == "" {
 			dbPath = config.GetString("db")
@@ -250,6 +255,10 @@ var rootCmd = &cobra.Command{
 			noDaemon = true
 			noAutoFlush = true
 			noAutoImport = true
+			// Use shorter lock timeout in sandbox mode unless explicitly set
+			if !cmd.Flags().Changed("lock-timeout") {
+				lockTimeout = 100 * time.Millisecond
+			}
 		}
 
 		// Force direct mode for human-only interactive commands
@@ -555,7 +564,7 @@ var rootCmd = &cobra.Command{
 
 		// Fall back to direct storage access
 		var err error
-		store, err = sqlite.New(rootCtx, dbPath)
+		store, err = sqlite.NewWithTimeout(rootCtx, dbPath, lockTimeout)
 		if err != nil {
 			// Check for fresh clone scenario (bd-dmb)
 			beadsDir := filepath.Dir(dbPath)
@@ -572,10 +581,14 @@ var rootCmd = &cobra.Command{
 		storeMutex.Unlock()
 
 		// Initialize flush manager (fixes bd-52: race condition in auto-flush)
+		// Skip FlushManager creation in sandbox mode - no background goroutines needed
+		// (bd-dh8a: improves Windows exit behavior and container scenarios)
 		// For in-process test scenarios where commands run multiple times,
 		// we create a new manager each time. Shutdown() is idempotent so
 		// PostRun can safely shutdown whichever manager is active.
-		flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
+		if !sandboxMode {
+			flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
+		}
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)

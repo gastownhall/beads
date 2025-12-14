@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	// Import SQLite driver
 	sqlite3 "github.com/ncruces/go-sqlite3"
@@ -72,8 +73,17 @@ func init() {
 	_ = setupWASMCache()
 }
 
-// New creates a new SQLite storage backend
+// New creates a new SQLite storage backend with default 30s busy timeout
 func New(ctx context.Context, path string) (*SQLiteStorage, error) {
+	return NewWithTimeout(ctx, path, 30*time.Second)
+}
+
+// NewWithTimeout creates a new SQLite storage backend with configurable busy timeout.
+// A timeout of 0 means fail immediately if the database is locked.
+func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration) (*SQLiteStorage, error) {
+	// Convert timeout to milliseconds for SQLite pragma
+	timeoutMs := int64(busyTimeout / time.Millisecond)
+
 	// Build connection string with proper URI syntax
 	// For :memory: databases, use shared cache so multiple connections see the same data
 	var connStr string
@@ -81,12 +91,12 @@ func New(ctx context.Context, path string) (*SQLiteStorage, error) {
 		// Use shared in-memory database with a named identifier
 		// Note: WAL mode doesn't work with shared in-memory databases, so use DELETE mode
 		// The name "memdb" is required for cache=shared to work properly across connections
-		connStr = "file:memdb?mode=memory&cache=shared&_pragma=journal_mode(DELETE)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+		connStr = fmt.Sprintf("file:memdb?mode=memory&cache=shared&_pragma=journal_mode(DELETE)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)&_time_format=sqlite", timeoutMs)
 	} else if strings.HasPrefix(path, "file:") {
 		// Already a URI - append our pragmas if not present
 		connStr = path
 		if !strings.Contains(path, "_pragma=foreign_keys") {
-			connStr += "&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+			connStr += fmt.Sprintf("&_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)&_time_format=sqlite", timeoutMs)
 		}
 	} else {
 		// Ensure directory exists for file-based databases
@@ -95,7 +105,7 @@ func New(ctx context.Context, path string) (*SQLiteStorage, error) {
 			return nil, fmt.Errorf("failed to create directory: %w", err)
 		}
 		// Use file URI with pragmas
-		connStr = "file:" + path + "?_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)&_time_format=sqlite"
+		connStr = fmt.Sprintf("file:%s?_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)&_time_format=sqlite", path, timeoutMs)
 	}
 
 	db, err := sql.Open("sqlite3", connStr)
