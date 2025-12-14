@@ -706,6 +706,10 @@ func TestCloseIssue(t *testing.T) {
 	if closed.ClosedAt == nil {
 		t.Error("ClosedAt should be set")
 	}
+
+	if closed.CloseReason != "Done" {
+		t.Errorf("CloseReason not set: got %q, want %q", closed.CloseReason, "Done")
+	}
 }
 
 func TestClosedAtInvariant(t *testing.T) {
@@ -766,13 +770,16 @@ func TestClosedAtInvariant(t *testing.T) {
 			t.Fatalf("CloseIssue failed: %v", err)
 		}
 
-		// Verify it's closed with closed_at set
+		// Verify it's closed with closed_at and close_reason set
 		closed, err := store.GetIssue(ctx, issue.ID)
 		if err != nil {
 			t.Fatalf("GetIssue failed: %v", err)
 		}
 		if closed.ClosedAt == nil {
 			t.Fatal("ClosedAt should be set after closing")
+		}
+		if closed.CloseReason != "Done" {
+			t.Errorf("CloseReason should be 'Done', got %q", closed.CloseReason)
 		}
 
 		// Reopen the issue
@@ -784,7 +791,7 @@ func TestClosedAtInvariant(t *testing.T) {
 			t.Fatalf("UpdateIssue failed: %v", err)
 		}
 
-		// Verify closed_at was cleared
+		// Verify closed_at and close_reason were cleared
 		reopened, err := store.GetIssue(ctx, issue.ID)
 		if err != nil {
 			t.Fatalf("GetIssue failed: %v", err)
@@ -794,6 +801,9 @@ func TestClosedAtInvariant(t *testing.T) {
 		}
 		if reopened.ClosedAt != nil {
 			t.Error("ClosedAt should be cleared when reopening issue")
+		}
+		if reopened.CloseReason != "" {
+			t.Errorf("CloseReason should be cleared when reopening issue, got %q", reopened.CloseReason)
 		}
 	})
 

@@ -106,7 +106,9 @@ func getCurrentJSONLIDs(jsonlPath string) (map[string]bool, error) {
 		}
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -118,12 +120,15 @@ func getCurrentJSONLIDs(jsonlPath string) (map[string]bool, error) {
 		}
 
 		var issue struct {
-			ID string `json:"id"`
+			ID     string `json:"id"`
+			Status string `json:"status"`
 		}
 		if err := json.Unmarshal(line, &issue); err != nil {
 			continue
 		}
-		if issue.ID != "" {
+		// Skip tombstones - they represent migrated deletions and shouldn't
+		// be re-added to the deletions manifest (bd-in7q fix)
+		if issue.ID != "" && issue.Status != "tombstone" {
 			ids[issue.ID] = true
 		}
 	}
@@ -158,14 +163,16 @@ func looksLikeIssueID(id string) bool {
 	// Prefix should be alphanumeric (letters/numbers/underscores)
 	prefix := id[:dashIdx]
 	for _, c := range prefix {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+		isValidPrefixChar := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+		if !isValidPrefixChar {
 			return false
 		}
 	}
 	// Suffix should be alphanumeric (base36 hash or number), may contain dots for children
 	suffix := id[dashIdx+1:]
 	for _, c := range suffix {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.') {
+		isValidSuffixChar := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.'
+		if !isValidSuffixChar {
 			return false
 		}
 	}

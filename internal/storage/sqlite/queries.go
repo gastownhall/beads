@@ -500,10 +500,13 @@ func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 		setClauses = append(setClauses, "closed_at = ?")
 		args = append(args, now)
 	} else if oldIssue.Status == types.StatusClosed {
-		// Changing from closed to something else: clear closed_at
+		// Changing from closed to something else: clear closed_at and close_reason
 		updates["closed_at"] = nil
 		setClauses = append(setClauses, "closed_at = ?")
 		args = append(args, nil)
+		updates["close_reason"] = ""
+		setClauses = append(setClauses, "close_reason = ?")
+		args = append(args, "")
 	}
 
 	return setClauses, args
@@ -806,10 +809,14 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// NOTE: close_reason is stored in two places:
+	// 1. issues.close_reason - for direct queries (bd show --json, exports)
+	// 2. events.comment - for audit history (when was it closed, by whom)
+	// Keep both in sync. If refactoring, consider deriving one from the other.
 	result, err := tx.ExecContext(ctx, `
-		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?
+		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?
 		WHERE id = ?
-	`, types.StatusClosed, now, now, id)
+	`, types.StatusClosed, now, now, reason, id)
 	if err != nil {
 		return fmt.Errorf("failed to close issue: %w", err)
 	}

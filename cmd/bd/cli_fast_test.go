@@ -333,6 +333,9 @@ func TestCLI_Close(t *testing.T) {
 	if closed[0]["status"] != "closed" {
 		t.Errorf("Expected status 'closed', got: %v", closed[0]["status"])
 	}
+	if closed[0]["close_reason"] != "Done" {
+		t.Errorf("Expected close_reason 'Done', got: %v", closed[0]["close_reason"])
+	}
 }
 
 func TestCLI_DepAdd(t *testing.T) {

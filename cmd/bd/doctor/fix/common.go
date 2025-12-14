@@ -86,5 +86,5 @@ func isWithinWorkspace(root, candidate string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || !(rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }

@@ -224,3 +224,69 @@ func TestConvertDeletionRecordToTombstone(t *testing.T) {
 		t.Errorf("Expected empty OriginalType, got %s", tombstone.OriginalType)
 	}
 }
+
+// TestMigrateTombstones_TombstonesAreValid verifies that migrated tombstones
+// have the tombstone status set, so they won't be re-added to deletions manifest (bd-in7q fix)
+func TestMigrateTombstones_TombstonesAreValid(t *testing.T) {
+	// Setup: create temp .beads directory
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create deletions.jsonl with some entries
+	deletionsPath := deletions.DefaultPath(beadsDir)
+	deleteTime := time.Now().Add(-24 * time.Hour)
+
+	records := []deletions.DeletionRecord{
+		{ID: "test-abc", Timestamp: deleteTime, Actor: "alice", Reason: "duplicate"},
+	}
+
+	for _, record := range records {
+		if err := deletions.AppendDeletion(deletionsPath, record); err != nil {
+			t.Fatalf("Failed to write deletion: %v", err)
+		}
+	}
+
+	// Create empty issues.jsonl
+	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(issuesPath, []byte{}, 0600); err != nil {
+		t.Fatalf("Failed to create issues.jsonl: %v", err)
+	}
+
+	// Load deletions
+	loadResult, err := deletions.LoadDeletions(deletionsPath)
+	if err != nil {
+		t.Fatalf("LoadDeletions failed: %v", err)
+	}
+
+	// Convert to tombstones (simulating what migrate-tombstones does)
+	var tombstones []*types.Issue
+	for _, record := range loadResult.Records {
+		ts := convertDeletionRecordToTombstone(record)
+		// CRITICAL: Tombstones must have status "tombstone"
+		// so they won't be re-added to deletions manifest on next sync (bd-in7q)
+		if ts.Status != types.StatusTombstone {
+			t.Errorf("Converted tombstone must have status 'tombstone', got %s", ts.Status)
+		}
+		tombstones = append(tombstones, ts)
+	}
+
+	// Verify tombstone is valid
+	if len(tombstones) != 1 {
+		t.Fatalf("Expected 1 tombstone, got %d", len(tombstones))
+	}
+	ts := tombstones[0]
+
+	// These fields are critical for the doctor fix to work correctly
+	if ts.ID != "test-abc" {
+		t.Errorf("Expected ID test-abc, got %s", ts.ID)
+	}
+	if ts.Status != types.StatusTombstone {
+		t.Errorf("Expected status tombstone, got %s", ts.Status)
+	}
+	if ts.DeletedBy != "alice" {
+		t.Errorf("Expected DeletedBy 'alice', got %s", ts.DeletedBy)
+	}
+}
