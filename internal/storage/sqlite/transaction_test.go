@@ -268,6 +268,9 @@ func TestTransactionCloseIssue(t *testing.T) {
 	if closed.Status != types.StatusClosed {
 		t.Errorf("expected status 'closed', got %q", closed.Status)
 	}
+	if closed.CloseReason != "Done" {
+		t.Errorf("expected close_reason 'Done', got %q", closed.CloseReason)
+	}
 }
 
 // TestTransactionDeleteIssue tests deleting an issue within a transaction.
