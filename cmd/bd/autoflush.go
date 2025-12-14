@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // outputJSON outputs data as pretty-printed JSON
@@ -42,12 +43,26 @@ func outputJSON(v interface{}) {
 //
 // Thread-safe: No shared state access.
 func findJSONLPath() string {
+	// Allow explicit override (useful in no-db mode or non-standard layouts)
+	if jsonlEnv := os.Getenv("BEADS_JSONL"); jsonlEnv != "" {
+		return utils.CanonicalizePath(jsonlEnv)
+	}
+
 	// Use public API for path discovery
 	jsonlPath := beads.FindJSONLPath(dbPath)
 
+	// In --no-db mode, dbPath may be empty. Fall back to locating the .beads directory.
+	if jsonlPath == "" {
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			return ""
+		}
+		jsonlPath = utils.FindJSONLInDir(beadsDir)
+	}
+
 	// Ensure the directory exists (important for new databases)
 	// This is the only difference from the public API - we create the directory
-	dbDir := filepath.Dir(dbPath)
+	dbDir := filepath.Dir(jsonlPath)
 	if err := os.MkdirAll(dbDir, 0750); err != nil {
 		// If we can't create the directory, return discovered path anyway
 		// (the subsequent write will fail with a clearer error)
