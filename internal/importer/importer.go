@@ -883,6 +883,24 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 		}
 
 		if del, found := loadResult.Records[dbIssue.ID]; found {
+			// SAFETY GUARD (bd-k92d): Prevent deletion of open/in_progress issues without explicit warning
+			// This protects against data loss from:
+			// 1. Repo ID mismatches causing incorrect deletions
+			// 2. Race conditions during daemon sync
+			// 3. Accidental deletion of active work
+			if dbIssue.Status == types.StatusOpen || dbIssue.Status == types.StatusInProgress {
+				fmt.Fprintf(os.Stderr, "⚠️  WARNING: Refusing to delete %s with status=%s\n", dbIssue.ID, dbIssue.Status)
+				fmt.Fprintf(os.Stderr, "   Title: %s\n", dbIssue.Title)
+				fmt.Fprintf(os.Stderr, "   This issue is in deletions.jsonl but still open/in_progress in your database.\n")
+				fmt.Fprintf(os.Stderr, "   This may indicate:\n")
+				fmt.Fprintf(os.Stderr, "   - A repo ID mismatch (check with 'bd migrate --update-repo-id')\n")
+				fmt.Fprintf(os.Stderr, "   - A sync race condition with unpushed local changes\n")
+				fmt.Fprintf(os.Stderr, "   - Accidental deletion on another clone\n")
+				fmt.Fprintf(os.Stderr, "   To force deletion: bd delete %s\n", dbIssue.ID)
+				fmt.Fprintf(os.Stderr, "   To keep this issue: remove it from .beads/deletions.jsonl\n\n")
+				continue
+			}
+
 			// Issue is in deletions manifest - convert to tombstone (bd-dve)
 			if err := sqliteStore.CreateTombstone(ctx, dbIssue.ID, del.Actor, del.Reason); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create tombstone for %s: %v\n", dbIssue.ID, err)
@@ -950,6 +968,24 @@ func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 		}
 
 		for _, id := range deletedViaGit {
+			// SAFETY GUARD (bd-k92d): Check if this is an open/in_progress issue before deleting
+			// Get the issue from database to check its status
+			issue, err := sqliteStore.GetIssue(ctx, id)
+			if err == nil && issue != nil {
+				if issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress {
+					fmt.Fprintf(os.Stderr, "⚠️  WARNING: git-history-backfill refusing to delete %s with status=%s\n", id, issue.Status)
+					fmt.Fprintf(os.Stderr, "   Title: %s\n", issue.Title)
+					fmt.Fprintf(os.Stderr, "   This issue was found in git history but is still open/in_progress.\n")
+					fmt.Fprintf(os.Stderr, "   This may indicate:\n")
+					fmt.Fprintf(os.Stderr, "   - A repo ID mismatch between clones\n")
+					fmt.Fprintf(os.Stderr, "   - The issue was re-created after being deleted\n")
+					fmt.Fprintf(os.Stderr, "   - Local uncommitted work that conflicts with remote history\n")
+					fmt.Fprintf(os.Stderr, "   To force deletion: bd delete %s\n", id)
+					fmt.Fprintf(os.Stderr, "   To prevent git-history checks: use --no-git-history flag\n\n")
+					continue
+				}
+			}
+
 			// Backfill the deletions manifest (self-healing)
 			backfillRecord := deletions.DeletionRecord{
 				ID:        id,

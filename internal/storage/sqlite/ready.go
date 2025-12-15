@@ -238,22 +238,38 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 	return issues, rows.Err()
 }
 
-// GetBlockedIssues returns issues that are blocked by dependencies
+// GetBlockedIssues returns issues that are blocked by dependencies or have status=blocked
 func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
+	// Use UNION to combine:
+	// 1. Issues with open/in_progress/blocked status that have dependency blockers
+	// 2. Issues with status=blocked (even if they have no dependency blockers)
 	// Use GROUP_CONCAT to get all blocker IDs in a single query (no N+1)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		    i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
-		    COUNT(d.depends_on_id) as blocked_by_count,
-		    GROUP_CONCAT(d.depends_on_id, ',') as blocker_ids
+		    COALESCE(COUNT(d.depends_on_id), 0) as blocked_by_count,
+		    COALESCE(GROUP_CONCAT(d.depends_on_id, ','), '') as blocker_ids
 		FROM issues i
-		JOIN dependencies d ON i.id = d.issue_id
-		JOIN issues blocker ON d.depends_on_id = blocker.id
+		LEFT JOIN dependencies d ON i.id = d.issue_id
+		    AND d.type = 'blocks'
+		    AND EXISTS (
+		        SELECT 1 FROM issues blocker
+		        WHERE blocker.id = d.depends_on_id
+		        AND blocker.status IN ('open', 'in_progress', 'blocked')
+		    )
 		WHERE i.status IN ('open', 'in_progress', 'blocked')
-		  AND d.type = 'blocks'
-		  AND blocker.status IN ('open', 'in_progress', 'blocked')
+		  AND (
+		      i.status = 'blocked'
+		      OR EXISTS (
+		          SELECT 1 FROM dependencies d2
+		          JOIN issues blocker ON d2.depends_on_id = blocker.id
+		          WHERE d2.issue_id = i.id
+		            AND d2.type = 'blocks'
+		            AND blocker.status IN ('open', 'in_progress', 'blocked')
+		      )
+		  )
 		GROUP BY i.id
 		ORDER BY i.priority ASC
 	`)
@@ -303,6 +319,8 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		// Parse comma-separated blocker IDs
 		if blockerIDsStr != "" {
 			issue.BlockedBy = strings.Split(blockerIDsStr, ",")
+		} else {
+			issue.BlockedBy = []string{}
 		}
 
 		blocked = append(blocked, &issue)

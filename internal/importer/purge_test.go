@@ -38,12 +38,15 @@ func TestPurgeDeletedIssues(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
+	// issue2 is CLOSED so it can be safely deleted (bd-k92d: safety guard prevents deleting open/in_progress)
+	closedTime := time.Now().UTC()
 	issue2 := &types.Issue{
 		ID:        "test-def",
 		Title:     "Issue 2",
-		Status:    types.StatusOpen,
+		Status:    types.StatusClosed,
 		Priority:  1,
 		IssueType: types.TypeTask,
+		ClosedAt:  &closedTime,
 	}
 	issue3 := &types.Issue{
 		ID:        "test-ghi",
