@@ -19248,3 +19248,6 @@
 {"id":"bd-zbyb","ts":"2025-12-15T00:36:34.165103Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
 {"id":"bd-2k5f","ts":"2025-12-15T00:36:34.169016Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
 {"id":"bd-y6t6","ts":"2025-12-15T00:36:34.173166Z","by":"git-history-backfill","reason":"recovered from git history (pruned from manifest)"}
+{"id":"bd-dtn3","ts":"2025-12-14T16:46:53.145424-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
+{"id":"bd-kwx5","ts":"2025-12-14T16:46:53.145424-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
+{"id":"bd-olc1","ts":"2025-12-14T16:46:53.145424-08:00","by":"bd-doctor-hydrate","reason":"Hydrated from git history"}
