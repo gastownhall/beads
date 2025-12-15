@@ -371,7 +371,11 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, localMode bool,
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
-	log.log("Database opened: %s", daemonDBPath)
+
+	// Enable freshness checking to detect external database file modifications
+	// (e.g., when git merge replaces the database file)
+	store.EnableFreshnessChecking()
+	log.log("Database opened: %s (freshness checking enabled)", daemonDBPath)
 
 	// Auto-upgrade .beads/.gitignore if outdated
 	gitignoreCheck := doctor.CheckGitignore()

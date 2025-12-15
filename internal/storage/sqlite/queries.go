@@ -166,6 +166,9 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 // GetIssue retrieves an issue by ID
 func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	// Check for external database file modifications (daemon mode)
+	s.checkFreshness()
+
 	var issue types.Issue
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
@@ -1305,6 +1308,9 @@ func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.
 
 // SearchIssues finds issues matching query and filters
 func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	// Check for external database file modifications (daemon mode)
+	s.checkFreshness()
+
 	whereClauses := []string{}
 	args := []interface{}{}
 
