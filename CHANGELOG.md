@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2025-12-15
+
+**Tombstone Architecture** - This release completes the migration to inline tombstones
+for soft-delete, replacing the legacy `deletions.jsonl` manifest. This is intended to
+be the last significant architectural change to Beads' storage format.
+
 ### Added
 
 - **Inline tombstones for soft-delete (bd-vw8)**
@@ -21,7 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Archives old file as `deletions.jsonl.migrated`
   - Use `--dry-run` to preview changes
 
-- **Enhanced Git Worktree Support** (bd-737): Comprehensive compatibility improvements for git worktrees using shared database architecture
+- **`bd doctor` tombstone health checks (bd-s3v)**
+  - Detects orphaned tombstones (missing from database)
+  - Identifies expired tombstones ready for pruning
+  - Warns about tombstone/live issue conflicts
+
+- **Enhanced Git Worktree Support (bd-737)** - Comprehensive compatibility improvements using shared database architecture
   - Shared `.beads` database across all worktrees in a repository
   - Worktree-aware database discovery prioritizes main repository
   - Git hooks automatically adapt to worktree context
@@ -29,6 +40,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Comprehensive documentation in `docs/WORKTREES.md`
   - Worktree lifecycle management with sparse checkout for sync branches
   - Automatic detection and user-friendly warnings for worktree conflicts
+
+- **MCP Context Engineering Optimizations (GH #481)** - 80-90% context reduction
+  - Smarter tool response formatting reduces token usage
+  - Compaction configuration options for MCP server
+  - Extended context engineering documentation
+
+- **`bd thanks` command (GH #555)** - Thank contributors to your project
+  - Lists contributors with their contribution counts
+  - Useful for acknowledgments and community building
+
+- **`BD_NO_INSTALL_HOOKS` environment variable (GH #500)**
+  - Set to disable automatic git hook installation
+  - Useful for CI environments or custom hook setups
+
+- **Claude Code skill marketplace installation (GH #468)**
+  - Beads skill now installable via Claude Code marketplace
+  - Slash commands updated to use `beads:` prefix (GH #467)
+
+- **Smithery integration (GH #501)** - "Run in Smithery" badge for easy MCP server deployment
+
+- **`bd version` shows commit and branch (GH #504)** - Better version diagnostics
+
+### Fixed
+
+- **Daemon delete auto-sync (GH #528, #537)**
+  - Delete operations now properly trigger auto-sync to sync branch
+  - RPC support for delete mutations
+  - Fixed sync branch commits failing with pre-commit hooks (GH #521)
+
+- **`close_reason` persistence (GH #551)** - Close reasons now properly saved to database on close
+
+- **`bd migrate-tombstones` corruption fix (GH #554)** - Prevents corrupting deletions manifest during migration
+
+- **JSONL-only mode improvements (GH #549)**
+  - Proper `GetReadyWork`/`GetBlockedIssues` implementation for memory storage
+  - Fixed child counters in no-database mode
+  - Better detection and error messages (GH #534)
+
+- **Tombstone sync fixes**
+  - Preserve tombstones in `sanitizeJSONLWithDeletions` (bd-kzxd)
+  - Include tombstones when building ID map during import
+  - Clear `closed_at` when converting closed issue to tombstone
+  - Include tombstones in `getCurrentJSONLIDs` to prevent doctor corruption (GH #552)
+
+- **Sync safety improvements**
+  - Protect locally exported issues from sanitization (bd-3ee1)
+  - Add safety guards for issue deletion in blocked command
+  - Retry with rebase for concurrent push conflicts
+  - Protect local issues from git-history-backfill during sync (GH #485)
+
+- **Windows fixes**
+  - `bd onboard` no longer hangs on Windows (GH #531)
+  - Restored Windows smoke tests (reverted by #478)
+
+- **External `BEADS_DIR` support** - Sync now works with beads data in separate git repository
+
+- **Go version inconsistencies and broken documentation links (GH #535)**
+
+- **Stealth mode path fix (GH #538)** - Use project-specific paths in global gitignore
+
+- **Daemon sync-branch hook incompatibility detection (GH #532)**
+
+### Performance
+
+- **Lock file improvements (GH #484, #555)**
+  - Fixed stale startlock delay
+  - Fast fail on stale lock from crashed process
+  - Comprehensive benchmarks added
+  - Test coverage improved from 42% to 98%
+
+### Documentation
+
+- Agent memory patterns using comments (GH #487) - @bryceroche
+- Added beads_viewer TUI to third-party tools (GH #515) - @aspiers
+- Go install fallback instructions and uninstall documentation
+
+### Contributors
+
+Thanks to our community contributors for this release:
+
+- @aspiers - Documentation for beads_viewer
+- @AodhanHayter - Nix version fix (GH #502)
+- @broady - close_reason persistence (GH #551)
+- @bryceroche - Agent memory documentation (GH #487)
+- @cerebustech-dev - Sync protection fix (GH #485)
+- @cpdata - Daemon sync fixes (GH #521, #528, #537)
+- @gurdasnijor - Smithery badge (GH #501)
+- @loganthomas - Documentation fixes (GH #535)
+- @mahawi1992 - MCP context optimizations (GH #481)
+- @maphew - Version output and migration fix (GH #504, #554)
+- @rsnodgrass - `bd thanks` and benchmarks (GH #484, #555)
+- @schpet - Claude Code skill marketplace (GH #467, #468)
+- @withzombies - `BD_NO_INSTALL_HOOKS` env var (GH #500)
 
 ## [0.29.0] - 2025-12-03
 

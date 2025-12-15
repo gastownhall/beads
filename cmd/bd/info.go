@@ -288,6 +288,24 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.0",
+		Date:    "2025-12-15",
+		Changes: []string{
+			"TOMBSTONE ARCHITECTURE - Deleted issues become inline tombstones in issues.jsonl (bd-vw8)",
+			"bd migrate-tombstones - Convert legacy deletions.jsonl to inline tombstones (bd-8f9)",
+			"bd doctor tombstone health checks - Detects orphaned/expired tombstones (bd-s3v)",
+			"Git Worktree Support (bd-737) - Shared database across worktrees, worktree-aware hooks",
+			"MCP Context Engineering (GH #481) - 80-90% context reduction for MCP responses",
+			"bd thanks command (GH #555) - List contributors to your project",
+			"BD_NO_INSTALL_HOOKS env var (GH #500) - Disable automatic git hook installation",
+			"Claude Code skill marketplace (GH #468) - Install beads skill via marketplace",
+			"Daemon delete auto-sync (GH #528, #537) - Delete operations trigger auto-sync",
+			"close_reason persistence (GH #551) - Close reasons now saved to database on close",
+			"JSONL-only mode improvements (GH #549) - GetReadyWork/GetBlockedIssues for memory storage",
+			"Lock file improvements (GH #484, #555) - Fast fail on stale locks, 98% test coverage",
+		},
+	},
+	{
 		Version: "0.29.0",
 		Date:    "2025-12-03",
 		Changes: []string{
