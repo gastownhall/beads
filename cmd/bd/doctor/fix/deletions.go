@@ -126,9 +126,12 @@ func getCurrentJSONLIDs(jsonlPath string) (map[string]bool, error) {
 		if err := json.Unmarshal(line, &issue); err != nil {
 			continue
 		}
-		// Skip tombstones - they represent migrated deletions and shouldn't
-		// be re-added to the deletions manifest (bd-in7q fix)
-		if issue.ID != "" && issue.Status != "tombstone" {
+		// Include ALL issues including tombstones (bd-552 fix)
+		// Tombstones represent migrated deletions that ARE accounted for.
+		// By including them in currentIDs, they won't appear "missing" when
+		// compared to historicalIDs, preventing erroneous re-addition to
+		// deletions.jsonl. The previous bd-in7q fix had backwards logic.
+		if issue.ID != "" {
 			ids[issue.ID] = true
 		}
 	}

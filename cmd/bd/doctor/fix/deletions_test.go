@@ -9,7 +9,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestGetCurrentJSONLIDs_SkipsTombstones(t *testing.T) {
+// TestGetCurrentJSONLIDs_IncludesTombstones verifies that tombstones ARE included
+// in the current ID set. This is critical for bd-552 fix: tombstones represent
+// migrated deletions that are accounted for. By including them, they won't appear
+// "missing" when compared to historicalIDs, preventing erroneous re-addition to
+// deletions.jsonl.
+func TestGetCurrentJSONLIDs_IncludesTombstones(t *testing.T) {
 	// Setup: Create temp file with mix of normal issues and tombstones
 	tmpDir := t.TempDir()
 	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
@@ -22,9 +27,9 @@ func TestGetCurrentJSONLIDs_SkipsTombstones(t *testing.T) {
 			Status: types.StatusOpen,
 		},
 		{
-			ID:       "bd-def",
-			Title:    "(deleted)",
-			Status:   types.StatusTombstone,
+			ID:        "bd-def",
+			Title:     "(deleted)",
+			Status:    types.StatusTombstone,
 			DeletedBy: "test-user",
 		},
 		{
@@ -33,9 +38,9 @@ func TestGetCurrentJSONLIDs_SkipsTombstones(t *testing.T) {
 			Status: types.StatusOpen,
 		},
 		{
-			ID:       "bd-jkl",
-			Title:    "(deleted)",
-			Status:   types.StatusTombstone,
+			ID:        "bd-jkl",
+			Title:     "(deleted)",
+			Status:    types.StatusTombstone,
 			DeletedBy: "test-user",
 		},
 	}
@@ -59,10 +64,12 @@ func TestGetCurrentJSONLIDs_SkipsTombstones(t *testing.T) {
 		t.Fatalf("getCurrentJSONLIDs failed: %v", err)
 	}
 
-	// Verify: Should only contain non-tombstone IDs
+	// Verify: Should contain ALL IDs including tombstones (bd-552 fix)
 	expectedIDs := map[string]bool{
 		"bd-abc": true,
+		"bd-def": true, // tombstone - must be included
 		"bd-ghi": true,
+		"bd-jkl": true, // tombstone - must be included
 	}
 
 	if len(ids) != len(expectedIDs) {
@@ -75,12 +82,12 @@ func TestGetCurrentJSONLIDs_SkipsTombstones(t *testing.T) {
 		}
 	}
 
-	// Verify tombstones are NOT included
-	if ids["bd-def"] {
-		t.Error("Tombstone bd-def should not be included in current IDs")
+	// Verify tombstones ARE included (this is the bd-552 fix)
+	if !ids["bd-def"] {
+		t.Error("Tombstone bd-def MUST be included in current IDs (bd-552 fix)")
 	}
-	if ids["bd-jkl"] {
-		t.Error("Tombstone bd-jkl should not be included in current IDs")
+	if !ids["bd-jkl"] {
+		t.Error("Tombstone bd-jkl MUST be included in current IDs (bd-552 fix)")
 	}
 }
 
@@ -144,5 +151,6 @@ invalid json line
 }
 
 // Note: Full integration test for HydrateDeletionsManifest would require git repo setup.
-// The unit tests above verify the core fix (skipping tombstones in getCurrentJSONLIDs).
+// The unit tests above verify the core fix (bd-552: including tombstones in getCurrentJSONLIDs
+// so they aren't erroneously re-added to deletions.jsonl).
 // Integration tests are handled in migrate_tombstones_test.go with full sync cycle.
