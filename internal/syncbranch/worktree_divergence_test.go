@@ -683,3 +683,70 @@ func TestCountIssuesInContent(t *testing.T) {
 		})
 	}
 }
+
+// TestIsSyncBranchSameAsCurrent tests detection of sync.branch == current branch (GH#519)
+func TestIsSyncBranchSameAsCurrent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	t.Run("returns true when sync branch equals current branch", func(t *testing.T) {
+		repoDir := setupTestRepo(t)
+		defer os.RemoveAll(repoDir)
+
+		// Create initial commit so we can get current branch
+		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
+		runGit(t, repoDir, "add", ".")
+		runGit(t, repoDir, "commit", "-m", "initial commit")
+
+		// Get current branch name
+		currentBranch := strings.TrimSpace(getGitOutput(t, repoDir, "symbolic-ref", "--short", "HEAD"))
+
+		// Save original dir and change to test repo
+		origDir, _ := os.Getwd()
+		os.Chdir(repoDir)
+		defer os.Chdir(origDir)
+
+		// Should return true when sync branch == current branch
+		if !IsSyncBranchSameAsCurrent(ctx, currentBranch) {
+			t.Errorf("IsSyncBranchSameAsCurrent(%q) = false, want true", currentBranch)
+		}
+	})
+
+	t.Run("returns false when sync branch differs from current branch", func(t *testing.T) {
+		repoDir := setupTestRepo(t)
+		defer os.RemoveAll(repoDir)
+
+		// Create initial commit
+		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
+		runGit(t, repoDir, "add", ".")
+		runGit(t, repoDir, "commit", "-m", "initial commit")
+
+		// Save original dir and change to test repo
+		origDir, _ := os.Getwd()
+		os.Chdir(repoDir)
+		defer os.Chdir(origDir)
+
+		// Should return false when sync branch != current branch
+		if IsSyncBranchSameAsCurrent(ctx, "beads-sync") {
+			t.Error("IsSyncBranchSameAsCurrent(\"beads-sync\") = true, want false")
+		}
+	})
+
+	t.Run("returns false on error getting current branch", func(t *testing.T) {
+		// Test in a non-git directory
+		tmpDir, _ := os.MkdirTemp("", "non-git-*")
+		defer os.RemoveAll(tmpDir)
+
+		origDir, _ := os.Getwd()
+		os.Chdir(tmpDir)
+		defer os.Chdir(origDir)
+
+		// Should return false when not in a git repo
+		if IsSyncBranchSameAsCurrent(ctx, "any-branch") {
+			t.Error("IsSyncBranchSameAsCurrent in non-git dir = true, want false")
+		}
+	})
+}

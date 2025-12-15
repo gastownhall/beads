@@ -380,12 +380,20 @@ Use --merge to merge the sync branch back to main branch.`,
 		if err := ensureStoreActive(); err == nil && store != nil {
 			syncBranchName, _ = syncbranch.Get(ctx, store)
 			if syncBranchName != "" && syncbranch.HasGitRemote(ctx) {
-				repoRoot, err = syncbranch.GetRepoRoot(ctx)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: sync.branch configured but failed to get repo root: %v\n", err)
-					fmt.Fprintf(os.Stderr, "Falling back to current branch commits\n")
+				// GH#519: Check if sync.branch equals current branch
+				// If so, we can't use a worktree (git doesn't allow same branch in multiple worktrees)
+				// Fall back to direct commits on the current branch
+				if syncbranch.IsSyncBranchSameAsCurrent(ctx, syncBranchName) {
+					// sync.branch == current branch - use regular commits, not worktree
+					useSyncBranch = false
 				} else {
-					useSyncBranch = true
+					repoRoot, err = syncbranch.GetRepoRoot(ctx)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: sync.branch configured but failed to get repo root: %v\n", err)
+						fmt.Fprintf(os.Stderr, "Falling back to current branch commits\n")
+					} else {
+						useSyncBranch = true
+					}
 				}
 			}
 		}

@@ -916,3 +916,25 @@ func HasGitRemote(ctx context.Context) bool {
 	}
 	return len(strings.TrimSpace(string(output))) > 0
 }
+
+// GetCurrentBranch returns the name of the current git branch
+func GetCurrentBranch(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current branch: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// IsSyncBranchSameAsCurrent returns true if the sync branch is the same as the current branch.
+// This is used to detect the case where we can't use a worktree because the branch is already
+// checked out. In this case, we should commit directly to the current branch instead.
+// See: https://github.com/steveyegge/beads/issues/519
+func IsSyncBranchSameAsCurrent(ctx context.Context, syncBranch string) bool {
+	currentBranch, err := GetCurrentBranch(ctx)
+	if err != nil {
+		return false
+	}
+	return currentBranch == syncBranch
+}
