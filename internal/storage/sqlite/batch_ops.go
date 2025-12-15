@@ -32,6 +32,27 @@ func validateBatchIssuesWithCustomStatuses(issues []*types.Issue, customStatuses
 			issue.UpdatedAt = now
 		}
 
+		// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+		// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			closedAt := maxTime.Add(time.Second)
+			issue.ClosedAt = &closedAt
+		}
+
+		// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			deletedAt := maxTime.Add(time.Second)
+			issue.DeletedAt = &deletedAt
+		}
+
 		if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 			return fmt.Errorf("validation failed for issue %d: %w", i, err)
 		}

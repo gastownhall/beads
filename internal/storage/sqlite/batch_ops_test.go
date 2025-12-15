@@ -480,3 +480,119 @@ func TestBulkOperations(t *testing.T) {
 		}
 	})
 }
+
+// TestDefensiveClosedAtFix tests GH#523 - closed issues without closed_at timestamp
+// from older versions of bd should be automatically fixed during import.
+func TestDefensiveClosedAtFix(t *testing.T) {
+	t.Run("sets closed_at for closed issues missing it", func(t *testing.T) {
+		now := time.Now()
+		pastTime := now.Add(-24 * time.Hour)
+
+		issues := []*types.Issue{
+			{
+				Title:     "Closed issue without closed_at",
+				Priority:  1,
+				IssueType: "task",
+				Status:    "closed",
+				CreatedAt: pastTime,
+				UpdatedAt: pastTime.Add(time.Hour),
+				// ClosedAt intentionally NOT set - simulating old bd data
+			},
+		}
+
+		err := validateBatchIssues(issues)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// closed_at should be set to max(created_at, updated_at) + 1 second
+		if issues[0].ClosedAt == nil {
+			t.Fatal("closed_at should have been set")
+		}
+
+		expectedClosedAt := pastTime.Add(time.Hour).Add(time.Second)
+		if !issues[0].ClosedAt.Equal(expectedClosedAt) {
+			t.Errorf("closed_at mismatch: want %v, got %v", expectedClosedAt, *issues[0].ClosedAt)
+		}
+	})
+
+	t.Run("preserves existing closed_at", func(t *testing.T) {
+		now := time.Now()
+		pastTime := now.Add(-24 * time.Hour)
+		closedTime := pastTime.Add(2 * time.Hour)
+
+		issues := []*types.Issue{
+			{
+				Title:     "Closed issue with closed_at",
+				Priority:  1,
+				IssueType: "task",
+				Status:    "closed",
+				CreatedAt: pastTime,
+				UpdatedAt: pastTime.Add(time.Hour),
+				ClosedAt:  &closedTime,
+			},
+		}
+
+		err := validateBatchIssues(issues)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// closed_at should be preserved
+		if !issues[0].ClosedAt.Equal(closedTime) {
+			t.Errorf("closed_at should be preserved: want %v, got %v", closedTime, *issues[0].ClosedAt)
+		}
+	})
+
+	t.Run("does not set closed_at for open issues", func(t *testing.T) {
+		issues := []*types.Issue{
+			{
+				Title:     "Open issue",
+				Priority:  1,
+				IssueType: "task",
+				Status:    "open",
+			},
+		}
+
+		err := validateBatchIssues(issues)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if issues[0].ClosedAt != nil {
+			t.Error("closed_at should remain nil for open issues")
+		}
+	})
+
+	t.Run("sets deleted_at for tombstones missing it", func(t *testing.T) {
+		now := time.Now()
+		pastTime := now.Add(-24 * time.Hour)
+
+		issues := []*types.Issue{
+			{
+				Title:     "Tombstone without deleted_at",
+				Priority:  1,
+				IssueType: "task",
+				Status:    "tombstone",
+				CreatedAt: pastTime,
+				UpdatedAt: pastTime.Add(time.Hour),
+				// DeletedAt intentionally NOT set
+			},
+		}
+
+		err := validateBatchIssues(issues)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// deleted_at should be set to max(created_at, updated_at) + 1 second
+		if issues[0].DeletedAt == nil {
+			t.Fatal("deleted_at should have been set")
+		}
+
+		expectedDeletedAt := pastTime.Add(time.Hour).Add(time.Second)
+		if !issues[0].DeletedAt.Equal(expectedDeletedAt) {
+			t.Errorf("deleted_at mismatch: want %v, got %v", expectedDeletedAt, *issues[0].DeletedAt)
+		}
+	})
+}
