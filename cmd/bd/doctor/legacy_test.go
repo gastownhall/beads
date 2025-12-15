@@ -40,6 +40,18 @@ func TestCheckAgentDocumentation(t *testing.T) {
 			expectFix:      false,
 		},
 		{
+			name:           "claude.local.md exists (local-only)",
+			files:          []string{"claude.local.md"},
+			expectedStatus: "ok",
+			expectFix:      false,
+		},
+		{
+			name:           ".claude/claude.local.md exists (local-only)",
+			files:          []string{".claude/claude.local.md"},
+			expectedStatus: "ok",
+			expectFix:      false,
+		},
+		{
 			name:           "multiple docs",
 			files:          []string{"AGENTS.md", "CLAUDE.md"},
 			expectedStatus: "ok",
@@ -123,6 +135,22 @@ func TestCheckLegacyBeadsSlashCommands(t *testing.T) {
 			name: "legacy slash command in .claude/CLAUDE.md",
 			fileContent: map[string]string{
 				".claude/CLAUDE.md": "Use /beads:show to see an issue.",
+			},
+			expectedStatus: "warning",
+			expectWarning:  true,
+		},
+		{
+			name: "legacy slash command in claude.local.md",
+			fileContent: map[string]string{
+				"claude.local.md": "Use /beads:show to see an issue.",
+			},
+			expectedStatus: "warning",
+			expectWarning:  true,
+		},
+		{
+			name: "legacy slash command in .claude/claude.local.md",
+			fileContent: map[string]string{
+				".claude/claude.local.md": "Use /beads:ready to see ready issues.",
 			},
 			expectedStatus: "warning",
 			expectWarning:  true,

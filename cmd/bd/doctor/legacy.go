@@ -22,6 +22,9 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 		filepath.Join(repoPath, "AGENTS.md"),
 		filepath.Join(repoPath, "CLAUDE.md"),
 		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
+		// Local-only variants (not committed to repo)
+		filepath.Join(repoPath, "claude.local.md"),
+		filepath.Join(repoPath, ".claude", "claude.local.md"),
 	}
 
 	var filesWithLegacyCommands []string
@@ -71,11 +74,15 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 
 // CheckAgentDocumentation checks if agent documentation (AGENTS.md or CLAUDE.md) exists
 // and recommends adding it if missing, suggesting bd onboard or bd setup claude.
+// Also supports local-only variants (claude.local.md) that are gitignored.
 func CheckAgentDocumentation(repoPath string) DoctorCheck {
 	docFiles := []string{
 		filepath.Join(repoPath, "AGENTS.md"),
 		filepath.Join(repoPath, "CLAUDE.md"),
 		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
+		// Local-only variants (not committed to repo)
+		filepath.Join(repoPath, "claude.local.md"),
+		filepath.Join(repoPath, ".claude", "claude.local.md"),
 	}
 
 	var foundDocs []string
@@ -102,6 +109,10 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 		Fix: "Add agent documentation:\n" +
 			"  • Run 'bd onboard' to create AGENTS.md with workflow guidance\n" +
 			"  • Or run 'bd setup claude' to add Claude-specific documentation\n" +
+			"\n" +
+			"For local-only documentation (not committed to repo):\n" +
+			"  • Create claude.local.md or .claude/claude.local.md\n" +
+			"  • Add 'claude.local.md' to your .gitignore\n" +
 			"\n" +
 			"Recommended: Include bd workflow in your project documentation so\n" +
 			"AI agents understand how to track issues and manage dependencies",
