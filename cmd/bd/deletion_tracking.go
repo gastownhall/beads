@@ -12,8 +12,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// isIssueNotFoundError checks if the error indicates the issue doesn't exist
-// This is OK during merge - the issue may already be deleted/tombstoned
+// isIssueNotFoundError checks if the error indicates the issue doesn't exist in the database.
+//
+// During 3-way merge, we try to delete issues that were removed remotely. However, the issue
+// may already be gone from the local database due to:
+//   - Already tombstoned by a previous sync/import
+//   - Never existed locally (multi-repo scenarios, partial clones)
+//   - Deleted by user between export and import phases
+//
+// In all these cases, "issue not found" is success from the merge's perspective - the goal
+// is to ensure the issue is deleted, and it already is. We only fail on actual database errors.
 func isIssueNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -84,13 +92,22 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 		return false, fmt.Errorf("failed to compute accepted deletions: %w", err)
 	}
 
-	// Prune accepted deletions from the database
-	// "Issue not found" errors are OK - the issue may already be deleted/tombstoned
+	// Prune accepted deletions from the database.
+	//
+	// "Accepted deletions" are issues that:
+	//   1. Existed in the base snapshot (last successful import)
+	//   2. Were NOT modified locally (still in left snapshot, unchanged)
+	//   3. Are NOT in the merged result (deleted remotely)
+	//
+	// We tolerate "issue not found" errors because the issue may already be gone:
+	//   - Tombstoned by auto-import's git-history-backfill
+	//   - Deleted manually by the user
+	//   - Never existed in this clone (multi-repo, partial history)
+	// The goal is ensuring deletion, so already-deleted is success.
 	var deletionErrors []error
 	var alreadyGone int
 	for _, id := range acceptedDeletions {
 		if err := store.DeleteIssue(ctx, id); err != nil {
-			// If issue is already gone (tombstoned or never existed locally), that's fine
 			if isIssueNotFoundError(err) {
 				alreadyGone++
 				continue

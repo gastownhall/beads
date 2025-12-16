@@ -139,7 +139,19 @@ func (fc *fieldComparator) checkFieldChanged(key string, existing *types.Issue, 
 	}
 }
 
-// RenameImportedIssuePrefixes renames all issues and their references to match the target prefix
+// RenameImportedIssuePrefixes renames all issues and their references to match the target prefix.
+//
+// This function handles three ID formats:
+//   - Sequential numeric IDs: "old-123" → "new-123"
+//   - Hash-based IDs: "old-abc1" → "new-abc1"
+//   - Hierarchical IDs: "old-abc1.2.3" → "new-abc1.2.3"
+//
+// The suffix (everything after "prefix-") is preserved during rename, only the prefix changes.
+// This preserves issue identity across prefix renames while maintaining parent-child relationships
+// in hierarchical IDs (dots denote subtask nesting, e.g., bd-abc1.2 is child 2 of bd-abc1).
+//
+// All text references to old IDs in issue fields (title, description, notes, etc.) and
+// dependency relationships are updated to use the new IDs.
 func RenameImportedIssuePrefixes(issues []*types.Issue, targetPrefix string) error {
 	// Build a mapping of old IDs to new IDs
 	idMapping := make(map[string]string)
@@ -270,9 +282,18 @@ func isBoundary(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' || c == '.' || c == '!' || c == '?' || c == ':' || c == ';' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}'
 }
 
-// isValidIDSuffix checks if a string is a valid issue ID suffix
-// Accepts: digits (0-9), lowercase letters (a-z), and dots (.) for hierarchy
-// Examples: "123", "abc1", "6we", "6we.2", "abc.1.2"
+// isValidIDSuffix validates the suffix portion of an issue ID (everything after "prefix-").
+//
+// Beads supports three ID formats, all of which this function must accept:
+//   - Sequential numeric: "123", "999" (legacy format)
+//   - Hash-based (base36): "abc1", "6we", "zzz" (current format, content-addressed)
+//   - Hierarchical: "abc1.2", "6we.2.3" (subtasks, dot-separated child counters)
+//
+// The dot separator in hierarchical IDs represents parent-child relationships:
+// "bd-abc1.2" means child #2 of parent "bd-abc1". Maximum depth is 3 levels.
+//
+// Rejected: uppercase letters, hyphens (would be confused with prefix separator),
+// and special characters.
 func isValidIDSuffix(s string) bool {
 	if len(s) == 0 {
 		return false
