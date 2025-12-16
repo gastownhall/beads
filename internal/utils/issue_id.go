@@ -6,11 +6,14 @@ import (
 )
 
 // ExtractIssuePrefix extracts the prefix from an issue ID like "bd-123" -> "bd"
-// Uses the last hyphen before a numeric or hash suffix:
+// Uses the last hyphen before an alphanumeric suffix:
 //   - "beads-vscode-1" -> "beads-vscode" (numeric suffix)
 //   - "web-app-a3f8e9" -> "web-app" (hash suffix)
 //   - "my-cool-app-123" -> "my-cool-app" (numeric suffix)
-// Only uses first hyphen for non-ID suffixes like "vc-baseline-test" -> "vc"
+//   - "hacker-news-test" -> "hacker-news" (alphanumeric suffix, GH#405)
+//
+// Only uses first hyphen when suffix contains non-alphanumeric characters,
+// which indicates it's not an issue ID but something like a project name.
 func ExtractIssuePrefix(issueID string) string {
 	// Try last hyphen first (handles multi-part prefixes like "beads-vscode-1")
 	lastIdx := strings.LastIndex(issueID, "-")
@@ -19,30 +22,35 @@ func ExtractIssuePrefix(issueID string) string {
 	}
 
 	suffix := issueID[lastIdx+1:]
-	// Check if suffix looks like an issue ID component (numeric or hash-like)
-	if len(suffix) > 0 {
-		// Extract just the numeric part (handle "123.1.2" -> check "123")
-		numPart := suffix
-		if dotIdx := strings.Index(suffix, "."); dotIdx > 0 {
-			numPart = suffix[:dotIdx]
-		}
+	if len(suffix) == 0 {
+		// Trailing hyphen like "bd-" - return prefix before the hyphen
+		return issueID[:lastIdx]
+	}
 
-		// Check if it's numeric
-		var num int
-		if _, err := fmt.Sscanf(numPart, "%d", &num); err == nil {
-			// Suffix is numeric, use last hyphen
-			return issueID[:lastIdx]
-		}
+	// Extract the base part before any dot (handle "123.1.2" -> check "123")
+	basePart := suffix
+	if dotIdx := strings.Index(suffix, "."); dotIdx > 0 {
+		basePart = suffix[:dotIdx]
+	}
 
-		// Check if it looks like a hash (hexadecimal characters, 4+ chars)
-		// Hash IDs are typically 4-8 hex characters (e.g., "a3f8e9", "1a2b")
-		if isLikelyHash(numPart) {
-			// Suffix looks like a hash, use last hyphen
-			return issueID[:lastIdx]
+	// Check if basePart is alphanumeric (valid issue ID suffix)
+	// Issue IDs are always alphanumeric: numeric (1, 23) or hash (a3f, xyz, test)
+	isAlphanumeric := len(basePart) > 0
+	for _, c := range basePart {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			isAlphanumeric = false
+			break
 		}
 	}
 
-	// Suffix is not numeric or hash-like (e.g., "vc-baseline-test"), fall back to first hyphen
+	// If suffix is alphanumeric, this is an issue ID - use last hyphen
+	// This handles all issue ID formats including word-like hashes (GH#405)
+	if isAlphanumeric {
+		return issueID[:lastIdx]
+	}
+
+	// Suffix contains special characters - not a standard issue ID
+	// Fall back to first hyphen for cases like project names with descriptions
 	firstIdx := strings.Index(issueID, "-")
 	if firstIdx <= 0 {
 		return ""

@@ -360,7 +360,7 @@ func TestExtractIssuePrefix(t *testing.T) {
 		{
 			name:     "multi-part non-numeric suffix",
 			issueID:  "vc-baseline-test",
-			expected: "vc", // Falls back to first hyphen for non-numeric suffix
+			expected: "vc-baseline", // Alphanumeric suffix uses last hyphen (GH#405 fix)
 		},
 		{
 			name:     "beads-vscode style prefix",
