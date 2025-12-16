@@ -15,7 +15,7 @@ var (
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Setup integration with AI editors",
-	Long:  `Setup integration files for AI editors like Claude Code, Cursor, and Aider.`,
+	Long:  `Setup integration files for AI editors like Claude Code, Cursor, Aider, and Factory.ai Droid.`,
 }
 
 var setupCursorCmd = &cobra.Command{
@@ -66,6 +66,31 @@ must confirm using Aider's /run command.`,
 	},
 }
 
+var setupFactoryCmd = &cobra.Command{
+	Use:   "factory",
+	Short: "Setup Factory.ai (Droid) integration",
+	Long: `Install Beads workflow configuration for Factory.ai Droid.
+
+Creates or updates AGENTS.md with bd workflow instructions.
+Factory Droids automatically read AGENTS.md on session start.
+
+AGENTS.md is the standard format used across AI coding assistants
+(Factory, Cursor, Aider, Gemini CLI, Jules, and more).`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if setupCheck {
+			setup.CheckFactory()
+			return
+		}
+
+		if setupRemove {
+			setup.RemoveFactory()
+			return
+		}
+
+		setup.InstallFactory()
+	},
+}
+
 var setupClaudeCmd = &cobra.Command{
 	Use:   "claude",
 	Short: "Setup Claude Code integration",
@@ -92,6 +117,9 @@ agents from forgetting bd workflow after context compaction.`,
 }
 
 func init() {
+	setupFactoryCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Factory.ai integration is installed")
+	setupFactoryCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd section from AGENTS.md")
+
 	setupClaudeCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (not globally)")
 	setupClaudeCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Claude integration is installed")
 	setupClaudeCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd hooks from Claude settings")
@@ -103,6 +131,7 @@ func init() {
 	setupAiderCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if Aider integration is installed")
 	setupAiderCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove bd config from Aider")
 
+	setupCmd.AddCommand(setupFactoryCmd)
 	setupCmd.AddCommand(setupClaudeCmd)
 	setupCmd.AddCommand(setupCursorCmd)
 	setupCmd.AddCommand(setupAiderCmd)

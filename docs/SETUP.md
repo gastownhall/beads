@@ -5,10 +5,11 @@
 
 ## Overview
 
-The `bd setup` command configures beads integration with AI coding tools. It supports three integrations:
+The `bd setup` command configures beads integration with AI coding tools. It supports four integrations:
 
 | Tool | Command | Integration Type |
 |------|---------|-----------------|
+| [Factory.ai (Droid)](#factoryai-droid) | `bd setup factory` | AGENTS.md file (universal standard) |
 | [Claude Code](#claude-code) | `bd setup claude` | SessionStart/PreCompact hooks |
 | [Cursor IDE](#cursor-ide) | `bd setup cursor` | Rules file (.cursor/rules/beads.mdc) |
 | [Aider](#aider) | `bd setup aider` | Config file (.aider.conf.yml) |
@@ -17,15 +18,106 @@ The `bd setup` command configures beads integration with AI coding tools. It sup
 
 ```bash
 # Install integration for your tool
+bd setup factory   # For Factory.ai Droid (and other AGENTS.md-compatible tools)
 bd setup claude    # For Claude Code
 bd setup cursor    # For Cursor IDE
 bd setup aider     # For Aider
 
 # Verify installation
+bd setup factory --check
 bd setup claude --check
 bd setup cursor --check
 bd setup aider --check
 ```
+
+## Factory.ai (Droid)
+
+Factory.ai Droid integration uses the AGENTS.md standard, which is compatible with multiple AI coding assistants.
+
+### Installation
+
+```bash
+# Create or update AGENTS.md with beads integration
+bd setup factory
+```
+
+### What Gets Installed
+
+Creates or updates `AGENTS.md` in your project root with:
+- Issue tracking workflow instructions
+- Quick command reference
+- Issue types and priorities
+- Auto-sync explanation
+- Important rules for AI agents
+
+The beads section is wrapped in HTML comments (`<!-- BEGIN/END BEADS INTEGRATION -->`) for safe updates.
+
+### AGENTS.md Standard
+
+AGENTS.md is an industry-standard format for AI coding agent instructions, supported by:
+- **Factory.ai Droid** - Specialized coding agents
+- **Cursor** - Also reads AGENTS.md (in addition to .cursor/rules)
+- **Aider** - Can be configured to read AGENTS.md
+- **Gemini CLI** - Google's command-line AI assistant
+- **Jules** - Google's coding assistant
+- **Codex** - OpenAI's code generation model
+- **Zed** - AI-enhanced editor
+- And many more emerging tools
+
+Using AGENTS.md means one configuration file works across your entire AI tool ecosystem.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check if beads section exists in AGENTS.md |
+| `--remove` | Remove beads section from AGENTS.md |
+
+### Examples
+
+```bash
+# Check if beads section is in AGENTS.md
+bd setup factory --check
+# Output: ✓ Factory.ai integration installed: AGENTS.md
+#         Beads section found in AGENTS.md
+
+# Remove beads section
+bd setup factory --remove
+```
+
+### How It Works
+
+Factory Droid and other AGENTS.md-compatible tools automatically read `AGENTS.md` from:
+1. Current working directory (`./AGENTS.md`)
+2. Parent directories up to repo root
+3. Personal override (`~/.factory/AGENTS.md`)
+
+The beads section teaches AI agents:
+- To use `bd ready` for finding work
+- To use `bd create` for tracking new issues
+- To use `bd sync` at session end
+- The complete workflow pattern and best practices
+
+### Updating Existing AGENTS.md
+
+If you already have an AGENTS.md file with other project instructions:
+- `bd setup factory` will **append** the beads section
+- Re-running it will **update** the existing beads section (idempotent)
+- The markers (`<!-- BEGIN/END BEADS INTEGRATION -->`) ensure safe updates
+
+### When to Use This vs Other Integrations
+
+**Use Factory integration when:**
+- ✅ You use Factory.ai Droid
+- ✅ You want one config file for multiple AI tools
+- ✅ You prefer the AGENTS.md standard
+- ✅ Your team uses multiple AI coding assistants
+
+**Use other integrations when:**
+- ✅ You only use Claude Code → `bd setup claude` (hooks are more dynamic)
+- ✅ You need tool-specific features (like Claude's stealth mode)
+
+You can use multiple integrations simultaneously - they complement each other!
 
 ## Claude Code
 
@@ -185,22 +277,31 @@ This respects Aider's philosophy of keeping humans in control while still levera
 
 ## Comparison
 
-| Feature | Claude Code | Cursor | Aider |
-|---------|-------------|--------|-------|
-| Command execution | Automatic | Automatic | Manual (/run) |
-| Context injection | Hooks | Rules file | Config file |
-| Global install | Yes | No (per-project) | No (per-project) |
-| Stealth mode | Yes | N/A | N/A |
+| Feature | Factory.ai | Claude Code | Cursor | Aider |
+|---------|-----------|-------------|--------|-------|
+| Command execution | Automatic | Automatic | Automatic | Manual (/run) |
+| Context injection | AGENTS.md | Hooks | Rules file | Config file |
+| Global install | No (per-project) | Yes | No (per-project) | No (per-project) |
+| Stealth mode | N/A | Yes | N/A | N/A |
+| Standard format | Yes (AGENTS.md) | No (proprietary) | No (proprietary) | No (proprietary) |
+| Multi-tool compatible | Yes | No | No | No |
 
 ## Best Practices
 
-1. **Install globally for Claude Code** - You'll get beads context in every project automatically
+1. **Start with Factory integration** - Creates AGENTS.md which works across multiple AI tools:
+   ```bash
+   bd setup factory
+   ```
 
-2. **Install per-project for Cursor/Aider** - These tools expect project-local configuration
+2. **Add tool-specific integrations as needed** - Claude hooks, Cursor rules, or Aider config for tool-specific features
 
-3. **Use stealth mode in CI/CD** - `bd setup claude --stealth` avoids git operations that might fail in automated environments
+3. **Install globally for Claude Code** - You'll get beads context in every project automatically
 
-4. **Run `bd doctor` after setup** - Verifies the integration is working:
+4. **Use stealth mode in CI/CD** - `bd setup claude --stealth` avoids git operations that might fail in automated environments
+
+5. **Commit AGENTS.md to git** - This ensures all team members and AI tools get the same instructions
+
+6. **Run `bd doctor` after setup** - Verifies the integration is working:
    ```bash
    bd doctor | grep -i claude
    # Claude Integration: Hooks installed (CLI mode)
