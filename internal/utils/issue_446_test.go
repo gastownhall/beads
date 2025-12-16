@@ -43,16 +43,18 @@ func TestExtractIssuePrefixAllLetterHash(t *testing.T) {
 	}
 }
 
-// TestExtractIssuePrefixWordSuffix ensures 4+ char word suffixes still work
+// TestExtractIssuePrefixWordSuffix tests alphanumeric suffixes (GH#405 fix)
+// With the GH#405 fix, all alphanumeric suffixes use last-hyphen extraction,
+// even if they look like English words. This fixes multi-hyphen prefix parsing.
 func TestExtractIssuePrefixWordSuffix(t *testing.T) {
-	// These should use first-hyphen extraction (word suffixes, not hashes)
+	// These should use last-hyphen extraction (alphanumeric = valid issue ID suffix)
 	wordSuffixes := []struct {
 		issueID  string
 		expected string
 	}{
-		{"vc-baseline-test", "vc"},     // 4-char "test" - word, not hash
-		{"vc-baseline-hello", "vc"},    // 5-char word
-		{"vc-some-feature", "vc"},      // multi-word suffix
+		{"vc-baseline-test", "vc-baseline"},  // GH#405: alphanumeric suffix uses last hyphen
+		{"vc-baseline-hello", "vc-baseline"}, // GH#405: alphanumeric suffix uses last hyphen
+		{"vc-some-feature", "vc-some"},       // GH#405: alphanumeric suffix uses last hyphen
 	}
 
 	for _, tc := range wordSuffixes {
