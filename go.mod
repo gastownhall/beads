@@ -9,7 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/fatih/color v1.18.0
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/ncruces/go-sqlite3 v0.30.1
+	github.com/ncruces/go-sqlite3 v0.30.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/tetratelabs/wazero v1.10.1
@@ -50,6 +50,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
 )
