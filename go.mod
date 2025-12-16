@@ -14,8 +14,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/tetratelabs/wazero v1.10.1
 	golang.org/x/mod v0.30.0
-	golang.org/x/sys v0.38.0
-	golang.org/x/term v0.37.0
+	golang.org/x/sys v0.39.0
+	golang.org/x/term v0.38.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	rsc.io/script v0.0.2
