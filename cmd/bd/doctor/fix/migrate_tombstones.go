@@ -42,7 +42,7 @@ func MigrateTombstones(path string) error {
 
 	// Load existing JSONL to check for already-existing tombstones
 	existingTombstones := make(map[string]bool)
-	if file, err := os.Open(jsonlPath); err == nil {
+	if file, err := os.Open(filepath.Clean(jsonlPath)); err == nil {
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 		for scanner.Scan() {
@@ -56,7 +56,7 @@ func MigrateTombstones(path string) error {
 				}
 			}
 		}
-		file.Close()
+		_ = file.Close()
 	}
 
 	// Convert deletions to tombstones
@@ -74,7 +74,7 @@ func MigrateTombstones(path string) error {
 		fmt.Printf("  All %d deletion(s) already have tombstones - archiving deletions.jsonl\n", skipped)
 	} else {
 		// Append tombstones to issues.jsonl
-		file, err := os.OpenFile(jsonlPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		file, err := os.OpenFile(filepath.Clean(jsonlPath), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to open issues.jsonl: %w", err)
 		}
