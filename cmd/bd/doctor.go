@@ -384,7 +384,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "JSONL Config":
 			err = fix.LegacyJSONLConfig(path)
 		case "Deletions Manifest":
-			err = fix.HydrateDeletionsManifest(path)
+			err = fix.MigrateTombstones(path)
 		case "Untracked Files":
 			err = fix.UntrackedJSONL(path)
 		case "Sync Branch Health":
