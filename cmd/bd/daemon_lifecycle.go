@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
 )
 
@@ -302,6 +303,59 @@ func stopDaemon(pidFile string) {
 	}
 	
 	fmt.Println("Daemon killed")
+}
+
+// stopAllDaemons stops all running bd daemons (bd-47tn)
+func stopAllDaemons() {
+	// Discover all running daemons using the registry
+	daemons, err := daemon.DiscoverDaemons(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error discovering daemons: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Filter to only alive daemons
+	var alive []daemon.DaemonInfo
+	for _, d := range daemons {
+		if d.Alive {
+			alive = append(alive, d)
+		}
+	}
+
+	if len(alive) == 0 {
+		if jsonOutput {
+			fmt.Println(`{"stopped": 0, "message": "No running daemons found"}`)
+		} else {
+			fmt.Println("No running daemons found")
+		}
+		return
+	}
+
+	if !jsonOutput {
+		fmt.Printf("Found %d running daemon(s), stopping...\n", len(alive))
+	}
+
+	// Stop all daemons (with force=true for stubborn processes)
+	results := daemon.KillAllDaemons(alive, true)
+
+	if jsonOutput {
+		output, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(output))
+	} else {
+		if results.Stopped > 0 {
+			fmt.Printf("✓ Stopped %d daemon(s)\n", results.Stopped)
+		}
+		if results.Failed > 0 {
+			fmt.Printf("✗ Failed to stop %d daemon(s):\n", results.Failed)
+			for _, f := range results.Failures {
+				fmt.Printf("  - PID %d (%s): %s\n", f.PID, f.Workspace, f.Error)
+			}
+		}
+	}
+
+	if results.Failed > 0 {
+		os.Exit(1)
+	}
 }
 
 // startDaemon starts the daemon (in foreground if requested, otherwise background)

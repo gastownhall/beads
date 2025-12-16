@@ -659,6 +659,58 @@ func checkHooksQuick() string {
 	return fmt.Sprintf("Git hooks outdated: %s (%s → %s)", strings.Join(outdatedHooks, ", "), oldestVersion, Version)
 }
 
+// getPrePushHookPath resolves the pre-push hook path for a git repository.
+// Handles both standard .git/hooks and shared hooks via core.hooksPath.
+// Returns (hookPath, error) where error is set if not a git repo.
+// (bd-e0o7: extracted common helper)
+func getPrePushHookPath(path string) (string, error) {
+	// Get git directory (handles worktrees where .git is a file)
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("not a git repository")
+	}
+	gitDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(path, gitDir)
+	}
+
+	// Check for shared hooks via core.hooksPath first
+	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	hooksPathCmd.Dir = path
+	if hooksPathOutput, err := hooksPathCmd.Output(); err == nil {
+		sharedHooksDir := strings.TrimSpace(string(hooksPathOutput))
+		if !filepath.IsAbs(sharedHooksDir) {
+			sharedHooksDir = filepath.Join(path, sharedHooksDir)
+		}
+		return filepath.Join(sharedHooksDir, "pre-push"), nil
+	}
+
+	// Use standard .git/hooks location
+	return filepath.Join(gitDir, "hooks", "pre-push"), nil
+}
+
+// extractBdHookVersion extracts the version from a bd hook's content.
+// Returns empty string if not a bd hook or version cannot be determined.
+// (bd-e0o7: extracted common helper)
+func extractBdHookVersion(content string) string {
+	if !strings.Contains(content, "bd-hooks-version:") {
+		return "" // Not a bd hook
+	}
+
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "bd-hooks-version:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+			break
+		}
+	}
+	return ""
+}
+
 // checkSyncBranchHookQuick does a fast check for sync-branch hook compatibility (issue #532).
 // Returns empty string if OK, otherwise returns issue description.
 func checkSyncBranchHookQuick(path string) string {
@@ -668,30 +720,9 @@ func checkSyncBranchHookQuick(path string) string {
 		return "" // sync-branch not configured, nothing to check
 	}
 
-	// Get git directory
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = path
-	output, err := cmd.Output()
+	hookPath, err := getPrePushHookPath(path)
 	if err != nil {
 		return "" // Not a git repo, skip
-	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(path, gitDir)
-	}
-
-	// Find pre-push hook (check shared hooks first)
-	var hookPath string
-	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
-	hooksPathCmd.Dir = path
-	if hooksPathOutput, err := hooksPathCmd.Output(); err == nil {
-		sharedHooksDir := strings.TrimSpace(string(hooksPathOutput))
-		if !filepath.IsAbs(sharedHooksDir) {
-			sharedHooksDir = filepath.Join(path, sharedHooksDir)
-		}
-		hookPath = filepath.Join(sharedHooksDir, "pre-push")
-	} else {
-		hookPath = filepath.Join(gitDir, "hooks", "pre-push")
 	}
 
 	content, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
@@ -699,25 +730,9 @@ func checkSyncBranchHookQuick(path string) string {
 		return "" // No pre-push hook, covered by other checks
 	}
 
-	// Check if bd hook and extract version
-	hookStr := string(content)
-	if !strings.Contains(hookStr, "bd-hooks-version:") {
-		return "" // Not a bd hook, can't check
-	}
-
-	var hookVersion string
-	for _, line := range strings.Split(hookStr, "\n") {
-		if strings.Contains(line, "bd-hooks-version:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				hookVersion = strings.TrimSpace(parts[1])
-			}
-			break
-		}
-	}
-
+	hookVersion := extractBdHookVersion(string(content))
 	if hookVersion == "" {
-		return "" // Can't determine version
+		return "" // Not a bd hook or can't determine version
 	}
 
 	// Check if version < minSyncBranchHookVersion (when sync-branch bypass was added)
@@ -2072,6 +2087,7 @@ func checkGitHooks() doctorCheck {
 // checkSyncBranchHookCompatibility checks if pre-push hook is compatible with sync-branch mode.
 // When sync-branch is configured, the pre-push hook must have the sync-branch bypass logic
 // (added in version 0.29.0). Without it, users experience circular "bd sync" failures (issue #532).
+// (bd-e0o7: refactored to use extracted helpers)
 func checkSyncBranchHookCompatibility(path string) doctorCheck {
 	// Check if sync-branch is configured
 	syncBranch := syncbranch.GetFromYAML()
@@ -2083,38 +2099,14 @@ func checkSyncBranchHookCompatibility(path string) doctorCheck {
 		}
 	}
 
-	// sync-branch is configured - check pre-push hook version
-	// Get actual git directory (handles worktrees where .git is a file)
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = path
-	output, err := cmd.Output()
+	// Get pre-push hook path using common helper
+	hookPath, err := getPrePushHookPath(path)
 	if err != nil {
 		return doctorCheck{
 			Name:    "Sync Branch Hook Compatibility",
 			Status:  statusOK,
 			Message: "N/A (not a git repository)",
 		}
-	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(path, gitDir)
-	}
-
-	// Check for pre-push hook in standard location or shared hooks location
-	var hookPath string
-
-	// First check if core.hooksPath is configured (shared hooks)
-	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
-	hooksPathCmd.Dir = path
-	if hooksPathOutput, err := hooksPathCmd.Output(); err == nil {
-		sharedHooksDir := strings.TrimSpace(string(hooksPathOutput))
-		if !filepath.IsAbs(sharedHooksDir) {
-			sharedHooksDir = filepath.Join(path, sharedHooksDir)
-		}
-		hookPath = filepath.Join(sharedHooksDir, "pre-push")
-	} else {
-		// Use standard .git/hooks location
-		hookPath = filepath.Join(gitDir, "hooks", "pre-push")
 	}
 
 	hookContent, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
@@ -2127,27 +2119,18 @@ func checkSyncBranchHookCompatibility(path string) doctorCheck {
 		}
 	}
 
-	// Check if this is a bd hook and extract version
-	hookStr := string(hookContent)
-	if !strings.Contains(hookStr, "bd-hooks-version:") {
-		// Not a bd hook - can't determine compatibility
+	// Extract version using common helper
+	hookVersion := extractBdHookVersion(string(hookContent))
+
+	// Not a bd hook - this is intentionally a Warning (vs OK in quick check)
+	// because the full doctor check wants to alert users to potential issues
+	// with custom hooks that may not be sync-branch compatible
+	if !strings.Contains(string(hookContent), "bd-hooks-version:") {
 		return doctorCheck{
 			Name:    "Sync Branch Hook Compatibility",
 			Status:  statusWarning,
 			Message: "Pre-push hook is not a bd hook",
 			Detail:  "Cannot verify sync-branch compatibility with custom hooks",
-		}
-	}
-
-	// Extract version from hook
-	var hookVersion string
-	for _, line := range strings.Split(hookStr, "\n") {
-		if strings.Contains(line, "bd-hooks-version:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				hookVersion = strings.TrimSpace(parts[1])
-			}
-			break
 		}
 	}
 
@@ -2566,16 +2549,14 @@ func checkSyncBranchConfig(path string) doctorCheck {
 		currentBranch = strings.TrimSpace(string(output))
 	}
 
-	// CRITICAL: Check if we're on the sync branch - this is a misconfiguration
-	// that will cause bd sync to fail trying to create a worktree for a branch
-	// that's already checked out
+	// GH#519: Check if we're on the sync branch - this is supported but worth noting
+	// bd sync will commit directly instead of using worktree when on sync branch
 	if syncBranch != "" && currentBranch == syncBranch {
 		return doctorCheck{
 			Name:    "Sync Branch Config",
-			Status:  statusError,
-			Message: fmt.Sprintf("On sync branch '%s'", syncBranch),
-			Detail:  fmt.Sprintf("Currently on branch '%s' which is configured as the sync branch. bd sync cannot create a worktree for a branch that's already checked out.", syncBranch),
-			Fix:     "Switch to your main working branch: git checkout main",
+			Status:  statusOK,
+			Message: fmt.Sprintf("On sync branch '%s' (direct mode)", syncBranch),
+			Detail:  fmt.Sprintf("Currently on sync branch '%s'. bd sync will commit directly instead of using worktree.", syncBranch),
 		}
 	}
 

@@ -58,9 +58,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		fromMain, _ := cmd.Flags().GetBool("from-main")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 		squash, _ := cmd.Flags().GetBool("squash")
-		// Recovery options (bd-vckm)
-		resetRemote, _ := cmd.Flags().GetBool("reset-remote")
-		forcePush, _ := cmd.Flags().GetBool("force-push")
+		checkIntegrity, _ := cmd.Flags().GetBool("check")
 
 		// bd-sync-corruption fix: Force direct mode for sync operations.
 		// This prevents stale daemon SQLite connections from corrupting exports.
@@ -93,6 +91,15 @@ Use --merge to merge the sync branch back to main branch.`,
 			return
 		}
 
+		// If check mode, run pre-sync integrity checks (bd-hlsw.1)
+		if checkIntegrity {
+			if err := showSyncIntegrityCheck(ctx, jsonlPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		// If merge mode, merge sync branch to main
 		if merge {
 			if err := mergeSyncBranch(ctx, dryRun); err != nil {
@@ -105,15 +112,6 @@ Use --merge to merge the sync branch back to main branch.`,
 		// If from-main mode, one-way sync from main branch (gt-ick9: ephemeral branch support)
 		if fromMain {
 			if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, noGitHistory); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-
-		// Handle recovery options (bd-vckm)
-		if resetRemote || forcePush {
-			if err := handleSyncRecovery(ctx, jsonlPath, resetRemote, forcePush, renameOnImport, noGitHistory, dryRun); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -389,20 +387,22 @@ Use --merge to merge the sync branch back to main branch.`,
 		var syncBranchName string
 		var repoRoot string
 		var useSyncBranch bool
+		var onSyncBranch bool // GH#519: track if we're on the sync branch
 		if err := ensureStoreActive(); err == nil && store != nil {
 			syncBranchName, _ = syncbranch.Get(ctx, store)
 			if syncBranchName != "" && syncbranch.HasGitRemote(ctx) {
-				// GH#519: Check if sync.branch equals current branch
-				// If so, we can't use a worktree (git doesn't allow same branch in multiple worktrees)
-				// Fall back to direct commits on the current branch
-				if syncbranch.IsSyncBranchSameAsCurrent(ctx, syncBranchName) {
-					// sync.branch == current branch - use regular commits, not worktree
-					useSyncBranch = false
+				repoRoot, err = syncbranch.GetRepoRoot(ctx)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: sync.branch configured but failed to get repo root: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Falling back to current branch commits\n")
 				} else {
-					repoRoot, err = syncbranch.GetRepoRoot(ctx)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: sync.branch configured but failed to get repo root: %v\n", err)
-						fmt.Fprintf(os.Stderr, "Falling back to current branch commits\n")
+					// GH#519: Check if current branch is the sync branch
+					// If so, commit directly instead of using worktree (which would fail)
+					currentBranch, _ := getCurrentBranch(ctx)
+					if currentBranch == syncBranchName {
+						onSyncBranch = true
+						// Don't use worktree - commit directly to current branch
+						useSyncBranch = false
 					} else {
 						useSyncBranch = true
 					}
@@ -424,6 +424,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			if dryRun {
 				if useSyncBranch {
 					fmt.Printf("→ [DRY RUN] Would commit changes to sync branch '%s' via worktree\n", syncBranchName)
+				} else if onSyncBranch {
+					// GH#519: on sync branch, commit directly
+					fmt.Printf("→ [DRY RUN] Would commit changes directly to sync branch '%s'\n", syncBranchName)
 				} else {
 					fmt.Println("→ [DRY RUN] Would commit changes to git")
 				}
@@ -444,7 +447,12 @@ Use --merge to merge the sync branch back to main branch.`,
 				}
 			} else {
 				// Regular commit to current branch
-				fmt.Println("→ Committing changes to git...")
+				// GH#519: if on sync branch, show appropriate message
+				if onSyncBranch {
+					fmt.Printf("→ Committing changes directly to sync branch '%s'...\n", syncBranchName)
+				} else {
+					fmt.Println("→ Committing changes to git...")
+				}
 				if err := gitCommitBeadsDir(ctx, message); err != nil {
 					fmt.Fprintf(os.Stderr, "Error committing: %v\n", err)
 					os.Exit(1)
@@ -460,6 +468,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			if dryRun {
 				if useSyncBranch {
 					fmt.Printf("→ [DRY RUN] Would pull from sync branch '%s' via worktree\n", syncBranchName)
+				} else if onSyncBranch {
+					// GH#519: on sync branch, regular git pull
+					fmt.Printf("→ [DRY RUN] Would pull directly on sync branch '%s'\n", syncBranchName)
 				} else {
 					fmt.Println("→ [DRY RUN] Would pull from remote")
 				}
@@ -526,7 +537,12 @@ Use --merge to merge the sync branch back to main branch.`,
 					// Check merge driver configuration before pulling
 					checkMergeDriverConfig()
 
-					fmt.Println("→ Pulling from remote...")
+					// GH#519: show appropriate message when on sync branch
+					if onSyncBranch {
+						fmt.Printf("→ Pulling from remote on sync branch '%s'...\n", syncBranchName)
+					} else {
+						fmt.Println("→ Pulling from remote...")
+					}
 					err := gitPull(ctx)
 					if err != nil {
 						// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
@@ -788,9 +804,7 @@ func init() {
 	syncCmd.Flags().Bool("from-main", false, "One-way sync from main branch (for ephemeral branches without upstream)")
 	syncCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
 	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
-	// Recovery options for diverged sync branches (bd-vckm)
-	syncCmd.Flags().Bool("reset-remote", false, "Reset local sync branch to remote state (discards local sync changes)")
-	syncCmd.Flags().Bool("force-push", false, "Force push local sync branch to remote (overwrites remote)")
+	syncCmd.Flags().Bool("check", false, "Pre-sync integrity check: detect forced pushes, prefix mismatches, and orphaned issues")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -859,7 +873,7 @@ func gitHasChanges(ctx context.Context, filePath string) (bool, error) {
 
 // getRepoRootForWorktree returns the main repository root for running git commands
 // This is always the main repository root, never the worktree root
-func getRepoRootForWorktree(_ context.Context) string {
+func getRepoRootForWorktree(ctx context.Context) string {
 	repoRoot, err := git.GetMainRepoRoot()
 	if err != nil {
 		// Fallback to current directory if GetMainRepoRoot fails
@@ -1913,129 +1927,6 @@ func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
 	return noGitHistory
 }
 
-// handleSyncRecovery handles --reset-remote and --force-push recovery options (bd-vckm)
-// These are used when the sync branch has diverged significantly from remote.
-func handleSyncRecovery(ctx context.Context, jsonlPath string, resetRemote, forcePush, renameOnImport, noGitHistory, dryRun bool) error {
-	// Check if sync.branch is configured
-	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("failed to initialize store: %w", err)
-	}
-
-	syncBranchName, err := syncbranch.Get(ctx, store)
-	if err != nil {
-		return fmt.Errorf("failed to get sync branch config: %w", err)
-	}
-
-	if syncBranchName == "" {
-		return fmt.Errorf("sync.branch not configured - recovery options only apply to sync branch mode\nRun 'bd config set sync.branch <branch-name>' to configure")
-	}
-
-	repoRoot, err := syncbranch.GetRepoRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
-	}
-
-	// Check current divergence
-	divergence, err := syncbranch.CheckDivergence(ctx, repoRoot, syncBranchName)
-	if err != nil {
-		return fmt.Errorf("failed to check divergence: %w", err)
-	}
-
-	fmt.Printf("Sync branch '%s' status:\n", syncBranchName)
-	fmt.Printf("  Local ahead:  %d commits\n", divergence.LocalAhead)
-	fmt.Printf("  Remote ahead: %d commits\n", divergence.RemoteAhead)
-	if divergence.IsDiverged {
-		fmt.Println("  Status: DIVERGED")
-	} else if divergence.LocalAhead > 0 {
-		fmt.Println("  Status: Local ahead of remote")
-	} else if divergence.RemoteAhead > 0 {
-		fmt.Println("  Status: Remote ahead of local")
-	} else {
-		fmt.Println("  Status: In sync")
-	}
-	fmt.Println()
-
-	if resetRemote {
-		if dryRun {
-			fmt.Println("[DRY RUN] Would reset local sync branch to remote state")
-			fmt.Printf("  This would discard %d local commit(s)\n", divergence.LocalAhead)
-			return nil
-		}
-
-		if divergence.LocalAhead == 0 {
-			fmt.Println("Nothing to reset - local is not ahead of remote")
-			return nil
-		}
-
-		fmt.Printf("Resetting sync branch '%s' to remote state...\n", syncBranchName)
-		fmt.Printf("  This will discard %d local commit(s)\n", divergence.LocalAhead)
-
-		if err := syncbranch.ResetToRemote(ctx, repoRoot, syncBranchName, jsonlPath); err != nil {
-			return fmt.Errorf("reset to remote failed: %w", err)
-		}
-
-		fmt.Println("✓ Reset complete - local sync branch now matches remote")
-
-		// Import the JSONL to update the database
-		fmt.Println("→ Importing JSONL to update database...")
-		if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
-			return fmt.Errorf("import after reset failed: %w", err)
-		}
-		fmt.Println("✓ Import complete")
-		return nil
-	}
-
-	if forcePush {
-		if dryRun {
-			fmt.Println("[DRY RUN] Would force push local sync branch to remote")
-			fmt.Printf("  This would overwrite %d remote commit(s)\n", divergence.RemoteAhead)
-			return nil
-		}
-
-		if divergence.RemoteAhead == 0 && divergence.LocalAhead == 0 {
-			fmt.Println("Nothing to force push - already in sync")
-			return nil
-		}
-
-		fmt.Printf("Force pushing sync branch '%s' to remote...\n", syncBranchName)
-		if divergence.RemoteAhead > 0 {
-			fmt.Printf("  This will overwrite %d remote commit(s)\n", divergence.RemoteAhead)
-		}
-
-		if err := forcePushSyncBranch(ctx, repoRoot, syncBranchName); err != nil {
-			return fmt.Errorf("force push failed: %w", err)
-		}
-
-		fmt.Println("✓ Force push complete - remote now matches local")
-		return nil
-	}
-
-	return nil
-}
-
-// forcePushSyncBranch force pushes the local sync branch to remote (bd-vckm)
-// This is used when you want to overwrite the remote state with local state.
-func forcePushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
-	// Worktree path is under .git/beads-worktrees/<branch>
-	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
-
-	// Get remote name
-	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", syncBranch))
-	remoteOutput, err := remoteCmd.Output()
-	remote := "origin"
-	if err == nil {
-		remote = strings.TrimSpace(string(remoteOutput))
-	}
-
-	// Force push
-	pushCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--force", remote, syncBranch)
-	if output, err := pushCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push --force failed: %w\n%s", err, output)
-	}
-
-	return nil
-}
-
 // isExternalBeadsDir checks if the beads directory is in a different git repo than cwd.
 // This is used to detect when BEADS_DIR points to a separate repository.
 // Contributed by dand-oss (https://github.com/steveyegge/beads/pull/533)
@@ -2137,4 +2028,363 @@ func pullFromExternalBeadsRepo(ctx context.Context, beadsDir string) error {
 	}
 
 	return nil
+}
+
+// SyncIntegrityResult contains the results of a pre-sync integrity check.
+// bd-hlsw.1: Pre-sync integrity check
+type SyncIntegrityResult struct {
+	ForcedPush       *ForcedPushCheck   `json:"forced_push,omitempty"`
+	PrefixMismatch   *PrefixMismatch    `json:"prefix_mismatch,omitempty"`
+	OrphanedChildren *OrphanedChildren  `json:"orphaned_children,omitempty"`
+	HasProblems      bool               `json:"has_problems"`
+}
+
+// ForcedPushCheck detects if sync branch has diverged from remote.
+type ForcedPushCheck struct {
+	Detected    bool   `json:"detected"`
+	LocalRef    string `json:"local_ref,omitempty"`
+	RemoteRef   string `json:"remote_ref,omitempty"`
+	Message     string `json:"message"`
+}
+
+// PrefixMismatch detects issues with wrong prefix in JSONL.
+type PrefixMismatch struct {
+	ConfiguredPrefix string   `json:"configured_prefix"`
+	MismatchedIDs    []string `json:"mismatched_ids,omitempty"`
+	Count            int      `json:"count"`
+}
+
+// OrphanedChildren detects issues with parent that doesn't exist.
+type OrphanedChildren struct {
+	OrphanedIDs []string `json:"orphaned_ids,omitempty"`
+	Count       int      `json:"count"`
+}
+
+// showSyncIntegrityCheck performs pre-sync integrity checks without modifying state.
+// bd-hlsw.1: Detects forced pushes, prefix mismatches, and orphaned children.
+func showSyncIntegrityCheck(ctx context.Context, jsonlPath string) error {
+	fmt.Println("Sync Integrity Check")
+	fmt.Println("====================\n")
+
+	result := &SyncIntegrityResult{}
+
+	// Check 1: Detect forced pushes on sync branch
+	forcedPush := checkForcedPush(ctx)
+	result.ForcedPush = forcedPush
+	if forcedPush.Detected {
+		result.HasProblems = true
+	}
+	printForcedPushResult(forcedPush)
+
+	// Check 2: Detect prefix mismatches in JSONL
+	prefixMismatch, err := checkPrefixMismatch(ctx, jsonlPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: prefix check failed: %v\n", err)
+	} else {
+		result.PrefixMismatch = prefixMismatch
+		if prefixMismatch != nil && prefixMismatch.Count > 0 {
+			result.HasProblems = true
+		}
+		printPrefixMismatchResult(prefixMismatch)
+	}
+
+	// Check 3: Detect orphaned children (parent issues that don't exist)
+	orphaned, err := checkOrphanedChildrenInJSONL(jsonlPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: orphaned check failed: %v\n", err)
+	} else {
+		result.OrphanedChildren = orphaned
+		if orphaned != nil && orphaned.Count > 0 {
+			result.HasProblems = true
+		}
+		printOrphanedChildrenResult(orphaned)
+	}
+
+	// Summary
+	fmt.Println("\nSummary")
+	fmt.Println("-------")
+	if result.HasProblems {
+		fmt.Println("Problems detected! Review above and consider:")
+		if result.ForcedPush != nil && result.ForcedPush.Detected {
+			fmt.Println("  - Force push: Reset local sync branch or use 'bd sync --from-main'")
+		}
+		if result.PrefixMismatch != nil && result.PrefixMismatch.Count > 0 {
+			fmt.Println("  - Prefix mismatch: Use 'bd import --rename-on-import' to fix")
+		}
+		if result.OrphanedChildren != nil && result.OrphanedChildren.Count > 0 {
+			fmt.Println("  - Orphaned children: Remove parent references or create missing parents")
+		}
+		os.Exit(1)
+	} else {
+		fmt.Println("No problems detected. Safe to sync.")
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(data))
+	}
+
+	return nil
+}
+
+// checkForcedPush detects if the sync branch has diverged from remote.
+// This can happen when someone force-pushes to the sync branch.
+func checkForcedPush(ctx context.Context) *ForcedPushCheck {
+	result := &ForcedPushCheck{
+		Detected: false,
+		Message:  "No sync branch configured or no remote",
+	}
+
+	// Get sync branch name
+	if err := ensureStoreActive(); err != nil {
+		return result
+	}
+
+	syncBranch, _ := syncbranch.Get(ctx, store)
+	if syncBranch == "" {
+		return result
+	}
+
+	// Check if sync branch exists locally
+	checkLocalCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	if checkLocalCmd.Run() != nil {
+		result.Message = fmt.Sprintf("Sync branch '%s' does not exist locally", syncBranch)
+		return result
+	}
+
+	// Get local ref
+	localRefCmd := exec.CommandContext(ctx, "git", "rev-parse", syncBranch)
+	localRefOutput, err := localRefCmd.Output()
+	if err != nil {
+		result.Message = "Failed to get local sync branch ref"
+		return result
+	}
+	localRef := strings.TrimSpace(string(localRefOutput))
+	result.LocalRef = localRef
+
+	// Check if remote tracking branch exists
+	remote := "origin"
+	if configuredRemote, err := store.GetConfig(ctx, "sync.remote"); err == nil && configuredRemote != "" {
+		remote = configuredRemote
+	}
+
+	// Get remote ref
+	remoteRefCmd := exec.CommandContext(ctx, "git", "rev-parse", remote+"/"+syncBranch)
+	remoteRefOutput, err := remoteRefCmd.Output()
+	if err != nil {
+		result.Message = fmt.Sprintf("Remote tracking branch '%s/%s' does not exist", remote, syncBranch)
+		return result
+	}
+	remoteRef := strings.TrimSpace(string(remoteRefOutput))
+	result.RemoteRef = remoteRef
+
+	// If refs match, no divergence
+	if localRef == remoteRef {
+		result.Message = "Sync branch is in sync with remote"
+		return result
+	}
+
+	// Check if local is ahead of remote (normal case)
+	aheadCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", remoteRef, localRef)
+	if aheadCmd.Run() == nil {
+		result.Message = "Local sync branch is ahead of remote (normal)"
+		return result
+	}
+
+	// Check if remote is ahead of local (behind, needs pull)
+	behindCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", localRef, remoteRef)
+	if behindCmd.Run() == nil {
+		result.Message = "Local sync branch is behind remote (needs pull)"
+		return result
+	}
+
+	// If neither is ancestor, branches have diverged - likely a force push
+	result.Detected = true
+	result.Message = fmt.Sprintf("Sync branch has DIVERGED from remote! Local: %s, Remote: %s. This may indicate a force push on the remote.", localRef[:8], remoteRef[:8])
+
+	return result
+}
+
+func printForcedPushResult(fp *ForcedPushCheck) {
+	fmt.Println("1. Force Push Detection")
+	if fp.Detected {
+		fmt.Printf("   [PROBLEM] %s\n", fp.Message)
+	} else {
+		fmt.Printf("   [OK] %s\n", fp.Message)
+	}
+	fmt.Println()
+}
+
+// checkPrefixMismatch detects issues in JSONL that don't match the configured prefix.
+func checkPrefixMismatch(ctx context.Context, jsonlPath string) (*PrefixMismatch, error) {
+	result := &PrefixMismatch{
+		MismatchedIDs: []string{},
+	}
+
+	// Get configured prefix
+	if err := ensureStoreActive(); err != nil {
+		return nil, err
+	}
+
+	prefix, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix == "" {
+		prefix = "bd" // Default
+	}
+	result.ConfiguredPrefix = prefix
+
+	// Read JSONL and check each issue's prefix
+	f, err := os.Open(jsonlPath) // #nosec G304 - controlled path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil // No JSONL, no mismatches
+		}
+		return nil, fmt.Errorf("failed to open JSONL: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var issue struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(line, &issue); err != nil {
+			continue // Skip malformed lines
+		}
+
+		// Check if ID starts with configured prefix
+		if !strings.HasPrefix(issue.ID, prefix+"-") {
+			result.MismatchedIDs = append(result.MismatchedIDs, issue.ID)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read JSONL: %w", err)
+	}
+
+	result.Count = len(result.MismatchedIDs)
+	return result, nil
+}
+
+func printPrefixMismatchResult(pm *PrefixMismatch) {
+	fmt.Println("2. Prefix Mismatch Check")
+	if pm == nil {
+		fmt.Println("   [SKIP] Could not check prefix")
+		fmt.Println()
+		return
+	}
+
+	fmt.Printf("   Configured prefix: %s\n", pm.ConfiguredPrefix)
+	if pm.Count > 0 {
+		fmt.Printf("   [PROBLEM] Found %d issue(s) with wrong prefix:\n", pm.Count)
+		// Show first 10
+		limit := pm.Count
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			fmt.Printf("      - %s\n", pm.MismatchedIDs[i])
+		}
+		if pm.Count > 10 {
+			fmt.Printf("      ... and %d more\n", pm.Count-10)
+		}
+	} else {
+		fmt.Println("   [OK] All issues have correct prefix")
+	}
+	fmt.Println()
+}
+
+// checkOrphanedChildrenInJSONL detects issues with parent references to non-existent issues.
+func checkOrphanedChildrenInJSONL(jsonlPath string) (*OrphanedChildren, error) {
+	result := &OrphanedChildren{
+		OrphanedIDs: []string{},
+	}
+
+	// Read JSONL and build maps of IDs and parent references
+	f, err := os.Open(jsonlPath) // #nosec G304 - controlled path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("failed to open JSONL: %w", err)
+	}
+	defer f.Close()
+
+	existingIDs := make(map[string]bool)
+	parentRefs := make(map[string]string) // child ID -> parent ID
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		var issue struct {
+			ID     string `json:"id"`
+			Parent string `json:"parent,omitempty"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(line, &issue); err != nil {
+			continue
+		}
+
+		// Skip tombstones
+		if issue.Status == string(types.StatusTombstone) {
+			continue
+		}
+
+		existingIDs[issue.ID] = true
+		if issue.Parent != "" {
+			parentRefs[issue.ID] = issue.Parent
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read JSONL: %w", err)
+	}
+
+	// Find orphaned children (parent doesn't exist)
+	for childID, parentID := range parentRefs {
+		if !existingIDs[parentID] {
+			result.OrphanedIDs = append(result.OrphanedIDs, fmt.Sprintf("%s (parent: %s)", childID, parentID))
+		}
+	}
+
+	result.Count = len(result.OrphanedIDs)
+	return result, nil
+}
+
+func printOrphanedChildrenResult(oc *OrphanedChildren) {
+	fmt.Println("3. Orphaned Children Check")
+	if oc == nil {
+		fmt.Println("   [SKIP] Could not check orphaned children")
+		fmt.Println()
+		return
+	}
+
+	if oc.Count > 0 {
+		fmt.Printf("   [PROBLEM] Found %d issue(s) with missing parent:\n", oc.Count)
+		limit := oc.Count
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			fmt.Printf("      - %s\n", oc.OrphanedIDs[i])
+		}
+		if oc.Count > 10 {
+			fmt.Printf("      ... and %d more\n", oc.Count-10)
+		}
+	} else {
+		fmt.Println("   [OK] No orphaned children found")
+	}
+	fmt.Println()
 }

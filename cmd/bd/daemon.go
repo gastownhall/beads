@@ -36,6 +36,7 @@ Common operations:
   bd daemon --start              Start the daemon (background)
   bd daemon --start --foreground Start in foreground (for systemd/supervisord)
   bd daemon --stop               Stop a running daemon
+  bd daemon --stop-all           Stop ALL running bd daemons
   bd daemon --status             Check if daemon is running
   bd daemon --health             Check daemon health and metrics
 
@@ -43,6 +44,7 @@ Run 'bd daemon' with no flags to see available options.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		start, _ := cmd.Flags().GetBool("start")
 		stop, _ := cmd.Flags().GetBool("stop")
+		stopAll, _ := cmd.Flags().GetBool("stop-all")
 		status, _ := cmd.Flags().GetBool("status")
 		health, _ := cmd.Flags().GetBool("health")
 		metrics, _ := cmd.Flags().GetBool("metrics")
@@ -54,7 +56,7 @@ Run 'bd daemon' with no flags to see available options.`,
 		foreground, _ := cmd.Flags().GetBool("foreground")
 
 		// If no operation flags provided, show help
-		if !start && !stop && !status && !health && !metrics {
+		if !start && !stop && !stopAll && !status && !health && !metrics {
 			_ = cmd.Help()
 			return
 		}
@@ -116,6 +118,11 @@ Run 'bd daemon' with no flags to see available options.`,
 
 		if stop {
 			stopDaemon(pidFile)
+			return
+		}
+
+		if stopAll {
+			stopAllDaemons()
 			return
 		}
 
@@ -222,6 +229,7 @@ func init() {
 	daemonCmd.Flags().Bool("auto-push", false, "Automatically push commits")
 	daemonCmd.Flags().Bool("local", false, "Run in local-only mode (no git required, no sync)")
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
+	daemonCmd.Flags().Bool("stop-all", false, "Stop all running bd daemons")
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().Bool("health", false, "Check daemon health and metrics")
 	daemonCmd.Flags().Bool("metrics", false, "Show detailed daemon metrics")
