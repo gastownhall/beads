@@ -593,8 +593,18 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				// Exact match (same content, same ID) - idempotent case
 				result.Unchanged++
 			} else {
-				// Same content, different ID - rename detected
-				if !opts.SkipUpdate {
+				// Same content, different ID - check if this is a rename or cross-prefix duplicate
+				existingPrefix := utils.ExtractIssuePrefix(existing.ID)
+				incomingPrefix := utils.ExtractIssuePrefix(incoming.ID)
+
+				if existingPrefix != incomingPrefix {
+					// Cross-prefix content match: same content but different projects/prefixes.
+					// This is NOT a rename - it's a duplicate from another project.
+					// Skip the incoming issue and keep the existing one unchanged.
+					// Calling handleRename would fail because CreateIssue validates prefix.
+					result.Skipped++
+				} else if !opts.SkipUpdate {
+					// Same prefix, different ID suffix - this is a true rename
 					deletedID, err := handleRename(ctx, sqliteStore, existing, incoming)
 					if err != nil {
 						return fmt.Errorf("failed to handle rename %s -> %s: %w", existing.ID, incoming.ID, err)
