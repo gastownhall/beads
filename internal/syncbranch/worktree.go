@@ -728,6 +728,9 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Push with explicit remote and branch, set upstream if not set
 		cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--set-upstream", remote, branch)
+		// Set BD_SYNC_IN_PROGRESS so pre-push hook knows to skip checks (GH#532)
+		// This prevents circular error where hook suggests running bd sync
+		cmd.Env = append(os.Environ(), "BD_SYNC_IN_PROGRESS=1")
 		output, err := cmd.CombinedOutput()
 
 		if err == nil {

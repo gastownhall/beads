@@ -28,6 +28,12 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
+# Skip if bd sync is already in progress (GH#532: prevents circular error)
+# bd sync sets this env var when pushing from worktree
+if [ -n "$BD_SYNC_IN_PROGRESS" ]; then
+    exit 0
+fi
+
 # Check if sync-branch is configured in config.yaml or env var
 # If so, .beads changes go to a separate branch via worktree, not the current branch
 SYNC_BRANCH="${BEADS_SYNC_BRANCH:-}"

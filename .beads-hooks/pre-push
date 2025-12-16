@@ -25,6 +25,12 @@ if [ ! -d .beads ]; then
     exit 0
 fi
 
+# Skip if bd sync is already in progress (GH#532: prevents circular error)
+# bd sync sets this env var when pushing from worktree
+if [ -n "$BD_SYNC_IN_PROGRESS" ]; then
+    exit 0
+fi
+
 # Optionally flush pending bd changes so they surface in JSONL
 # This prevents the race where a debounced flush lands after the check
 if command -v bd >/dev/null 2>&1; then
