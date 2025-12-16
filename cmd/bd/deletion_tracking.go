@@ -5,11 +5,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/merge"
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+// isIssueNotFoundError checks if the error indicates the issue doesn't exist
+// This is OK during merge - the issue may already be deleted/tombstoned
+func isIssueNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "issue not found:")
+}
 
 // getVersion returns the current bd version
 func getVersion() string {
@@ -75,10 +85,16 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 	}
 
 	// Prune accepted deletions from the database
-	// Collect all deletion errors - fail the operation if any delete fails
+	// "Issue not found" errors are OK - the issue may already be deleted/tombstoned
 	var deletionErrors []error
+	var alreadyGone int
 	for _, id := range acceptedDeletions {
 		if err := store.DeleteIssue(ctx, id); err != nil {
+			// If issue is already gone (tombstoned or never existed locally), that's fine
+			if isIssueNotFoundError(err) {
+				alreadyGone++
+				continue
+			}
 			deletionErrors = append(deletionErrors, fmt.Errorf("issue %s: %w", id, err))
 		}
 	}
@@ -89,9 +105,15 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 
 	// Print stats if deletions were found
 	stats := sm.GetStats()
-	if stats.DeletionsFound > 0 {
-		fmt.Fprintf(os.Stderr, "3-way merge: pruned %d deleted issue(s) from database (base: %d, left: %d, merged: %d)\n",
-			stats.DeletionsFound, stats.BaseCount, stats.LeftCount, stats.MergedCount)
+	actuallyDeleted := len(acceptedDeletions) - alreadyGone
+	if stats.DeletionsFound > 0 || alreadyGone > 0 {
+		if alreadyGone > 0 {
+			fmt.Fprintf(os.Stderr, "3-way merge: pruned %d deleted issue(s) from database, %d already gone (base: %d, left: %d, merged: %d)\n",
+				actuallyDeleted, alreadyGone, stats.BaseCount, stats.LeftCount, stats.MergedCount)
+		} else {
+			fmt.Fprintf(os.Stderr, "3-way merge: pruned %d deleted issue(s) from database (base: %d, left: %d, merged: %d)\n",
+				actuallyDeleted, stats.BaseCount, stats.LeftCount, stats.MergedCount)
+		}
 	}
 
 	return true, nil
