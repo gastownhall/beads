@@ -73,6 +73,22 @@ func TestCheckDocumentationBdPrimeReference(t *testing.T) {
 			expectDetail:   true,
 		},
 		{
+			name: "claude.local.md references bd prime (local-only)",
+			fileContent: map[string]string{
+				"claude.local.md": "Run bd prime for context.",
+			},
+			expectedStatus: "ok",
+			expectDetail:   true,
+		},
+		{
+			name: ".claude/claude.local.md references bd prime (local-only)",
+			fileContent: map[string]string{
+				".claude/claude.local.md": "Use bd prime for workflow context.",
+			},
+			expectedStatus: "ok",
+			expectDetail:   true,
+		},
+		{
 			name: "multiple files reference bd prime",
 			fileContent: map[string]string{
 				"AGENTS.md": "Use bd prime",
