@@ -1265,3 +1265,62 @@ func TestCheckSyncBranchHookQuick(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractManualFix tests the extractManualFix function (GH#403)
+func TestExtractManualFix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "manually pattern with git config",
+			input:    "Run 'bd doctor --fix' to update to correct config, or manually: git config merge.beads.driver \"bd merge %A %O %A %B\"",
+			expected: "git config merge.beads.driver \"bd merge %A %O %A %B\"",
+		},
+		{
+			name:     "manually pattern with newline",
+			input:    "Run 'bd doctor --fix' to auto-migrate, or manually:\nbd init && bd import",
+			expected: "bd init && bd import",
+		},
+		{
+			name:     "or alternative after bd doctor --fix",
+			input:    "Run 'bd doctor --fix' or bd init",
+			expected: "bd init",
+		},
+		{
+			name:     "or alternative before bd doctor --fix",
+			input:    "Run: bd init (safe to re-run) or bd doctor --fix",
+			expected: "bd init (safe to re-run)",
+		},
+		{
+			name:     "just bd doctor --fix",
+			input:    "Run 'bd doctor --fix'",
+			expected: "",
+		},
+		{
+			name:     "no bd doctor --fix at all",
+			input:    "Run 'bd init' to initialize the database",
+			expected: "Run 'bd init' to initialize the database",
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "update configuration suggestion",
+			input:    "Run 'bd doctor --fix' to update the configuration",
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := extractManualFix(tc.input)
+			if result != tc.expected {
+				t.Errorf("extractManualFix(%q) = %q, expected %q", tc.input, result, tc.expected)
+			}
+		})
+	}
+}

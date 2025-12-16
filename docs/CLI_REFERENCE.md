@@ -11,6 +11,7 @@
 - [Filtering & Search](#filtering--search)
 - [Advanced Operations](#advanced-operations)
 - [Database Management](#database-management)
+- [Setup & Integration](#setup--integration)
 
 ## Basic Operations
 
@@ -550,10 +551,29 @@ bd sync  # Force immediate sync, bypass debounce
 
 **ALWAYS run `bd sync` at end of agent sessions** to ensure changes are committed/pushed immediately.
 
+## Setup & Integration
+
+Configure beads integration with AI coding tools:
+
+```bash
+# Setup integration
+bd setup claude    # Claude Code hooks (SessionStart/PreCompact)
+bd setup cursor    # Cursor IDE rules file
+bd setup aider     # Aider configuration
+
+# Check/remove integration
+bd setup claude --check      # Verify installation
+bd setup claude --remove     # Remove hooks
+bd setup claude --project    # Project-only (not global)
+```
+
+See [SETUP.md](SETUP.md) for detailed documentation on each integration.
+
 ## See Also
 
 - [AGENTS.md](../AGENTS.md) - Main agent workflow guide
 - [DAEMON.md](DAEMON.md) - Daemon management and event-driven mode
 - [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git workflows and merge strategies
-- [LABELS.md](LABELS.md) - Label system guide
+- [LABELS.md](../LABELS.md) - Label system guide
+- [SETUP.md](SETUP.md) - AI tool integration setup
 - [README.md](../README.md) - User documentation

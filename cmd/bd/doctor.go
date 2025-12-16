@@ -404,7 +404,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 		if err != nil {
 			errorCount++
 			color.Red("  ✗ Error: %v\n", err)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
+			// GH#403: Don't suggest "bd doctor --fix" when we're already running --fix
+			manualFix := extractManualFix(check.Fix)
+			if manualFix != "" {
+				fmt.Printf("  Manual fix: %s\n", manualFix)
+			}
 		} else {
 			fixedCount++
 			color.Green("  ✓ Fixed\n")
@@ -416,6 +420,53 @@ func applyFixList(path string, fixes []doctorCheck) {
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// extractManualFix extracts the manual fix portion from a Fix message.
+// GH#403: When running "bd doctor --fix", suggesting "Run 'bd doctor --fix'" is circular.
+// This function extracts just the manual command when available.
+//
+// Examples:
+//   - "Run 'bd doctor --fix' to ..., or manually: git config ..." -> "git config ..."
+//   - "Run 'bd doctor --fix' or bd init" -> "bd init"
+//   - "Run: bd init or bd doctor --fix" -> "bd init"
+//   - "Run 'bd doctor --fix'" -> "" (no alternative)
+func extractManualFix(fix string) string {
+	// Pattern 1: "..., or manually: <command>" - extract everything after "manually:"
+	if idx := strings.Index(strings.ToLower(fix), "manually:"); idx != -1 {
+		manual := strings.TrimSpace(fix[idx+len("manually:"):])
+		return manual
+	}
+
+	// Pattern 2: "Run 'bd doctor --fix' or <alternative>" - extract the alternative
+	// Also handles "Run: bd init or bd doctor --fix"
+	fixLower := strings.ToLower(fix)
+	if strings.Contains(fixLower, "bd doctor --fix") {
+		// Try to find " or " and extract the other option
+		if idx := strings.Index(fixLower, " or "); idx != -1 {
+			before := fix[:idx]
+			after := fix[idx+4:] // len(" or ") = 4
+
+			// Check which side has "bd doctor --fix"
+			if strings.Contains(strings.ToLower(before), "bd doctor --fix") {
+				// "bd doctor --fix or <alternative>" - return alternative
+				return strings.TrimSpace(after)
+			}
+			// "<alternative> or bd doctor --fix" - return alternative
+			// Remove any "Run:" or "Run " prefix
+			result := strings.TrimSpace(before)
+			result = strings.TrimPrefix(result, "Run:")
+			result = strings.TrimPrefix(result, "Run ")
+			return strings.TrimSpace(result)
+		}
+
+		// No " or " found - the whole fix is just "bd doctor --fix"
+		// Return empty string to indicate no manual alternative
+		return ""
+	}
+
+	// No "bd doctor --fix" in the message - return as-is
+	return fix
 }
 
 // runCheckHealth runs lightweight health checks for git hooks.
