@@ -14,336 +14,354 @@ import (
 )
 
 var resetCmd = &cobra.Command{
-	Use:   "reset [--confirm <remote-url>]",
-	Short: "Completely remove beads from this repository",
-	Long: `Completely remove beads from this repository, including all issue data.
+	Use:   "reset",
+	Short: "Remove all beads data and configuration",
+	Long: `Reset beads to an uninitialized state, removing all local data.
 
-This command:
-1. Stops any running daemon
-2. Removes git hooks installed by beads
-3. Removes the merge driver configuration
-4. Removes beads entry from .gitattributes
-5. Deletes the .beads directory (ALL ISSUE DATA)
-6. Removes the sync worktree (if exists)
+This command removes:
+  - The .beads directory (database, JSONL, config)
+  - Git hooks installed by bd
+  - Merge driver configuration
+  - Sync branch worktrees
 
-WARNING: This permanently deletes all issue data. Consider backing up first:
-  cp .beads/issues.jsonl ~/beads-backup-$(date +%Y%m%d).jsonl
+By default, shows what would be deleted (dry-run mode).
+Use --force to actually perform the reset.
 
-SAFETY: You must pass --confirm with the git remote URL to confirm.
-
-EXAMPLES:
-  # Preview what would be removed
-  bd reset --dry-run
-
-  # Actually reset (requires confirmation)
-  bd reset --confirm origin
-
-  # Or with the full remote URL
-  bd reset --confirm git@github.com:user/repo.git
-
-After reset, you can reinitialize with:
-  bd init`,
+Examples:
+  bd reset              # Show what would be deleted
+  bd reset --force      # Actually delete everything`,
 	Run: runReset,
 }
 
-var (
-	resetConfirm string
-	resetDryRun  bool
-	resetForce   bool
-)
-
 func init() {
-	resetCmd.Flags().StringVar(&resetConfirm, "confirm", "", "Remote name or URL to confirm reset (required)")
-	resetCmd.Flags().BoolVar(&resetDryRun, "dry-run", false, "Preview what would be removed without making changes")
-	resetCmd.Flags().BoolVar(&resetForce, "force", false, "Skip confirmation prompts")
+	resetCmd.Flags().Bool("force", false, "Actually perform the reset (required)")
 	rootCmd.AddCommand(resetCmd)
 }
 
 func runReset(cmd *cobra.Command, args []string) {
-	// Check if we're in a beads repository
-	beadsDir := findBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintln(os.Stderr, "Error: No .beads directory found - nothing to reset")
+	CheckReadonly("reset")
+
+	force, _ := cmd.Flags().GetBool("force")
+
+	// Check if we're in a git repo
+	gitDir, err := git.GetGitDir()
+	if err != nil {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"error": "not a git repository",
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: not a git repository\n")
+		}
 		os.Exit(1)
 	}
 
-	// Get git root
-	gitRoot, err := git.GetMainRepoRoot()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Not in a git repository: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Verify confirmation unless dry-run or force
-	if !resetDryRun && !resetForce {
-		if resetConfirm == "" {
-			fmt.Fprintln(os.Stderr, color.RedString("Error: --confirm flag required"))
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "This command permanently deletes all issue data.")
-			fmt.Fprintln(os.Stderr, "To confirm, pass the remote name or URL:")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "  bd reset --confirm origin")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Or use --dry-run to preview what would be removed:")
-			fmt.Fprintln(os.Stderr, "  bd reset --dry-run")
-			os.Exit(1)
-		}
-
-		// Verify the confirmation matches a remote
-		if !verifyResetConfirmation(resetConfirm) {
-			fmt.Fprintf(os.Stderr, color.RedString("Error: '%s' does not match any git remote\n"), resetConfirm)
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Available remotes:")
-			listRemotes()
-			os.Exit(1)
-		}
-	}
-
-	if resetDryRun {
-		fmt.Println(color.YellowString("DRY RUN - no changes will be made"))
-		fmt.Println()
-	}
-
-	// Track what we'll do/did
-	var actions []string
-
-	// 1. Stop daemon
-	fmt.Println("Checking for running daemon...")
-	if resetDryRun {
-		actions = append(actions, "Would stop daemon (if running)")
-	} else {
-		if err := stopDaemonForReset(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	// Check if .beads directory exists
+	beadsDir := ".beads"
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"message": "beads not initialized",
+				"reset":   false,
+			})
 		} else {
-			actions = append(actions, "Stopped daemon")
+			fmt.Println("Beads is not initialized in this repository.")
+			fmt.Println("Nothing to reset.")
 		}
-	}
-
-	// 2. Uninstall hooks
-	fmt.Println("Checking git hooks...")
-	if resetDryRun {
-		hooks := CheckGitHooks()
-		for _, h := range hooks {
-			if h.Installed {
-				actions = append(actions, fmt.Sprintf("Would remove hook: %s", h.Name))
-			}
-		}
-	} else {
-		if err := uninstallHooks(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to uninstall hooks: %v\n", err)
-		} else {
-			actions = append(actions, "Removed git hooks")
-		}
-	}
-
-	// 3. Remove merge driver config
-	fmt.Println("Checking merge driver config...")
-	if resetDryRun {
-		actions = append(actions, "Would remove merge driver config (git config)")
-	} else {
-		if err := removeMergeDriverConfig(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-		} else {
-			actions = append(actions, "Removed merge driver config")
-		}
-	}
-
-	// 4. Remove .gitattributes entry
-	fmt.Println("Checking .gitattributes...")
-	gitattributes := filepath.Join(gitRoot, ".gitattributes")
-	if resetDryRun {
-		if _, err := os.Stat(gitattributes); err == nil {
-			actions = append(actions, "Would remove beads entry from .gitattributes")
-		}
-	} else {
-		if err := removeBeadsFromGitattributes(gitattributes); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-		} else {
-			actions = append(actions, "Removed beads entry from .gitattributes")
-		}
-	}
-
-	// 5. Remove .beads directory
-	fmt.Println("Checking .beads directory...")
-	if resetDryRun {
-		// Count files
-		fileCount := 0
-		_ = filepath.Walk(beadsDir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && !info.IsDir() {
-				fileCount++
-			}
-			return nil
-		})
-		actions = append(actions, fmt.Sprintf("Would delete .beads directory (%d files)", fileCount))
-	} else {
-		if err := os.RemoveAll(beadsDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to remove .beads directory: %v\n", err)
-			os.Exit(1)
-		}
-		actions = append(actions, "Deleted .beads directory")
-	}
-
-	// 6. Remove sync worktree
-	gitDir, _ := git.GetGitDir()
-	worktreePath := filepath.Join(gitDir, "beads-worktrees")
-	if _, err := os.Stat(worktreePath); err == nil {
-		fmt.Println("Checking sync worktree...")
-		if resetDryRun {
-			actions = append(actions, "Would remove sync worktree")
-		} else {
-			// First try to remove the git worktree properly
-			_ = exec.Command("git", "worktree", "remove", "--force", filepath.Join(worktreePath, "beads-sync")).Run()
-			// Then remove the directory
-			if err := os.RemoveAll(worktreePath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
-			} else {
-				actions = append(actions, "Removed sync worktree")
-			}
-		}
-	}
-
-	// Summary
-	fmt.Println()
-	if resetDryRun {
-		fmt.Println(color.YellowString("Actions that would be taken:"))
-	} else {
-		fmt.Println(color.GreenString("Reset complete!"))
-	}
-	for _, action := range actions {
-		fmt.Printf("  %s %s\n", color.GreenString("✓"), action)
-	}
-
-	if !resetDryRun {
-		fmt.Println()
-		fmt.Println("To reinitialize beads, run:")
-		fmt.Println("  bd init")
-	}
-}
-
-// verifyResetConfirmation checks if the provided confirmation matches a remote
-func verifyResetConfirmation(confirm string) bool {
-	// Get list of remotes
-	output, err := exec.Command("git", "remote", "-v").Output()
-	if err != nil {
-		return false
-	}
-
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			remoteName := parts[0]
-			remoteURL := parts[1]
-
-			// Match against remote name or URL
-			if confirm == remoteName || confirm == remoteURL {
-				return true
-			}
-
-			// Also match partial URLs (e.g., user/repo)
-			if strings.Contains(remoteURL, confirm) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// listRemotes prints available git remotes
-func listRemotes() {
-	output, err := exec.Command("git", "remote", "-v").Output()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "  (unable to list remotes)")
 		return
 	}
 
-	// Dedupe (git remote -v shows each twice for fetch/push)
-	seen := make(map[string]bool)
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			key := parts[0] + " " + parts[1]
-			if !seen[key] {
-				seen[key] = true
-				fmt.Printf("  %s\t%s\n", parts[0], parts[1])
+	// Collect what would be deleted
+	items := collectResetItems(gitDir, beadsDir)
+
+	if !force {
+		// Dry-run mode: show what would be deleted
+		showResetPreview(items)
+		return
+	}
+
+	// Actually perform the reset
+	performReset(items, gitDir, beadsDir)
+}
+
+type resetItem struct {
+	Type        string `json:"type"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
+}
+
+func collectResetItems(gitDir, beadsDir string) []resetItem {
+	var items []resetItem
+
+	// Check for running daemon
+	pidFile := filepath.Join(beadsDir, "daemon.pid")
+	if _, err := os.Stat(pidFile); err == nil {
+		if isRunning, pid := isDaemonRunning(pidFile); isRunning {
+			items = append(items, resetItem{
+				Type:        "daemon",
+				Path:        pidFile,
+				Description: fmt.Sprintf("Stop running daemon (PID %d)", pid),
+			})
+		}
+	}
+
+	// Check for git hooks
+	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
+	hooksDir := filepath.Join(gitDir, "hooks")
+	for _, hookName := range hookNames {
+		hookPath := filepath.Join(hooksDir, hookName)
+		if _, err := os.Stat(hookPath); err == nil {
+			// Check if it's a beads hook by looking for version marker
+			if isBdHook(hookPath) {
+				items = append(items, resetItem{
+					Type:        "hook",
+					Path:        hookPath,
+					Description: fmt.Sprintf("Remove git hook: %s", hookName),
+				})
 			}
 		}
 	}
-}
 
-// stopDaemonForReset stops the daemon for this repository
-func stopDaemonForReset() error {
-	// Try to stop daemon via the daemon command
-	cmd := exec.Command("bd", "daemon", "--stop")
-	_ = cmd.Run() // Ignore errors - daemon might not be running
-
-	// Also try killall
-	cmd = exec.Command("bd", "daemons", "killall")
-	_ = cmd.Run()
-
-	return nil
-}
-
-// removeMergeDriverConfig removes the beads merge driver from git config
-func removeMergeDriverConfig() error {
-	// Remove merge driver settings
-	_ = exec.Command("git", "config", "--unset", "merge.beads.driver").Run()
-	_ = exec.Command("git", "config", "--unset", "merge.beads.name").Run()
-	return nil
-}
-
-// removeBeadsFromGitattributes removes beads entries from .gitattributes
-func removeBeadsFromGitattributes(path string) error {
-	// Check if file exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil // Nothing to do
+	// Check for merge driver config
+	if hasMergeDriverConfig() {
+		items = append(items, resetItem{
+			Type:        "config",
+			Path:        "merge.beads.*",
+			Description: "Remove merge driver configuration",
+		})
 	}
 
-	// Read the file
-	// #nosec G304 -- path comes from gitRoot which is validated
-	content, err := os.ReadFile(path)
+	// Check for .gitattributes entry
+	if hasGitattributesEntry() {
+		items = append(items, resetItem{
+			Type:        "gitattributes",
+			Path:        ".gitattributes",
+			Description: "Remove beads entry from .gitattributes",
+		})
+	}
+
+	// Check for sync branch worktrees
+	worktreesDir := filepath.Join(gitDir, "beads-worktrees")
+	if info, err := os.Stat(worktreesDir); err == nil && info.IsDir() {
+		items = append(items, resetItem{
+			Type:        "worktrees",
+			Path:        worktreesDir,
+			Description: "Remove sync branch worktrees",
+		})
+	}
+
+	// The .beads directory itself
+	items = append(items, resetItem{
+		Type:        "directory",
+		Path:        beadsDir,
+		Description: "Remove .beads directory (database, JSONL, config)",
+	})
+
+	return items
+}
+
+func isBdHook(hookPath string) bool {
+	// #nosec G304 -- hook path is constructed from git dir, not user input
+	file, err := os.Open(hookPath)
 	if err != nil {
-		return fmt.Errorf("failed to read .gitattributes: %w", err)
+		return false
 	}
+	defer file.Close()
 
-	// Filter out beads-related lines
-	var newLines []string
-	inBeadsSection := false
-	scanner := bufio.NewScanner(strings.NewReader(string(content)))
-	for scanner.Scan() {
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() && lineCount < 10 {
 		line := scanner.Text()
-
-		// Skip beads comment header
-		if strings.Contains(line, "Use bd merge for beads") {
-			inBeadsSection = true
-			continue
+		if strings.Contains(line, "bd-hooks-version:") || strings.Contains(line, "beads") {
+			return true
 		}
+		lineCount++
+	}
+	return false
+}
 
-		// Skip beads merge attribute lines
-		if strings.Contains(line, "merge=beads") {
-			inBeadsSection = false
-			continue
-		}
+func hasMergeDriverConfig() bool {
+	cmd := exec.Command("git", "config", "--get", "merge.beads.driver")
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+	return false
+}
 
-		// Skip empty lines immediately after beads section
-		if inBeadsSection && strings.TrimSpace(line) == "" {
-			inBeadsSection = false
-			continue
-		}
+func hasGitattributesEntry() bool {
+	// #nosec G304 -- fixed path
+	content, err := os.ReadFile(".gitattributes")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(content), "merge=beads")
+}
 
-		inBeadsSection = false
-		newLines = append(newLines, line)
+func showResetPreview(items []resetItem) {
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"dry_run": true,
+			"items":   items,
+		})
+		return
 	}
 
-	// If file would be empty (or just whitespace), remove it
+	yellow := color.New(color.FgYellow).SprintFunc()
+	red := color.New(color.FgRed).SprintFunc()
+
+	fmt.Println(yellow("Reset preview (dry-run mode)"))
+	fmt.Println()
+	fmt.Println("The following will be removed:")
+	fmt.Println()
+
+	for _, item := range items {
+		fmt.Printf("  %s %s\n", red("•"), item.Description)
+		if item.Type != "config" {
+			fmt.Printf("    %s\n", item.Path)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(red("⚠ This operation cannot be undone!"))
+	fmt.Println()
+	fmt.Printf("To proceed, run: %s\n", yellow("bd reset --force"))
+}
+
+func performReset(items []resetItem, gitDir, beadsDir string) {
+	green := color.New(color.FgGreen).SprintFunc()
+
+	var errors []string
+
+	for _, item := range items {
+		switch item.Type {
+		case "daemon":
+			pidFile := filepath.Join(beadsDir, "daemon.pid")
+			stopDaemonQuiet(pidFile)
+			if !jsonOutput {
+				fmt.Printf("%s Stopped daemon\n", green("✓"))
+			}
+
+		case "hook":
+			if err := os.Remove(item.Path); err != nil {
+				errors = append(errors, fmt.Sprintf("failed to remove hook %s: %v", item.Path, err))
+			} else if !jsonOutput {
+				fmt.Printf("%s Removed %s\n", green("✓"), filepath.Base(item.Path))
+			}
+			// Restore backup if exists
+			backupPath := item.Path + ".backup"
+			if _, err := os.Stat(backupPath); err == nil {
+				if err := os.Rename(backupPath, item.Path); err == nil && !jsonOutput {
+					fmt.Printf("  Restored backup hook\n")
+				}
+			}
+
+		case "config":
+			// Remove merge driver config (ignore errors - may not exist)
+			exec.Command("git", "config", "--unset", "merge.beads.driver").Run()
+			exec.Command("git", "config", "--unset", "merge.beads.name").Run()
+			if !jsonOutput {
+				fmt.Printf("%s Removed merge driver config\n", green("✓"))
+			}
+
+		case "gitattributes":
+			if err := removeGitattributesEntry(); err != nil {
+				errors = append(errors, fmt.Sprintf("failed to update .gitattributes: %v", err))
+			} else if !jsonOutput {
+				fmt.Printf("%s Updated .gitattributes\n", green("✓"))
+			}
+
+		case "worktrees":
+			if err := os.RemoveAll(item.Path); err != nil {
+				errors = append(errors, fmt.Sprintf("failed to remove worktrees: %v", err))
+			} else if !jsonOutput {
+				fmt.Printf("%s Removed sync worktrees\n", green("✓"))
+			}
+
+		case "directory":
+			if err := os.RemoveAll(item.Path); err != nil {
+				errors = append(errors, fmt.Sprintf("failed to remove .beads: %v", err))
+			} else if !jsonOutput {
+				fmt.Printf("%s Removed .beads directory\n", green("✓"))
+			}
+		}
+	}
+
+	if jsonOutput {
+		result := map[string]interface{}{
+			"reset":   true,
+			"success": len(errors) == 0,
+		}
+		if len(errors) > 0 {
+			result["errors"] = errors
+		}
+		outputJSON(result)
+		return
+	}
+
+	fmt.Println()
+	if len(errors) > 0 {
+		fmt.Println("Completed with errors:")
+		for _, e := range errors {
+			fmt.Printf("  • %s\n", e)
+		}
+	} else {
+		fmt.Printf("%s Reset complete\n", green("✓"))
+		fmt.Println()
+		fmt.Println("To reinitialize beads, run: bd init")
+	}
+}
+
+// stopDaemonQuiet stops the daemon without printing status messages
+func stopDaemonQuiet(pidFile string) {
+	isRunning, pid := isDaemonRunning(pidFile)
+	if !isRunning {
+		return
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+
+	_ = sendStopSignal(process)
+
+	// Wait up to 5 seconds for daemon to stop
+	for i := 0; i < 50; i++ {
+		if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
+			return
+		}
+		// Small sleep handled by the check
+	}
+
+	// Force kill if still running
+	_ = process.Kill()
+}
+
+func removeGitattributesEntry() error {
+	// #nosec G304 -- fixed path
+	content, err := os.ReadFile(".gitattributes")
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var newLines []string
+	for _, line := range lines {
+		if !strings.Contains(line, "merge=beads") {
+			newLines = append(newLines, line)
+		}
+	}
+
 	newContent := strings.Join(newLines, "\n")
+	// Remove trailing empty lines
+	newContent = strings.TrimRight(newContent, "\n")
+
+	// If file is now empty or only whitespace, remove it
 	if strings.TrimSpace(newContent) == "" {
-		return os.Remove(path)
+		return os.Remove(".gitattributes")
 	}
 
-	// Write back
-	// #nosec G306 -- .gitattributes should be readable
-	return os.WriteFile(path, []byte(newContent+"\n"), 0644)
+	// Add single trailing newline
+	newContent += "\n"
+	return os.WriteFile(".gitattributes", []byte(newContent), 0644)
 }
