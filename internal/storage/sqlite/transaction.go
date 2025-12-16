@@ -97,15 +97,40 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("failed to get custom statuses: %w", err)
 	}
 
+	// Set timestamps first so defensive fixes can use them
+	now := time.Now()
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
+	}
+	if issue.UpdatedAt.IsZero() {
+		issue.UpdatedAt = now
+	}
+
+	// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+	// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		closedAt := maxTime.Add(time.Second)
+		issue.ClosedAt = &closedAt
+	}
+
+	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		deletedAt := maxTime.Add(time.Second)
+		issue.DeletedAt = &deletedAt
+	}
+
 	// Validate issue before creating (with custom status support)
 	if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
-
-	// Set timestamps
-	now := time.Now()
-	issue.CreatedAt = now
-	issue.UpdatedAt = now
 
 	// Compute content hash (bd-95)
 	if issue.ContentHash == "" {
@@ -184,11 +209,38 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 	// Validate and prepare all issues first (with custom status support)
 	now := time.Now()
 	for _, issue := range issues {
+		// Set timestamps first so defensive fixes can use them
+		if issue.CreatedAt.IsZero() {
+			issue.CreatedAt = now
+		}
+		if issue.UpdatedAt.IsZero() {
+			issue.UpdatedAt = now
+		}
+
+		// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+		// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			closedAt := maxTime.Add(time.Second)
+			issue.ClosedAt = &closedAt
+		}
+
+		// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			deletedAt := maxTime.Add(time.Second)
+			issue.DeletedAt = &deletedAt
+		}
+
 		if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 			return fmt.Errorf("validation failed for issue: %w", err)
 		}
-		issue.CreatedAt = now
-		issue.UpdatedAt = now
 		if issue.ContentHash == "" {
 			issue.ContentHash = issue.ComputeContentHash()
 		}
