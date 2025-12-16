@@ -24,7 +24,7 @@ cd my-project
 bd init
 
 # Start daemon for auto-sync (optional)
-bd daemon start --auto-commit --auto-push
+bd daemon --start --auto-commit --auto-push
 ```
 
 ## Phase 1: Research & Planning

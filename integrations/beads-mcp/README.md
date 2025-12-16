@@ -288,7 +288,7 @@ Test daemon RPC with multiple repositories:
 ```bash
 # Start the daemon first
 cd /path/to/beads
-./bd daemon start
+./bd daemon --start
 
 # Run multi-repo test
 cd integrations/beads-mcp

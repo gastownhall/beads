@@ -137,7 +137,7 @@ bd daemon --start
 
 1. Check where daemon is running:
    ```bash
-   bd daemon status
+   bd daemon --status
    ```
 
 2. Use `set_context` tool in Claude to set workspace root:
