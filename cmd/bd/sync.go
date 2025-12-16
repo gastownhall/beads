@@ -57,6 +57,11 @@ Use --merge to merge the sync branch back to main branch.`,
 		squash, _ := cmd.Flags().GetBool("squash")
 		checkIntegrity, _ := cmd.Flags().GetBool("check")
 
+		// If --no-push not explicitly set, check no-push config
+		if !cmd.Flags().Changed("no-push") {
+			noPush = config.GetBool("no-push")
+		}
+
 		// bd-sync-corruption fix: Force direct mode for sync operations.
 		// This prevents stale daemon SQLite connections from corrupting exports.
 		// If the daemon was running but its database file was deleted and recreated

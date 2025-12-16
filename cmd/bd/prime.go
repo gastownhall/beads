@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/config"
 )
 
 var (
@@ -126,6 +127,7 @@ func outputPrimeContext(w io.Writer, mcpMode bool, stealthMode bool) error {
 // outputMCPContext outputs minimal context for MCP users
 func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
+	noPush := config.GetBool("no-push")
 
 	var closeProtocol string
 	if stealthMode {
@@ -133,6 +135,8 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 		closeProtocol = "Before saying \"done\": bd sync --flush-only"
 	} else if ephemeral {
 		closeProtocol = "Before saying \"done\": git status → git add → bd sync --from-main → git commit (no push - ephemeral branch)"
+	} else if noPush {
+		closeProtocol = "Before saying \"done\": git status → git add → bd sync → git commit (push disabled - run git push manually)"
 	} else {
 		closeProtocol = "Before saying \"done\": git status → git add → bd sync → git commit → bd sync → git push"
 	}
@@ -157,6 +161,7 @@ Start: Check ` + "`ready`" + ` tool for available work.
 // outputCLIContext outputs full CLI reference for non-MCP users
 func outputCLIContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
+	noPush := config.GetBool("no-push")
 
 	var closeProtocol string
 	var closeNote string
@@ -188,6 +193,22 @@ bd close <id1> <id2> ...    # Close all completed issues at once
 bd sync --from-main         # Pull latest beads from main
 git add . && git commit -m "..."  # Commit your changes
 # Merge to main when ready (local merge, not push)
+` + "```"
+	} else if noPush {
+		closeProtocol = `[ ] 1. git status              (check what changed)
+[ ] 2. git add <files>         (stage code changes)
+[ ] 3. bd sync                 (commit beads changes)
+[ ] 4. git commit -m "..."     (commit code)
+[ ] 5. bd sync                 (commit any new beads changes)`
+		closeNote = "**Note:** Push disabled via config. Run `git push` manually when ready."
+		syncSection = `### Sync & Collaboration
+- ` + "`bd sync`" + ` - Sync with git remote (run at session end)
+- ` + "`bd sync --status`" + ` - Check sync status without syncing`
+		completingWorkflow = `**Completing work:**
+` + "```bash" + `
+bd close <id1> <id2> ...    # Close all completed issues at once
+bd sync                     # Sync beads (push disabled)
+# git push                  # Run manually when ready
 ` + "```"
 	} else {
 		closeProtocol = `[ ] 1. git status              (check what changed)

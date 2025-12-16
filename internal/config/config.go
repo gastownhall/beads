@@ -106,6 +106,9 @@ func Initialize() error {
 	// Sync configuration defaults (bd-4u8)
 	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
 
+	// Push configuration defaults
+	v.SetDefault("no-push", false)
+
 	// Read config file if it was found
 	if configFileSet {
 		if err := v.ReadInConfig(); err != nil {
