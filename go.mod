@@ -2,7 +2,7 @@ module github.com/steveyegge/beads
 
 go 1.24.0
 
-toolchain go1.24.2
+toolchain go1.24.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.19.0
