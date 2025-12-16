@@ -58,6 +58,9 @@ Use --merge to merge the sync branch back to main branch.`,
 		fromMain, _ := cmd.Flags().GetBool("from-main")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 		squash, _ := cmd.Flags().GetBool("squash")
+		// Recovery options (bd-vckm)
+		resetRemote, _ := cmd.Flags().GetBool("reset-remote")
+		forcePush, _ := cmd.Flags().GetBool("force-push")
 
 		// bd-sync-corruption fix: Force direct mode for sync operations.
 		// This prevents stale daemon SQLite connections from corrupting exports.
@@ -102,6 +105,15 @@ Use --merge to merge the sync branch back to main branch.`,
 		// If from-main mode, one-way sync from main branch (gt-ick9: ephemeral branch support)
 		if fromMain {
 			if err := doSyncFromMain(ctx, jsonlPath, renameOnImport, dryRun, noGitHistory); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		// Handle recovery options (bd-vckm)
+		if resetRemote || forcePush {
+			if err := handleSyncRecovery(ctx, jsonlPath, resetRemote, forcePush, renameOnImport, noGitHistory, dryRun); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -768,6 +780,9 @@ func init() {
 	syncCmd.Flags().Bool("from-main", false, "One-way sync from main branch (for ephemeral branches without upstream)")
 	syncCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
 	syncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output sync statistics in JSON format")
+	// Recovery options for diverged sync branches (bd-vckm)
+	syncCmd.Flags().Bool("reset-remote", false, "Reset local sync branch to remote state (discards local sync changes)")
+	syncCmd.Flags().Bool("force-push", false, "Force push local sync branch to remote (overwrites remote)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -1888,6 +1903,129 @@ func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
 		return true
 	}
 	return noGitHistory
+}
+
+// handleSyncRecovery handles --reset-remote and --force-push recovery options (bd-vckm)
+// These are used when the sync branch has diverged significantly from remote.
+func handleSyncRecovery(ctx context.Context, jsonlPath string, resetRemote, forcePush, renameOnImport, noGitHistory, dryRun bool) error {
+	// Check if sync.branch is configured
+	if err := ensureStoreActive(); err != nil {
+		return fmt.Errorf("failed to initialize store: %w", err)
+	}
+
+	syncBranchName, err := syncbranch.Get(ctx, store)
+	if err != nil {
+		return fmt.Errorf("failed to get sync branch config: %w", err)
+	}
+
+	if syncBranchName == "" {
+		return fmt.Errorf("sync.branch not configured - recovery options only apply to sync branch mode\nRun 'bd config set sync.branch <branch-name>' to configure")
+	}
+
+	repoRoot, err := syncbranch.GetRepoRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get repo root: %w", err)
+	}
+
+	// Check current divergence
+	divergence, err := syncbranch.CheckDivergence(ctx, repoRoot, syncBranchName)
+	if err != nil {
+		return fmt.Errorf("failed to check divergence: %w", err)
+	}
+
+	fmt.Printf("Sync branch '%s' status:\n", syncBranchName)
+	fmt.Printf("  Local ahead:  %d commits\n", divergence.LocalAhead)
+	fmt.Printf("  Remote ahead: %d commits\n", divergence.RemoteAhead)
+	if divergence.IsDiverged {
+		fmt.Println("  Status: DIVERGED")
+	} else if divergence.LocalAhead > 0 {
+		fmt.Println("  Status: Local ahead of remote")
+	} else if divergence.RemoteAhead > 0 {
+		fmt.Println("  Status: Remote ahead of local")
+	} else {
+		fmt.Println("  Status: In sync")
+	}
+	fmt.Println()
+
+	if resetRemote {
+		if dryRun {
+			fmt.Println("[DRY RUN] Would reset local sync branch to remote state")
+			fmt.Printf("  This would discard %d local commit(s)\n", divergence.LocalAhead)
+			return nil
+		}
+
+		if divergence.LocalAhead == 0 {
+			fmt.Println("Nothing to reset - local is not ahead of remote")
+			return nil
+		}
+
+		fmt.Printf("Resetting sync branch '%s' to remote state...\n", syncBranchName)
+		fmt.Printf("  This will discard %d local commit(s)\n", divergence.LocalAhead)
+
+		if err := syncbranch.ResetToRemote(ctx, repoRoot, syncBranchName, jsonlPath); err != nil {
+			return fmt.Errorf("reset to remote failed: %w", err)
+		}
+
+		fmt.Println("✓ Reset complete - local sync branch now matches remote")
+
+		// Import the JSONL to update the database
+		fmt.Println("→ Importing JSONL to update database...")
+		if err := importFromJSONL(ctx, jsonlPath, renameOnImport, noGitHistory); err != nil {
+			return fmt.Errorf("import after reset failed: %w", err)
+		}
+		fmt.Println("✓ Import complete")
+		return nil
+	}
+
+	if forcePush {
+		if dryRun {
+			fmt.Println("[DRY RUN] Would force push local sync branch to remote")
+			fmt.Printf("  This would overwrite %d remote commit(s)\n", divergence.RemoteAhead)
+			return nil
+		}
+
+		if divergence.RemoteAhead == 0 && divergence.LocalAhead == 0 {
+			fmt.Println("Nothing to force push - already in sync")
+			return nil
+		}
+
+		fmt.Printf("Force pushing sync branch '%s' to remote...\n", syncBranchName)
+		if divergence.RemoteAhead > 0 {
+			fmt.Printf("  This will overwrite %d remote commit(s)\n", divergence.RemoteAhead)
+		}
+
+		if err := forcePushSyncBranch(ctx, repoRoot, syncBranchName); err != nil {
+			return fmt.Errorf("force push failed: %w", err)
+		}
+
+		fmt.Println("✓ Force push complete - remote now matches local")
+		return nil
+	}
+
+	return nil
+}
+
+// forcePushSyncBranch force pushes the local sync branch to remote (bd-vckm)
+// This is used when you want to overwrite the remote state with local state.
+func forcePushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Get remote name
+	remoteCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "config", "--get", fmt.Sprintf("branch.%s.remote", syncBranch))
+	remoteOutput, err := remoteCmd.Output()
+	remote := "origin"
+	if err == nil {
+		remote = strings.TrimSpace(string(remoteOutput))
+	}
+
+	// Force push
+	pushCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--force", remote, syncBranch)
+	if output, err := pushCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git push --force failed: %w\n%s", err, output)
+	}
+
+	return nil
 }
 
 // isExternalBeadsDir checks if the beads directory is in a different git repo than cwd.

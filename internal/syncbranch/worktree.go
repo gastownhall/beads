@@ -24,6 +24,20 @@ type CommitResult struct {
 	Message    string // Commit message used
 }
 
+// DivergenceInfo contains information about sync branch divergence from remote
+type DivergenceInfo struct {
+	LocalAhead   int    // Number of commits local is ahead of remote
+	RemoteAhead  int    // Number of commits remote is ahead of local
+	Branch       string // The sync branch name
+	Remote       string // The remote name (e.g., "origin")
+	IsDiverged   bool   // True if both local and remote have commits the other doesn't
+	IsSignificant bool  // True if divergence exceeds threshold (suggests recovery needed)
+}
+
+// SignificantDivergenceThreshold is the number of commits at which divergence is considered significant
+// When both local and remote are ahead by at least this many commits, the user should consider recovery options
+const SignificantDivergenceThreshold = 5
+
 // PullResult contains information about a worktree pull operation
 type PullResult struct {
 	Pulled        bool   // True if pull was performed
@@ -455,6 +469,119 @@ func getDivergence(ctx context.Context, worktreePath, branch, remote string) (in
 	return localAhead, remoteAhead, nil
 }
 
+// CheckDivergence checks the divergence between local sync branch and remote.
+// This should be called before attempting sync operations to detect significant divergence
+// that may require user intervention.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - repoRoot: Path to the git repository root
+//   - syncBranch: Name of the sync branch (e.g., "beads-sync")
+//
+// Returns DivergenceInfo with details about the divergence, or error if check fails.
+func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*DivergenceInfo, error) {
+	info := &DivergenceInfo{
+		Branch: syncBranch,
+	}
+
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Initialize worktree manager
+	wtMgr := git.NewWorktreeManager(repoRoot)
+
+	// Ensure worktree exists
+	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to create worktree: %w", err)
+	}
+
+	// Get remote name
+	remote := getRemoteForBranch(ctx, worktreePath, syncBranch)
+	info.Remote = remote
+
+	// Fetch from remote to get latest state
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, syncBranch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		// Check if remote branch doesn't exist yet (first sync)
+		if strings.Contains(string(output), "couldn't find remote ref") {
+			// Remote branch doesn't exist - no divergence possible
+			return info, nil
+		}
+		return nil, fmt.Errorf("git fetch failed: %w\n%s", err, output)
+	}
+
+	// Check for divergence
+	localAhead, remoteAhead, err := getDivergence(ctx, worktreePath, syncBranch, remote)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check divergence: %w", err)
+	}
+
+	info.LocalAhead = localAhead
+	info.RemoteAhead = remoteAhead
+	info.IsDiverged = localAhead > 0 && remoteAhead > 0
+
+	// Significant divergence: both sides have many commits
+	// This suggests automatic merge may be problematic
+	if info.IsDiverged && (localAhead >= SignificantDivergenceThreshold || remoteAhead >= SignificantDivergenceThreshold) {
+		info.IsSignificant = true
+	}
+
+	return info, nil
+}
+
+// ResetToRemote resets the local sync branch to match the remote state.
+// This discards all local commits on the sync branch and adopts the remote's history.
+// Use this when the sync branch has diverged significantly and you want to discard local changes.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - repoRoot: Path to the git repository root
+//   - syncBranch: Name of the sync branch (e.g., "beads-sync")
+//   - jsonlPath: Path to the JSONL file in the main repo (will be updated with remote content)
+//
+// Returns error if reset fails.
+func ResetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) error {
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Initialize worktree manager
+	wtMgr := git.NewWorktreeManager(repoRoot)
+
+	// Ensure worktree exists
+	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
+		return fmt.Errorf("failed to create worktree: %w", err)
+	}
+
+	// Get remote name
+	remote := getRemoteForBranch(ctx, worktreePath, syncBranch)
+
+	// Fetch from remote to get latest state
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, syncBranch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch failed: %w\n%s", err, output)
+	}
+
+	// Reset worktree to remote's state
+	resetCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard",
+		fmt.Sprintf("%s/%s", remote, syncBranch))
+	if output, err := resetCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset failed: %w\n%s", err, output)
+	}
+
+	// Convert absolute path to relative path from repo root
+	jsonlRelPath, err := filepath.Rel(repoRoot, jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to get relative JSONL path: %w", err)
+	}
+
+	// Copy JSONL from worktree to main repo
+	if err := copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // performContentMerge extracts JSONL from base, local, and remote, then merges content.
 // Returns the merged JSONL content.
 func performContentMerge(ctx context.Context, worktreePath, branch, remote, jsonlRelPath string) ([]byte, error) {
@@ -741,8 +868,26 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 		if isNonFastForwardError(outputStr) {
 			// Attempt fetch + rebase to get ahead of remote
 			if rebaseErr := fetchAndRebaseInWorktree(ctx, worktreePath, branch, remote); rebaseErr != nil {
-				// Rebase failed - return original push error with context
-				return fmt.Errorf("push failed and recovery rebase also failed: push: %w; rebase: %v", lastErr, rebaseErr)
+				// Rebase failed - provide clear recovery options (bd-vckm)
+				return fmt.Errorf(`sync branch diverged and automatic recovery failed
+
+The sync branch '%s' has diverged from remote '%s/%s' and automatic rebase failed.
+
+Recovery options:
+  1. Reset to remote state (discard local sync changes):
+     bd sync --reset-remote
+
+  2. Force push local state to remote (overwrites remote):
+     bd sync --force-push
+
+  3. Manual recovery in the sync branch worktree:
+     cd .git/beads-worktrees/%s
+     git status
+     # Resolve conflicts manually, then:
+     bd sync
+
+Original error: %v
+Rebase error: %v`, branch, remote, branch, branch, lastErr, rebaseErr)
 			}
 			// Rebase succeeded - retry push immediately (no backoff needed)
 			continue
