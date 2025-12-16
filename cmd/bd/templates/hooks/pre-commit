@@ -23,9 +23,17 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
-# Check if we're in a bd workspace
+# Check if we're in a bd workspace with an actual database
+# Just having a .beads directory isn't enough - it must be properly initialized
 if [ ! -d .beads ]; then
     # Not a bd workspace, nothing to do
+    exit 0
+fi
+
+# Verify beads is actually initialized (has database or config)
+# This handles the case where .beads was removed from git but directory lingers
+if [ ! -f .beads/beads.db ] && [ ! -f .beads/config.yaml ] && [ ! -f .beads/issues.jsonl ]; then
+    # Directory exists but beads not initialized, nothing to do
     exit 0
 fi
 
@@ -46,10 +54,11 @@ fi
 # Flush pending changes to JSONL
 # Use --flush-only to skip git operations (we're already in a git hook)
 # Suppress output unless there's an error
+# Note: We don't block commits on flush failure - beads issues shouldn't prevent code commits
 if ! bd sync --flush-only >/dev/null 2>&1; then
-    echo "Error: Failed to flush bd changes to JSONL" >&2
+    echo "Warning: Failed to flush bd changes to JSONL" >&2
     echo "Run 'bd sync --flush-only' manually to diagnose" >&2
-    exit 1
+    # Continue with commit - don't block code changes due to beads issues
 fi
 
 # Stage all tracked JSONL files (issues.jsonl is canonical, beads.jsonl for backward compat, deletions.jsonl for deletion propagation)
