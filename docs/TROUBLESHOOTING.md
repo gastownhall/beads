@@ -656,7 +656,7 @@ bd --allow-stale list --status open
 ```bash
 # Most reliable for sandboxed environments
 bd --sandbox ready
-bd --sandbox import -i .beads/beads.jsonl
+bd --sandbox import -i .beads/issues.jsonl
 ```
 
 ---
@@ -670,7 +670,7 @@ If stuck in a sandboxed environment:
 bd --sandbox ready
 
 # Step 2: If you get staleness errors, force import
-bd import --force -i .beads/beads.jsonl
+bd import --force -i .beads/issues.jsonl
 
 # Step 3: If still blocked, use allow-stale (emergency only)
 bd --allow-stale ready

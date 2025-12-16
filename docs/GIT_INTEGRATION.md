@@ -595,7 +595,7 @@ git config merge.beads.driver
 bd init --skip-db  # Only reconfigure git, don't touch database
 
 # Verify .gitattributes
-grep "beads.jsonl" .gitattributes
+grep "issues.jsonl" .gitattributes
 # Expected: .beads/issues.jsonl merge=beads
 ```
 

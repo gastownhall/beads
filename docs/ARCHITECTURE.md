@@ -33,7 +33,7 @@ bd's core design enables a distributed, git-backed issue tracker that feels like
                                v
 ┌─────────────────────────────────────────────────────────────────┐
 │                       JSONL File                                 │
-│                   (.beads/beads.jsonl)                           │
+│                   (.beads/issues.jsonl)                          │
 │                                                                  │
 │  - Git-tracked source of truth                                   │
 │  - One JSON line per entity (issue, dep, label, comment)         │
@@ -246,7 +246,7 @@ open ──▶ in_progress ──▶ closed
 ```
 .beads/
 ├── beads.db          # SQLite database (gitignored)
-├── beads.jsonl       # JSONL source of truth (git-tracked)
+├── issues.jsonl      # JSONL source of truth (git-tracked)
 ├── bd.sock           # Daemon socket (gitignored)
 ├── daemon.log        # Daemon logs (gitignored)
 ├── config.yaml       # Project config (optional)

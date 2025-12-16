@@ -1,5 +1,5 @@
 #!/bin/sh
-# bd-hooks-version: 0.24.2
+# bd-hooks-version: 0.29.0
 #
 # bd (beads) pre-commit hook
 #
@@ -29,10 +29,12 @@ fi
 # Flush pending changes to JSONL
 # Use --flush-only to skip git operations (we're already in a git hook)
 # Suppress output unless there's an error
+# Note: We warn but don't fail - this allows commits to proceed even if
+# beads has issues (e.g., user removed .beads from their branch)
 if ! bd sync --flush-only >/dev/null 2>&1; then
-    echo "Error: Failed to flush bd changes to JSONL" >&2
+    echo "Warning: Failed to flush bd changes to JSONL" >&2
     echo "Run 'bd sync --flush-only' manually to diagnose" >&2
-    exit 1
+    # Don't block the commit - user may have removed beads or have other issues
 fi
 
 # Stage all tracked JSONL files (issues.jsonl is canonical, beads.jsonl for backward compat, deletions.jsonl for deletion propagation)

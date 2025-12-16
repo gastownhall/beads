@@ -176,11 +176,11 @@ my-project/
 │   ├── beads-worktrees/       # Hidden worktree directory
 │   │   └── beads-metadata/    # Lightweight checkout of sync branch
 │   │       └── .beads/
-│   │           └── beads.jsonl
+│   │           └── issues.jsonl
 │   └── ...
 ├── .beads/                    # Main beads directory (in your workspace)
 │   ├── beads.db               # SQLite database
-│   ├── beads.jsonl            # JSONL export
+│   ├── issues.jsonl            # JSONL export
 │   └── bd.sock                # Daemon socket (if running)
 ├── src/                       # Your application code
 │   └── ...
@@ -209,7 +209,7 @@ my-project/
 
 ### Troubleshooting
 
-**"Merge conflicts in beads.jsonl"**
+**"Merge conflicts in issues.jsonl"**
 
 JSONL is append-only and line-based, so conflicts are rare. If they occur:
 1. Both versions are usually valid - keep both lines

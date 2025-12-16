@@ -231,16 +231,16 @@ The conflicts you'll encounter are **git merge conflicts** in the JSONL file whe
 **Resolution:**
 ```bash
 # After git merge creates conflict
-git checkout --theirs .beads/beads.jsonl  # Accept remote version
+git checkout --theirs .beads/issues.jsonl  # Accept remote version
 # OR
-git checkout --ours .beads/beads.jsonl    # Keep local version
+git checkout --ours .beads/issues.jsonl    # Keep local version
 # OR manually resolve in editor (keep line with newer updated_at)
 
 # Import the resolved JSONL
-bd import -i .beads/beads.jsonl
+bd import -i .beads/issues.jsonl
 
 # Commit the merge
-git add .beads/beads.jsonl
+git add .beads/issues.jsonl
 git commit
 ```
 

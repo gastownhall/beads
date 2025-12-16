@@ -58,7 +58,7 @@ When you create issues as a contributor:
 bd create "Fix authentication bug" -p 1
 ```
 
-Beads automatically routes this to your planning repo (`~/.beads-planning/.beads/beads.jsonl`), not the current repo.
+Beads automatically routes this to your planning repo (`~/.beads-planning/.beads/issues.jsonl`), not the current repo.
 
 ### Viewing Issues
 

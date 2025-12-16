@@ -62,7 +62,7 @@ Files that are automatically gitignored (do NOT commit):
 - `.beads/beads.left.jsonl`, `beads.right.jsonl` - Temporary merge artifacts
 
 The sync branch (beads-metadata) will contain:
-- `.beads/beads.jsonl` - Issue data in JSONL format (committed automatically by daemon)
+- `.beads/issues.jsonl` - Issue data in JSONL format (committed automatically by daemon)
 - `.beads/metadata.json` - Metadata about the beads installation
 - `.beads/config.yaml` - Configuration template (optional)
 
@@ -100,10 +100,10 @@ your-project/
 │   └── beads-worktrees/
 │       └── beads-metadata/  # Worktree (only .beads/ checked out)
 │           └── .beads/
-│               └── beads.jsonl
+│               └── issues.jsonl
 ├── .beads/                  # Your main copy
 │   ├── beads.db
-│   ├── beads.jsonl
+│   ├── issues.jsonl
 │   └── .gitignore
 ├── .gitattributes           # Merge driver config (in main branch)
 └── src/                     # Your code (untouched)
@@ -116,7 +116,7 @@ Main branch (protected):
 - `.gitattributes` - Merge driver configuration
 
 Sync branch (beads-metadata):
-- `.beads/beads.jsonl` - Issue data (committed by daemon)
+- `.beads/issues.jsonl` - Issue data (committed by daemon)
 - `.beads/metadata.json` - Repository metadata
 - `.beads/config.yaml` - Configuration template
 
@@ -136,7 +136,7 @@ Not tracked (gitignored):
 When you update an issue:
 
 1. Issue is updated in `.beads/beads.db` (SQLite database)
-2. Daemon exports to `.beads/beads.jsonl` (JSONL file)
+2. Daemon exports to `.beads/issues.jsonl` (JSONL file)
 3. JSONL is copied to worktree (`.git/beads-worktrees/beads-metadata/.beads/`)
 4. Daemon commits the change in the worktree to `beads-metadata` branch
 5. Main branch stays untouched (no commits on `main`)
@@ -295,11 +295,11 @@ If you encounter conflicts during merge:
 # bd sync --merge will detect conflicts and show:
 Error: Merge conflicts detected
 Conflicting files:
-  .beads/beads.jsonl
+  .beads/issues.jsonl
 
 To resolve:
-1. Fix conflicts in .beads/beads.jsonl
-2. git add .beads/beads.jsonl
+1. Fix conflicts in .beads/issues.jsonl
+2. git add .beads/issues.jsonl
 3. git commit
 4. bd import  # Reimport to sync database
 ```
@@ -308,7 +308,7 @@ To resolve:
 
 JSONL files are append-only and line-based, so conflicts are rare. When they occur:
 
-1. Open `.beads/beads.jsonl` and look for conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
+1. Open `.beads/issues.jsonl` and look for conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
 2. Both versions are usually valid - keep both lines
 3. Remove the conflict markers
 4. Save and commit
@@ -332,8 +332,8 @@ Example conflict resolution:
 Then:
 
 ```bash
-git add .beads/beads.jsonl
-git commit -m "Resolve beads.jsonl merge conflict"
+git add .beads/issues.jsonl
+git commit -m "Resolve issues.jsonl merge conflict"
 bd import  # Import to database (will use latest timestamp)
 ```
 

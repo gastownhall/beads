@@ -129,11 +129,11 @@ This solves bd-my64: changes made between commit and push (or pending debounced 
 After a git pull or merge, the hook runs:
 
 ```bash
-bd import -i .beads/beads.jsonl
+bd import -i .beads/issues.jsonl
 ```
 
 This ensures your local database reflects the merged state. The hook:
-- Only runs if `.beads/beads.jsonl` exists (also checks `issues.jsonl` for backward compat)
+- Only runs if `.beads/issues.jsonl` exists (also checks `issues.jsonl` for backward compat)
 - Imports any new issues or updates from the merge
 - Warns on failure but doesn't block the merge
 
