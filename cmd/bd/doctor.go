@@ -2498,16 +2498,14 @@ func checkSyncBranchConfig(path string) doctorCheck {
 		currentBranch = strings.TrimSpace(string(output))
 	}
 
-	// CRITICAL: Check if we're on the sync branch - this is a misconfiguration
-	// that will cause bd sync to fail trying to create a worktree for a branch
-	// that's already checked out
+	// GH#519: Check if we're on the sync branch - this is supported but worth noting
+	// bd sync will commit directly instead of using worktree when on sync branch
 	if syncBranch != "" && currentBranch == syncBranch {
 		return doctorCheck{
 			Name:    "Sync Branch Config",
-			Status:  statusError,
-			Message: fmt.Sprintf("On sync branch '%s'", syncBranch),
-			Detail:  fmt.Sprintf("Currently on branch '%s' which is configured as the sync branch. bd sync cannot create a worktree for a branch that's already checked out.", syncBranch),
-			Fix:     "Switch to your main working branch: git checkout main",
+			Status:  statusOK,
+			Message: fmt.Sprintf("On sync branch '%s' (direct mode)", syncBranch),
+			Detail:  fmt.Sprintf("Currently on sync branch '%s'. bd sync will commit directly instead of using worktree.", syncBranch),
 		}
 	}
 

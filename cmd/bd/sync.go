@@ -377,6 +377,7 @@ Use --merge to merge the sync branch back to main branch.`,
 		var syncBranchName string
 		var repoRoot string
 		var useSyncBranch bool
+		var onSyncBranch bool // GH#519: track if we're on the sync branch
 		if err := ensureStoreActive(); err == nil && store != nil {
 			syncBranchName, _ = syncbranch.Get(ctx, store)
 			if syncBranchName != "" && syncbranch.HasGitRemote(ctx) {
@@ -385,7 +386,16 @@ Use --merge to merge the sync branch back to main branch.`,
 					fmt.Fprintf(os.Stderr, "Warning: sync.branch configured but failed to get repo root: %v\n", err)
 					fmt.Fprintf(os.Stderr, "Falling back to current branch commits\n")
 				} else {
-					useSyncBranch = true
+					// GH#519: Check if current branch is the sync branch
+					// If so, commit directly instead of using worktree (which would fail)
+					currentBranch, _ := getCurrentBranch(ctx)
+					if currentBranch == syncBranchName {
+						onSyncBranch = true
+						// Don't use worktree - commit directly to current branch
+						useSyncBranch = false
+					} else {
+						useSyncBranch = true
+					}
 				}
 			}
 		}
@@ -404,6 +414,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			if dryRun {
 				if useSyncBranch {
 					fmt.Printf("→ [DRY RUN] Would commit changes to sync branch '%s' via worktree\n", syncBranchName)
+				} else if onSyncBranch {
+					// GH#519: on sync branch, commit directly
+					fmt.Printf("→ [DRY RUN] Would commit changes directly to sync branch '%s'\n", syncBranchName)
 				} else {
 					fmt.Println("→ [DRY RUN] Would commit changes to git")
 				}
@@ -424,7 +437,12 @@ Use --merge to merge the sync branch back to main branch.`,
 				}
 			} else {
 				// Regular commit to current branch
-				fmt.Println("→ Committing changes to git...")
+				// GH#519: if on sync branch, show appropriate message
+				if onSyncBranch {
+					fmt.Printf("→ Committing changes directly to sync branch '%s'...\n", syncBranchName)
+				} else {
+					fmt.Println("→ Committing changes to git...")
+				}
 				if err := gitCommitBeadsDir(ctx, message); err != nil {
 					fmt.Fprintf(os.Stderr, "Error committing: %v\n", err)
 					os.Exit(1)
@@ -440,6 +458,9 @@ Use --merge to merge the sync branch back to main branch.`,
 			if dryRun {
 				if useSyncBranch {
 					fmt.Printf("→ [DRY RUN] Would pull from sync branch '%s' via worktree\n", syncBranchName)
+				} else if onSyncBranch {
+					// GH#519: on sync branch, regular git pull
+					fmt.Printf("→ [DRY RUN] Would pull directly on sync branch '%s'\n", syncBranchName)
 				} else {
 					fmt.Println("→ [DRY RUN] Would pull from remote")
 				}
@@ -506,7 +527,12 @@ Use --merge to merge the sync branch back to main branch.`,
 					// Check merge driver configuration before pulling
 					checkMergeDriverConfig()
 
-					fmt.Println("→ Pulling from remote...")
+					// GH#519: show appropriate message when on sync branch
+					if onSyncBranch {
+						fmt.Printf("→ Pulling from remote on sync branch '%s'...\n", syncBranchName)
+					} else {
+						fmt.Println("→ Pulling from remote...")
+					}
 					err := gitPull(ctx)
 					if err != nil {
 						// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
