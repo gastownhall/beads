@@ -303,7 +303,7 @@ bd daemons killall        # Restart all daemons
 - ❌ Don't manually override routing without good reason
 
 ### Teams
-- ✅ Commit `.beads/beads.jsonl` to shared repo
+- ✅ Commit `.beads/issues.jsonl` to shared repo
 - ✅ Use `bd sync` to ensure changes are committed/pushed
 - ✅ Link related issues across repos with dependencies
 - ❌ Don't gitignore `.beads/` - you lose the git ledger
@@ -328,14 +328,14 @@ Multi-repo mode is fully backward compatible:
 **Without multi-repo config:**
 ```bash
 bd create "Issue" -p 1
-# → Creates in .beads/beads.jsonl (single-repo mode)
+# → Creates in .beads/issues.jsonl (single-repo mode)
 ```
 
 **With multi-repo config:**
 ```bash
 bd create "Issue" -p 1
 # → Auto-routed based on config
-# → Old issues in .beads/beads.jsonl still work
+# → Old issues in .beads/issues.jsonl still work
 ```
 
 **Disabling multi-repo:**
