@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,9 +22,13 @@ import (
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
-	db     *sql.DB
-	dbPath string
-	closed atomic.Bool // Tracks whether Close() has been called
+	db          *sql.DB
+	dbPath      string
+	closed      atomic.Bool // Tracks whether Close() has been called
+	connStr     string      // Connection string for reconnection
+	busyTimeout time.Duration
+	freshness   *FreshnessChecker // Optional freshness checker for daemon mode
+	reconnectMu sync.Mutex        // Protects reconnection
 }
 
 // setupWASMCache configures WASM compilation caching to reduce SQLite startup time.
@@ -180,8 +185,10 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 	}
 
 	storage := &SQLiteStorage{
-		db:     db,
-		dbPath: absPath,
+		db:          db,
+		dbPath:      absPath,
+		connStr:     connStr,
+		busyTimeout: busyTimeout,
 	}
 
 	// Hydrate from multi-repo config if configured (bd-307)
@@ -204,6 +211,24 @@ func (s *SQLiteStorage) Close() error {
 	// Without this, writes may be stranded in the WAL and lost between CLI invocations.
 	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return s.db.Close()
+}
+
+// configureConnectionPool sets up the connection pool based on database type.
+// In-memory databases use a single connection (SQLite isolation requirement).
+// File-based databases use a pool sized for concurrent access.
+func (s *SQLiteStorage) configureConnectionPool(db *sql.DB) {
+	isInMemory := s.dbPath == ":memory:" ||
+		(strings.HasPrefix(s.connStr, "file:") && strings.Contains(s.connStr, "mode=memory"))
+	if isInMemory {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		// SQLite WAL mode: 1 writer + N readers. Limit to prevent goroutine pile-up.
+		maxConns := runtime.NumCPU() + 1
+		db.SetMaxOpenConns(maxConns)
+		db.SetMaxIdleConns(2)
+		db.SetConnMaxLifetime(0) // SQLite doesn't need connection recycling
+	}
 }
 
 // Path returns the absolute path to the database file
@@ -317,4 +342,87 @@ func (s *SQLiteStorage) UnderlyingConn(ctx context.Context) (*sql.Conn, error) {
 func (s *SQLiteStorage) CheckpointWAL(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)")
 	return err
+}
+
+// EnableFreshnessChecking enables detection of external database file modifications.
+// This is used by the daemon to detect when the database file has been replaced
+// (e.g., by git merge) and automatically reconnect.
+//
+// When enabled, read operations will check if the database file has been replaced
+// and trigger a reconnection if necessary. This adds minimal overhead (~1ms per check)
+// but ensures the daemon always sees the latest data.
+func (s *SQLiteStorage) EnableFreshnessChecking() {
+	if s.dbPath == "" || s.dbPath == ":memory:" {
+		return
+	}
+
+	s.freshness = NewFreshnessChecker(s.dbPath, s.reconnect)
+}
+
+// DisableFreshnessChecking disables external modification detection.
+func (s *SQLiteStorage) DisableFreshnessChecking() {
+	if s.freshness != nil {
+		s.freshness.Disable()
+	}
+}
+
+// checkFreshness checks if the database file has been modified externally.
+// If the file was replaced, it triggers a reconnection.
+// This should be called before read operations in daemon mode.
+func (s *SQLiteStorage) checkFreshness() {
+	if s.freshness != nil {
+		s.freshness.Check()
+	}
+}
+
+// reconnect closes the current database connection and opens a new one.
+// This is called when the database file has been replaced externally.
+func (s *SQLiteStorage) reconnect() error {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+
+	if s.closed.Load() {
+		return nil
+	}
+
+	// Close the old connection - log but continue since connection may be stale/invalid
+	if err := s.db.Close(); err != nil {
+		// Old connection might already be broken after file replacement - this is expected
+		debugPrintf("reconnect: close old connection: %v (continuing)\n", err)
+	}
+
+	// Open a new connection
+	db, err := sql.Open("sqlite3", s.connStr)
+	if err != nil {
+		return fmt.Errorf("failed to reconnect: %w", err)
+	}
+
+	// Restore connection pool settings
+	s.configureConnectionPool(db)
+
+	// Re-enable WAL mode for file-based databases
+	isInMemory := s.dbPath == ":memory:" ||
+		(strings.HasPrefix(s.connStr, "file:") && strings.Contains(s.connStr, "mode=memory"))
+	if !isInMemory {
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			_ = db.Close()
+			return fmt.Errorf("failed to enable WAL mode on reconnect: %w", err)
+		}
+	}
+
+	// Test the new connection
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("failed to ping on reconnect: %w", err)
+	}
+
+	// Swap in the new connection
+	s.db = db
+
+	// Update freshness checker state
+	if s.freshness != nil {
+		s.freshness.UpdateState()
+	}
+
+	return nil
 }
