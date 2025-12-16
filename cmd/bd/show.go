@@ -514,6 +514,15 @@ var updateCmd = &cobra.Command{
 			}
 			updates["estimated_minutes"] = estimate
 		}
+		if cmd.Flags().Changed("type") {
+			issueType, _ := cmd.Flags().GetString("type")
+			// Validate issue type
+			if !types.IssueType(issueType).IsValid() {
+				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore\n", issueType)
+				os.Exit(1)
+			}
+			updates["issue_type"] = issueType
+		}
 		if cmd.Flags().Changed("add-label") {
 			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
 			updates["add_labels"] = addLabels
@@ -605,6 +614,9 @@ var updateCmd = &cobra.Command{
 				}
 				if estimate, ok := updates["estimated_minutes"].(int); ok {
 					updateArgs.EstimatedMinutes = &estimate
+				}
+				if issueType, ok := updates["issue_type"].(string); ok {
+					updateArgs.IssueType = &issueType
 				}
 				if addLabels, ok := updates["add_labels"].([]string); ok {
 					updateArgs.AddLabels = addLabels
@@ -1037,6 +1049,7 @@ func init() {
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
+	updateCmd.Flags().StringP("type", "t", "", "Issue type (bug|feature|task|epic|chore)")
 	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
