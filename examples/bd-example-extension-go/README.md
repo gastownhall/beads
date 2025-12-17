@@ -1,6 +1,6 @@
 # BD Extension Example (Go)
 
-This example demonstrates how to extend bd with custom tables for application-specific orchestration, following the patterns described in [EXTENDING.md](../../EXTENDING.md).
+This example demonstrates how to extend bd with custom tables for application-specific orchestration, following the patterns described in [EXTENDING.md](../../docs/EXTENDING.md).
 
 ## What This Example Shows
 
