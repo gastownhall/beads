@@ -757,6 +757,198 @@ func TestStatistics(t *testing.T) {
 	}
 }
 
+func TestStatistics_BlockedAndReadyCounts(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	closedAt := time.Now()
+
+	// Create issues:
+	// - blocker: open issue that blocks others
+	// - blocked1: open issue blocked by blocker
+	// - blocked2: in_progress issue blocked by blocker
+	// - ready1: open issue with no blockers
+	// - ready2: open issue "blocked" by a closed issue (should be ready)
+	// - closedBlocker: closed issue that doesn't block
+	blocker := &types.Issue{Title: "Blocker", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	blocked1 := &types.Issue{Title: "Blocked Open", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	blocked2 := &types.Issue{Title: "Blocked InProgress", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask}
+	ready1 := &types.Issue{Title: "Ready 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	ready2 := &types.Issue{Title: "Ready 2 (closed blocker)", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	closedBlocker := &types.Issue{Title: "Closed Blocker", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &closedAt}
+
+	for _, issue := range []*types.Issue{blocker, blocked1, blocked2, ready1, ready2, closedBlocker} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+	}
+
+	// Close the closedBlocker properly
+	if err := store.CloseIssue(ctx, closedBlocker.ID, "Done", "test"); err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
+	}
+
+	// Add blocking dependencies
+	// blocked1 is blocked by blocker (open)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     blocked1.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}, "test"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// blocked2 is blocked by blocker (open)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     blocked2.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}, "test"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// ready2 is "blocked" by closedBlocker (closed, so doesn't actually block)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     ready2.ID,
+		DependsOnID: closedBlocker.ID,
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}, "test"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed: %v", err)
+	}
+
+	// Expected:
+	// - BlockedIssues: 2 (blocked1 and blocked2)
+	// - ReadyIssues: 3 (blocker, ready1, ready2 - all open with no open blockers)
+	if stats.BlockedIssues != 2 {
+		t.Errorf("Expected 2 blocked issues, got %d", stats.BlockedIssues)
+	}
+	if stats.ReadyIssues != 3 {
+		t.Errorf("Expected 3 ready issues, got %d", stats.ReadyIssues)
+	}
+
+	// Verify other counts are correct
+	if stats.TotalIssues != 6 {
+		t.Errorf("Expected 6 total issues, got %d", stats.TotalIssues)
+	}
+	if stats.OpenIssues != 4 {
+		t.Errorf("Expected 4 open issues, got %d", stats.OpenIssues)
+	}
+	if stats.InProgressIssues != 1 {
+		t.Errorf("Expected 1 in-progress issue, got %d", stats.InProgressIssues)
+	}
+	if stats.ClosedIssues != 1 {
+		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
+	}
+}
+
+func TestStatistics_EpicsEligibleForClosure(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	closedAt := time.Now()
+
+	// Create an epic with two children, both closed
+	epic1 := &types.Issue{Title: "Epic 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	child1 := &types.Issue{Title: "Child 1", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &closedAt}
+	child2 := &types.Issue{Title: "Child 2", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &closedAt}
+
+	// Create an epic with one open child (not eligible)
+	epic2 := &types.Issue{Title: "Epic 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	child3 := &types.Issue{Title: "Child 3", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{epic1, child1, child2, epic2, child3} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+	}
+
+	// Close the children properly
+	for _, child := range []*types.Issue{child1, child2} {
+		if err := store.CloseIssue(ctx, child.ID, "Done", "test"); err != nil {
+			t.Fatalf("CloseIssue failed: %v", err)
+		}
+	}
+
+	// Add parent-child dependencies
+	for _, dep := range []*types.Dependency{
+		{IssueID: child1.ID, DependsOnID: epic1.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"},
+		{IssueID: child2.ID, DependsOnID: epic1.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"},
+		{IssueID: child3.ID, DependsOnID: epic2.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"},
+	} {
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency failed: %v", err)
+		}
+	}
+
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed: %v", err)
+	}
+
+	// Only epic1 should be eligible (all children closed)
+	if stats.EpicsEligibleForClosure != 1 {
+		t.Errorf("Expected 1 epic eligible for closure, got %d", stats.EpicsEligibleForClosure)
+	}
+}
+
+func TestStatistics_TombstonesExcludedFromTotal(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	deletedAt := time.Now()
+
+	// Create 2 regular issues and 1 tombstone
+	issues := []*types.Issue{
+		{Title: "Open Issue", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Closed Issue", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &deletedAt},
+		{Title: "Tombstone Issue", Status: types.StatusTombstone, Priority: 1, IssueType: types.TypeTask, DeletedAt: &deletedAt, DeletedBy: "test"},
+	}
+
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+	}
+
+	// Close the closed issue properly
+	if err := store.CloseIssue(ctx, issues[1].ID, "Done", "test"); err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
+	}
+
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed: %v", err)
+	}
+
+	// Tombstone should be excluded from total but counted separately
+	if stats.TotalIssues != 2 {
+		t.Errorf("Expected 2 total issues (excluding tombstone), got %d", stats.TotalIssues)
+	}
+	if stats.TombstoneIssues != 1 {
+		t.Errorf("Expected 1 tombstone issue, got %d", stats.TombstoneIssues)
+	}
+	if stats.OpenIssues != 1 {
+		t.Errorf("Expected 1 open issue, got %d", stats.OpenIssues)
+	}
+	if stats.ClosedIssues != 1 {
+		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
+	}
+}
+
 func TestConfigOperations(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()
