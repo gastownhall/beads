@@ -389,6 +389,9 @@ type IssueFilter struct {
 
 	// Tombstone filtering (bd-1bu)
 	IncludeTombstones bool // If false (default), exclude tombstones from results
+
+	// Ephemeral filtering (bd-kwro.9)
+	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only non-ephemeral)
 }
 
 // SortPolicy determines how ready work is ordered

@@ -21,6 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New dependency types: `replies-to`, `relates-to`, `duplicates`, `supersedes`
   - Schema migration 019 (automatic on first use)
 
+- **`bd mail` commands** (bd-kwro.6) - Inter-agent messaging
+  - `bd mail send <recipient> -s <subject> -m <body>` - Send messages
+  - `bd mail inbox` - List open messages for your identity
+  - `bd mail read <id>` - Display message content
+  - `bd mail ack <id>` - Acknowledge (close) messages
+  - `bd mail reply <id> -m <body>` - Reply to messages (creates threads)
+  - Identity via `BEADS_IDENTITY` env var or `.beads/config.json`
+
+- **Graph link commands** (bd-kwro.2-5) - Knowledge graph relationships
+  - `bd relate <id1> <id2>` - Create bidirectional "see also" links
+  - `bd unrelate <id1> <id2>` - Remove relates_to links
+  - `bd duplicate <id> --of <canonical>` - Mark issue as duplicate (closes it)
+  - `bd supersede <old> --with <new>` - Mark issue as superseded (closes it)
+  - `bd show --thread` - View message threads via replies_to chain
+
+- **Hooks system** (bd-kwro.8) - Extensible event notifications
+  - `.beads/hooks/on_create` - Runs after issue creation
+  - `.beads/hooks/on_update` - Runs after issue update
+  - `.beads/hooks/on_close` - Runs after issue close
+  - `.beads/hooks/on_message` - Runs after message send
+  - Hooks receive issue ID, event type as args, full JSON on stdin
+
+- **`bd cleanup --ephemeral` flag** (bd-kwro.9) - Clean up transient messages
+  - Deletes only closed issues with `ephemeral=true`
+  - Useful for cleaning up messages after swarms complete
+
 ### Fixed
 
 - **Windows build errors** (GH#585) - Fixed gosec lint warnings
@@ -36,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All deletion tracking now via inline tombstones in `issues.jsonl`
 
 ### Documentation
+
+- **Messaging documentation** (bd-kwro.11) - New docs for messaging system
+  - `docs/messaging.md` - Full messaging reference with examples
+  - `docs/graph-links.md` - Graph link types and use cases
+  - Updated `AGENTS.md` with inter-agent messaging section
 
 - Windows installation command in upgrade instructions (GH#589)
   - Contributed by @alexx-ftw
