@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
@@ -250,19 +251,22 @@ var createCmd = &cobra.Command{
 				FatalError("%v", err)
 			}
 
+			// Parse response to get issue for hook
+			var issue types.Issue
+			if err := json.Unmarshal(resp.Data, &issue); err != nil {
+				FatalError("parsing response: %v", err)
+			}
+
+			// Run create hook (bd-kwro.8)
+			if hookRunner != nil {
+				hookRunner.Run(hooks.EventCreate, &issue)
+			}
+
 			if jsonOutput {
 				fmt.Println(string(resp.Data))
 			} else if silent {
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err != nil {
-					FatalError("parsing response: %v", err)
-				}
 				fmt.Println(issue.ID)
 			} else {
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err != nil {
-					FatalError("parsing response: %v", err)
-				}
 				green := color.New(color.FgGreen).SprintFunc()
 				fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
 				fmt.Printf("  Title: %s\n", issue.Title)
@@ -392,6 +396,11 @@ var createCmd = &cobra.Command{
 
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
+
+		// Run create hook (bd-kwro.8)
+		if hookRunner != nil {
+			hookRunner.Run(hooks.EventCreate, issue)
+		}
 
 		if jsonOutput {
 			outputJSON(issue)

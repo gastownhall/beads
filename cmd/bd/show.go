@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -22,6 +25,7 @@ var showCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
+		showThread, _ := cmd.Flags().GetBool("thread")
 		ctx := rootCtx
 
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
@@ -59,6 +63,12 @@ var showCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		}
+
+		// Handle --thread flag: show full conversation thread
+		if showThread && len(resolvedIDs) > 0 {
+			showMessageThread(ctx, resolvedIDs[0], jsonOutput)
+			return
 		}
 
 		// If daemon is running, use RPC
@@ -637,12 +647,17 @@ var updateCmd = &cobra.Command{
 					continue
 				}
 
-				if jsonOutput {
-					var issue types.Issue
-					if err := json.Unmarshal(resp.Data, &issue); err == nil {
+				var issue types.Issue
+				if err := json.Unmarshal(resp.Data, &issue); err == nil {
+					// Run update hook (bd-kwro.8)
+					if hookRunner != nil {
+						hookRunner.Run(hooks.EventUpdate, &issue)
+					}
+					if jsonOutput {
 						updatedIssues = append(updatedIssues, &issue)
 					}
-				} else {
+				}
+				if !jsonOutput {
 					green := color.New(color.FgGreen).SprintFunc()
 					fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
 				}
@@ -716,8 +731,13 @@ var updateCmd = &cobra.Command{
 				}
 			}
 
+			// Run update hook (bd-kwro.8)
+			issue, _ := store.GetIssue(ctx, id)
+			if issue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventUpdate, issue)
+			}
+
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil {
 					updatedIssues = append(updatedIssues, issue)
 				}
@@ -990,12 +1010,17 @@ var closeCmd = &cobra.Command{
 					continue
 				}
 
-				if jsonOutput {
-					var issue types.Issue
-					if err := json.Unmarshal(resp.Data, &issue); err == nil {
+				var issue types.Issue
+				if err := json.Unmarshal(resp.Data, &issue); err == nil {
+					// Run close hook (bd-kwro.8)
+					if hookRunner != nil {
+						hookRunner.Run(hooks.EventClose, &issue)
+					}
+					if jsonOutput {
 						closedIssues = append(closedIssues, &issue)
 					}
-				} else {
+				}
+				if !jsonOutput {
 					green := color.New(color.FgGreen).SprintFunc()
 					fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
 				}
@@ -1014,8 +1039,14 @@ var closeCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
+
+			// Run close hook (bd-kwro.8)
+			issue, _ := store.GetIssue(ctx, id)
+			if issue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventClose, issue)
+			}
+
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil {
 					closedIssues = append(closedIssues, issue)
 				}
@@ -1036,8 +1067,178 @@ var closeCmd = &cobra.Command{
 	},
 }
 
+// showMessageThread displays a full conversation thread for a message
+func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
+	// Get the starting message
+	var startMsg *types.Issue
+	var err error
+
+	if daemonClient != nil {
+		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: messageID})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching message %s: %v\n", messageID, err)
+			os.Exit(1)
+		}
+		if err := json.Unmarshal(resp.Data, &startMsg); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		startMsg, err = store.GetIssue(ctx, messageID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching message %s: %v\n", messageID, err)
+			os.Exit(1)
+		}
+	}
+
+	if startMsg == nil {
+		fmt.Fprintf(os.Stderr, "Message %s not found\n", messageID)
+		os.Exit(1)
+	}
+
+	// Find the root of the thread by following replies_to chain upward
+	rootMsg := startMsg
+	seen := make(map[string]bool)
+	seen[rootMsg.ID] = true
+
+	for rootMsg.RepliesTo != "" {
+		if seen[rootMsg.RepliesTo] {
+			break // Avoid infinite loops
+		}
+		seen[rootMsg.RepliesTo] = true
+
+		var parentMsg *types.Issue
+		if daemonClient != nil {
+			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: rootMsg.RepliesTo})
+			if err != nil {
+				break // Parent not found, use current as root
+			}
+			if err := json.Unmarshal(resp.Data, &parentMsg); err != nil {
+				break
+			}
+		} else {
+			parentMsg, _ = store.GetIssue(ctx, rootMsg.RepliesTo)
+		}
+		if parentMsg == nil {
+			break
+		}
+		rootMsg = parentMsg
+	}
+
+	// Now collect all messages in the thread
+	// Start from root and find all replies
+	threadMessages := []*types.Issue{rootMsg}
+	threadIDs := map[string]bool{rootMsg.ID: true}
+	queue := []string{rootMsg.ID}
+
+	// BFS to find all replies
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		// Find all messages that reply to currentID
+		var replies []*types.Issue
+		if daemonClient != nil {
+			// In daemon mode, search for messages with replies_to = currentID
+			// Use list with a filter (simplified: we'll search all messages)
+			// This is inefficient but works for now
+			listArgs := &rpc.ListArgs{IssueType: "message"}
+			resp, err := daemonClient.List(listArgs)
+			if err == nil {
+				var allMessages []*types.Issue
+				if err := json.Unmarshal(resp.Data, &allMessages); err == nil {
+					for _, msg := range allMessages {
+						if msg.RepliesTo == currentID && !threadIDs[msg.ID] {
+							replies = append(replies, msg)
+						}
+					}
+				}
+			}
+		} else {
+			// Direct mode - search for replies
+			messageType := types.TypeMessage
+			filter := types.IssueFilter{IssueType: &messageType}
+			allMessages, _ := store.SearchIssues(ctx, "", filter)
+			for _, msg := range allMessages {
+				if msg.RepliesTo == currentID && !threadIDs[msg.ID] {
+					replies = append(replies, msg)
+				}
+			}
+		}
+
+		for _, reply := range replies {
+			threadMessages = append(threadMessages, reply)
+			threadIDs[reply.ID] = true
+			queue = append(queue, reply.ID)
+		}
+	}
+
+	// Sort by creation time
+	sort.Slice(threadMessages, func(i, j int) bool {
+		return threadMessages[i].CreatedAt.Before(threadMessages[j].CreatedAt)
+	})
+
+	if jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(threadMessages)
+		return
+	}
+
+	// Display the thread
+	cyan := color.New(color.FgCyan).SprintFunc()
+	dim := color.New(color.Faint).SprintFunc()
+
+	fmt.Printf("\n%s Thread: %s\n", cyan("📬"), rootMsg.Title)
+	fmt.Println(strings.Repeat("─", 66))
+
+	for _, msg := range threadMessages {
+		// Show indent based on depth (count replies_to chain)
+		depth := 0
+		parent := msg.RepliesTo
+		for parent != "" && depth < 5 {
+			depth++
+			// Find parent to get its replies_to
+			for _, m := range threadMessages {
+				if m.ID == parent {
+					parent = m.RepliesTo
+					break
+				}
+			}
+		}
+		indent := strings.Repeat("  ", depth)
+
+		// Format timestamp
+		timeStr := msg.CreatedAt.Format("2006-01-02 15:04")
+
+		// Status indicator
+		statusIcon := "📧"
+		if msg.Status == types.StatusClosed {
+			statusIcon = "✓"
+		}
+
+		fmt.Printf("%s%s %s %s\n", indent, statusIcon, cyan(msg.ID), dim(timeStr))
+		fmt.Printf("%s  From: %s  To: %s\n", indent, msg.Sender, msg.Assignee)
+		if msg.RepliesTo != "" {
+			fmt.Printf("%s  Re: %s\n", indent, msg.RepliesTo)
+		}
+		fmt.Printf("%s  %s: %s\n", indent, dim("Subject"), msg.Title)
+		if msg.Description != "" {
+			// Indent the body
+			bodyLines := strings.Split(msg.Description, "\n")
+			for _, line := range bodyLines {
+				fmt.Printf("%s  %s\n", indent, line)
+			}
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("Total: %d messages in thread\n\n", len(threadMessages))
+}
+
 func init() {
 	showCmd.Flags().Bool("json", false, "Output JSON format")
+	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
 	rootCmd.AddCommand(showCmd)
 
 	updateCmd.Flags().StringP("status", "s", "", "New status")

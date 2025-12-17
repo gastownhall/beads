@@ -72,6 +72,10 @@ type CreateArgs struct {
 	EstimatedMinutes   *int     `json:"estimated_minutes,omitempty"` // Time estimate in minutes
 	Labels             []string `json:"labels,omitempty"`
 	Dependencies       []string `json:"dependencies,omitempty"`
+	// Messaging fields (bd-kwro)
+	Sender    string `json:"sender,omitempty"`     // Who sent this (for messages)
+	Ephemeral bool   `json:"ephemeral,omitempty"`  // Can be bulk-deleted when closed
+	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 }
 
 // UpdateArgs represents arguments for the update operation
@@ -91,6 +95,10 @@ type UpdateArgs struct {
 	AddLabels          []string `json:"add_labels,omitempty"`
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`
+	// Messaging fields (bd-kwro)
+	Sender    *string `json:"sender,omitempty"`     // Who sent this (for messages)
+	Ephemeral *bool   `json:"ephemeral,omitempty"`  // Can be bulk-deleted when closed
+	RepliesTo *string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 }
 
 // CloseArgs represents arguments for the close operation

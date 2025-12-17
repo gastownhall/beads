@@ -76,6 +76,16 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.IssueType != nil {
 		u["issue_type"] = *a.IssueType
 	}
+	// Messaging fields (bd-kwro)
+	if a.Sender != nil {
+		u["sender"] = *a.Sender
+	}
+	if a.Ephemeral != nil {
+		u["ephemeral"] = *a.Ephemeral
+	}
+	if a.RepliesTo != nil {
+		u["replies_to"] = *a.RepliesTo
+	}
 	return u
 }
 
@@ -150,6 +160,10 @@ func (s *Server) handleCreate(req *Request) Response {
 		ExternalRef:        externalRef,
 		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
+		// Messaging fields (bd-kwro)
+		Sender:    createArgs.Sender,
+		Ephemeral: createArgs.Ephemeral,
+		RepliesTo: createArgs.RepliesTo,
 	}
 	
 	// Check if any dependencies are discovered-from type

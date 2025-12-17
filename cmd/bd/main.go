@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/memory"
@@ -82,6 +83,9 @@ var (
 
 	// Auto-flush manager (replaces timer-based approach to fix bd-52)
 	flushManager *FlushManager
+
+	// Hook runner for extensibility (bd-kwro.8)
+	hookRunner *hooks.Runner
 
 	// skipFinalFlush is set by sync command when sync.branch mode completes successfully.
 	// This prevents PersistentPostRun from re-exporting and dirtying the working directory.
@@ -597,6 +601,13 @@ var rootCmd = &cobra.Command{
 		// PostRun can safely shutdown whichever manager is active.
 		if !sandboxMode {
 			flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
+		}
+
+		// Initialize hook runner (bd-kwro.8)
+		// dbPath is .beads/something.db, so workspace root is parent of .beads
+		if dbPath != "" {
+			beadsDir := filepath.Dir(dbPath)
+			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 		}
 
 		// Warn if multiple databases detected in directory hierarchy

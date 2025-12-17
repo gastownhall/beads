@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -85,6 +86,21 @@ Examples:
 	RunE: runMailAck,
 }
 
+var mailReplyCmd = &cobra.Command{
+	Use:   "reply <id> -m <body>",
+	Short: "Reply to a message",
+	Long: `Reply to an existing message, creating a conversation thread.
+
+Creates a new message with replies_to set to the original message,
+and sends it to the original sender.
+
+Examples:
+  bd mail reply bd-abc123 -m "Thanks for the update!"
+  bd mail reply bd-abc123 -m "Done" --urgent`,
+	Args: cobra.ExactArgs(1),
+	RunE: runMailReply,
+}
+
 // Mail command flags
 var (
 	mailSubject      string
@@ -101,6 +117,7 @@ func init() {
 	mailCmd.AddCommand(mailInboxCmd)
 	mailCmd.AddCommand(mailReadCmd)
 	mailCmd.AddCommand(mailAckCmd)
+	mailCmd.AddCommand(mailReplyCmd)
 
 	// Send command flags
 	mailSendCmd.Flags().StringVarP(&mailSubject, "subject", "s", "", "Message subject (required)")
@@ -119,6 +136,12 @@ func init() {
 
 	// Ack command flags
 	mailAckCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override identity")
+
+	// Reply command flags
+	mailReplyCmd.Flags().StringVarP(&mailBody, "body", "m", "", "Reply body (required)")
+	mailReplyCmd.Flags().BoolVar(&mailUrgent, "urgent", false, "Set priority=0 (urgent)")
+	mailReplyCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override sender identity")
+	_ = mailReplyCmd.MarkFlagRequired("body")
 }
 
 func runMailSend(cmd *cobra.Command, args []string) error {
@@ -141,6 +164,8 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			IssueType:   string(types.TypeMessage),
 			Priority:    priority,
 			Assignee:    recipient,
+			Sender:      sender,
+			Ephemeral:   true, // Messages can be bulk-deleted
 		}
 
 		resp, err := daemonClient.Create(createArgs)
@@ -148,13 +173,17 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to send message: %w", err)
 		}
 
-		// Parse response to get issue ID and update sender field
+		// Parse response to get issue ID
 		var issue types.Issue
 		if err := json.Unmarshal(resp.Data, &issue); err != nil {
 			return fmt.Errorf("parsing response: %w", err)
 		}
 
-		// Note: sender/ephemeral fields need daemon support - for now they work in direct mode
+		// Run message hook (bd-kwro.8)
+		if hookRunner != nil {
+			hookRunner.Run(hooks.EventMessage, &issue)
+		}
+
 		if jsonOutput {
 			result := map[string]interface{}{
 				"id":        issue.ID,
@@ -200,6 +229,11 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	// Trigger auto-flush
 	if flushManager != nil {
 		flushManager.MarkDirty(false)
+	}
+
+	// Run message hook (bd-kwro.8)
+	if hookRunner != nil {
+		hookRunner.Run(hooks.EventMessage, issue)
 	}
 
 	if jsonOutput {
@@ -483,6 +517,155 @@ func runMailAck(cmd *cobra.Command, args []string) error {
 
 	if len(errors) > 0 && len(acked) == 0 {
 		return fmt.Errorf("failed to acknowledge any messages")
+	}
+
+	return nil
+}
+
+func runMailReply(cmd *cobra.Command, args []string) error {
+	CheckReadonly("mail reply")
+
+	messageID := args[0]
+	sender := config.GetIdentity(mailIdentity)
+
+	// Get the original message
+	var originalMsg *types.Issue
+
+	if daemonClient != nil {
+		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: messageID})
+		if err != nil {
+			return fmt.Errorf("failed to get original message: %w", err)
+		}
+		if err := json.Unmarshal(resp.Data, &originalMsg); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+	} else {
+		var err error
+		originalMsg, err = store.GetIssue(rootCtx, messageID)
+		if err != nil {
+			return fmt.Errorf("failed to get original message: %w", err)
+		}
+	}
+
+	if originalMsg == nil {
+		return fmt.Errorf("message not found: %s", messageID)
+	}
+
+	if originalMsg.IssueType != types.TypeMessage {
+		return fmt.Errorf("%s is not a message (type: %s)", messageID, originalMsg.IssueType)
+	}
+
+	// Determine recipient: reply goes to the original sender
+	recipient := originalMsg.Sender
+	if recipient == "" {
+		return fmt.Errorf("original message has no sender, cannot determine reply recipient")
+	}
+
+	// Build reply subject
+	subject := originalMsg.Title
+	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+		subject = "Re: " + subject
+	}
+
+	// Determine priority
+	priority := 2 // default: normal
+	if mailUrgent {
+		priority = 0
+	}
+
+	// Create the reply message
+	now := time.Now()
+	reply := &types.Issue{
+		Title:       subject,
+		Description: mailBody,
+		Status:      types.StatusOpen,
+		Priority:    priority,
+		IssueType:   types.TypeMessage,
+		Assignee:    recipient,
+		Sender:      sender,
+		Ephemeral:   true,
+		RepliesTo:   messageID, // Thread link
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if daemonClient != nil {
+		// Daemon mode - create reply with all messaging fields
+		createArgs := &rpc.CreateArgs{
+			Title:       reply.Title,
+			Description: reply.Description,
+			IssueType:   string(types.TypeMessage),
+			Priority:    priority,
+			Assignee:    recipient,
+			Sender:      sender,
+			Ephemeral:   true,
+			RepliesTo:   messageID, // Thread link
+		}
+
+		resp, err := daemonClient.Create(createArgs)
+		if err != nil {
+			return fmt.Errorf("failed to send reply: %w", err)
+		}
+
+		var createdIssue types.Issue
+		if err := json.Unmarshal(resp.Data, &createdIssue); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+
+		if jsonOutput {
+			result := map[string]interface{}{
+				"id":         createdIssue.ID,
+				"to":         recipient,
+				"from":       sender,
+				"subject":    subject,
+				"replies_to": messageID,
+				"priority":   priority,
+				"timestamp":  createdIssue.CreatedAt,
+			}
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(result)
+		}
+
+		fmt.Printf("Reply sent: %s\n", createdIssue.ID)
+		fmt.Printf("  To: %s\n", recipient)
+		fmt.Printf("  Re: %s\n", messageID)
+		if mailUrgent {
+			fmt.Printf("  Priority: URGENT\n")
+		}
+		return nil
+	}
+
+	// Direct mode
+	if err := store.CreateIssue(rootCtx, reply, actor); err != nil {
+		return fmt.Errorf("failed to send reply: %w", err)
+	}
+
+	// Trigger auto-flush
+	if flushManager != nil {
+		flushManager.MarkDirty(false)
+	}
+
+	if jsonOutput {
+		result := map[string]interface{}{
+			"id":         reply.ID,
+			"to":         recipient,
+			"from":       sender,
+			"subject":    subject,
+			"replies_to": messageID,
+			"priority":   priority,
+			"timestamp":  reply.CreatedAt,
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
+
+	fmt.Printf("Reply sent: %s\n", reply.ID)
+	fmt.Printf("  To: %s\n", recipient)
+	fmt.Printf("  Re: %s\n", messageID)
+	if mailUrgent {
+		fmt.Printf("  Priority: URGENT\n")
 	}
 
 	return nil
