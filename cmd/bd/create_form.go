@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,8 +12,190 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// createFormRawInput holds the raw string values from the form UI.
+// This struct encapsulates all form fields before parsing/conversion.
+type createFormRawInput struct {
+	Title       string
+	Description string
+	IssueType   string
+	Priority    string // String from select, e.g., "0", "1", "2"
+	Assignee    string
+	Labels      string // Comma-separated
+	Design      string
+	Acceptance  string
+	ExternalRef string
+	Deps        string // Comma-separated, format: "type:id" or "id"
+}
+
+// createFormValues holds the parsed values from the create-form input.
+// This struct is used to pass form data to the issue creation logic,
+// allowing the creation logic to be tested independently of the form UI.
+type createFormValues struct {
+	Title              string
+	Description        string
+	IssueType          string
+	Priority           int
+	Assignee           string
+	Labels             []string
+	Design             string
+	AcceptanceCriteria string
+	ExternalRef        string
+	Dependencies       []string
+}
+
+// parseCreateFormInput parses raw form input into a createFormValues struct.
+// It handles comma-separated labels and dependencies, and converts priority strings.
+func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
+	// Parse priority
+	priority, err := strconv.Atoi(raw.Priority)
+	if err != nil {
+		priority = 2 // Default to medium if parsing fails
+	}
+
+	// Parse labels
+	var labels []string
+	if raw.Labels != "" {
+		for _, l := range strings.Split(raw.Labels, ",") {
+			l = strings.TrimSpace(l)
+			if l != "" {
+				labels = append(labels, l)
+			}
+		}
+	}
+
+	// Parse dependencies
+	var deps []string
+	if raw.Deps != "" {
+		for _, d := range strings.Split(raw.Deps, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				deps = append(deps, d)
+			}
+		}
+	}
+
+	return &createFormValues{
+		Title:              raw.Title,
+		Description:        raw.Description,
+		IssueType:          raw.IssueType,
+		Priority:           priority,
+		Assignee:           raw.Assignee,
+		Labels:             labels,
+		Design:             raw.Design,
+		AcceptanceCriteria: raw.Acceptance,
+		ExternalRef:        raw.ExternalRef,
+		Dependencies:       deps,
+	}
+}
+
+// CreateIssueFromFormValues creates an issue from the given form values.
+// It returns the created issue and any error that occurred.
+// This function handles labels, dependencies, and source_repo inheritance.
+func CreateIssueFromFormValues(ctx context.Context, s storage.Storage, fv *createFormValues, actor string) (*types.Issue, error) {
+	var externalRefPtr *string
+	if fv.ExternalRef != "" {
+		externalRefPtr = &fv.ExternalRef
+	}
+
+	issue := &types.Issue{
+		Title:              fv.Title,
+		Description:        fv.Description,
+		Design:             fv.Design,
+		AcceptanceCriteria: fv.AcceptanceCriteria,
+		Status:             types.StatusOpen,
+		Priority:           fv.Priority,
+		IssueType:          types.IssueType(fv.IssueType),
+		Assignee:           fv.Assignee,
+		ExternalRef:        externalRefPtr,
+	}
+
+	// Check if any dependencies are discovered-from type
+	// If so, inherit source_repo from the parent issue
+	var discoveredFromParentID string
+	for _, depSpec := range fv.Dependencies {
+		depSpec = strings.TrimSpace(depSpec)
+		if depSpec == "" {
+			continue
+		}
+
+		if strings.Contains(depSpec, ":") {
+			parts := strings.SplitN(depSpec, ":", 2)
+			if len(parts) == 2 {
+				depType := types.DependencyType(strings.TrimSpace(parts[0]))
+				dependsOnID := strings.TrimSpace(parts[1])
+
+				if depType == types.DepDiscoveredFrom && dependsOnID != "" {
+					discoveredFromParentID = dependsOnID
+					break
+				}
+			}
+		}
+	}
+
+	// If we found a discovered-from dependency, inherit source_repo from parent
+	if discoveredFromParentID != "" {
+		parentIssue, err := s.GetIssue(ctx, discoveredFromParentID)
+		if err == nil && parentIssue != nil && parentIssue.SourceRepo != "" {
+			issue.SourceRepo = parentIssue.SourceRepo
+		}
+	}
+
+	if err := s.CreateIssue(ctx, issue, actor); err != nil {
+		return nil, fmt.Errorf("failed to create issue: %w", err)
+	}
+
+	// Add labels if specified
+	for _, label := range fv.Labels {
+		if err := s.AddLabel(ctx, issue.ID, label, actor); err != nil {
+			// Log warning but don't fail the entire operation
+			fmt.Fprintf(os.Stderr, "Warning: failed to add label %s: %v\n", label, err)
+		}
+	}
+
+	// Add dependencies if specified
+	for _, depSpec := range fv.Dependencies {
+		depSpec = strings.TrimSpace(depSpec)
+		if depSpec == "" {
+			continue
+		}
+
+		var depType types.DependencyType
+		var dependsOnID string
+
+		if strings.Contains(depSpec, ":") {
+			parts := strings.SplitN(depSpec, ":", 2)
+			if len(parts) != 2 {
+				fmt.Fprintf(os.Stderr, "Warning: invalid dependency format '%s', expected 'type:id' or 'id'\n", depSpec)
+				continue
+			}
+			depType = types.DependencyType(strings.TrimSpace(parts[0]))
+			dependsOnID = strings.TrimSpace(parts[1])
+		} else {
+			depType = types.DepBlocks
+			dependsOnID = depSpec
+		}
+
+		if !depType.IsValid() {
+			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", depType)
+			continue
+		}
+
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: dependsOnID,
+			Type:        depType,
+		}
+		if err := s.AddDependency(ctx, dep, actor); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to add dependency %s -> %s: %v\n", issue.ID, dependsOnID, err)
+		}
+	}
+
+	return issue, nil
+}
 
 var createFormCmd = &cobra.Command{
 	Use:   "create-form",
@@ -34,19 +217,8 @@ The form uses keyboard navigation:
 }
 
 func runCreateForm(cmd *cobra.Command) {
-	// Form field values
-	var (
-		title       string
-		description string
-		issueType   string
-		priorityStr string
-		assignee    string
-		labelsInput string
-		design      string
-		acceptance  string
-		externalRef string
-		depsInput   string
-	)
+	// Raw form input - will be populated by the form
+	raw := &createFormRawInput{}
 
 	// Issue type options
 	typeOptions := []huh.Option[string]{
@@ -73,7 +245,7 @@ func runCreateForm(cmd *cobra.Command) {
 				Title("Title").
 				Description("Brief summary of the issue (required)").
 				Placeholder("e.g., Fix authentication bug in login handler").
-				Value(&title).
+				Value(&raw.Title).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {
 						return fmt.Errorf("title is required")
@@ -89,19 +261,19 @@ func runCreateForm(cmd *cobra.Command) {
 				Description("Detailed context about the issue").
 				Placeholder("Explain why this issue exists and what needs to be done...").
 				CharLimit(5000).
-				Value(&description),
+				Value(&raw.Description),
 
 			huh.NewSelect[string]().
 				Title("Type").
 				Description("Categorize the kind of work").
 				Options(typeOptions...).
-				Value(&issueType),
+				Value(&raw.IssueType),
 
 			huh.NewSelect[string]().
 				Title("Priority").
 				Description("Set urgency level").
 				Options(priorityOptions...).
-				Value(&priorityStr),
+				Value(&raw.Priority),
 		),
 
 		huh.NewGroup(
@@ -109,19 +281,19 @@ func runCreateForm(cmd *cobra.Command) {
 				Title("Assignee").
 				Description("Who should work on this? (optional)").
 				Placeholder("username or email").
-				Value(&assignee),
+				Value(&raw.Assignee),
 
 			huh.NewInput().
 				Title("Labels").
 				Description("Comma-separated tags (optional)").
 				Placeholder("e.g., urgent, backend, needs-review").
-				Value(&labelsInput),
+				Value(&raw.Labels),
 
 			huh.NewInput().
 				Title("External Reference").
 				Description("Link to external tracker (optional)").
 				Placeholder("e.g., gh-123, jira-ABC-456").
-				Value(&externalRef),
+				Value(&raw.ExternalRef),
 		),
 
 		huh.NewGroup(
@@ -130,14 +302,14 @@ func runCreateForm(cmd *cobra.Command) {
 				Description("Technical approach or design details (optional)").
 				Placeholder("Describe the implementation approach...").
 				CharLimit(5000).
-				Value(&design),
+				Value(&raw.Design),
 
 			huh.NewText().
 				Title("Acceptance Criteria").
 				Description("How do we know this is done? (optional)").
 				Placeholder("List the criteria for completion...").
 				CharLimit(5000).
-				Value(&acceptance),
+				Value(&raw.Acceptance),
 		),
 
 		huh.NewGroup(
@@ -145,7 +317,7 @@ func runCreateForm(cmd *cobra.Command) {
 				Title("Dependencies").
 				Description("Format: type:id or just id (optional)").
 				Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
-				Value(&depsInput),
+				Value(&raw.Deps),
 
 			huh.NewConfirm().
 				Title("Create this issue?").
@@ -163,53 +335,22 @@ func runCreateForm(cmd *cobra.Command) {
 		FatalError("form error: %v", err)
 	}
 
-	// Parse priority
-	priority, err := strconv.Atoi(priorityStr)
-	if err != nil {
-		priority = 2 // Default to medium if parsing fails
-	}
-
-	// Parse labels
-	var labels []string
-	if labelsInput != "" {
-		for _, l := range strings.Split(labelsInput, ",") {
-			l = strings.TrimSpace(l)
-			if l != "" {
-				labels = append(labels, l)
-			}
-		}
-	}
-
-	// Parse dependencies
-	var deps []string
-	if depsInput != "" {
-		for _, d := range strings.Split(depsInput, ",") {
-			d = strings.TrimSpace(d)
-			if d != "" {
-				deps = append(deps, d)
-			}
-		}
-	}
-
-	// Create the issue
-	var externalRefPtr *string
-	if externalRef != "" {
-		externalRefPtr = &externalRef
-	}
+	// Parse the form input
+	fv := parseCreateFormInput(raw)
 
 	// If daemon is running, use RPC
 	if daemonClient != nil {
 		createArgs := &rpc.CreateArgs{
-			Title:              title,
-			Description:        description,
-			IssueType:          issueType,
-			Priority:           priority,
-			Design:             design,
-			AcceptanceCriteria: acceptance,
-			Assignee:           assignee,
-			ExternalRef:        externalRef,
-			Labels:             labels,
-			Dependencies:       deps,
+			Title:              fv.Title,
+			Description:        fv.Description,
+			IssueType:          fv.IssueType,
+			Priority:           fv.Priority,
+			Design:             fv.Design,
+			AcceptanceCriteria: fv.AcceptanceCriteria,
+			Assignee:           fv.Assignee,
+			ExternalRef:        fv.ExternalRef,
+			Labels:             fv.Labels,
+			Dependencies:       fv.Dependencies,
 		}
 
 		resp, err := daemonClient.Create(createArgs)
@@ -229,99 +370,10 @@ func runCreateForm(cmd *cobra.Command) {
 		return
 	}
 
-	// Direct mode
-	issue := &types.Issue{
-		Title:              title,
-		Description:        description,
-		Design:             design,
-		AcceptanceCriteria: acceptance,
-		Status:             types.StatusOpen,
-		Priority:           priority,
-		IssueType:          types.IssueType(issueType),
-		Assignee:           assignee,
-		ExternalRef:        externalRefPtr,
-	}
-
-	ctx := rootCtx
-
-	// Check if any dependencies are discovered-from type
-	// If so, inherit source_repo from the parent issue
-	var discoveredFromParentID string
-	for _, depSpec := range deps {
-		depSpec = strings.TrimSpace(depSpec)
-		if depSpec == "" {
-			continue
-		}
-
-		if strings.Contains(depSpec, ":") {
-			parts := strings.SplitN(depSpec, ":", 2)
-			if len(parts) == 2 {
-				depType := types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID := strings.TrimSpace(parts[1])
-
-				if depType == types.DepDiscoveredFrom && dependsOnID != "" {
-					discoveredFromParentID = dependsOnID
-					break
-				}
-			}
-		}
-	}
-
-	// If we found a discovered-from dependency, inherit source_repo from parent
-	if discoveredFromParentID != "" {
-		parentIssue, err := store.GetIssue(ctx, discoveredFromParentID)
-		if err == nil && parentIssue.SourceRepo != "" {
-			issue.SourceRepo = parentIssue.SourceRepo
-		}
-	}
-
-	if err := store.CreateIssue(ctx, issue, actor); err != nil {
+	// Direct mode - use the extracted creation function
+	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
+	if err != nil {
 		FatalError("%v", err)
-	}
-
-	// Add labels if specified
-	for _, label := range labels {
-		if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			WarnError("failed to add label %s: %v", label, err)
-		}
-	}
-
-	// Add dependencies if specified
-	for _, depSpec := range deps {
-		depSpec = strings.TrimSpace(depSpec)
-		if depSpec == "" {
-			continue
-		}
-
-		var depType types.DependencyType
-		var dependsOnID string
-
-		if strings.Contains(depSpec, ":") {
-			parts := strings.SplitN(depSpec, ":", 2)
-			if len(parts) != 2 {
-				WarnError("invalid dependency format '%s', expected 'type:id' or 'id'", depSpec)
-				continue
-			}
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			dependsOnID = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			dependsOnID = depSpec
-		}
-
-		if !depType.IsValid() {
-			WarnError("invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)", depType)
-			continue
-		}
-
-		dep := &types.Dependency{
-			IssueID:     issue.ID,
-			DependsOnID: dependsOnID,
-			Type:        depType,
-		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
-			WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)
-		}
 	}
 
 	// Schedule auto-flush
