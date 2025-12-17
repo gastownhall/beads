@@ -260,6 +260,10 @@ func TestRunSync_KillsDescendants(t *testing.T) {
 		t.Skip("TestRunSync_KillsDescendants requires Linux /proc")
 	}
 
+	if testing.Short() {
+		t.Skip("Skipping long-running descendant kill test in short mode")
+	}
+
 	tmpDir := t.TempDir()
 	hookPath := filepath.Join(tmpDir, HookOnCreate)
 	pidFile := filepath.Join(tmpDir, "child.pid")
@@ -278,10 +282,6 @@ func TestRunSync_KillsDescendants(t *testing.T) {
 		timeout:  500 * time.Millisecond,
 	}
 	issue := &types.Issue{ID: "bd-test", Title: "Test"}
-
-	if testing.Short() {
-		t.Skip("Skipping long-running descendant kill test in short mode")
-	}
 
 	err := runner.RunSync(EventCreate, issue)
 	if err == nil {

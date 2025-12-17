@@ -3,13 +3,8 @@
 package hooks
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -97,62 +92,6 @@ func (r *Runner) RunSync(event string, issue *types.Issue) error {
 	}
 
 	return r.runHook(hookPath, event, issue)
-}
-
-func (r *Runner) runHook(hookPath, event string, issue *types.Issue) error {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-
-	// Prepare JSON data for stdin
-	issueJSON, err := json.Marshal(issue)
-	if err != nil {
-		return err
-	}
-
-	// Create command: hook_script <issue_id> <event_type>
-	// #nosec G204 -- hookPath is from controlled .beads/hooks directory
-	cmd := exec.CommandContext(ctx, hookPath, issue.ID, event)
-	cmd.Stdin = bytes.NewReader(issueJSON)
-
-	// Capture output for debugging (but don't block on it)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Start the hook so we can manage its process group and kill children on timeout.
-	//
-	// Rationale: scripts may spawn child processes (backgrounded or otherwise).
-	// If we only kill the immediate process, descendants may survive and keep
-	// the test (or caller) blocked — see TestRunSync_Timeout which previously
-	// observed a `sleep 60` still running after the parent process was killed.
-	// Creating a process group (Setpgid) and sending a negative PID to
-	// `syscall.Kill` ensures the entire group (parent + children) are killed
-	// reliably on timeout.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Kill the whole process group to ensure any children (e.g., sleep)
-		// are also terminated.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		// Wait for process to exit
-		<-done
-		return ctx.Err()
-	case err := <-done:
-		if err != nil {
-			return err
-		}
-		return nil
-	}
 }
 
 // HookExists checks if a hook exists for an event
