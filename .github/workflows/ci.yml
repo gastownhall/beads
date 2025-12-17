@@ -7,6 +7,16 @@ on:
     branches: [ main ]
 
 jobs:
+  # Fast check to ensure all version files are in sync
+  check-version-consistency:
+    name: Check version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check all versions match
+        run: ./scripts/check-versions.sh
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes
