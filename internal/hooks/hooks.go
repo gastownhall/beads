@@ -3,11 +3,7 @@
 package hooks
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -96,37 +92,6 @@ func (r *Runner) RunSync(event string, issue *types.Issue) error {
 	}
 
 	return r.runHook(hookPath, event, issue)
-}
-
-func (r *Runner) runHook(hookPath, event string, issue *types.Issue) error {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-
-	// Prepare JSON data for stdin
-	issueJSON, err := json.Marshal(issue)
-	if err != nil {
-		return err
-	}
-
-	// Create command: hook_script <issue_id> <event_type>
-	// #nosec G204 -- hookPath is from controlled .beads/hooks directory
-	cmd := exec.CommandContext(ctx, hookPath, issue.ID, event)
-	cmd.Stdin = bytes.NewReader(issueJSON)
-
-	// Capture output for debugging (but don't block on it)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Run the hook
-	err = cmd.Run()
-	if err != nil {
-		// Log error but don't fail - hooks shouldn't break beads
-		// In production, this could go to a log file
-		return err
-	}
-
-	return nil
 }
 
 // HookExists checks if a hook exists for an event

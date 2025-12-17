@@ -3,6 +3,9 @@ package hooks
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,6 +252,56 @@ sleep 60`
 	// Should have returned within timeout + some buffer
 	if elapsed > 5*time.Second {
 		t.Errorf("RunSync took too long: %v", elapsed)
+	}
+}
+
+func TestRunSync_KillsDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("TestRunSync_KillsDescendants requires Linux /proc")
+	}
+
+	if testing.Short() {
+		t.Skip("Skipping long-running descendant kill test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	hookPath := filepath.Join(tmpDir, HookOnCreate)
+	pidFile := filepath.Join(tmpDir, "child.pid")
+
+	// Hook starts a background sleep, writes its pid, and waits for it.
+	// Parent will remain alive until the child exits, so killing the
+	// process group should terminate both.
+	hookScript := `#!/bin/sh
+(sleep 60 & echo $! > ` + pidFile + ` ; wait)`
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		t.Fatalf("Failed to create hook file: %v", err)
+	}
+
+	runner := &Runner{
+		hooksDir: tmpDir,
+		timeout:  500 * time.Millisecond,
+	}
+	issue := &types.Issue{ID: "bd-test", Title: "Test"}
+
+	err := runner.RunSync(EventCreate, issue)
+	if err == nil {
+		t.Fatal("Expected RunSync to return an error on timeout")
+	}
+
+	// Read the child PID and ensure it's not running anymore.
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("Failed to read pid file: %v", err)
+	}
+	pidStr := strings.TrimSpace(string(data))
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		t.Fatalf("Invalid pid in pid file: %v", err)
+	}
+
+	// Check /proc/<pid> does not exist
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
+		t.Fatalf("Child process %d still exists after timeout", pid)
 	}
 }
 
