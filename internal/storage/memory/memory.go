@@ -1202,24 +1202,102 @@ func (m *MemoryStorage) GetStatistics(ctx context.Context) (*types.Statistics, e
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	stats := &types.Statistics{
-		TotalIssues: len(m.issues),
-	}
+	stats := &types.Statistics{}
 
+	// First pass: count by status
 	for _, issue := range m.issues {
 		switch issue.Status {
 		case types.StatusOpen:
 			stats.OpenIssues++
 		case types.StatusInProgress:
 			stats.InProgressIssues++
-		case types.StatusBlocked:
-			stats.BlockedIssues++
 		case types.StatusClosed:
 			stats.ClosedIssues++
+		case types.StatusTombstone:
+			stats.TombstoneIssues++
 		}
 	}
 
+	// TotalIssues excludes tombstones (matches SQLite behavior)
+	stats.TotalIssues = stats.OpenIssues + stats.InProgressIssues + stats.ClosedIssues
+
+	// Second pass: calculate blocked and ready issues based on dependencies
+	// An issue is blocked if it has open blockers (uses same logic as GetBlockedIssues)
+	for id, issue := range m.issues {
+		// Only consider non-closed, non-tombstone issues for blocking
+		if issue.Status == types.StatusClosed || issue.Status == types.StatusTombstone {
+			continue
+		}
+
+		blockers := m.getOpenBlockers(id)
+		if len(blockers) > 0 {
+			stats.BlockedIssues++
+		} else if issue.Status == types.StatusOpen {
+			// Ready = open issues with no open blockers
+			stats.ReadyIssues++
+		}
+	}
+
+	// Calculate average lead time (hours from created to closed)
+	var totalLeadTime float64
+	var closedCount int
+	for _, issue := range m.issues {
+		if issue.Status == types.StatusClosed && issue.ClosedAt != nil {
+			leadTime := issue.ClosedAt.Sub(issue.CreatedAt).Hours()
+			totalLeadTime += leadTime
+			closedCount++
+		}
+	}
+	if closedCount > 0 {
+		stats.AverageLeadTime = totalLeadTime / float64(closedCount)
+	}
+
+	// Calculate epics eligible for closure
+	stats.EpicsEligibleForClosure = m.countEpicsEligibleForClosure()
+
 	return stats, nil
+}
+
+// countEpicsEligibleForClosure returns the count of non-closed epics where all children are closed
+func (m *MemoryStorage) countEpicsEligibleForClosure() int {
+	// Build a map of epic -> children using parent-child dependencies
+	epicChildren := make(map[string][]string)
+	for _, deps := range m.dependencies {
+		for _, dep := range deps {
+			if dep.Type == types.DepParentChild {
+				// dep.IssueID is the child, dep.DependsOnID is the parent
+				epicChildren[dep.DependsOnID] = append(epicChildren[dep.DependsOnID], dep.IssueID)
+			}
+		}
+	}
+
+	count := 0
+	for epicID, children := range epicChildren {
+		epic, exists := m.issues[epicID]
+		if !exists {
+			continue
+		}
+		// Only consider non-closed epics
+		if epic.IssueType != types.TypeEpic || epic.Status == types.StatusClosed {
+			continue
+		}
+		// Check if all children are closed
+		if len(children) == 0 {
+			continue
+		}
+		allClosed := true
+		for _, childID := range children {
+			child, exists := m.issues[childID]
+			if !exists || child.Status != types.StatusClosed {
+				allClosed = false
+				break
+			}
+		}
+		if allClosed {
+			count++
+		}
+	}
+	return count
 }
 
 // Dirty tracking
