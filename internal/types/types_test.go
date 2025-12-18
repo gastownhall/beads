@@ -415,6 +415,7 @@ func TestIssueTypeIsValid(t *testing.T) {
 }
 
 func TestDependencyTypeIsValid(t *testing.T) {
+	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
 	tests := []struct {
 		depType DependencyType
 		valid   bool
@@ -423,14 +424,80 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DepRelated, true},
 		{DepParentChild, true},
 		{DepDiscoveredFrom, true},
-		{DependencyType("invalid"), false},
-		{DependencyType(""), false},
+		{DepRepliesTo, true},
+		{DepRelatesTo, true},
+		{DepDuplicates, true},
+		{DepSupersedes, true},
+		{DepAuthoredBy, true},
+		{DepAssignedTo, true},
+		{DepApprovedBy, true},
+		{DependencyType("custom-type"), true},  // Custom types are now valid
+		{DependencyType("any-string"), true},   // Any non-empty string is valid
+		{DependencyType(""), false},            // Empty is still invalid
+		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
 	for _, tt := range tests {
 		t.Run(string(tt.depType), func(t *testing.T) {
 			if got := tt.depType.IsValid(); got != tt.valid {
 				t.Errorf("DependencyType(%q).IsValid() = %v, want %v", tt.depType, got, tt.valid)
+			}
+		})
+	}
+}
+
+func TestDependencyTypeIsWellKnown(t *testing.T) {
+	tests := []struct {
+		depType   DependencyType
+		wellKnown bool
+	}{
+		{DepBlocks, true},
+		{DepRelated, true},
+		{DepParentChild, true},
+		{DepDiscoveredFrom, true},
+		{DepRepliesTo, true},
+		{DepRelatesTo, true},
+		{DepDuplicates, true},
+		{DepSupersedes, true},
+		{DepAuthoredBy, true},
+		{DepAssignedTo, true},
+		{DepApprovedBy, true},
+		{DependencyType("custom-type"), false},
+		{DependencyType("unknown"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.depType), func(t *testing.T) {
+			if got := tt.depType.IsWellKnown(); got != tt.wellKnown {
+				t.Errorf("DependencyType(%q).IsWellKnown() = %v, want %v", tt.depType, got, tt.wellKnown)
+			}
+		})
+	}
+}
+
+func TestDependencyTypeAffectsReadyWork(t *testing.T) {
+	tests := []struct {
+		depType DependencyType
+		affects bool
+	}{
+		{DepBlocks, true},
+		{DepParentChild, true},
+		{DepRelated, false},
+		{DepDiscoveredFrom, false},
+		{DepRepliesTo, false},
+		{DepRelatesTo, false},
+		{DepDuplicates, false},
+		{DepSupersedes, false},
+		{DepAuthoredBy, false},
+		{DepAssignedTo, false},
+		{DepApprovedBy, false},
+		{DependencyType("custom-type"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.depType), func(t *testing.T) {
+			if got := tt.depType.AffectsReadyWork(); got != tt.affects {
+				t.Errorf("DependencyType(%q).AffectsReadyWork() = %v, want %v", tt.depType, got, tt.affects)
 			}
 		})
 	}

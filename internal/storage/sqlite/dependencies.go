@@ -21,7 +21,7 @@ const (
 func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	// Validate dependency type
 	if !dep.Type.IsValid() {
-		return fmt.Errorf("invalid dependency type: %s (must be blocks, related, parent-child, or discovered-from)", dep.Type)
+		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
 	// Validate that both issues exist
@@ -125,11 +125,11 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 			dep.IssueID, dep.DependsOnID, dep.IssueID)
 	}
 
-	// Insert dependency
+	// Insert dependency (including metadata and thread_id for edge consolidation - Decision 004)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
-		VALUES (?, ?, ?, ?, ?)
-	`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedAt, dep.CreatedBy)
+		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedAt, dep.CreatedBy, dep.Metadata, dep.ThreadID)
 	if err != nil {
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}
@@ -151,8 +151,8 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		}
 
 		// Invalidate blocked issues cache since dependencies changed (bd-5qim)
-		// Only invalidate for 'blocks' and 'parent-child' types since they affect blocking
-		if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+		// Only invalidate for types that affect ready work calculation
+		if dep.Type.AffectsReadyWork() {
 			if err := s.invalidateBlockedCache(ctx, tx); err != nil {
 				return fmt.Errorf("failed to invalidate blocked cache: %w", err)
 			}
@@ -174,7 +174,7 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 		// Store whether cache needs invalidation before deletion
 		needsCacheInvalidation := false
 		if err == nil {
-			needsCacheInvalidation = (depType == types.DepBlocks || depType == types.DepParentChild)
+			needsCacheInvalidation = depType.AffectsReadyWork()
 		}
 
 		result, err := tx.ExecContext(ctx, `
@@ -369,7 +369,8 @@ func (s *SQLiteStorage) GetDependencyCounts(ctx context.Context, issueIDs []stri
 // GetDependencyRecords returns raw dependency records for an issue
 func (s *SQLiteStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT issue_id, depends_on_id, type, created_at, created_by
+		SELECT issue_id, depends_on_id, type, created_at, created_by,
+		       COALESCE(metadata, '{}') as metadata, COALESCE(thread_id, '') as thread_id
 		FROM dependencies
 		WHERE issue_id = ?
 		ORDER BY created_at ASC
@@ -388,6 +389,8 @@ func (s *SQLiteStorage) GetDependencyRecords(ctx context.Context, issueID string
 			&dep.Type,
 			&dep.CreatedAt,
 			&dep.CreatedBy,
+			&dep.Metadata,
+			&dep.ThreadID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan dependency: %w", err)
@@ -402,7 +405,8 @@ func (s *SQLiteStorage) GetDependencyRecords(ctx context.Context, issueID string
 // This is optimized for bulk export operations to avoid N+1 queries
 func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT issue_id, depends_on_id, type, created_at, created_by
+		SELECT issue_id, depends_on_id, type, created_at, created_by,
+		       COALESCE(metadata, '{}') as metadata, COALESCE(thread_id, '') as thread_id
 		FROM dependencies
 		ORDER BY issue_id, created_at ASC
 	`)
@@ -421,6 +425,8 @@ func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string
 			&dep.Type,
 			&dep.CreatedAt,
 			&dep.CreatedBy,
+			&dep.Metadata,
+			&dep.ThreadID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan dependency: %w", err)

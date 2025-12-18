@@ -244,6 +244,12 @@ type Dependency struct {
 	Type        DependencyType `json:"type"`
 	CreatedAt   time.Time      `json:"created_at"`
 	CreatedBy   string         `json:"created_by"`
+	// Metadata contains type-specific edge data (JSON blob)
+	// Examples: similarity scores, approval details, skill proficiency
+	Metadata string `json:"metadata,omitempty"`
+	// ThreadID groups conversation edges for efficient thread queries
+	// For replies-to edges, this identifies the conversation root
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // DependencyCounts holds counts for dependencies and dependents
@@ -271,25 +277,49 @@ type DependencyType string
 
 // Dependency type constants
 const (
-	DepBlocks         DependencyType = "blocks"
+	// Workflow types (affect ready work calculation)
+	DepBlocks      DependencyType = "blocks"
+	DepParentChild DependencyType = "parent-child"
+
+	// Association types
 	DepRelated        DependencyType = "related"
-	DepParentChild    DependencyType = "parent-child"
 	DepDiscoveredFrom DependencyType = "discovered-from"
+
 	// Graph link types (bd-kwro)
-	DepRepliesTo   DependencyType = "replies-to"   // Conversation threading
-	DepRelatesTo   DependencyType = "relates-to"   // Loose knowledge graph edges
-	DepDuplicates  DependencyType = "duplicates"   // Deduplication link
-	DepSupersedes  DependencyType = "supersedes"   // Version chain link
+	DepRepliesTo  DependencyType = "replies-to"  // Conversation threading
+	DepRelatesTo  DependencyType = "relates-to"  // Loose knowledge graph edges
+	DepDuplicates DependencyType = "duplicates"  // Deduplication link
+	DepSupersedes DependencyType = "supersedes"  // Version chain link
+
+	// Entity types (HOP foundation - Decision 004)
+	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
+	DepAssignedTo DependencyType = "assigned-to" // Assignment relationship
+	DepApprovedBy DependencyType = "approved-by" // Approval relationship
 )
 
-// IsValid checks if the dependency type value is valid
+// IsValid checks if the dependency type value is valid.
+// Accepts any non-empty string up to 50 characters.
+// Use IsWellKnown() to check if it's a built-in type.
 func (d DependencyType) IsValid() bool {
+	return len(d) > 0 && len(d) <= 50
+}
+
+// IsWellKnown checks if the dependency type is a well-known constant.
+// Returns false for custom/user-defined types (which are still valid).
+func (d DependencyType) IsWellKnown() bool {
 	switch d {
-	case DepBlocks, DepRelated, DepParentChild, DepDiscoveredFrom,
-		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes:
+	case DepBlocks, DepParentChild, DepRelated, DepDiscoveredFrom,
+		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+		DepAuthoredBy, DepAssignedTo, DepApprovedBy:
 		return true
 	}
 	return false
+}
+
+// AffectsReadyWork returns true if this dependency type blocks work.
+// Only "blocks" and "parent-child" relationships affect the ready work calculation.
+func (d DependencyType) AffectsReadyWork() bool {
+	return d == DepBlocks || d == DepParentChild
 }
 
 // Label represents a tag on an issue
