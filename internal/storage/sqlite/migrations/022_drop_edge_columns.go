@@ -68,7 +68,9 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 		return fmt.Errorf("failed to disable foreign keys: %w", err)
 	}
 	// Re-enable foreign keys at the end (deferred to ensure it runs)
-	defer db.Exec(`PRAGMA foreign_keys = ON`)
+	defer func() {
+		_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+	}()
 
 	// Drop views that depend on the issues table BEFORE starting transaction
 	// This is necessary because SQLite validates views during table operations

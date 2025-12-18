@@ -217,6 +217,7 @@ The form uses keyboard navigation:
 }
 
 func runCreateForm(cmd *cobra.Command) {
+	_ = cmd // cmd parameter required by cobra.Command.Run signature
 	// Raw form input - will be populated by the form
 	raw := &createFormRawInput{}
 
@@ -329,7 +330,7 @@ func runCreateForm(cmd *cobra.Command) {
 	err := form.Run()
 	if err != nil {
 		if err == huh.ErrUserAborted {
-			fmt.Fprintln(os.Stderr, "Issue creation cancelled.")
+			fmt.Fprintln(os.Stderr, "Issue creation canceled.")
 			os.Exit(0)
 		}
 		FatalError("form error: %v", err)

@@ -94,6 +94,7 @@ func readBodyFile(filePath string) (string, error) {
 	if filePath == "-" {
 		reader = os.Stdin
 	} else {
+		// #nosec G304 - filePath comes from user flag, validated by caller
 		file, err := os.Open(filePath)
 		if err != nil {
 			return "", fmt.Errorf("failed to open file: %w", err)

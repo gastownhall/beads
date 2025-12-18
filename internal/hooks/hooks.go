@@ -67,8 +67,10 @@ func (r *Runner) Run(event string, issue *types.Issue) {
 		return // Not executable, skip
 	}
 
-	// Run asynchronously
-	go r.runHook(hookPath, event, issue)
+	// Run asynchronously (ignore error as this is fire-and-forget)
+	go func() {
+		_ = r.runHook(hookPath, event, issue)
+	}()
 }
 
 // RunSync executes a hook synchronously and returns any error.
