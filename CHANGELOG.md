@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.5] - 2025-12-18
+
+### Removed
+
+- **YAML simple template system** - Removed `--from-template` flag from `bd create`
+  - Deleted embedded templates: `bug.yaml`, `epic.yaml`, `feature.yaml`
+  - Templates are now purely Beads-based (epics with `template` label)
+  - Use `bd template instantiate <id>` for template workflows
+
 ## [0.30.4] - 2025-12-18
 
 ### Added

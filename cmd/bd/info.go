@@ -288,10 +288,19 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.5",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"REMOVED: YAML simple template system - --from-template flag removed from bd create",
+			"REMOVED: Embedded templates (bug.yaml, epic.yaml, feature.yaml) - Use Beads templates instead",
+			"Templates are now purely Beads-based - Create epic with 'template' label, use bd template instantiate",
+		},
+	},
+	{
 		Version: "0.30.4",
 		Date:    "2025-12-18",
 		Changes: []string{
-			"bd template instantiate (bd-r6a.2) - Create beads issues from YAML workflow templates",
+			"bd template instantiate (bd-r6a.2) - Create beads issues from Beads templates",
 			"--assignee flag for template instantiate - Auto-assign during instantiation",
 			"bd mail inbox --identity fix - Now properly filters by identity parameter",
 			"Orphan detection fixes - No longer warns about closed issues or tombstones",
