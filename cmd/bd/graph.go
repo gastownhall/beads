@@ -277,7 +277,7 @@ func computeLayout(subgraph *TemplateSubgraph) *GraphLayout {
 }
 
 // renderGraph renders the ASCII visualization
-func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
+func renderGraph(layout *GraphLayout, _ *TemplateSubgraph) {
 	if len(layout.Nodes) == 0 {
 		fmt.Println("Empty graph")
 		return
