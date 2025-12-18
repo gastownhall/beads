@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.3] - 2025-12-17
+
+### Fixed
+
+- **Data loss race condition** (bd-b6xo) - Removed unsafe `ClearDirtyIssues()` method
+  - Old method cleared ALL dirty issues, risking data loss if export failed partway
+  - All code now uses `ClearDirtyIssuesByID()` which only clears exported issues
+  - Affects: `internal/storage/sqlite/dirty.go`, `internal/storage/memory/memory.go`
+
+### Closed (Already Implemented)
+
+- **Stale database warning** (bd-2q6d) - Commands now warn when database is out of sync with JSONL
+- **Staleness check error handling** (bd-n4td, bd-o4qy) - Proper warnings and error returns
+
 ## [0.30.2] - 2025-12-16
 
 ### Added

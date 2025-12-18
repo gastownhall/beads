@@ -288,6 +288,15 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.3",
+		Date:    "2025-12-17",
+		Changes: []string{
+			"SECURITY: Data loss race condition fixed (bd-b6xo) - Removed unsafe ClearDirtyIssues() method",
+			"Stale database warning (bd-2q6d) - Commands now warn when DB is out of sync with JSONL",
+			"Staleness check error handling improved (bd-n4td, bd-o4qy) - Proper warnings on check failures",
+		},
+	},
+	{
 		Version: "0.30.2",
 		Date:    "2025-12-16",
 		Changes: []string{
