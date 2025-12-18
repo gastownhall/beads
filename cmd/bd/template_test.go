@@ -450,7 +450,7 @@ func TestCloneSubgraph(t *testing.T) {
 		}
 
 		vars := map[string]string{"version": "2.0.0"}
-		result, err := cloneSubgraph(ctx, s, subgraph, vars, "test-user")
+		result, err := cloneSubgraph(ctx, s, subgraph, vars, "", "test-user")
 		if err != nil {
 			t.Fatalf("cloneSubgraph failed: %v", err)
 		}
@@ -490,7 +490,7 @@ func TestCloneSubgraph(t *testing.T) {
 		}
 
 		vars := map[string]string{"service": "api-gateway"}
-		result, err := cloneSubgraph(ctx, s, subgraph, vars, "test-user")
+		result, err := cloneSubgraph(ctx, s, subgraph, vars, "", "test-user")
 		if err != nil {
 			t.Fatalf("cloneSubgraph failed: %v", err)
 		}
@@ -549,7 +549,7 @@ func TestCloneSubgraph(t *testing.T) {
 			t.Fatalf("loadTemplateSubgraph failed: %v", err)
 		}
 
-		result, err := cloneSubgraph(ctx, s, subgraph, nil, "test-user")
+		result, err := cloneSubgraph(ctx, s, subgraph, nil, "", "test-user")
 		if err != nil {
 			t.Fatalf("cloneSubgraph failed: %v", err)
 		}
@@ -560,6 +560,52 @@ func TestCloneSubgraph(t *testing.T) {
 		}
 		if newEpic.Status != types.StatusOpen {
 			t.Errorf("Status = %s, want %s", newEpic.Status, types.StatusOpen)
+		}
+	})
+
+	t.Run("assignee override applies to root epic only", func(t *testing.T) {
+		epic := h.createIssue("Root Epic", "", types.TypeEpic, 1)
+		child := h.createIssue("Child Task", "", types.TypeTask, 2)
+		h.addParentChild(child.ID, epic.ID)
+
+		// Set assignees on template
+		err := s.UpdateIssue(ctx, epic.ID, map[string]interface{}{"assignee": "template-owner"}, "test-user")
+		if err != nil {
+			t.Fatalf("Failed to set epic assignee: %v", err)
+		}
+		err = s.UpdateIssue(ctx, child.ID, map[string]interface{}{"assignee": "child-owner"}, "test-user")
+		if err != nil {
+			t.Fatalf("Failed to set child assignee: %v", err)
+		}
+
+		subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)
+		if err != nil {
+			t.Fatalf("loadTemplateSubgraph failed: %v", err)
+		}
+
+		// Clone with assignee override
+		result, err := cloneSubgraph(ctx, s, subgraph, nil, "new-assignee", "test-user")
+		if err != nil {
+			t.Fatalf("cloneSubgraph failed: %v", err)
+		}
+
+		// Root epic should have override assignee
+		newEpic, err := s.GetIssue(ctx, result.NewEpicID)
+		if err != nil {
+			t.Fatalf("Failed to get cloned epic: %v", err)
+		}
+		if newEpic.Assignee != "new-assignee" {
+			t.Errorf("Epic assignee = %q, want %q", newEpic.Assignee, "new-assignee")
+		}
+
+		// Child should keep template assignee
+		newChildID := result.IDMapping[child.ID]
+		newChild, err := s.GetIssue(ctx, newChildID)
+		if err != nil {
+			t.Fatalf("Failed to get cloned child: %v", err)
+		}
+		if newChild.Assignee != "child-owner" {
+			t.Errorf("Child assignee = %q, want %q", newChild.Assignee, "child-owner")
 		}
 	})
 }

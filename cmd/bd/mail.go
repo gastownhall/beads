@@ -130,6 +130,7 @@ func init() {
 	// Inbox command flags
 	mailInboxCmd.Flags().StringVar(&mailFrom, "from", "", "Filter by sender")
 	mailInboxCmd.Flags().IntVar(&mailPriorityFlag, "priority", -1, "Filter by priority (0-4)")
+	mailInboxCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override recipient identity")
 
 	// Read command flags
 	mailReadCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override identity for access check")

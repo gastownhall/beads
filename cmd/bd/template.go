@@ -383,6 +383,7 @@ Example:
 		ctx := rootCtx
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		varFlags, _ := cmd.Flags().GetStringSlice("var")
+		assignee, _ := cmd.Flags().GetString("assignee")
 
 		// Parse variables
 		vars := make(map[string]string)
@@ -446,7 +447,11 @@ Example:
 			fmt.Printf("\nDry run: would create %d issues from template %s\n\n", len(subgraph.Issues), templateID)
 			for _, issue := range subgraph.Issues {
 				newTitle := substituteVariables(issue.Title, vars)
-				fmt.Printf("  - %s (from %s)\n", newTitle, issue.ID)
+				suffix := ""
+				if issue.ID == subgraph.Root.ID && assignee != "" {
+					suffix = fmt.Sprintf(" (assignee: %s)", assignee)
+				}
+				fmt.Printf("  - %s (from %s)%s\n", newTitle, issue.ID, suffix)
 			}
 			if len(vars) > 0 {
 				fmt.Printf("\nVariables:\n")
@@ -458,7 +463,7 @@ Example:
 		}
 
 		// Clone the subgraph
-		result, err := cloneSubgraph(ctx, store, subgraph, vars, actor)
+		result, err := cloneSubgraph(ctx, store, subgraph, vars, assignee, actor)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error instantiating template: %v\n", err)
 			os.Exit(1)
@@ -484,6 +489,7 @@ func init() {
 
 	templateInstantiateCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value)")
 	templateInstantiateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	templateInstantiateCmd.Flags().String("assignee", "", "Assign the root epic to this agent/user")
 
 	templateCmd.AddCommand(templateListCmd)
 	templateCmd.AddCommand(templateShowCmd)
@@ -734,7 +740,8 @@ func substituteVariables(text string, vars map[string]string) string {
 }
 
 // cloneSubgraph creates new issues from the template with variable substitution
-func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, vars map[string]string, actorName string) (*InstantiateResult, error) {
+// If assignee is non-empty, it will be set on the root epic
+func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, vars map[string]string, assignee string, actorName string) (*InstantiateResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -746,6 +753,12 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 	err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
 		// First pass: create all issues with new IDs
 		for _, oldIssue := range subgraph.Issues {
+			// Determine assignee: use override for root epic, otherwise keep template's
+			issueAssignee := oldIssue.Assignee
+			if oldIssue.ID == subgraph.Root.ID && assignee != "" {
+				issueAssignee = assignee
+			}
+
 			newIssue := &types.Issue{
 				// Don't set ID - let the system generate it
 				Title:              substituteVariables(oldIssue.Title, vars),
@@ -756,7 +769,7 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				Status:             types.StatusOpen, // Always start fresh
 				Priority:           oldIssue.Priority,
 				IssueType:          oldIssue.IssueType,
-				Assignee:           oldIssue.Assignee,
+				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
 				CreatedAt:          time.Now(),
 				UpdatedAt:          time.Now(),
