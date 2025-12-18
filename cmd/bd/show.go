@@ -554,6 +554,12 @@ var updateCmd = &cobra.Command{
 			}
 			updates["issue_type"] = issueType
 		}
+		parentChanged := cmd.Flags().Changed("parent")
+		var newParent string
+		if parentChanged {
+			newParent, _ = cmd.Flags().GetString("parent")
+			updates["parent"] = newParent
+		}
 
 		if len(updates) == 0 {
 			fmt.Println("No updates specified")
@@ -640,6 +646,9 @@ var updateCmd = &cobra.Command{
 				if issueType, ok := updates["issue_type"].(string); ok {
 					updateArgs.IssueType = &issueType
 				}
+				if parent, ok := updates["parent"].(string); ok {
+					updateArgs.Parent = &parent
+				}
 
 				resp, err := daemonClient.Update(updateArgs)
 				if err != nil {
@@ -675,7 +684,7 @@ var updateCmd = &cobra.Command{
 			// Apply regular field updates if any
 			regularUpdates := make(map[string]interface{})
 			for k, v := range updates {
-				if k != "add_labels" && k != "remove_labels" && k != "set_labels" {
+				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" {
 					regularUpdates[k] = v
 				}
 			}
@@ -727,6 +736,40 @@ var updateCmd = &cobra.Command{
 					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
 						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
 						continue
+					}
+				}
+			}
+
+			// Handle parent change
+			if newParent, ok := updates["parent"].(string); ok {
+				// Remove existing parent-child dependencies
+				deps, err := store.GetDependencyRecords(ctx, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error getting dependencies for %s: %v\n", id, err)
+					continue
+				}
+				for _, dep := range deps {
+					if dep.Type == types.DepParentChild {
+						if err := store.RemoveDependency(ctx, id, dep.DependsOnID, actor); err != nil {
+							fmt.Fprintf(os.Stderr, "Error removing old parent from %s: %v\n", id, err)
+						}
+					}
+				}
+				// Add new parent if specified
+				if newParent != "" {
+					// Resolve partial ID for new parent
+					resolvedParent, err := utils.ResolvePartialID(ctx, store, newParent)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error resolving parent ID %s: %v\n", newParent, err)
+						continue
+					}
+					dep := &types.Dependency{
+						IssueID:     id,
+						DependsOnID: resolvedParent,
+						Type:        types.DepParentChild,
+					}
+					if err := store.AddDependency(ctx, dep, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error setting new parent for %s: %v\n", id, err)
 					}
 				}
 			}
@@ -1253,6 +1296,7 @@ func init() {
 	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
+	updateCmd.Flags().String("parent", "", "New parent issue ID (use empty string to remove parent)")
 
 	updateCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(updateCmd)

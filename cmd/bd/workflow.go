@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -198,6 +201,11 @@ Use 'bd ready' to see which tasks are ready to work on.`,
 		wf, err := loadWorkflow(templateName)
 		if err != nil {
 			FatalError("%v", err)
+		}
+
+		// Validate workflow has at least one task
+		if len(wf.Tasks) == 0 {
+			FatalError("workflow template '%s' has no tasks defined", templateName)
 		}
 
 		// Parse variable flags
@@ -528,34 +536,79 @@ status is not automatically changed - use 'bd close' to mark complete.`,
 		dim := color.New(color.Faint).SprintFunc()
 
 		// Look for verification in task description
-		// Format: ```verify\ncommand\n```
-		verifyCmd := extractVerifyCommand(task.Description)
-		if verifyCmd == "" {
+		// Format: ```verify\ncommand\nexpect_exit: N\nexpect_stdout: pattern\n```
+		verify := extractVerification(task.Description)
+		if verify == nil || verify.Command == "" {
 			fmt.Printf("No verification command found for task: %s\n", blue(taskID))
 			fmt.Printf("Add a verification block to the task description:\n")
 			fmt.Printf("  %s\n", dim("```verify"))
 			fmt.Printf("  %s\n", dim("./scripts/check-versions.sh"))
+			fmt.Printf("  %s\n", dim("expect_exit: 0"))
+			fmt.Printf("  %s\n", dim("expect_stdout: success"))
 			fmt.Printf("  %s\n", dim("```"))
 			return
 		}
 
 		fmt.Printf("Running verification for: %s \"%s\"\n", blue(taskID), task.Title)
-		fmt.Printf("Command: %s\n\n", dim(verifyCmd))
+		fmt.Printf("Command: %s\n", dim(verify.Command))
+		if verify.ExpectExit != nil {
+			fmt.Printf("Expected exit: %d\n", *verify.ExpectExit)
+		}
+		if verify.ExpectStdout != "" {
+			fmt.Printf("Expected stdout: %s\n", verify.ExpectStdout)
+		}
+		fmt.Println()
 
-		// Run the command
-		execCmd := exec.Command("sh", "-c", verifyCmd)
-		execCmd.Stdout = os.Stdout
+		// Run the command, capturing stdout if we need to check it
+		execCmd := exec.Command("sh", "-c", verify.Command)
+		var stdout strings.Builder
+		if verify.ExpectStdout != "" {
+			// Capture stdout for pattern matching, but also display it
+			execCmd.Stdout = &stdout
+		} else {
+			execCmd.Stdout = os.Stdout
+		}
 		execCmd.Stderr = os.Stderr
 		err := execCmd.Run()
 
+		// Display captured stdout
+		if verify.ExpectStdout != "" {
+			fmt.Print(stdout.String())
+		}
+
 		fmt.Println()
+
+		// Check exit code
+		actualExit := 0
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
-				fmt.Printf("%s Verification failed (exit code: %d)\n", red("✗"), exitErr.ExitCode())
+				actualExit = exitErr.ExitCode()
 			} else {
 				fmt.Printf("%s Verification failed: %v\n", red("✗"), err)
+				os.Exit(1)
 			}
+		}
+
+		// Check expected exit code
+		if verify.ExpectExit != nil {
+			if actualExit != *verify.ExpectExit {
+				fmt.Printf("%s Verification failed: expected exit code %d, got %d\n",
+					red("✗"), *verify.ExpectExit, actualExit)
+				os.Exit(1)
+			}
+		} else if actualExit != 0 {
+			// Default: expect exit code 0
+			fmt.Printf("%s Verification failed (exit code: %d)\n", red("✗"), actualExit)
 			os.Exit(1)
+		}
+
+		// Check expected stdout pattern
+		if verify.ExpectStdout != "" {
+			if !strings.Contains(stdout.String(), verify.ExpectStdout) {
+				fmt.Printf("%s Verification failed: stdout does not contain %q\n",
+					red("✗"), verify.ExpectStdout)
+				os.Exit(1)
+			}
 		}
 
 		fmt.Printf("%s Verification passed\n", green("✓"))
@@ -743,9 +796,8 @@ func createWorkflowInstance(wf *types.WorkflowTemplate, vars map[string]string) 
 			}
 
 			// Add verification block to description if present
-			if task.Verification != nil && task.Verification.Command != "" {
-				verifyCmd := substituteVars(task.Verification.Command, vars)
-				taskDesc += "\n\n```verify\n" + verifyCmd + "\n```"
+			if verifyBlock := buildVerificationBlock(task.Verification, vars); verifyBlock != "" {
+				taskDesc += "\n\n" + verifyBlock
 			}
 
 			taskLabels := []string{"workflow"}
@@ -778,6 +830,7 @@ func createWorkflowInstance(wf *types.WorkflowTemplate, vars map[string]string) 
 			for _, depName := range task.DependsOn {
 				depID := instance.TaskMap[depName]
 				if depID == "" {
+					fmt.Fprintf(os.Stderr, "Warning: task '%s' depends_on references unknown task ID '%s'\n", task.ID, depName)
 					continue
 				}
 				depArgs := &rpc.DepAddArgs{
@@ -834,9 +887,8 @@ func createWorkflowInstance(wf *types.WorkflowTemplate, vars map[string]string) 
 			}
 
 			// Add verification block to description if present
-			if task.Verification != nil && task.Verification.Command != "" {
-				verifyCmd := substituteVars(task.Verification.Command, vars)
-				taskDesc += "\n\n```verify\n" + verifyCmd + "\n```"
+			if verifyBlock := buildVerificationBlock(task.Verification, vars); verifyBlock != "" {
+				taskDesc += "\n\n" + verifyBlock
 			}
 
 			// Get next child ID
@@ -883,6 +935,7 @@ func createWorkflowInstance(wf *types.WorkflowTemplate, vars map[string]string) 
 			for _, depName := range task.DependsOn {
 				depID := instance.TaskMap[depName]
 				if depID == "" {
+					fmt.Fprintf(os.Stderr, "Warning: task '%s' depends_on references unknown task ID '%s'\n", task.ID, depName)
 					continue
 				}
 				dep := &types.Dependency{
@@ -902,24 +955,71 @@ func createWorkflowInstance(wf *types.WorkflowTemplate, vars map[string]string) 
 	return instance, nil
 }
 
-// extractVerifyCommand extracts a verify command from task description
-// Looks for ```verify\ncommand\n``` block
-func extractVerifyCommand(description string) string {
+// parsedVerification holds verification data extracted from task description
+type parsedVerification struct {
+	Command      string
+	ExpectExit   *int
+	ExpectStdout string
+}
+
+// extractVerification extracts verification data from task description
+// Looks for ```verify\ncommand\nexpect_exit: N\nexpect_stdout: pattern\n``` block
+func extractVerification(description string) *parsedVerification {
 	start := strings.Index(description, "```verify\n")
 	if start == -1 {
-		return ""
+		return nil
 	}
 	start += len("```verify\n")
 	end := strings.Index(description[start:], "\n```")
 	if end == -1 {
+		return nil
+	}
+	content := description[start : start+end]
+
+	result := &parsedVerification{}
+	lines := strings.Split(content, "\n")
+
+	// First line is always the command
+	if len(lines) > 0 {
+		result.Command = strings.TrimSpace(lines[0])
+	}
+
+	// Remaining lines are optional metadata
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "expect_exit:") {
+			valStr := strings.TrimSpace(strings.TrimPrefix(line, "expect_exit:"))
+			if val, err := fmt.Sscanf(valStr, "%d", new(int)); err == nil && val == 1 {
+				exitCode := 0
+				fmt.Sscanf(valStr, "%d", &exitCode)
+				result.ExpectExit = &exitCode
+			}
+		} else if strings.HasPrefix(line, "expect_stdout:") {
+			result.ExpectStdout = strings.TrimSpace(strings.TrimPrefix(line, "expect_stdout:"))
+		}
+	}
+
+	return result
+}
+
+// buildVerificationBlock creates a verify block string from Verification data
+func buildVerificationBlock(v *types.Verification, vars map[string]string) string {
+	if v == nil || v.Command == "" {
 		return ""
 	}
-	return strings.TrimSpace(description[start : start+end])
+	verifyCmd := substituteVars(v.Command, vars)
+	block := "```verify\n" + verifyCmd
+	if v.ExpectExit != nil {
+		block += fmt.Sprintf("\nexpect_exit: %d", *v.ExpectExit)
+	}
+	if v.ExpectStdout != "" {
+		block += "\nexpect_stdout: " + substituteVars(v.ExpectStdout, vars)
+	}
+	block += "\n```"
+	return block
 }
 
 // resolvePartialID resolves a partial ID to a full ID (for direct mode)
-func resolvePartialID(ctx interface{}, s interface{}, id string) (string, error) {
-	// This is a simplified version - the real implementation is in utils package
-	// For now, just return the ID as-is if it looks complete
-	return id, nil
+func resolvePartialID(ctx context.Context, s storage.Storage, id string) (string, error) {
+	return utils.ResolvePartialID(ctx, s, id)
 }

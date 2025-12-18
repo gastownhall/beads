@@ -89,9 +89,10 @@ type UpdateArgs struct {
 	AcceptanceCriteria *string  `json:"acceptance_criteria,omitempty"`
 	Notes              *string  `json:"notes,omitempty"`
 	Assignee           *string  `json:"assignee,omitempty"`
-	ExternalRef        *string  `json:"external_ref,omitempty"` // Link to external issue trackers
+	ExternalRef        *string  `json:"external_ref,omitempty"`      // Link to external issue trackers
 	EstimatedMinutes   *int     `json:"estimated_minutes,omitempty"` // Time estimate in minutes
 	IssueType          *string  `json:"issue_type,omitempty"`        // Issue type (bug|feature|task|epic|chore)
+	Parent             *string  `json:"parent,omitempty"`            // New parent issue ID (empty string to remove parent)
 	AddLabels          []string `json:"add_labels,omitempty"`
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`

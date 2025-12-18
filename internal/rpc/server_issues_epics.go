@@ -371,8 +371,46 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
+	// Handle parent change
+	parentChanged := false
+	if updateArgs.Parent != nil {
+		parentChanged = true
+		// First, remove any existing parent-child dependency
+		deps, err := store.GetDependencyRecords(ctx, updateArgs.ID)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get dependencies: %v", err),
+			}
+		}
+		for _, dep := range deps {
+			if dep.Type == types.DepParentChild {
+				if err := store.RemoveDependency(ctx, updateArgs.ID, dep.DependsOnID, actor); err != nil {
+					return Response{
+						Success: false,
+						Error:   fmt.Sprintf("failed to remove old parent: %v", err),
+					}
+				}
+			}
+		}
+		// Add new parent if specified (empty string means just remove parent)
+		if *updateArgs.Parent != "" {
+			newDep := &types.Dependency{
+				IssueID:     updateArgs.ID,
+				DependsOnID: *updateArgs.Parent,
+				Type:        types.DepParentChild,
+			}
+			if err := store.AddDependency(ctx, newDep, actor); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to set new parent: %v", err),
+				}
+			}
+		}
+	}
+
 	// Emit mutation event for event-driven daemon (only if any updates or label operations were performed)
-	if len(updates) > 0 || len(updateArgs.SetLabels) > 0 || len(updateArgs.AddLabels) > 0 || len(updateArgs.RemoveLabels) > 0 {
+	if len(updates) > 0 || len(updateArgs.SetLabels) > 0 || len(updateArgs.AddLabels) > 0 || len(updateArgs.RemoveLabels) > 0 || parentChanged {
 		s.emitMutation(MutationUpdate, updateArgs.ID)
 	}
 
