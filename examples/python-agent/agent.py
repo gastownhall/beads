@@ -8,21 +8,12 @@ This demonstrates how an agent can:
 3. Discover new issues during work
 4. Link discoveries back to parent tasks
 5. Complete work and move on
-6. Coordinate with other agents via Agent Mail (optional)
 """
 
 import json
 import subprocess
 import sys
-import os
-from pathlib import Path
 from typing import Optional
-
-# Add lib directory to path for beads_mail_adapter
-lib_path = Path(__file__).parent.parent.parent / "lib"
-sys.path.insert(0, str(lib_path))
-
-from beads_mail_adapter import AgentMailAdapter
 
 
 class BeadsAgent:
@@ -30,12 +21,6 @@ class BeadsAgent:
 
     def __init__(self):
         self.current_task = None
-        self.mail = AgentMailAdapter()
-        
-        if self.mail.enabled:
-            print(f"📬 Agent Mail enabled (agent: {self.mail.agent_name})")
-        else:
-            print("📭 Agent Mail disabled (Beads-only mode)")
 
     def run_bd(self, *args) -> dict:
         """Run bd command and parse JSON output."""
@@ -47,20 +32,7 @@ class BeadsAgent:
         return {}
 
     def find_ready_work(self) -> Optional[dict]:
-        """Find the highest priority ready work.
-        
-        Integration Point 1: Check inbox before finding work.
-        """
-        # Check inbox for notifications from other agents
-        messages = self.mail.check_inbox()
-        if messages:
-            print(f"📨 Received {len(messages)} messages:")
-            for msg in messages:
-                event_type = msg.get("event_type", "unknown")
-                payload = msg.get("payload", {})
-                from_agent = msg.get("from_agent", "unknown")
-                print(f"   • {event_type} from {from_agent}: {payload}")
-        
+        """Find the highest priority ready work."""
         ready = self.run_bd("ready", "--limit", "1")
 
         if isinstance(ready, list) and len(ready) > 0:
@@ -68,26 +40,9 @@ class BeadsAgent:
         return None
 
     def claim_task(self, issue_id: str) -> dict:
-        """Claim a task by setting status to in_progress.
-        
-        Integration Point 2: Reserve issue before claiming.
-        Integration Point 3: Notify other agents of status change.
-        """
-        # Reserve the issue to prevent conflicts with other agents
-        if not self.mail.reserve_issue(issue_id):
-            print(f"⚠️  Failed to reserve {issue_id} - already claimed by another agent")
-            return {}
-        
+        """Claim a task by setting status to in_progress."""
         print(f"📋 Claiming task: {issue_id}")
         result = self.run_bd("update", issue_id, "--status", "in_progress")
-        
-        # Notify other agents of status change
-        self.mail.notify("status_changed", {
-            "issue_id": issue_id,
-            "status": "in_progress",
-            "agent": self.mail.agent_name
-        })
-        
         return result
 
     def create_issue(self, title: str, description: str = "",
@@ -108,23 +63,9 @@ class BeadsAgent:
         )
 
     def complete_task(self, issue_id: str, reason: str = "Completed"):
-        """Mark task as complete.
-        
-        Integration Point 4: Release reservation and notify completion.
-        """
+        """Mark task as complete."""
         print(f"✅ Completing task: {issue_id} - {reason}")
         result = self.run_bd("close", issue_id, "--reason", reason)
-        
-        # Notify other agents of completion
-        self.mail.notify("issue_completed", {
-            "issue_id": issue_id,
-            "reason": reason,
-            "agent": self.mail.agent_name
-        })
-        
-        # Release the reservation
-        self.mail.release_issue(issue_id)
-        
         return result
 
     def simulate_work(self, issue: dict) -> bool:

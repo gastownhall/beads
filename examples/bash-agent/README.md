@@ -10,7 +10,6 @@ A bash script demonstrating how an AI agent can use bd to manage tasks autonomou
 - Random issue creation to simulate real agent behavior
 - Dependency linking with `discovered-from`
 - Statistics display
-- **Optional Agent Mail integration** for multi-agent coordination
 
 ## Prerequisites
 
@@ -20,8 +19,6 @@ A bash script demonstrating how an AI agent can use bd to manage tasks autonomou
 - A beads database initialized: `bd init`
 
 ## Usage
-
-### Basic (Single Agent)
 
 ```bash
 # Make executable
@@ -33,29 +30,6 @@ chmod +x agent.sh
 # Run with custom iteration limit
 ./agent.sh 20
 ```
-
-### Multi-Agent Mode (with Agent Mail)
-
-```bash
-# Terminal 1: Start Agent Mail server
-cd ~/src/mcp_agent_mail
-source .venv/bin/activate
-python -m mcp_agent_mail.cli serve-http
-
-# Terminal 2: Run first agent
-export BEADS_AGENT_MAIL_URL=http://127.0.0.1:8765
-export BEADS_AGENT_NAME=bash-agent-1
-export BEADS_PROJECT_ID=my-project
-./agent.sh 10
-
-# Terminal 3: Run second agent (simultaneously)
-export BEADS_AGENT_MAIL_URL=http://127.0.0.1:8765
-export BEADS_AGENT_NAME=bash-agent-2
-export BEADS_PROJECT_ID=my-project
-./agent.sh 10
-```
-
-Agents will coordinate via Agent Mail to prevent claiming the same issues.
 
 ## What It Does
 

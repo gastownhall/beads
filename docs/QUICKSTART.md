@@ -197,40 +197,6 @@ bd cleanup --force
 
 **Note:** Compaction is permanent graceful decay. Original content is discarded but viewable via `bd restore <id>` from git history.
 
-## Advanced: Agent Mail (Optional)
-
-For **multi-agent workflows** (2+ AI agents working concurrently), Agent Mail provides real-time coordination:
-
-**Benefits:**
-- 20-50x latency reduction (<100ms vs 2-5s git sync)
-- Collision prevention via file reservations
-- Agents can't accidentally claim same issue
-
-**Quick setup:**
-```bash
-# Install and start server (one-time)
-git clone https://github.com/Dicklesworthstone/mcp_agent_mail.git
-cd mcp_agent_mail && python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-python -m mcp_agent_mail.cli serve-http
-
-# Configure each agent (environment variables)
-export BEADS_AGENT_MAIL_URL=http://127.0.0.1:8765
-export BEADS_AGENT_NAME=assistant-alpha  # Unique per agent
-export BEADS_PROJECT_ID=my-project
-
-# Use bd normally - Agent Mail auto-activates
-bd ready
-bd update bd-42 --status in_progress  # Reserves instantly
-```
-
-**When to use:**
-- ✅ Multiple agents working simultaneously
-- ✅ High collision risk (frequent status updates)
-- ❌ Single agent workflows (unnecessary overhead)
-
-See [AGENT_MAIL.md](AGENT_MAIL.md) for complete guide.
-
 ## Background Daemon
 
 bd runs a background daemon for auto-sync and performance. You rarely need to manage it directly:

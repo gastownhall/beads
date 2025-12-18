@@ -25,8 +25,7 @@ bd info --json
 # {
 #   "database_path": "/path/to/.beads/beads.db",
 #   "issue_prefix": "bd",
-#   "daemon_running": true,
-#   "agent_mail_enabled": false
+#   "daemon_running": true
 # }
 ```
 

@@ -84,6 +84,5 @@ tree = agent.run_bd("dep", "tree", "bd-1")
 
 ## See Also
 
-- [AGENT_MAIL_EXAMPLE.md](AGENT_MAIL_EXAMPLE.md) - Multi-agent coordination with Agent Mail
 - [../bash-agent/](../bash-agent/) - Bash version of this example
 - [../claude-desktop-mcp/](../claude-desktop-mcp/) - MCP server for Claude Desktop

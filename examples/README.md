@@ -6,7 +6,6 @@ This directory contains examples of how to integrate bd with AI agents and workf
 
 ### Agent Integration
 - **[python-agent/](python-agent/)** - Simple Python agent that discovers ready work and completes tasks
-  - **[AGENT_MAIL_EXAMPLE.md](python-agent/AGENT_MAIL_EXAMPLE.md)** - Multi-agent coordination with Agent Mail
 - **[bash-agent/](bash-agent/)** - Bash script showing the full agent workflow
 - **[startup-hooks/](startup-hooks/)** - Session startup scripts for automatic bd upgrade detection
 - **[claude-desktop-mcp/](claude-desktop-mcp/)** - MCP server for Claude Desktop integration

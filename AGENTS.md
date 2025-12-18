@@ -23,7 +23,7 @@ This shows the last 3 versions with workflow-impacting changes, avoiding the nee
 - New commands and flags that improve agent workflows
 - Breaking changes that require workflow updates
 - Performance improvements and bug fixes
-- Integration features (MCP, Agent Mail, git hooks)
+- Integration features (MCP, git hooks)
 
 **Why this matters:** bd releases weekly with major versions. This command helps you quickly understand what changed without parsing the full CHANGELOG.
 
@@ -285,52 +285,6 @@ bd create "Fix auth bug" -t bug -p 1 --json  # What bug? Where? Why?
 bd create "Add feature" -t feature --json     # What feature? Why needed?
 bd create "Refactor code" -t task --json      # What code? Why refactor?
 ```
-
-### Optional: Agent Mail for Multi-Agent Coordination
-
-**⚠️ NOT CURRENTLY CONFIGURED** - The mcp-agent-mail server is not set up for this project. Do not attempt to use mcp-agent-mail tools.
-
-**For multi-agent workflows only** - if multiple AI agents work on the same repository simultaneously, consider using Agent Mail for real-time coordination:
-
-**With Agent Mail enabled:**
-```bash
-# Configure environment (one-time per session)
-export BEADS_AGENT_MAIL_URL=http://127.0.0.1:8765
-export BEADS_AGENT_NAME=assistant-alpha
-export BEADS_PROJECT_ID=my-project
-
-# Workflow (identical commands)
-bd ready                                    # Shows available work
-bd update bd-42 --status in_progress       # Reserves issue instantly (<100ms)
-# ... work on issue ...
-bd close bd-42 "Done"                       # Releases reservation automatically
-```
-
-**Without Agent Mail (git-only mode):**
-```bash
-# No environment variables needed
-bd ready                                    # Shows available work
-bd update bd-42 --status in_progress       # Updates via git sync (2-5s latency)
-# ... work on issue ...
-bd close bd-42 "Done"                       # Updates via git sync
-```
-
-**Key differences:**
-- **Latency**: <100ms (Agent Mail) vs 2-5s (git-only)
-- **Collision prevention**: Instant reservation (Agent Mail) vs eventual consistency (git)
-- **Setup**: Requires server + env vars (Agent Mail) vs zero config (git-only)
-
-**When to use Agent Mail:**
-- ✅ Multiple agents working concurrently
-- ✅ Frequent status updates (high collision risk)
-- ✅ Real-time coordination needed
-
-**When to skip:**
-- ✅ Single agent workflows
-- ✅ Infrequent updates (low collision risk)
-- ✅ Simplicity preferred over latency
-
-See [docs/AGENT_MAIL_QUICKSTART.md](docs/AGENT_MAIL_QUICKSTART.md) for 5-minute setup, or [docs/AGENT_MAIL.md](docs/AGENT_MAIL.md) for complete documentation. Example code in [examples/python-agent/AGENT_MAIL_EXAMPLE.md](examples/python-agent/AGENT_MAIL_EXAMPLE.md).
 
 ### Inter-Agent Messaging (bd mail)
 

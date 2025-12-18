@@ -4,15 +4,10 @@
 #
 # This demonstrates the full lifecycle of an agent managing tasks:
 # - Find ready work
-# - Claim and execute (with optional Agent Mail reservation)
+# - Claim and execute
 # - Discover new issues
 # - Link discoveries
 # - Complete and move on
-#
-# Optional Agent Mail integration:
-#   export BEADS_AGENT_MAIL_URL=http://127.0.0.1:8765
-#   export BEADS_AGENT_NAME=bash-agent-1
-#   export BEADS_PROJECT_ID=my-project
 
 set -euo pipefail
 
@@ -39,87 +34,7 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
-# Agent Mail integration (optional, graceful degradation)
-AGENT_MAIL_ENABLED=false
-AGENT_MAIL_URL="${BEADS_AGENT_MAIL_URL:-}"
 AGENT_NAME="${BEADS_AGENT_NAME:-bash-agent-$$}"
-PROJECT_ID="${BEADS_PROJECT_ID:-default}"
-
-# Check Agent Mail health
-check_agent_mail() {
-    if [[ -z "$AGENT_MAIL_URL" ]]; then
-        return 1
-    fi
-    
-    if ! command -v curl &> /dev/null; then
-        log_warning "curl not available, Agent Mail disabled"
-        return 1
-    fi
-    
-    if curl -s -f "$AGENT_MAIL_URL/health" > /dev/null 2>&1; then
-        return 0
-    fi
-    return 1
-}
-
-# Reserve an issue (prevents other agents from claiming)
-reserve_issue() {
-    local issue_id="$1"
-    
-    if ! $AGENT_MAIL_ENABLED; then
-        return 0  # Skip if disabled
-    fi
-    
-    local response=$(curl -s -X POST "$AGENT_MAIL_URL/api/reserve" \
-        -H "Content-Type: application/json" \
-        -d "{\"file_path\": \"$issue_id\", \"agent_name\": \"$AGENT_NAME\", \"project_id\": \"$PROJECT_ID\", \"ttl_seconds\": 300}" \
-        2>/dev/null || echo "")
-    
-    if [[ -z "$response" ]] || echo "$response" | grep -q "error"; then
-        log_warning "Failed to reserve $issue_id (may be claimed by another agent)"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Release an issue reservation
-release_issue() {
-    local issue_id="$1"
-    
-    if ! $AGENT_MAIL_ENABLED; then
-        return 0  # Skip if disabled
-    fi
-    
-    curl -s -X POST "$AGENT_MAIL_URL/api/release" \
-        -H "Content-Type: application/json" \
-        -d "{\"file_path\": \"$issue_id\", \"agent_name\": \"$AGENT_NAME\", \"project_id\": \"$PROJECT_ID\"}" \
-        > /dev/null 2>&1 || true
-}
-
-# Send notification to other agents
-notify() {
-    local event_type="$1"
-    local issue_id="$2"
-    local message="$3"
-    
-    if ! $AGENT_MAIL_ENABLED; then
-        return 0  # Skip if disabled
-    fi
-    
-    curl -s -X POST "$AGENT_MAIL_URL/api/notify" \
-        -H "Content-Type: application/json" \
-        -d "{\"event_type\": \"$event_type\", \"from_agent\": \"$AGENT_NAME\", \"project_id\": \"$PROJECT_ID\", \"payload\": {\"issue_id\": \"$issue_id\", \"message\": \"$message\"}}" \
-        > /dev/null 2>&1 || true
-}
-
-# Initialize Agent Mail
-if check_agent_mail; then
-    AGENT_MAIL_ENABLED=true
-    log_success "Agent Mail enabled (agent: $AGENT_NAME)"
-else
-    log_info "Agent Mail disabled (Beads-only mode)"
-fi
 
 # Check if bd is installed
 if ! command -v bd &> /dev/null; then
@@ -150,19 +65,10 @@ get_field() {
 # Claim a task
 claim_task() {
     local issue_id="$1"
-    
-    # Try to reserve first (Agent Mail)
-    if ! reserve_issue "$issue_id"; then
-        log_error "Could not reserve $issue_id - skipping"
-        return 1
-    fi
-    
+
     log_info "Claiming task: $issue_id"
     bd update "$issue_id" --status in_progress --json > /dev/null
-    
-    # Notify other agents
-    notify "status_changed" "$issue_id" "Claimed by $AGENT_NAME"
-    
+
     log_success "Task claimed"
     return 0
 }
@@ -212,11 +118,7 @@ complete_task() {
 
     log_info "Completing task: $issue_id"
     bd close "$issue_id" --reason "$reason" --json > /dev/null
-    
-    # Notify completion and release reservation
-    notify "issue_completed" "$issue_id" "$reason"
-    release_issue "$issue_id"
-    
+
     log_success "Task completed: $issue_id"
 }
 
@@ -259,9 +161,9 @@ run_agent() {
 
         issue_id=$(get_field "$ready_work" "id")
 
-        # Claim it (may fail if another agent reserved it)
+        # Claim it
         if ! claim_task "$issue_id"; then
-            log_warning "Skipping already-claimed task, trying next iteration"
+            log_warning "Failed to claim task, trying next iteration"
             continue
         fi
 
