@@ -227,6 +227,11 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Check for external database file modifications (daemon mode)
 	s.checkFreshness()
 
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	var issue types.Issue
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
@@ -1399,6 +1404,11 @@ func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.
 func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	// Check for external database file modifications (daemon mode)
 	s.checkFreshness()
+
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
 
 	whereClauses := []string{}
 	args := []interface{}{}

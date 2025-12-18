@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -808,6 +809,146 @@ func TestBranchMergeNoErroneousDeletion(t *testing.T) {
 	if finalIssueB == nil {
 		t.Error("ERRONEOUS DELETION: Issue B was deleted!")
 	}
+}
+
+// TestConcurrentReadsWithReconnect verifies the race condition fix from GH#607.
+// The race condition was:
+// 1. Operation A calls checkFreshness() → no change → proceeds to use s.db
+// 2. Operation B calls checkFreshness() → detects change → calls reconnect()
+// 3. reconnect() closes s.db while Operation A is still using it
+// 4. Operation A fails with "database is closed"
+//
+// The fix uses sync.RWMutex:
+// - Read operations hold RLock during database access
+// - reconnect() holds exclusive Lock, waiting for readers to finish
+func TestConcurrentReadsWithReconnect(t *testing.T) {
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "beads-concurrent-reconnect-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	ctx := context.Background()
+
+	// Create store
+	store, err := New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// Initialize
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		store.Close()
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create an issue to query
+	issue := &types.Issue{
+		Title:     "Concurrent Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		store.Close()
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	issueID := issue.ID
+
+	// Enable freshness checking
+	store.EnableFreshnessChecking()
+
+	// Track errors from concurrent operations
+	const numGoroutines = 50
+	const opsPerGoroutine = 100
+	errChan := make(chan error, numGoroutines*opsPerGoroutine)
+	doneChan := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Start goroutines that continuously call GetIssue
+	for i := range numGoroutines {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+			for j := range opsPerGoroutine {
+				select {
+				case <-doneChan:
+					return
+				default:
+				}
+
+				_, err := store.GetIssue(ctx, issueID)
+				if err != nil {
+					errChan <- err
+				}
+
+				// Occasionally trigger reconnect by touching the file
+				// This simulates external modifications
+				if j%20 == 0 && goroutineID == 0 {
+					// Touch the file to change mtime
+					now := time.Now()
+					os.Chtimes(dbPath, now, now)
+				}
+			}
+		}(i)
+	}
+
+	// Also start a goroutine that forces reconnections
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 20 {
+			select {
+			case <-doneChan:
+				return
+			default:
+			}
+
+			// Force reconnection by calling it directly
+			// This simulates what happens when freshness check detects changes
+			_ = store.reconnect()
+
+			// Small delay between reconnections
+			time.Sleep(time.Duration(10+i) * time.Millisecond)
+		}
+	}()
+
+	// Wait for all operations to complete (max 2 seconds)
+	time.Sleep(2 * time.Second)
+	close(doneChan)
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	// Now safe to close store and error channel
+	store.Close()
+	close(errChan)
+
+	// Count errors
+	var dbClosedErrors int
+	var otherErrors int
+	for err := range errChan {
+		errStr := err.Error()
+		if errStr == "sql: database is closed" ||
+			errStr == "database is closed" ||
+			errStr == "sql: statement is closed" {
+			dbClosedErrors++
+		} else {
+			otherErrors++
+			t.Logf("Other error: %v", err)
+		}
+	}
+
+	if dbClosedErrors > 0 {
+		t.Errorf("Race condition detected: %d 'database is closed' errors occurred (GH#607 not fixed)", dbClosedErrors)
+	}
+	if otherErrors > 0 {
+		t.Logf("Note: %d non-database-closed errors occurred (may be expected)", otherErrors)
+	}
+	t.Logf("Completed %d goroutines × %d ops with %d db closed errors, %d other errors",
+		numGoroutines, opsPerGoroutine, dbClosedErrors, otherErrors)
 }
 
 // BenchmarkGetIssueWithFreshness measures GetIssue with freshness checking enabled.

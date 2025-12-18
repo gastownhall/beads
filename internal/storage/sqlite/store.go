@@ -28,7 +28,7 @@ type SQLiteStorage struct {
 	connStr     string      // Connection string for reconnection
 	busyTimeout time.Duration
 	freshness   *FreshnessChecker // Optional freshness checker for daemon mode
-	reconnectMu sync.Mutex        // Protects reconnection
+	reconnectMu sync.RWMutex      // Protects reconnection and db access (GH#607)
 }
 
 // setupWASMCache configures WASM compilation caching to reduce SQLite startup time.
@@ -207,6 +207,9 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 // It checkpoints the WAL to ensure all writes are flushed to the main database file.
 func (s *SQLiteStorage) Close() error {
 	s.closed.Store(true)
+	// Acquire write lock to prevent racing with reconnect() (GH#607)
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
 	// Checkpoint WAL to ensure all writes are persisted to the main database file.
 	// Without this, writes may be stranded in the WAL and lost between CLI invocations.
 	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
