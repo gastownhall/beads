@@ -37,6 +37,7 @@ var migrationsList = []Migration{
 	{"tombstone_columns", migrations.MigrateTombstoneColumns},
 	{"messaging_fields", migrations.MigrateMessagingFields},
 	{"edge_consolidation", migrations.MigrateEdgeConsolidation},
+	{"migrate_edge_fields", migrations.MigrateEdgeFields},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -81,6 +82,7 @@ func getMigrationDescription(name string) string {
 		"tombstone_columns":            "Adds tombstone columns (deleted_at, deleted_by, delete_reason, original_type) for inline soft-delete (bd-vw8)",
 		"messaging_fields":             "Adds messaging fields (sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by) for inter-agent communication (bd-kwro)",
 		"edge_consolidation":           "Adds metadata and thread_id columns to dependencies table for edge schema consolidation (Decision 004)",
+		"migrate_edge_fields":          "Migrates existing issue fields (replies_to, relates_to, duplicate_of, superseded_by) to dependency edges (Decision 004 Phase 3)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
