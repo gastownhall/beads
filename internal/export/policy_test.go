@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -95,6 +96,72 @@ func TestErrorPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestErrorPolicyString(t *testing.T) {
+	tests := []struct {
+		policy ErrorPolicy
+		want   string
+	}{
+		{PolicyStrict, "strict"},
+		{PolicyBestEffort, "best-effort"},
+		{PolicyPartial, "partial"},
+		{PolicyRequiredCore, "required-core"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.policy.String(); got != tt.want {
+				t.Errorf("String() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewManifest(t *testing.T) {
+	manifest := NewManifest(PolicyBestEffort)
+
+	if manifest == nil {
+		t.Fatal("NewManifest returned nil")
+	}
+	if manifest.ErrorPolicy != string(PolicyBestEffort) {
+		t.Errorf("ErrorPolicy = %v, want %v", manifest.ErrorPolicy, PolicyBestEffort)
+	}
+	if !manifest.Complete {
+		t.Error("Complete should be true by default")
+	}
+	if manifest.ExportedAt.IsZero() {
+		t.Error("ExportedAt should not be zero")
+	}
+}
+
+func TestWriteManifest(t *testing.T) {
+	t.Run("writes manifest successfully", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		jsonlPath := tmpDir + "/test.jsonl"
+
+		manifest := NewManifest(PolicyStrict)
+		manifest.ExportedCount = 5
+		manifest.Complete = true
+
+		err := WriteManifest(jsonlPath, manifest)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify manifest file was created
+		manifestPath := tmpDir + "/test.manifest.json"
+		if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+			t.Error("manifest file was not created")
+		}
+	})
+
+	t.Run("fails on invalid directory", func(t *testing.T) {
+		err := WriteManifest("/nonexistent/path/test.jsonl", NewManifest(PolicyStrict))
+		if err == nil {
+			t.Error("expected error for nonexistent directory")
+		}
+	})
 }
 
 func TestFetchWithPolicy(t *testing.T) {

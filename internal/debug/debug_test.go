@@ -137,3 +137,149 @@ func TestPrintf(t *testing.T) {
 		})
 	}
 }
+
+func TestSetVerbose(t *testing.T) {
+	oldVerbose := verboseMode
+	oldEnabled := enabled
+	defer func() {
+		verboseMode = oldVerbose
+		enabled = oldEnabled
+	}()
+
+	enabled = false
+	verboseMode = false
+
+	if Enabled() {
+		t.Error("Enabled() should be false initially")
+	}
+
+	SetVerbose(true)
+	if !Enabled() {
+		t.Error("Enabled() should be true after SetVerbose(true)")
+	}
+
+	SetVerbose(false)
+	if Enabled() {
+		t.Error("Enabled() should be false after SetVerbose(false)")
+	}
+}
+
+func TestSetQuietAndIsQuiet(t *testing.T) {
+	oldQuiet := quietMode
+	defer func() { quietMode = oldQuiet }()
+
+	quietMode = false
+
+	if IsQuiet() {
+		t.Error("IsQuiet() should be false initially")
+	}
+
+	SetQuiet(true)
+	if !IsQuiet() {
+		t.Error("IsQuiet() should be true after SetQuiet(true)")
+	}
+
+	SetQuiet(false)
+	if IsQuiet() {
+		t.Error("IsQuiet() should be false after SetQuiet(false)")
+	}
+}
+
+func TestPrintNormal(t *testing.T) {
+	tests := []struct {
+		name       string
+		quiet      bool
+		format     string
+		args       []interface{}
+		wantOutput string
+	}{
+		{
+			name:       "outputs when not quiet",
+			quiet:      false,
+			format:     "info: %s\n",
+			args:       []interface{}{"message"},
+			wantOutput: "info: message\n",
+		},
+		{
+			name:       "no output when quiet",
+			quiet:      true,
+			format:     "info: %s\n",
+			args:       []interface{}{"message"},
+			wantOutput: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldQuiet := quietMode
+			oldStdout := os.Stdout
+			defer func() {
+				quietMode = oldQuiet
+				os.Stdout = oldStdout
+			}()
+
+			quietMode = tt.quiet
+
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			PrintNormal(tt.format, tt.args...)
+
+			w.Close()
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+
+			if got := buf.String(); got != tt.wantOutput {
+				t.Errorf("PrintNormal() output = %q, want %q", got, tt.wantOutput)
+			}
+		})
+	}
+}
+
+func TestPrintlnNormal(t *testing.T) {
+	tests := []struct {
+		name       string
+		quiet      bool
+		args       []interface{}
+		wantOutput string
+	}{
+		{
+			name:       "outputs when not quiet",
+			quiet:      false,
+			args:       []interface{}{"hello", "world"},
+			wantOutput: "hello world\n",
+		},
+		{
+			name:       "no output when quiet",
+			quiet:      true,
+			args:       []interface{}{"hello", "world"},
+			wantOutput: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldQuiet := quietMode
+			oldStdout := os.Stdout
+			defer func() {
+				quietMode = oldQuiet
+				os.Stdout = oldStdout
+			}()
+
+			quietMode = tt.quiet
+
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			PrintlnNormal(tt.args...)
+
+			w.Close()
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+
+			if got := buf.String(); got != tt.wantOutput {
+				t.Errorf("PrintlnNormal() output = %q, want %q", got, tt.wantOutput)
+			}
+		})
+	}
+}
