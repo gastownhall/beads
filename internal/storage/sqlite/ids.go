@@ -223,9 +223,24 @@ func tryResurrectParent(parentID string, issues []*types.Issue) bool {
 func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*types.Issue, actor string, orphanHandling OrphanHandling, skipPrefixValidation bool) error {
 	usedIDs := make(map[string]bool)
 
-	// First pass: record explicitly provided IDs
+	// First pass: record explicitly provided IDs and check for duplicates within batch
 	for i := range issues {
 		if issues[i].ID != "" {
+			// Check for duplicate IDs within the batch
+			if usedIDs[issues[i].ID] {
+				return fmt.Errorf("duplicate issue ID within batch: %s", issues[i].ID)
+			}
+
+			// Check if ID already exists in database
+			var existingCount int
+			err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, issues[i].ID).Scan(&existingCount)
+			if err != nil {
+				return fmt.Errorf("failed to check ID existence: %w", err)
+			}
+			if existingCount > 0 {
+				return fmt.Errorf("issue ID already exists: %s", issues[i].ID)
+			}
+
 			// Validate that explicitly provided ID matches the configured prefix (bd-177)
 			// Skip validation during import to allow issues with different prefixes (e.g., from renamed repos)
 			if !skipPrefixValidation {
