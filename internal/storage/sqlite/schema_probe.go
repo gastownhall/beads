@@ -19,7 +19,7 @@ var expectedSchema = map[string][]string{
 		"created_at", "updated_at", "closed_at", "content_hash", "external_ref",
 		"compaction_level", "compacted_at", "compacted_at_commit", "original_size",
 	},
-	"dependencies":         {"issue_id", "depends_on_id", "type", "created_at", "created_by"},
+	"dependencies":         {"issue_id", "depends_on_id", "type", "created_at", "created_by", "metadata", "thread_id"},
 	"labels":               {"issue_id", "label"},
 	"comments":             {"id", "issue_id", "author", "text", "created_at"},
 	"events":               {"id", "issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at"},
