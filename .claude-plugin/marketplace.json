@@ -9,7 +9,7 @@
       "name": "beads",
       "source": "./",
       "description": "AI-supervised issue tracker for coding workflows",
-      "version": "0.30.3"
+      "version": "0.30.4"
     }
   ]
 }

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.4] - 2025-12-18
+
+### Added
+
+- **`bd template instantiate`** (bd-r6a.2) - Create beads issues from YAML workflow templates
+  - `bd template instantiate <file.yaml>` - Create issues from workflow definitions
+  - `--assignee <identity>` flag for auto-assignment during instantiation
+  - Supports multi-issue workflows with dependency chains
+  - Templates define issue properties (title, type, priority, dependencies)
+
+### Changed
+
+- **`bd mail inbox --identity`** - Fixed to properly filter by identity parameter
+
+### Fixed
+
+- **Orphan detection warnings** - No longer warns about closed issues or tombstones
+  - Previously `bd doctor` reported false positives for completed dependencies
+
+### Removed
+
+- **Legacy MCP Agent Mail integration** (bd-6gd) - Removed obsolete `mcp_agents` package
+- **YAML workflow execution system** (bd-r6a.1) - Replaced by simpler template instantiation
+
+### Notes
+
+- **Experimental edges**: The new graph link fields (`relates_to`, `replies_to`, `duplicate_of`, `superseded_by`) and mail commands are **experimental and subject to change** in upcoming releases. Early adopters should expect breaking changes to these APIs.
+
 ## [0.30.3] - 2025-12-17
 
 ### Fixed

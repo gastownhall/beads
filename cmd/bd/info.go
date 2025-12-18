@@ -288,6 +288,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.4",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"bd template instantiate (bd-r6a.2) - Create beads issues from YAML workflow templates",
+			"--assignee flag for template instantiate - Auto-assign during instantiation",
+			"bd mail inbox --identity fix - Now properly filters by identity parameter",
+			"Orphan detection fixes - No longer warns about closed issues or tombstones",
+			"EXPERIMENTAL: Graph link fields (relates_to, replies_to, duplicate_of, superseded_by) and mail commands are subject to breaking changes",
+		},
+	},
+	{
 		Version: "0.30.3",
 		Date:    "2025-12-17",
 		Changes: []string{
