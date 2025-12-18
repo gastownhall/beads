@@ -112,13 +112,25 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update the duplicate issue with duplicate_of and close it
-	updates := map[string]interface{}{
-		"duplicate_of": canonicalID,
-		"status":       string(types.StatusClosed),
-	}
-
-	if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
-		return fmt.Errorf("failed to mark as duplicate: %w", err)
+	closedStatus := string(types.StatusClosed)
+	if daemonClient != nil {
+		// Use RPC for daemon mode (bd-fu83)
+		_, err := daemonClient.Update(&rpc.UpdateArgs{
+			ID:          duplicateID,
+			DuplicateOf: &canonicalID,
+			Status:      &closedStatus,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to mark as duplicate: %w", err)
+		}
+	} else {
+		updates := map[string]interface{}{
+			"duplicate_of": canonicalID,
+			"status":       closedStatus,
+		}
+		if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
+			return fmt.Errorf("failed to mark as duplicate: %w", err)
+		}
 	}
 
 	// Trigger auto-flush
@@ -199,13 +211,25 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update the old issue with superseded_by and close it
-	updates := map[string]interface{}{
-		"superseded_by": newID,
-		"status":        string(types.StatusClosed),
-	}
-
-	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
-		return fmt.Errorf("failed to mark as superseded: %w", err)
+	closedStatus := string(types.StatusClosed)
+	if daemonClient != nil {
+		// Use RPC for daemon mode (bd-fu83)
+		_, err := daemonClient.Update(&rpc.UpdateArgs{
+			ID:           oldID,
+			SupersededBy: &newID,
+			Status:       &closedStatus,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to mark as superseded: %w", err)
+		}
+	} else {
+		updates := map[string]interface{}{
+			"superseded_by": newID,
+			"status":        closedStatus,
+		}
+		if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
+			return fmt.Errorf("failed to mark as superseded: %w", err)
+		}
 	}
 
 	// Trigger auto-flush

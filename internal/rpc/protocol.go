@@ -99,6 +99,10 @@ type UpdateArgs struct {
 	Sender    *string `json:"sender,omitempty"`     // Who sent this (for messages)
 	Ephemeral *bool   `json:"ephemeral,omitempty"`  // Can be bulk-deleted when closed
 	RepliesTo *string `json:"replies_to,omitempty"` // Issue ID for conversation threading
+	// Graph link fields (bd-fu83)
+	RelatesTo    *string `json:"relates_to,omitempty"`    // JSON array of related issue IDs
+	DuplicateOf  *string `json:"duplicate_of,omitempty"`  // Canonical issue ID if duplicate
+	SupersededBy *string `json:"superseded_by,omitempty"` // Replacement issue ID if obsolete
 }
 
 // CloseArgs represents arguments for the close operation

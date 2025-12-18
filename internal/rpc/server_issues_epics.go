@@ -87,6 +87,16 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo
 	}
+	// Graph link fields (bd-fu83)
+	if a.RelatesTo != nil {
+		u["relates_to"] = *a.RelatesTo
+	}
+	if a.DuplicateOf != nil {
+		u["duplicate_of"] = *a.DuplicateOf
+	}
+	if a.SupersededBy != nil {
+		u["superseded_by"] = *a.SupersededBy
+	}
 	return u
 }
 

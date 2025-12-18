@@ -122,20 +122,44 @@ func runRelate(cmd *cobra.Command, args []string) error {
 	// Add id2 to issue1's relates_to if not already present
 	if !contains(issue1.RelatesTo, id2) {
 		newRelatesTo1 := append(issue1.RelatesTo, id2)
-		if err := store.UpdateIssue(ctx, id1, map[string]interface{}{
-			"relates_to": formatRelatesTo(newRelatesTo1),
-		}, actor); err != nil {
-			return fmt.Errorf("failed to update %s: %w", id1, err)
+		formattedRelatesTo1 := formatRelatesTo(newRelatesTo1)
+		if daemonClient != nil {
+			// Use RPC for daemon mode (bd-fu83)
+			_, err := daemonClient.Update(&rpc.UpdateArgs{
+				ID:        id1,
+				RelatesTo: &formattedRelatesTo1,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to update %s: %w", id1, err)
+			}
+		} else {
+			if err := store.UpdateIssue(ctx, id1, map[string]interface{}{
+				"relates_to": formattedRelatesTo1,
+			}, actor); err != nil {
+				return fmt.Errorf("failed to update %s: %w", id1, err)
+			}
 		}
 	}
 
 	// Add id1 to issue2's relates_to if not already present
 	if !contains(issue2.RelatesTo, id1) {
 		newRelatesTo2 := append(issue2.RelatesTo, id1)
-		if err := store.UpdateIssue(ctx, id2, map[string]interface{}{
-			"relates_to": formatRelatesTo(newRelatesTo2),
-		}, actor); err != nil {
-			return fmt.Errorf("failed to update %s: %w", id2, err)
+		formattedRelatesTo2 := formatRelatesTo(newRelatesTo2)
+		if daemonClient != nil {
+			// Use RPC for daemon mode (bd-fu83)
+			_, err := daemonClient.Update(&rpc.UpdateArgs{
+				ID:        id2,
+				RelatesTo: &formattedRelatesTo2,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to update %s: %w", id2, err)
+			}
+		} else {
+			if err := store.UpdateIssue(ctx, id2, map[string]interface{}{
+				"relates_to": formattedRelatesTo2,
+			}, actor); err != nil {
+				return fmt.Errorf("failed to update %s: %w", id2, err)
+			}
 		}
 	}
 
@@ -232,18 +256,42 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 
 	// Remove id2 from issue1's relates_to
 	newRelatesTo1 := remove(issue1.RelatesTo, id2)
-	if err := store.UpdateIssue(ctx, id1, map[string]interface{}{
-		"relates_to": formatRelatesTo(newRelatesTo1),
-	}, actor); err != nil {
-		return fmt.Errorf("failed to update %s: %w", id1, err)
+	formattedRelatesTo1 := formatRelatesTo(newRelatesTo1)
+	if daemonClient != nil {
+		// Use RPC for daemon mode (bd-fu83)
+		_, err := daemonClient.Update(&rpc.UpdateArgs{
+			ID:        id1,
+			RelatesTo: &formattedRelatesTo1,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update %s: %w", id1, err)
+		}
+	} else {
+		if err := store.UpdateIssue(ctx, id1, map[string]interface{}{
+			"relates_to": formattedRelatesTo1,
+		}, actor); err != nil {
+			return fmt.Errorf("failed to update %s: %w", id1, err)
+		}
 	}
 
 	// Remove id1 from issue2's relates_to
 	newRelatesTo2 := remove(issue2.RelatesTo, id1)
-	if err := store.UpdateIssue(ctx, id2, map[string]interface{}{
-		"relates_to": formatRelatesTo(newRelatesTo2),
-	}, actor); err != nil {
-		return fmt.Errorf("failed to update %s: %w", id2, err)
+	formattedRelatesTo2 := formatRelatesTo(newRelatesTo2)
+	if daemonClient != nil {
+		// Use RPC for daemon mode (bd-fu83)
+		_, err := daemonClient.Update(&rpc.UpdateArgs{
+			ID:        id2,
+			RelatesTo: &formattedRelatesTo2,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update %s: %w", id2, err)
+		}
+	} else {
+		if err := store.UpdateIssue(ctx, id2, map[string]interface{}{
+			"relates_to": formattedRelatesTo2,
+		}, actor); err != nil {
+			return fmt.Errorf("failed to update %s: %w", id2, err)
+		}
 	}
 
 	// Trigger auto-flush
