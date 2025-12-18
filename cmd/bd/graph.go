@@ -108,9 +108,73 @@ func init() {
 }
 
 // loadGraphSubgraph loads an issue and its subgraph for visualization
-// Reuses template subgraph loading logic
+// Unlike template loading, this includes ALL dependency types (not just parent-child)
 func loadGraphSubgraph(ctx context.Context, s storage.Storage, issueID string) (*TemplateSubgraph, error) {
-	return loadTemplateSubgraph(ctx, s, issueID)
+	if s == nil {
+		return nil, fmt.Errorf("no database connection")
+	}
+
+	// Get the root issue
+	root, err := s.GetIssue(ctx, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issue: %w", err)
+	}
+	if root == nil {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	subgraph := &TemplateSubgraph{
+		Root:     root,
+		Issues:   []*types.Issue{root},
+		IssueMap: map[string]*types.Issue{root.ID: root},
+	}
+
+	// BFS to find all connected issues (via any dependency type)
+	// We traverse both directions: dependents and dependencies
+	queue := []string{root.ID}
+	visited := map[string]bool{root.ID: true}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		// Get issues that depend on this one (dependents)
+		dependents, err := s.GetDependents(ctx, currentID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range dependents {
+			if !visited[dep.ID] {
+				visited[dep.ID] = true
+				subgraph.Issues = append(subgraph.Issues, dep)
+				subgraph.IssueMap[dep.ID] = dep
+				queue = append(queue, dep.ID)
+			}
+		}
+
+		// Get issues this one depends on (dependencies) - but only for non-root
+		// to avoid pulling in unrelated upstream issues
+		if currentID == root.ID {
+			// For root, we might want to include direct dependencies too
+			// Skip for now to keep graph focused on "what this issue encompasses"
+		}
+	}
+
+	// Load all dependencies within the subgraph
+	for _, issue := range subgraph.Issues {
+		deps, err := s.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range deps {
+			// Only include dependencies where both ends are in the subgraph
+			if _, ok := subgraph.IssueMap[dep.DependsOnID]; ok {
+				subgraph.Dependencies = append(subgraph.Dependencies, dep)
+			}
+		}
+	}
+
+	return subgraph, nil
 }
 
 // computeLayout assigns layers to nodes using topological sort
