@@ -512,62 +512,8 @@ func TestCreateIssuesRollback(t *testing.T) {
 		}
 	})
 
-	t.Run("rollback on conflict with existing ID", func(t *testing.T) {
-		// Create an issue with explicit ID
-		existingIssue := &types.Issue{
-			ID:        "bd-existing",
-			Title:     "Existing issue",
-			Status:    types.StatusOpen,
-			Priority:  1,
-			IssueType: types.TypeTask,
-		}
-		err := store.CreateIssue(ctx, existingIssue, "test-user")
-		if err != nil {
-			t.Fatalf("failed to create existing issue: %v", err)
-		}
-
-		// Try to create batch with conflicting ID
-		issues := []*types.Issue{
-			{
-				Title:     "Should rollback",
-				Status:    types.StatusOpen,
-				Priority:  1,
-				IssueType: types.TypeTask,
-			},
-			{
-				ID:        "bd-existing",
-				Title:     "Conflict",
-				Status:    types.StatusOpen,
-				Priority:  1,
-				IssueType: types.TypeTask,
-			},
-		}
-
-		err = store.CreateIssues(ctx, issues, "test-user")
-		if err == nil {
-			t.Fatal("expected error for duplicate ID, got nil")
-		}
-
-		// Verify rollback - "Should rollback" issue should not exist
-		filter := types.IssueFilter{}
-		allIssues, err := store.SearchIssues(ctx, "", filter)
-		if err != nil {
-			t.Fatalf("failed to search issues: %v", err)
-		}
-
-		// Count should only include the pre-existing issues
-		foundRollback := false
-		for _, issue := range allIssues {
-			if issue.Title == "Should rollback" {
-				foundRollback = true
-				break
-			}
-		}
-
-		if foundRollback {
-			t.Error("expected rollback of all issues in batch, but 'Should rollback' was found")
-		}
-	})
+	// Note: "rollback on conflict with existing ID" test removed - CreateIssues
+	// uses INSERT OR IGNORE which silently skips duplicates (needed for JSONL import)
 }
 
 func TestUpdateIssue(t *testing.T) {
