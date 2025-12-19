@@ -35,11 +35,16 @@ var mailSendCmd = &cobra.Command{
 	Long: `Send a message to another agent via beads.
 
 Creates an issue with type=message, sender=your identity, assignee=recipient.
-The --urgent flag sets priority=0.
+The --urgent flag sets priority=0. Use --priority for explicit priority control.
+
+Priority levels: 0=critical/urgent, 1=high, 2=normal (default), 3=low, 4=backlog
 
 Examples:
   bd mail send worker-1 -s "Task complete" -m "Finished bd-xyz"
   bd mail send worker-1 -s "Help needed" -m "Blocked on auth" --urgent
+  bd mail send worker-1 -s "Quick note" -m "FYI" --priority 3
+  bd mail send worker-1 -s "Task" -m "Do this" --type task --priority 1
+  bd mail send worker-1 -s "Re: Hello" -m "Hi back" --reply-to bd-abc123
   bd mail send worker-1 -s "Quick note" -m "FYI" --identity refinery`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMailSend,
@@ -109,6 +114,11 @@ var (
 	mailIdentity     string
 	mailFrom         string
 	mailPriorityFlag int
+	// New flags for GGT compatibility (gt-8j8e)
+	mailSendPriority int    // Numeric priority for mail send (0-4)
+	mailMsgType      string // Message type (task, scavenge, notification, reply)
+	mailThreadID     string // Thread ID for conversation grouping
+	mailReplyTo      string // Message ID being replied to
 )
 
 func init() {
@@ -124,6 +134,11 @@ func init() {
 	mailSendCmd.Flags().StringVarP(&mailBody, "body", "m", "", "Message body (required)")
 	mailSendCmd.Flags().BoolVar(&mailUrgent, "urgent", false, "Set priority=0 (urgent)")
 	mailSendCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override sender identity")
+	// GGT compatibility flags (gt-8j8e)
+	mailSendCmd.Flags().IntVar(&mailSendPriority, "priority", -1, "Message priority (0-4, where 0=urgent)")
+	mailSendCmd.Flags().StringVar(&mailMsgType, "type", "", "Message type (task, scavenge, notification, reply)")
+	mailSendCmd.Flags().StringVar(&mailThreadID, "thread-id", "", "Thread ID for conversation grouping")
+	mailSendCmd.Flags().StringVar(&mailReplyTo, "reply-to", "", "Message ID this is replying to")
 	_ = mailSendCmd.MarkFlagRequired("subject")
 	_ = mailSendCmd.MarkFlagRequired("body")
 
@@ -151,10 +166,21 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	recipient := args[0]
 	sender := config.GetIdentity(mailIdentity)
 
-	// Determine priority
+	// Determine priority (gt-8j8e: --priority takes precedence over --urgent)
 	priority := 2 // default: normal
-	if mailUrgent {
+	if cmd.Flags().Changed("priority") && mailSendPriority >= 0 && mailSendPriority <= 4 {
+		priority = mailSendPriority
+	} else if mailUrgent {
 		priority = 0
+	}
+
+	// Build labels for GGT metadata (gt-8j8e)
+	var labels []string
+	if mailMsgType != "" {
+		labels = append(labels, "msg-type:"+mailMsgType)
+	}
+	if mailThreadID != "" {
+		labels = append(labels, "thread:"+mailThreadID)
 	}
 
 	// If daemon is running, use RPC
@@ -167,6 +193,8 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			Assignee:    recipient,
 			Sender:      sender,
 			Ephemeral:   true, // Messages can be bulk-deleted
+			Labels:      labels,
+			RepliesTo:   mailReplyTo, // Thread link (gt-8j8e)
 		}
 
 		resp, err := daemonClient.Create(createArgs)
@@ -202,8 +230,8 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Message sent: %s\n", issue.ID)
 		fmt.Printf("  To: %s\n", recipient)
 		fmt.Printf("  Subject: %s\n", mailSubject)
-		if mailUrgent {
-			fmt.Printf("  Priority: URGENT\n")
+		if priority <= 1 {
+			fmt.Printf("  Priority: P%d\n", priority)
 		}
 		return nil
 	}
@@ -219,12 +247,28 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		Assignee:    recipient,
 		Sender:      sender,
 		Ephemeral:   true, // Messages can be bulk-deleted
+		Labels:      labels,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 
 	if err := store.CreateIssue(rootCtx, issue, actor); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	// Add reply-to dependency if specified (gt-8j8e)
+	if mailReplyTo != "" {
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: mailReplyTo,
+			Type:        types.DepRepliesTo,
+			CreatedAt:   now,
+			CreatedBy:   actor,
+		}
+		if err := store.AddDependency(rootCtx, dep, actor); err != nil {
+			// Log but don't fail - the message was still sent
+			fmt.Fprintf(os.Stderr, "Warning: failed to create reply-to link: %v\n", err)
+		}
 	}
 
 	// Trigger auto-flush
@@ -254,8 +298,8 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Message sent: %s\n", issue.ID)
 	fmt.Printf("  To: %s\n", recipient)
 	fmt.Printf("  Subject: %s\n", mailSubject)
-	if mailUrgent {
-		fmt.Printf("  Priority: URGENT\n")
+	if priority <= 1 {
+		fmt.Printf("  Priority: P%d\n", priority)
 	}
 
 	return nil
