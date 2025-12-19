@@ -113,3 +113,6 @@ bd-profile-*.prof
 bd-trace-*.out
 # AI planning documents (ephemeral)
 history/
+
+# Gas Town agent state
+state.json
