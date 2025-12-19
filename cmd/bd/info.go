@@ -288,6 +288,14 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.6",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"bd graph command shows dependency counts using subgraph formatting (bd-6v2)",
+			"types.StatusPinned for persistent beads that survive cleanup",
+		},
+	},
+	{
 		Version: "0.30.5",
 		Date:    "2025-12-18",
 		Changes: []string{

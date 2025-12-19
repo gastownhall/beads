@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.6] - 2025-12-18
+
+## [0.30.6] - 2025-12-18
+
+### Added
+
+- **`bd graph` dependency counts** (bd-6v2) - Graph command shows dependency counts using subgraph formatting
+- **`types.StatusPinned`** - New status for persistent beads that survive cleanup
+
 ## [0.30.5] - 2025-12-18
 
 ### Removed
