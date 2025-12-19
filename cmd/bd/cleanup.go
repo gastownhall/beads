@@ -126,6 +126,22 @@ SEE ALSO:
 			os.Exit(1)
 		}
 
+		// Filter out pinned issues - they are protected from cleanup (bd-b2k)
+		pinnedCount := 0
+		filteredIssues := make([]*types.Issue, 0, len(closedIssues))
+		for _, issue := range closedIssues {
+			if issue.Pinned {
+				pinnedCount++
+				continue
+			}
+			filteredIssues = append(filteredIssues, issue)
+		}
+		closedIssues = filteredIssues
+
+		if pinnedCount > 0 && !jsonOutput {
+			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+		}
+
 		if len(closedIssues) == 0 {
 			if jsonOutput {
 				result := map[string]interface{}{

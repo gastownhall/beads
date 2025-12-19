@@ -248,6 +248,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
+	// Protection fields (bd-b2k)
+	var pinned sql.NullInt64
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -257,7 +259,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -267,7 +269,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral,
+		&sender, &ephemeral, &pinned,
 	)
 
 	if err == sql.ErrNoRows {
@@ -324,6 +326,10 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
+	}
+	// Protection fields (bd-b2k)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
 	}
 
 	// Fetch labels for this issue
@@ -431,6 +437,8 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
+	// Protection fields (bd-b2k)
+	var pinned sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -438,7 +446,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -448,7 +456,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral,
+		&sender, &ephemeral, &pinned,
 	)
 
 	if err == sql.ErrNoRows {
@@ -506,6 +514,10 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
 	}
+	// Protection fields (bd-b2k)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
+	}
 
 	// Fetch labels for this issue
 	labels, err := s.GetLabels(ctx, issue.ID)
@@ -536,6 +548,8 @@ var allowedUpdateFields = map[string]bool{
 	"ephemeral": true,
 	// NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
 	// Use AddDependency() to create graph edges instead
+	// Protection fields (bd-b2k)
+	"pinned": true,
 }
 
 // validatePriority validates a priority value
@@ -1564,7 +1578,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral
+		       sender, ephemeral, pinned
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

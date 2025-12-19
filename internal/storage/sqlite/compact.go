@@ -47,7 +47,7 @@ func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCa
 		  -- Find all issues that depend on (are blocked by) other issues
 		  dependent_tree AS (
 		    -- Base case: direct dependents
-		    SELECT 
+		    SELECT
 		      d.depends_on_id as issue_id,
 		      i.id as dependent_id,
 		      i.status as dependent_status,
@@ -55,11 +55,11 @@ func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCa
 		    FROM dependencies d
 		    JOIN issues i ON d.issue_id = i.id
 		    WHERE d.type = 'blocks'
-		    
+
 		    UNION ALL
-		    
+
 		    -- Recursive case: parent-child relationships
-		    SELECT 
+		    SELECT
 		      dt.issue_id,
 		      i.id as dependent_id,
 		      i.status as dependent_status,
@@ -70,20 +70,21 @@ func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCa
 		    WHERE d.type = 'parent-child'
 		      AND dt.depth < ?
 		  )
-		SELECT 
+		SELECT
 		  i.id,
 		  i.closed_at,
 		  COALESCE(i.original_size, LENGTH(i.description) + LENGTH(i.design) + LENGTH(i.notes) + LENGTH(i.acceptance_criteria)) as original_size,
 		  0 as estimated_size,
 		  COUNT(DISTINCT dt.dependent_id) as dependent_count
 		FROM issues i
-		LEFT JOIN dependent_tree dt ON i.id = dt.issue_id 
+		LEFT JOIN dependent_tree dt ON i.id = dt.issue_id
 		  AND dt.dependent_status IN ('open', 'in_progress', 'blocked')
 		  AND dt.depth <= ?
 		WHERE i.status = 'closed'
 		  AND i.closed_at IS NOT NULL
 		  AND i.closed_at <= datetime('now', '-' || CAST(? AS INTEGER) || ' days')
 		  AND COALESCE(i.compaction_level, 0) = 0
+		  AND COALESCE(i.pinned, 0) = 0  -- Exclude pinned issues (bd-b2k)
 		  AND dt.dependent_id IS NULL  -- No open dependents
 		GROUP BY i.id
 		ORDER BY i.closed_at ASC
@@ -142,7 +143,7 @@ func (s *SQLiteStorage) GetTier2Candidates(ctx context.Context) ([]*CompactionCa
 		  FROM events
 		  GROUP BY issue_id
 		)
-		SELECT 
+		SELECT
 		  i.id,
 		  i.closed_at,
 		  i.original_size,
@@ -154,6 +155,7 @@ func (s *SQLiteStorage) GetTier2Candidates(ctx context.Context) ([]*CompactionCa
 		  AND i.closed_at IS NOT NULL
 		  AND i.closed_at <= datetime('now', '-' || CAST(? AS INTEGER) || ' days')
 		  AND i.compaction_level = 1
+		  AND COALESCE(i.pinned, 0) = 0  -- Exclude pinned issues (bd-b2k)
 		  AND COALESCE(ec.event_count, 0) >= CAST(? AS INTEGER)
 		  AND NOT EXISTS (
 		    -- Check for open dependents
@@ -196,13 +198,14 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 	var status string
 	var closedAt sql.NullTime
 	var compactionLevel int
-	
+	var pinned int
+
 	err := s.db.QueryRowContext(ctx, `
-		SELECT status, closed_at, COALESCE(compaction_level, 0)
+		SELECT status, closed_at, COALESCE(compaction_level, 0), COALESCE(pinned, 0)
 		FROM issues
 		WHERE id = ?
-	`, issueID).Scan(&status, &closedAt, &compactionLevel)
-	
+	`, issueID).Scan(&status, &closedAt, &compactionLevel, &pinned)
+
 	if err == sql.ErrNoRows {
 		return false, "issue not found", nil
 	}
@@ -214,9 +217,14 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 	if status != "closed" {
 		return false, "issue is not closed", nil
 	}
-	
+
 	if !closedAt.Valid {
 		return false, "issue has no closed_at timestamp", nil
+	}
+
+	// Pinned issues are protected from compaction (bd-b2k)
+	if pinned != 0 {
+		return false, "issue is pinned (protected from compaction)", nil
 	}
 
 	switch tier {
