@@ -714,6 +714,8 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		// Messaging fields (bd-kwro)
 		var sender sql.NullString
 		var ephemeral sql.NullInt64
+		// Pinned flag (bd-p8e)
+		var pinned sql.NullInt64
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -721,7 +723,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &ephemeral,
+			&sender, &ephemeral, &pinned,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -765,6 +767,10 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		}
 		if ephemeral.Valid && ephemeral.Int64 != 0 {
 			issue.Ephemeral = true
+		}
+		// Pinned flag (bd-p8e)
+		if pinned.Valid && pinned.Int64 != 0 {
+			issue.Pinned = true
 		}
 
 		issues = append(issues, &issue)

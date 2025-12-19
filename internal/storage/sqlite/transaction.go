@@ -306,7 +306,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -1080,6 +1080,15 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		}
 	}
 
+	// Pinned filtering (bd-p8e)
+	if filter.Pinned != nil {
+		if *filter.Pinned {
+			whereClauses = append(whereClauses, "pinned = 1")
+		} else {
+			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1098,7 +1107,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral
+		       sender, ephemeral, pinned
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1141,6 +1150,8 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
+	// Pinned flag (bd-p8e)
+	var pinned sql.NullInt64
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1149,7 +1160,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral,
+		&sender, &ephemeral, &pinned,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1202,6 +1213,10 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	}
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
+	}
+	// Pinned flag (bd-p8e)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
 	}
 
 	return &issue, nil

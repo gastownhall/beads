@@ -31,6 +31,10 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 	if issue.Ephemeral {
 		ephemeral = 1
 	}
+	pinned := 0
+	if issue.Pinned {
+		pinned = 1
+	}
 
 	_, err := conn.ExecContext(ctx, `
 		INSERT OR IGNORE INTO issues (
@@ -38,8 +42,8 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			sender, ephemeral, pinned
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -47,7 +51,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-		issue.Sender, ephemeral,
+		issue.Sender, ephemeral, pinned,
 	)
 	if err != nil {
 		// INSERT OR IGNORE should handle duplicates, but driver may still return error
@@ -68,8 +72,8 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			sender, ephemeral, pinned
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -86,6 +90,10 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 		if issue.Ephemeral {
 			ephemeral = 1
 		}
+		pinned := 0
+		if issue.Pinned {
+			pinned = 1
+		}
 
 		_, err = stmt.ExecContext(ctx,
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
@@ -94,7 +102,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-			issue.Sender, ephemeral,
+			issue.Sender, ephemeral, pinned,
 		)
 		if err != nil {
 			// INSERT OR IGNORE should handle duplicates, but driver may still return error

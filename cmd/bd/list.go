@@ -128,7 +128,11 @@ var listCmd = &cobra.Command{
 		// Priority range flags
 		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
 		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
-		
+
+		// Pinned filtering flags (bd-p8e)
+		pinnedFlag, _ := cmd.Flags().GetBool("pinned")
+		noPinnedFlag, _ := cmd.Flags().GetBool("no-pinned")
+
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Normalize labels: trim, dedupe, remove empty
@@ -265,6 +269,19 @@ var listCmd = &cobra.Command{
 			filter.PriorityMax = &priorityMax
 		}
 
+		// Pinned filtering (bd-p8e): --pinned and --no-pinned are mutually exclusive
+		if pinnedFlag && noPinnedFlag {
+			fmt.Fprintf(os.Stderr, "Error: --pinned and --no-pinned are mutually exclusive\n")
+			os.Exit(1)
+		}
+		if pinnedFlag {
+			pinned := true
+			filter.Pinned = &pinned
+		} else if noPinnedFlag {
+			pinned := false
+			filter.Pinned = &pinned
+		}
+
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
 		ctx := rootCtx
@@ -339,6 +356,9 @@ var listCmd = &cobra.Command{
 			// Priority range
 			listArgs.PriorityMin = filter.PriorityMin
 			listArgs.PriorityMax = filter.PriorityMax
+
+			// Pinned filtering (bd-p8e)
+			listArgs.Pinned = filter.Pinned
 
 			 resp, err := daemonClient.List(listArgs)
 			if err != nil {
@@ -552,7 +572,11 @@ func init() {
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
-	
+
+	// Pinned filtering (bd-p8e)
+	listCmd.Flags().Bool("pinned", false, "Show only pinned issues")
+	listCmd.Flags().Bool("no-pinned", false, "Exclude pinned issues")
+
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)
 }

@@ -39,6 +39,7 @@ var migrationsList = []Migration{
 	{"edge_consolidation", migrations.MigrateEdgeConsolidation},
 	{"migrate_edge_fields", migrations.MigrateEdgeFields},
 	{"drop_edge_columns", migrations.MigrateDropEdgeColumns},
+	{"pinned_column", migrations.MigratePinnedColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -85,6 +86,7 @@ func getMigrationDescription(name string) string {
 		"edge_consolidation":           "Adds metadata and thread_id columns to dependencies table for edge schema consolidation (Decision 004)",
 		"migrate_edge_fields":          "Migrates existing issue fields (replies_to, relates_to, duplicate_of, superseded_by) to dependency edges (Decision 004 Phase 3)",
 		"drop_edge_columns":            "Drops deprecated edge columns (replies_to, relates_to, duplicate_of, superseded_by) from issues table (Decision 004 Phase 4)",
+		"pinned_column":                 "Adds pinned column for flagging important issues (bd-p8e)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {

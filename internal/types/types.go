@@ -45,6 +45,9 @@ type Issue struct {
 	Ephemeral bool   `json:"ephemeral,omitempty"` // Can be bulk-deleted when closed
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
+
+	// Pinned flag (bd-p8e): mark important issues
+	Pinned bool `json:"pinned,omitempty"` // Pinned issues are visually marked
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -432,6 +435,9 @@ type IssueFilter struct {
 
 	// Ephemeral filtering (bd-kwro.9)
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only non-ephemeral)
+
+	// Pinned filtering (bd-p8e)
+	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
 }
 
 // SortPolicy determines how ready work is ordered
