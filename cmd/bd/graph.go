@@ -277,7 +277,7 @@ func computeLayout(subgraph *TemplateSubgraph) *GraphLayout {
 }
 
 // renderGraph renders the ASCII visualization
-func renderGraph(layout *GraphLayout, _ *TemplateSubgraph) {
+func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 	if len(layout.Nodes) == 0 {
 		fmt.Println("Empty graph")
 		return
@@ -303,6 +303,9 @@ func renderGraph(layout *GraphLayout, _ *TemplateSubgraph) {
 	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed")
 	fmt.Println()
 
+	// Build dependency counts from subgraph
+	blocksCounts, blockedByCounts := computeDependencyCounts(subgraph)
+
 	// Render layers left to right
 	layerBoxes := make([][]string, len(layout.Layers))
 
@@ -310,7 +313,7 @@ func renderGraph(layout *GraphLayout, _ *TemplateSubgraph) {
 		var boxes []string
 		for _, id := range layer {
 			node := layout.Nodes[id]
-			box := renderNodeBox(node, boxWidth)
+			box := renderNodeBoxWithDeps(node, boxWidth, blocksCounts[id], blockedByCounts[id])
 			boxes = append(boxes, box)
 		}
 		layerBoxes[layerIdx] = boxes
@@ -344,6 +347,19 @@ func renderGraph(layout *GraphLayout, _ *TemplateSubgraph) {
 			fmt.Println("      ▼")
 		}
 		fmt.Println()
+	}
+
+	// Show dependency summary
+	if len(subgraph.Dependencies) > 0 {
+		blocksDeps := 0
+		for _, dep := range subgraph.Dependencies {
+			if dep.Type == types.DepBlocks {
+				blocksDeps++
+			}
+		}
+		if blocksDeps > 0 {
+			fmt.Printf("  Dependencies: %d blocking relationships\n", blocksDeps)
+		}
 	}
 
 	// Show summary
@@ -402,4 +418,80 @@ func padRight(s string, width int) string {
 		return string(runes[:width])
 	}
 	return s + strings.Repeat(" ", width-len(runes))
+}
+
+// computeDependencyCounts calculates how many issues each issue blocks and is blocked by
+func computeDependencyCounts(subgraph *TemplateSubgraph) (blocks map[string]int, blockedBy map[string]int) {
+	blocks = make(map[string]int)
+	blockedBy = make(map[string]int)
+
+	for _, dep := range subgraph.Dependencies {
+		if dep.Type == types.DepBlocks {
+			// dep.DependsOnID blocks dep.IssueID
+			// So dep.DependsOnID "blocks" count increases
+			blocks[dep.DependsOnID]++
+			// And dep.IssueID "blocked by" count increases
+			blockedBy[dep.IssueID]++
+		}
+	}
+
+	return blocks, blockedBy
+}
+
+// renderNodeBoxWithDeps renders a node box with dependency information
+func renderNodeBoxWithDeps(node *GraphNode, width int, blocksCount int, blockedByCount int) string {
+	// Status indicator
+	var statusIcon string
+	var colorFn func(a ...interface{}) string
+
+	switch node.Issue.Status {
+	case types.StatusOpen:
+		statusIcon = "○"
+		colorFn = color.New(color.FgWhite).SprintFunc()
+	case types.StatusInProgress:
+		statusIcon = "◐"
+		colorFn = color.New(color.FgYellow).SprintFunc()
+	case types.StatusBlocked:
+		statusIcon = "●"
+		colorFn = color.New(color.FgRed).SprintFunc()
+	case types.StatusClosed:
+		statusIcon = "✓"
+		colorFn = color.New(color.FgGreen).SprintFunc()
+	default:
+		statusIcon = "?"
+		colorFn = color.New(color.FgWhite).SprintFunc()
+	}
+
+	title := truncateTitle(node.Issue.Title, width-4)
+	id := node.Issue.ID
+
+	// Build dependency info string
+	var depInfo string
+	if blocksCount > 0 || blockedByCount > 0 {
+		parts := []string{}
+		if blocksCount > 0 {
+			parts = append(parts, fmt.Sprintf("blocks:%d", blocksCount))
+		}
+		if blockedByCount > 0 {
+			parts = append(parts, fmt.Sprintf("needs:%d", blockedByCount))
+		}
+		depInfo = strings.Join(parts, " ")
+	}
+
+	// Build the box
+	topBottom := "  ┌" + strings.Repeat("─", width) + "┐"
+	middle := fmt.Sprintf("  │ %s %s │", statusIcon, colorFn(padRight(title, width-4)))
+	idLine := fmt.Sprintf("  │ %s │", color.New(color.FgHiBlack).Sprint(padRight(id, width-2)))
+
+	var result string
+	if depInfo != "" {
+		depLine := fmt.Sprintf("  │ %s │", color.New(color.FgCyan).Sprint(padRight(depInfo, width-2)))
+		bottom := "  └" + strings.Repeat("─", width) + "┘"
+		result = topBottom + "\n" + middle + "\n" + idLine + "\n" + depLine + "\n" + bottom
+	} else {
+		bottom := "  └" + strings.Repeat("─", width) + "┘"
+		result = topBottom + "\n" + middle + "\n" + idLine + "\n" + bottom
+	}
+
+	return result
 }

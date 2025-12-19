@@ -201,6 +201,144 @@ func stringContains(s, substr string) bool {
 	return false
 }
 
+func TestComputeDependencyCounts(t *testing.T) {
+	t.Run("empty subgraph", func(t *testing.T) {
+		subgraph := &TemplateSubgraph{
+			Root:         &types.Issue{ID: "root-1"},
+			Issues:       []*types.Issue{},
+			Dependencies: []*types.Dependency{},
+			IssueMap:     make(map[string]*types.Issue),
+		}
+		blocks, blockedBy := computeDependencyCounts(subgraph)
+		if len(blocks) != 0 {
+			t.Errorf("expected empty blocks map, got %d entries", len(blocks))
+		}
+		if len(blockedBy) != 0 {
+			t.Errorf("expected empty blockedBy map, got %d entries", len(blockedBy))
+		}
+	})
+
+	t.Run("single blocking dependency", func(t *testing.T) {
+		subgraph := &TemplateSubgraph{
+			Root: &types.Issue{ID: "root-1"},
+			Dependencies: []*types.Dependency{
+				{IssueID: "issue-2", DependsOnID: "issue-1", Type: types.DepBlocks},
+			},
+		}
+		blocks, blockedBy := computeDependencyCounts(subgraph)
+		if blocks["issue-1"] != 1 {
+			t.Errorf("expected issue-1 to block 1, got %d", blocks["issue-1"])
+		}
+		if blockedBy["issue-2"] != 1 {
+			t.Errorf("expected issue-2 to be blocked by 1, got %d", blockedBy["issue-2"])
+		}
+	})
+
+	t.Run("multiple dependencies", func(t *testing.T) {
+		subgraph := &TemplateSubgraph{
+			Root: &types.Issue{ID: "root-1"},
+			Dependencies: []*types.Dependency{
+				{IssueID: "issue-2", DependsOnID: "issue-1", Type: types.DepBlocks},
+				{IssueID: "issue-3", DependsOnID: "issue-1", Type: types.DepBlocks},
+				{IssueID: "issue-3", DependsOnID: "issue-2", Type: types.DepBlocks},
+			},
+		}
+		blocks, blockedBy := computeDependencyCounts(subgraph)
+		// issue-1 blocks 2 issues (issue-2 and issue-3)
+		if blocks["issue-1"] != 2 {
+			t.Errorf("expected issue-1 to block 2, got %d", blocks["issue-1"])
+		}
+		// issue-2 blocks 1 issue (issue-3)
+		if blocks["issue-2"] != 1 {
+			t.Errorf("expected issue-2 to block 1, got %d", blocks["issue-2"])
+		}
+		// issue-3 is blocked by 2 issues
+		if blockedBy["issue-3"] != 2 {
+			t.Errorf("expected issue-3 to be blocked by 2, got %d", blockedBy["issue-3"])
+		}
+	})
+
+	t.Run("ignores non-blocks dependencies", func(t *testing.T) {
+		subgraph := &TemplateSubgraph{
+			Root: &types.Issue{ID: "root-1"},
+			Dependencies: []*types.Dependency{
+				{IssueID: "issue-2", DependsOnID: "issue-1", Type: types.DepParentChild},
+				{IssueID: "issue-3", DependsOnID: "issue-1", Type: types.DepRelatesTo},
+			},
+		}
+		blocks, blockedBy := computeDependencyCounts(subgraph)
+		if len(blocks) != 0 {
+			t.Errorf("expected empty blocks map for non-blocks deps, got %d entries", len(blocks))
+		}
+		if len(blockedBy) != 0 {
+			t.Errorf("expected empty blockedBy map for non-blocks deps, got %d entries", len(blockedBy))
+		}
+	})
+}
+
+func TestRenderNodeBoxWithDeps(t *testing.T) {
+	tests := []struct {
+		name           string
+		node           *GraphNode
+		width          int
+		blocksCount    int
+		blockedByCount int
+		wantContains   []string
+	}{
+		{
+			name: "no dependencies",
+			node: &GraphNode{
+				Issue: &types.Issue{ID: "test-1", Title: "Test", Status: types.StatusOpen},
+			},
+			width:          20,
+			blocksCount:    0,
+			blockedByCount: 0,
+			wantContains:   []string{"test-1", "Test"},
+		},
+		{
+			name: "with blocks count",
+			node: &GraphNode{
+				Issue: &types.Issue{ID: "test-2", Title: "Blocker", Status: types.StatusOpen},
+			},
+			width:          20,
+			blocksCount:    3,
+			blockedByCount: 0,
+			wantContains:   []string{"test-2", "Blocker", "blocks:3"},
+		},
+		{
+			name: "with needs count",
+			node: &GraphNode{
+				Issue: &types.Issue{ID: "test-3", Title: "Blocked", Status: types.StatusBlocked},
+			},
+			width:          20,
+			blocksCount:    0,
+			blockedByCount: 2,
+			wantContains:   []string{"test-3", "Blocked", "needs:2"},
+		},
+		{
+			name: "with both counts",
+			node: &GraphNode{
+				Issue: &types.Issue{ID: "test-4", Title: "Middle", Status: types.StatusInProgress},
+			},
+			width:          25,
+			blocksCount:    1,
+			blockedByCount: 2,
+			wantContains:   []string{"test-4", "Middle", "blocks:1", "needs:2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderNodeBoxWithDeps(tt.node, tt.width, tt.blocksCount, tt.blockedByCount)
+			for _, want := range tt.wantContains {
+				if !stringContains(got, want) {
+					t.Errorf("renderNodeBoxWithDeps() missing %q in output:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
 func TestComputeLayout(t *testing.T) {
 	t.Run("empty subgraph", func(t *testing.T) {
 		subgraph := &TemplateSubgraph{
