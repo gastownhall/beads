@@ -63,26 +63,23 @@ func TestFindAllDatabases(t *testing.T) {
 
 	databases := FindAllDatabases()
 
-	// Should find both databases, with project1 first (closest)
-	if len(databases) != 2 {
-		t.Fatalf("expected 2 databases, got %d", len(databases))
+	// Should find only the closest database (gt-bzd: stop searching when .beads found)
+	// Parent .beads directories are out of scope in multi-workspace setups like Gas Town
+	if len(databases) != 1 {
+		t.Fatalf("expected 1 database (closest only), got %d", len(databases))
 	}
 
-	// First database should be project1 (closest to CWD)
+	// Database should be project1 (closest to CWD)
 	if databases[0].Path != project1DB {
-		t.Errorf("expected first database to be %s, got %s", project1DB, databases[0].Path)
+		t.Errorf("expected database to be %s, got %s", project1DB, databases[0].Path)
 	}
 	if databases[0].BeadsDir != project1Beads {
-		t.Errorf("expected first beads dir to be %s, got %s", project1Beads, databases[0].BeadsDir)
+		t.Errorf("expected beads dir to be %s, got %s", project1Beads, databases[0].BeadsDir)
 	}
 
-	// Second database should be root (furthest from CWD)
-	if databases[1].Path != rootDB {
-		t.Errorf("expected second database to be %s, got %s", rootDB, databases[1].Path)
-	}
-	if databases[1].BeadsDir != rootBeads {
-		t.Errorf("expected second beads dir to be %s, got %s", rootBeads, databases[1].BeadsDir)
-	}
+	// Root database should NOT be found - it's out of scope (parent of closest .beads)
+	_ = rootDB     // referenced but not expected in results
+	_ = rootBeads  // referenced but not expected in results
 }
 
 func TestFindAllDatabases_Single(t *testing.T) {

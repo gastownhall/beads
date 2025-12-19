@@ -528,10 +528,11 @@ func findDatabaseInTree() string {
 	return ""
 }
 
-// FindAllDatabases scans the directory hierarchy for all .beads directories
-// Returns a slice of DatabaseInfo for each database found, starting from the
-// closest to CWD (most relevant) to the furthest (least relevant).
-// Stops at the git repository root to avoid finding unrelated databases (bd-c8x).
+// FindAllDatabases scans the directory hierarchy for the closest .beads directory.
+// Returns a slice with at most one DatabaseInfo - the closest database to CWD.
+// Stops searching upward as soon as a .beads directory is found (gt-bzd),
+// because in multi-workspace setups (like Gas Town), nested .beads directories
+// are intentional and separate - parent directories are out of scope.
 // Redirect files are supported: if a .beads/redirect file exists, its contents
 // are used as the actual .beads directory path.
 func FindAllDatabases() []DatabaseInfo {
@@ -594,6 +595,10 @@ func FindAllDatabases() []DatabaseInfo {
 					BeadsDir:   beadsDir,
 					IssueCount: issueCount,
 				})
+
+				// Stop searching upward - the closest .beads is the one to use (gt-bzd)
+				// Parent directories are out of scope in multi-workspace setups
+				break
 			}
 		}
 
