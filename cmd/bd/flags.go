@@ -24,6 +24,8 @@ func registerCommonIssueFlags(cmd *cobra.Command) {
 
 // getDescriptionFlag retrieves the description value, checking --body-file, --description-file,
 // --description, and --body (in that order of precedence).
+// Supports reading from stdin via --description=- or --body=- (useful when description
+// contains apostrophes or other characters that are hard to escape in shell).
 // Returns the value and whether any flag was explicitly changed.
 func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 	bodyFileChanged := cmd.Flags().Changed("body-file")
@@ -64,10 +66,29 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 		return content, true
 	}
 
+	// Check if description or body is "-" (read from stdin)
+	// This provides a convenient shorthand: --description=- instead of --body-file=-
+	desc, _ := cmd.Flags().GetString("description")
+	body, _ := cmd.Flags().GetString("body")
+
+	if desc == "-" || body == "-" {
+		// Error if both are set to different values
+		if descChanged && bodyChanged && desc != body {
+			fmt.Fprintf(os.Stderr, "Error: cannot specify both --description and --body with different values\n")
+			fmt.Fprintf(os.Stderr, "  --description: %q\n", desc)
+			fmt.Fprintf(os.Stderr, "  --body:        %q\n", body)
+			os.Exit(1)
+		}
+		content, err := readBodyFile("-")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+			os.Exit(1)
+		}
+		return content, true
+	}
+
 	// Error if both description and body are specified with different values
 	if descChanged && bodyChanged {
-		desc, _ := cmd.Flags().GetString("description")
-		body, _ := cmd.Flags().GetString("body")
 		if desc != body {
 			fmt.Fprintf(os.Stderr, "Error: cannot specify both --description and --body with different values\n")
 			fmt.Fprintf(os.Stderr, "  --description: %q\n", desc)
@@ -78,11 +99,9 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 
 	// Return whichever was set (or description's value if neither)
 	if bodyChanged {
-		body, _ := cmd.Flags().GetString("body")
 		return body, true
 	}
 
-	desc, _ := cmd.Flags().GetString("description")
 	return desc, descChanged
 }
 

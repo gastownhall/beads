@@ -34,8 +34,6 @@ CREATE TABLE IF NOT EXISTS issues (
     pinned INTEGER DEFAULT 0,
     -- NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
     -- These relationships are now stored in the dependencies table
-    -- Workflow fields
-    pinned INTEGER DEFAULT 0,
     CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 );
 

@@ -36,11 +36,6 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		pinned = 1
 	}
 
-	pinned := 0
-	if issue.Pinned {
-		pinned = 1
-	}
-
 	_, err := conn.ExecContext(ctx, `
 		INSERT OR IGNORE INTO issues (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -95,11 +90,6 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 		if issue.Ephemeral {
 			ephemeral = 1
 		}
-		pinned := 0
-		if issue.Pinned {
-			pinned = 1
-		}
-
 		pinned := 0
 		if issue.Pinned {
 			pinned = 1
