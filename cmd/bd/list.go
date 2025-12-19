@@ -37,6 +37,14 @@ func parseTimeFlag(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse time %q (try formats: 2006-01-02, 2006-01-02T15:04:05, or RFC3339)", s)
 }
 
+// pinIndicator returns a pushpin emoji prefix for pinned issues (bd-18b)
+func pinIndicator(issue *types.Issue) string {
+	if issue.Status == types.StatusPinned {
+		return "📌 "
+	}
+	return ""
+}
+
 // sortIssues sorts a slice of issues by the specified field and direction
 func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 	if sortBy == "" {
@@ -373,7 +381,7 @@ var listCmd = &cobra.Command{
 				// Long format: multi-line with details
 				fmt.Printf("\nFound %d issues:\n\n", len(issues))
 				for _, issue := range issues {
-					fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
+					fmt.Printf("%s%s [P%d] [%s] %s\n", pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status)
 					fmt.Printf("  %s\n", issue.Title)
 					if issue.Assignee != "" {
 						fmt.Printf("  Assignee: %s\n", issue.Assignee)
@@ -394,8 +402,8 @@ var listCmd = &cobra.Command{
 					if issue.Assignee != "" {
 						assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 					}
-					fmt.Printf("%s [P%d] [%s] %s%s%s - %s\n",
-						issue.ID, issue.Priority, issue.IssueType, issue.Status,
+					fmt.Printf("%s%s [P%d] [%s] %s%s%s - %s\n",
+						pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status,
 						assigneeStr, labelsStr, issue.Title)
 				}
 			}
@@ -481,7 +489,7 @@ var listCmd = &cobra.Command{
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]
 
-				fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
+				fmt.Printf("%s%s [P%d] [%s] %s\n", pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status)
 				fmt.Printf("  %s\n", issue.Title)
 				if issue.Assignee != "" {
 					fmt.Printf("  Assignee: %s\n", issue.Assignee)
@@ -504,8 +512,8 @@ var listCmd = &cobra.Command{
 				if issue.Assignee != "" {
 					assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 				}
-				fmt.Printf("%s [P%d] [%s] %s%s%s - %s\n",
-					issue.ID, issue.Priority, issue.IssueType, issue.Status,
+				fmt.Printf("%s%s [P%d] [%s] %s%s%s - %s\n",
+					pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status,
 					assigneeStr, labelsStr, issue.Title)
 			}
 		}
