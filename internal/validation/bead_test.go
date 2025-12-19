@@ -1,7 +1,10 @@
 package validation
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestParsePriority(t *testing.T) {
@@ -101,6 +104,62 @@ func TestValidateIDFormat(t *testing.T) {
 			}
 			if got != tt.wantPrefix {
 				t.Errorf("ValidateIDFormat(%q) = %q, want %q", tt.input, got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestParseIssueType(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantType     types.IssueType
+		wantError    bool
+		errorContains string
+	}{
+		// Valid issue types
+		{"bug type", "bug", types.TypeBug, false, ""},
+		{"feature type", "feature", types.TypeFeature, false, ""},
+		{"task type", "task", types.TypeTask, false, ""},
+		{"epic type", "epic", types.TypeEpic, false, ""},
+		{"chore type", "chore", types.TypeChore, false, ""},
+		
+		// Case sensitivity (function is case-sensitive)
+		{"uppercase bug", "BUG", types.TypeTask, true, "invalid issue type"},
+		{"mixed case feature", "FeAtUrE", types.TypeTask, true, "invalid issue type"},
+		
+		// With whitespace
+		{"bug with spaces", "  bug  ", types.TypeBug, false, ""},
+		{"feature with tabs", "\tfeature\t", types.TypeFeature, false, ""},
+		
+		// Invalid issue types
+		{"invalid type", "invalid", types.TypeTask, true, "invalid issue type"},
+		{"empty string", "", types.TypeTask, true, "invalid issue type"},
+		{"whitespace only", "   ", types.TypeTask, true, "invalid issue type"},
+		{"numeric type", "123", types.TypeTask, true, "invalid issue type"},
+		{"special chars", "bug!", types.TypeTask, true, "invalid issue type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueType(tt.input)
+			
+			// Check error conditions
+			if (err != nil) != tt.wantError {
+				t.Errorf("ParseIssueType(%q) error = %v, wantError %v", tt.input, err, tt.wantError)
+				return
+			}
+			
+			if err != nil && tt.errorContains != "" {
+				if !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("ParseIssueType(%q) error message = %q, should contain %q", tt.input, err.Error(), tt.errorContains)
+				}
+				return
+			}
+			
+			// Check return value
+			if got != tt.wantType {
+				t.Errorf("ParseIssueType(%q) = %v, want %v", tt.input, got, tt.wantType)
 			}
 		})
 	}

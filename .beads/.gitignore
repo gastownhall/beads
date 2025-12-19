@@ -18,10 +18,6 @@ bd.sock
 db.sqlite
 bd.db
 
-# Legacy deletions manifest (replaced by tombstones)
-deletions.jsonl
-deletions.jsonl.migrated
-
 # Merge artifacts (temporary files from 3-way merge)
 beads.base.jsonl
 beads.base.meta.json

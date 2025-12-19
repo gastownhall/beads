@@ -699,3 +699,260 @@ func TestRenderTreeOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeBidirectionalTrees_Empty(t *testing.T) {
+	// Test merging empty trees
+	downTree := []*types.TreeNode{}
+	upTree := []*types.TreeNode{}
+	rootID := "test-root"
+
+	result := mergeBidirectionalTrees(downTree, upTree, rootID)
+
+	if len(result) != 0 {
+		t.Errorf("Expected empty result for empty trees, got %d nodes", len(result))
+	}
+}
+
+func TestMergeBidirectionalTrees_OnlyDown(t *testing.T) {
+	// Test with only down tree (dependencies)
+	downTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-1", Title: "Dependency 1", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "test-root",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-2", Title: "Dependency 2", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "test-root",
+		},
+	}
+	upTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+	}
+
+	result := mergeBidirectionalTrees(downTree, upTree, "test-root")
+
+	// Should have all nodes from down tree
+	if len(result) != 3 {
+		t.Errorf("Expected 3 nodes, got %d", len(result))
+	}
+
+	// Verify downTree nodes are present
+	hasRoot := false
+	hasDep1 := false
+	hasDep2 := false
+	for _, node := range result {
+		if node.ID == "test-root" {
+			hasRoot = true
+		}
+		if node.ID == "dep-1" {
+			hasDep1 = true
+		}
+		if node.ID == "dep-2" {
+			hasDep2 = true
+		}
+	}
+	if !hasRoot || !hasDep1 || !hasDep2 {
+		t.Error("Expected all down tree nodes in result")
+	}
+}
+
+func TestMergeBidirectionalTrees_WithDependents(t *testing.T) {
+	// Test with both dependencies and dependents
+	downTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-1", Title: "Dependency 1", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "test-root",
+		},
+	}
+	upTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "test-root",
+		},
+	}
+
+	result := mergeBidirectionalTrees(downTree, upTree, "test-root")
+
+	// Should have dependent first, then down tree nodes (3 total, root appears once)
+	// Pattern: dependent node(s), then root + dependencies
+	if len(result) < 3 {
+		t.Errorf("Expected at least 3 nodes, got %d", len(result))
+	}
+
+	// Find dependent-1 and dep-1 in result
+	foundDependentID := false
+	foundDepID := false
+	for _, node := range result {
+		if node.ID == "dependent-1" {
+			foundDependentID = true
+		}
+		if node.ID == "dep-1" {
+			foundDepID = true
+		}
+	}
+
+	if !foundDependentID {
+		t.Error("Expected dependent-1 in merged result")
+	}
+	if !foundDepID {
+		t.Error("Expected dep-1 in merged result")
+	}
+}
+
+func TestMergeBidirectionalTrees_MultipleDepth(t *testing.T) {
+	// Test with multi-level hierarchies
+	downTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-1", Title: "Dep 1", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "root",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-1-1", Title: "Dep 1.1", Status: types.StatusOpen},
+			Depth:    2,
+			ParentID: "dep-1",
+		},
+	}
+	upTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
+			Depth:    1,
+			ParentID: "root",
+		},
+		{
+			Issue:    types.Issue{ID: "dependent-1-1", Title: "Dependent 1.1", Status: types.StatusOpen},
+			Depth:    2,
+			ParentID: "dependent-1",
+		},
+	}
+
+	result := mergeBidirectionalTrees(downTree, upTree, "root")
+
+	// Should include all nodes from both trees (minus duplicate root)
+	if len(result) < 5 {
+		t.Errorf("Expected at least 5 nodes, got %d", len(result))
+	}
+
+	// Verify all IDs are present (except we might have root twice from both trees)
+	expectedIDs := map[string]bool{
+		"root":            false,
+		"dep-1":           false,
+		"dep-1-1":         false,
+		"dependent-1":     false,
+		"dependent-1-1":   false,
+	}
+
+	for _, node := range result {
+		if _, exists := expectedIDs[node.ID]; exists {
+			expectedIDs[node.ID] = true
+		}
+	}
+
+	for id, found := range expectedIDs {
+		if !found {
+			t.Errorf("Expected ID %s in merged result", id)
+		}
+	}
+}
+
+func TestMergeBidirectionalTrees_ExcludesRootFromUp(t *testing.T) {
+	// Test that root is excluded from upTree
+	downTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+	}
+	upTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+	}
+
+	result := mergeBidirectionalTrees(downTree, upTree, "root")
+
+	// Should have exactly 1 node (root)
+	if len(result) != 1 {
+		t.Errorf("Expected 1 node (root only), got %d", len(result))
+	}
+
+	if result[0].ID != "root" {
+		t.Errorf("Expected root node, got %s", result[0].ID)
+	}
+}
+
+func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
+	// Test that depth values are preserved from original trees
+	downTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dep-1", Title: "Dep 1", Status: types.StatusOpen},
+			Depth:    5, // Non-standard depth to verify preservation
+			ParentID: "root",
+		},
+	}
+	upTree := []*types.TreeNode{
+		{
+			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
+			Depth:    0,
+			ParentID: "",
+		},
+		{
+			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
+			Depth:    3, // Different depth
+			ParentID: "root",
+		},
+	}
+
+	result := mergeBidirectionalTrees(downTree, upTree, "root")
+
+	// Find nodes and verify their depths are preserved
+	for _, node := range result {
+		if node.ID == "dep-1" && node.Depth != 5 {
+			t.Errorf("Expected dep-1 depth=5, got %d", node.Depth)
+		}
+		if node.ID == "dependent-1" && node.Depth != 3 {
+			t.Errorf("Expected dependent-1 depth=3, got %d", node.Depth)
+		}
+	}
+}

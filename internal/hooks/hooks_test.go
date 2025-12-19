@@ -299,10 +299,17 @@ func TestRunSync_KillsDescendants(t *testing.T) {
 		t.Fatalf("Invalid pid in pid file: %v", err)
 	}
 
-	// Check /proc/<pid> does not exist
-	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
-		t.Fatalf("Child process %d still exists after timeout", pid)
+	// Check /proc/<pid> does not exist - retry a few times in case of timing
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+			// Process is gone, test passed
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
+
+	// If we get here, the process is still running
+	t.Fatalf("Child process %d still exists after timeout", pid)
 }
 
 func TestRunSync_HookFailure(t *testing.T) {

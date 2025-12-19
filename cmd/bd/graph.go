@@ -99,7 +99,7 @@ Colors indicate status:
 		}
 
 		// Render ASCII graph
-		renderGraph(layout, subgraph)
+		renderGraph(layout)
 	},
 }
 
@@ -277,7 +277,7 @@ func computeLayout(subgraph *TemplateSubgraph) *GraphLayout {
 }
 
 // renderGraph renders the ASCII visualization
-func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
+func renderGraph(layout *GraphLayout) {
 	if len(layout.Nodes) == 0 {
 		fmt.Println("Empty graph")
 		return

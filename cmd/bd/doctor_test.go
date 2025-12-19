@@ -1175,6 +1175,9 @@ func TestCheckSyncBranchHookCompatibility(t *testing.T) {
 				// Create pre-push hook if specified
 				if tc.hookVersion != "" {
 					hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+					if err := os.MkdirAll(hooksDir, 0755); err != nil {
+						t.Fatal(err)
+					}
 					hookPath := filepath.Join(hooksDir, "pre-push")
 					var hookContent string
 					if tc.hookVersion == "custom" {
@@ -1246,6 +1249,9 @@ func TestCheckSyncBranchHookQuick(t *testing.T) {
 
 				if tc.hookVersion != "" {
 					hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+					if err := os.MkdirAll(hooksDir, 0755); err != nil {
+						t.Fatal(err)
+					}
 					hookPath := filepath.Join(hooksDir, "pre-push")
 					hookContent := fmt.Sprintf("#!/bin/sh\n# bd-hooks-version: %s\nexit 0\n", tc.hookVersion)
 					if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {

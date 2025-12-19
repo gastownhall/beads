@@ -17,13 +17,22 @@ func TestDaemonAutoStart(t *testing.T) {
 	
 	// Save original env
 	origAutoStart := os.Getenv("BEADS_AUTO_START_DAEMON")
+	origNoDaemon := os.Getenv("BEADS_NO_DAEMON")
 	defer func() {
 		if origAutoStart != "" {
 			os.Setenv("BEADS_AUTO_START_DAEMON", origAutoStart)
 		} else {
 			os.Unsetenv("BEADS_AUTO_START_DAEMON")
 		}
+		if origNoDaemon != "" {
+			os.Setenv("BEADS_NO_DAEMON", origNoDaemon)
+		} else {
+			os.Unsetenv("BEADS_NO_DAEMON")
+		}
 	}()
+
+	// Ensure BEADS_NO_DAEMON doesn't interfere with these tests
+	os.Unsetenv("BEADS_NO_DAEMON")
 
 	t.Run("shouldAutoStartDaemon defaults to true", func(t *testing.T) {
 		os.Unsetenv("BEADS_AUTO_START_DAEMON")
