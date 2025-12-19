@@ -222,7 +222,7 @@ With --stealth: configures global git settings for invisible beads usage:
 					fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
 					fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
 					fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
-					fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
+					fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
 					fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
 				}
 				return
@@ -440,7 +440,7 @@ With --stealth: configures global git settings for invisible beads usage:
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
-		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
+		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
 		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
 
 		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)

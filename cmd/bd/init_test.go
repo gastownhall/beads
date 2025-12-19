@@ -27,7 +27,7 @@ func TestInitCommand(t *testing.T) {
 			name:           "init with custom prefix",
 			prefix:         "myproject",
 			quiet:          false,
-			wantOutputText: "myproject-1, myproject-2",
+			wantOutputText: "myproject-<hash>",
 		},
 		{
 			name:         "init with quiet flag",
@@ -39,7 +39,7 @@ func TestInitCommand(t *testing.T) {
 			name:           "init with prefix ending in hyphen",
 			prefix:         "test-",
 			quiet:          false,
-			wantOutputText: "test-1, test-2",
+			wantOutputText: "test-<hash>",
 		},
 	}
 

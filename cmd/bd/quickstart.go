@@ -26,7 +26,7 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("            Auto-detects prefix from directory name (e.g., myapp-1, myapp-2)\n\n")
 
 		fmt.Printf("  %s   Initialize with custom prefix\n", cyan("bd init --prefix api"))
-		fmt.Printf("            Issues will be named: api-1, api-2, ...\n\n")
+		fmt.Printf("            Issues will be named: api-<hash> (e.g., api-a3f2dd)\n\n")
 
 		fmt.Printf("%s\n", bold("CREATING ISSUES"))
 		fmt.Printf("  %s\n", cyan("bd create \"Fix login bug\""))
