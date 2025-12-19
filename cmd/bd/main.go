@@ -195,6 +195,9 @@ var rootCmd = &cobra.Command{
 			actor = config.GetString("actor")
 		}
 
+		// Protect forks from accidentally committing upstream issue database
+		ensureForkProtection()
+
 		// Performance profiling setup
 		// When --profile is enabled, force direct mode to capture actual database operations
 		// rather than just RPC serialization/network overhead. This gives accurate profiles
