@@ -9,12 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.30.6] - 2025-12-18
 
-## [0.30.6] - 2025-12-18
-
 ### Added
 
 - **`bd graph` dependency counts** (bd-6v2) - Graph command shows dependency counts using subgraph formatting
 - **`types.StatusPinned`** - New status for persistent beads that survive cleanup
+
+### Fixed
+
+- **CRITICAL: Dependency resurrection bug** (bd-ndye) - Fixed 3-way merge to respect dependency removals
+  - `mergeDependencies` was using union (additive-only) instead of proper 3-way merge
+  - Now removals are authoritative: if either left or right removes a dep, it stays removed
+  - This prevented orphaned parent-child relationships from being permanently removed
 
 ## [0.30.5] - 2025-12-18
 

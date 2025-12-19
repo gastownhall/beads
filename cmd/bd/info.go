@@ -293,6 +293,7 @@ var versionChanges = []VersionChange{
 		Changes: []string{
 			"bd graph command shows dependency counts using subgraph formatting (bd-6v2)",
 			"types.StatusPinned for persistent beads that survive cleanup",
+			"CRITICAL: Fixed dependency resurrection bug in 3-way merge (bd-ndye) - removals now win",
 		},
 	},
 	{

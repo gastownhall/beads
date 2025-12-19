@@ -128,22 +128,25 @@ func TestMergeField(t *testing.T) {
 	}
 }
 
-// TestMergeDependencies tests dependency union and deduplication
+// TestMergeDependencies tests 3-way dependency merge with removal semantics (bd-ndye)
 func TestMergeDependencies(t *testing.T) {
 	tests := []struct {
 		name     string
+		base     []Dependency
 		left     []Dependency
 		right    []Dependency
 		expected []Dependency
 	}{
 		{
-			name:     "empty both sides",
+			name:     "empty all sides",
+			base:     []Dependency{},
 			left:     []Dependency{},
 			right:    []Dependency{},
 			expected: []Dependency{},
 		},
 		{
-			name: "only left has deps",
+			name: "left adds dep (not in base)",
+			base: []Dependency{},
 			left: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
@@ -153,7 +156,8 @@ func TestMergeDependencies(t *testing.T) {
 			},
 		},
 		{
-			name: "only right has deps",
+			name: "right adds dep (not in base)",
+			base: []Dependency{},
 			left: []Dependency{},
 			right: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
@@ -163,7 +167,8 @@ func TestMergeDependencies(t *testing.T) {
 			},
 		},
 		{
-			name: "union of different deps",
+			name: "both add different deps (not in base)",
+			base: []Dependency{},
 			left: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
@@ -176,38 +181,61 @@ func TestMergeDependencies(t *testing.T) {
 			},
 		},
 		{
-			name: "deduplication of identical deps",
-			left: []Dependency{
+			name: "left removes dep from base - REMOVAL WINS",
+			base: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
+			left:     []Dependency{}, // Left removed it
 			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-02T00:00:00Z"}, // Different timestamp but same logical dep
-			},
-			expected: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
+			expected: []Dependency{}, // Should be empty - removal wins
 		},
 		{
-			name: "multiple deps with dedup",
+			name: "right removes dep from base - REMOVAL WINS",
+			base: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			},
 			left: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
+			},
+			right:    []Dependency{}, // Right removed it
+			expected: []Dependency{}, // Should be empty - removal wins
+		},
+		{
+			name: "both keep dep from base",
+			base: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			},
+			left: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
 			right: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-02T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-4", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
 			},
 			expected: []Dependency{
 				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-4", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			},
+		},
+		{
+			name: "complex: left removes one, right adds one",
+			base: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			},
+			left: []Dependency{}, // Left removed bd-2
+			right: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"}, // Right added bd-3
+			},
+			expected: []Dependency{
+				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"}, // Only the new one
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := mergeDependencies(tt.left, tt.right)
+			result := mergeDependencies(tt.base, tt.left, tt.right)
 			if len(result) != len(tt.expected) {
 				t.Errorf("mergeDependencies() returned %d deps, want %d", len(result), len(tt.expected))
 				return

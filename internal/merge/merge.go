@@ -575,8 +575,8 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 		result.ClosedAt = ""
 	}
 
-	// Merge dependencies - combine and deduplicate
-	result.Dependencies = mergeDependencies(left.Dependencies, right.Dependencies)
+	// Merge dependencies - proper 3-way merge where removals win (bd-ndye)
+	result.Dependencies = mergeDependencies(base.Dependencies, left.Dependencies, right.Dependencies)
 
 	// bd-1sn: If status became tombstone via mergeStatus safety fallback,
 	// copy tombstone fields from whichever side has them
@@ -792,23 +792,87 @@ func maxTime(t1, t2 string) string {
 	return t2
 }
 
-func mergeDependencies(left, right []Dependency) []Dependency {
-	seen := make(map[string]bool)
-	var result []Dependency
-
-	for _, dep := range left {
-		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, dep)
-		}
+// mergeDependencies performs a proper 3-way merge of dependencies (bd-ndye)
+// Key principle: REMOVALS ARE AUTHORITATIVE
+// - If dep was in base and removed by left OR right → exclude (removal wins)
+// - If dep wasn't in base and added by left OR right → include
+// - If dep was in base and both still have it → include
+func mergeDependencies(base, left, right []Dependency) []Dependency {
+	// Build sets for O(1) lookup
+	depKey := func(dep Dependency) string {
+		return fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 	}
 
+	baseSet := make(map[string]bool)
+	for _, dep := range base {
+		baseSet[depKey(dep)] = true
+	}
+
+	leftSet := make(map[string]bool)
+	leftDeps := make(map[string]Dependency)
+	for _, dep := range left {
+		key := depKey(dep)
+		leftSet[key] = true
+		leftDeps[key] = dep
+	}
+
+	rightSet := make(map[string]bool)
+	rightDeps := make(map[string]Dependency)
 	for _, dep := range right {
-		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
+		key := depKey(dep)
+		rightSet[key] = true
+		rightDeps[key] = dep
+	}
+
+	// Collect all unique keys
+	allKeys := make(map[string]bool)
+	for k := range baseSet {
+		allKeys[k] = true
+	}
+	for k := range leftSet {
+		allKeys[k] = true
+	}
+	for k := range rightSet {
+		allKeys[k] = true
+	}
+
+	var result []Dependency
+	seen := make(map[string]bool)
+
+	for key := range allKeys {
+		inBase := baseSet[key]
+		inLeft := leftSet[key]
+		inRight := rightSet[key]
+
+		// 3-way merge logic:
+		if inBase {
+			// Was in base - check if either side removed it
+			if !inLeft {
+				// Left removed it → don't include (left wins)
+				continue
+			}
+			if !inRight {
+				// Right removed it → don't include (right wins)
+				continue
+			}
+			// Both still have it → include
+		} else {
+			// Wasn't in base - must have been added by left or right
+			if !inLeft && !inRight {
+				// Neither has it (shouldn't happen but handle gracefully)
+				continue
+			}
+			// At least one side added it → include
+		}
+
 		if !seen[key] {
 			seen[key] = true
-			result = append(result, dep)
+			// Prefer left's version of the dep (for any metadata differences)
+			if dep, ok := leftDeps[key]; ok {
+				result = append(result, dep)
+			} else if dep, ok := rightDeps[key]; ok {
+				result = append(result, dep)
+			}
 		}
 	}
 
