@@ -25,7 +25,8 @@ bd info --json
 # {
 #   "database_path": "/path/to/.beads/beads.db",
 #   "issue_prefix": "bd",
-#   "daemon_running": true
+#   "daemon_running": true,
+#   "agent_mail_enabled": false
 # }
 ```
 
@@ -63,6 +64,14 @@ bd create "Add support for OAuth 2.0" -d "Implement RFC 6749 (OAuth 2.0 spec)" -
 
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
+
+# Create with description from file (avoids shell escaping issues)
+bd create "Issue title" --body-file=description.md --json
+bd create "Issue title" --body-file description.md -p 1 --json
+
+# Read description from stdin
+echo "Description text" | bd create "Issue title" --body-file=- --json
+cat description.md | bd create "Issue title" --body-file - -p 1 --json
 
 # Create epic with hierarchical child tasks
 bd create "Auth System" -t epic -p 1 --json         # Returns: bd-a3f8e9
