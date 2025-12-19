@@ -156,6 +156,9 @@ type ListArgs struct {
 	// Priority range
 	PriorityMin *int `json:"priority_min,omitempty"`
 	PriorityMax *int `json:"priority_max,omitempty"`
+
+	// Pinned filtering (bd-p8e)
+	Pinned *bool `json:"pinned,omitempty"`
 }
 
 // CountArgs represents arguments for the count operation

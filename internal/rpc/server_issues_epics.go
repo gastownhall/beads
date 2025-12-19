@@ -698,6 +698,9 @@ func (s *Server) handleList(req *Request) Response {
 	filter.PriorityMin = listArgs.PriorityMin
 	filter.PriorityMax = listArgs.PriorityMax
 
+	// Pinned filtering (bd-p8e)
+	filter.Pinned = listArgs.Pinned
+
 	// Guard against excessive ID lists to avoid SQLite parameter limits
 	const maxIDs = 1000
 	if len(filter.IDs) > maxIDs {
