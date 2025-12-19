@@ -218,18 +218,19 @@ type IssueType string
 
 // Issue type constants
 const (
-	TypeBug     IssueType = "bug"
-	TypeFeature IssueType = "feature"
-	TypeTask    IssueType = "task"
-	TypeEpic    IssueType = "epic"
-	TypeChore   IssueType = "chore"
-	TypeMessage IssueType = "message" // Ephemeral communication between workers
+	TypeBug          IssueType = "bug"
+	TypeFeature      IssueType = "feature"
+	TypeTask         IssueType = "task"
+	TypeEpic         IssueType = "epic"
+	TypeChore        IssueType = "chore"
+	TypeMessage      IssueType = "message"       // Ephemeral communication between workers
+	TypeMergeRequest IssueType = "merge-request" // Merge queue entry for refinery processing
 )
 
 // IsValid checks if the issue type value is valid
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest:
 		return true
 	}
 	return false
