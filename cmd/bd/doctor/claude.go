@@ -2,20 +2,15 @@ package doctor
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
-
-// DoctorCheck represents a single diagnostic check result
-type DoctorCheck struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"` // "ok", "warning", or "error"
-	Message string `json:"message"`
-	Detail  string `json:"detail,omitempty"`
-	Fix     string `json:"fix,omitempty"`
-}
 
 // CheckClaude returns Claude integration verification as a DoctorCheck
 func CheckClaude() DoctorCheck {
@@ -349,4 +344,154 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 		Message: "Documentation references match installed features",
 		Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
 	}
+}
+
+// CheckClaudePlugin checks if the beads Claude Code plugin is installed and up to date.
+func CheckClaudePlugin() DoctorCheck {
+	// Check if running in Claude Code
+	if os.Getenv("CLAUDECODE") != "1" {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusOK,
+			Message: "N/A (not running in Claude Code)",
+		}
+	}
+
+	// Get plugin version from installed_plugins.json
+	pluginVersion, pluginInstalled, err := GetClaudePluginVersion()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusWarning,
+			Message: "Unable to check plugin version",
+			Detail:  err.Error(),
+		}
+	}
+
+	if !pluginInstalled {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusWarning,
+			Message: "beads plugin not installed",
+			Fix:     "Install plugin: /plugin install beads@beads-marketplace",
+		}
+	}
+
+	// Query PyPI for latest MCP version
+	latestMCPVersion, err := fetchLatestPyPIVersion("beads-mcp")
+	if err != nil {
+		// Network error - don't fail
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("version %s (unable to check for updates)", pluginVersion),
+		}
+	}
+
+	// Compare versions
+	if latestMCPVersion == "" || pluginVersion == latestMCPVersion {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("version %s (latest)", pluginVersion),
+		}
+	}
+
+	if CompareVersions(latestMCPVersion, pluginVersion) > 0 {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("version %s (latest: %s)", pluginVersion, latestMCPVersion),
+			Fix:     "Update plugin: /plugin update beads@beads-marketplace\nRestart Claude Code after update",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Claude Plugin",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("version %s", pluginVersion),
+	}
+}
+
+// GetClaudePluginVersion returns the installed beads Claude plugin version.
+func GetClaudePluginVersion() (version string, installed bool, err error) {
+	// Get user home directory (cross-platform)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", false, fmt.Errorf("unable to determine home directory: %w", err)
+	}
+
+	// Path to installed_plugins.json
+	pluginPath := filepath.Join(homeDir, ".claude", "plugins", "installed_plugins.json")
+
+	// Read plugin file
+	data, err := os.ReadFile(pluginPath) // #nosec G304 - path is controlled
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("unable to read plugin file: %w", err)
+	}
+
+	// Parse JSON - handle nested structure
+	var pluginData struct {
+		Version int `json:"version"`
+		Plugins map[string]struct {
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+
+	if err := json.Unmarshal(data, &pluginData); err != nil {
+		return "", false, fmt.Errorf("unable to parse plugin file: %w", err)
+	}
+
+	// Look for beads plugin
+	if plugin, ok := pluginData.Plugins["beads@beads-marketplace"]; ok {
+		return plugin.Version, true, nil
+	}
+
+	return "", false, nil
+}
+
+func fetchLatestPyPIVersion(packageName string) (string, error) {
+	url := fmt.Sprintf("https://pypi.org/pypi/%s/json", packageName)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Set User-Agent
+	req.Header.Set("User-Agent", "beads-cli-doctor")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pypi api returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var data struct {
+		Info struct {
+			Version string `json:"version"`
+		} `json:"info"`
+	}
+
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "", err
+	}
+
+	return data.Info.Version, nil
 }
