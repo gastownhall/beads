@@ -36,7 +36,7 @@ func TestConnectionLimits(t *testing.T) {
 	}
 	defer store.Close()
 
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	// Set low connection limit for testing
 	os.Setenv("BEADS_DAEMON_MAX_CONNS", "5")
@@ -158,7 +158,7 @@ func TestRequestTimeout(t *testing.T) {
 	}
 	defer store.Close()
 
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	// Set very short timeout for testing
 	os.Setenv("BEADS_DAEMON_REQUEST_TIMEOUT", "100ms")
@@ -199,14 +199,9 @@ func TestRequestTimeout(t *testing.T) {
 }
 
 func TestHealthResponseIncludesLimits(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-limits-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
+	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {

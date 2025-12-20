@@ -2,6 +2,9 @@ package rpc
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -23,6 +26,22 @@ func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 		_ = store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
-	
+
 	return store
+}
+
+func newTestSocketPath(t *testing.T) string {
+	t.Helper()
+
+	// On unix, AF_UNIX socket paths have small length limits (notably on darwin).
+	// Prefer a short base dir when available.
+	if runtime.GOOS != "windows" {
+		d, err := os.MkdirTemp("/tmp", "beads-sock-")
+		if err == nil {
+			t.Cleanup(func() { _ = os.RemoveAll(d) })
+			return filepath.Join(d, "rpc.sock")
+		}
+	}
+
+	return filepath.Join(t.TempDir(), "rpc.sock")
 }

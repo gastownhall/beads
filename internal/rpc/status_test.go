@@ -13,7 +13,7 @@ import (
 func TestStatusEndpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
@@ -87,8 +87,7 @@ func TestStatusEndpoint(t *testing.T) {
 func TestStatusEndpointWithConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
-
+	socketPath := newTestSocketPath(t)
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
@@ -146,8 +145,7 @@ func TestStatusEndpointWithConfig(t *testing.T) {
 func TestStatusEndpointLocalMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
-
+	socketPath := newTestSocketPath(t)
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
@@ -205,7 +203,7 @@ func TestStatusEndpointLocalMode(t *testing.T) {
 func TestStatusEndpointDefaultConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
@@ -262,7 +260,7 @@ func TestStatusEndpointDefaultConfig(t *testing.T) {
 func TestSetConfigConcurrency(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
