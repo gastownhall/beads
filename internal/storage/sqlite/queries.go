@@ -250,6 +250,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var ephemeral sql.NullInt64
 	// Pinned field (bd-7h5)
 	var pinned sql.NullInt64
+	// Template field (beads-1ra)
+	var isTemplate sql.NullInt64
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -259,7 +261,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -269,7 +271,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral, &pinned,
+		&sender, &ephemeral, &pinned, &isTemplate,
 	)
 
 	if err == sql.ErrNoRows {
@@ -330,6 +332,10 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
+	}
+	// Template field (beads-1ra)
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
 	}
 
 	// Fetch labels for this issue
@@ -439,6 +445,8 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var ephemeral sql.NullInt64
 	// Pinned field (bd-7h5)
 	var pinned sql.NullInt64
+	// Template field (beads-1ra)
+	var isTemplate sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -446,7 +454,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -456,7 +464,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral, &pinned,
+		&sender, &ephemeral, &pinned, &isTemplate,
 	)
 
 	if err == sql.ErrNoRows {
@@ -517,6 +525,10 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
+	}
+	// Template field (beads-1ra)
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
 	}
 
 	// Fetch labels for this issue
@@ -1589,6 +1601,15 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		}
 	}
 
+	// Template filtering (beads-1ra)
+	if filter.IsTemplate != nil {
+		if *filter.IsTemplate {
+			whereClauses = append(whereClauses, "is_template = 1")
+		} else {
+			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1606,7 +1627,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

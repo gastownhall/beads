@@ -2,6 +2,7 @@
 package utils
 
 import (
+	"os"
 	"path/filepath"
 )
 
@@ -53,6 +54,19 @@ func FindJSONLInDir(dbDir string) string {
 
 	// If only deletions/merge files exist, default to issues.jsonl
 	return filepath.Join(dbDir, "issues.jsonl")
+}
+
+// FindMoleculesJSONLInDir finds the molecules.jsonl file in the given .beads directory.
+// Returns the path to molecules.jsonl if it exists, empty string otherwise.
+// Molecules are template issues used for instantiation (beads-1ra).
+func FindMoleculesJSONLInDir(dbDir string) string {
+	moleculesPath := filepath.Join(dbDir, "molecules.jsonl")
+	// Check if file exists - we don't fall back to any other file
+	// because molecules.jsonl is optional and specific
+	if _, err := os.Stat(moleculesPath); err == nil {
+		return moleculesPath
+	}
+	return ""
 }
 
 // CanonicalizePath converts a path to its canonical form by:

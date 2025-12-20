@@ -211,11 +211,12 @@ const (
 
 // IssueType constants
 const (
-	TypeBug     = types.TypeBug
-	TypeFeature = types.TypeFeature
-	TypeTask    = types.TypeTask
-	TypeEpic    = types.TypeEpic
-	TypeChore   = types.TypeChore
+	TypeBug      = types.TypeBug
+	TypeFeature  = types.TypeFeature
+	TypeTask     = types.TypeTask
+	TypeEpic     = types.TypeEpic
+	TypeChore    = types.TypeChore
+	TypeMolecule = types.TypeMolecule
 )
 
 // DependencyType constants

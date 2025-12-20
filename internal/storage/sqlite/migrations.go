@@ -40,6 +40,7 @@ var migrationsList = []Migration{
 	{"migrate_edge_fields", migrations.MigrateEdgeFields},
 	{"drop_edge_columns", migrations.MigrateDropEdgeColumns},
 	{"pinned_column", migrations.MigratePinnedColumn},
+	{"is_template_column", migrations.MigrateIsTemplateColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -87,6 +88,7 @@ func getMigrationDescription(name string) string {
 		"migrate_edge_fields":          "Migrates existing issue fields (replies_to, relates_to, duplicate_of, superseded_by) to dependency edges (Decision 004 Phase 3)",
 		"drop_edge_columns":            "Drops deprecated edge columns (replies_to, relates_to, duplicate_of, superseded_by) from issues table (Decision 004 Phase 4)",
 		"pinned_column":                "Adds pinned column for persistent context markers (bd-7h5)",
+		"is_template_column":           "Adds is_template column for template molecules (beads-1ra)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
