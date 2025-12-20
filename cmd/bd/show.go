@@ -673,6 +673,17 @@ var updateCmd = &cobra.Command{
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
+			// Check if issue is a template (beads-1ra): templates are read-only
+			issue, err := store.GetIssue(ctx, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", id, err)
+				continue
+			}
+			if issue != nil && issue.IsTemplate {
+				fmt.Fprintf(os.Stderr, "Error: cannot update template %s: templates are read-only; use 'bd molecule instantiate' to create a work item\n", id)
+				continue
+			}
+
 			// Apply regular field updates if any
 			regularUpdates := make(map[string]interface{})
 			for k, v := range updates {
@@ -733,14 +744,14 @@ var updateCmd = &cobra.Command{
 			}
 
 			// Run update hook (bd-kwro.8)
-			issue, _ := store.GetIssue(ctx, id)
-			if issue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventUpdate, issue)
+			updatedIssue, _ := store.GetIssue(ctx, id)
+			if updatedIssue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventUpdate, updatedIssue)
 			}
 
 			if jsonOutput {
-				if issue != nil {
-					updatedIssues = append(updatedIssues, issue)
+				if updatedIssue != nil {
+					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
 				green := color.New(color.FgGreen).SprintFunc()
@@ -1002,17 +1013,21 @@ var closeCmd = &cobra.Command{
 		if daemonClient != nil {
 			closedIssues := []*types.Issue{}
 			for _, id := range resolvedIDs {
-				// Check if issue is pinned (bd-6v2)
-				if !force {
-					showArgs := &rpc.ShowArgs{ID: id}
-					showResp, showErr := daemonClient.Show(showArgs)
-					if showErr == nil {
-						var issue types.Issue
-						if json.Unmarshal(showResp.Data, &issue) == nil {
-							if issue.Status == types.StatusPinned {
-								fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
-								continue
-							}
+				// Get issue for template and pinned checks
+				showArgs := &rpc.ShowArgs{ID: id}
+				showResp, showErr := daemonClient.Show(showArgs)
+				if showErr == nil {
+					var issue types.Issue
+					if json.Unmarshal(showResp.Data, &issue) == nil {
+						// Check if issue is a template (beads-1ra): templates are read-only
+						if issue.IsTemplate {
+							fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
+							continue
+						}
+						// Check if issue is pinned (bd-6v2)
+						if !force && issue.Status == types.StatusPinned {
+							fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
+							continue
 						}
 					}
 				}
@@ -1052,9 +1067,17 @@ var closeCmd = &cobra.Command{
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
+			// Get issue for checks
+			issue, _ := store.GetIssue(ctx, id)
+
+			// Check if issue is a template (beads-1ra): templates are read-only
+			if issue != nil && issue.IsTemplate {
+				fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
+				continue
+			}
+
 			// Check if issue is pinned (bd-6v2)
 			if !force {
-				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil && issue.Status == types.StatusPinned {
 					fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
 					continue
@@ -1067,14 +1090,14 @@ var closeCmd = &cobra.Command{
 			}
 
 			// Run close hook (bd-kwro.8)
-			issue, _ := store.GetIssue(ctx, id)
-			if issue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventClose, issue)
+			closedIssue, _ := store.GetIssue(ctx, id)
+			if closedIssue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventClose, closedIssue)
 			}
 
 			if jsonOutput {
-				if issue != nil {
-					closedIssues = append(closedIssues, issue)
+				if closedIssue != nil {
+					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
 				green := color.New(color.FgGreen).SprintFunc()

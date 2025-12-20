@@ -141,6 +141,9 @@ var listCmd = &cobra.Command{
 		pinnedFlag, _ := cmd.Flags().GetBool("pinned")
 		noPinnedFlag, _ := cmd.Flags().GetBool("no-pinned")
 
+		// Template filtering (beads-1ra)
+		includeTemplates, _ := cmd.Flags().GetBool("include-templates")
+
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Normalize labels: trim, dedupe, remove empty
@@ -290,6 +293,13 @@ var listCmd = &cobra.Command{
 			filter.Pinned = &pinned
 		}
 
+		// Template filtering (beads-1ra): exclude templates by default
+		// Use --include-templates to show all issues including templates
+		if !includeTemplates {
+			isTemplate := false
+			filter.IsTemplate = &isTemplate
+		}
+
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
 		ctx := rootCtx
@@ -367,6 +377,9 @@ var listCmd = &cobra.Command{
 
 			// Pinned filtering (bd-p8e)
 			listArgs.Pinned = filter.Pinned
+
+			// Template filtering (beads-1ra)
+			listArgs.IncludeTemplates = includeTemplates
 
 			 resp, err := daemonClient.List(listArgs)
 			if err != nil {
@@ -584,6 +597,9 @@ func init() {
 	// Pinned filtering (bd-p8e)
 	listCmd.Flags().Bool("pinned", false, "Show only pinned issues")
 	listCmd.Flags().Bool("no-pinned", false, "Exclude pinned issues")
+
+	// Template filtering (beads-1ra): exclude templates by default
+	listCmd.Flags().Bool("include-templates", false, "Include template molecules in output")
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

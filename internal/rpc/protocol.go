@@ -159,6 +159,9 @@ type ListArgs struct {
 
 	// Pinned filtering (bd-p8e)
 	Pinned *bool `json:"pinned,omitempty"`
+
+	// Template filtering (beads-1ra)
+	IncludeTemplates bool `json:"include_templates,omitempty"`
 }
 
 // CountArgs represents arguments for the count operation

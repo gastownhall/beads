@@ -337,6 +337,28 @@ func (s *Server) handleUpdate(req *Request) Response {
 	}
 
 	ctx := s.reqCtx(req)
+
+	// Check if issue is a template (beads-1ra): templates are read-only
+	issue, err := store.GetIssue(ctx, updateArgs.ID)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get issue: %v", err),
+		}
+	}
+	if issue == nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("issue %s not found", updateArgs.ID),
+		}
+	}
+	if issue.IsTemplate {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("cannot update template %s: templates are read-only; use 'bd molecule instantiate' to create a work item", updateArgs.ID),
+		}
+	}
+
 	updates := updatesFromArgs(updateArgs)
 	actor := s.reqActor(req)
 
@@ -406,15 +428,15 @@ func (s *Server) handleUpdate(req *Request) Response {
 		s.emitMutation(MutationUpdate, updateArgs.ID)
 	}
 
-	issue, err := store.GetIssue(ctx, updateArgs.ID)
-	if err != nil {
+	updatedIssue, getErr := store.GetIssue(ctx, updateArgs.ID)
+	if getErr != nil {
 		return Response{
 			Success: false,
-			Error:   fmt.Sprintf("failed to get updated issue: %v", err),
+			Error:   fmt.Sprintf("failed to get updated issue: %v", getErr),
 		}
 	}
 
-	data, _ := json.Marshal(issue)
+	data, _ := json.Marshal(updatedIssue)
 	return Response{
 		Success: true,
 		Data:    data,
@@ -439,6 +461,22 @@ func (s *Server) handleClose(req *Request) Response {
 	}
 
 	ctx := s.reqCtx(req)
+
+	// Check if issue is a template (beads-1ra): templates are read-only
+	issue, err := store.GetIssue(ctx, closeArgs.ID)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get issue: %v", err),
+		}
+	}
+	if issue != nil && issue.IsTemplate {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("cannot close template %s: templates are read-only", closeArgs.ID),
+		}
+	}
+
 	if err := store.CloseIssue(ctx, closeArgs.ID, closeArgs.Reason, s.reqActor(req)); err != nil {
 		return Response{
 			Success: false,
@@ -449,8 +487,8 @@ func (s *Server) handleClose(req *Request) Response {
 	// Emit mutation event for event-driven daemon
 	s.emitMutation(MutationUpdate, closeArgs.ID)
 
-	issue, _ := store.GetIssue(ctx, closeArgs.ID)
-	data, _ := json.Marshal(issue)
+	closedIssue, _ := store.GetIssue(ctx, closeArgs.ID)
+	data, _ := json.Marshal(closedIssue)
 	return Response{
 		Success: true,
 		Data:    data,
@@ -509,6 +547,12 @@ func (s *Server) handleDelete(req *Request) Response {
 		}
 		if issue == nil {
 			errors = append(errors, fmt.Sprintf("%s: not found", issueID))
+			continue
+		}
+
+		// Check if issue is a template (beads-1ra): templates are read-only
+		if issue.IsTemplate {
+			errors = append(errors, fmt.Sprintf("%s: cannot delete template (templates are read-only)", issueID))
 			continue
 		}
 
@@ -700,6 +744,12 @@ func (s *Server) handleList(req *Request) Response {
 
 	// Pinned filtering (bd-p8e)
 	filter.Pinned = listArgs.Pinned
+
+	// Template filtering (beads-1ra): exclude templates by default
+	if !listArgs.IncludeTemplates {
+		isTemplate := false
+		filter.IsTemplate = &isTemplate
+	}
 
 	// Guard against excessive ID lists to avoid SQLite parameter limits
 	const maxIDs = 1000
