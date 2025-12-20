@@ -33,12 +33,14 @@ func getEmbeddedHooks() (map[string]string, error) {
 }
 
 const hookVersionPrefix = "# bd-hooks-version: "
+const shimVersionPrefix = "# bd-shim "
 
 // HookStatus represents the status of a single git hook
 type HookStatus struct {
 	Name      string
 	Installed bool
 	Version   string
+	IsShim    bool // true if this is a thin shim (version-agnostic)
 	Outdated  bool
 }
 
@@ -64,16 +66,18 @@ func CheckGitHooks() []HookStatus {
 
 		// Check if hook exists
 		hookPath := filepath.Join(gitDir, "hooks", hookName)
-		version, err := getHookVersion(hookPath)
+		versionInfo, err := getHookVersion(hookPath)
 		if err != nil {
 			// Hook doesn't exist or couldn't be read
 			status.Installed = false
 		} else {
 			status.Installed = true
-			status.Version = version
+			status.Version = versionInfo.Version
+			status.IsShim = versionInfo.IsShim
 
-			// Check if outdated (compare to current bd version)
-			if version != "" && version != Version {
+			// Thin shims are never outdated (they delegate to bd)
+			// Legacy hooks are outdated if version differs from current bd version
+			if !versionInfo.IsShim && versionInfo.Version != "" && versionInfo.Version != Version {
 				status.Outdated = true
 			}
 		}
@@ -84,12 +88,18 @@ func CheckGitHooks() []HookStatus {
 	return statuses
 }
 
+// hookVersionInfo contains version information extracted from a hook file
+type hookVersionInfo struct {
+	Version string // bd version (for legacy hooks) or shim version
+	IsShim  bool   // true if this is a thin shim
+}
+
 // getHookVersion extracts the version from a hook file
-func getHookVersion(path string) (string, error) {
+func getHookVersion(path string) (hookVersionInfo, error) {
 	// #nosec G304 -- hook path constrained to .git/hooks directory
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return hookVersionInfo{}, err
 	}
 	defer file.Close()
 
@@ -98,15 +108,21 @@ func getHookVersion(path string) (string, error) {
 	lineCount := 0
 	for scanner.Scan() && lineCount < 10 {
 		line := scanner.Text()
+		// Check for thin shim marker first
+		if strings.HasPrefix(line, shimVersionPrefix) {
+			version := strings.TrimSpace(strings.TrimPrefix(line, shimVersionPrefix))
+			return hookVersionInfo{Version: version, IsShim: true}, nil
+		}
+		// Check for legacy version marker
 		if strings.HasPrefix(line, hookVersionPrefix) {
 			version := strings.TrimSpace(strings.TrimPrefix(line, hookVersionPrefix))
-			return version, nil
+			return hookVersionInfo{Version: version, IsShim: false}, nil
 		}
 		lineCount++
 	}
 
 	// No version found (old hook)
-	return "", nil
+	return hookVersionInfo{}, nil
 }
 
 // FormatHookWarnings returns a formatted warning message if hooks are outdated
@@ -275,6 +291,8 @@ var hooksListCmd = &cobra.Command{
 			for _, status := range statuses {
 				if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
+				} else if status.IsShim {
+					fmt.Printf("  ✓ %s: installed (shim %s)\n", status.Name, status.Version)
 				} else if status.Outdated {
 					fmt.Printf("  ⚠ %s: installed (version %s, current: %s) - outdated\n",
 						status.Name, status.Version, Version)
@@ -383,6 +401,295 @@ func uninstallHooks() error {
 	return nil
 }
 
+// =============================================================================
+// Hook Implementation Functions (called by thin shims via 'bd hooks run')
+// =============================================================================
+
+// runPreCommitHook flushes pending changes to JSONL before commit.
+// Returns 0 on success (or if not applicable), non-zero on error.
+func runPreCommitHook() int {
+	// Check if we're in a bd workspace
+	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0 // Not a bd workspace, nothing to do
+	}
+
+	// Check if sync-branch is configured (changes go to separate branch)
+	if hookGetSyncBranch() != "" {
+		return 0 // Skip - changes synced to separate branch
+	}
+
+	// Flush pending changes to JSONL
+	// Use --flush-only to skip git operations (we're already in a git hook)
+	cmd := exec.Command("bd", "sync", "--flush-only")
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Warning: Failed to flush bd changes to JSONL")
+		fmt.Fprintln(os.Stderr, "Run 'bd sync --flush-only' manually to diagnose")
+		// Don't block the commit - user may have removed beads or have other issues
+	}
+
+	// Stage all tracked JSONL files
+	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl"} {
+		if _, err := os.Stat(f); err == nil {
+			gitAdd := exec.Command("git", "add", f)
+			_ = gitAdd.Run() // Ignore errors - file may not exist
+		}
+	}
+
+	return 0
+}
+
+// runPostMergeHook imports JSONL after pull/merge.
+// Returns 0 on success (or if not applicable), non-zero on error.
+func runPostMergeHook() int {
+	// Skip during rebase
+	if isRebaseInProgress() {
+		return 0
+	}
+
+	// Check if we're in a bd workspace
+	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0
+	}
+
+	// Check if any JSONL file exists
+	if !hasBeadsJSONL() {
+		return 0
+	}
+
+	// Run bd sync --import-only --no-git-history
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after merge")
+		fmt.Fprintln(os.Stderr, string(output))
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run 'bd doctor --fix' to diagnose and repair")
+		// Don't fail the merge, just warn
+	}
+
+	// Run quick health check
+	healthCmd := exec.Command("bd", "doctor", "--check-health")
+	_ = healthCmd.Run() // Ignore errors
+
+	return 0
+}
+
+// runPrePushHook prevents pushing stale JSONL.
+// Returns 0 to allow push, non-zero to block.
+func runPrePushHook() int {
+	// Check if we're in a bd workspace
+	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0
+	}
+
+	// Skip if bd sync is already in progress (prevents circular error)
+	if os.Getenv("BD_SYNC_IN_PROGRESS") != "" {
+		return 0
+	}
+
+	// Check if sync-branch is configured
+	if hookGetSyncBranch() != "" {
+		return 0 // Skip - changes synced to separate branch
+	}
+
+	// Flush pending bd changes
+	flushCmd := exec.Command("bd", "sync", "--flush-only")
+	_ = flushCmd.Run() // Ignore errors
+
+	// Check for uncommitted JSONL changes
+	files := []string{}
+	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl"} {
+		// Check if file exists or is tracked
+		if _, err := os.Stat(f); err == nil {
+			files = append(files, f)
+		} else {
+			// Check if tracked by git
+			checkCmd := exec.Command("git", "ls-files", "--error-unmatch", f)
+			if checkCmd.Run() == nil {
+				files = append(files, f)
+			}
+		}
+	}
+
+	if len(files) == 0 {
+		return 0
+	}
+
+	// Check for uncommitted changes using git status
+	args := append([]string{"status", "--porcelain", "--"}, files...)
+	statusCmd := exec.Command("git", args...)
+	output, _ := statusCmd.Output()
+	if len(output) > 0 {
+		fmt.Fprintln(os.Stderr, "❌ Error: Uncommitted changes detected")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Before pushing, ensure all changes are committed. This includes:")
+		fmt.Fprintln(os.Stderr, "  • bd JSONL updates (run 'bd sync')")
+		fmt.Fprintln(os.Stderr, "  • any other modified files (run 'git status' to review)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run 'bd sync' to commit these changes:")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  bd sync")
+		fmt.Fprintln(os.Stderr, "")
+		return 1
+	}
+
+	return 0
+}
+
+// runPostCheckoutHook imports JSONL after branch checkout.
+// args: [previous-HEAD, new-HEAD, flag] where flag=1 for branch checkout
+// Returns 0 on success (or if not applicable), non-zero on error.
+func runPostCheckoutHook(args []string) int {
+	// Only run on branch checkouts (flag=1)
+	if len(args) >= 3 && args[2] != "1" {
+		return 0
+	}
+
+	// Skip during rebase
+	if isRebaseInProgress() {
+		return 0
+	}
+
+	// Check if we're in a bd workspace
+	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0
+	}
+
+	// Detect git worktree and show warning
+	if isGitWorktree() {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════════════╗")
+		fmt.Fprintln(os.Stderr, "║ Welcome to beads in git worktree!                                        ║")
+		fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════════════╣")
+		fmt.Fprintln(os.Stderr, "║ Note: Daemon mode is not recommended with git worktrees.                 ║")
+		fmt.Fprintln(os.Stderr, "║ Worktrees share the same database, and the daemon may commit changes     ║")
+		fmt.Fprintln(os.Stderr, "║ to the wrong branch.                                                     ║")
+		fmt.Fprintln(os.Stderr, "║                                                                          ║")
+		fmt.Fprintln(os.Stderr, "║ RECOMMENDED: Disable daemon for this session:                            ║")
+		fmt.Fprintln(os.Stderr, "║   export BEADS_NO_DAEMON=1                                               ║")
+		fmt.Fprintln(os.Stderr, "║                                                                          ║")
+		fmt.Fprintln(os.Stderr, "║ For more information:                                                    ║")
+		fmt.Fprintln(os.Stderr, "║   - Run: bd doctor                                                       ║")
+		fmt.Fprintln(os.Stderr, "║   - Read: docs/GIT_INTEGRATION.md (lines 10-53)                          ║")
+		fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════════════╝")
+		fmt.Fprintln(os.Stderr, "")
+	}
+
+	// Check if any JSONL file exists
+	if !hasBeadsJSONL() {
+		return 0
+	}
+
+	// Run bd sync --import-only --no-git-history
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after checkout")
+		fmt.Fprintln(os.Stderr, string(output))
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run 'bd doctor --fix' to diagnose and repair")
+		// Don't fail the checkout, just warn
+	}
+
+	// Run quick health check
+	healthCmd := exec.Command("bd", "doctor", "--check-health")
+	_ = healthCmd.Run() // Ignore errors
+
+	return 0
+}
+
+// =============================================================================
+// Hook Helper Functions
+// =============================================================================
+
+// hookGetSyncBranch returns the configured sync branch for hook context.
+// This is a simplified version that doesn't require context.
+func hookGetSyncBranch() string {
+	// Check environment variable first
+	if branch := os.Getenv("BEADS_SYNC_BRANCH"); branch != "" {
+		return branch
+	}
+
+	// Check config.yaml
+	configPath := ".beads/config.yaml"
+	data, err := os.ReadFile(configPath) // #nosec G304 -- config path is hardcoded
+	if err != nil {
+		return ""
+	}
+
+	// Simple YAML parsing for sync-branch
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "sync-branch:") {
+			value := strings.TrimPrefix(line, "sync-branch:")
+			value = strings.TrimSpace(value)
+			value = strings.Trim(value, `"'`)
+			return value
+		}
+	}
+
+	return ""
+}
+
+// isRebaseInProgress checks if a rebase is in progress.
+func isRebaseInProgress() bool {
+	if _, err := os.Stat(".git/rebase-merge"); err == nil {
+		return true
+	}
+	if _, err := os.Stat(".git/rebase-apply"); err == nil {
+		return true
+	}
+	return false
+}
+
+// hasBeadsJSONL checks if any JSONL file exists in .beads/.
+func hasBeadsJSONL() bool {
+	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl"} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+var hooksRunCmd = &cobra.Command{
+	Use:   "run <hook-name> [args...]",
+	Short: "Execute a git hook (called by thin shims)",
+	Long: `Execute the logic for a git hook. This command is typically called by
+thin shim scripts installed in .git/hooks/.
+
+Supported hooks:
+  - pre-commit: Flush pending changes to JSONL before commit
+  - post-merge: Import JSONL after pull/merge
+  - pre-push: Prevent pushing stale JSONL
+  - post-checkout: Import JSONL after branch checkout
+
+The thin shim pattern ensures hook logic is always in sync with the
+installed bd version - upgrading bd automatically updates hook behavior.`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		hookName := args[0]
+		hookArgs := args[1:]
+
+		var exitCode int
+		switch hookName {
+		case "pre-commit":
+			exitCode = runPreCommitHook()
+		case "post-merge":
+			exitCode = runPostMergeHook()
+		case "pre-push":
+			exitCode = runPrePushHook()
+		case "post-checkout":
+			exitCode = runPostCheckoutHook(hookArgs)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown hook: %s\n", hookName)
+			os.Exit(1)
+		}
+
+		os.Exit(exitCode)
+	},
+}
+
 func init() {
 	hooksInstallCmd.Flags().Bool("force", false, "Overwrite existing hooks without backup")
 	hooksInstallCmd.Flags().Bool("shared", false, "Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/")
@@ -390,6 +697,7 @@ func init() {
 	hooksCmd.AddCommand(hooksInstallCmd)
 	hooksCmd.AddCommand(hooksUninstallCmd)
 	hooksCmd.AddCommand(hooksListCmd)
+	hooksCmd.AddCommand(hooksRunCmd)
 
 	rootCmd.AddCommand(hooksCmd)
 }

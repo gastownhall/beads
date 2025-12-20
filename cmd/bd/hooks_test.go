@@ -267,8 +267,12 @@ func TestHooksCheckGitHooks(t *testing.T) {
 		if !status.Installed {
 			t.Errorf("Hook %s should be installed", status.Name)
 		}
-		if status.Version != Version {
-			t.Errorf("Hook %s version mismatch: got %s, want %s", status.Name, status.Version, Version)
+		// Thin shims use version format "v1" (shim format version, not bd version)
+		if !status.IsShim {
+			t.Errorf("Hook %s should be a thin shim", status.Name)
+		}
+		if status.Version != "v1" {
+			t.Errorf("Hook %s shim version mismatch: got %s, want v1", status.Name, status.Version)
 		}
 		if status.Outdated {
 			t.Errorf("Hook %s should not be outdated", status.Name)
