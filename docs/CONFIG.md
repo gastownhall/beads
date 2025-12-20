@@ -35,6 +35,7 @@ Tool-level settings you can configure:
 | `no-auto-flush` | `--no-auto-flush` | `BD_NO_AUTO_FLUSH` | `false` | Disable auto JSONL export |
 | `no-auto-import` | `--no-auto-import` | `BD_NO_AUTO_IMPORT` | `false` | Disable auto JSONL import |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to remote in bd sync |
+| `create.require-description` | - | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description when creating issues |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BD_ACTOR` | `$USER` | Actor name for audit trail |
 | `flush-debounce` | - | `BEADS_FLUSH_DEBOUNCE` | `5s` | Debounce time for auto-flush |
@@ -71,6 +72,10 @@ daemon-log-compress: true    # Compress rotated logs (default true)
 ```yaml
 # Project team prefers longer flush delay
 flush-debounce: 15s
+
+# Require descriptions on all issues (enforces context for future work)
+create:
+  require-description: true
 ```
 
 ### Why Two Systems?

@@ -67,12 +67,18 @@ var createCmd = &cobra.Command{
 		// Get field values
 		description, _ := getDescriptionFlag(cmd)
 
-		// Warn if creating an issue without a description (unless it's a test issue or silent mode)
-		if description == "" && !strings.Contains(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
-			fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
-			fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
+		// Check if description is required by config
+		if description == "" && !strings.Contains(strings.ToLower(title), "test") {
+			if config.GetBool("create.require-description") {
+				FatalError("description is required (set create.require-description: false in config.yaml to disable)")
+			}
+			// Warn if creating an issue without a description (unless silent mode)
+			if !silent && !debug.IsQuiet() {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
+				fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
+				fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
+			}
 		}
 
 		design, _ := cmd.Flags().GetString("design")
