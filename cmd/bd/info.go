@@ -288,6 +288,14 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.7",
+		Date:    "2025-12-19",
+		Changes: []string{
+			"FIX: bd graph no longer crashes with nil pointer on epics (fixes #657)",
+			"FIX: Windows npm installer no longer fails with file lock error (fixes #652)",
+		},
+	},
+	{
 		Version: "0.30.6",
 		Date:    "2025-12-18",
 		Changes: []string{

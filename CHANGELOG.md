@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.7] - 2025-12-19
+
+### Fixed
+
+- **`bd graph` nil pointer crash** (#657) - Fixed crash when running `bd graph` on epics
+  - `renderGraph()` was passed `nil` instead of the subgraph, causing panic in `computeDependencyCounts()`
+
+- **Windows npm installer file lock** (#652) - Fixed installation failure on Windows
+  - The download file handle wasn't fully closed before extraction attempted
+  - Now properly waits for `file.close()` callback before proceeding
+
 ## [0.30.6] - 2025-12-18
 
 ### Added
