@@ -877,89 +877,57 @@ func TestGetClaudePluginVersion(t *testing.T) {
 }
 
 func TestCheckMetadataVersionTracking(t *testing.T) {
+	// GH#662: Tests updated to use .local_version file instead of metadata.json:LastBdVersion
 	tests := []struct {
 		name           string
-		setupMetadata  func(beadsDir string) error
+		setupVersion   func(beadsDir string) error
 		expectedStatus string
 		expectWarning  bool
 	}{
 		{
 			name: "valid current version",
-			setupMetadata: func(beadsDir string) error {
-				cfg := map[string]string{
-					"database":        "beads.db",
-					"last_bd_version": Version,
-				}
-				data, _ := json.Marshal(cfg)
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			setupVersion: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version+"\n"), 0644)
 			},
 			expectedStatus: doctor.StatusOK,
 			expectWarning:  false,
 		},
 		{
 			name: "slightly outdated version",
-			setupMetadata: func(beadsDir string) error {
-				cfg := map[string]string{
-					"database":        "beads.db",
-					"last_bd_version": "0.24.0",
-				}
-				data, _ := json.Marshal(cfg)
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			setupVersion: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.24.0\n"), 0644)
 			},
 			expectedStatus: doctor.StatusOK,
 			expectWarning:  false,
 		},
 		{
 			name: "very old version",
-			setupMetadata: func(beadsDir string) error {
-				cfg := map[string]string{
-					"database":        "beads.db",
-					"last_bd_version": "0.14.0",
-				}
-				data, _ := json.Marshal(cfg)
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			setupVersion: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.14.0\n"), 0644)
 			},
 			expectedStatus: doctor.StatusWarning,
 			expectWarning:  true,
 		},
 		{
-			name: "empty version field",
-			setupMetadata: func(beadsDir string) error {
-				cfg := map[string]string{
-					"database":        "beads.db",
-					"last_bd_version": "",
-				}
-				data, _ := json.Marshal(cfg)
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			name: "empty version file",
+			setupVersion: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(""), 0644)
 			},
 			expectedStatus: doctor.StatusWarning,
 			expectWarning:  true,
 		},
 		{
 			name: "invalid version format",
-			setupMetadata: func(beadsDir string) error {
-				cfg := map[string]string{
-					"database":        "beads.db",
-					"last_bd_version": "invalid-version",
-				}
-				data, _ := json.Marshal(cfg)
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644)
+			setupVersion: func(beadsDir string) error {
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("invalid-version\n"), 0644)
 			},
 			expectedStatus: doctor.StatusWarning,
 			expectWarning:  true,
 		},
 		{
-			name: "corrupted metadata.json",
-			setupMetadata: func(beadsDir string) error {
-				return os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{invalid json}"), 0644)
-			},
-			expectedStatus: doctor.StatusError,
-			expectWarning:  false,
-		},
-		{
-			name: "missing metadata.json",
-			setupMetadata: func(beadsDir string) error {
-				// Don't create metadata.json
+			name: "missing .local_version file",
+			setupVersion: func(beadsDir string) error {
+				// Don't create .local_version
 				return nil
 			},
 			expectedStatus: doctor.StatusWarning,
@@ -975,8 +943,8 @@ func TestCheckMetadataVersionTracking(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Setup metadata.json
-			if err := tc.setupMetadata(beadsDir); err != nil {
+			// Setup .local_version file
+			if err := tc.setupVersion(beadsDir); err != nil {
 				t.Fatal(err)
 			}
 

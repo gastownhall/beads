@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // CheckCLIVersion checks if the CLI version is up to date.
@@ -53,62 +52,73 @@ func CheckCLIVersion(cliVersion string) DoctorCheck {
 	}
 }
 
-// CheckMetadataVersionTracking checks if metadata.json has proper version tracking.
+// localVersionFile is the gitignored file that stores the last bd version used locally.
+// Must match the constant in version_tracking.go.
+const localVersionFile = ".local_version"
+
+// CheckMetadataVersionTracking checks if version tracking is properly configured.
+// Version tracking uses .local_version file (gitignored) to track the last bd version used.
+//
+// GH#662: This was updated to check .local_version instead of metadata.json:LastBdVersion,
+// which is now deprecated.
 func CheckMetadataVersionTracking(path string, currentVersion string) DoctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
 
-	// Load metadata.json
-	cfg, err := configfile.Load(beadsDir)
+	// Read .local_version file
+	// #nosec G304 - path is constructed from controlled beadsDir + constant
+	data, err := os.ReadFile(localVersionPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet - will be created on next bd command
+			return DoctorCheck{
+				Name:    "Version Tracking",
+				Status:  StatusWarning,
+				Message: "Version tracking not initialized",
+				Detail:  "The .local_version file will be created on next bd command",
+				Fix:     "Run any bd command (e.g., 'bd ready') to initialize version tracking",
+			}
+		}
+		// Other error reading file
 		return DoctorCheck{
-			Name:    "Metadata Version Tracking",
+			Name:    "Version Tracking",
 			Status:  StatusError,
-			Message: "Unable to read metadata.json",
+			Message: "Unable to read .local_version file",
 			Detail:  err.Error(),
-			Fix:     "Ensure metadata.json exists and is valid JSON. Run 'bd init' if needed.",
+			Fix:     "Check file permissions on .beads/.local_version",
 		}
 	}
 
-	// Check if metadata.json exists
-	if cfg == nil {
-		return DoctorCheck{
-			Name:    "Metadata Version Tracking",
-			Status:  StatusWarning,
-			Message: "metadata.json not found",
-			Fix:     "Run any bd command to create metadata.json with version tracking",
-		}
-	}
+	lastVersion := strings.TrimSpace(string(data))
 
-	// Check if LastBdVersion field is present
-	if cfg.LastBdVersion == "" {
+	// Check if file is empty
+	if lastVersion == "" {
 		return DoctorCheck{
-			Name:    "Metadata Version Tracking",
+			Name:    "Version Tracking",
 			Status:  StatusWarning,
-			Message: "LastBdVersion field is empty (first run)",
+			Message: ".local_version file is empty",
 			Detail:  "Version tracking will be initialized on next command",
 			Fix:     "Run any bd command to initialize version tracking",
 		}
 	}
 
-	// Validate that LastBdVersion is a valid semver-like string
-	// Simple validation: should be X.Y.Z format where X, Y, Z are numbers
-	if !IsValidSemver(cfg.LastBdVersion) {
+	// Validate that version is a valid semver-like string
+	if !IsValidSemver(lastVersion) {
 		return DoctorCheck{
-			Name:    "Metadata Version Tracking",
+			Name:    "Version Tracking",
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("LastBdVersion has invalid format: %q", cfg.LastBdVersion),
+			Message: fmt.Sprintf("Invalid version format in .local_version: %q", lastVersion),
 			Detail:  "Expected semver format like '0.24.2'",
 			Fix:     "Run any bd command to reset version tracking to current version",
 		}
 	}
 
-	// Check if LastBdVersion is very old (> 10 versions behind)
-	// Calculate version distance
-	versionDiff := CompareVersions(currentVersion, cfg.LastBdVersion)
+	// Check if version is very old (> 10 versions behind)
+	versionDiff := CompareVersions(currentVersion, lastVersion)
 	if versionDiff > 0 {
 		// Current version is newer - check how far behind
 		currentParts := ParseVersionParts(currentVersion)
-		lastParts := ParseVersionParts(cfg.LastBdVersion)
+		lastParts := ParseVersionParts(lastVersion)
 
 		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
 		majorDiff := currentParts[0] - lastParts[0]
@@ -116,27 +126,27 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 
 		if majorDiff >= 1 || (majorDiff == 0 && minorDiff >= 10) {
 			return DoctorCheck{
-				Name:    "Metadata Version Tracking",
+				Name:    "Version Tracking",
 				Status:  StatusWarning,
-				Message: fmt.Sprintf("LastBdVersion is very old: %s (current: %s)", cfg.LastBdVersion, currentVersion),
+				Message: fmt.Sprintf("Last recorded version is very old: %s (current: %s)", lastVersion, currentVersion),
 				Detail:  "You may have missed important upgrade notifications",
 				Fix:     "Run 'bd upgrade review' to see recent changes",
 			}
 		}
 
-		// Version is behind but not too old
+		// Version is behind but not too old - this is normal after upgrade
 		return DoctorCheck{
-			Name:    "Metadata Version Tracking",
+			Name:    "Version Tracking",
 			Status:  StatusOK,
-			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", cfg.LastBdVersion, currentVersion),
+			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
 		}
 	}
 
-	// Version is current or ahead (shouldn't happen, but handle it)
+	// Version is current or ahead
 	return DoctorCheck{
-		Name:    "Metadata Version Tracking",
+		Name:    "Version Tracking",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Version tracking active (version: %s)", cfg.LastBdVersion),
+		Message: fmt.Sprintf("Version tracking active (version: %s)", lastVersion),
 	}
 }
 
