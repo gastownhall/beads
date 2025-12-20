@@ -13,9 +13,11 @@ import (
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
+// TODO: Consider integrating into 'bd doctor' migration detection
 var migrateSyncCmd = &cobra.Command{
-	Use:   "migrate-sync <branch-name>",
-	Short: "Migrate to sync.branch workflow for multi-clone setups",
+	Use:     "migrate-sync <branch-name>",
+	GroupID: "maint",
+	Short:   "Migrate to sync.branch workflow for multi-clone setups",
 	Long: `Migrate to using a dedicated sync branch for beads data.
 
 This command configures the repository to commit .beads changes to a separate

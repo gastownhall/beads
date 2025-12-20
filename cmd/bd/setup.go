@@ -13,8 +13,9 @@ var (
 )
 
 var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Setup integration with AI editors",
+	Use:     "setup",
+	GroupID: "setup",
+	Short:   "Setup integration with AI editors",
 	Long:  `Setup integration files for AI editors like Claude Code, Cursor, Aider, and Factory.ai Droid.`,
 }
 

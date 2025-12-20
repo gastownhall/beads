@@ -12,8 +12,9 @@ import (
 )
 
 var repoCmd = &cobra.Command{
-	Use:   "repo",
-	Short: "Manage multiple repository configuration",
+	Use:     "repo",
+	GroupID: "advanced",
+	Short:   "Manage multiple repository configuration",
 	Long: `Configure and manage multiple repository support for multi-clone sync.
 
 Examples:

@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/util"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -100,8 +101,9 @@ func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 }
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List issues",
+	Use:     "list",
+	GroupID: "issues",
+	Short:   "List issues",
 	Run: func(cmd *cobra.Command, args []string) {
 		status, _ := cmd.Flags().GetString("status")
 		assignee, _ := cmd.Flags().GetString("assignee")
@@ -422,8 +424,22 @@ var listCmd = &cobra.Command{
 				// Long format: multi-line with details
 				fmt.Printf("\nFound %d issues:\n\n", len(issues))
 				for _, issue := range issues {
-					fmt.Printf("%s%s [P%d] [%s] %s\n", pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status)
-					fmt.Printf("  %s\n", issue.Title)
+					status := string(issue.Status)
+					if status == "closed" {
+						// Entire closed issue is dimmed
+						line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
+							pinIndicator(issue), issue.ID, issue.Priority,
+							issue.IssueType, status, issue.Title)
+						fmt.Println(ui.RenderClosedLine(line))
+					} else {
+						fmt.Printf("%s%s [%s] [%s] %s\n",
+							pinIndicator(issue),
+							ui.RenderID(issue.ID),
+							ui.RenderPriority(issue.Priority),
+							ui.RenderType(string(issue.IssueType)),
+							ui.RenderStatus(status))
+						fmt.Printf("  %s\n", issue.Title)
+					}
 					if issue.Assignee != "" {
 						fmt.Printf("  Assignee: %s\n", issue.Assignee)
 					}
@@ -443,9 +459,22 @@ var listCmd = &cobra.Command{
 					if issue.Assignee != "" {
 						assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 					}
-					fmt.Printf("%s%s [P%d] [%s] %s%s%s - %s\n",
-						pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status,
-						assigneeStr, labelsStr, issue.Title)
+					status := string(issue.Status)
+					if status == "closed" {
+						// Entire closed line is dimmed
+						line := fmt.Sprintf("%s%s [P%d] [%s] %s%s%s - %s",
+							pinIndicator(issue), issue.ID, issue.Priority,
+							issue.IssueType, status, assigneeStr, labelsStr, issue.Title)
+						fmt.Println(ui.RenderClosedLine(line))
+					} else {
+						fmt.Printf("%s%s [%s] [%s] %s%s%s - %s\n",
+							pinIndicator(issue),
+							ui.RenderID(issue.ID),
+							ui.RenderPriority(issue.Priority),
+							ui.RenderType(string(issue.IssueType)),
+							ui.RenderStatus(status),
+							assigneeStr, labelsStr, issue.Title)
+					}
 				}
 			}
 			return
@@ -529,9 +558,23 @@ var listCmd = &cobra.Command{
 			fmt.Printf("\nFound %d issues:\n\n", len(issues))
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]
+				status := string(issue.Status)
 
-				fmt.Printf("%s%s [P%d] [%s] %s\n", pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status)
-				fmt.Printf("  %s\n", issue.Title)
+				if status == "closed" {
+					// Entire closed issue is dimmed
+					line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
+						pinIndicator(issue), issue.ID, issue.Priority,
+						issue.IssueType, status, issue.Title)
+					fmt.Println(ui.RenderClosedLine(line))
+				} else {
+					fmt.Printf("%s%s [%s] [%s] %s\n",
+						pinIndicator(issue),
+						ui.RenderID(issue.ID),
+						ui.RenderPriority(issue.Priority),
+						ui.RenderType(string(issue.IssueType)),
+						ui.RenderStatus(status))
+					fmt.Printf("  %s\n", issue.Title)
+				}
 				if issue.Assignee != "" {
 					fmt.Printf("  Assignee: %s\n", issue.Assignee)
 				}
@@ -553,9 +596,22 @@ var listCmd = &cobra.Command{
 				if issue.Assignee != "" {
 					assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 				}
-				fmt.Printf("%s%s [P%d] [%s] %s%s%s - %s\n",
-					pinIndicator(issue), issue.ID, issue.Priority, issue.IssueType, issue.Status,
-					assigneeStr, labelsStr, issue.Title)
+				status := string(issue.Status)
+				if status == "closed" {
+					// Entire closed line is dimmed
+					line := fmt.Sprintf("%s%s [P%d] [%s] %s%s%s - %s",
+						pinIndicator(issue), issue.ID, issue.Priority,
+						issue.IssueType, status, assigneeStr, labelsStr, issue.Title)
+					fmt.Println(ui.RenderClosedLine(line))
+				} else {
+					fmt.Printf("%s%s [%s] [%s] %s%s%s - %s\n",
+						pinIndicator(issue),
+						ui.RenderID(issue.ID),
+						ui.RenderPriority(issue.Priority),
+						ui.RenderType(string(issue.IssueType)),
+						ui.RenderStatus(status),
+						assigneeStr, labelsStr, issue.Title)
+				}
 			}
 		}
 

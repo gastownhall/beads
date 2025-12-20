@@ -14,8 +14,9 @@ import (
 )
 
 var commentsCmd = &cobra.Command{
-	Use:   "comments [issue-id]",
-	Short: "View or manage comments on an issue",
+	Use:     "comments [issue-id]",
+	GroupID: "issues",
+	Short:   "View or manage comments on an issue",
 	Long: `View or manage comments on an issue.
 
 Examples:
@@ -215,8 +216,9 @@ Examples:
 
 // commentCmd is a top-level alias for commentsAddCmd
 var commentCmd = &cobra.Command{
-	Use:   "comment [issue-id] [text]",
-	Short: "Add a comment to an issue (alias for 'comments add')",
+	Use:     "comment [issue-id] [text]",
+	GroupID: "issues",
+	Short:   "Add a comment to an issue (alias for 'comments add')",
 	Long: `Add a comment to an issue. This is a convenient alias for 'bd comments add'.
 
 Examples:

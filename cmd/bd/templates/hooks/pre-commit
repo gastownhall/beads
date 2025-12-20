@@ -1,5 +1,6 @@
 #!/bin/sh
 # bd-shim v1
+# bd-hooks-version: 0.30.7
 #
 # bd (beads) pre-commit hook - thin shim
 #

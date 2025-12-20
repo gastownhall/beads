@@ -34,9 +34,11 @@ var (
 	compactLimit   int
 )
 
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var compactCmd = &cobra.Command{
-	Use:   "compact",
-	Short: "Compact old closed issues to save space",
+	Use:     "compact",
+	GroupID: "maint",
+	Short:   "Compact old closed issues to save space",
 	Long: `Compact old closed issues using semantic summarization.
 
 Compaction reduces database size by summarizing closed issues that are no longer

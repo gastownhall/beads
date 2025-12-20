@@ -160,8 +160,9 @@ func FormatHookWarnings(statuses []HookStatus) string {
 // Cobra commands
 
 var hooksCmd = &cobra.Command{
-	Use:   "hooks",
-	Short: "Manage git hooks for bd auto-sync",
+	Use:     "hooks",
+	GroupID: "setup",
+	Short:   "Manage git hooks for bd auto-sync",
 	Long: `Install, uninstall, or list git hooks that provide automatic bd sync.
 
 The hooks ensure that:
@@ -407,6 +408,8 @@ func uninstallHooks() error {
 
 // runPreCommitHook flushes pending changes to JSONL before commit.
 // Returns 0 on success (or if not applicable), non-zero on error.
+//
+//nolint:unparam // Always returns 0 by design - warns but doesn't block commits
 func runPreCommitHook() int {
 	// Check if we're in a bd workspace
 	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
@@ -430,6 +433,7 @@ func runPreCommitHook() int {
 	// Stage all tracked JSONL files
 	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"} {
 		if _, err := os.Stat(f); err == nil {
+			// #nosec G204 -- f is a fixed string from the hardcoded slice above
 			gitAdd := exec.Command("git", "add", f)
 			_ = gitAdd.Run() // Ignore errors - file may not exist
 		}
@@ -440,6 +444,8 @@ func runPreCommitHook() int {
 
 // runPostMergeHook imports JSONL after pull/merge.
 // Returns 0 on success (or if not applicable), non-zero on error.
+//
+//nolint:unparam // Always returns 0 by design - warns but doesn't block merges
 func runPostMergeHook() int {
 	// Skip during rebase
 	if isRebaseInProgress() {
@@ -504,6 +510,7 @@ func runPrePushHook() int {
 			files = append(files, f)
 		} else {
 			// Check if tracked by git
+			// #nosec G204 -- f is a fixed string from the hardcoded slice above
 			checkCmd := exec.Command("git", "ls-files", "--error-unmatch", f)
 			if checkCmd.Run() == nil {
 				files = append(files, f)
@@ -517,6 +524,7 @@ func runPrePushHook() int {
 
 	// Check for uncommitted changes using git status
 	args := append([]string{"status", "--porcelain", "--"}, files...)
+	// #nosec G204 -- args contains only fixed strings from hardcoded slice
 	statusCmd := exec.Command("git", args...)
 	output, _ := statusCmd.Output()
 	if len(output) > 0 {
@@ -539,6 +547,8 @@ func runPrePushHook() int {
 // runPostCheckoutHook imports JSONL after branch checkout.
 // args: [previous-HEAD, new-HEAD, flag] where flag=1 for branch checkout
 // Returns 0 on success (or if not applicable), non-zero on error.
+//
+//nolint:unparam // Always returns 0 by design - warns but doesn't block checkouts
 func runPostCheckoutHook(args []string) int {
 	// Only run on branch checkouts (flag=1)
 	if len(args) >= 3 && args[2] != "1" {

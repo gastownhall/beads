@@ -21,8 +21,9 @@ var (
 )
 
 var primeCmd = &cobra.Command{
-	Use:   "prime",
-	Short: "Output AI-optimized workflow context",
+	Use:     "prime",
+	GroupID: "setup",
+	Short:   "Output AI-optimized workflow context",
 	Long: `Output essential Beads workflow context in AI-optimized markdown format.
 
 Automatically detects if MCP server is active and adapts output:

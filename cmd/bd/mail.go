@@ -15,8 +15,9 @@ import (
 )
 
 var mailCmd = &cobra.Command{
-	Use:   "mail",
-	Short: "Send and receive messages via beads",
+	Use:     "mail",
+	GroupID: "advanced",
+	Short:   "Send and receive messages via beads",
 	Long: `Send and receive messages between agents using beads storage.
 
 Messages are stored as issues with type=message, enabling git-native

@@ -111,8 +111,9 @@ func validateExportPath(path string) error {
 }
 
 var exportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export issues to JSONL format",
+	Use:     "export",
+	GroupID: "sync",
+	Short:   "Export issues to JSONL format",
 	Long: `Export all issues to JSON Lines format (one JSON object per line).
 Issues are sorted by ID for consistent diffs.
 

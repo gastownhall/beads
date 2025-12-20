@@ -37,8 +37,9 @@ type JiraSyncResult struct {
 }
 
 var jiraCmd = &cobra.Command{
-	Use:   "jira",
-	Short: "Jira integration commands",
+	Use:     "jira",
+	GroupID: "advanced",
+	Short:   "Jira integration commands",
 	Long: `Synchronize issues between beads and Jira.
 
 Configuration:

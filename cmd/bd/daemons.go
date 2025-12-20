@@ -14,8 +14,9 @@ import (
 	"github.com/steveyegge/beads/internal/daemon"
 )
 var daemonsCmd = &cobra.Command{
-	Use:   "daemons",
-	Short: "Manage multiple bd daemons",
+	Use:     "daemons",
+	GroupID: "sync",
+	Short:   "Manage multiple bd daemons",
 	Long: `Manage bd daemon processes across all repositories and worktrees.
 Subcommands:
   list    - Show all running daemons

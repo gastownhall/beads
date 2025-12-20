@@ -41,8 +41,9 @@ type RecentActivitySummary struct {
 }
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show issue database overview",
+	Use:     "status",
+	GroupID: "views",
+	Short:   "Show issue database overview",
 	Long: `Show a quick snapshot of the issue database state.
 
 This command provides a summary of issue counts by state (open, in_progress,

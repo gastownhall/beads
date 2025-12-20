@@ -12,8 +12,9 @@ import (
 )
 
 var quickCmd = &cobra.Command{
-	Use:   "q [title]",
-	Short: "Quick capture: create issue and output only ID",
+	Use:     "q [title]",
+	GroupID: "issues",
+	Short:   "Quick capture: create issue and output only ID",
 	Long: `Quick capture creates an issue and outputs only the issue ID.
 Designed for scripting and AI agent integration.
 

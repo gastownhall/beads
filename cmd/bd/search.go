@@ -15,8 +15,9 @@ import (
 )
 
 var searchCmd = &cobra.Command{
-	Use:   "search [query]",
-	Short: "Search issues by text query",
+	Use:     "search [query]",
+	GroupID: "issues",
+	Short:   "Search issues by text query",
 	Long: `Search issues across title, description, and ID.
 
 Examples:
