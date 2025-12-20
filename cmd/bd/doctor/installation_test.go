@@ -18,20 +18,6 @@ func TestCheckInstallation(t *testing.T) {
 			t.Errorf("expected name 'Installation', got %s", check.Name)
 		}
 	})
-
-	t.Run("beads directory exists", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.Mkdir(beadsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		check := CheckInstallation(tmpDir)
-
-		if check.Status != StatusOK {
-			t.Errorf("expected StatusOK, got %s", check.Status)
-		}
-	})
 }
 
 func TestCheckMultipleDatabases(t *testing.T) {

@@ -270,7 +270,7 @@ func CheckBdInPath() DoctorCheck {
 	_, err := exec.LookPath("bd")
 	if err != nil {
 		return DoctorCheck{
-			Name:    "bd in PATH",
+			Name:    "CLI Availability",
 			Status:  "warning",
 			Message: "'bd' command not found in PATH",
 			Detail:  "Claude hooks execute 'bd prime' and won't work without bd in PATH",
@@ -282,9 +282,9 @@ func CheckBdInPath() DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:    "bd in PATH",
+		Name:    "CLI Availability",
 		Status:  "ok",
-		Message: "'bd' command available",
+		Message: "'bd' command available in PATH",
 	}
 }
 
@@ -317,7 +317,7 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	// If no docs reference bd prime, that's fine - not everyone uses it
 	if len(filesWithBdPrime) == 0 {
 		return DoctorCheck{
-			Name:    "Documentation bd prime",
+			Name:    "Prime Documentation",
 			Status:  "ok",
 			Message: "No bd prime references in documentation",
 		}
@@ -327,7 +327,7 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	cmd := exec.Command("bd", "prime", "--help")
 	if err := cmd.Run(); err != nil {
 		return DoctorCheck{
-			Name:    "Documentation bd prime",
+			Name:    "Prime Documentation",
 			Status:  "warning",
 			Message: "Documentation references 'bd prime' but command not found",
 			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
@@ -339,7 +339,7 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:    "Documentation bd prime",
+		Name:    "Prime Documentation",
 		Status:  "ok",
 		Message: "Documentation references match installed features",
 		Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),

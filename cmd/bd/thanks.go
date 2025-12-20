@@ -6,38 +6,39 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
-// lipgloss styles for the thanks page
+// lipgloss styles for the thanks page using Ayu theme
 var (
 	thanksTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("7")) // white, bold
+				Foreground(ui.ColorWarn)
 
 	thanksSubtitleStyle = lipgloss.NewStyle().
-				Faint(true)
+				Foreground(ui.ColorMuted)
 
 	thanksSectionStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("6")). // cyan for section headers
+				Foreground(ui.ColorAccent).
 				Bold(true)
 
 	thanksNameStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("2")) // green
+			Foreground(ui.ColorPass)
 
 	thanksLabelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("3")) // yellow
+				Foreground(ui.ColorWarn)
 
 	thanksDimStyle = lipgloss.NewStyle().
-			Faint(true)
+			Foreground(ui.ColorMuted)
 )
 
 // thanksBoxStyle returns a box style with dynamic width
 func thanksBoxStyle(width int) lipgloss.Style {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.DoubleBorder()).
-		BorderForeground(lipgloss.Color("7")).
+		BorderForeground(ui.ColorMuted).
 		Padding(1, 4).
-		Width(width - 4). // account for border
+		Width(width - 4).
 		Align(lipgloss.Center)
 }
 

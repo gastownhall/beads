@@ -13,8 +13,8 @@ func TestCheckBdInPath(t *testing.T) {
 	check := CheckBdInPath()
 
 	// Just verify the check returns a valid result
-	if check.Name != "bd in PATH" {
-		t.Errorf("Expected check name 'bd in PATH', got %s", check.Name)
+	if check.Name != "CLI Availability" {
+		t.Errorf("Expected check name 'CLI Availability', got %s", check.Name)
 	}
 
 	if check.Status != "ok" && check.Status != "warning" {
@@ -119,8 +119,8 @@ func TestCheckDocumentationBdPrimeReference(t *testing.T) {
 
 			check := CheckDocumentationBdPrimeReference(tmpDir)
 
-			if check.Name != "Documentation bd prime" {
-				t.Errorf("Expected check name 'Documentation bd prime', got %s", check.Name)
+			if check.Name != "Prime Documentation" {
+				t.Errorf("Expected check name 'Prime Documentation', got %s", check.Name)
 			}
 
 			// The status depends on whether bd is installed, so we accept both ok and warning

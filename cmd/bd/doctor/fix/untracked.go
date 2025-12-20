@@ -19,7 +19,8 @@ func UntrackedJSONL(path string) error {
 	beadsDir := filepath.Join(path, ".beads")
 
 	// Find untracked JSONL files
-	cmd := exec.Command("git", "status", "--porcelain", ".beads/")
+	// Use --untracked-files=all to show individual files, not just the directory
+	cmd := exec.Command("git", "status", "--porcelain", "--untracked-files=all", ".beads/")
 	cmd.Dir = path
 	output, err := cmd.Output()
 	if err != nil {
@@ -67,9 +68,11 @@ func UntrackedJSONL(path string) error {
 		fmt.Printf("  Staged %s\n", filepath.Base(file))
 	}
 
-	// Commit the staged files
+	// Commit only the JSONL files we staged (using --only to preserve other staged changes)
 	commitMsg := "chore(beads): commit untracked JSONL files\n\nAuto-committed by bd doctor --fix (bd-pbj)"
-	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+	commitArgs := []string{"commit", "--only", "-m", commitMsg}
+	commitArgs = append(commitArgs, untrackedFiles...)
+	commitCmd := exec.Command("git", commitArgs...) // #nosec G204 -- untrackedFiles validated above
 	commitCmd.Dir = path
 	commitCmd.Stdout = os.Stdout
 	commitCmd.Stderr = os.Stderr

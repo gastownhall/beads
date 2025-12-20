@@ -2,6 +2,8 @@
 
 This project uses a two-tier testing approach to balance speed and thoroughness.
 
+> **Testing Philosophy**: For guidance on what to test, anti-patterns to avoid, and target metrics, see [TESTING_PHILOSOPHY.md](TESTING_PHILOSOPHY.md).
+
 ## Test Categories
 
 ### Fast Tests (Unit Tests)

@@ -48,10 +48,9 @@ func Permissions(path string) error {
 		// Ensure database has exactly 0600 permissions (owner rw only)
 		expectedFileMode := os.FileMode(0600)
 		currentPerms := dbInfo.Mode().Perm()
-		requiredPerms := os.FileMode(0600)
 
-		// Check if we have both read and write for owner
-		if currentPerms&requiredPerms != requiredPerms {
+		// Check if permissions are not exactly 0600
+		if currentPerms != expectedFileMode {
 			if err := os.Chmod(dbPath, expectedFileMode); err != nil {
 				return fmt.Errorf("failed to fix database permissions: %w", err)
 			}

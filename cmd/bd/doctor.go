@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/syncbranch"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // Status constants for doctor checks
@@ -29,11 +30,12 @@ const (
 )
 
 type doctorCheck struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"` // statusOK, statusWarning, or statusError
-	Message string `json:"message"`
-	Detail  string `json:"detail,omitempty"` // Additional detail like storage type
-	Fix     string `json:"fix,omitempty"`
+	Name     string `json:"name"`
+	Status   string `json:"status"` // statusOK, statusWarning, or statusError
+	Message  string `json:"message"`
+	Detail   string `json:"detail,omitempty"` // Additional detail like storage type
+	Fix      string `json:"fix,omitempty"`
+	Category string `json:"category,omitempty"` // category for grouping in output
 }
 
 type doctorResult struct {
@@ -539,19 +541,19 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 1: Installation (.beads/ directory)
-	installCheck := convertDoctorCheck(doctor.CheckInstallation(path))
+	installCheck := convertWithCategory(doctor.CheckInstallation(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, installCheck)
 	if installCheck.Status != statusOK {
 		result.OverallOK = false
 	}
 
 	// Check Git Hooks early (even if .beads/ doesn't exist yet)
-	hooksCheck := convertDoctorCheck(doctor.CheckGitHooks())
+	hooksCheck := convertWithCategory(doctor.CheckGitHooks(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, hooksCheck)
 	// Don't fail overall check for missing hooks, just warn
 
 	// Check sync-branch hook compatibility (issue #532)
-	syncBranchHookCheck := convertDoctorCheck(doctor.CheckSyncBranchHookCompatibility(path))
+	syncBranchHookCheck := convertWithCategory(doctor.CheckSyncBranchHookCompatibility(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, syncBranchHookCheck)
 	if syncBranchHookCheck.Status == statusError {
 		result.OverallOK = false
@@ -564,171 +566,171 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 1a: Fresh clone detection (bd-4ew)
 	// Must come early - if this is a fresh clone, other checks may be misleading
-	freshCloneCheck := convertDoctorCheck(doctor.CheckFreshClone(path))
+	freshCloneCheck := convertWithCategory(doctor.CheckFreshClone(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, freshCloneCheck)
 	if freshCloneCheck.Status == statusWarning || freshCloneCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2: Database version
-	dbCheck := convertDoctorCheck(doctor.CheckDatabaseVersion(path, Version))
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2a: Schema compatibility (bd-ckvw)
-	schemaCheck := convertDoctorCheck(doctor.CheckSchemaCompatibility(path))
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2b: Database integrity (bd-2au)
-	integrityCheck := convertDoctorCheck(doctor.CheckDatabaseIntegrity(path))
+	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: ID format (hash vs sequential)
-	idCheck := convertDoctorCheck(doctor.CheckIDFormat(path))
+	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, idCheck)
 	if idCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 
 	// Check 4: CLI version (GitHub)
-	versionCheck := convertDoctorCheck(doctor.CheckCLIVersion(Version))
+	versionCheck := convertWithCategory(doctor.CheckCLIVersion(Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, versionCheck)
 	// Don't fail overall check for outdated CLI, just warn
 
 	// Check 4.5: Claude plugin version (if running in Claude Code)
-	pluginCheck := convertDoctorCheck(doctor.CheckClaudePlugin())
+	pluginCheck := convertWithCategory(doctor.CheckClaudePlugin(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, pluginCheck)
 	// Don't fail overall check for outdated plugin, just warn
 
 	// Check 5: Multiple database files
-	multiDBCheck := convertDoctorCheck(doctor.CheckMultipleDatabases(path))
+	multiDBCheck := convertWithCategory(doctor.CheckMultipleDatabases(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, multiDBCheck)
 	if multiDBCheck.Status == statusWarning || multiDBCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 6: Multiple JSONL files (excluding merge artifacts)
-	jsonlCheck := convertDoctorCheck(doctor.CheckLegacyJSONLFilename(path))
+	jsonlCheck := convertWithCategory(doctor.CheckLegacyJSONLFilename(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, jsonlCheck)
 	if jsonlCheck.Status == statusWarning || jsonlCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 6a: Legacy JSONL config (bd-6xd: migrate beads.jsonl to issues.jsonl)
-	legacyConfigCheck := convertDoctorCheck(doctor.CheckLegacyJSONLConfig(path))
+	legacyConfigCheck := convertWithCategory(doctor.CheckLegacyJSONLConfig(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, legacyConfigCheck)
 	// Don't fail overall check for legacy config, just warn
 
 	// Check 7: Database/JSONL configuration mismatch
-	configCheck := convertDoctorCheck(doctor.CheckDatabaseConfig(path))
+	configCheck := convertWithCategory(doctor.CheckDatabaseConfig(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, configCheck)
 	if configCheck.Status == statusWarning || configCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 7a: Configuration value validation (bd-alz)
-	configValuesCheck := convertDoctorCheck(doctor.CheckConfigValues(path))
+	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
 	// Check 8: Daemon health
-	daemonCheck := convertDoctorCheck(doctor.CheckDaemonStatus(path, Version))
+	daemonCheck := convertWithCategory(doctor.CheckDaemonStatus(path, Version), doctor.CategoryRuntime)
 	result.Checks = append(result.Checks, daemonCheck)
 	if daemonCheck.Status == statusWarning || daemonCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 9: Database-JSONL sync
-	syncCheck := convertDoctorCheck(doctor.CheckDatabaseJSONLSync(path))
+	syncCheck := convertWithCategory(doctor.CheckDatabaseJSONLSync(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, syncCheck)
 	if syncCheck.Status == statusWarning || syncCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 9: Permissions
-	permCheck := convertDoctorCheck(doctor.CheckPermissions(path))
+	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 10: Dependency cycles
-	cycleCheck := convertDoctorCheck(doctor.CheckDependencyCycles(path))
+	cycleCheck := convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 
 	// Check 11: Claude integration
-	claudeCheck := convertDoctorCheck(doctor.CheckClaude())
+	claudeCheck := convertWithCategory(doctor.CheckClaude(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)
 	// Don't fail overall check for missing Claude integration, just warn
 
 	// Check 11a: bd in PATH (needed for Claude hooks to work)
-	bdPathCheck := convertDoctorCheck(doctor.CheckBdInPath())
+	bdPathCheck := convertWithCategory(doctor.CheckBdInPath(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
 	// Check 11b: Documentation bd prime references match installed version
-	bdPrimeDocsCheck := convertDoctorCheck(doctor.CheckDocumentationBdPrimeReference(path))
+	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn
 
 	// Check 12: Agent documentation presence
-	agentDocsCheck := convertDoctorCheck(doctor.CheckAgentDocumentation(path))
+	agentDocsCheck := convertWithCategory(doctor.CheckAgentDocumentation(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, agentDocsCheck)
 	// Don't fail overall check for missing docs, just warn
 
 	// Check 13: Legacy beads slash commands in documentation
-	legacyDocsCheck := convertDoctorCheck(doctor.CheckLegacyBeadsSlashCommands(path))
+	legacyDocsCheck := convertWithCategory(doctor.CheckLegacyBeadsSlashCommands(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, legacyDocsCheck)
 	// Don't fail overall check for legacy docs, just warn
 
 	// Check 14: Gitignore up to date
-	gitignoreCheck := convertDoctorCheck(doctor.CheckGitignore())
+	gitignoreCheck := convertWithCategory(doctor.CheckGitignore(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
 	// Check 15: Git merge driver configuration
-	mergeDriverCheck := convertDoctorCheck(doctor.CheckMergeDriver(path))
+	mergeDriverCheck := convertWithCategory(doctor.CheckMergeDriver(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, mergeDriverCheck)
 	// Don't fail overall check for merge driver, just warn
 
 	// Check 16: Metadata.json version tracking (bd-u4sb)
-	metadataCheck := convertDoctorCheck(doctor.CheckMetadataVersionTracking(path, Version))
+	metadataCheck := convertWithCategory(doctor.CheckMetadataVersionTracking(path, Version), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, metadataCheck)
 	// Don't fail overall check for metadata, just warn
 
 	// Check 17: Sync branch configuration (bd-rsua)
-	syncBranchCheck := convertDoctorCheck(doctor.CheckSyncBranchConfig(path))
+	syncBranchCheck := convertWithCategory(doctor.CheckSyncBranchConfig(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, syncBranchCheck)
 	// Don't fail overall check for missing sync.branch, just warn
 
 	// Check 17a: Sync branch health (bd-6rf)
-	syncBranchHealthCheck := convertDoctorCheck(doctor.CheckSyncBranchHealth(path))
+	syncBranchHealthCheck := convertWithCategory(doctor.CheckSyncBranchHealth(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, syncBranchHealthCheck)
 	// Don't fail overall check for sync branch health, just warn
 
 	// Check 18: Deletions manifest (legacy, now replaced by tombstones)
-	deletionsCheck := convertDoctorCheck(doctor.CheckDeletionsManifest(path))
+	deletionsCheck := convertWithCategory(doctor.CheckDeletionsManifest(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, deletionsCheck)
 	// Don't fail overall check for missing deletions manifest, just warn
 
 	// Check 19: Tombstones health (bd-s3v)
-	tombstonesCheck := convertDoctorCheck(doctor.CheckTombstones(path))
+	tombstonesCheck := convertWithCategory(doctor.CheckTombstones(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, tombstonesCheck)
 	// Don't fail overall check for tombstone issues, just warn
 
 	// Check 20: Untracked .beads/*.jsonl files (bd-pbj)
-	untrackedCheck := convertDoctorCheck(doctor.CheckUntrackedBeadsFiles(path))
+	untrackedCheck := convertWithCategory(doctor.CheckUntrackedBeadsFiles(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, untrackedCheck)
 	// Don't fail overall check for untracked files, just warn
 
@@ -738,12 +740,20 @@ func runDiagnostics(path string) doctorResult {
 // convertDoctorCheck converts doctor package check to main package check
 func convertDoctorCheck(dc doctor.DoctorCheck) doctorCheck {
 	return doctorCheck{
-		Name:    dc.Name,
-		Status:  dc.Status,
-		Message: dc.Message,
-		Detail:  dc.Detail,
-		Fix:     dc.Fix,
+		Name:     dc.Name,
+		Status:   dc.Status,
+		Message:  dc.Message,
+		Detail:   dc.Detail,
+		Fix:      dc.Fix,
+		Category: dc.Category,
 	}
+}
+
+// convertWithCategory converts a doctor check and sets its category
+func convertWithCategory(dc doctor.DoctorCheck, category string) doctorCheck {
+	check := convertDoctorCheck(dc)
+	check.Category = category
+	return check
 }
 
 // exportDiagnostics writes the doctor result to a JSON file (bd-9cc)
@@ -765,63 +775,117 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 }
 
 func printDiagnostics(result doctorResult) {
-	// Print header
-	fmt.Println("\nDiagnostics")
+	// Print header with version
+	fmt.Printf("\nbd doctor v%s\n\n", result.CLIVersion)
 
-	// Print each check with tree formatting
-	for i, check := range result.Checks {
-		// Determine prefix
-		prefix := "├"
-		if i == len(result.Checks)-1 {
-			prefix = "└"
-		}
-
-		// Format status indicator
-		var statusIcon string
-		switch check.Status {
-		case statusOK:
-			statusIcon = ""
-		case statusWarning:
-			statusIcon = color.YellowString(" ⚠")
-		case statusError:
-			statusIcon = color.RedString(" ✗")
-		}
-
-		// Print main check line
-		fmt.Printf(" %s %s: %s%s\n", prefix, check.Name, check.Message, statusIcon)
-
-		// Print detail if present (indented under the check)
-		if check.Detail != "" {
-			detailPrefix := "│"
-			if i == len(result.Checks)-1 {
-				detailPrefix = " "
-			}
-			fmt.Printf(" %s   %s\n", detailPrefix, color.New(color.Faint).Sprint(check.Detail))
-		}
-	}
-
-	fmt.Println()
-
-	// Print warnings/errors with fixes
-	hasIssues := false
+	// Group checks by category
+	checksByCategory := make(map[string][]doctorCheck)
 	for _, check := range result.Checks {
-		if check.Status != statusOK && check.Fix != "" {
-			if !hasIssues {
-				hasIssues = true
-			}
-
-			switch check.Status {
-			case statusWarning:
-				color.Yellow("⚠ Warning: %s\n", check.Message)
-			case statusError:
-				color.Red("✗ Error: %s\n", check.Message)
-			}
-
-			fmt.Printf("  Fix: %s\n\n", check.Fix)
+		cat := check.Category
+		if cat == "" {
+			cat = "Other"
 		}
+		checksByCategory[cat] = append(checksByCategory[cat], check)
 	}
 
-	if !hasIssues {
+	// Track counts
+	var passCount, warnCount, failCount int
+	var warnings []doctorCheck
+
+	// Print checks by category in defined order
+	for _, category := range doctor.CategoryOrder {
+		checks, exists := checksByCategory[category]
+		if !exists || len(checks) == 0 {
+			continue
+		}
+
+		// Print category header
+		fmt.Println(ui.RenderCategory(category))
+
+		// Print each check in this category
+		for _, check := range checks {
+			// Determine status icon
+			var statusIcon string
+			switch check.Status {
+			case statusOK:
+				statusIcon = ui.RenderPassIcon()
+				passCount++
+			case statusWarning:
+				statusIcon = ui.RenderWarnIcon()
+				warnCount++
+				warnings = append(warnings, check)
+			case statusError:
+				statusIcon = ui.RenderFailIcon()
+				failCount++
+				warnings = append(warnings, check)
+			}
+
+			// Print check line: icon + name + message
+			fmt.Printf("  %s  %s", statusIcon, check.Name)
+			if check.Message != "" {
+				fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
+			}
+			fmt.Println()
+
+			// Print detail if present (indented)
+			if check.Detail != "" {
+				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(check.Detail))
+			}
+		}
+		fmt.Println()
+	}
+
+	// Print any checks without a category
+	if otherChecks, exists := checksByCategory["Other"]; exists && len(otherChecks) > 0 {
+		fmt.Println(ui.RenderCategory("Other"))
+		for _, check := range otherChecks {
+			var statusIcon string
+			switch check.Status {
+			case statusOK:
+				statusIcon = ui.RenderPassIcon()
+				passCount++
+			case statusWarning:
+				statusIcon = ui.RenderWarnIcon()
+				warnCount++
+				warnings = append(warnings, check)
+			case statusError:
+				statusIcon = ui.RenderFailIcon()
+				failCount++
+				warnings = append(warnings, check)
+			}
+			fmt.Printf("  %s  %s", statusIcon, check.Name)
+			if check.Message != "" {
+				fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
+			}
+			fmt.Println()
+			if check.Detail != "" {
+				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(check.Detail))
+			}
+		}
+		fmt.Println()
+	}
+
+	// Print summary line
+	fmt.Println(ui.RenderSeparator())
+	summary := fmt.Sprintf("%s %d passed  %s %d warnings  %s %d failed",
+		ui.RenderPassIcon(), passCount,
+		ui.RenderWarnIcon(), warnCount,
+		ui.RenderFailIcon(), failCount,
+	)
+	fmt.Println(summary)
+
+	// Print warnings/errors section with fixes
+	if len(warnings) > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderWarn(ui.IconWarn + "  WARNINGS"))
+		for _, check := range warnings {
+			fmt.Printf("   %s: %s\n", check.Name, check.Message)
+			if check.Fix != "" {
+				fmt.Printf("   %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.Fix)
+			}
+		}
+	} else {
+		fmt.Println()
 		color.Green("✓ All checks passed\n")
 	}
 }

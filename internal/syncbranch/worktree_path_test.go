@@ -107,6 +107,13 @@ func TestGetBeadsWorktreePath(t *testing.T) {
 		// Should point to the main repo's .git/beads-worktrees, not the worktree's
 		mainGitDir := filepath.Join(mainRepoPath, ".git")
 		expectedPath := filepath.Join(mainGitDir, "beads-worktrees", "beads-sync")
+
+		// Resolve symlinks for comparison (on macOS, /var -> /private/var)
+		resolvedExpected, err := filepath.EvalSymlinks(mainRepoPath)
+		if err == nil {
+			expectedPath = filepath.Join(resolvedExpected, ".git", "beads-worktrees", "beads-sync")
+		}
+
 		if path != expectedPath {
 			t.Errorf("Expected path %q, got %q", expectedPath, path)
 		}

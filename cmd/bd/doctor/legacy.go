@@ -43,14 +43,14 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 
 	if len(filesWithLegacyCommands) == 0 {
 		return DoctorCheck{
-			Name:    "Documentation",
+			Name:    "Legacy Commands",
 			Status:  "ok",
 			Message: "No legacy beads slash commands detected",
 		}
 	}
 
 	return DoctorCheck{
-		Name:    "Integration Pattern",
+		Name:    "Legacy Commands",
 		Status:  "warning",
 		Message: fmt.Sprintf("Old beads integration detected in %s", strings.Join(filesWithLegacyCommands, ", ")),
 		Detail:  "Found: /beads:* slash command references (deprecated)\n" +
