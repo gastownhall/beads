@@ -233,7 +233,7 @@ func (s *SQLiteStorage) GetDependenciesWithMetadata(ctx context.Context, issueID
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned,
+		       i.sender, i.ephemeral, i.pinned, i.is_template,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.depends_on_id
@@ -255,7 +255,7 @@ func (s *SQLiteStorage) GetDependentsWithMetadata(ctx context.Context, issueID s
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned,
+		       i.sender, i.ephemeral, i.pinned, i.is_template,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
@@ -716,6 +716,8 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var ephemeral sql.NullInt64
 		// Pinned field (bd-7h5)
 		var pinned sql.NullInt64
+		// Template field (beads-1ra)
+		var isTemplate sql.NullInt64
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -723,7 +725,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &ephemeral, &pinned,
+			&sender, &ephemeral, &pinned, &isTemplate,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -772,6 +774,10 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
 		}
+		// Template field (beads-1ra)
+		if isTemplate.Valid && isTemplate.Int64 != 0 {
+			issue.IsTemplate = true
+		}
 
 		issues = append(issues, &issue)
 		issueIDs = append(issueIDs, issue.ID)
@@ -813,6 +819,8 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		var ephemeral sql.NullInt64
 		// Pinned field (bd-7h5)
 		var pinned sql.NullInt64
+		// Template field (beads-1ra)
+		var isTemplate sql.NullInt64
 		var depType types.DependencyType
 
 		err := rows.Scan(
@@ -821,7 +829,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &ephemeral, &pinned,
+			&sender, &ephemeral, &pinned, &isTemplate,
 			&depType,
 		)
 		if err != nil {
@@ -867,6 +875,10 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
+		}
+		// Template field (beads-1ra)
+		if isTemplate.Valid && isTemplate.Int64 != 0 {
+			issue.IsTemplate = true
 		}
 
 		// Fetch labels for this issue

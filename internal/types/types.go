@@ -48,6 +48,9 @@ type Issue struct {
 
 	// Pinned field (bd-7h5): persistent context markers
 	Pinned bool `json:"pinned,omitempty"` // If true, issue is a persistent context marker, not a work item
+
+	// Template field (beads-1ra): template molecule support
+	IsTemplate bool `json:"is_template,omitempty"` // If true, issue is a read-only template molecule
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -82,6 +85,10 @@ func (i *Issue) ComputeContentHash() string {
 	h.Write([]byte{0})
 	if i.Pinned {
 		h.Write([]byte("pinned"))
+	}
+	h.Write([]byte{0})
+	if i.IsTemplate {
+		h.Write([]byte("template"))
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil))
@@ -233,7 +240,7 @@ const (
 	TypeChore        IssueType = "chore"
 	TypeMessage      IssueType = "message"       // Ephemeral communication between workers
 	TypeMergeRequest IssueType = "merge-request" // Merge queue entry for refinery processing
-	TypeMolecule     IssueType = "molecule"      // Composable workflow template
+	TypeMolecule     IssueType = "molecule"      // Template molecule for issue hierarchies (beads-1ra)
 )
 
 // IsValid checks if the issue type value is valid
@@ -446,6 +453,9 @@ type IssueFilter struct {
 
 	// Pinned filtering (bd-7h5)
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
+
+	// Template filtering (beads-1ra)
+	IsTemplate *bool // Filter by template flag (nil = any, true = only templates, false = exclude templates)
 }
 
 // SortPolicy determines how ready work is ordered

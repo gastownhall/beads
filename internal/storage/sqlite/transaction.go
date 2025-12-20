@@ -306,7 +306,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -1107,7 +1107,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1152,6 +1152,8 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var ephemeral sql.NullInt64
 	// Pinned field (bd-7h5)
 	var pinned sql.NullInt64
+	// Template field (beads-1ra)
+	var isTemplate sql.NullInt64
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1160,7 +1162,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral, &pinned,
+		&sender, &ephemeral, &pinned, &isTemplate,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1217,6 +1219,10 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
+	}
+	// Template field (beads-1ra)
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
 	}
 
 	return &issue, nil
