@@ -425,6 +425,10 @@ func computeDependencyCounts(subgraph *TemplateSubgraph) (blocks map[string]int,
 	blocks = make(map[string]int)
 	blockedBy = make(map[string]int)
 
+	if subgraph == nil {
+		return blocks, blockedBy
+	}
+
 	for _, dep := range subgraph.Dependencies {
 		if dep.Type == types.DepBlocks {
 			// dep.DependsOnID blocks dep.IssueID

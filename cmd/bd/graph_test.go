@@ -202,6 +202,16 @@ func stringContains(s, substr string) bool {
 }
 
 func TestComputeDependencyCounts(t *testing.T) {
+	t.Run("nil subgraph", func(t *testing.T) {
+		blocks, blockedBy := computeDependencyCounts(nil)
+		if len(blocks) != 0 {
+			t.Errorf("expected empty blocks map for nil subgraph, got %d entries", len(blocks))
+		}
+		if len(blockedBy) != 0 {
+			t.Errorf("expected empty blockedBy map for nil subgraph, got %d entries", len(blockedBy))
+		}
+	})
+
 	t.Run("empty subgraph", func(t *testing.T) {
 		subgraph := &TemplateSubgraph{
 			Root:         &types.Issue{ID: "root-1"},
