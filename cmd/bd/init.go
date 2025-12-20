@@ -1586,17 +1586,15 @@ const landingThePlaneSection = `
 - If push fails, resolve and retry until it succeeds
 `
 
-// addLandingThePlaneInstructions adds "landing the plane" instructions to AGENTS.md and @AGENTS.md
+// addLandingThePlaneInstructions adds "landing the plane" instructions to AGENTS.md
 func addLandingThePlaneInstructions(verbose bool) {
-	// Files to update (AGENTS.md and @AGENTS.md for web Claude)
-	agentFiles := []string{"AGENTS.md", "@AGENTS.md"}
+	// File to update (AGENTS.md is the standard comprehensive documentation file)
+	agentFile := "AGENTS.md"
 
-	for _, filename := range agentFiles {
-		if err := updateAgentFile(filename, verbose); err != nil {
-			// Non-fatal - continue with other files
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update %s: %v\n", filename, err)
-			}
+	if err := updateAgentFile(agentFile, verbose); err != nil {
+		// Non-fatal - continue with other files
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to update %s: %v\n", agentFile, err)
 		}
 	}
 }
