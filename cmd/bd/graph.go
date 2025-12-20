@@ -99,7 +99,7 @@ Colors indicate status:
 		}
 
 		// Render ASCII graph
-		renderGraph(layout, nil)
+		renderGraph(layout, subgraph)
 	},
 }
 

@@ -73,8 +73,12 @@ function downloadFile(url, dest) {
       response.pipe(file);
 
       file.on('finish', () => {
-        file.close();
-        resolve();
+        // Wait for file.close() to complete before resolving
+        // This is critical on Windows where the file may still be locked
+        file.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
       });
     });
 
