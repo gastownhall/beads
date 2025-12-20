@@ -4,12 +4,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
+// If path is a symlink, writes to the resolved target (preserving the symlink).
 func atomicWriteFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
+	targetPath, err := utils.ResolveForWrite(path)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	dir := filepath.Dir(targetPath)
 
 	// Create unique temp file in same directory
 	tmpFile, err := os.CreateTemp(dir, ".*.tmp")
@@ -38,7 +46,7 @@ func atomicWriteFile(path string, data []byte) error {
 	}
 
 	// Atomic rename
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := os.Rename(tmpPath, targetPath); err != nil {
 		_ = os.Remove(tmpPath) // Best effort cleanup
 		return fmt.Errorf("rename temp file: %w", err)
 	}

@@ -67,6 +67,45 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFile_PreservesSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create target file
+	target := filepath.Join(tmpDir, "target.txt")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create symlink
+	link := filepath.Join(tmpDir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write via symlink
+	if err := atomicWriteFile(link, []byte("updated")); err != nil {
+		t.Fatalf("atomicWriteFile failed: %v", err)
+	}
+
+	// Verify symlink still exists
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("failed to lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("symlink was replaced with regular file")
+	}
+
+	// Verify target was updated
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("failed to read target: %v", err)
+	}
+	if string(data) != "updated" {
+		t.Errorf("target content = %q, want %q", string(data), "updated")
+	}
+}
+
 func TestDirExists(t *testing.T) {
 	tmpDir := t.TempDir()
 

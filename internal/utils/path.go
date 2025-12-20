@@ -69,6 +69,23 @@ func FindMoleculesJSONLInDir(dbDir string) string {
 	return ""
 }
 
+// ResolveForWrite returns the path to write to, resolving symlinks.
+// If path is a symlink, returns the resolved target path.
+// If path doesn't exist, returns path unchanged (new file).
+func ResolveForWrite(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return filepath.EvalSymlinks(path)
+	}
+	return path, nil
+}
+
 // CanonicalizePath converts a path to its canonical form by:
 // 1. Converting to absolute path
 // 2. Resolving symlinks
