@@ -38,9 +38,8 @@ Town (/Users/stevey/gt)
 ## Key Commands
 
 ### Finding Work
-- `gt mail inbox` - Check your inbox (mail is in Gas Town)
-- `bd ready` - Available issues
-- `bd list --status=in_progress` - Your active work
+- `gt mail inbox` - Check your inbox (run from YOUR cwd, not ~/gt)
+- The overseer directs your work. Your molecule (pinned handoff) is your yellow sticky.
 
 ### Working
 - `bd update <id> --status=in_progress` - Claim an issue
@@ -187,10 +186,6 @@ A 50k token MCP schema consumes the same compute whether you use those tools or 
 **Essential commands for AI agents:**
 
 ```bash
-# Find work
-bd ready --json                                    # Unblocked issues
-bd stale --days 30 --json                          # Forgotten issues
-
 # Create and manage issues
 bd create "Issue title" --description="Detailed context about the issue" -t bug|feature|task -p 0-4 --json
 bd create "Found bug" --description="What the bug is and how it was discovered" -p 1 --deps discovered-from:<parent-id> --json
@@ -310,14 +305,12 @@ bd monitor --port 3000      # Custom port
 
 ### Workflow
 
-1. **Check for ready work**: Run `bd ready` to see what's unblocked (or `bd stale` to find forgotten issues)
-2. **Claim your task**: `bd update <id> --status in_progress`
-3. **Work on it**: Implement, test, document
-4. **Discover new work**: If you find bugs or TODOs, create issues:
-   - Old way (two commands): `bd create "Found bug in auth" --description="Details about the bug" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
-   - New way (one command): `bd create "Found bug in auth" --description="Login fails with 500 when password has special chars" -t bug -p 1 --deps discovered-from:<current-id> --json`
-5. **Complete**: `bd close <id> --reason "Implemented"`
-6. **Sync at end of session**: `bd sync` (see "Agent Session Workflow" below)
+1. **Check your inbox**: Run `gt mail inbox` from your cwd to see handoffs and work assignments
+2. **Work on assigned tasks**: The overseer directs your work
+3. **Discover new work**: If you find bugs or TODOs, create issues:
+   - `bd create "Found bug in auth" --description="Login fails with 500 when password has special chars" -t bug -p 1 --json`
+4. **Complete**: `bd close <id> --reason "Implemented"`
+5. **Sync at end of session**: `bd sync`
 
 ### IMPORTANT: Always Include Issue Descriptions
 
@@ -604,17 +597,11 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for detailed instructions on:
 
 - Always use `--json` flags for programmatic use
 - **Always run `bd sync` at end of session** to flush/commit/push immediately
-- **Check `bd info --whats-new` at session start** if bd was recently upgraded
-- **Run `bd hooks install`** if `bd info` warns about outdated git hooks
+- **Run `gt mail inbox` from your cwd** - not ~/gt (which makes you the Mayor)
 - Link discoveries with `discovered-from` to maintain context
-- Check `bd ready` before asking "what next?"
-- Auto-sync batches changes in 30-second window - use `bd sync` to force immediate flush
-- Use `--no-auto-flush` or `--no-auto-import` to disable automatic sync if needed
+- The overseer directs your work - don't poll bd for tasks
 - Use `bd dep tree` to understand complex dependencies
-- Priority 0-1 issues are usually more important than 2-4
 - Use `--dry-run` to preview import changes before applying
-- Hash IDs eliminate collisions - same ID with different content is a normal update
-- Use `--id` flag with `bd create` to partition ID space for parallel workers (e.g., `worker1-100`, `worker2-500`)
 
 ### Checking GitHub Issues and PRs
 
@@ -667,12 +654,6 @@ bd init --contributor  # Interactive setup for separate planning repo
 bd init --team  # Interactive setup for team collaboration
 ```
 
-**Check for ready work:**
-
-```bash
-bd ready --json
-```
-
 **Create new issues:**
 
 ```bash
@@ -711,12 +692,10 @@ bd close bd-42 --reason "Completed" --json
 
 ### Workflow for AI Agents
 
-1. **Check ready work**: `bd ready` shows unblocked issues
-2. **Claim your task**: `bd update <id> --status in_progress`
-3. **Work on it**: Implement, test, document
-4. **Discover new work?** Create linked issue:
-   - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
-5. **Complete**: `bd close <id> --reason "Done"`
+1. **Check your inbox**: `gt mail inbox` (from your cwd, not ~/gt)
+2. **Work on assigned tasks**: The overseer directs your work
+3. **Discover new work?** Create issue: `bd create "Found bug" --description="Details" -p 1 --json`
+4. **Complete**: `bd close <id> --reason "Done"`
 
 ### Auto-Sync
 
@@ -770,14 +749,13 @@ history/
 
 ### Important Rules
 
-- ✅ Use bd for ALL task tracking
+- ✅ Use bd for issue tracking (creating, closing issues)
 - ✅ Always use `--json` flag for programmatic use
 - ✅ Link discovered work with `discovered-from` dependencies
-- ✅ Check `bd ready` before asking "what should I work on?"
+- ✅ Run `gt mail inbox` from your cwd, not ~/gt
 - ✅ Store AI planning docs in `history/` directory
+- ❌ Do NOT use `bd ready` or `bd list` to find work - the overseer directs your work
 - ❌ Do NOT create markdown TODO lists
-- ❌ Do NOT use external issue trackers
-- ❌ Do NOT duplicate tracking systems
 - ❌ Do NOT clutter repo root with planning documents
 
 For more details, see README.md and docs/QUICKSTART.md.
