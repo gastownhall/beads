@@ -10,8 +10,9 @@ import (
 )
 
 var upgradeCmd = &cobra.Command{
-	Use:   "upgrade",
-	Short: "Check and manage bd version upgrades",
+	Use:     "upgrade",
+	GroupID: "maint",
+	Short:   "Check and manage bd version upgrades",
 	Long: `Commands for checking bd version upgrades and reviewing changes.
 
 The upgrade command helps you stay aware of bd version changes:

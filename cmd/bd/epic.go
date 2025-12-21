@@ -3,14 +3,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 var epicCmd = &cobra.Command{
-	Use:   "epic",
-	Short: "Epic management commands",
+	Use:     "epic",
+	GroupID: "deps",
+	Short:   "Epic management commands",
 }
 var epicStatusCmd = &cobra.Command{
 	Use:   "status",
@@ -67,10 +68,6 @@ var epicStatusCmd = &cobra.Command{
 			fmt.Println("No open epics found")
 			return
 		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
-		green := color.New(color.FgGreen).SprintFunc()
-		bold := color.New(color.Bold).SprintFunc()
 		for _, epicStatus := range epics {
 			epic := epicStatus.Epic
 			percentage := 0
@@ -79,17 +76,17 @@ var epicStatusCmd = &cobra.Command{
 			}
 			statusIcon := ""
 			if epicStatus.EligibleForClose {
-				statusIcon = green("✓")
+				statusIcon = ui.RenderPass("✓")
 			} else if percentage > 0 {
-				statusIcon = yellow("○")
+				statusIcon = ui.RenderWarn("○")
 			} else {
 				statusIcon = "○"
 			}
-			fmt.Printf("%s %s %s\n", statusIcon, cyan(epic.ID), bold(epic.Title))
+			fmt.Printf("%s %s %s\n", statusIcon, ui.RenderAccent(epic.ID), ui.RenderBold(epic.Title))
 			fmt.Printf("   Progress: %d/%d children closed (%d%%)\n",
 				epicStatus.ClosedChildren, epicStatus.TotalChildren, percentage)
 			if epicStatus.EligibleForClose {
-				fmt.Printf("   %s\n", green("Eligible for closure"))
+				fmt.Printf("   %s\n", ui.RenderPass("Eligible for closure"))
 			}
 			fmt.Println()
 		}

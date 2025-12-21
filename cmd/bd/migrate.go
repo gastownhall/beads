@@ -8,20 +8,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
+// TODO: Consider integrating into 'bd doctor' migration detection
 var migrateCmd = &cobra.Command{
-	Use:   "migrate",
-	Short: "Migrate database to current version",
+	Use:     "migrate",
+	GroupID: "maint",
+	Short:   "Migrate database to current version",
 	Long: `Detect and migrate database files to the current version.
 
 This command:
@@ -140,12 +142,12 @@ This command:
 				fmt.Printf("  Current database: %s\n", filepath.Base(currentDB.path))
 				fmt.Printf("  Schema version: %s\n", currentDB.version)
 				if currentDB.version != Version {
-					color.Yellow("  ⚠ Version mismatch (current: %s, expected: %s)\n", currentDB.version, Version)
+					fmt.Printf("  ⚠ %s\n", ui.RenderWarn(fmt.Sprintf("Version mismatch (current: %s, expected: %s)", currentDB.version, Version)))
 				} else {
-					color.Green("  ✓ Version matches\n")
+					fmt.Printf("  %s\n", ui.RenderPass("✓ Version matches"))
 				}
 			} else {
-				color.Yellow("  No %s found\n", cfg.Database)
+				fmt.Printf("  %s\n", ui.RenderWarn(fmt.Sprintf("No %s found", cfg.Database)))
 			}
 
 			if len(oldDBs) > 0 {
@@ -231,7 +233,7 @@ This command:
 					os.Exit(1)
 				}
 				if !jsonOutput {
-					color.Green("✓ Created backup: %s\n", filepath.Base(backupPath))
+					fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Created backup: %s", filepath.Base(backupPath))))
 				}
 			}
 
@@ -256,7 +258,7 @@ This command:
 			needsVersionUpdate = true
 
 			if !jsonOutput {
-				color.Green("✓ Migration complete\n\n")
+				fmt.Printf("%s\n\n", ui.RenderPass("✓ Migration complete"))
 			}
 		}
 
@@ -305,7 +307,7 @@ This command:
 							os.Exit(1)
 						}
 						if !jsonOutput {
-							color.Green("✓ Detected and set issue prefix: %s\n", detectedPrefix)
+							fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Detected and set issue prefix: %s", detectedPrefix)))
 						}
 					}
 				}
@@ -327,12 +329,12 @@ This command:
 			// Close and checkpoint to finalize the WAL
 			if err := store.Close(); err != nil {
 				if !jsonOutput {
-					color.Yellow("Warning: error closing database: %v\n", err)
+					fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: error closing database: %v", err)))
 				}
 			}
 
 			if !jsonOutput {
-				color.Green("✓ Version updated\n\n")
+				fmt.Printf("%s\n\n", ui.RenderPass("✓ Version updated"))
 			}
 		}
 
@@ -361,7 +363,7 @@ This command:
 				for _, db := range oldDBs {
 					if err := os.Remove(db.path); err != nil {
 						if !jsonOutput {
-							color.Yellow("Warning: failed to remove %s: %v\n", filepath.Base(db.path), err)
+							fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to remove %s: %v", filepath.Base(db.path), err)))
 						}
 					} else if !jsonOutput {
 						fmt.Printf("Removed %s\n", filepath.Base(db.path))
@@ -369,7 +371,7 @@ This command:
 				}
 
 				if !jsonOutput {
-					color.Green("\n✓ Cleanup complete\n")
+					fmt.Printf("\n%s\n", ui.RenderPass("✓ Cleanup complete"))
 				}
 			}
 		}
@@ -426,7 +428,7 @@ This command:
 						os.Exit(1)
 					}
 					if !jsonOutput {
-						color.Green("✓ Created backup: %s\n", filepath.Base(backupPath))
+						fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Created backup: %s", filepath.Base(backupPath))))
 					}
 					}
 					
@@ -449,7 +451,7 @@ This command:
 					if dryRun {
 						fmt.Printf("\nWould migrate %d issues to hash-based IDs\n", len(mapping))
 					} else {
-						color.Green("✓ Migrated %d issues to hash-based IDs\n", len(mapping))
+						fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Migrated %d issues to hash-based IDs", len(mapping))))
 						}
 						}
 						} else {
@@ -464,7 +466,7 @@ This command:
 		if !dryRun {
 			if err := cfg.Save(beadsDir); err != nil {
 				if !jsonOutput {
-					color.Yellow("Warning: failed to save metadata.json: %v\n", err)
+					fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to save metadata.json: %v", err)))
 				}
 				// Don't fail migration if config save fails
 			}
@@ -693,7 +695,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 			"new_repo_id": newRepoID[:8],
 		})
 	} else {
-		color.Green("✓ Repository ID updated\n\n")
+		fmt.Printf("%s\n\n", ui.RenderPass("✓ Repository ID updated"))
 		fmt.Printf("  Old: %s\n", oldDisplay)
 		fmt.Printf("  New: %s\n", newRepoID[:8])
 	}
@@ -1016,7 +1018,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 				"message":  "sync.branch already set to this value",
 			})
 		} else {
-			color.Green("✓ sync.branch already set to '%s'\n", b)
+			fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ sync.branch already set to '%s'", b)))
 			fmt.Println("No changes needed")
 		}
 		return
@@ -1044,7 +1046,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 			"message":  "Enabled separate branch workflow",
 		})
 	} else {
-		color.Green("✓ Enabled separate branch workflow\n\n")
+		fmt.Printf("%s\n\n", ui.RenderPass("✓ Enabled separate branch workflow"))
 		fmt.Printf("Set sync.branch to '%s'\n\n", b)
 		fmt.Println("Next steps:")
 		fmt.Println("  1. Restart the daemon to create worktree and start committing to the branch:")

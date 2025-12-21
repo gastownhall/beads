@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -397,8 +397,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 
 	// Report failures if any
 	if len(failedIssues) > 0 {
-		red := color.New(color.FgRed).SprintFunc()
-		fmt.Fprintf(os.Stderr, "\n%s Failed to create %d issues:\n", red("✗"), len(failedIssues))
+		fmt.Fprintf(os.Stderr, "\n%s Failed to create %d issues:\n", ui.RenderFail("✗"), len(failedIssues))
 		for _, title := range failedIssues {
 			fmt.Fprintf(os.Stderr, "  - %s\n", title)
 		}
@@ -407,8 +406,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	if jsonOutput {
 		outputJSON(createdIssues)
 	} else {
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Created %d issues from %s:\n", green("✓"), len(createdIssues), filepath)
+		fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(createdIssues), filepath)
 		for _, issue := range createdIssues {
 			fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
 		}

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // legacyDeletionRecordCmd represents a single deletion entry from the legacy deletions.jsonl manifest.
@@ -68,9 +68,11 @@ func loadLegacyDeletionsCmd(path string) (map[string]legacyDeletionRecordCmd, []
 	return records, warnings, nil
 }
 
+// TODO: Consider integrating into 'bd doctor' migration detection
 var migrateTombstonesCmd = &cobra.Command{
-	Use:   "migrate-tombstones",
-	Short: "Convert deletions.jsonl entries to inline tombstones",
+	Use:     "migrate-tombstones",
+	GroupID: "maint",
+	Short:   "Convert deletions.jsonl entries to inline tombstones",
 	Long: `Migrate legacy deletions.jsonl entries to inline tombstones in issues.jsonl.
 
 This command converts existing deletion records from the legacy deletions.jsonl
@@ -149,7 +151,7 @@ Examples:
 		// Print warnings from loading
 		for _, warning := range warnings {
 			if !jsonOutput {
-				color.Yellow("Warning: %s\n", warning)
+				fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: %s", warning)))
 			}
 		}
 
@@ -288,7 +290,7 @@ Examples:
 		if err := os.Rename(deletionsPath, archivePath); err != nil {
 			// Warn but don't fail - tombstones were already created
 			if !jsonOutput {
-				color.Yellow("Warning: could not archive deletions.jsonl: %v\n", err)
+				fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: could not archive deletions.jsonl: %v", err)))
 			}
 		} else if verbose && !jsonOutput {
 			fmt.Printf("  ✓ Archived deletions.jsonl to %s\n", filepath.Base(archivePath))
@@ -305,7 +307,7 @@ Examples:
 				"migrated_ids": migratedIDs,
 			})
 		} else {
-			color.Green("\n✓ Migration complete\n\n")
+			fmt.Printf("\n%s\n\n", ui.RenderPass("✓ Migration complete"))
 			fmt.Printf("  Migrated: %d tombstone(s)\n", len(migratedIDs))
 			if len(skippedIDs) > 0 {
 				fmt.Printf("  Skipped:  %d (already had tombstones)\n", len(skippedIDs))

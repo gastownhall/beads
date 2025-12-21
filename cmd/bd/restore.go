@@ -8,14 +8,15 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var restoreCmd = &cobra.Command{
-	Use:   "restore <issue-id>",
-	Short: "Restore full history of a compacted issue from git",
+	Use:     "restore <issue-id>",
+	GroupID: "sync",
+	Short:   "Restore full history of a compacted issue from git",
 	Long: `Restore full history of a compacted issue from git version control.
 
 When an issue is compacted, the git commit hash is saved. This command:
@@ -185,59 +186,54 @@ func readIssueFromJSONL(jsonlPath, issueID string) (*types.Issue, error) {
 
 // displayRestoredIssue displays the restored issue in a readable format
 func displayRestoredIssue(issue *types.Issue, commitHash string) {
-	cyan := color.New(color.FgCyan).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	bold := color.New(color.Bold).SprintFunc()
-
-	fmt.Printf("\n%s %s (restored from git commit %s)\n", cyan("📜"), bold(issue.ID), yellow(commitHash[:8]))
-	fmt.Printf("%s\n\n", bold(issue.Title))
+	fmt.Printf("\n%s %s (restored from git commit %s)\n", ui.RenderAccent("📜"), ui.RenderBold(issue.ID), ui.RenderWarn(commitHash[:8]))
+	fmt.Printf("%s\n\n", ui.RenderBold(issue.Title))
 
 	if issue.Description != "" {
-		fmt.Printf("%s\n%s\n\n", bold("Description:"), issue.Description)
+		fmt.Printf("%s\n%s\n\n", ui.RenderBold("Description:"), issue.Description)
 	}
 
 	if issue.Design != "" {
-		fmt.Printf("%s\n%s\n\n", bold("Design:"), issue.Design)
+		fmt.Printf("%s\n%s\n\n", ui.RenderBold("Design:"), issue.Design)
 	}
 
 	if issue.AcceptanceCriteria != "" {
-		fmt.Printf("%s\n%s\n\n", bold("Acceptance Criteria:"), issue.AcceptanceCriteria)
+		fmt.Printf("%s\n%s\n\n", ui.RenderBold("Acceptance Criteria:"), issue.AcceptanceCriteria)
 	}
 
 	if issue.Notes != "" {
-		fmt.Printf("%s\n%s\n\n", bold("Notes:"), issue.Notes)
+		fmt.Printf("%s\n%s\n\n", ui.RenderBold("Notes:"), issue.Notes)
 	}
 
 	fmt.Printf("%s %s | %s %d | %s %s\n",
-		bold("Status:"), issue.Status,
-		bold("Priority:"), issue.Priority,
-		bold("Type:"), issue.IssueType,
+		ui.RenderBold("Status:"), issue.Status,
+		ui.RenderBold("Priority:"), issue.Priority,
+		ui.RenderBold("Type:"), issue.IssueType,
 	)
 
 	if issue.Assignee != "" {
-		fmt.Printf("%s %s\n", bold("Assignee:"), issue.Assignee)
+		fmt.Printf("%s %s\n", ui.RenderBold("Assignee:"), issue.Assignee)
 	}
 
 	if len(issue.Labels) > 0 {
-		fmt.Printf("%s %s\n", bold("Labels:"), strings.Join(issue.Labels, ", "))
+		fmt.Printf("%s %s\n", ui.RenderBold("Labels:"), strings.Join(issue.Labels, ", "))
 	}
 
-	fmt.Printf("\n%s %s\n", bold("Created:"), issue.CreatedAt.Format("2006-01-02 15:04:05"))
-	fmt.Printf("%s %s\n", bold("Updated:"), issue.UpdatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("\n%s %s\n", ui.RenderBold("Created:"), issue.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("%s %s\n", ui.RenderBold("Updated:"), issue.UpdatedAt.Format("2006-01-02 15:04:05"))
 	if issue.ClosedAt != nil {
-		fmt.Printf("%s %s\n", bold("Closed:"), issue.ClosedAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%s %s\n", ui.RenderBold("Closed:"), issue.ClosedAt.Format("2006-01-02 15:04:05"))
 	}
 
 	if len(issue.Dependencies) > 0 {
-		fmt.Printf("\n%s\n", bold("Dependencies:"))
+		fmt.Printf("\n%s\n", ui.RenderBold("Dependencies:"))
 		for _, dep := range issue.Dependencies {
-			fmt.Printf("  %s %s (%s)\n", green("→"), dep.DependsOnID, dep.Type)
+			fmt.Printf("  %s %s (%s)\n", ui.RenderPass("→"), dep.DependsOnID, dep.Type)
 		}
 	}
 
 	if issue.CompactionLevel > 0 {
-		fmt.Printf("\n%s Level %d", yellow("⚠️  This issue was compacted:"), issue.CompactionLevel)
+		fmt.Printf("\n%s Level %d", ui.RenderWarn("⚠️  This issue was compacted:"), issue.CompactionLevel)
 		if issue.CompactedAt != nil {
 			fmt.Printf(" at %s", issue.CompactedAt.Format("2006-01-02 15:04:05"))
 		}

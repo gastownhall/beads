@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var pinCmd = &cobra.Command{
-	Use:   "pin [id...]",
-	Short: "Pin one or more issues as persistent context markers",
+	Use:     "pin [id...]",
+	GroupID: "issues",
+	Short:   "Pin one or more issues as persistent context markers",
 	Long: `Pin issues to mark them as persistent context markers.
 
 Pinned issues are not work items - they are context beads that should
@@ -78,8 +79,8 @@ Examples:
 						pinnedIssues = append(pinnedIssues, &issue)
 					}
 				} else {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Pinned %s\n", green("📌"), id)
+					
+					fmt.Printf("%s Pinned %s\n", ui.RenderPass("📌"), id)
 				}
 			}
 
@@ -117,8 +118,8 @@ Examples:
 					pinnedIssues = append(pinnedIssues, issue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Pinned %s\n", green("📌"), fullID)
+				
+				fmt.Printf("%s Pinned %s\n", ui.RenderPass("📌"), fullID)
 			}
 		}
 

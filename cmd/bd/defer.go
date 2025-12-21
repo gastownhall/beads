@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -82,8 +82,7 @@ Examples:
 						deferredIssues = append(deferredIssues, &issue)
 					}
 				} else {
-					cyan := color.New(color.FgCyan).SprintFunc()
-					fmt.Printf("%s Deferred %s\n", cyan("*"), id)
+					fmt.Printf("%s Deferred %s\n", ui.RenderAccent("*"), id)
 				}
 			}
 
@@ -121,8 +120,7 @@ Examples:
 					deferredIssues = append(deferredIssues, issue)
 				}
 			} else {
-				cyan := color.New(color.FgCyan).SprintFunc()
-				fmt.Printf("%s Deferred %s\n", cyan("*"), fullID)
+				fmt.Printf("%s Deferred %s\n", ui.RenderAccent("*"), fullID)
 			}
 		}
 

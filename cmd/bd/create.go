@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -14,11 +13,13 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
 var createCmd = &cobra.Command{
 	Use:     "create [title]",
+	GroupID: "issues",
 	Aliases: []string{"new"},
 	Short:   "Create a new issue (or multiple issues from markdown file)",
 	Args:    cobra.MinimumNArgs(0), // Changed to allow no args when using -f
@@ -59,8 +60,7 @@ var createCmd = &cobra.Command{
 
 		// Warn if creating a test issue in production database (unless silent mode)
 		if strings.HasPrefix(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Fprintf(os.Stderr, "%s Creating issue with 'Test' prefix in production database.\n", yellow("⚠"))
+			fmt.Fprintf(os.Stderr, "%s Creating issue with 'Test' prefix in production database.\n", ui.RenderWarn("⚠"))
 			fmt.Fprintf(os.Stderr, "  For testing, consider using: BEADS_DB=/tmp/test.db ./bd create \"Test issue\"\n")
 		}
 
@@ -74,8 +74,7 @@ var createCmd = &cobra.Command{
 			}
 			// Warn if creating an issue without a description (unless silent mode)
 			if !silent && !debug.IsQuiet() {
-				yellow := color.New(color.FgYellow).SprintFunc()
-				fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
+				fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", ui.RenderWarn("⚠"))
 				fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
 				fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
 			}
@@ -241,8 +240,7 @@ var createCmd = &cobra.Command{
 			} else if silent {
 				fmt.Println(issue.ID)
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
+				fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
 				fmt.Printf("  Title: %s\n", issue.Title)
 				fmt.Printf("  Priority: P%d\n", issue.Priority)
 				fmt.Printf("  Status: %s\n", issue.Status)
@@ -381,8 +379,7 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
+			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
 			fmt.Printf("  Title: %s\n", issue.Title)
 			fmt.Printf("  Priority: P%d\n", issue.Priority)
 			fmt.Printf("  Status: %s\n", issue.Status)

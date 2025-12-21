@@ -11,8 +11,9 @@ import (
 )
 
 var configCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Manage configuration settings",
+	Use:     "config",
+	GroupID: "setup",
+	Short:   "Manage configuration settings",
 	Long: `Manage configuration settings for external integrations and preferences.
 
 Configuration is stored per-project in .beads/*.db and is version-control-friendly.

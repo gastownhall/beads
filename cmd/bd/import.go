@@ -21,8 +21,9 @@ import (
 )
 
 var importCmd = &cobra.Command{
-	Use:   "import",
-	Short: "Import issues from JSONL format",
+	Use:     "import",
+	GroupID: "sync",
+	Short:   "Import issues from JSONL format",
 	Long: `Import issues from JSON Lines format (one JSON object per line).
 
 Reads from stdin by default, or use -i flag for file input.

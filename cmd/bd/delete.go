@@ -10,11 +10,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // deleteViaDaemon uses the RPC daemon to delete issues
@@ -62,19 +62,17 @@ func deleteViaDaemon(issueIDs []string, force, dryRun, cascade bool, jsonOutput 
 	
 	deletedCount := int(result["deleted_count"].(float64))
 	totalCount := int(result["total_count"].(float64))
-	
-	green := color.New(color.FgGreen).SprintFunc()
+
 	if deletedCount > 0 {
 		if deletedCount == 1 {
-			fmt.Printf("%s Deleted %s\n", green("✓"), issueIDs[0])
+			fmt.Printf("%s Deleted %s\n", ui.RenderPass("✓"), issueIDs[0])
 		} else {
-			fmt.Printf("%s Deleted %d issue(s)\n", green("✓"), deletedCount)
+			fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), deletedCount)
 		}
 	}
-	
+
 	if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
-		yellow := color.New(color.FgYellow).SprintFunc()
-		fmt.Printf("\n%s Warnings:\n", yellow("⚠"))
+		fmt.Printf("\n%s Warnings:\n", ui.RenderWarn("⚠"))
 		for _, e := range errors {
 			fmt.Printf("  %s\n", e)
 		}
@@ -85,8 +83,9 @@ func deleteViaDaemon(issueIDs []string, force, dryRun, cascade bool, jsonOutput 
 }
 
 var deleteCmd = &cobra.Command{
-	Use:   "delete <issue-id> [issue-id...]",
-	Short: "Delete one or more issues and clean up references",
+	Use:     "delete <issue-id> [issue-id...]",
+	GroupID: "issues",
+	Short:   "Delete one or more issues and clean up references",
 	Long: `Delete one or more issues and clean up all references to them.
 This command will:
 1. Remove all dependency links (any type, both directions) involving the issues
@@ -215,9 +214,7 @@ the issues will not resurrect from remote branches.`,
 		replacementText := `$1[deleted:` + issueID + `]$3`
 		// Preview mode
 		if !force {
-			red := color.New(color.FgRed).SprintFunc()
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Printf("\n%s\n", red("⚠️  DELETE PREVIEW"))
+			fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 			fmt.Printf("\nIssue to delete:\n")
 			fmt.Printf("  %s: %s\n", issueID, issue.Title)
 			totalDeps := len(depRecords) + len(dependents)
@@ -248,8 +245,8 @@ the issues will not resurrect from remote branches.`,
 					fmt.Printf("  (none have text references)\n")
 				}
 			}
-			fmt.Printf("\n%s\n", yellow("This operation cannot be undone!"))
-			fmt.Printf("To proceed, run: %s\n\n", yellow("bd delete "+issueID+" --force"))
+			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
+			fmt.Printf("To proceed, run: %s\n\n", ui.RenderWarn("bd delete "+issueID+" --force"))
 			return
 		}
 		// Actually delete
@@ -323,8 +320,7 @@ the issues will not resurrect from remote branches.`,
 				"references_updated":   updatedIssueCount,
 			})
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Deleted %s\n", green("✓"), issueID)
+			fmt.Printf("%s Deleted %s\n", ui.RenderPass("✓"), issueID)
 			fmt.Printf("  Removed %d dependency link(s)\n", totalDepsRemoved)
 			fmt.Printf("  Updated text references in %d issue(s)\n", updatedIssueCount)
 		}
@@ -476,14 +472,13 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		if dryRun {
 			fmt.Printf("\n(Dry-run mode - no changes made)\n")
 		} else {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Printf("\n%s\n", yellow("This operation cannot be undone!"))
+			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
 			if cascade {
 				fmt.Printf("To proceed with cascade deletion, run: %s\n",
-					yellow("bd delete "+strings.Join(issueIDs, " ")+" --cascade --force"))
+					ui.RenderWarn("bd delete "+strings.Join(issueIDs, " ")+" --cascade --force"))
 			} else {
 				fmt.Printf("To proceed, run: %s\n",
-					yellow("bd delete "+strings.Join(issueIDs, " ")+" --force"))
+					ui.RenderWarn("bd delete "+strings.Join(issueIDs, " ")+" --force"))
 			}
 		}
 		return
@@ -527,7 +522,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// Use 'bd cleanup --hard' after syncing to fully purge old tombstones.
 	if hardDelete {
 		if !jsonOutput {
-			fmt.Println(color.YellowString("⚠️  HARD DELETE MODE: Pruning tombstones from JSONL"))
+			fmt.Println(ui.RenderWarn("⚠️  HARD DELETE MODE: Pruning tombstones from JSONL"))
 			fmt.Println("  Note: Tombstones kept in DB to prevent resurrection. Run 'bd sync' then 'bd cleanup --hard' to fully purge.")
 		}
 		// Prune tombstones from JSONL using negative TTL (immediate expiration)
@@ -555,24 +550,20 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			"orphaned_issues":      result.OrphanedIssues,
 		})
 	} else {
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Deleted %d issue(s)\n", green("✓"), result.DeletedCount)
+		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.DeletedCount)
 		fmt.Printf("  Removed %d dependency link(s)\n", result.DependenciesCount)
 		fmt.Printf("  Removed %d label(s)\n", result.LabelsCount)
 		fmt.Printf("  Removed %d event(s)\n", result.EventsCount)
 		fmt.Printf("  Updated text references in %d issue(s)\n", updatedCount)
 		if len(result.OrphanedIssues) > 0 {
-			yellow := color.New(color.FgYellow).SprintFunc()
 			fmt.Printf("  %s Orphaned %d issue(s): %s\n",
-				yellow("⚠"), len(result.OrphanedIssues), strings.Join(result.OrphanedIssues, ", "))
+				ui.RenderWarn("⚠"), len(result.OrphanedIssues), strings.Join(result.OrphanedIssues, ", "))
 		}
 	}
 }
 // showDeletionPreview shows what would be deleted
 func showDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, depError error) {
-	red := color.New(color.FgRed).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	fmt.Printf("\n%s\n", red("⚠️  DELETE PREVIEW"))
+	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 	fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
 	for _, id := range issueIDs {
 		if issue := issues[id]; issue != nil {
@@ -580,10 +571,10 @@ func showDeletionPreview(issueIDs []string, issues map[string]*types.Issue, casc
 		}
 	}
 	if cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", yellow("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
 	}
 	if depError != nil {
-		fmt.Printf("\n%s\n", red(depError.Error()))
+		fmt.Printf("\n%s\n", ui.RenderFail(depError.Error()))
 	}
 }
 // updateTextReferencesInIssues updates text references to deleted issues in pre-collected connected issues

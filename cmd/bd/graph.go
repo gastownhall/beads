@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -33,8 +33,9 @@ type GraphLayout struct {
 }
 
 var graphCmd = &cobra.Command{
-	Use:   "graph <issue-id>",
-	Short: "Display issue dependency graph",
+	Use:     "graph <issue-id>",
+	GroupID: "deps",
+	Short:   "Display issue dependency graph",
 	Long: `Display an ASCII visualization of an issue's dependency graph.
 
 For epics, shows all children and their dependencies.
@@ -283,8 +284,7 @@ func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 		return
 	}
 
-	cyan := color.New(color.FgCyan).SprintFunc()
-	fmt.Printf("\n%s Dependency graph for %s:\n\n", cyan("📊"), layout.RootID)
+	fmt.Printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
 
 	// Calculate box width based on longest title
 	maxTitleLen := 0
@@ -370,36 +370,37 @@ func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 func renderNodeBox(node *GraphNode, width int) string {
 	// Status indicator
 	var statusIcon string
-	var colorFn func(a ...interface{}) string
+	var titleStr string
+
+	title := truncateTitle(node.Issue.Title, width-4)
 
 	switch node.Issue.Status {
 	case types.StatusOpen:
 		statusIcon = "○"
-		colorFn = color.New(color.FgWhite).SprintFunc()
+		titleStr = padRight(title, width-4)
 	case types.StatusInProgress:
 		statusIcon = "◐"
-		colorFn = color.New(color.FgYellow).SprintFunc()
+		titleStr = ui.RenderWarn(padRight(title, width-4))
 	case types.StatusBlocked:
 		statusIcon = "●"
-		colorFn = color.New(color.FgRed).SprintFunc()
+		titleStr = ui.RenderFail(padRight(title, width-4))
 	case types.StatusDeferred:
 		statusIcon = "❄"
-		colorFn = color.New(color.FgCyan).SprintFunc()
+		titleStr = ui.RenderAccent(padRight(title, width-4))
 	case types.StatusClosed:
 		statusIcon = "✓"
-		colorFn = color.New(color.FgGreen).SprintFunc()
+		titleStr = ui.RenderPass(padRight(title, width-4))
 	default:
 		statusIcon = "?"
-		colorFn = color.New(color.FgWhite).SprintFunc()
+		titleStr = padRight(title, width-4)
 	}
 
-	title := truncateTitle(node.Issue.Title, width-4)
 	id := node.Issue.ID
 
 	// Build the box
 	topBottom := "  ┌" + strings.Repeat("─", width) + "┐"
-	middle := fmt.Sprintf("  │ %s %s │", statusIcon, colorFn(padRight(title, width-4)))
-	idLine := fmt.Sprintf("  │ %s │", color.New(color.FgHiBlack).Sprint(padRight(id, width-2)))
+	middle := fmt.Sprintf("  │ %s %s │", statusIcon, titleStr)
+	idLine := fmt.Sprintf("  │ %s │", ui.RenderMuted(padRight(id, width-2)))
 	bottom := "  └" + strings.Repeat("─", width) + "┘"
 
 	return topBottom + "\n" + middle + "\n" + idLine + "\n" + bottom
@@ -449,30 +450,31 @@ func computeDependencyCounts(subgraph *TemplateSubgraph) (blocks map[string]int,
 func renderNodeBoxWithDeps(node *GraphNode, width int, blocksCount int, blockedByCount int) string {
 	// Status indicator
 	var statusIcon string
-	var colorFn func(a ...interface{}) string
+	var titleStr string
+
+	title := truncateTitle(node.Issue.Title, width-4)
 
 	switch node.Issue.Status {
 	case types.StatusOpen:
 		statusIcon = "○"
-		colorFn = color.New(color.FgWhite).SprintFunc()
+		titleStr = padRight(title, width-4)
 	case types.StatusInProgress:
 		statusIcon = "◐"
-		colorFn = color.New(color.FgYellow).SprintFunc()
+		titleStr = ui.RenderWarn(padRight(title, width-4))
 	case types.StatusBlocked:
 		statusIcon = "●"
-		colorFn = color.New(color.FgRed).SprintFunc()
+		titleStr = ui.RenderFail(padRight(title, width-4))
 	case types.StatusDeferred:
 		statusIcon = "❄"
-		colorFn = color.New(color.FgCyan).SprintFunc()
+		titleStr = ui.RenderAccent(padRight(title, width-4))
 	case types.StatusClosed:
 		statusIcon = "✓"
-		colorFn = color.New(color.FgGreen).SprintFunc()
+		titleStr = ui.RenderPass(padRight(title, width-4))
 	default:
 		statusIcon = "?"
-		colorFn = color.New(color.FgWhite).SprintFunc()
+		titleStr = padRight(title, width-4)
 	}
 
-	title := truncateTitle(node.Issue.Title, width-4)
 	id := node.Issue.ID
 
 	// Build dependency info string
@@ -490,12 +492,12 @@ func renderNodeBoxWithDeps(node *GraphNode, width int, blocksCount int, blockedB
 
 	// Build the box
 	topBottom := "  ┌" + strings.Repeat("─", width) + "┐"
-	middle := fmt.Sprintf("  │ %s %s │", statusIcon, colorFn(padRight(title, width-4)))
-	idLine := fmt.Sprintf("  │ %s │", color.New(color.FgHiBlack).Sprint(padRight(id, width-2)))
+	middle := fmt.Sprintf("  │ %s %s │", statusIcon, titleStr)
+	idLine := fmt.Sprintf("  │ %s │", ui.RenderMuted(padRight(id, width-2)))
 
 	var result string
 	if depInfo != "" {
-		depLine := fmt.Sprintf("  │ %s │", color.New(color.FgCyan).Sprint(padRight(depInfo, width-2)))
+		depLine := fmt.Sprintf("  │ %s │", ui.RenderAccent(padRight(depInfo, width-2)))
 		bottom := "  └" + strings.Repeat("─", width) + "┘"
 		result = topBottom + "\n" + middle + "\n" + idLine + "\n" + depLine + "\n" + bottom
 	} else {

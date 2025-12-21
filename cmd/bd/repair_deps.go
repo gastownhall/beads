@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var repairDepsCmd = &cobra.Command{
-	Use:   "repair-deps",
-	Short: "Find and fix orphaned dependency references",
+	Use:     "repair-deps",
+	GroupID: "maint",
+	Short:   "Find and fix orphaned dependency references",
 	Long: `Scans all issues for dependencies pointing to non-existent issues.
 
 Reports orphaned dependencies and optionally removes them with --fix.
@@ -105,13 +107,11 @@ Interactive mode with --interactive prompts for each orphan.`,
 
 		// Report results
 		if len(orphans) == 0 {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\n%s No orphaned dependencies found\n\n", green("✓"))
+			fmt.Printf("\n%s No orphaned dependencies found\n\n", ui.RenderPass("✓"))
 			return
 		}
 
-		yellow := color.New(color.FgYellow).SprintFunc()
-		fmt.Printf("\n%s Found %d orphaned dependencies:\n\n", yellow("⚠"), len(orphans))
+		fmt.Printf("\n%s Found %d orphaned dependencies:\n\n", ui.RenderWarn("⚠"), len(orphans))
 
 		for i, o := range orphans {
 			fmt.Printf("%d. %s → %s (%s) [%s does not exist]\n",
@@ -142,8 +142,7 @@ Interactive mode with --interactive prompts for each orphan.`,
 				}
 			}
 			markDirtyAndScheduleFlush()
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\n%s Fixed %d orphaned dependencies\n\n", green("✓"), fixed)
+			fmt.Printf("\n%s Fixed %d orphaned dependencies\n\n", ui.RenderPass("✓"), fixed)
 		} else if fix {
 			db := store.UnderlyingDB()
 			for _, o := range orphans {
@@ -159,8 +158,7 @@ Interactive mode with --interactive prompts for each orphan.`,
 				}
 			}
 			markDirtyAndScheduleFlush()
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Fixed %d orphaned dependencies\n\n", green("✓"), len(orphans))
+			fmt.Printf("%s Fixed %d orphaned dependencies\n\n", ui.RenderPass("✓"), len(orphans))
 		} else {
 			fmt.Printf("Run with --fix to automatically remove orphaned dependencies\n")
 			fmt.Printf("Run with --interactive to review each dependency\n\n")

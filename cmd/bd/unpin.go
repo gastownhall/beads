@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var unpinCmd = &cobra.Command{
-	Use:   "unpin [id...]",
-	Short: "Unpin one or more issues",
+	Use:     "unpin [id...]",
+	GroupID: "issues",
+	Short:   "Unpin one or more issues",
 	Long: `Unpin issues to remove their persistent context marker status.
 
 This restores the issue to a normal work item that can be cleaned up
@@ -78,8 +79,7 @@ Examples:
 						unpinnedIssues = append(unpinnedIssues, &issue)
 					}
 				} else {
-					yellow := color.New(color.FgYellow).SprintFunc()
-					fmt.Printf("%s Unpinned %s\n", yellow("📍"), id)
+					fmt.Printf("%s Unpinned %s\n", ui.RenderWarn("📍"), id)
 				}
 			}
 
@@ -117,8 +117,7 @@ Examples:
 					unpinnedIssues = append(unpinnedIssues, issue)
 				}
 			} else {
-				yellow := color.New(color.FgYellow).SprintFunc()
-				fmt.Printf("%s Unpinned %s\n", yellow("📍"), fullID)
+				fmt.Printf("%s Unpinned %s\n", ui.RenderWarn("📍"), fullID)
 			}
 		}
 

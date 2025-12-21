@@ -4,13 +4,14 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 var duplicatesCmd = &cobra.Command{
-	Use:   "duplicates",
-	Short: "Find and optionally merge duplicate issues",
+	Use:     "duplicates",
+	GroupID: "deps",
+	Short:   "Find and optionally merge duplicate issues",
 	Long: `Find issues with identical content (title, description, design, acceptance criteria).
 Groups issues by content hash and reports duplicates with suggested merge targets.
 The merge target is chosen by:
@@ -119,18 +120,15 @@ Example:
 			}
 			outputJSON(output)
 		} else {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			cyan := color.New(color.FgCyan).SprintFunc()
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Found %d duplicate group(s):\n\n", yellow("🔍"), len(duplicateGroups))
+			fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
 			for i, group := range duplicateGroups {
 				target := chooseMergeTarget(group, refCounts)
-				fmt.Printf("%s Group %d: %s\n", cyan("━━"), i+1, group[0].Title)
+				fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
 				for _, issue := range group {
 					refs := refCounts[issue.ID]
 					marker := "  "
 					if issue.ID == target.ID {
-						marker = green("→ ")
+						marker = ui.RenderPass("→ ")
 					}
 					fmt.Printf("%s%s (%s, P%d, %d references)\n",
 						marker, issue.ID, issue.Status, issue.Priority, refs)
@@ -141,18 +139,18 @@ Example:
 						sources = append(sources, issue.ID)
 					}
 				}
-				fmt.Printf("  %s Duplicate: %s (same content as %s)\n", cyan("Note:"), strings.Join(sources, " "), target.ID)
+				fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
 				fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
-					cyan("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
+					ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
 			}
 			if autoMerge {
 				if dryRun {
-					fmt.Printf("%s Dry run - would execute %d merge(s)\n", yellow("⚠"), len(mergeCommands))
+					fmt.Printf("%s Dry run - would execute %d merge(s)\n", ui.RenderWarn("⚠"), len(mergeCommands))
 				} else {
-					fmt.Printf("%s Merged %d group(s)\n", green("✓"), len(mergeCommands))
+					fmt.Printf("%s Merged %d group(s)\n", ui.RenderPass("✓"), len(mergeCommands))
 				}
 			} else {
-				fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", cyan("💡"))
+				fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
 			}
 		}
 	},

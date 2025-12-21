@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var relateCmd = &cobra.Command{
-	Use:   "relate <id1> <id2>",
-	Short: "Create a bidirectional relates_to link between issues",
+	Use:     "relate <id1> <id2>",
+	GroupID: "deps",
+	Short:   "Create a bidirectional relates_to link between issues",
 	Long: `Create a loose 'see also' relationship between two issues.
 
 The relates_to link is bidirectional - both issues will reference each other.
@@ -28,8 +29,9 @@ Examples:
 }
 
 var unrelateCmd = &cobra.Command{
-	Use:   "unrelate <id1> <id2>",
-	Short: "Remove a relates_to link between issues",
+	Use:     "unrelate <id1> <id2>",
+	GroupID: "deps",
+	Short:   "Remove a relates_to link between issues",
 	Long: `Remove a relates_to relationship between two issues.
 
 Removes the link in both directions.
@@ -177,8 +179,7 @@ func runRelate(cmd *cobra.Command, args []string) error {
 		return encoder.Encode(result)
 	}
 
-	green := color.New(color.FgGreen).SprintFunc()
-	fmt.Printf("%s Linked %s ↔ %s\n", green("✓"), id1, id2)
+	fmt.Printf("%s Linked %s ↔ %s\n", ui.RenderPass("✓"), id1, id2)
 	return nil
 }
 
@@ -300,8 +301,7 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 		return encoder.Encode(result)
 	}
 
-	green := color.New(color.FgGreen).SprintFunc()
-	fmt.Printf("%s Unlinked %s ↔ %s\n", green("✓"), id1, id2)
+	fmt.Printf("%s Unlinked %s ↔ %s\n", ui.RenderPass("✓"), id1, id2)
 	return nil
 }
 

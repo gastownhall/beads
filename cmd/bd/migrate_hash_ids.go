@@ -13,16 +13,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
+// TODO: Consider integrating into 'bd doctor' migration detection
 var migrateHashIDsCmd = &cobra.Command{
-	Use:   "migrate-hash-ids",
-	Short: "Migrate sequential IDs to hash-based IDs (legacy)",
+	Use:     "migrate-hash-ids",
+	GroupID: "maint",
+	Short:   "Migrate sequential IDs to hash-based IDs (legacy)",
 	Long: `Migrate database from sequential IDs (bd-1, bd-2) to hash-based IDs (bd-a3f8e9a2).
 
 *** LEGACY COMMAND ***
@@ -86,7 +88,7 @@ WARNING: Backup your database before running this command, even though it create
 				os.Exit(1)
 			}
 			if !jsonOutput {
-				color.Green("✓ Created backup: %s\n\n", filepath.Base(backupPath))
+				fmt.Printf("%s\n\n", ui.RenderPass(fmt.Sprintf("✓ Created backup: %s", filepath.Base(backupPath))))
 			}
 		}
 		
@@ -163,10 +165,10 @@ WARNING: Backup your database before running this command, even though it create
 			mappingPath := filepath.Join(filepath.Dir(dbPath), "hash-id-mapping.json")
 			if err := saveMappingFile(mappingPath, mapping); err != nil {
 				if !jsonOutput {
-					color.Yellow("Warning: failed to save mapping file: %v\n", err)
+					fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to save mapping file: %v", err)))
 				}
 			} else if !jsonOutput {
-				color.Green("✓ Saved mapping to: %s\n", filepath.Base(mappingPath))
+				fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Saved mapping to: %s", filepath.Base(mappingPath))))
 			}
 		}
 		
@@ -193,7 +195,7 @@ WARNING: Backup your database before running this command, even though it create
 					count++
 				}
 			} else {
-				color.Green("\n✓ Migration complete!\n\n")
+				fmt.Printf("\n%s\n\n", ui.RenderPass("✓ Migration complete!"))
 				fmt.Printf("Migrated %d issues to hash-based IDs\n", len(mapping))
 				fmt.Println("\nNext steps:")
 				fmt.Println("  1. Run 'bd export' to update JSONL file")

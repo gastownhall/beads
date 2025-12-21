@@ -7,17 +7,18 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var depCmd = &cobra.Command{
-	Use:   "dep",
-	Short: "Manage dependencies",
+	Use:     "dep",
+	GroupID: "deps",
+	Short:   "Manage dependencies",
 }
 
 var depAddCmd = &cobra.Command{
@@ -88,9 +89,8 @@ var depAddCmd = &cobra.Command{
 				return
 			}
 
-			green := color.New(color.FgGreen).SprintFunc()
 			fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-				green("✓"), args[0], args[1], depType)
+				ui.RenderPass("✓"), args[0], args[1], depType)
 			return
 		}
 
@@ -114,8 +114,7 @@ var depAddCmd = &cobra.Command{
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
 		} else if len(cycles) > 0 {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", yellow("⚠"))
+			fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
 			fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
 			fmt.Fprintf(os.Stderr, "Cycle path:\n")
 			for _, cycle := range cycles {
@@ -144,9 +143,8 @@ var depAddCmd = &cobra.Command{
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			green("✓"), fromID, toID, depType)
+			ui.RenderPass("✓"), fromID, toID, depType)
 	},
 }
 
@@ -215,9 +213,8 @@ var depRemoveCmd = &cobra.Command{
 				return
 			}
 
-			green := color.New(color.FgGreen).SprintFunc()
 			fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-				green("✓"), fromID, toID)
+				ui.RenderPass("✓"), fromID, toID)
 			return
 		}
 
@@ -242,9 +239,8 @@ var depRemoveCmd = &cobra.Command{
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-			green("✓"), fullFromID, fullToID)
+			ui.RenderPass("✓"), fullFromID, fullToID)
 	},
 }
 
@@ -388,14 +384,13 @@ Examples:
 			return
 		}
 
-		cyan := color.New(color.FgCyan).SprintFunc()
 		switch direction {
 		case "up":
-			fmt.Printf("\n%s Dependent tree for %s:\n\n", cyan("🌲"), fullID)
+			fmt.Printf("\n%s Dependent tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
 		case "both":
-			fmt.Printf("\n%s Full dependency graph for %s:\n\n", cyan("🌲"), fullID)
+			fmt.Printf("\n%s Full dependency graph for %s:\n\n", ui.RenderAccent("🌲"), fullID)
 		default:
-			fmt.Printf("\n%s Dependency tree for %s:\n\n", cyan("🌲"), fullID)
+			fmt.Printf("\n%s Dependency tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
 		}
 
 		// Render tree with proper connectors
@@ -436,13 +431,11 @@ var depCyclesCmd = &cobra.Command{
 		}
 
 		if len(cycles) == 0 {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\n%s No dependency cycles detected\n\n", green("✓"))
+			fmt.Printf("\n%s No dependency cycles detected\n\n", ui.RenderPass("✓"))
 			return
 		}
 
-		red := color.New(color.FgRed).SprintFunc()
-		fmt.Printf("\n%s Found %d dependency cycles:\n\n", red("⚠"), len(cycles))
+		fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(cycles))
 		for i, cycle := range cycles {
 			fmt.Printf("%d. Cycle involving:\n", i+1)
 			for _, issue := range cycle {
@@ -580,8 +573,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 
 	// Check if we've seen this node before (diamond dependency)
 	if r.seen[node.ID] {
-		gray := color.New(color.FgHiBlack).SprintFunc()
-		fmt.Printf("%s%s (shown above)\n", prefix.String(), gray(node.ID))
+		fmt.Printf("%s%s (shown above)\n", prefix.String(), ui.RenderMuted(node.ID))
 		return
 	}
 	r.seen[node.ID] = true
@@ -591,8 +583,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 
 	// Add truncation warning if at max depth and has children
 	if node.Truncated || (depth == r.maxDepth && len(children[node.ID]) > 0) {
-		yellow := color.New(color.FgYellow).SprintFunc()
-		line += yellow(" …")
+		line += ui.RenderWarn(" …")
 	}
 
 	fmt.Printf("%s%s\n", prefix.String(), line)
@@ -615,13 +606,13 @@ func formatTreeNode(node *types.TreeNode) string {
 	var idStr string
 	switch node.Status {
 	case types.StatusOpen:
-		idStr = color.New(color.FgWhite).Sprint(node.ID)
+		idStr = ui.StatusOpenStyle.Render(node.ID)
 	case types.StatusInProgress:
-		idStr = color.New(color.FgYellow).Sprint(node.ID)
+		idStr = ui.StatusInProgressStyle.Render(node.ID)
 	case types.StatusBlocked:
-		idStr = color.New(color.FgRed).Sprint(node.ID)
+		idStr = ui.StatusBlockedStyle.Render(node.ID)
 	case types.StatusClosed:
-		idStr = color.New(color.FgGreen).Sprint(node.ID)
+		idStr = ui.StatusClosedStyle.Render(node.ID)
 	default:
 		idStr = node.ID
 	}
@@ -634,8 +625,7 @@ func formatTreeNode(node *types.TreeNode) string {
 	// An issue is ready if it's open and has no blocking dependencies
 	// (In the tree view, depth 0 with status open implies ready in the "down" direction)
 	if node.Status == types.StatusOpen && node.Depth == 0 {
-		green := color.New(color.FgGreen, color.Bold).SprintFunc()
-		line += " " + green("[READY]")
+		line += " " + ui.PassStyle.Bold(true).Render("[READY]")
 	}
 
 	return line

@@ -6,16 +6,18 @@ import (
 	"os"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // Hard delete mode: bypass tombstone TTL safety, use --older-than days directly
 
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var cleanupCmd = &cobra.Command{
-	Use:   "cleanup",
-	Short: "Delete closed issues and prune expired tombstones",
+	Use:     "cleanup",
+	GroupID: "maint",
+	Short:   "Delete closed issues and prune expired tombstones",
 	Long: `Delete closed issues and prune expired tombstones to reduce database size.
 
 This command:
@@ -82,7 +84,7 @@ SEE ALSO:
 				customTTL = -1
 			}
 			if !jsonOutput && !dryRun {
-				fmt.Println(color.YellowString("⚠️  HARD DELETE MODE: Bypassing tombstone TTL safety"))
+				fmt.Println(ui.RenderWarn("⚠️  HARD DELETE MODE: Bypassing tombstone TTL safety"))
 			}
 		}
 
@@ -197,7 +199,7 @@ SEE ALSO:
 				fmt.Printf("Found %d %s issue(s)\n", len(closedIssues), issueType)
 			}
 			if dryRun {
-				fmt.Println(color.YellowString("DRY RUN - no changes will be made"))
+				fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
 			}
 			fmt.Println()
 		}
@@ -235,13 +237,12 @@ SEE ALSO:
 				}
 			} else if tombstoneResult != nil && tombstoneResult.PrunedCount > 0 {
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
 					ttlMsg := fmt.Sprintf("older than %d days", tombstoneResult.TTLDays)
 					if hardDelete && olderThanDays == 0 {
 						ttlMsg = "all tombstones (--hard mode)"
 					}
 					fmt.Printf("\n%s Pruned %d expired tombstone(s) (%s)\n",
-						green("✓"), tombstoneResult.PrunedCount, ttlMsg)
+						ui.RenderPass("✓"), tombstoneResult.PrunedCount, ttlMsg)
 				}
 			}
 		}

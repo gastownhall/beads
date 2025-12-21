@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // createFormRawInput holds the raw string values from the form UI.
@@ -198,8 +198,9 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.Storage, fv *creat
 }
 
 var createFormCmd = &cobra.Command{
-	Use:   "create-form",
-	Short: "Create a new issue using an interactive form",
+	Use:     "create-form",
+	GroupID: "issues",
+	Short:   "Create a new issue using an interactive form",
 	Long: `Create a new issue using an interactive terminal form.
 
 This command provides a user-friendly form interface for creating issues,
@@ -388,8 +389,7 @@ func runCreateForm(cmd *cobra.Command) {
 }
 
 func printCreatedIssue(issue *types.Issue) {
-	green := color.New(color.FgGreen).SprintFunc()
-	fmt.Printf("\n%s Created issue: %s\n", green("✓"), issue.ID)
+	fmt.Printf("\n%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
 	fmt.Printf("  Title:    %s\n", issue.Title)
 	fmt.Printf("  Type:     %s\n", issue.IssueType)
 	fmt.Printf("  Priority: P%d\n", issue.Priority)

@@ -7,14 +7,16 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var detectPollutionCmd = &cobra.Command{
-	Use:   "detect-pollution",
-	Short: "Detect and optionally clean test issues from database",
+	Use:     "detect-pollution",
+	GroupID: "maint",
+	Short:   "Detect and optionally clean test issues from database",
 	Long: `Detect test issues that leaked into production database using pattern matching.
 
 This command finds issues that appear to be test data based on:
@@ -168,8 +170,7 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
 
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Deleted %d test issues\n", green("✓"), deleted)
+		fmt.Printf("%s Deleted %d test issues\n", ui.RenderPass("✓"), deleted)
 		fmt.Printf("\nCleanup complete. To restore, run: bd import %s\n", backupPath)
 	},
 }

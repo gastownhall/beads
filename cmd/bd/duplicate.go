@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var duplicateCmd = &cobra.Command{
-	Use:   "duplicate <id> --of <canonical>",
-	Short: "Mark an issue as a duplicate of another",
+	Use:     "duplicate <id> --of <canonical>",
+	GroupID: "deps",
+	Short:   "Mark an issue as a duplicate of another",
 	Long: `Mark an issue as a duplicate of a canonical issue.
 
 The duplicate issue is automatically closed with a reference to the canonical.
@@ -27,8 +28,9 @@ Examples:
 }
 
 var supersedeCmd = &cobra.Command{
-	Use:   "supersede <id> --with <new>",
-	Short: "Mark an issue as superseded by a newer one",
+	Use:     "supersede <id> --with <new>",
+	GroupID: "deps",
+	Short:   "Mark an issue as superseded by a newer one",
 	Long: `Mark an issue as superseded by a newer version.
 
 The superseded issue is automatically closed with a reference to the replacement.
@@ -149,8 +151,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 		return encoder.Encode(result)
 	}
 
-	green := color.New(color.FgGreen).SprintFunc()
-	fmt.Printf("%s Marked %s as duplicate of %s (closed)\n", green("✓"), duplicateID, canonicalID)
+	fmt.Printf("%s Marked %s as duplicate of %s (closed)\n", ui.RenderPass("✓"), duplicateID, canonicalID)
 	return nil
 }
 
@@ -248,7 +249,6 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 		return encoder.Encode(result)
 	}
 
-	green := color.New(color.FgGreen).SprintFunc()
-	fmt.Printf("%s Marked %s as superseded by %s (closed)\n", green("✓"), oldID, newID)
+	fmt.Printf("%s Marked %s as superseded by %s (closed)\n", ui.RenderPass("✓"), oldID, newID)
 	return nil
 }

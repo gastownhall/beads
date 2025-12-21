@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -39,8 +39,9 @@ type InstantiateResult struct {
 }
 
 var templateCmd = &cobra.Command{
-	Use:   "template",
-	Short: "Manage issue templates",
+	Use:     "template",
+	GroupID: "setup",
+	Short:   "Manage issue templates",
 	Long: `Manage Beads templates for creating issue hierarchies.
 
 Templates are epics with the "template" label. They can have child issues
@@ -106,17 +107,14 @@ var templateListCmd = &cobra.Command{
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
-		cyan := color.New(color.FgCyan).SprintFunc()
-
-		fmt.Printf("%s\n", green("Templates (for bd template instantiate):"))
+		fmt.Printf("%s\n", ui.RenderPass("Templates (for bd template instantiate):"))
 		for _, tmpl := range beadsTemplates {
 			vars := extractVariables(tmpl.Title + " " + tmpl.Description)
 			varStr := ""
 			if len(vars) > 0 {
 				varStr = fmt.Sprintf(" (vars: %s)", strings.Join(vars, ", "))
 			}
-			fmt.Printf("  %s: %s%s\n", cyan(tmpl.ID), tmpl.Title, varStr)
+			fmt.Printf("  %s: %s%s\n", ui.RenderAccent(tmpl.ID), tmpl.Title, varStr)
 		}
 		fmt.Println()
 	},
@@ -175,25 +173,21 @@ func showBeadsTemplate(subgraph *TemplateSubgraph) {
 		return
 	}
 
-	cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-
-	fmt.Printf("\n%s Template: %s\n", cyan("📋"), subgraph.Root.Title)
+	fmt.Printf("\n%s Template: %s\n", ui.RenderAccent("📋"), subgraph.Root.Title)
 	fmt.Printf("   ID: %s\n", subgraph.Root.ID)
 	fmt.Printf("   Issues: %d\n", len(subgraph.Issues))
 
 	// Show variables
 	vars := extractAllVariables(subgraph)
 	if len(vars) > 0 {
-		fmt.Printf("\n%s Variables:\n", yellow("📝"))
+		fmt.Printf("\n%s Variables:\n", ui.RenderWarn("📝"))
 		for _, v := range vars {
 			fmt.Printf("   {{%s}}\n", v)
 		}
 	}
 
 	// Show structure
-	fmt.Printf("\n%s Structure:\n", green("🌲"))
+	fmt.Printf("\n%s Structure:\n", ui.RenderPass("🌲"))
 	printTemplateTree(subgraph, subgraph.Root.ID, 0, true)
 	fmt.Println()
 }
@@ -309,8 +303,7 @@ Example:
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Created %d issues from template\n", green("✓"), result.Created)
+		fmt.Printf("%s Created %d issues from template\n", ui.RenderPass("✓"), result.Created)
 		fmt.Printf("  New epic: %s\n", result.NewEpicID)
 	},
 }

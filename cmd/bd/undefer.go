@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -78,8 +78,7 @@ Examples:
 						undeferredIssues = append(undeferredIssues, &issue)
 					}
 				} else {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Undeferred %s (now open)\n", green("*"), id)
+					fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), id)
 				}
 			}
 
@@ -117,8 +116,7 @@ Examples:
 					undeferredIssues = append(undeferredIssues, issue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Undeferred %s (now open)\n", green("*"), fullID)
+				fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), fullID)
 			}
 		}
 

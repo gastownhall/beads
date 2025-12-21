@@ -3,15 +3,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 var reopenCmd = &cobra.Command{
-	Use:   "reopen [id...]",
-	Short: "Reopen one or more closed issues",
+	Use:     "reopen [id...]",
+	GroupID: "issues",
+	Short:   "Reopen one or more closed issues",
 	Long: `Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
 This is more explicit than 'bd update --status open' and emits a Reopened event.`,
 	Args: cobra.MinimumNArgs(1),
@@ -76,12 +77,11 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 						reopenedIssues = append(reopenedIssues, &issue)
 					}
 				} else {
-					blue := color.New(color.FgBlue).SprintFunc()
 					reasonMsg := ""
 					if reason != "" {
 						reasonMsg = ": " + reason
 					}
-					fmt.Printf("%s Reopened %s%s\n", blue("↻"), id, reasonMsg)
+					fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), id, reasonMsg)
 				}
 			}
 			if jsonOutput && len(reopenedIssues) > 0 {
@@ -120,12 +120,11 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 					reopenedIssues = append(reopenedIssues, issue)
 				}
 			} else {
-				blue := color.New(color.FgBlue).SprintFunc()
 				reasonMsg := ""
 				if reason != "" {
 					reasonMsg = ": " + reason
 				}
-				fmt.Printf("%s Reopened %s%s\n", blue("↻"), fullID, reasonMsg)
+				fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), fullID, reasonMsg)
 			}
 		}
 		// Schedule auto-flush if any issues were reopened

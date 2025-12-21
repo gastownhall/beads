@@ -12,8 +12,9 @@ import (
 )
 
 var infoCmd = &cobra.Command{
-	Use:   "info",
-	Short: "Show database and daemon information",
+	Use:     "info",
+	GroupID: "setup",
+	Short:   "Show database and daemon information",
 	Long: `Display information about the current database path and daemon status.
 
 This command helps debug issues where bd is using an unexpected database

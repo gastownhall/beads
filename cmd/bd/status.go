@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // StatusOutput represents the complete status output
@@ -33,6 +33,7 @@ type RecentActivitySummary struct {
 
 var statusCmd = &cobra.Command{
 	Use:     "status",
+	GroupID: "views",
 	Aliases: []string{"stats"},
 	Short:   "Show issue database overview and statistics",
 	Long: `Show a quick snapshot of the issue database state and statistics.
@@ -129,20 +130,15 @@ Examples:
 			return
 		}
 
-		// Human-readable colorized output
-		cyan := color.New(color.FgCyan).SprintFunc()
-		green := color.New(color.FgGreen).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
-		red := color.New(color.FgRed).SprintFunc()
-
-		fmt.Printf("\n%s Issue Database Status\n\n", cyan("📊"))
+		// Human-readable colorized output using semantic ui package
+		fmt.Printf("\n%s Issue Database Status\n\n", ui.RenderAccent("📊"))
 		fmt.Printf("Summary:\n")
 		fmt.Printf("  Total Issues:           %d\n", stats.TotalIssues)
-		fmt.Printf("  Open:                   %s\n", green(fmt.Sprintf("%d", stats.OpenIssues)))
-		fmt.Printf("  In Progress:            %s\n", yellow(fmt.Sprintf("%d", stats.InProgressIssues)))
-		fmt.Printf("  Blocked:                %s\n", red(fmt.Sprintf("%d", stats.BlockedIssues)))
+		fmt.Printf("  Open:                   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.OpenIssues)))
+		fmt.Printf("  In Progress:            %s\n", ui.RenderWarn(fmt.Sprintf("%d", stats.InProgressIssues)))
+		fmt.Printf("  Blocked:                %s\n", ui.RenderFail(fmt.Sprintf("%d", stats.BlockedIssues)))
 		fmt.Printf("  Closed:                 %d\n", stats.ClosedIssues)
-		fmt.Printf("  Ready to Work:          %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
+		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.ReadyIssues)))
 
 		// Extended statistics (only show if non-zero)
 		hasExtended := stats.TombstoneIssues > 0 || stats.PinnedIssues > 0 ||
@@ -156,7 +152,7 @@ Examples:
 				fmt.Printf("  Pinned:                 %d\n", stats.PinnedIssues)
 			}
 			if stats.EpicsEligibleForClosure > 0 {
-				fmt.Printf("  Epics Ready to Close:   %s\n", green(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
+				fmt.Printf("  Epics Ready to Close:   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
 			}
 			if stats.AverageLeadTime > 0 {
 				fmt.Printf("  Avg Lead Time:          %.1f hours\n", stats.AverageLeadTime)

@@ -14,8 +14,9 @@ import (
 )
 
 var countCmd = &cobra.Command{
-	Use:   "count",
-	Short: "Count issues matching filters",
+	Use:     "count",
+	GroupID: "views",
+	Short:   "Count issues matching filters",
 	Long: `Count issues matching the specified filters.
 
 By default, returns the total count of issues matching the filters.

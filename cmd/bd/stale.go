@@ -1,17 +1,20 @@
 package main
+
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"time"
-	"github.com/fatih/color"
+
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 var staleCmd = &cobra.Command{
-	Use:   "stale",
-	Short: "Show stale issues (not updated recently)",
+	Use:     "stale",
+	GroupID: "views",
+	Short:   "Show stale issues (not updated recently)",
 	Long: `Show issues that haven't been updated recently and may need attention.
 This helps identify:
 - In-progress issues with no recent activity (may be abandoned)
@@ -88,17 +91,15 @@ This helps identify:
 }
 func displayStaleIssues(issues []*types.Issue, days int) {
 	if len(issues) == 0 {
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("\n%s No stale issues found (all active)\n\n", green("✨"))
+		fmt.Printf("\n%s No stale issues found (all active)\n\n", ui.RenderPass("✨"))
 		return
 	}
-	yellow := color.New(color.FgYellow).SprintFunc()
-	fmt.Printf("\n%s Stale issues (%d not updated in %d+ days):\n\n", yellow("⏰"), len(issues), days)
+	fmt.Printf("\n%s Stale issues (%d not updated in %d+ days):\n\n", ui.RenderWarn("⏰"), len(issues), days)
 	now := time.Now()
 	for i, issue := range issues {
 		daysStale := int(now.Sub(issue.UpdatedAt).Hours() / 24)
-		fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
-		fmt.Printf("   Status: %s, Last updated: %d days ago\n", issue.Status, daysStale)
+		fmt.Printf("%d. [%s] %s: %s\n", i+1, ui.RenderPriority(issue.Priority), ui.RenderID(issue.ID), issue.Title)
+		fmt.Printf("   Status: %s, Last updated: %d days ago\n", ui.RenderStatus(string(issue.Status)), daysStale)
 		if issue.Assignee != "" {
 			fmt.Printf("   Assignee: %s\n", issue.Assignee)
 		}

@@ -16,8 +16,9 @@ var (
 )
 
 var mergeCmd = &cobra.Command{
-	Use:   "merge <output> <base> <left> <right>",
-	Short: "Git merge driver for beads JSONL files",
+	Use:     "merge <output> <base> <left> <right>",
+	GroupID: "sync",
+	Short:   "Git merge driver for beads JSONL files",
 	Long: `bd merge is a git merge driver for beads issue tracker JSONL files.
 
 NOTE: This command is for git merge operations, NOT for merging duplicate issues.

@@ -23,8 +23,9 @@ import (
 )
 
 var syncCmd = &cobra.Command{
-	Use:   "sync",
-	Short: "Synchronize issues with git remote",
+	Use:     "sync",
+	GroupID: "sync",
+	Short:   "Synchronize issues with git remote",
 	Long: `Synchronize issues with git remote in a single operation:
 1. Export pending changes to JSONL
 2. Commit changes to git

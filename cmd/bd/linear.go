@@ -18,8 +18,9 @@ import (
 
 // linearCmd is the root command for Linear integration.
 var linearCmd = &cobra.Command{
-	Use:   "linear",
-	Short: "Linear integration commands",
+	Use:     "linear",
+	GroupID: "advanced",
+	Short:   "Linear integration commands",
 	Long: `Synchronize issues between beads and Linear.
 
 Configuration:

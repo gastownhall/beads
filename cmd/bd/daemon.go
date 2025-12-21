@@ -20,8 +20,9 @@ import (
 )
 
 var daemonCmd = &cobra.Command{
-	Use:   "daemon",
-	Short: "Manage background sync daemon",
+	Use:     "daemon",
+	GroupID: "sync",
+	Short:   "Manage background sync daemon",
 	Long: `Manage the background daemon that automatically syncs issues with git remote.
 
 The daemon will:

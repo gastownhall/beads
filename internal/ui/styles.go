@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -11,8 +12,9 @@ import (
 // Ayu theme color palette
 // Dark: https://terminalcolors.com/themes/ayu/dark/
 // Light: https://terminalcolors.com/themes/ayu/light/
+// Source: https://github.com/ayu-theme/ayu-colors
 var (
-	// Semantic status colors (Ayu theme - adaptive light/dark)
+	// Core semantic colors (Ayu theme - adaptive light/dark)
 	ColorPass = lipgloss.AdaptiveColor{
 		Light: "#86b300", // ayu light bright green
 		Dark:  "#c2d94c", // ayu dark bright green
@@ -33,15 +35,122 @@ var (
 		Light: "#399ee6", // ayu light bright blue
 		Dark:  "#59c2ff", // ayu dark bright blue
 	}
+
+	// === Workflow Status Colors ===
+	// Only actionable states get color - open/closed match standard text
+	ColorStatusOpen = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+	ColorStatusInProgress = lipgloss.AdaptiveColor{
+		Light: "#f2ae49", // yellow - active work, very visible
+		Dark:  "#ffb454",
+	}
+	ColorStatusClosed = lipgloss.AdaptiveColor{
+		Light: "#9099a1", // slightly dimmed - visually shows "done"
+		Dark:  "#8090a0",
+	}
+	ColorStatusBlocked = lipgloss.AdaptiveColor{
+		Light: "#f07171", // red - needs attention
+		Dark:  "#f26d78",
+	}
+	ColorStatusPinned = lipgloss.AdaptiveColor{
+		Light: "#d2a6ff", // purple - special/elevated
+		Dark:  "#d2a6ff",
+	}
+
+	// === Priority Colors ===
+	// Only P0/P1 get color - P2/P3/P4 match standard text
+	ColorPriorityP0 = lipgloss.AdaptiveColor{
+		Light: "#f07171", // bright red - critical
+		Dark:  "#f07178",
+	}
+	ColorPriorityP1 = lipgloss.AdaptiveColor{
+		Light: "#ff8f40", // orange - high urgency
+		Dark:  "#ff8f40",
+	}
+	ColorPriorityP2 = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+	ColorPriorityP3 = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+	ColorPriorityP4 = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+
+	// === Issue Type Colors ===
+	// Bugs and epics get color - they need attention
+	// All other types use standard text
+	ColorTypeBug = lipgloss.AdaptiveColor{
+		Light: "#f07171", // bright red - bugs are problems
+		Dark:  "#f26d78",
+	}
+	ColorTypeFeature = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+	ColorTypeTask = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+	ColorTypeEpic = lipgloss.AdaptiveColor{
+		Light: "#d2a6ff", // purple - larger scope work
+		Dark:  "#d2a6ff",
+	}
+	ColorTypeChore = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
+
+	// === Issue ID Color ===
+	// IDs use standard text color - subtle, not attention-grabbing
+	ColorID = lipgloss.AdaptiveColor{
+		Light: "", // standard text color
+		Dark:  "",
+	}
 )
 
-// Status styles - consistent across all commands
+// Core styles - consistent across all commands
 var (
 	PassStyle   = lipgloss.NewStyle().Foreground(ColorPass)
 	WarnStyle   = lipgloss.NewStyle().Foreground(ColorWarn)
 	FailStyle   = lipgloss.NewStyle().Foreground(ColorFail)
 	MutedStyle  = lipgloss.NewStyle().Foreground(ColorMuted)
 	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+)
+
+// Issue ID style
+var IDStyle = lipgloss.NewStyle().Foreground(ColorID)
+
+// Status styles for workflow states
+var (
+	StatusOpenStyle       = lipgloss.NewStyle().Foreground(ColorStatusOpen)
+	StatusInProgressStyle = lipgloss.NewStyle().Foreground(ColorStatusInProgress)
+	StatusClosedStyle     = lipgloss.NewStyle().Foreground(ColorStatusClosed)
+	StatusBlockedStyle    = lipgloss.NewStyle().Foreground(ColorStatusBlocked)
+	StatusPinnedStyle     = lipgloss.NewStyle().Foreground(ColorStatusPinned)
+)
+
+// Priority styles
+var (
+	PriorityP0Style = lipgloss.NewStyle().Foreground(ColorPriorityP0).Bold(true)
+	PriorityP1Style = lipgloss.NewStyle().Foreground(ColorPriorityP1)
+	PriorityP2Style = lipgloss.NewStyle().Foreground(ColorPriorityP2)
+	PriorityP3Style = lipgloss.NewStyle().Foreground(ColorPriorityP3)
+	PriorityP4Style = lipgloss.NewStyle().Foreground(ColorPriorityP4)
+)
+
+// Type styles for issue categories
+var (
+	TypeBugStyle     = lipgloss.NewStyle().Foreground(ColorTypeBug)
+	TypeFeatureStyle = lipgloss.NewStyle().Foreground(ColorTypeFeature)
+	TypeTaskStyle    = lipgloss.NewStyle().Foreground(ColorTypeTask)
+	TypeEpicStyle    = lipgloss.NewStyle().Foreground(ColorTypeEpic)
+	TypeChoreStyle   = lipgloss.NewStyle().Foreground(ColorTypeChore)
 )
 
 // CategoryStyle for section headers - bold with accent color
@@ -127,4 +236,126 @@ func RenderSkipIcon() string {
 // RenderInfoIcon renders the info icon with styling
 func RenderInfoIcon() string {
 	return AccentStyle.Render(IconInfo)
+}
+
+// === Issue Component Renderers ===
+
+// RenderID renders an issue ID with semantic styling
+func RenderID(id string) string {
+	return IDStyle.Render(id)
+}
+
+// RenderStatus renders a status with semantic styling
+// in_progress/blocked/pinned get color; open/closed use standard text
+func RenderStatus(status string) string {
+	switch status {
+	case "in_progress":
+		return StatusInProgressStyle.Render(status)
+	case "blocked":
+		return StatusBlockedStyle.Render(status)
+	case "pinned":
+		return StatusPinnedStyle.Render(status)
+	case "closed":
+		return StatusClosedStyle.Render(status)
+	default: // open and others
+		return StatusOpenStyle.Render(status)
+	}
+}
+
+// RenderPriority renders a priority level with semantic styling
+// P0/P1 get color; P2/P3/P4 use standard text
+func RenderPriority(priority int) string {
+	label := fmt.Sprintf("P%d", priority)
+	switch priority {
+	case 0:
+		return PriorityP0Style.Render(label)
+	case 1:
+		return PriorityP1Style.Render(label)
+	case 2:
+		return PriorityP2Style.Render(label)
+	case 3:
+		return PriorityP3Style.Render(label)
+	case 4:
+		return PriorityP4Style.Render(label)
+	default:
+		return label
+	}
+}
+
+// RenderType renders an issue type with semantic styling
+// bugs get color; all other types use standard text
+func RenderType(issueType string) string {
+	switch issueType {
+	case "bug":
+		return TypeBugStyle.Render(issueType)
+	case "feature":
+		return TypeFeatureStyle.Render(issueType)
+	case "task":
+		return TypeTaskStyle.Render(issueType)
+	case "epic":
+		return TypeEpicStyle.Render(issueType)
+	case "chore":
+		return TypeChoreStyle.Render(issueType)
+	default:
+		return issueType
+	}
+}
+
+// RenderIssueCompact renders a compact one-line issue summary
+// Format: ID [Priority] [Type] Status - Title
+// When status is "closed", the entire line is dimmed to show it's done
+func RenderIssueCompact(id string, priority int, issueType, status, title string) string {
+	line := fmt.Sprintf("%s [P%d] [%s] %s - %s",
+		id, priority, issueType, status, title)
+	if status == "closed" {
+		// Entire line is dimmed - visually shows "done"
+		return StatusClosedStyle.Render(line)
+	}
+	return fmt.Sprintf("%s [%s] [%s] %s - %s",
+		RenderID(id),
+		RenderPriority(priority),
+		RenderType(issueType),
+		RenderStatus(status),
+		title,
+	)
+}
+
+// RenderPriorityForStatus renders priority with color only if not closed
+func RenderPriorityForStatus(priority int, status string) string {
+	if status == "closed" {
+		return fmt.Sprintf("P%d", priority)
+	}
+	return RenderPriority(priority)
+}
+
+// RenderTypeForStatus renders type with color only if not closed
+func RenderTypeForStatus(issueType, status string) string {
+	if status == "closed" {
+		return issueType
+	}
+	return RenderType(issueType)
+}
+
+// RenderClosedLine renders an entire line in the closed/dimmed style
+func RenderClosedLine(line string) string {
+	return StatusClosedStyle.Render(line)
+}
+
+// BoldStyle for emphasis
+var BoldStyle = lipgloss.NewStyle().Bold(true)
+
+// CommandStyle for command names - subtle contrast, not attention-grabbing
+var CommandStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
+	Light: "#5c6166", // slightly darker than standard
+	Dark:  "#bfbdb6", // slightly brighter than standard
+})
+
+// RenderBold renders text in bold
+func RenderBold(s string) string {
+	return BoldStyle.Render(s)
+}
+
+// RenderCommand renders a command name with subtle styling
+func RenderCommand(s string) string {
+	return CommandStyle.Render(s)
 }

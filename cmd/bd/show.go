@@ -9,21 +9,22 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
 var showCmd = &cobra.Command{
-	Use:   "show [id...]",
-	Short: "Show issue details",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "show [id...]",
+	GroupID: "issues",
+	Short:   "Show issue details",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		showThread, _ := cmd.Flags().GetBool("thread")
@@ -118,8 +119,6 @@ var showCmd = &cobra.Command{
 					}
 					issue := &details.Issue
 
-					cyan := color.New(color.FgCyan).SprintFunc()
-
 					// Format output (same as direct mode below)
 					tierEmoji := ""
 					statusSuffix := ""
@@ -132,7 +131,7 @@ var showCmd = &cobra.Command{
 						statusSuffix = " (compacted L2)"
 					}
 
-					fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+					fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
 					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 					if issue.CloseReason != "" {
 						fmt.Printf("Close reason: %s\n", issue.CloseReason)
@@ -299,8 +298,6 @@ var showCmd = &cobra.Command{
 				fmt.Println("\n" + strings.Repeat("─", 60))
 			}
 
-			cyan := color.New(color.FgCyan).SprintFunc()
-
 			// Add compaction emoji to title line
 			tierEmoji := ""
 			statusSuffix := ""
@@ -313,7 +310,7 @@ var showCmd = &cobra.Command{
 				statusSuffix = " (compacted L2)"
 			}
 
-			fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+			fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
 			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 			if issue.CloseReason != "" {
 				fmt.Printf("Close reason: %s\n", issue.CloseReason)
@@ -463,9 +460,10 @@ var showCmd = &cobra.Command{
 }
 
 var updateCmd = &cobra.Command{
-	Use:   "update [id...]",
-	Short: "Update one or more issues",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "update [id...]",
+	GroupID: "issues",
+	Short:   "Update one or more issues",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("update")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -659,8 +657,7 @@ var updateCmd = &cobra.Command{
 					}
 				}
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+					fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 				}
 			}
 
@@ -754,8 +751,7 @@ var updateCmd = &cobra.Command{
 					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 			}
 		}
 
@@ -771,8 +767,9 @@ var updateCmd = &cobra.Command{
 }
 
 var editCmd = &cobra.Command{
-	Use:   "edit [id]",
-	Short: "Edit an issue field in $EDITOR",
+	Use:     "edit [id]",
+	GroupID: "issues",
+	Short:   "Edit an issue field in $EDITOR",
 	Long: `Edit an issue field using your configured $EDITOR.
 
 By default, edits the description. Use flags to edit other fields.
@@ -962,16 +959,16 @@ Examples:
 			markDirtyAndScheduleFlush()
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
 		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
-		fmt.Printf("%s Updated %s for issue: %s\n", green("✓"), fieldName, id)
+		fmt.Printf("%s Updated %s for issue: %s\n", ui.RenderPass("✓"), fieldName, id)
 	},
 }
 
 var closeCmd = &cobra.Command{
-	Use:   "close [id...]",
-	Short: "Close one or more issues",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "close [id...]",
+	GroupID: "issues",
+	Short:   "Close one or more issues",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("close")
 		reason, _ := cmd.Flags().GetString("reason")
@@ -1053,8 +1050,7 @@ var closeCmd = &cobra.Command{
 					}
 				}
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
+					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
 				}
 			}
 
@@ -1100,8 +1096,7 @@ var closeCmd = &cobra.Command{
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
 			}
 		}
 
@@ -1221,10 +1216,7 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 	}
 
 	// Display the thread
-	cyan := color.New(color.FgCyan).SprintFunc()
-	dim := color.New(color.Faint).SprintFunc()
-
-	fmt.Printf("\n%s Thread: %s\n", cyan("📬"), rootMsg.Title)
+	fmt.Printf("\n%s Thread: %s\n", ui.RenderAccent("📬"), rootMsg.Title)
 	fmt.Println(strings.Repeat("─", 66))
 
 	for _, msg := range threadMessages {
@@ -1246,12 +1238,12 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 			statusIcon = "✓"
 		}
 
-		fmt.Printf("%s%s %s %s\n", indent, statusIcon, cyan(msg.ID), dim(timeStr))
+		fmt.Printf("%s%s %s %s\n", indent, statusIcon, ui.RenderAccent(msg.ID), ui.RenderMuted(timeStr))
 		fmt.Printf("%s  From: %s  To: %s\n", indent, msg.Sender, msg.Assignee)
 		if parentID := repliesTo[msg.ID]; parentID != "" {
 			fmt.Printf("%s  Re: %s\n", indent, parentID)
 		}
-		fmt.Printf("%s  %s: %s\n", indent, dim("Subject"), msg.Title)
+		fmt.Printf("%s  %s: %s\n", indent, ui.RenderMuted("Subject"), msg.Title)
 		if msg.Description != "" {
 			// Indent the body
 			bodyLines := strings.Split(msg.Description, "\n")

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 const copilotInstructionsContent = `# GitHub Copilot Instructions
@@ -37,10 +37,6 @@ Run ` + "`bd prime`" + ` for workflow context, or install hooks (` + "`bd hooks 
 For full workflow details: ` + "`bd prime`" + ``
 
 func renderOnboardInstructions(w io.Writer) error {
-	bold := color.New(color.Bold).SprintFunc()
-	cyan := color.New(color.FgCyan).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-
 	writef := func(format string, args ...interface{}) error {
 		_, err := fmt.Fprintf(w, format, args...)
 		return err
@@ -54,7 +50,7 @@ func renderOnboardInstructions(w io.Writer) error {
 		return err
 	}
 
-	if err := writef("\n%s\n\n", bold("bd Onboarding")); err != nil {
+	if err := writef("\n%s\n\n", ui.RenderBold("bd Onboarding")); err != nil {
 		return err
 	}
 	if err := writeln("Add this minimal snippet to AGENTS.md (or create it):"); err != nil {
@@ -64,17 +60,17 @@ func renderOnboardInstructions(w io.Writer) error {
 		return err
 	}
 
-	if err := writef("%s\n", cyan("--- BEGIN AGENTS.MD CONTENT ---")); err != nil {
+	if err := writef("%s\n", ui.RenderAccent("--- BEGIN AGENTS.MD CONTENT ---")); err != nil {
 		return err
 	}
 	if err := writeln(agentsContent); err != nil {
 		return err
 	}
-	if err := writef("%s\n\n", cyan("--- END AGENTS.MD CONTENT ---")); err != nil {
+	if err := writef("%s\n\n", ui.RenderAccent("--- END AGENTS.MD CONTENT ---")); err != nil {
 		return err
 	}
 
-	if err := writef("%s\n", bold("For GitHub Copilot users:")); err != nil {
+	if err := writef("%s\n", ui.RenderBold("For GitHub Copilot users:")); err != nil {
 		return err
 	}
 	if err := writeln("Add the same content to .github/copilot-instructions.md"); err != nil {
@@ -84,13 +80,13 @@ func renderOnboardInstructions(w io.Writer) error {
 		return err
 	}
 
-	if err := writef("%s\n", bold("How it works:")); err != nil {
+	if err := writef("%s\n", ui.RenderBold("How it works:")); err != nil {
 		return err
 	}
-	if err := writef("   • %s provides dynamic workflow context (~80 lines)\n", cyan("bd prime")); err != nil {
+	if err := writef("   • %s provides dynamic workflow context (~80 lines)\n", ui.RenderAccent("bd prime")); err != nil {
 		return err
 	}
-	if err := writef("   • %s auto-injects bd prime at session start\n", cyan("bd hooks install")); err != nil {
+	if err := writef("   • %s auto-injects bd prime at session start\n", ui.RenderAccent("bd hooks install")); err != nil {
 		return err
 	}
 	if err := writeln("   • AGENTS.md only needs this minimal pointer, not full instructions"); err != nil {
@@ -100,7 +96,7 @@ func renderOnboardInstructions(w io.Writer) error {
 		return err
 	}
 
-	if err := writef("%s\n\n", green("This keeps AGENTS.md lean while bd prime provides up-to-date workflow details.")); err != nil {
+	if err := writef("%s\n\n", ui.RenderPass("This keeps AGENTS.md lean while bd prime provides up-to-date workflow details.")); err != nil {
 		return err
 	}
 
@@ -108,8 +104,9 @@ func renderOnboardInstructions(w io.Writer) error {
 }
 
 var onboardCmd = &cobra.Command{
-	Use:   "onboard",
-	Short: "Display minimal snippet for AGENTS.md",
+	Use:     "onboard",
+	GroupID: "setup",
+	Short:   "Display minimal snippet for AGENTS.md",
 	Long: `Display a minimal snippet to add to AGENTS.md for bd integration.
 
 This outputs a small (~10 line) snippet that points to 'bd prime' for full

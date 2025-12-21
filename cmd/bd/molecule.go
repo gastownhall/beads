@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var moleculeCmd = &cobra.Command{
@@ -268,8 +268,7 @@ Examples:
 			if jsonOutput {
 				outputJSON(&issue)
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Created work item: %s (from template %s)\n", green("✓"), issue.ID, moleculeID)
+				fmt.Printf("%s Created work item: %s (from template %s)\n", ui.RenderPass("✓"), issue.ID, moleculeID)
 				fmt.Printf("  Title: %s\n", issue.Title)
 				fmt.Printf("  Priority: P%d\n", issue.Priority)
 				fmt.Printf("  Status: %s\n", issue.Status)
@@ -328,8 +327,7 @@ Examples:
 		if jsonOutput {
 			outputJSON(createdIssue)
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Created work item: %s (from template %s)\n", green("✓"), createdIssue.ID, moleculeID)
+			fmt.Printf("%s Created work item: %s (from template %s)\n", ui.RenderPass("✓"), createdIssue.ID, moleculeID)
 			fmt.Printf("  Title: %s\n", createdIssue.Title)
 			fmt.Printf("  Priority: P%d\n", createdIssue.Priority)
 			fmt.Printf("  Status: %s\n", createdIssue.Status)

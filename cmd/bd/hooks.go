@@ -160,8 +160,9 @@ func FormatHookWarnings(statuses []HookStatus) string {
 // Cobra commands
 
 var hooksCmd = &cobra.Command{
-	Use:   "hooks",
-	Short: "Manage git hooks for bd auto-sync",
+	Use:     "hooks",
+	GroupID: "setup",
+	Short:   "Manage git hooks for bd auto-sync",
 	Long: `Install, uninstall, or list git hooks that provide automatic bd sync.
 
 The hooks ensure that:

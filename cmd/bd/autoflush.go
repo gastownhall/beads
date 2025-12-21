@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -566,10 +566,9 @@ func flushToJSONLWithState(state flushState) {
 
 			// Show prominent warning after 3+ consecutive failures
 			if failCount >= 3 {
-				red := color.New(color.FgRed, color.Bold).SprintFunc()
-				fmt.Fprintf(os.Stderr, "\n%s\n", red("⚠️  CRITICAL: Auto-flush has failed "+fmt.Sprint(failCount)+" times consecutively!"))
-				fmt.Fprintf(os.Stderr, "%s\n", red("⚠️  Your JSONL file may be out of sync with the database."))
-				fmt.Fprintf(os.Stderr, "%s\n\n", red("⚠️  Run 'bd export -o .beads/issues.jsonl' manually to fix."))
+				fmt.Fprintf(os.Stderr, "\n%s\n", ui.RenderFail("⚠️  CRITICAL: Auto-flush has failed "+fmt.Sprint(failCount)+" times consecutively!"))
+				fmt.Fprintf(os.Stderr, "%s\n", ui.RenderFail("⚠️  Your JSONL file may be out of sync with the database."))
+				fmt.Fprintf(os.Stderr, "%s\n\n", ui.RenderFail("⚠️  Run 'bd export -o .beads/issues.jsonl' manually to fix."))
 			}
 			return
 		}
@@ -601,10 +600,9 @@ func flushToJSONLWithState(state flushState) {
 
 		// Show prominent warning after 3+ consecutive failures
 		if failCount >= 3 {
-			red := color.New(color.FgRed, color.Bold).SprintFunc()
-			fmt.Fprintf(os.Stderr, "\n%s\n", red("⚠️  CRITICAL: Auto-flush has failed "+fmt.Sprint(failCount)+" times consecutively!"))
-			fmt.Fprintf(os.Stderr, "%s\n", red("⚠️  Your JSONL file may be out of sync with the database."))
-			fmt.Fprintf(os.Stderr, "%s\n\n", red("⚠️  Run 'bd export -o .beads/issues.jsonl' manually to fix."))
+			fmt.Fprintf(os.Stderr, "\n%s\n", ui.RenderFail("⚠️  CRITICAL: Auto-flush has failed "+fmt.Sprint(failCount)+" times consecutively!"))
+			fmt.Fprintf(os.Stderr, "%s\n", ui.RenderFail("⚠️  Your JSONL file may be out of sync with the database."))
+			fmt.Fprintf(os.Stderr, "%s\n\n", ui.RenderFail("⚠️  Run 'bd export -o .beads/issues.jsonl' manually to fix."))
 		}
 	}
 

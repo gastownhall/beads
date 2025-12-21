@@ -7,13 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var cleanCmd = &cobra.Command{
-	Use:   "clean",
-	Short: "Clean up temporary git merge artifacts from .beads directory",
+	Use:     "clean",
+	GroupID: "maint",
+	Short:   "Clean up temporary git merge artifacts from .beads directory",
 	Long: `Delete temporary git merge artifacts from the .beads directory.
 
 This command removes temporary files created during git merges and conflicts.
@@ -76,7 +78,7 @@ SEE ALSO:
 		// Just run by default, no --force needed
 
 		if dryRun {
-			fmt.Println(color.YellowString("DRY RUN - no changes will be made"))
+			fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
 		}
 		fmt.Printf("Found %d file(s) to clean:\n", len(filesToDelete))
 		for _, file := range filesToDelete {

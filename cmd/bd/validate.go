@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
+// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
 var validateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Run comprehensive database health checks",
+	Use:     "validate",
+	GroupID: "maint",
+	Short:   "Run comprehensive database health checks",
 	Long: `Run all validation checks to ensure database integrity:
 - Orphaned dependencies (references to deleted issues)
 - Duplicate issues (identical content)
@@ -193,9 +195,6 @@ func (r *validationResults) toJSON() map[string]interface{} {
 	return output
 }
 func (r *validationResults) print(_ bool) {
-	green := color.New(color.FgGreen).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	red := color.New(color.FgRed).SprintFunc()
 	fmt.Println("\nValidation Results:")
 	fmt.Println("===================")
 	totalIssues := 0
@@ -204,33 +203,34 @@ func (r *validationResults) print(_ bool) {
 	for _, name := range r.checkOrder {
 		result := r.checks[name]
 		prefix := "✓"
-		colorFunc := green
+		var coloredPrefix string
 		if result.err != nil {
 			prefix = "✗"
-			colorFunc = red
-			fmt.Printf("%s %s: ERROR - %v\n", colorFunc(prefix), result.name, result.err)
+			coloredPrefix = ui.RenderFail(prefix)
+			fmt.Printf("%s %s: ERROR - %v\n", coloredPrefix, result.name, result.err)
 		} else if result.issueCount > 0 {
 			prefix = "⚠"
-			colorFunc = yellow
+			coloredPrefix = ui.RenderWarn(prefix)
 			if result.fixedCount > 0 {
-				fmt.Printf("%s %s: %d found, %d fixed\n", colorFunc(prefix), result.name, result.issueCount, result.fixedCount)
+				fmt.Printf("%s %s: %d found, %d fixed\n", coloredPrefix, result.name, result.issueCount, result.fixedCount)
 			} else {
-				fmt.Printf("%s %s: %d found\n", colorFunc(prefix), result.name, result.issueCount)
+				fmt.Printf("%s %s: %d found\n", coloredPrefix, result.name, result.issueCount)
 			}
 		} else {
-			fmt.Printf("%s %s: OK\n", colorFunc(prefix), result.name)
+			coloredPrefix = ui.RenderPass(prefix)
+			fmt.Printf("%s %s: OK\n", coloredPrefix, result.name)
 		}
 		totalIssues += result.issueCount
 		totalFixed += result.fixedCount
 	}
 	fmt.Println()
 	if totalIssues == 0 {
-		fmt.Printf("%s Database is healthy!\n", green("✓"))
+		fmt.Printf("%s Database is healthy!\n", ui.RenderPass("✓"))
 	} else if totalFixed == totalIssues {
-		fmt.Printf("%s Fixed all %d issues\n", green("✓"), totalFixed)
+		fmt.Printf("%s Fixed all %d issues\n", ui.RenderPass("✓"), totalFixed)
 	} else {
 		remaining := totalIssues - totalFixed
-		fmt.Printf("%s Found %d issues", yellow("⚠"), totalIssues)
+		fmt.Printf("%s Found %d issues", ui.RenderWarn("⚠"), totalIssues)
 		if totalFixed > 0 {
 			fmt.Printf(" (fixed %d, %d remaining)", totalFixed, remaining)
 		}

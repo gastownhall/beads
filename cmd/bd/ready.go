@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/util"
 )
 var readyCmd = &cobra.Command{
@@ -105,20 +105,20 @@ var readyCmd = &cobra.Command{
 						hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 					}
 				}
-				yellow := color.New(color.FgYellow).SprintFunc()
 				if hasOpenIssues {
 					fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-						yellow("✨"))
+						ui.RenderWarn("✨"))
 				} else {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("\n%s No open issues\n\n", green("✨"))
+					fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 				}
 				return
 			}
-			cyan := color.New(color.FgCyan).SprintFunc()
-			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
+			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
-				fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+					ui.RenderPriority(issue.Priority),
+					ui.RenderType(string(issue.IssueType)),
+					ui.RenderID(issue.ID), issue.Title)
 				if issue.EstimatedMinutes != nil {
 					fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 				}
@@ -175,21 +175,21 @@ var readyCmd = &cobra.Command{
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
 			if hasOpenIssues {
-				yellow := color.New(color.FgYellow).SprintFunc()
 				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					yellow("✨"))
+					ui.RenderWarn("✨"))
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("\n%s No open issues\n\n", green("✨"))
+				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 			}
 			// Show tip even when no ready work found
 			maybeShowTip(store)
 			return
 		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
+		fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 		for i, issue := range issues {
-			fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+				ui.RenderPriority(issue.Priority),
+				ui.RenderType(string(issue.IssueType)),
+				ui.RenderID(issue.ID), issue.Title)
 			if issue.EstimatedMinutes != nil {
 				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 			}
@@ -233,14 +233,14 @@ var blockedCmd = &cobra.Command{
 			return
 		}
 		if len(blocked) == 0 {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\n%s No blocked issues\n\n", green("✨"))
+			fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
 			return
 		}
-		red := color.New(color.FgRed).SprintFunc()
-		fmt.Printf("\n%s Blocked issues (%d):\n\n", red("🚫"), len(blocked))
+		fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
 		for _, issue := range blocked {
-			fmt.Printf("[P%d] %s: %s\n", issue.Priority, issue.ID, issue.Title)
+			fmt.Printf("[%s] %s: %s\n",
+				ui.RenderPriority(issue.Priority),
+				ui.RenderID(issue.ID), issue.Title)
 			blockedBy := issue.BlockedBy
 			if blockedBy == nil {
 				blockedBy = []string{}

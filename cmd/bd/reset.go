@@ -8,14 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var resetCmd = &cobra.Command{
-	Use:   "reset",
-	Short: "Remove all beads data and configuration",
+	Use:     "reset",
+	GroupID: "advanced",
+	Short:   "Remove all beads data and configuration",
 	Long: `Reset beads to an uninitialized state, removing all local data.
 
 This command removes:
@@ -206,29 +207,26 @@ func showResetPreview(items []resetItem) {
 		return
 	}
 
-	yellow := color.New(color.FgYellow).SprintFunc()
-	red := color.New(color.FgRed).SprintFunc()
 
-	fmt.Println(yellow("Reset preview (dry-run mode)"))
+	fmt.Println(ui.RenderWarn("Reset preview (dry-run mode)"))
 	fmt.Println()
 	fmt.Println("The following will be removed:")
 	fmt.Println()
 
 	for _, item := range items {
-		fmt.Printf("  %s %s\n", red("•"), item.Description)
+		fmt.Printf("  %s %s\n", ui.RenderFail("•"), item.Description)
 		if item.Type != "config" {
 			fmt.Printf("    %s\n", item.Path)
 		}
 	}
 
 	fmt.Println()
-	fmt.Println(red("⚠ This operation cannot be undone!"))
+	fmt.Println(ui.RenderFail("⚠ This operation cannot be undone!"))
 	fmt.Println()
-	fmt.Printf("To proceed, run: %s\n", yellow("bd reset --force"))
+	fmt.Printf("To proceed, run: %s\n", ui.RenderWarn("bd reset --force"))
 }
 
 func performReset(items []resetItem, _, beadsDir string) {
-	green := color.New(color.FgGreen).SprintFunc()
 
 	var errors []string
 
@@ -238,14 +236,14 @@ func performReset(items []resetItem, _, beadsDir string) {
 			pidFile := filepath.Join(beadsDir, "daemon.pid")
 			stopDaemonQuiet(pidFile)
 			if !jsonOutput {
-				fmt.Printf("%s Stopped daemon\n", green("✓"))
+				fmt.Printf("%s Stopped daemon\n", ui.RenderPass("✓"))
 			}
 
 		case "hook":
 			if err := os.Remove(item.Path); err != nil {
 				errors = append(errors, fmt.Sprintf("failed to remove hook %s: %v", item.Path, err))
 			} else if !jsonOutput {
-				fmt.Printf("%s Removed %s\n", green("✓"), filepath.Base(item.Path))
+				fmt.Printf("%s Removed %s\n", ui.RenderPass("✓"), filepath.Base(item.Path))
 			}
 			// Restore backup if exists
 			backupPath := item.Path + ".backup"
@@ -260,28 +258,28 @@ func performReset(items []resetItem, _, beadsDir string) {
 			_ = exec.Command("git", "config", "--unset", "merge.beads.driver").Run()
 			_ = exec.Command("git", "config", "--unset", "merge.beads.name").Run()
 			if !jsonOutput {
-				fmt.Printf("%s Removed merge driver config\n", green("✓"))
+				fmt.Printf("%s Removed merge driver config\n", ui.RenderPass("✓"))
 			}
 
 		case "gitattributes":
 			if err := removeGitattributesEntry(); err != nil {
 				errors = append(errors, fmt.Sprintf("failed to update .gitattributes: %v", err))
 			} else if !jsonOutput {
-				fmt.Printf("%s Updated .gitattributes\n", green("✓"))
+				fmt.Printf("%s Updated .gitattributes\n", ui.RenderPass("✓"))
 			}
 
 		case "worktrees":
 			if err := os.RemoveAll(item.Path); err != nil {
 				errors = append(errors, fmt.Sprintf("failed to remove worktrees: %v", err))
 			} else if !jsonOutput {
-				fmt.Printf("%s Removed sync worktrees\n", green("✓"))
+				fmt.Printf("%s Removed sync worktrees\n", ui.RenderPass("✓"))
 			}
 
 		case "directory":
 			if err := os.RemoveAll(item.Path); err != nil {
 				errors = append(errors, fmt.Sprintf("failed to remove .beads: %v", err))
 			} else if !jsonOutput {
-				fmt.Printf("%s Removed .beads directory\n", green("✓"))
+				fmt.Printf("%s Removed .beads directory\n", ui.RenderPass("✓"))
 			}
 		}
 	}
@@ -305,7 +303,7 @@ func performReset(items []resetItem, _, beadsDir string) {
 			fmt.Printf("  • %s\n", e)
 		}
 	} else {
-		fmt.Printf("%s Reset complete\n", green("✓"))
+		fmt.Printf("%s Reset complete\n", ui.RenderPass("✓"))
 		fmt.Println()
 		fmt.Println("To reinitialize beads, run: bd init")
 	}

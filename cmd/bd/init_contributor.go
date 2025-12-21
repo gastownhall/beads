@@ -9,30 +9,25 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // runContributorWizard guides the user through OSS contributor setup
 func runContributorWizard(ctx context.Context, store storage.Storage) error {
-	green := color.New(color.FgGreen).SprintFunc()
-	cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	bold := color.New(color.Bold).SprintFunc()
-
-	fmt.Printf("\n%s %s\n\n", bold("bd"), bold("Contributor Workflow Setup Wizard"))
+	fmt.Printf("\n%s %s\n\n", ui.RenderBold("bd"), ui.RenderBold("Contributor Workflow Setup Wizard"))
 	fmt.Println("This wizard will configure beads for OSS contribution.")
 	fmt.Println()
 
 	// Step 1: Detect fork relationship
-	fmt.Printf("%s Detecting git repository setup...\n", cyan("▶"))
+	fmt.Printf("%s Detecting git repository setup...\n", ui.RenderAccent("▶"))
 
 	isFork, upstreamURL := detectForkSetup()
 
 	if isFork {
-		fmt.Printf("%s Detected fork workflow (upstream: %s)\n", green("✓"), upstreamURL)
+		fmt.Printf("%s Detected fork workflow (upstream: %s)\n", ui.RenderPass("✓"), upstreamURL)
 	} else {
-		fmt.Printf("%s No upstream remote detected\n", yellow("⚠"))
+		fmt.Printf("%s No upstream remote detected\n", ui.RenderWarn("⚠"))
 		fmt.Println("\n  For fork workflows, add an 'upstream' remote:")
 		fmt.Println("  git remote add upstream <original-repo-url>")
 		fmt.Println()
@@ -50,13 +45,13 @@ func runContributorWizard(ctx context.Context, store storage.Storage) error {
 	}
 
 	// Step 2: Check push access to origin
-	fmt.Printf("\n%s Checking repository access...\n", cyan("▶"))
+	fmt.Printf("\n%s Checking repository access...\n", ui.RenderAccent("▶"))
 
 	hasPushAccess, originURL := checkPushAccess()
 
 	if hasPushAccess {
-		fmt.Printf("%s You have push access to origin (%s)\n", green("✓"), originURL)
-		fmt.Printf("  %s You can commit directly to this repository.\n", yellow("⚠"))
+		fmt.Printf("%s You have push access to origin (%s)\n", ui.RenderPass("✓"), originURL)
+		fmt.Printf("  %s You can commit directly to this repository.\n", ui.RenderWarn("⚠"))
 		fmt.Println()
 		fmt.Print("Do you want to use a separate planning repo anyway? [Y/n]: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -68,12 +63,12 @@ func runContributorWizard(ctx context.Context, store storage.Storage) error {
 			return nil
 		}
 	} else {
-		fmt.Printf("%s Read-only access to origin (%s)\n", green("✓"), originURL)
+		fmt.Printf("%s Read-only access to origin (%s)\n", ui.RenderPass("✓"), originURL)
 		fmt.Println("  Planning repo recommended to keep experimental work separate.")
 	}
 
 	// Step 3: Configure planning repository
-	fmt.Printf("\n%s Setting up planning repository...\n", cyan("▶"))
+	fmt.Printf("\n%s Setting up planning repository...\n", ui.RenderAccent("▶"))
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -83,7 +78,7 @@ func runContributorWizard(ctx context.Context, store storage.Storage) error {
 	defaultPlanningRepo := filepath.Join(homeDir, ".beads-planning")
 
 	fmt.Printf("\nWhere should contributor planning issues be stored?\n")
-	fmt.Printf("Default: %s\n", cyan(defaultPlanningRepo))
+	fmt.Printf("Default: %s\n", ui.RenderAccent(defaultPlanningRepo))
 	fmt.Print("Planning repo path [press Enter for default]: ")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -101,7 +96,7 @@ func runContributorWizard(ctx context.Context, store storage.Storage) error {
 
 	// Create planning repository if it doesn't exist
 	if _, err := os.Stat(planningPath); os.IsNotExist(err) {
-		fmt.Printf("\nCreating planning repository at %s\n", cyan(planningPath))
+		fmt.Printf("\nCreating planning repository at %s\n", ui.RenderAccent(planningPath))
 
 		if err := os.MkdirAll(planningPath, 0750); err != nil {
 			return fmt.Errorf("failed to create planning repo directory: %w", err)
@@ -159,13 +154,13 @@ Created by: bd init --contributor
 		cmd.Dir = planningPath
 		_ = cmd.Run()
 
-		fmt.Printf("%s Planning repository created\n", green("✓"))
+		fmt.Printf("%s Planning repository created\n", ui.RenderPass("✓"))
 	} else {
-		fmt.Printf("%s Using existing planning repository\n", green("✓"))
+		fmt.Printf("%s Using existing planning repository\n", ui.RenderPass("✓"))
 	}
 
 	// Step 4: Configure contributor routing
-	fmt.Printf("\n%s Configuring contributor auto-routing...\n", cyan("▶"))
+	fmt.Printf("\n%s Configuring contributor auto-routing...\n", ui.RenderAccent("▶"))
 
 	// Set contributor.planning_repo config
 	if err := store.SetConfig(ctx, "contributor.planning_repo", planningPath); err != nil {
@@ -177,7 +172,7 @@ Created by: bd init --contributor
 		return fmt.Errorf("failed to enable auto-routing: %w", err)
 	}
 
-	fmt.Printf("%s Auto-routing enabled\n", green("✓"))
+	fmt.Printf("%s Auto-routing enabled\n", ui.RenderPass("✓"))
 
 	// If this is a fork, configure sync to pull beads from upstream (bd-bx9)
 	// This ensures `bd sync` gets the latest issues from the source repo,
@@ -186,22 +181,22 @@ Created by: bd init --contributor
 		if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {
 			return fmt.Errorf("failed to set sync remote: %w", err)
 		}
-		fmt.Printf("%s Sync configured to pull from upstream (source repo)\n", green("✓"))
+		fmt.Printf("%s Sync configured to pull from upstream (source repo)\n", ui.RenderPass("✓"))
 	}
 
 	// Step 5: Summary
-	fmt.Printf("\n%s %s\n\n", green("✓"), bold("Contributor setup complete!"))
+	fmt.Printf("\n%s %s\n\n", ui.RenderPass("✓"), ui.RenderBold("Contributor setup complete!"))
 
 	fmt.Println("Configuration:")
-	fmt.Printf("  Current repo issues: %s\n", cyan(".beads/issues.jsonl"))
-	fmt.Printf("  Planning repo issues: %s\n", cyan(filepath.Join(planningPath, ".beads/issues.jsonl")))
+	fmt.Printf("  Current repo issues: %s\n", ui.RenderAccent(".beads/issues.jsonl"))
+	fmt.Printf("  Planning repo issues: %s\n", ui.RenderAccent(filepath.Join(planningPath, ".beads/issues.jsonl")))
 	fmt.Println()
 	fmt.Println("How it works:")
 	fmt.Println("  • Issues you create will route to the planning repo")
 	fmt.Println("  • Planning stays out of your PRs to upstream")
 	fmt.Println("  • Use 'bd list' to see issues from both repos")
 	fmt.Println()
-	fmt.Printf("Try it: %s\n", cyan("bd create \"Plan feature X\" -p 2"))
+	fmt.Printf("Try it: %s\n", ui.RenderAccent("bd create \"Plan feature X\" -p 2"))
 	fmt.Println()
 
 	return nil

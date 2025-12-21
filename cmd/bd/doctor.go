@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/cobra"
@@ -64,8 +63,9 @@ const ConfigKeyHintsDoctor = "hints.doctor"
 const minSyncBranchHookVersion = "0.29.0"
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor [path]",
-	Short: "Check beads installation health",
+	Use:     "doctor [path]",
+	GroupID: "maint",
+	Short:   "Check and fix beads installation health (start here)",
 	Long: `Sanity check the beads installation for the current directory or specified path.
 
 This command checks:
@@ -205,9 +205,9 @@ func previewFixes(result doctorResult) {
 		// Show the issue details
 		fmt.Printf("  %d. %s\n", i+1, issue.Name)
 		if issue.Status == statusError {
-			color.Red("     Status: ERROR\n")
+			fmt.Printf("     Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
-			color.Yellow("     Status: WARNING\n")
+			fmt.Printf("     Status: %s\n", ui.RenderWarn("WARNING"))
 		}
 		fmt.Printf("     Issue:  %s\n", issue.Message)
 		if issue.Detail != "" {
@@ -286,9 +286,9 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 		// Show issue details
 		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), issue.Name)
 		if issue.Status == statusError {
-			color.Red("  Status: ERROR\n")
+			fmt.Printf("  Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
-			color.Yellow("  Status: WARNING\n")
+			fmt.Printf("  Status: %s\n", ui.RenderWarn("WARNING"))
 		}
 		fmt.Printf("  Issue:  %s\n", issue.Message)
 		if issue.Detail != "" {
@@ -401,11 +401,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 
 		if err != nil {
 			errorCount++
-			color.Red("  ✗ Error: %v\n", err)
+			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
 		} else {
 			fixedCount++
-			color.Green("  ✓ Fixed\n")
+			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
 		}
 	}
 
@@ -886,7 +886,7 @@ func printDiagnostics(result doctorResult) {
 		}
 	} else {
 		fmt.Println()
-		color.Green("✓ All checks passed\n")
+		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
 	}
 }
 
