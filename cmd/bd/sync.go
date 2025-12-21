@@ -1789,8 +1789,8 @@ func commitToExternalBeadsRepo(ctx context.Context, beadsDir, message string, pu
 	// Push if requested
 	if push {
 		pushCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "push")
-		if output, err := pushCmd.CombinedOutput(); err != nil {
-			return true, fmt.Errorf("git push failed: %w\n%s", err, output)
+		if pushOutput, err := runGitCmdWithTimeoutMsg(ctx, pushCmd, "git push", 5*time.Second); err != nil {
+			return true, fmt.Errorf("git push failed: %w\n%s", err, pushOutput)
 		}
 	}
 
@@ -2151,6 +2151,25 @@ func checkOrphanedChildrenInJSONL(jsonlPath string) (*OrphanedChildren, error) {
 
 	result.Count = len(result.OrphanedIDs)
 	return result, nil
+}
+
+// runGitCmdWithTimeoutMsg runs a git command and prints a helpful message if it takes too long.
+// This helps when git operations hang waiting for credential/browser auth.
+func runGitCmdWithTimeoutMsg(ctx context.Context, cmd *exec.Cmd, cmdName string, timeoutDelay time.Duration) ([]byte, error) {
+	// Start a timer to print a message if the command takes too long
+	timeoutChan := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-time.After(timeoutDelay):
+			fmt.Fprintf(os.Stderr, "⏳ %s is taking longer than expected (possibly waiting for authentication). If this hangs, check for a browser auth prompt or run 'git status' in another terminal.\n", cmdName)
+			timeoutChan <- struct{}{}
+		case <-ctx.Done():
+			// Context cancelled, don't print message
+		}
+	}()
+
+	output, err := cmd.CombinedOutput()
+	return output, err
 }
 
 func printOrphanedChildrenResult(oc *OrphanedChildren) {

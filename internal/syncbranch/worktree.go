@@ -774,6 +774,33 @@ func fetchAndRebaseInWorktree(ctx context.Context, worktreePath, branch, remote 
 	return nil
 }
 
+// runCmdWithTimeoutMessage runs a command and prints a helpful message if it takes too long.
+// This helps when git operations hang waiting for credential/browser auth.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - timeoutMsg: Message to print when timeout is reached (e.g., "Waiting for Git authentication in browser...")
+//   - timeoutDelay: Duration to wait before printing message (e.g., 5 seconds)
+//   - cmd: The command to run
+//
+// Returns: combined output and error from the command
+func runCmdWithTimeoutMessage(ctx context.Context, timeoutMsg string, timeoutDelay time.Duration, cmd *exec.Cmd) ([]byte, error) {
+	// Start a timer to print a message if the command takes too long
+	timerChan := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-time.After(timeoutDelay):
+			fmt.Fprintf(os.Stderr, "⏳ %s\n", timeoutMsg)
+			timerChan <- struct{}{}
+		case <-ctx.Done():
+			// Context cancelled, don't print message
+		}
+	}()
+
+	output, err := cmd.CombinedOutput()
+	return output, err
+}
+
 // pushFromWorktree pushes the sync branch from the worktree with retry logic
 // for handling concurrent push conflicts (non-fast-forward errors).
 func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
@@ -787,7 +814,14 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 		// Set BD_SYNC_IN_PROGRESS so pre-push hook knows to skip checks (GH#532)
 		// This prevents circular error where hook suggests running bd sync
 		cmd.Env = append(os.Environ(), "BD_SYNC_IN_PROGRESS=1")
-		output, err := cmd.CombinedOutput()
+
+		// Run with timeout message in case of hanging auth
+		output, err := runCmdWithTimeoutMessage(
+			ctx,
+			fmt.Sprintf("Git push is waiting (possibly for authentication). If this hangs, check for a browser auth prompt."),
+			5*time.Second,
+			cmd,
+		)
 
 		if err == nil {
 			return nil // Success
