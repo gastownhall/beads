@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2025-12-20
+
+### Added
+
+- **`bd defer` / `bd undefer` commands** (bd-4jr) - New "deferred" status for icebox issues
+  - Issues that are deliberately postponed, not blocked by dependencies
+  - Deferred issues excluded from `bd ready` and shown with ❄️ snowflake styling
+  - Full support in MCP server, graph views, and statistics
+
+- **Agent audit trail** (GH#649) - Append-only logging for AI agent interactions
+  - New `.beads/interactions.jsonl` audit file
+  - `bd audit record` - Log LLM calls, tool calls, or pipe JSON via stdin
+  - `bd audit label <id>` - Append quality labels (good/bad) for dataset curation
+  - `bd compact --audit` - Optionally log compaction prompts/responses
+  - Audit entries are immutable; labels create new referencing entries
+
+- **Directory-aware label scoping** (GH#541) - Auto-filter issues by directory in monorepos
+  - Configure `directory.labels` to map paths to label filters
+  - `bd ready` and `bd list` auto-apply when in matching directories
+  - Example: `packages/maverick: maverick` shows only maverick-labeled issues
+
+- **Molecules catalog** (gt-0ei3) - Separate storage for template molecules
+  - Templates now live in `molecules.jsonl`, distinct from work items
+  - Hierarchical loading: built-in → town → user → project
+  - Molecules use `mol-*` ID namespace with `is_template: true`
+
+- **Windows winget manifest** (GH#524) - Prepare beads for Windows Package Manager
+  - Added manifest files for winget submission
+  - Once merged to microsoft/winget-pkgs: `winget install SteveYegge.beads`
+
+- **Git commit configuration** (GH#600) - Control beads auto-commit behavior
+  - `git.author` - Override commit author (useful for bots)
+  - `git.no-gpg-sign` - Disable GPG signing (fixes Touch ID prompts)
+
+- **Require description config** (GH#596) - Enforce descriptions on issue creation
+  - Set `create.require-description: true` to error on missing descriptions
+  - Also supports `BD_CREATE_REQUIRE_DESCRIPTION` env var
+
+### Changed
+
+- **`bd stats` merged into `bd status`** (GH#644) - Consolidated status commands
+  - `stats` now an alias for `status`
+  - Colorized output with emoji header
+  - Shows all statistics (tombstones, pinned, epics, lead time)
+  - Added `--no-activity` flag to skip git activity parsing
+
+- **Thin hook shims** (GH#615) - Hooks now delegate to `bd hooks run`
+  - Eliminates hook version drift after upgrades
+  - No more manual `bd hooks install --force` needed
+  - Shims use `# bd-shim v1` marker (format version, not bd version)
+
+- **MCP context tool consolidation** - Merged 3 tools into 1
+  - Combined `set_context`, `where_am_i`, `init` into single `context` tool
+  - Actions: `set` (default with workspace_root), `show` (default), `init`
+
+- **Doctor improvements** (GH#656) - Enhanced diagnostics and testing
+  - Visual improvements with grouped output
+  - Comprehensive test coverage added
+  - Fixed gosec warnings
+  - Contributed by @rsnodgrass
+
+### Fixed
+
+- **`relates-to` cycle detection** (GH#661) - Exclude relates-to from cycle detection
+  - Relates-to links are bidirectional by design, not cycles
+
+- **Doctor `.local_version` check** (GH#662) - Check correct version file
+  - Now checks `.local_version` instead of deprecated `LastBdVersion`
+
+- **Doctor Claude plugin link** (GH#623) - Updated broken documentation link
+
+- **Read-only gitignore in stealth mode** (GH#663) - Print manual instructions instead of failing
+  - When global gitignore is read-only (e.g., symlink to immutable location), shows what to add manually
+  - Contributed by @qmx
+
 ## [0.30.7] - 2025-12-19
 
 ### Fixed
