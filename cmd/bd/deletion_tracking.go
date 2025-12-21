@@ -136,20 +136,6 @@ func merge3WayAndPruneDeletions(ctx context.Context, store storage.Storage, json
 	return true, nil
 }
 
-// cleanupSnapshots removes the snapshot files and their metadata
-// Deprecated: Use SnapshotManager.Cleanup() instead
-func cleanupSnapshots(jsonlPath string) error {
-	sm := NewSnapshotManager(jsonlPath)
-	return sm.Cleanup()
-}
-
-// validateSnapshotConsistency checks if snapshot files are consistent
-// Deprecated: Use SnapshotManager.Validate() instead
-func validateSnapshotConsistency(jsonlPath string) error {
-	sm := NewSnapshotManager(jsonlPath)
-	return sm.Validate()
-}
-
 // getSnapshotStats returns statistics about the snapshot files
 // Deprecated: Use SnapshotManager.GetStats() instead
 func getSnapshotStats(jsonlPath string) (baseCount, leftCount int, baseExists, leftExists bool) {
