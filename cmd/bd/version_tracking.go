@@ -149,65 +149,7 @@ func maybeShowUpgradeNotification() {
 	fmt.Println("💡 Run 'bd upgrade review' to see what changed")
 	fmt.Println("💊 Run 'bd doctor' to verify upgrade completed cleanly")
 
-	// Check if BD_GUIDE.md exists and needs updating
-	checkAndSuggestBDGuideUpdate()
-
 	fmt.Println()
-}
-
-// checkAndSuggestBDGuideUpdate checks if .beads/BD_GUIDE.md exists and suggests regeneration if outdated.
-// bd-woro: Auto-update BD_GUIDE.md on version changes
-func checkAndSuggestBDGuideUpdate() {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		return
-	}
-
-	guidePath := beadsDir + "/BD_GUIDE.md"
-
-	// Check if BD_GUIDE.md exists
-	if _, err := os.Stat(guidePath); os.IsNotExist(err) {
-		// File doesn't exist - no suggestion needed
-		return
-	}
-
-	// Read first few lines to check version stamp
-	// #nosec G304 - guidePath is constructed from beadsDir + constant string
-	content, err := os.ReadFile(guidePath)
-	if err != nil {
-		return // Silent failure
-	}
-
-	// Look for version in the first 200 bytes (should be in the header)
-	header := string(content)
-	if len(header) > 200 {
-		header = header[:200]
-	}
-
-	// Check if the file has the old version stamp
-	oldVersionStamp := fmt.Sprintf("bd v%s", previousVersion)
-	currentVersionStamp := fmt.Sprintf("bd v%s", Version)
-
-	if containsSubstring(header, oldVersionStamp) && !containsSubstring(header, currentVersionStamp) {
-		// BD_GUIDE.md is outdated
-		fmt.Printf("📄 BD_GUIDE.md is outdated (v%s → v%s)\n", previousVersion, Version)
-		fmt.Printf("💡 Run 'bd onboard --output .beads/BD_GUIDE.md' to regenerate\n")
-	}
-}
-
-// containsSubstring checks if haystack contains needle (case-sensitive)
-func containsSubstring(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && findSubstring(haystack, needle) >= 0
-}
-
-// findSubstring returns the index of needle in haystack, or -1 if not found
-func findSubstring(haystack, needle string) int {
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
 }
 
 // findActualJSONLFile scans .beads/ for the actual JSONL file in use.

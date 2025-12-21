@@ -113,18 +113,11 @@ bd info --whats-new
 # 2. Update git hooks to match new bd version
 bd hooks install
 
-# 3. Regenerate BD_GUIDE.md if it exists (optional but recommended)
-bd onboard --output .beads/BD_GUIDE.md
-
-# 4. Check for any outdated hooks (optional)
+# 3. Check for any outdated hooks (optional)
 bd info  # Shows warnings if hooks are outdated
 ```
 
 **Why update hooks?** Git hooks (pre-commit, post-merge, pre-push) are versioned with bd. Outdated hooks may miss new auto-sync features or bug fixes. Running `bd hooks install` ensures hooks match your bd version.
-
-**About BD_GUIDE.md:** This is an optional auto-generated file that separates bd-specific instructions from project-specific ones. If your project uses this file (in `.beads/BD_GUIDE.md`), regenerate it after upgrades to get the latest bd documentation. The file is version-stamped and should never be manually edited.
-
-**Related:** See GitHub Discussion #239 for background on agent upgrade workflows.
 
 ## Human Setup vs Agent Usage
 

@@ -111,7 +111,6 @@ The `.beads/` directory contains:
 | `config.yaml` | Project configuration |
 | `metadata.json` | Version tracking |
 | `deletions.jsonl` | Soft-deleted issues |
-| `BD_GUIDE.md` | AI agent instructions |
 | `README.md` | Human-readable overview |
 
 Remove everything:
