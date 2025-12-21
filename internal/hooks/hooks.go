@@ -12,18 +12,16 @@ import (
 
 // Event types
 const (
-	EventCreate  = "create"
-	EventUpdate  = "update"
-	EventClose   = "close"
-	EventMessage = "message"
+	EventCreate = "create"
+	EventUpdate = "update"
+	EventClose  = "close"
 )
 
 // Hook file names
 const (
-	HookOnCreate  = "on_create"
-	HookOnUpdate  = "on_update"
-	HookOnClose   = "on_close"
-	HookOnMessage = "on_message"
+	HookOnCreate = "on_create"
+	HookOnUpdate = "on_update"
+	HookOnClose  = "on_close"
 )
 
 // Runner handles hook execution
@@ -120,8 +118,6 @@ func eventToHook(event string) string {
 		return HookOnUpdate
 	case EventClose:
 		return HookOnClose
-	case EventMessage:
-		return HookOnMessage
 	default:
 		return ""
 	}

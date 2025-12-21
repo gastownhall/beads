@@ -19,7 +19,7 @@ the overseer, not as part of a swarm.
 
 **Your mail address:** `beads/dave`
 
-Check your mail with: `bd mail inbox --identity beads-dave`
+Check your mail with: `gt mail inbox` (mail is handled by Gas Town, not beads)
 
 ## Gas Town Architecture
 
@@ -38,7 +38,7 @@ Town (/Users/stevey/gt)
 ## Key Commands
 
 ### Finding Work
-- `bd mail inbox --identity beads-dave` - Check your inbox
+- `gt mail inbox` - Check your inbox (mail is in Gas Town)
 - `bd ready` - Available issues
 - `bd list --status=in_progress` - Your active work
 
@@ -49,8 +49,8 @@ Town (/Users/stevey/gt)
 - `bd sync` - Sync beads changes
 
 ### Communication
-- `bd mail send mayor -s "Subject" -m "Message"` - To Mayor
-- `bd mail send beads-dave -s "Subject" -m "Message"` - To yourself (handoff)
+- `gt mail send mayor/ -s "Subject" -m "Message"` - To Mayor
+- `gt mail send beads/dave -s "Subject" -m "Message"` - To yourself (handoff)
 
 ## Beads Database
 
@@ -360,47 +360,6 @@ bd create "Fix auth bug" -t bug -p 1 --json  # What bug? Where? Why?
 bd create "Add feature" -t feature --json     # What feature? Why needed?
 bd create "Refactor code" -t task --json      # What code? Why refactor?
 ```
-
-### Inter-Agent Messaging (bd mail)
-
-Beads includes a built-in messaging system for direct agent-to-agent communication. Messages are stored as beads issues, synced via git.
-
-**Setup:**
-
-```bash
-# Set your identity (add to environment or .beads/config.json)
-export BEADS_IDENTITY="worker-1"
-```
-
-**Commands:**
-
-```bash
-# Send a message
-bd mail send <recipient> -s "Subject" -m "Body"
-bd mail send worker-2 -s "Handoff" -m "Your turn on bd-xyz" --urgent
-
-# Check your inbox
-bd mail inbox
-
-# Read a specific message
-bd mail read bd-a1b2
-
-# Acknowledge (mark as read/close)
-bd mail ack bd-a1b2
-
-# Reply to a message (creates thread)
-bd mail reply bd-a1b2 -m "Thanks, on it!"
-```
-
-**Use cases:**
-- Task handoffs between agents
-- Status updates to coordinator
-- Blocking questions requiring response
-- Priority signaling with `--urgent` flag
-
-**Cleanup:** Messages are ephemeral. Run `bd cleanup --ephemeral --force` to delete closed messages.
-
-See [docs/messaging.md](docs/messaging.md) for full documentation.
 
 ### Deletion Tracking
 

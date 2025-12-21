@@ -44,7 +44,6 @@ func TestEventToHook(t *testing.T) {
 		{EventCreate, HookOnCreate},
 		{EventUpdate, HookOnUpdate},
 		{EventClose, HookOnClose},
-		{EventMessage, HookOnMessage},
 		{"unknown", ""},
 		{"", ""},
 	}
@@ -182,7 +181,7 @@ echo "$1 $2" > ` + outputFile
 
 func TestRunSync_ReceivesJSON(t *testing.T) {
 	tmpDir := t.TempDir()
-	hookPath := filepath.Join(tmpDir, HookOnMessage)
+	hookPath := filepath.Join(tmpDir, HookOnCreate)
 	outputFile := filepath.Join(tmpDir, "stdin.txt")
 
 	// Create a hook that captures stdin
@@ -194,13 +193,12 @@ cat > ` + outputFile
 
 	runner := NewRunner(tmpDir)
 	issue := &types.Issue{
-		ID:       "bd-msg",
-		Title:    "Test Message",
-		Sender:   "alice",
+		ID:       "bd-test",
+		Title:    "Test Issue",
 		Assignee: "bob",
 	}
 
-	err := runner.RunSync(EventMessage, issue)
+	err := runner.RunSync(EventCreate, issue)
 	if err != nil {
 		t.Errorf("RunSync returned error: %v", err)
 	}
@@ -380,7 +378,6 @@ func TestAllHookEvents(t *testing.T) {
 		{EventCreate, HookOnCreate},
 		{EventUpdate, HookOnUpdate},
 		{EventClose, HookOnClose},
-		{EventMessage, HookOnMessage},
 	}
 
 	for _, e := range events {

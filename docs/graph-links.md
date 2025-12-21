@@ -9,7 +9,8 @@ Beads supports several types of links between issues to create a knowledge graph
 Creates message threads, similar to email or chat conversations.
 
 **Created by:**
-- `bd mail reply <id>` command
+- `gt mail reply <id>` command (Gas Town handles messaging)
+- `bd dep add <new-id> <original-id> --type replies_to` (manual linking)
 
 **Use cases:**
 - Agent-to-agent message threads
@@ -19,19 +20,19 @@ Creates message threads, similar to email or chat conversations.
 **Example:**
 
 ```bash
-# Original message
-bd mail send worker-1 -s "Review needed" -m "Please review bd-xyz"
-# Creates: bd-a1b2
+# Original message (via Gas Town)
+gt mail send gastown/worker -s "Review needed" -m "Please review gt-xyz"
+# Creates: gt-a1b2
 
-# Reply (automatically sets replies_to: bd-a1b2)
-bd mail reply bd-a1b2 -m "Done! Approved with minor comments."
-# Creates: bd-c3d4 with replies_to: bd-a1b2
+# Reply (automatically sets replies_to)
+gt mail reply gt-a1b2 -m "Done! Approved with minor comments."
+# Creates: gt-c3d4 with replies_to: gt-a1b2
 ```
 
 **Viewing threads:**
 
 ```bash
-bd show bd-a1b2 --thread
+bd show gt-a1b2 --thread
 ```
 
 ### relates_to - Loose Associations
@@ -255,12 +256,12 @@ bd supersede bd-rfc2 --with bd-rfc3
 
 ### Message Threading
 
-Build conversation chains:
+Build conversation chains (via Gas Town):
 
 ```bash
-bd mail send dev -s "Question" -m "How does X work?"
-bd mail reply bd-q1 -m "X works by..."
-bd mail reply bd-q1.reply -m "Thanks!"
+gt mail send gastown/dev -s "Question" -m "How does X work?"
+gt mail reply gt-q1 -m "X works by..."
+gt mail reply gt-q1.reply -m "Thanks!"
 ```
 
 ## Best Practices
