@@ -1047,3 +1047,92 @@ func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 		t.Error("File should contain bd onboard prompt")
 	}
 }
+
+// TestSetupGlobalGitIgnore_ReadOnly verifies graceful handling when the
+// gitignore file cannot be written (prints manual instructions instead of failing).
+func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
+	t.Run("read-only file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configDir := filepath.Join(tmpDir, ".config", "git")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		ignorePath := filepath.Join(configDir, "ignore")
+		if err := os.WriteFile(ignorePath, []byte("# existing\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(ignorePath, 0444); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(ignorePath, 0644)
+
+		output := captureStdout(t, func() error {
+			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
+		})
+
+		if !strings.Contains(output, "Unable to write") {
+			t.Error("expected instructions for manual addition")
+		}
+		if !strings.Contains(output, "/test/project/.beads/") {
+			t.Error("expected .beads pattern in output")
+		}
+	})
+
+	t.Run("symlink to read-only file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Target file in a separate location
+		targetDir := filepath.Join(tmpDir, "target")
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		targetFile := filepath.Join(targetDir, "ignore")
+		if err := os.WriteFile(targetFile, []byte("# existing\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(targetFile, 0444); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(targetFile, 0644)
+
+		// Symlink from expected location
+		configDir := filepath.Join(tmpDir, ".config", "git")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(targetFile, filepath.Join(configDir, "ignore")); err != nil {
+			t.Fatal(err)
+		}
+
+		output := captureStdout(t, func() error {
+			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
+		})
+
+		if !strings.Contains(output, "Unable to write") {
+			t.Error("expected instructions for manual addition")
+		}
+		if !strings.Contains(output, "/test/project/.beads/") {
+			t.Error("expected .beads pattern in output")
+		}
+	})
+}
+
+func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := fn()
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	return buf.String()
+}

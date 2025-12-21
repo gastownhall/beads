@@ -1503,7 +1503,19 @@ func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) erro
 	// Write the updated ignore file
 	// #nosec G306 - config file needs 0644
 	if err := os.WriteFile(ignorePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write global gitignore: %w", err)
+		fmt.Printf("\nUnable to write to %s (file is read-only)\n\n", ignorePath)
+		fmt.Printf("To enable stealth mode, add these lines to your global gitignore:\n\n")
+		if !hasBeads || !hasClaude {
+			fmt.Printf("# Beads stealth mode: %s\n", projectPath)
+		}
+		if !hasBeads {
+			fmt.Printf("%s\n", beadsPattern)
+		}
+		if !hasClaude {
+			fmt.Printf("%s\n", claudePattern)
+		}
+		fmt.Println()
+		return nil
 	}
 
 	if verbose {
