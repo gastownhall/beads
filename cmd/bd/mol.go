@@ -786,7 +786,6 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 			Status:      types.StatusOpen,
 			Priority:    minPriority(protoA.Priority, protoB.Priority),
 			IssueType:   types.TypeEpic,
-			Labels:      []string{MoleculeLabel}, // Mark as proto
 			BondedFrom: []types.BondRef{
 				{ProtoID: protoA.ID, BondType: bondType, BondPoint: ""},
 				{ProtoID: protoB.ID, BondType: bondType, BondPoint: ""},
@@ -796,6 +795,11 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 			return fmt.Errorf("creating compound: %w", err)
 		}
 		compoundID = compound.ID
+
+		// Add template label (labels are stored separately, not in issue table)
+		if err := tx.AddLabel(ctx, compoundID, MoleculeLabel, actorName); err != nil {
+			return fmt.Errorf("adding template label: %w", err)
+		}
 
 		// Add parent-child dependencies from compound to both proto roots
 		depA := &types.Dependency{
