@@ -791,7 +791,7 @@ func runCmdWithTimeoutMessage(ctx context.Context, timeoutMsg string, timeoutDel
 		case <-time.After(timeoutDelay):
 			fmt.Fprintf(os.Stderr, "⏳ %s\n", timeoutMsg)
 		case <-ctx.Done():
-			// Context cancelled, don't print message
+			// Context canceled, don't print message
 		}
 	}()
 

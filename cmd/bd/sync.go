@@ -2162,7 +2162,7 @@ func runGitCmdWithTimeoutMsg(ctx context.Context, cmd *exec.Cmd, cmdName string,
 		case <-time.After(timeoutDelay):
 			fmt.Fprintf(os.Stderr, "⏳ %s is taking longer than expected (possibly waiting for authentication). If this hangs, check for a browser auth prompt or run 'git status' in another terminal.\n", cmdName)
 		case <-ctx.Done():
-			// Context cancelled, don't print message
+			// Context canceled, don't print message
 		}
 	}()
 
