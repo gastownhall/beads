@@ -902,6 +902,11 @@ func (m *MemoryStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	var results []*types.Issue
 
 	for _, issue := range m.issues {
+		// Skip pinned issues - they are context markers, not actionable work (bd-o9o)
+		if issue.Pinned {
+			continue
+		}
+
 		// Status filtering: default to open OR in_progress if not specified
 		if filter.Status == "" {
 			if issue.Status != types.StatusOpen && issue.Status != types.StatusInProgress {
