@@ -558,6 +558,8 @@ var allowedUpdateFields = map[string]bool{
 	// Messaging fields (bd-kwro)
 	"sender":    true,
 	"ephemeral": true,
+	// Pinned field (bd-7h5)
+	"pinned": true,
 	// NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
 	// Use AddDependency() to create graph edges instead
 }

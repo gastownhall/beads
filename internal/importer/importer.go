@@ -554,6 +554,8 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 					updates["notes"] = incoming.Notes
 					updates["closed_at"] = incoming.ClosedAt
+					// Pinned field (bd-7h5)
+					updates["pinned"] = incoming.Pinned
 
 					if incoming.Assignee != "" {
 						updates["assignee"] = incoming.Assignee
@@ -647,6 +649,8 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 				updates["notes"] = incoming.Notes
 				updates["closed_at"] = incoming.ClosedAt
+				// Pinned field (bd-7h5)
+				updates["pinned"] = incoming.Pinned
 
 				if incoming.Assignee != "" {
 					updates["assignee"] = incoming.Assignee

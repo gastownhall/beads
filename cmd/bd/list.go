@@ -38,9 +38,9 @@ func parseTimeFlag(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse time %q (try formats: 2006-01-02, 2006-01-02T15:04:05, or RFC3339)", s)
 }
 
-// pinIndicator returns a pushpin emoji prefix for pinned issues (bd-18b)
+// pinIndicator returns a pushpin emoji prefix for pinned issues (bd-18b, bd-7h5)
 func pinIndicator(issue *types.Issue) string {
-	if issue.Status == types.StatusPinned {
+	if issue.Pinned {
 		return "📌 "
 	}
 	return ""

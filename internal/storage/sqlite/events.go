@@ -121,7 +121,7 @@ func (s *SQLiteStorage) GetStatistics(ctx context.Context) (*types.Statistics, e
 			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed,
 			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0) as deferred,
 			COALESCE(SUM(CASE WHEN status = 'tombstone' THEN 1 ELSE 0 END), 0) as tombstone,
-			COALESCE(SUM(CASE WHEN status = 'pinned' THEN 1 ELSE 0 END), 0) as pinned
+			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) as pinned
 		FROM issues
 	`).Scan(&stats.TotalIssues, &stats.OpenIssues, &stats.InProgressIssues, &stats.ClosedIssues, &stats.DeferredIssues, &stats.TombstoneIssues, &stats.PinnedIssues)
 	if err != nil {

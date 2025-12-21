@@ -112,6 +112,15 @@ func (fc *fieldComparator) equalPriority(existing int, newVal interface{}) bool 
 	return ok && int64(existing) == newPriority
 }
 
+func (fc *fieldComparator) equalBool(existingVal bool, newVal interface{}) bool {
+	switch t := newVal.(type) {
+	case bool:
+		return existingVal == t
+	default:
+		return false
+	}
+}
+
 func (fc *fieldComparator) checkFieldChanged(key string, existing *types.Issue, newVal interface{}) bool {
 	switch key {
 	case "title":
@@ -134,6 +143,8 @@ func (fc *fieldComparator) checkFieldChanged(key string, existing *types.Issue, 
 		return !fc.equalStr(existing.Assignee, newVal)
 	case "external_ref":
 		return !fc.equalPtrStr(existing.ExternalRef, newVal)
+	case "pinned":
+		return !fc.equalBool(existing.Pinned, newVal)
 	default:
 		return false
 	}
