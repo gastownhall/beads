@@ -425,11 +425,25 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 
 	// If we found issues, report them
 	if len(issues) > 0 {
+		// Provide direction-specific guidance
+		var fixMsg string
+		if dbCount > jsonlCount {
+			fixMsg = "Run 'bd doctor --fix' to automatically export DB to JSONL, or manually run 'bd export'"
+		} else if jsonlCount > dbCount {
+			fixMsg = "Run 'bd doctor --fix' to automatically import JSONL to DB, or manually run 'bd sync --import-only'"
+		} else {
+			// Equal counts but other issues (like prefix mismatch)
+			fixMsg = "Run 'bd doctor --fix' to fix automatically, or manually run 'bd sync --import-only' or 'bd export' depending on which has newer data"
+		}
+		if strings.Contains(strings.Join(issues, " "), "Prefix mismatch") {
+			fixMsg = "Run 'bd import -i " + filepath.Base(jsonlPath) + " --rename-on-import' to fix prefixes"
+		}
+
 		return DoctorCheck{
 			Name:    "DB-JSONL Sync",
 			Status:  StatusWarning,
 			Message: strings.Join(issues, "; "),
-			Fix:     "Run 'bd sync --import-only' to import JSONL updates or 'bd import -i issues.jsonl --rename-on-import' to fix prefixes",
+			Fix:     fixMsg,
 		}
 	}
 

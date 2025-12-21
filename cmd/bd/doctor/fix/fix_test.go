@@ -628,3 +628,83 @@ func TestSyncBranchConfig_InvalidRemoteURL(t *testing.T) {
 	}
 }
 
+func TestCountJSONLIssues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_JSONL", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+
+		// Create empty JSONL
+		if err := os.WriteFile(jsonlPath, []byte(""), 0644); err != nil {
+			t.Fatalf("failed to create JSONL: %v", err)
+		}
+
+		count, err := countJSONLIssues(jsonlPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0, got %d", count)
+		}
+	})
+
+	t.Run("valid_issues", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+
+		// Create JSONL with 3 issues
+		jsonl := []byte(`{"id":"bd-1","title":"First"}
+{"id":"bd-2","title":"Second"}
+{"id":"bd-3","title":"Third"}
+`)
+		if err := os.WriteFile(jsonlPath, jsonl, 0644); err != nil {
+			t.Fatalf("failed to create JSONL: %v", err)
+		}
+
+		count, err := countJSONLIssues(jsonlPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 3 {
+			t.Errorf("expected 3, got %d", count)
+		}
+	})
+
+	t.Run("mixed_valid_and_invalid", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+
+		// Create JSONL with 2 valid and some invalid lines
+		jsonl := []byte(`{"id":"bd-1","title":"First"}
+invalid json line
+{"id":"bd-2","title":"Second"}
+{"title":"No ID"}
+`)
+		if err := os.WriteFile(jsonlPath, jsonl, 0644); err != nil {
+			t.Fatalf("failed to create JSONL: %v", err)
+		}
+
+		count, err := countJSONLIssues(jsonlPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("expected 2, got %d", count)
+		}
+	})
+
+	t.Run("nonexistent_file", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		jsonlPath := filepath.Join(dir, ".beads", "nonexistent.jsonl")
+
+		count, err := countJSONLIssues(jsonlPath)
+		if err == nil {
+			t.Error("expected error for nonexistent file")
+		}
+		if count != 0 {
+			t.Errorf("expected 0, got %d", count)
+		}
+	})
+}
+
