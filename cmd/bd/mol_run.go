@@ -127,7 +127,7 @@ func runMolRun(cmd *cobra.Command, args []string) {
 	fmt.Printf("  Assignee: %s\n", actor)
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  bd ready                # Find unblocked work in this molecule\n")
-	fmt.Printf("  bd show %s       # View molecule status\n", rootID[:8])
+	fmt.Printf("  bd show %s       # View molecule status\n", rootID)
 }
 
 func init() {
