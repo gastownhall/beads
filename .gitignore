@@ -117,3 +117,4 @@ history/
 # Gas Town agent state
 state.json
 .beads/redirect
+.beads-wisp/
