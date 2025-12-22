@@ -19,15 +19,26 @@ var molSpawnCmd = &cobra.Command{
 Variables are specified with --var key=value flags. The proto's {{key}}
 placeholders will be replaced with the corresponding values.
 
+Phase behavior:
+  - By default, spawned molecules are WISPS (ephemeral, in .beads-wisp/)
+  - Use --pour to create a persistent MOL (in .beads/)
+  - Wisps are local-only, gitignored, and not synced
+  - Mols are permanent, synced, and auditable
+
+Chemistry shortcuts:
+  bd pour <proto>    # Equivalent to: bd mol spawn <proto> --pour
+  bd wisp <proto>    # Equivalent to: bd mol spawn <proto>
+
 Use --attach to bond additional protos to the spawned molecule in a single
 command. Each attached proto is spawned and bonded using the --attach-type
 (default: sequential). This is equivalent to running spawn + multiple bond
 commands, but more convenient for composing workflows.
 
 Example:
-  bd mol spawn mol-code-review --var pr=123 --var repo=myproject
-  bd mol spawn bd-abc123 --var version=1.2.0 --assignee=worker-1
-  bd mol spawn mol-feature --attach mol-testing --attach mol-docs --var name=auth`,
+  bd mol spawn mol-patrol                                  # Creates wisp (default)
+  bd mol spawn mol-feature --pour --var name=auth          # Creates persistent mol
+  bd mol spawn bd-abc123 --pour --var version=1.2.0        # Persistent with vars
+  bd mol spawn mol-feature --attach mol-testing --var name=auth`,
 	Args: cobra.ExactArgs(1),
 	Run:  runMolSpawn,
 }
@@ -53,7 +64,14 @@ func runMolSpawn(cmd *cobra.Command, args []string) {
 	assignee, _ := cmd.Flags().GetString("assignee")
 	attachFlags, _ := cmd.Flags().GetStringSlice("attach")
 	attachType, _ := cmd.Flags().GetString("attach-type")
+	pour, _ := cmd.Flags().GetBool("pour")
 	persistent, _ := cmd.Flags().GetBool("persistent")
+
+	// Handle deprecated --persistent flag
+	if persistent {
+		fmt.Fprintf(os.Stderr, "Warning: --persistent is deprecated, use --pour instead\n")
+		pour = true
+	}
 
 	// Parse variables
 	vars := make(map[string]string)
@@ -182,8 +200,8 @@ func runMolSpawn(cmd *cobra.Command, args []string) {
 	}
 
 	// Clone the subgraph (spawn the molecule)
-	// Spawned molecules are wisps by default (bd-2vh3) - use --persistent to opt out
-	wisp := !persistent
+	// Spawned molecules are wisps by default (vapor phase) - use --pour for persistent mol (liquid phase)
+	wisp := !pour
 	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, wisp)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error spawning molecule: %v\n", err)
@@ -236,7 +254,9 @@ func init() {
 	molSpawnCmd.Flags().String("assignee", "", "Assign the root issue to this agent/user")
 	molSpawnCmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
 	molSpawnCmd.Flags().String("attach-type", types.BondTypeSequential, "Bond type for attachments: sequential, parallel, or conditional")
-	molSpawnCmd.Flags().Bool("persistent", false, "Create non-wisp issues (default: wisp for cleanup)")
+	molSpawnCmd.Flags().Bool("pour", false, "Create persistent mol in .beads/ (default: wisp in .beads-wisp/)")
+	molSpawnCmd.Flags().Bool("persistent", false, "Deprecated: use --pour instead")
+	_ = molSpawnCmd.Flags().MarkDeprecated("persistent", "use --pour instead")
 
 	molCmd.AddCommand(molSpawnCmd)
 }

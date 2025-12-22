@@ -71,6 +71,217 @@ type WispListResult struct {
 // StaleThreshold is how old a wisp must be to be considered stale
 const StaleThreshold = 24 * time.Hour
 
+// wispCreateCmd instantiates a proto as an ephemeral wisp
+var wispCreateCmd = &cobra.Command{
+	Use:   "create <proto-id>",
+	Short: "Instantiate a proto as an ephemeral wisp (solid -> vapor)",
+	Long: `Create a wisp from a proto - sublimation from solid to vapor.
+
+This is the chemistry-inspired command for creating ephemeral work from templates.
+The resulting wisp lives in .beads-wisp/ (ephemeral storage) and is NOT synced.
+
+Phase transition: Proto (solid) -> wisp -> Wisp (vapor)
+
+Use wisp create for:
+  - Patrol cycles (deacon, witness)
+  - Health checks and monitoring
+  - One-shot orchestration runs
+  - Routine operations with no audit value
+
+The wisp will:
+  - Be stored in .beads-wisp/ (gitignored)
+  - NOT sync to remote
+  - Either evaporate (burn) or condense to digest (squash)
+
+Equivalent to: bd mol spawn <proto>
+
+Examples:
+  bd wisp create mol-patrol                    # Ephemeral patrol cycle
+  bd wisp create mol-health-check              # One-time health check
+  bd wisp create mol-diagnostics --var target=db  # Diagnostic run`,
+	Args: cobra.ExactArgs(1),
+	Run:  runWispCreate,
+}
+
+func runWispCreate(cmd *cobra.Command, args []string) {
+	CheckReadonly("wisp create")
+
+	ctx := rootCtx
+
+	// Wisp create requires direct store access
+	if store == nil {
+		if daemonClient != nil {
+			fmt.Fprintf(os.Stderr, "Error: wisp create requires direct database access\n")
+			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon wisp create %s ...\n", args[0])
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+		}
+		os.Exit(1)
+	}
+
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	varFlags, _ := cmd.Flags().GetStringSlice("var")
+
+	// Parse variables
+	vars := make(map[string]string)
+	for _, v := range varFlags {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "Error: invalid variable format '%s', expected 'key=value'\n", v)
+			os.Exit(1)
+		}
+		vars[parts[0]] = parts[1]
+	}
+
+	// Resolve proto ID
+	protoID := args[0]
+	// Try to resolve partial ID if it doesn't look like a full ID
+	if !strings.HasPrefix(protoID, "bd-") && !strings.HasPrefix(protoID, "gt-") && !strings.HasPrefix(protoID, "mol-") {
+		// Might be a partial ID, try to resolve
+		if resolved, err := resolvePartialIDDirect(ctx, protoID); err == nil {
+			protoID = resolved
+		}
+	}
+
+	// Check if it's a named molecule (mol-xxx) - look up in catalog
+	if strings.HasPrefix(protoID, "mol-") {
+		// Find the proto by name
+		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			Labels: []string{MoleculeLabel},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error searching for proto: %v\n", err)
+			os.Exit(1)
+		}
+		found := false
+		for _, issue := range issues {
+			if strings.Contains(issue.Title, protoID) || issue.ID == protoID {
+				protoID = issue.ID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Error: proto '%s' not found in catalog\n", args[0])
+			fmt.Fprintf(os.Stderr, "Hint: run 'bd mol catalog' to see available protos\n")
+			os.Exit(1)
+		}
+	}
+
+	// Load the proto
+	protoIssue, err := store.GetIssue(ctx, protoID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+		os.Exit(1)
+	}
+	if !isProtoIssue(protoIssue) {
+		fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
+		os.Exit(1)
+	}
+
+	// Load the proto subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, store, protoID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check for missing variables
+	requiredVars := extractAllVariables(subgraph)
+	var missingVars []string
+	for _, v := range requiredVars {
+		if _, ok := vars[v]; !ok {
+			missingVars = append(missingVars, v)
+		}
+	}
+	if len(missingVars) > 0 {
+		fmt.Fprintf(os.Stderr, "Error: missing required variables: %s\n", strings.Join(missingVars, ", "))
+		fmt.Fprintf(os.Stderr, "Provide them with: --var %s=<value>\n", missingVars[0])
+		os.Exit(1)
+	}
+
+	if dryRun {
+		fmt.Printf("\nDry run: would create wisp with %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
+		fmt.Printf("Storage: wisp (.beads-wisp/)\n\n")
+		for _, issue := range subgraph.Issues {
+			newTitle := substituteVariables(issue.Title, vars)
+			fmt.Printf("  - %s (from %s)\n", newTitle, issue.ID)
+		}
+		return
+	}
+
+	// Open wisp storage
+	wispStore, err := beads.NewWispStorage(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to open wisp storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer wispStore.Close()
+
+	// Ensure wisp directory is gitignored
+	if err := beads.EnsureWispGitignore(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not update .gitignore: %v\n", err)
+	}
+
+	// Spawn as wisp (ephemeral=true)
+	result, err := spawnMolecule(ctx, wispStore, subgraph, vars, "", actor, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating wisp: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Don't schedule flush - wisps are not synced
+
+	if jsonOutput {
+		type wispCreateResult struct {
+			*InstantiateResult
+			Phase string `json:"phase"`
+		}
+		outputJSON(wispCreateResult{result, "vapor"})
+		return
+	}
+
+	fmt.Printf("%s Created wisp: %d issues\n", ui.RenderPass("✓"), result.Created)
+	fmt.Printf("  Root issue: %s\n", result.NewEpicID)
+	fmt.Printf("  Phase: vapor (ephemeral in .beads-wisp/)\n")
+	fmt.Printf("\nNext steps:\n")
+	fmt.Printf("  bd close %s.<step>       # Complete steps\n", result.NewEpicID)
+	fmt.Printf("  bd mol squash %s         # Condense to digest\n", result.NewEpicID)
+	fmt.Printf("  bd mol burn %s           # Discard without digest\n", result.NewEpicID)
+}
+
+// isProtoIssue checks if an issue is a proto (has the template label)
+func isProtoIssue(issue *types.Issue) bool {
+	for _, label := range issue.Labels {
+		if label == MoleculeLabel {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvePartialIDDirect resolves a partial ID directly from store
+func resolvePartialIDDirect(ctx context.Context, partial string) (string, error) {
+	// Try direct lookup first
+	if issue, err := store.GetIssue(ctx, partial); err == nil {
+		return issue.ID, nil
+	}
+	// Search by prefix
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		IDs: []string{partial + "*"},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(issues) == 1 {
+		return issues[0].ID, nil
+	}
+	if len(issues) > 1 {
+		return "", fmt.Errorf("ambiguous ID: %s matches %d issues", partial, len(issues))
+	}
+	return "", fmt.Errorf("not found: %s", partial)
+}
+
 var wispListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all wisps in current context",
@@ -483,12 +694,17 @@ func runWispGC(cmd *cobra.Command, args []string) {
 }
 
 func init() {
+	// Wisp create command flags
+	wispCreateCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value)")
+	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
 
 	wispGCCmd.Flags().Bool("dry-run", false, "Preview what would be cleaned")
 	wispGCCmd.Flags().String("age", "1h", "Age threshold for orphan detection")
 	wispGCCmd.Flags().Bool("all", false, "Also clean closed wisps older than threshold")
 
+	wispCmd.AddCommand(wispCreateCmd)
 	wispCmd.AddCommand(wispListCmd)
 	wispCmd.AddCommand(wispGCCmd)
 	rootCmd.AddCommand(wispCmd)

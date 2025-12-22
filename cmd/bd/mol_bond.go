@@ -32,18 +32,26 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
-Wisp storage (ephemeral molecules):
-  Use --wisp to create molecules in .beads-wisp/ instead of .beads/.
-  Wisps are local-only, gitignored, and not synced - the "steam" of Gas Town.
-  Use bd mol squash to convert a wisp to a digest in permanent storage.
-  Use bd mol burn to delete a wisp without creating a digest.
+Phase control:
+  By default, spawned protos follow the target's phase:
+  - Attaching to mol → spawns as mol (liquid)
+  - Attaching to wisp → spawns as wisp (vapor)
+
+  Override with:
+  --pour  Force spawn as liquid (persistent), even when attaching to wisp
+  --wisp  Force spawn as vapor (ephemeral), even when attaching to mol
+
+Use cases:
+  - Found important bug during patrol? Use --pour to persist it
+  - Need ephemeral diagnostic on persistent feature? Use --wisp
 
 Examples:
   bd mol bond mol-feature mol-deploy                    # Compound proto
   bd mol bond mol-feature mol-deploy --type parallel    # Run in parallel
   bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
   bd mol bond bd-abc123 bd-def456                       # Join two molecules
-  bd mol bond mol-patrol --wisp                         # Create wisp for patrol cycle`,
+  bd mol bond mol-critical-bug wisp-patrol --pour       # Persist found bug
+  bd mol bond mol-temp-check bd-feature --wisp          # Ephemeral diagnostic`,
 	Args: cobra.ExactArgs(2),
 	Run:  runMolBond,
 }
@@ -79,11 +87,19 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
 	wisp, _ := cmd.Flags().GetBool("wisp")
+	pour, _ := cmd.Flags().GetBool("pour")
+
+	// Validate phase flags are not both set
+	if wisp && pour {
+		fmt.Fprintf(os.Stderr, "Error: cannot use both --wisp and --pour\n")
+		os.Exit(1)
+	}
 
 	// Determine which store to use for spawning
+	// Default: follow target's phase. Override with --wisp or --pour.
 	targetStore := store
 	if wisp {
-		// Open wisp storage for ephemeral molecule creation
+		// Explicit --wisp: use wisp storage
 		wispStore, err := beads.NewWispStorage(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open wisp storage: %v\n", err)
@@ -97,6 +113,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "Warning: could not update .gitignore: %v\n", err)
 		}
 	}
+	// Note: --pour means use permanent storage (which is the default targetStore)
 
 	// Validate bond type
 	if bondType != types.BondTypeSequential && bondType != types.BondTypeParallel && bondType != types.BondTypeConditional {
@@ -149,18 +166,23 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 		fmt.Printf("  Bond type: %s\n", bondType)
 		if wisp {
-			fmt.Printf("  Storage: wisp (.beads-wisp/)\n")
+			fmt.Printf("  Phase override: vapor (--wisp)\n")
+		} else if pour {
+			fmt.Printf("  Phase override: liquid (--pour)\n")
 		}
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
 			if customTitle != "" {
 				fmt.Printf("  Custom title: %s\n", customTitle)
 			}
-			if wisp {
-				fmt.Printf("  Note: --wisp ignored for proto+proto (templates stay in permanent storage)\n")
+			if wisp || pour {
+				fmt.Printf("  Note: phase flags ignored for proto+proto (templates stay in permanent storage)\n")
 			}
 		} else if aIsProto || bIsProto {
 			fmt.Printf("  Result: spawn proto, attach to molecule\n")
+			if !wisp && !pour {
+				fmt.Printf("  Phase: follows target's phase\n")
+			}
 		} else {
 			fmt.Printf("  Result: compound molecule\n")
 		}
@@ -203,7 +225,9 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Spawned: %d issues\n", result.Spawned)
 	}
 	if wisp {
-		fmt.Printf("  Storage: wisp (.beads-wisp/)\n")
+		fmt.Printf("  Phase: vapor (ephemeral in .beads-wisp/)\n")
+	} else if pour {
+		fmt.Printf("  Phase: liquid (persistent in .beads/)\n")
 	}
 }
 
@@ -418,7 +442,8 @@ func init() {
 	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
 	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("wisp", false, "Create molecule in wisp storage (.beads-wisp/)")
+	molBondCmd.Flags().Bool("wisp", false, "Force spawn as vapor (ephemeral in .beads-wisp/)")
+	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent in .beads/)")
 
 	molCmd.AddCommand(molBondCmd)
 }

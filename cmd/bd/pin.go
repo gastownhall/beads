@@ -12,23 +12,50 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// pinCmd attaches a mol to an agent's hook (work assignment)
+//
+// In the molecular chemistry metaphor:
+//   - Hook: Agent's attachment point for work
+//   - Pin: Action of attaching a mol to an agent's hook
 var pinCmd = &cobra.Command{
-	Use:     "pin [id...]",
+	Use:     "pin <mol-id>",
 	GroupID: "issues",
-	Short:   "Pin one or more issues as persistent context markers",
-	Long: `Pin issues to mark them as persistent context markers.
+	Short:   "Attach a mol to an agent's hook (work assignment)",
+	Long: `Pin a mol to an agent's hook - the action of assigning work.
 
-Pinned issues are not work items - they are context beads that should
-remain visible and not be cleaned up or closed automatically.
+This is the chemistry-inspired command for work assignment. Pinning a mol
+to an agent's hook marks it as their current work focus.
+
+What happens when you pin:
+  1. The mol's pinned flag is set to true
+  2. The mol's assignee is set to the target agent (with --for)
+  3. The mol's status is set to in_progress (with --start)
+
+Use cases:
+  - Witness assigning work to polecat: bd pin bd-abc123 --for polecat-ace
+  - Self-assigning work: bd pin bd-abc123
+  - Reviewing what's on your hook: bd hook
+
+Legacy behavior:
+  - Multiple IDs can be pinned at once (original pin command)
+  - Without --for, just sets the pinned flag
 
 Examples:
-  bd pin bd-abc        # Pin a single issue
-  bd pin bd-abc bd-def # Pin multiple issues`,
+  bd pin bd-abc123                    # Pin (set pinned flag)
+  bd pin bd-abc123 --for polecat-ace  # Pin and assign to agent
+  bd pin bd-abc123 --for me --start   # Pin, assign to self, start work`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("pin")
 
 		ctx := rootCtx
+		forAgent, _ := cmd.Flags().GetString("for")
+		startWork, _ := cmd.Flags().GetBool("start")
+
+		// Handle "me" as alias for current actor
+		if forAgent == "me" {
+			forAgent = actor
+		}
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -67,6 +94,17 @@ Examples:
 					Pinned: &pinned,
 				}
 
+				// Set assignee if --for was provided
+				if forAgent != "" {
+					updateArgs.Assignee = &forAgent
+				}
+
+				// Set status to in_progress if --start was provided
+				if startWork {
+					status := string(types.StatusInProgress)
+					updateArgs.Status = &status
+				}
+
 				resp, err := daemonClient.Update(updateArgs)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error pinning %s: %v\n", id, err)
@@ -79,8 +117,11 @@ Examples:
 						pinnedIssues = append(pinnedIssues, &issue)
 					}
 				} else {
-					
-					fmt.Printf("%s Pinned %s\n", ui.RenderPass("📌"), id)
+					msg := fmt.Sprintf("Pinned %s", id)
+					if forAgent != "" {
+						msg += fmt.Sprintf(" to %s's hook", forAgent)
+					}
+					fmt.Printf("%s %s\n", ui.RenderPass("📌"), msg)
 				}
 			}
 
@@ -107,6 +148,16 @@ Examples:
 				"pinned": true,
 			}
 
+			// Set assignee if --for was provided
+			if forAgent != "" {
+				updates["assignee"] = forAgent
+			}
+
+			// Set status to in_progress if --start was provided
+			if startWork {
+				updates["status"] = string(types.StatusInProgress)
+			}
+
 			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error pinning %s: %v\n", fullID, err)
 				continue
@@ -118,8 +169,11 @@ Examples:
 					pinnedIssues = append(pinnedIssues, issue)
 				}
 			} else {
-				
-				fmt.Printf("%s Pinned %s\n", ui.RenderPass("📌"), fullID)
+				msg := fmt.Sprintf("Pinned %s", fullID)
+				if forAgent != "" {
+					msg += fmt.Sprintf(" to %s's hook", forAgent)
+				}
+				fmt.Printf("%s %s\n", ui.RenderPass("📌"), msg)
 			}
 		}
 
@@ -134,6 +188,11 @@ Examples:
 	},
 }
 
+
 func init() {
+	// Pin command flags
+	pinCmd.Flags().String("for", "", "Agent to pin work for (use 'me' for self)")
+	pinCmd.Flags().Bool("start", false, "Also set status to in_progress")
+
 	rootCmd.AddCommand(pinCmd)
 }
