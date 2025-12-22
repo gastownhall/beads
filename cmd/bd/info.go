@@ -294,6 +294,7 @@ var versionChanges = []VersionChange{
 		Changes: []string{
 			"FIX: P0 priority preserved - omitempty removed from Priority field (GH#671)",
 			"FIX: nil pointer check in markdown parsing (GH#674)",
+			"CHORE: Remove dead deprecated wrapper functions from deletion_tracking.go",
 		},
 	},
 	{
