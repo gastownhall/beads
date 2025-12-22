@@ -119,6 +119,19 @@ func checkYAMLConfigValues(repoPath string) []string {
 		}
 	}
 
+	// Validate remote-sync-interval (should be a valid duration, min 5s)
+	if v.IsSet("remote-sync-interval") {
+		intervalStr := v.GetString("remote-sync-interval")
+		if intervalStr != "" {
+			d, err := time.ParseDuration(intervalStr)
+			if err != nil {
+				issues = append(issues, fmt.Sprintf("remote-sync-interval: invalid duration %q (expected format like \"30s\", \"1m\", \"5m\")", intervalStr))
+			} else if d > 0 && d < 5*time.Second {
+				issues = append(issues, fmt.Sprintf("remote-sync-interval: %q is too low (minimum 5s to prevent excessive load)", intervalStr))
+			}
+		}
+	}
+
 	// Validate issue-prefix (should be alphanumeric with dashes/underscores, reasonably short)
 	if v.IsSet("issue-prefix") {
 		prefix := v.GetString("issue-prefix")

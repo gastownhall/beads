@@ -91,11 +91,13 @@ func Initialize() error {
 	_ = v.BindEnv("flush-debounce", "BEADS_FLUSH_DEBOUNCE")
 	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")
 	_ = v.BindEnv("identity", "BEADS_IDENTITY")
+	_ = v.BindEnv("remote-sync-interval", "BEADS_REMOTE_SYNC_INTERVAL")
 	
 	// Set defaults for additional settings
 	v.SetDefault("flush-debounce", "30s")
 	v.SetDefault("auto-start-daemon", true)
 	v.SetDefault("identity", "")
+	v.SetDefault("remote-sync-interval", "30s")
 	
 	// Routing configuration defaults
 	v.SetDefault("routing.mode", "auto")

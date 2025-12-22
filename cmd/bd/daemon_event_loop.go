@@ -7,9 +7,14 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+// DefaultRemoteSyncInterval is the default interval for periodic remote sync.
+// Can be overridden via BEADS_REMOTE_SYNC_INTERVAL environment variable.
+const DefaultRemoteSyncInterval = 30 * time.Second
 
 // runEventDrivenLoop implements event-driven daemon architecture.
 // Replaces polling ticker with reactive event handlers for:
@@ -17,6 +22,11 @@ import (
 // - RPC mutations (create, update, delete)
 // - Git operations (via hooks, optional)
 // - Parent process monitoring (exit if parent dies)
+// - Periodic remote sync (to pull updates from other clones)
+//
+// The remoteSyncInterval parameter controls how often the daemon pulls from
+// remote to check for updates from other clones. Use DefaultRemoteSyncInterval
+// or configure via BEADS_REMOTE_SYNC_INTERVAL environment variable.
 func runEventDrivenLoop(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -86,6 +96,14 @@ func runEventDrivenLoop(
 	healthTicker := time.NewTicker(60 * time.Second)
 	defer healthTicker.Stop()
 
+	// Periodic remote sync to pull updates from other clones
+	// This is essential for multi-clone workflows where the file watcher only
+	// sees local changes but remote may have updates from other clones.
+	// Default is 30 seconds; configurable via BEADS_REMOTE_SYNC_INTERVAL.
+	remoteSyncInterval := getRemoteSyncInterval(log)
+	remoteSyncTicker := time.NewTicker(remoteSyncInterval)
+	defer remoteSyncTicker.Stop()
+
 	// Parent process check (every 10 seconds)
 	parentCheckTicker := time.NewTicker(10 * time.Second)
 	defer parentCheckTicker.Stop()
@@ -107,6 +125,13 @@ func runEventDrivenLoop(
 		case <-healthTicker.C:
 			// Periodic health validation (not sync)
 			checkDaemonHealth(ctx, store, log)
+
+		case <-remoteSyncTicker.C:
+			// Periodic remote sync to pull updates from other clones
+			// This ensures the daemon sees changes pushed by other clones
+			// even when the local file watcher doesn't trigger
+			log.log("Periodic remote sync: checking for updates")
+			doAutoImport()
 
 		case <-parentCheckTicker.C:
 			// Check if parent process is still alive
@@ -217,4 +242,48 @@ func checkDaemonHealth(ctx context.Context, store storage.Storage, log daemonLog
 	if heapMB > 500 {
 		log.log("Health check: high memory usage warning: %dMB heap allocated", heapMB)
 	}
+}
+
+// getRemoteSyncInterval returns the interval for periodic remote sync.
+// Configuration sources (in order of precedence):
+//  1. BEADS_REMOTE_SYNC_INTERVAL environment variable
+//  2. remote-sync-interval in .beads/config.yaml
+//  3. DefaultRemoteSyncInterval (30s)
+//
+// Accepts Go duration strings like:
+// - "30s" (30 seconds)
+// - "1m" (1 minute)
+// - "5m" (5 minutes)
+// - "0" or "0s" (disables periodic sync - use with caution)
+//
+// Minimum allowed value is 5 seconds to prevent excessive load.
+func getRemoteSyncInterval(log daemonLogger) time.Duration {
+	// config.GetDuration handles both config.yaml and env var (env takes precedence)
+	duration := config.GetDuration("remote-sync-interval")
+	
+	// If config returns 0, it could mean:
+	// 1. User explicitly set "0" to disable
+	// 2. Config not found (use default)
+	// Check if there's an explicit value set
+	if duration == 0 {
+		// Check if user explicitly set it to 0 via env var
+		if envVal := os.Getenv("BEADS_REMOTE_SYNC_INTERVAL"); envVal == "0" || envVal == "0s" {
+			log.log("Warning: remote-sync-interval is 0, periodic remote sync disabled")
+			return 24 * time.Hour * 365
+		}
+		// Otherwise use default
+		return DefaultRemoteSyncInterval
+	}
+
+	// Minimum 5 seconds to prevent excessive load
+	if duration > 0 && duration < 5*time.Second {
+		log.log("Warning: remote-sync-interval too low (%v), using minimum 5s", duration)
+		return 5 * time.Second
+	}
+
+	// Log if using non-default value
+	if duration != DefaultRemoteSyncInterval {
+		log.log("Using custom remote sync interval: %v", duration)
+	}
+	return duration
 }
