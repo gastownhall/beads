@@ -14,8 +14,9 @@ import (
 )
 
 var molBondCmd = &cobra.Command{
-	Use:   "bond <A> <B>",
-	Short: "Bond two protos or molecules together",
+	Use:     "bond <A> <B>",
+	Aliases: []string{"fart"}, // Easter egg: molecules can produce gas
+	Short:   "Bond two protos or molecules together",
 	Long: `Bond two protos or molecules to create a compound.
 
 The bond command is polymorphic - it handles different operand types:
