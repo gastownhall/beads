@@ -451,6 +451,146 @@ func TestGetIdentity(t *testing.T) {
 	}
 }
 
+func TestGetExternalProjects(t *testing.T) {
+	err := Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	// Test default (empty map)
+	got := GetExternalProjects()
+	if got == nil {
+		t.Error("GetExternalProjects() returned nil, want empty map")
+	}
+	if len(got) != 0 {
+		t.Errorf("GetExternalProjects() = %v, want empty map", got)
+	}
+
+	// Test with Set
+	Set("external_projects", map[string]string{
+		"beads":   "../beads",
+		"gastown": "/absolute/path/to/gastown",
+	})
+
+	got = GetExternalProjects()
+	if len(got) != 2 {
+		t.Errorf("GetExternalProjects() has %d items, want 2", len(got))
+	}
+	if got["beads"] != "../beads" {
+		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
+	}
+	if got["gastown"] != "/absolute/path/to/gastown" {
+		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/absolute/path/to/gastown\"", got["gastown"])
+	}
+}
+
+func TestGetExternalProjectsFromConfig(t *testing.T) {
+	// Create a temporary directory for config file
+	tmpDir := t.TempDir()
+
+	// Create a config file with external_projects
+	configContent := `
+external_projects:
+  beads: ../beads
+  gastown: /path/to/gastown
+  other: ./relative/path
+`
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	// Change to tmp directory
+	t.Chdir(tmpDir)
+
+	// Initialize viper
+	err := Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	// Test that external_projects is loaded correctly
+	got := GetExternalProjects()
+	if len(got) != 3 {
+		t.Errorf("GetExternalProjects() has %d items, want 3", len(got))
+	}
+	if got["beads"] != "../beads" {
+		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
+	}
+	if got["gastown"] != "/path/to/gastown" {
+		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/path/to/gastown\"", got["gastown"])
+	}
+	if got["other"] != "./relative/path" {
+		t.Errorf("GetExternalProjects()[other] = %q, want \"./relative/path\"", got["other"])
+	}
+}
+
+func TestResolveExternalProjectPath(t *testing.T) {
+	// Create a temporary directory structure
+	tmpDir := t.TempDir()
+
+	// Create a project directory to resolve to
+	projectDir := filepath.Join(tmpDir, "beads-project")
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("failed to create project directory: %v", err)
+	}
+
+	// Create config file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	configContent := `
+external_projects:
+  beads: beads-project
+  missing: nonexistent-path
+  absolute: ` + projectDir + `
+`
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	// Change to tmp directory
+	t.Chdir(tmpDir)
+
+	// Initialize viper
+	err := Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	// Test resolving a relative path that exists
+	got := ResolveExternalProjectPath("beads")
+	if got != projectDir {
+		t.Errorf("ResolveExternalProjectPath(beads) = %q, want %q", got, projectDir)
+	}
+
+	// Test resolving a path that doesn't exist
+	got = ResolveExternalProjectPath("missing")
+	if got != "" {
+		t.Errorf("ResolveExternalProjectPath(missing) = %q, want empty string", got)
+	}
+
+	// Test resolving a project that isn't configured
+	got = ResolveExternalProjectPath("unknown")
+	if got != "" {
+		t.Errorf("ResolveExternalProjectPath(unknown) = %q, want empty string", got)
+	}
+
+	// Test resolving an absolute path
+	got = ResolveExternalProjectPath("absolute")
+	if got != projectDir {
+		t.Errorf("ResolveExternalProjectPath(absolute) = %q, want %q", got, projectDir)
+	}
+}
+
 func TestGetIdentityFromConfig(t *testing.T) {
 	// Create a temporary directory for config file
 	tmpDir := t.TempDir()

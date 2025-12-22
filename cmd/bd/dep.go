@@ -24,15 +24,32 @@ var depCmd = &cobra.Command{
 var depAddCmd = &cobra.Command{
 	Use:   "add [issue-id] [depends-on-id]",
 	Short: "Add a dependency",
-	Args:  cobra.ExactArgs(2),
+	Long: `Add a dependency between two issues.
+
+The depends-on-id can be:
+  - A local issue ID (e.g., bd-xyz)
+  - An external reference: external:<project>:<capability>
+
+External references are stored as-is and resolved at query time using
+the external_projects config. They block the issue until the capability
+is "shipped" in the target project.
+
+Examples:
+  bd dep add bd-42 bd-41                              # Local dependency
+  bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency`,
+	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("dep add")
 		depType, _ := cmd.Flags().GetString("type")
 
 		ctx := rootCtx
-		
+
 		// Resolve partial IDs first
 		var fromID, toID string
+
+		// Check if toID is an external reference (don't resolve it)
+		isExternalRef := strings.HasPrefix(args[1], "external:")
+
 		if daemonClient != nil {
 			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
 			resp, err := daemonClient.ResolveID(resolveArgs)
@@ -44,16 +61,26 @@ var depAddCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
 				os.Exit(1)
 			}
-			
-			resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
-			resp, err = daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &toID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-				os.Exit(1)
+
+			if isExternalRef {
+				// External references are stored as-is
+				toID = args[1]
+				// Validate format: external:<project>:<capability>
+				if err := validateExternalRef(toID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
+				resp, err = daemonClient.ResolveID(resolveArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
+					os.Exit(1)
+				}
+				if err := json.Unmarshal(resp.Data, &toID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
+					os.Exit(1)
+				}
 			}
 		} else {
 			var err error
@@ -62,11 +89,21 @@ var depAddCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
 				os.Exit(1)
 			}
-			
-			toID, err = utils.ResolvePartialID(ctx, store, args[1])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-				os.Exit(1)
+
+			if isExternalRef {
+				// External references are stored as-is
+				toID = args[1]
+				// Validate format: external:<project>:<capability>
+				if err := validateExternalRef(toID); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				toID, err = utils.ResolvePartialID(ctx, store, args[1])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
+					os.Exit(1)
+				}
 			}
 		}
 
@@ -726,6 +763,49 @@ func mergeBidirectionalTrees(downTree, upTree []*types.TreeNode, rootID string) 
 	result = append(result, downTree...)
 
 	return result
+}
+
+// validateExternalRef validates the format of an external dependency reference.
+// Valid format: external:<project>:<capability>
+func validateExternalRef(ref string) error {
+	if !strings.HasPrefix(ref, "external:") {
+		return fmt.Errorf("external reference must start with 'external:'")
+	}
+
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid external reference format: expected 'external:<project>:<capability>', got '%s'", ref)
+	}
+
+	project := parts[1]
+	capability := parts[2]
+
+	if project == "" {
+		return fmt.Errorf("external reference missing project name")
+	}
+	if capability == "" {
+		return fmt.Errorf("external reference missing capability name")
+	}
+
+	return nil
+}
+
+// IsExternalRef returns true if the dependency reference is an external reference.
+func IsExternalRef(ref string) bool {
+	return strings.HasPrefix(ref, "external:")
+}
+
+// ParseExternalRef parses an external reference into project and capability.
+// Returns empty strings if the format is invalid.
+func ParseExternalRef(ref string) (project, capability string) {
+	if !IsExternalRef(ref) {
+		return "", ""
+	}
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 {
+		return "", ""
+	}
+	return parts[1], parts[2]
 }
 
 func init() {

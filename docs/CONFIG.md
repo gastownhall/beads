@@ -39,6 +39,7 @@ Tool-level settings you can configure:
 | `git.author` | - | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | - | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `directory.labels` | - | - | (none) | Map directories to labels for automatic filtering |
+| `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BD_ACTOR` | `$USER` | Actor name for audit trail |
 | `flush-debounce` | - | `BEADS_FLUSH_DEBOUNCE` | `5s` | Debounce time for auto-flush |
@@ -94,6 +95,13 @@ directory:
     packages/maverick: maverick
     packages/agency: agency
     packages/io: io
+
+# Cross-project dependency resolution (bd-h807)
+# Maps project names to paths for resolving external: blocked_by references
+# Paths can be relative (from cwd) or absolute
+external_projects:
+  beads: ../beads
+  gastown: /path/to/gastown
 ```
 
 ### Why Two Systems?

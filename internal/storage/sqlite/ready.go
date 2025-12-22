@@ -274,12 +274,17 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 
 // GetBlockedIssues returns issues that are blocked by dependencies or have status=blocked
 // Note: Pinned issues are excluded from the output (beads-ei4)
+// Note: Includes external: references in blocked_by list (bd-om4a)
 func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
 	// Use UNION to combine:
 	// 1. Issues with open/in_progress/blocked status that have dependency blockers
 	// 2. Issues with status=blocked (even if they have no dependency blockers)
 	// Use GROUP_CONCAT to get all blocker IDs in a single query (no N+1)
 	// Exclude pinned issues (beads-ei4)
+	//
+	// For blocked_by_count and blocker_ids:
+	// - Count local blockers (open issues) + external refs (external:*)
+	// - External refs are always considered "open" until resolved (bd-om4a)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
@@ -290,22 +295,35 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		FROM issues i
 		LEFT JOIN dependencies d ON i.id = d.issue_id
 		    AND d.type = 'blocks'
-		    AND EXISTS (
-		        SELECT 1 FROM issues blocker
-		        WHERE blocker.id = d.depends_on_id
-		        AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		    AND (
+		        -- Local blockers: must be open/in_progress/blocked/deferred
+		        EXISTS (
+		            SELECT 1 FROM issues blocker
+		            WHERE blocker.id = d.depends_on_id
+		            AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		        )
+		        -- External refs: always included (resolution happens at query time)
+		        OR d.depends_on_id LIKE 'external:%'
 		    )
 		WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred')
 		  AND i.pinned = 0
 		  AND (
 		      i.status = 'blocked'
 		      OR i.status = 'deferred'
+		      -- Has local open blockers
 		      OR EXISTS (
 		          SELECT 1 FROM dependencies d2
 		          JOIN issues blocker ON d2.depends_on_id = blocker.id
 		          WHERE d2.issue_id = i.id
 		            AND d2.type = 'blocks'
 		            AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		      )
+		      -- Has external blockers (always considered blocking until resolved)
+		      OR EXISTS (
+		          SELECT 1 FROM dependencies d3
+		          WHERE d3.issue_id = i.id
+		            AND d3.type = 'blocks'
+		            AND d3.depends_on_id LIKE 'external:%'
 		      )
 		  )
 		GROUP BY i.id

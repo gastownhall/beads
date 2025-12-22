@@ -120,6 +120,10 @@ func Initialize() error {
 	// Maps directory patterns to labels for automatic filtering in monorepos
 	v.SetDefault("directory.labels", map[string]string{})
 
+	// External projects for cross-project dependency resolution (bd-h807)
+	// Maps project names to paths for resolving external: blocked_by references
+	v.SetDefault("external_projects", map[string]string{})
+
 	// Read config file if it was found
 	if configFileSet {
 		if err := v.ReadInConfig(); err != nil {
@@ -261,6 +265,43 @@ func GetMultiRepoConfig() *MultiRepoConfig {
 		Primary:    primary,
 		Additional: v.GetStringSlice("repos.additional"),
 	}
+}
+
+// GetExternalProjects returns the external_projects configuration.
+// Maps project names to paths for cross-project dependency resolution.
+// Example config.yaml:
+//
+//	external_projects:
+//	  beads: ../beads
+//	  gastown: /absolute/path/to/gastown
+func GetExternalProjects() map[string]string {
+	return GetStringMapString("external_projects")
+}
+
+// ResolveExternalProjectPath resolves a project name to its absolute path.
+// Returns empty string if project not configured or path doesn't exist.
+func ResolveExternalProjectPath(projectName string) string {
+	projects := GetExternalProjects()
+	path, ok := projects[projectName]
+	if !ok {
+		return ""
+	}
+
+	// Expand relative paths from config file location or cwd
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(cwd, path)
+	}
+
+	// Verify path exists
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+
+	return path
 }
 
 // GetIdentity resolves the user's identity for messaging.

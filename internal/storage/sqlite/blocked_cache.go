@@ -11,6 +11,7 @@
 // The blocked_issues_cache table stores issue_id values for all issues that are currently
 // blocked. An issue is blocked if:
 //   - It has a 'blocks' dependency on an open/in_progress/blocked issue (direct blocking)
+//   - It has a 'blocks' dependency on an external:* reference (cross-project blocking, bd-om4a)
 //   - Its parent is blocked and it's connected via 'parent-child' dependency (transitive blocking)
 //
 // The cache is maintained automatically by invalidating and rebuilding whenever:
@@ -112,16 +113,27 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 	}
 
 	// Rebuild using the recursive CTE logic
+	// Includes both local blockers (open issues) and external refs (bd-om4a)
 	query := `
 		INSERT INTO blocked_issues_cache (issue_id)
 		WITH RECURSIVE
 		  -- Step 1: Find issues blocked directly by dependencies
+		  -- Includes both local blockers (open issues) and external references
 		  blocked_directly AS (
+		    -- Local blockers: issues with open status
 		    SELECT DISTINCT d.issue_id
 		    FROM dependencies d
 		    JOIN issues blocker ON d.depends_on_id = blocker.id
 		    WHERE d.type = 'blocks'
 		      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+
+		    UNION
+
+		    -- External blockers: always blocking until resolved (bd-om4a)
+		    SELECT DISTINCT d.issue_id
+		    FROM dependencies d
+		    WHERE d.type = 'blocks'
+		      AND d.depends_on_id LIKE 'external:%'
 		  ),
 
 		  -- Step 2: Propagate blockage to all descendants via parent-child
