@@ -1,11 +1,15 @@
 package doctor
 
 import (
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // setupGitRepo creates a temporary git repository for testing
@@ -798,5 +802,300 @@ func TestCheckSyncBranchHookCompatibility_OldHookFormat(t *testing.T) {
 				t.Errorf("expected message to contain %q, got %q", tt.expectInMsg, check.Message)
 			}
 		})
+	}
+}
+
+// Tests for CheckOrphanedIssues
+
+func TestCheckOrphanedIssues_NoGitRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	// No git init - just a plain directory
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q", StatusOK, check.Status)
+	}
+	if !strings.Contains(check.Message, "not a git repository") {
+		t.Errorf("expected message about not a git repository, got %q", check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_NoBeadsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Initialize git repo WITHOUT creating .beads
+	cmd := exec.Command("git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q", StatusOK, check.Status)
+	}
+	if !strings.Contains(check.Message, "no .beads directory") {
+		t.Errorf("expected message about no .beads directory, got %q", check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_NoDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory but no database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q", StatusOK, check.Status)
+	}
+	if !strings.Contains(check.Message, "no database") {
+		t.Errorf("expected message about no database, got %q", check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_NoOpenIssues(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory and database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a minimal SQLite database with schema
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Create tables
+	_, err = db.Exec(`
+		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT);
+		INSERT INTO config (key, value) VALUES ('issue_prefix', 'bd');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q", StatusOK, check.Status)
+	}
+	if !strings.Contains(check.Message, "No open issues") {
+		t.Errorf("expected message about no open issues, got %q", check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_OpenIssueNotInCommits(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory and database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create database with an open issue
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT);
+		INSERT INTO config (key, value) VALUES ('issue_prefix', 'bd');
+		INSERT INTO issues (id, status) VALUES ('bd-abc', 'open');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Create a commit without the issue reference
+	readme := filepath.Join(tmpDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "README.md")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q", StatusOK, check.Status)
+	}
+	if !strings.Contains(check.Message, "No issues referenced") {
+		t.Errorf("expected message about no issues referenced, got %q", check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_OpenIssueInCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory and database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create database with an open issue
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT);
+		INSERT INTO config (key, value) VALUES ('issue_prefix', 'bd');
+		INSERT INTO issues (id, status) VALUES ('bd-abc', 'open');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Create a commit WITH the issue reference
+	readme := filepath.Join(tmpDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "README.md")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "Fix bug (bd-abc)")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusWarning {
+		t.Errorf("expected status %q, got %q (message: %s)", StatusWarning, check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "1 issue(s) referenced") {
+		t.Errorf("expected message about 1 issue referenced, got %q", check.Message)
+	}
+	if !strings.Contains(check.Detail, "bd-abc") {
+		t.Errorf("expected detail to contain bd-abc, got %q", check.Detail)
+	}
+}
+
+func TestCheckOrphanedIssues_ClosedIssueInCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory and database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create database with a CLOSED issue
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT);
+		INSERT INTO config (key, value) VALUES ('issue_prefix', 'bd');
+		INSERT INTO issues (id, status) VALUES ('bd-abc', 'closed');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Create a commit with the issue reference
+	readme := filepath.Join(tmpDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "README.md")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "Fix bug (bd-abc)")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	// Should be OK because the issue is closed
+	if check.Status != StatusOK {
+		t.Errorf("expected status %q, got %q (message: %s)", StatusOK, check.Status, check.Message)
+	}
+}
+
+func TestCheckOrphanedIssues_HierarchicalIssueID(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupGitRepoInDir(t, tmpDir)
+
+	// Create .beads directory and database
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create database with a hierarchical issue ID
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+		CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT);
+		INSERT INTO config (key, value) VALUES ('issue_prefix', 'bd');
+		INSERT INTO issues (id, status) VALUES ('bd-abc.1', 'open');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Create a commit with the hierarchical issue reference
+	readme := filepath.Join(tmpDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "README.md")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "Fix subtask (bd-abc.1)")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+
+	check := CheckOrphanedIssues(tmpDir)
+
+	if check.Status != StatusWarning {
+		t.Errorf("expected status %q, got %q (message: %s)", StatusWarning, check.Status, check.Message)
+	}
+	if !strings.Contains(check.Detail, "bd-abc.1") {
+		t.Errorf("expected detail to contain bd-abc.1, got %q", check.Detail)
 	}
 }

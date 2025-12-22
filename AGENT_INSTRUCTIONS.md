@@ -61,6 +61,17 @@ func TestMyFeature(t *testing.T) {
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
 
+### Commit Message Convention
+
+When committing work for an issue, include the issue ID in parentheses at the end:
+
+```bash
+git commit -m "Fix auth validation bug (bd-abc)"
+git commit -m "Add retry logic for database locks (bd-xyz)"
+```
+
+This enables `bd doctor` to detect **orphaned issues** - work that was committed but the issue wasn't closed. The doctor check cross-references open issues against git history to find these orphans.
+
 ### Git Workflow
 
 **Auto-sync provides batching!** bd automatically:

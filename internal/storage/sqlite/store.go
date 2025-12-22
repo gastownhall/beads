@@ -344,7 +344,7 @@ func (s *SQLiteStorage) UnderlyingConn(ctx context.Context) (*sql.Conn, error) {
 // - Makes database safe for backup/copy operations
 func (s *SQLiteStorage) CheckpointWAL(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)")
-	return err
+	return wrapDBError("checkpoint WAL", err)
 }
 
 // EnableFreshnessChecking enables detection of external database file modifications.

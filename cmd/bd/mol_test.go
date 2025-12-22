@@ -742,6 +742,546 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Spawn --attach Tests (bd-f7p1)
+// =============================================================================
+
+// TestSpawnWithBasicAttach tests spawning a proto with one --attach flag
+func TestSpawnWithBasicAttach(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create primary proto with a child
+	primaryProto := &types.Issue{
+		Title:     "Primary: {{feature}}",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, primaryProto, "test"); err != nil {
+		t.Fatalf("Failed to create primary proto: %v", err)
+	}
+
+	primaryChild := &types.Issue{
+		Title:     "Step 1 for {{feature}}",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, primaryChild, "test"); err != nil {
+		t.Fatalf("Failed to create primary child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     primaryChild.ID,
+		DependsOnID: primaryProto.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add primary child dependency: %v", err)
+	}
+
+	// Create attachment proto with a child
+	attachProto := &types.Issue{
+		Title:     "Attachment: {{feature}} docs",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, attachProto, "test"); err != nil {
+		t.Fatalf("Failed to create attach proto: %v", err)
+	}
+
+	attachChild := &types.Issue{
+		Title:     "Write docs for {{feature}}",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, attachChild, "test"); err != nil {
+		t.Fatalf("Failed to create attach child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     attachChild.ID,
+		DependsOnID: attachProto.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add attach child dependency: %v", err)
+	}
+
+	// Spawn primary proto
+	primarySubgraph, err := loadTemplateSubgraph(ctx, s, primaryProto.ID)
+	if err != nil {
+		t.Fatalf("Failed to load primary subgraph: %v", err)
+	}
+
+	vars := map[string]string{"feature": "auth"}
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	if err != nil {
+		t.Fatalf("Failed to spawn primary: %v", err)
+	}
+
+	if spawnResult.Created != 2 {
+		t.Errorf("Spawn created = %d, want 2", spawnResult.Created)
+	}
+
+	// Get the spawned molecule
+	spawnedMol, err := s.GetIssue(ctx, spawnResult.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned molecule: %v", err)
+	}
+
+	// Attach the second proto (simulating --attach flag behavior)
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	if err != nil {
+		t.Fatalf("Failed to bond attachment: %v", err)
+	}
+
+	if bondResult.Spawned != 2 {
+		t.Errorf("Bond spawned = %d, want 2", bondResult.Spawned)
+	}
+	if bondResult.ResultType != "compound_molecule" {
+		t.Errorf("ResultType = %q, want %q", bondResult.ResultType, "compound_molecule")
+	}
+
+	// Verify the spawned attachment root has dependency on the primary molecule
+	attachedRootID := bondResult.IDMapping[attachProto.ID]
+	deps, err := s.GetDependenciesWithMetadata(ctx, attachedRootID)
+	if err != nil {
+		t.Fatalf("Failed to get deps: %v", err)
+	}
+
+	foundBlocks := false
+	for _, dep := range deps {
+		if dep.ID == spawnedMol.ID && dep.DependencyType == types.DepBlocks {
+			foundBlocks = true
+		}
+	}
+	if !foundBlocks {
+		t.Error("Expected blocks dependency from attached proto to spawned molecule for sequential bond")
+	}
+
+	// Verify variable substitution worked in attached issues
+	attachedRoot, err := s.GetIssue(ctx, attachedRootID)
+	if err != nil {
+		t.Fatalf("Failed to get attached root: %v", err)
+	}
+	if !strings.Contains(attachedRoot.Title, "auth") {
+		t.Errorf("Attached root title %q should contain 'auth' from variable substitution", attachedRoot.Title)
+	}
+}
+
+// TestSpawnWithMultipleAttachments tests spawning with --attach A --attach B
+func TestSpawnWithMultipleAttachments(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create primary proto
+	primaryProto := &types.Issue{
+		Title:     "Primary Feature",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, primaryProto, "test"); err != nil {
+		t.Fatalf("Failed to create primary proto: %v", err)
+	}
+
+	// Create first attachment proto
+	attachA := &types.Issue{
+		Title:     "Attachment A: Testing",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, attachA, "test"); err != nil {
+		t.Fatalf("Failed to create attachA: %v", err)
+	}
+
+	// Create second attachment proto
+	attachB := &types.Issue{
+		Title:     "Attachment B: Documentation",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, attachB, "test"); err != nil {
+		t.Fatalf("Failed to create attachB: %v", err)
+	}
+
+	// Spawn primary
+	primarySubgraph, err := loadTemplateSubgraph(ctx, s, primaryProto.ID)
+	if err != nil {
+		t.Fatalf("Failed to load primary subgraph: %v", err)
+	}
+
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+	if err != nil {
+		t.Fatalf("Failed to spawn primary: %v", err)
+	}
+
+	spawnedMol, err := s.GetIssue(ctx, spawnResult.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned molecule: %v", err)
+	}
+
+	// Attach both protos (simulating --attach A --attach B)
+	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "test")
+	if err != nil {
+		t.Fatalf("Failed to bond attachA: %v", err)
+	}
+
+	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "test")
+	if err != nil {
+		t.Fatalf("Failed to bond attachB: %v", err)
+	}
+
+	// Both should have spawned their protos
+	if bondResultA.Spawned != 1 {
+		t.Errorf("bondResultA.Spawned = %d, want 1", bondResultA.Spawned)
+	}
+	if bondResultB.Spawned != 1 {
+		t.Errorf("bondResultB.Spawned = %d, want 1", bondResultB.Spawned)
+	}
+
+	// Both should depend on the primary molecule
+	attachedAID := bondResultA.IDMapping[attachA.ID]
+	attachedBID := bondResultB.IDMapping[attachB.ID]
+
+	depsA, err := s.GetDependenciesWithMetadata(ctx, attachedAID)
+	if err != nil {
+		t.Fatalf("Failed to get deps for A: %v", err)
+	}
+	depsB, err := s.GetDependenciesWithMetadata(ctx, attachedBID)
+	if err != nil {
+		t.Fatalf("Failed to get deps for B: %v", err)
+	}
+
+	foundABlocks := false
+	for _, dep := range depsA {
+		if dep.ID == spawnedMol.ID && dep.DependencyType == types.DepBlocks {
+			foundABlocks = true
+		}
+	}
+	foundBBlocks := false
+	for _, dep := range depsB {
+		if dep.ID == spawnedMol.ID && dep.DependencyType == types.DepBlocks {
+			foundBBlocks = true
+		}
+	}
+
+	if !foundABlocks {
+		t.Error("Expected A to block on spawned molecule")
+	}
+	if !foundBBlocks {
+		t.Error("Expected B to block on spawned molecule")
+	}
+}
+
+// TestSpawnAttachTypes verifies sequential vs parallel bonding behavior
+func TestSpawnAttachTypes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create primary proto
+	primaryProto := &types.Issue{
+		Title:     "Primary",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, primaryProto, "test"); err != nil {
+		t.Fatalf("Failed to create primary: %v", err)
+	}
+
+	// Create attachment proto
+	attachProto := &types.Issue{
+		Title:     "Attachment",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, attachProto, "test"); err != nil {
+		t.Fatalf("Failed to create attachment: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		bondType   string
+		expectType types.DependencyType
+	}{
+		{"sequential uses blocks", types.BondTypeSequential, types.DepBlocks},
+		{"parallel uses parent-child", types.BondTypeParallel, types.DepParentChild},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Spawn fresh primary for each test
+			primarySubgraph, err := loadTemplateSubgraph(ctx, s, primaryProto.ID)
+			if err != nil {
+				t.Fatalf("Failed to load primary subgraph: %v", err)
+			}
+
+			spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+			if err != nil {
+				t.Fatalf("Failed to spawn primary: %v", err)
+			}
+
+			spawnedMol, err := s.GetIssue(ctx, spawnResult.NewEpicID)
+			if err != nil {
+				t.Fatalf("Failed to get spawned molecule: %v", err)
+			}
+
+			// Bond with specified type
+			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "test")
+			if err != nil {
+				t.Fatalf("Failed to bond: %v", err)
+			}
+
+			// Check dependency type
+			attachedID := bondResult.IDMapping[attachProto.ID]
+			deps, err := s.GetDependenciesWithMetadata(ctx, attachedID)
+			if err != nil {
+				t.Fatalf("Failed to get deps: %v", err)
+			}
+
+			foundExpected := false
+			for _, dep := range deps {
+				if dep.ID == spawnedMol.ID && dep.DependencyType == tt.expectType {
+					foundExpected = true
+				}
+			}
+
+			if !foundExpected {
+				t.Errorf("Expected %s dependency from attached to spawned molecule", tt.expectType)
+			}
+		})
+	}
+}
+
+// TestSpawnAttachNonProtoError tests that attaching a non-proto fails validation
+func TestSpawnAttachNonProtoError(t *testing.T) {
+	// The isProto function is tested separately in TestIsProto
+	// This test verifies the validation logic that would be used in runMolSpawn
+
+	// Create a non-proto issue (no template label)
+	issue := &types.Issue{
+		Title:  "Not a proto",
+		Status: types.StatusOpen,
+		Labels: []string{"bug"}, // Not MoleculeLabel
+	}
+
+	if isProto(issue) {
+		t.Error("isProto should return false for issue without template label")
+	}
+
+	// Issue with template label should pass
+	protoIssue := &types.Issue{
+		Title:  "A proto",
+		Status: types.StatusOpen,
+		Labels: []string{MoleculeLabel},
+	}
+
+	if !isProto(protoIssue) {
+		t.Error("isProto should return true for issue with template label")
+	}
+}
+
+// TestSpawnVariableAggregation tests that variables from primary + attachments are combined
+func TestSpawnVariableAggregation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create primary proto with one variable
+	primaryProto := &types.Issue{
+		Title:       "Feature: {{feature_name}}",
+		Description: "Implement the {{feature_name}} feature",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeEpic,
+		Labels:      []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, primaryProto, "test"); err != nil {
+		t.Fatalf("Failed to create primary: %v", err)
+	}
+
+	// Create attachment proto with a different variable
+	attachProto := &types.Issue{
+		Title:       "Docs for {{doc_version}}",
+		Description: "Document version {{doc_version}}",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeEpic,
+		Labels:      []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, attachProto, "test"); err != nil {
+		t.Fatalf("Failed to create attachment: %v", err)
+	}
+
+	// Load subgraphs and extract variables
+	primarySubgraph, err := loadTemplateSubgraph(ctx, s, primaryProto.ID)
+	if err != nil {
+		t.Fatalf("Failed to load primary subgraph: %v", err)
+	}
+	attachSubgraph, err := loadTemplateSubgraph(ctx, s, attachProto.ID)
+	if err != nil {
+		t.Fatalf("Failed to load attach subgraph: %v", err)
+	}
+
+	// Aggregate variables (simulating runMolSpawn logic)
+	requiredVars := extractAllVariables(primarySubgraph)
+	attachVars := extractAllVariables(attachSubgraph)
+	for _, v := range attachVars {
+		found := false
+		for _, rv := range requiredVars {
+			if rv == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			requiredVars = append(requiredVars, v)
+		}
+	}
+
+	// Should have both variables
+	if len(requiredVars) != 2 {
+		t.Errorf("Expected 2 required vars, got %d: %v", len(requiredVars), requiredVars)
+	}
+
+	hasFeatureName := false
+	hasDocVersion := false
+	for _, v := range requiredVars {
+		if v == "feature_name" {
+			hasFeatureName = true
+		}
+		if v == "doc_version" {
+			hasDocVersion = true
+		}
+	}
+
+	if !hasFeatureName {
+		t.Error("Missing feature_name variable from primary proto")
+	}
+	if !hasDocVersion {
+		t.Error("Missing doc_version variable from attachment proto")
+	}
+
+	// Provide both variables and verify substitution
+	vars := map[string]string{
+		"feature_name": "authentication",
+		"doc_version":  "2.0",
+	}
+
+	// Spawn primary with variables
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	if err != nil {
+		t.Fatalf("Failed to spawn primary: %v", err)
+	}
+
+	// Verify primary variable was substituted
+	spawnedPrimary, err := s.GetIssue(ctx, spawnResult.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned primary: %v", err)
+	}
+	if !strings.Contains(spawnedPrimary.Title, "authentication") {
+		t.Errorf("Primary title %q should contain 'authentication'", spawnedPrimary.Title)
+	}
+
+	// Bond attachment with same variables
+	spawnedMol, _ := s.GetIssue(ctx, spawnResult.NewEpicID)
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	if err != nil {
+		t.Fatalf("Failed to bond: %v", err)
+	}
+
+	// Verify attachment variable was substituted
+	attachedID := bondResult.IDMapping[attachProto.ID]
+	attachedIssue, err := s.GetIssue(ctx, attachedID)
+	if err != nil {
+		t.Fatalf("Failed to get attached issue: %v", err)
+	}
+	if !strings.Contains(attachedIssue.Title, "2.0") {
+		t.Errorf("Attached title %q should contain '2.0'", attachedIssue.Title)
+	}
+}
+
+// TestSpawnAttachDryRunOutput tests that dry-run includes attachment info
+// This is a lighter test since dry-run is mainly a CLI output concern
+func TestSpawnAttachDryRunOutput(t *testing.T) {
+	// The dry-run logic in runMolSpawn outputs attachment info when len(attachments) > 0
+	// We verify the data structures that would be used in dry-run
+
+	type attachmentInfo struct {
+		id       string
+		title    string
+		subgraph *MoleculeSubgraph
+	}
+
+	// Simulate the attachment info collection
+	attachments := []attachmentInfo{
+		{id: "test-1", title: "Attachment 1", subgraph: &MoleculeSubgraph{
+			Issues: []*types.Issue{{Title: "Issue A"}, {Title: "Issue B"}},
+		}},
+		{id: "test-2", title: "Attachment 2", subgraph: &MoleculeSubgraph{
+			Issues: []*types.Issue{{Title: "Issue C"}},
+		}},
+	}
+
+	// Verify attachment count calculation (used in dry-run output)
+	totalAttachmentIssues := 0
+	for _, attach := range attachments {
+		totalAttachmentIssues += len(attach.subgraph.Issues)
+	}
+
+	if totalAttachmentIssues != 3 {
+		t.Errorf("Expected 3 total attachment issues, got %d", totalAttachmentIssues)
+	}
+
+	// Verify bond type would be included (sequential is default)
+	attachType := types.BondTypeSequential
+	if attachType != "sequential" {
+		t.Errorf("Expected default attach type 'sequential', got %q", attachType)
+	}
+}
+
 // TestWispFilteringFromExport verifies that wisp issues are filtered
 // from JSONL export (bd-687g). Wisp issues should only exist in SQLite,
 // not in issues.jsonl, to prevent "zombie" resurrection after mol squash.

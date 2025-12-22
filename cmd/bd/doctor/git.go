@@ -1,12 +1,16 @@
 package doctor
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -500,4 +504,163 @@ func FixMergeDriver(path string) error {
 // FixSyncBranchHealth fixes database-JSONL sync issues.
 func FixSyncBranchHealth(path string) error {
 	return fix.DBJSONLSync(path)
+}
+
+// CheckOrphanedIssues detects issues referenced in git commits but still open.
+// This catches cases where someone implemented a fix with "(bd-xxx)" in the commit
+// message but forgot to run "bd close".
+func CheckOrphanedIssues(path string) DoctorCheck {
+	// Skip if not in a git repo (check from path directory)
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = path
+	if err := cmd.Run(); err != nil {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (not a git repository)",
+			Category: CategoryGit,
+		}
+	}
+
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Skip if no .beads directory
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (no .beads directory)",
+			Category: CategoryGit,
+		}
+	}
+
+	// Get database path from config or use canonical name
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryGit,
+		}
+	}
+
+	// Open database read-only
+	db, err := openDBReadOnly(dbPath)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (unable to open database)",
+			Category: CategoryGit,
+		}
+	}
+	defer db.Close()
+
+	// Get issue prefix from config
+	var issuePrefix string
+	err = db.QueryRow("SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&issuePrefix)
+	if err != nil || issuePrefix == "" {
+		issuePrefix = "bd" // default
+	}
+
+	// Get all open issue IDs
+	rows, err := db.Query("SELECT id FROM issues WHERE status IN ('open', 'in_progress')")
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (unable to query issues)",
+			Category: CategoryGit,
+		}
+	}
+	defer rows.Close()
+
+	openSet := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			openSet[id] = true
+		}
+	}
+
+	if len(openSet) == 0 {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "No open issues to check",
+			Category: CategoryGit,
+		}
+	}
+
+	// Get issue IDs referenced in git commits
+	cmd = exec.Command("git", "log", "--oneline", "--all")
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "N/A (unable to read git log)",
+			Category: CategoryGit,
+		}
+	}
+
+	// Parse commit messages for issue references
+	// Match pattern like (bd-xxx) or (bd-xxx.1) including hierarchical IDs
+	pattern := fmt.Sprintf(`\(%s-[a-z0-9.]+\)`, regexp.QuoteMeta(issuePrefix))
+	re := regexp.MustCompile(pattern)
+
+	// Track which open issues appear in commits (with first commit hash)
+	orphanedIssues := make(map[string]string) // issue ID -> commit hash
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		matches := re.FindAllString(line, -1)
+		for _, match := range matches {
+			// Extract issue ID (remove parentheses)
+			issueID := strings.Trim(match, "()")
+			if openSet[issueID] {
+				// Only record the first (most recent) commit
+				if _, exists := orphanedIssues[issueID]; !exists {
+					// Extract commit hash (first word of line)
+					parts := strings.SplitN(line, " ", 2)
+					if len(parts) > 0 {
+						orphanedIssues[issueID] = parts[0]
+					}
+				}
+			}
+		}
+	}
+
+	if len(orphanedIssues) == 0 {
+		return DoctorCheck{
+			Name:     "Orphaned Issues",
+			Status:   StatusOK,
+			Message:  "No issues referenced in commits but still open",
+			Category: CategoryGit,
+		}
+	}
+
+	// Build detail message
+	var details []string
+	for id, commit := range orphanedIssues {
+		details = append(details, fmt.Sprintf("%s (commit %s)", id, commit))
+	}
+
+	return DoctorCheck{
+		Name:     "Orphaned Issues",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("%d issue(s) referenced in commits but still open", len(orphanedIssues)),
+		Detail:   strings.Join(details, ", "),
+		Fix:      "Run 'bd show <id>' to check if implemented, then 'bd close <id>' if done",
+		Category: CategoryGit,
+	}
+}
+
+// openDBReadOnly opens a SQLite database in read-only mode
+func openDBReadOnly(dbPath string) (*sql.DB, error) {
+	return sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 }
