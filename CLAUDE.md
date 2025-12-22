@@ -303,6 +303,50 @@ bd monitor --port 3000      # Custom port
 
 **AI agents**: Continue using CLI with `--json` flags. The monitor is for human supervision only.
 
+### Chemistry Commands (Templates & Workflows)
+
+bd uses a molecular chemistry metaphor for template instantiation:
+
+| Phase | Storage | Synced | Use Case |
+|-------|---------|--------|----------|
+| **Proto** (solid) | Built-in | N/A | Reusable templates |
+| **Mol** (liquid) | `.beads/` | Yes | Persistent work |
+| **Wisp** (vapor) | `.beads-wisp/` | No | Ephemeral operations |
+
+**Instantiation commands:**
+
+```bash
+# Pour: proto → persistent mol (liquid phase)
+bd pour <proto> --var key=value      # Create in .beads/
+
+# Wisp: proto → ephemeral wisp (vapor phase)
+bd wisp create <proto> --var key=value  # Create in .beads-wisp/
+
+# List available templates
+bd mol list --json
+```
+
+**Work assignment:**
+
+```bash
+# Pin work to an agent's hook
+bd pin <id> --for <agent> --start    # Assign and start work
+
+# Inspect what's on an agent's hook
+bd hook --agent <agent>              # Show pinned work
+bd hook --json                       # JSON output
+```
+
+**Phase control with bond:**
+
+```bash
+# Attach proto to existing mol/wisp
+bd mol bond <proto> <target> --pour  # Force liquid (persistent)
+bd mol bond <proto> <target> --wisp  # Force vapor (ephemeral)
+```
+
+**Note:** Commands like `bd pour` require `--no-daemon` flag when daemon is running.
+
 ### Workflow
 
 1. **Check your inbox**: Run `gt mail inbox` from your cwd to see handoffs and work assignments
