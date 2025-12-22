@@ -37,6 +37,7 @@ beads.right.meta.json
 
 # Keep JSONL exports and config (source of truth for git)
 !issues.jsonl
+!interactions.jsonl
 !metadata.json
 !config.json
 `
