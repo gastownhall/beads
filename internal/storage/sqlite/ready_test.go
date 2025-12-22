@@ -2,9 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1126,5 +1130,257 @@ func TestSortPolicyDefault(t *testing.T) {
 	}
 	if ready[1].Priority != 2 {
 		t.Errorf("Expected P2 second, got P%d", ready[1].Priority)
+	}
+}
+
+// TestGetReadyWorkExternalDeps tests that GetReadyWork filters out issues
+// with unsatisfied external dependencies (bd-zmmy)
+func TestGetReadyWorkExternalDeps(t *testing.T) {
+	// Create main test database
+	mainStore, mainCleanup := setupTestDB(t)
+	defer mainCleanup()
+
+	ctx := context.Background()
+
+	// Create external project directory with beads database
+	externalDir, err := os.MkdirTemp("", "beads-external-test-*")
+	if err != nil {
+		t.Fatalf("failed to create external temp dir: %v", err)
+	}
+	defer os.RemoveAll(externalDir)
+
+	// Create .beads directory and config in external project
+	beadsDir := filepath.Join(externalDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	// Create config file for external project
+	cfg := configfile.DefaultConfig()
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save external config: %v", err)
+	}
+
+	// Create external database (must match configfile.DefaultConfig().Database)
+	externalDBPath := filepath.Join(beadsDir, "beads.db")
+	externalStore, err := New(ctx, externalDBPath)
+	if err != nil {
+		t.Fatalf("failed to create external store: %v", err)
+	}
+	defer externalStore.Close()
+
+	// Set issue_prefix in external store
+	if err := externalStore.SetConfig(ctx, "issue_prefix", "ext"); err != nil {
+		t.Fatalf("failed to set external issue_prefix: %v", err)
+	}
+
+	// Initialize config if not already done (required for Set to work)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("failed to initialize config: %v", err)
+	}
+
+	// Configure external_projects to point to our temp external project
+	// Save current value to restore later
+	oldProjects := config.GetExternalProjects()
+	defer func() {
+		if oldProjects != nil {
+			config.Set("external_projects", oldProjects)
+		} else {
+			config.Set("external_projects", map[string]string{})
+		}
+	}()
+
+	config.Set("external_projects", map[string]string{
+		"external-test": externalDir,
+	})
+
+	// Create an issue in main DB with external dependency
+	issueWithExtDep := &types.Issue{
+		Title:     "Has external dep",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := mainStore.CreateIssue(ctx, issueWithExtDep, "test-user"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add external dependency
+	extDep := &types.Dependency{
+		IssueID:     issueWithExtDep.ID,
+		DependsOnID: "external:external-test:test-capability",
+		Type:        types.DepBlocks,
+	}
+	if err := mainStore.AddDependency(ctx, extDep, "test-user"); err != nil {
+		t.Fatalf("failed to add external dependency: %v", err)
+	}
+
+	// Create a regular issue without external dep
+	regularIssue := &types.Issue{
+		Title:     "Regular issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := mainStore.CreateIssue(ctx, regularIssue, "test-user"); err != nil {
+		t.Fatalf("failed to create regular issue: %v", err)
+	}
+
+	// Debug: check config
+	projects := config.GetExternalProjects()
+	t.Logf("External projects config: %v", projects)
+
+	resolvedPath := config.ResolveExternalProjectPath("external-test")
+	t.Logf("Resolved path for 'external-test': %s", resolvedPath)
+
+	// Test 1: External dep is not satisfied - issue should be blocked
+	ready, err := mainStore.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+
+	// Debug: log what we got
+	for _, issue := range ready {
+		t.Logf("Ready issue: %s - %s", issue.ID, issue.Title)
+	}
+
+	// Should only have the regular issue (external dep not satisfied)
+	if len(ready) != 1 {
+		t.Errorf("Expected 1 ready issue (external dep not satisfied), got %d", len(ready))
+	}
+	if len(ready) > 0 && ready[0].ID != regularIssue.ID {
+		t.Errorf("Expected regular issue %s to be ready, got %s", regularIssue.ID, ready[0].ID)
+	}
+
+	// Test 2: Ship the capability in external project
+	// Create an issue with provides:test-capability label and close it
+	capabilityIssue := &types.Issue{
+		Title:     "Ship test-capability",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := externalStore.CreateIssue(ctx, capabilityIssue, "test-user"); err != nil {
+		t.Fatalf("failed to create capability issue: %v", err)
+	}
+
+	// Add the provides: label
+	if err := externalStore.AddLabel(ctx, capabilityIssue.ID, "provides:test-capability", "test-user"); err != nil {
+		t.Fatalf("failed to add provides label: %v", err)
+	}
+
+	// Close the capability issue
+	if err := externalStore.CloseIssue(ctx, capabilityIssue.ID, "Shipped", "test-user"); err != nil {
+		t.Fatalf("failed to close capability issue: %v", err)
+	}
+
+	// Debug: verify the capability issue was properly set up
+	capIssue, err := externalStore.GetIssue(ctx, capabilityIssue.ID)
+	if err != nil {
+		t.Fatalf("failed to get capability issue: %v", err)
+	}
+	t.Logf("Capability issue status: %s", capIssue.Status)
+	labels, _ := externalStore.GetLabels(ctx, capabilityIssue.ID)
+	t.Logf("Capability issue labels: %v", labels)
+
+	// Close external store to checkpoint WAL before read-only access
+	externalStore.Close()
+
+	// Debug: check what path configfile.Load returns
+	testCfg, _ := configfile.Load(beadsDir)
+	if testCfg != nil {
+		t.Logf("Config database path: %s", testCfg.DatabasePath(beadsDir))
+		t.Logf("External DB path we created: %s", externalDBPath)
+	}
+
+	// Re-verify: manually check the external dep
+	status := CheckExternalDep(ctx, "external:external-test:test-capability")
+	t.Logf("External dep check: satisfied=%v, reason=%s", status.Satisfied, status.Reason)
+
+	// Now the external dep should be satisfied
+	ready, err = mainStore.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed after shipping: %v", err)
+	}
+
+	// Should now have both issues
+	if len(ready) != 2 {
+		t.Errorf("Expected 2 ready issues (external dep now satisfied), got %d", len(ready))
+		for _, issue := range ready {
+			t.Logf("Ready issue after shipping: %s - %s", issue.ID, issue.Title)
+		}
+	}
+
+	// Verify both issues are present
+	foundExtDep := false
+	foundRegular := false
+	for _, issue := range ready {
+		if issue.ID == issueWithExtDep.ID {
+			foundExtDep = true
+		}
+		if issue.ID == regularIssue.ID {
+			foundRegular = true
+		}
+	}
+	if !foundExtDep {
+		t.Error("Issue with external dep should now be ready")
+	}
+	if !foundRegular {
+		t.Error("Regular issue should still be ready")
+	}
+}
+
+// TestGetReadyWorkNoExternalProjectsConfigured tests that GetReadyWork
+// works normally when no external_projects are configured (bd-zmmy)
+func TestGetReadyWorkNoExternalProjectsConfigured(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Initialize config if not already done
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("failed to initialize config: %v", err)
+	}
+
+	// Ensure no external_projects configured
+	oldProjects := config.GetExternalProjects()
+	defer func() {
+		if oldProjects != nil {
+			config.Set("external_projects", oldProjects)
+		}
+	}()
+	config.Set("external_projects", map[string]string{})
+
+	// Create an issue with an external dependency (shouldn't matter since no config)
+	issue := &types.Issue{
+		Title:     "Has external dep but no config",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add external dependency (will be ignored since no external_projects configured)
+	extDep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: "external:unconfigured-project:some-capability",
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, extDep, "test-user"); err != nil {
+		t.Fatalf("failed to add external dependency: %v", err)
+	}
+
+	// Should skip external dep checking since no external_projects configured
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+
+	// Issue should be ready (external deps skipped when no config)
+	if len(ready) != 1 {
+		t.Errorf("Expected 1 ready issue (external deps skipped), got %d", len(ready))
 	}
 }

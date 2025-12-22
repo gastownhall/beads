@@ -41,6 +41,7 @@ var migrationsList = []Migration{
 	{"drop_edge_columns", migrations.MigrateDropEdgeColumns},
 	{"pinned_column", migrations.MigratePinnedColumn},
 	{"is_template_column", migrations.MigrateIsTemplateColumn},
+	{"remove_depends_on_fk", migrations.MigrateRemoveDependsOnFK},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -89,6 +90,7 @@ func getMigrationDescription(name string) string {
 		"drop_edge_columns":            "Drops deprecated edge columns (replies_to, relates_to, duplicate_of, superseded_by) from issues table (Decision 004 Phase 4)",
 		"pinned_column":                "Adds pinned column for persistent context markers (bd-7h5)",
 		"is_template_column":           "Adds is_template column for template molecules (beads-1ra)",
+		"remove_depends_on_fk":         "Removes FK constraint on depends_on_id to allow external references (bd-zmmy)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {

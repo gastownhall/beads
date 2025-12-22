@@ -217,6 +217,30 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 		)
 	}
 
+	// Check for orphaned local dependencies (non-external refs) (bd-zmmy)
+	// The FK constraint on depends_on_id was removed to allow external:* refs,
+	// so we need to validate local deps manually.
+	orphanRows, err := conn.QueryContext(ctx, `
+		SELECT d.issue_id, d.depends_on_id
+		FROM dependencies d
+		LEFT JOIN issues i ON d.depends_on_id = i.id
+		WHERE i.id IS NULL
+		  AND d.depends_on_id NOT LIKE 'external:%'
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check orphaned dependencies: %w", err)
+	}
+	defer orphanRows.Close()
+
+	if orphanRows.Next() {
+		var issueID, dependsOnID string
+		_ = orphanRows.Scan(&issueID, &dependsOnID)
+		return 0, fmt.Errorf(
+			"foreign key violation: issue %s depends on non-existent issue %s",
+			issueID, dependsOnID,
+		)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}

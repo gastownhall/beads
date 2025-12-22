@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -126,7 +127,113 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	}
 	defer func() { _ = rows.Close() }()
 
-	return s.scanIssues(ctx, rows)
+	issues, err := s.scanIssues(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter out issues with unsatisfied external dependencies (bd-zmmy)
+	// Only check if external_projects are configured
+	if len(config.GetExternalProjects()) > 0 && len(issues) > 0 {
+		issues, err = s.filterByExternalDeps(ctx, issues)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check external dependencies: %w", err)
+		}
+	}
+
+	return issues, nil
+}
+
+// filterByExternalDeps removes issues that have unsatisfied external dependencies.
+// External deps have format: external:<project>:<capability>
+// They are satisfied when the target project has a closed issue with provides:<capability> label.
+func (s *SQLiteStorage) filterByExternalDeps(ctx context.Context, issues []*types.Issue) ([]*types.Issue, error) {
+	if len(issues) == 0 {
+		return issues, nil
+	}
+
+	// Build list of issue IDs
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+
+	// Batch query: get all external deps for these issues
+	externalDeps, err := s.getExternalDepsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no external deps, return all issues
+	if len(externalDeps) == 0 {
+		return issues, nil
+	}
+
+	// Check each external dep and build set of blocked issue IDs
+	blockedIssues := make(map[string]bool)
+	for issueID, deps := range externalDeps {
+		for _, dep := range deps {
+			status := CheckExternalDep(ctx, dep)
+			if !status.Satisfied {
+				blockedIssues[issueID] = true
+				break // One unsatisfied dep is enough to block
+			}
+		}
+	}
+
+	// Filter out blocked issues
+	if len(blockedIssues) == 0 {
+		return issues, nil
+	}
+
+	result := make([]*types.Issue, 0, len(issues)-len(blockedIssues))
+	for _, issue := range issues {
+		if !blockedIssues[issue.ID] {
+			result = append(result, issue)
+		}
+	}
+
+	return result, nil
+}
+
+// getExternalDepsForIssues returns a map of issue ID -> list of external dep refs
+func (s *SQLiteStorage) getExternalDepsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
+	if len(issueIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(issueIDs))
+	args := make([]interface{}, len(issueIDs))
+	for i, id := range issueIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT issue_id, depends_on_id
+		FROM dependencies
+		WHERE issue_id IN (%s)
+		  AND type = 'blocks'
+		  AND depends_on_id LIKE 'external:%%'
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query external dependencies: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]string)
+	for rows.Next() {
+		var issueID, depRef string
+		if err := rows.Scan(&issueID, &depRef); err != nil {
+			return nil, fmt.Errorf("failed to scan external dependency: %w", err)
+		}
+		result[issueID] = append(result[issueID], depRef)
+	}
+
+	return result, rows.Err()
 }
 
 // GetStaleIssues returns issues that haven't been updated recently

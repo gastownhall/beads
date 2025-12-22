@@ -24,7 +24,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
-	// Validate that both issues exist
+	// Validate that source issue exists
 	issueExists, err := s.GetIssue(ctx, dep.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to check issue %s: %w", dep.IssueID, err)
@@ -33,31 +33,38 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	dependsOnExists, err := s.GetIssue(ctx, dep.DependsOnID)
-	if err != nil {
-		return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
-	}
-	if dependsOnExists == nil {
-		return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
-	}
+	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// They are resolved lazily at query time by CheckExternalDep
+	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
-	// Prevent self-dependency
-	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("issue cannot depend on itself")
-	}
+	var dependsOnExists *types.Issue
+	if !isExternalRef {
+		dependsOnExists, err = s.GetIssue(ctx, dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
+		}
+		if dependsOnExists == nil {
+			return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
+		}
 
-	// Validate parent-child dependency direction
-	// In parent-child relationships: child depends on parent (child is part of parent)
-	// Parent should NOT depend on child (semantically backwards)
-	// Consistent with dependency semantics: IssueID depends on DependsOnID
-	if dep.Type == types.DepParentChild {
-		// issueExists is the dependent (the one that depends on something)
-		// dependsOnExists is what it depends on
-		// Correct: Task (child) depends on Epic (parent) - child belongs to parent
-		// Incorrect: Epic (parent) depends on Task (child) - backwards
-		if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-			return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-				dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+		// Prevent self-dependency (only for local deps)
+		if dep.IssueID == dep.DependsOnID {
+			return fmt.Errorf("issue cannot depend on itself")
+		}
+
+		// Validate parent-child dependency direction (only for local deps)
+		// In parent-child relationships: child depends on parent (child is part of parent)
+		// Parent should NOT depend on child (semantically backwards)
+		// Consistent with dependency semantics: IssueID depends on DependsOnID
+		if dep.Type == types.DepParentChild {
+			// issueExists is the dependent (the one that depends on something)
+			// dependsOnExists is what it depends on
+			// Correct: Task (child) depends on Epic (parent) - child belongs to parent
+			// Incorrect: Epic (parent) depends on Task (child) - backwards
+			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
+				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
+					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+			}
 		}
 	}
 
@@ -152,9 +159,13 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-		// Mark both issues as dirty for incremental export
-		// (dependencies are exported with each issue, so both need updating)
-		if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
+		// Mark issues as dirty for incremental export
+		// For external refs, only mark the source issue (target doesn't exist locally)
+		issueIDsToMark := []string{dep.IssueID}
+		if !isExternalRef {
+			issueIDsToMark = append(issueIDsToMark, dep.DependsOnID)
+		}
+		if err := markIssuesDirtyTx(ctx, tx, issueIDsToMark); err != nil {
 			return wrapDBError("mark issues dirty after adding dependency", err)
 		}
 

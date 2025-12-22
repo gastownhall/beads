@@ -113,27 +113,19 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 	}
 
 	// Rebuild using the recursive CTE logic
-	// Includes both local blockers (open issues) and external refs (bd-om4a)
+	// Only includes local blockers (open issues) - external refs are resolved
+	// lazily at query time by GetReadyWork (bd-zmmy supersedes bd-om4a)
 	query := `
 		INSERT INTO blocked_issues_cache (issue_id)
 		WITH RECURSIVE
-		  -- Step 1: Find issues blocked directly by dependencies
-		  -- Includes both local blockers (open issues) and external references
+		  -- Step 1: Find issues blocked directly by LOCAL dependencies
+		  -- External refs (external:*) are excluded - they're resolved lazily by GetReadyWork
 		  blocked_directly AS (
-		    -- Local blockers: issues with open status
 		    SELECT DISTINCT d.issue_id
 		    FROM dependencies d
 		    JOIN issues blocker ON d.depends_on_id = blocker.id
 		    WHERE d.type = 'blocks'
 		      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
-
-		    UNION
-
-		    -- External blockers: always blocking until resolved (bd-om4a)
-		    SELECT DISTINCT d.issue_id
-		    FROM dependencies d
-		    WHERE d.type = 'blocks'
-		      AND d.depends_on_id LIKE 'external:%'
 		  ),
 
 		  -- Step 2: Propagate blockage to all descendants via parent-child

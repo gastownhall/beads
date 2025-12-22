@@ -12,6 +12,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -73,13 +74,26 @@ func CheckExternalDep(ctx context.Context, ref string) *ExternalDepStatus {
 
 	dbPath := cfg.DatabasePath(beadsDir)
 
-	// Open the external database (read-only)
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	// Verify database file exists
+	if _, err := os.Stat(dbPath); err != nil {
+		status.Reason = "database file not found: " + dbPath
+		return status
+	}
+
+	// Open the external database
+	// Use regular mode to ensure we can read from WAL-mode databases
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		status.Reason = "cannot open project database"
+		status.Reason = "cannot open project database: " + err.Error()
 		return status
 	}
 	defer func() { _ = db.Close() }()
+
+	// Verify we can ping the database
+	if err := db.Ping(); err != nil {
+		status.Reason = "cannot connect to project database: " + err.Error()
+		return status
+	}
 
 	// Check for a closed issue with provides:<capability> label
 	providesLabel := "provides:" + status.Capability
@@ -92,7 +106,7 @@ func CheckExternalDep(ctx context.Context, ref string) *ExternalDepStatus {
 	`, providesLabel).Scan(&count)
 
 	if err != nil {
-		status.Reason = "database query failed"
+		status.Reason = "database query failed: " + err.Error()
 		return status
 	}
 

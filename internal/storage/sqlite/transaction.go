@@ -600,7 +600,7 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
-	// Validate that both issues exist
+	// Validate that source issue exists
 	issueExists, err := t.GetIssue(ctx, dep.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to check issue %s: %w", dep.IssueID, err)
@@ -609,24 +609,31 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	dependsOnExists, err := t.GetIssue(ctx, dep.DependsOnID)
-	if err != nil {
-		return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
-	}
-	if dependsOnExists == nil {
-		return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
-	}
+	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// They are resolved lazily at query time by CheckExternalDep
+	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
-	// Prevent self-dependency
-	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("issue cannot depend on itself")
-	}
+	var dependsOnExists *types.Issue
+	if !isExternalRef {
+		dependsOnExists, err = t.GetIssue(ctx, dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
+		}
+		if dependsOnExists == nil {
+			return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
+		}
 
-	// Validate parent-child dependency direction
-	if dep.Type == types.DepParentChild {
-		if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-			return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-				dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+		// Prevent self-dependency (only for local deps)
+		if dep.IssueID == dep.DependsOnID {
+			return fmt.Errorf("issue cannot depend on itself")
+		}
+
+		// Validate parent-child dependency direction (only for local deps)
+		if dep.Type == types.DepParentChild {
+			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
+				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
+					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+			}
 		}
 	}
 
@@ -695,12 +702,14 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark both issues as dirty
+	// Mark issues as dirty - for external refs, only mark the source issue
 	if err := markDirty(ctx, t.conn, dep.IssueID); err != nil {
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
-	if err := markDirty(ctx, t.conn, dep.DependsOnID); err != nil {
-		return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
+	if !isExternalRef {
+		if err := markDirty(ctx, t.conn, dep.DependsOnID); err != nil {
+			return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
+		}
 	}
 
 	// Invalidate blocked cache for blocking dependencies (bd-1c4h)
