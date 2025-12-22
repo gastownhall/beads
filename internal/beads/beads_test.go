@@ -1402,17 +1402,17 @@ func TestIsWispDatabase(t *testing.T) {
 		},
 		{
 			name:     "wisp database",
-			dbPath:   "/project/.beads-wisps/beads.db",
+			dbPath:   "/project/.beads-wisp/beads.db",
 			expected: true,
 		},
 		{
 			name:     "nested wisp",
-			dbPath:   "/some/deep/path/.beads-wisps/beads.db",
+			dbPath:   "/some/deep/path/.beads-wisp/beads.db",
 			expected: true,
 		},
 		{
 			name:     "similar but not wisp",
-			dbPath:   "/project/.beads-wisps-backup/beads.db",
+			dbPath:   "/project/.beads-wisp-backup/beads.db",
 			expected: false,
 		},
 	}
@@ -1452,12 +1452,12 @@ func TestEnsureWispGitignore(t *testing.T) {
 		},
 		{
 			name:            "already gitignored",
-			existingContent: ".beads-wisps/\n",
+			existingContent: ".beads-wisp/\n",
 			expectAppend:    false,
 		},
 		{
 			name:            "already gitignored without slash",
-			existingContent: ".beads-wisps\n",
+			existingContent: ".beads-wisp\n",
 			expectAppend:    false,
 		},
 		{

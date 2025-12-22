@@ -1282,6 +1282,288 @@ func TestSpawnAttachDryRunOutput(t *testing.T) {
 	}
 }
 
+// TestSquashWispToPermanent tests cross-store squash: wisp → permanent digest (bd-kwjh.4)
+func TestSquashWispToPermanent(t *testing.T) {
+	ctx := context.Background()
+
+	// Create separate wisp and permanent stores
+	wispPath := t.TempDir() + "/wisp.db"
+	permPath := t.TempDir() + "/permanent.db"
+
+	wispStore, err := sqlite.New(ctx, wispPath)
+	if err != nil {
+		t.Fatalf("Failed to create wisp store: %v", err)
+	}
+	defer wispStore.Close()
+	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set wisp config: %v", err)
+	}
+
+	permStore, err := sqlite.New(ctx, permPath)
+	if err != nil {
+		t.Fatalf("Failed to create permanent store: %v", err)
+	}
+	defer permStore.Close()
+	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set permanent config: %v", err)
+	}
+
+	// Create a wisp molecule in wisp storage
+	wispRoot := &types.Issue{
+		Title:     "Deacon Patrol Cycle",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Wisp:      true,
+	}
+	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
+		t.Fatalf("Failed to create wisp root: %v", err)
+	}
+
+	wispChild1 := &types.Issue{
+		Title:       "Check witnesses",
+		Description: "Verified 3 witnesses healthy",
+		Status:      types.StatusClosed,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		Wisp:        true,
+		CloseReason: "All healthy",
+	}
+	wispChild2 := &types.Issue{
+		Title:       "Process mail queue",
+		Description: "Processed 5 mail items",
+		Status:      types.StatusClosed,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		Wisp:        true,
+		CloseReason: "Mail delivered",
+	}
+
+	if err := wispStore.CreateIssue(ctx, wispChild1, "test"); err != nil {
+		t.Fatalf("Failed to create wisp child1: %v", err)
+	}
+	if err := wispStore.CreateIssue(ctx, wispChild2, "test"); err != nil {
+		t.Fatalf("Failed to create wisp child2: %v", err)
+	}
+
+	// Add parent-child dependencies
+	if err := wispStore.AddDependency(ctx, &types.Dependency{
+		IssueID:     wispChild1.ID,
+		DependsOnID: wispRoot.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add child1 dependency: %v", err)
+	}
+	if err := wispStore.AddDependency(ctx, &types.Dependency{
+		IssueID:     wispChild2.ID,
+		DependsOnID: wispRoot.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add child2 dependency: %v", err)
+	}
+
+	// Load the subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, wispStore, wispRoot.ID)
+	if err != nil {
+		t.Fatalf("Failed to load wisp subgraph: %v", err)
+	}
+
+	// Verify subgraph loaded correctly
+	if len(subgraph.Issues) != 3 {
+		t.Fatalf("Expected 3 issues in subgraph, got %d", len(subgraph.Issues))
+	}
+
+	// Perform cross-store squash
+	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, false, "", "test")
+	if err != nil {
+		t.Fatalf("squashWispToPermanent failed: %v", err)
+	}
+
+	// Verify result
+	if result.SquashedCount != 3 {
+		t.Errorf("SquashedCount = %d, want 3", result.SquashedCount)
+	}
+	if !result.WispSquash {
+		t.Error("WispSquash should be true")
+	}
+	if result.DigestID == "" {
+		t.Error("DigestID should not be empty")
+	}
+	if result.DeletedCount != 3 {
+		t.Errorf("DeletedCount = %d, want 3", result.DeletedCount)
+	}
+
+	// Verify digest was created in permanent storage
+	digest, err := permStore.GetIssue(ctx, result.DigestID)
+	if err != nil {
+		t.Fatalf("Failed to get digest from permanent store: %v", err)
+	}
+	if digest.Wisp {
+		t.Error("Digest should NOT be a wisp")
+	}
+	if digest.Status != types.StatusClosed {
+		t.Errorf("Digest status = %v, want closed", digest.Status)
+	}
+	if !strings.Contains(digest.Title, "Deacon Patrol Cycle") {
+		t.Errorf("Digest title %q should contain original molecule title", digest.Title)
+	}
+	if !strings.Contains(digest.Description, "Check witnesses") {
+		t.Error("Digest description should contain child titles")
+	}
+
+	// Verify wisps were deleted from wisp storage
+	// Note: GetIssue returns (nil, nil) when issue doesn't exist
+	rootIssue, err := wispStore.GetIssue(ctx, wispRoot.ID)
+	if err != nil {
+		t.Errorf("Unexpected error checking root deletion: %v", err)
+	}
+	if rootIssue != nil {
+		t.Error("Wisp root should have been deleted")
+	}
+	child1Issue, err := wispStore.GetIssue(ctx, wispChild1.ID)
+	if err != nil {
+		t.Errorf("Unexpected error checking child1 deletion: %v", err)
+	}
+	if child1Issue != nil {
+		t.Error("Wisp child1 should have been deleted")
+	}
+	child2Issue, err := wispStore.GetIssue(ctx, wispChild2.ID)
+	if err != nil {
+		t.Errorf("Unexpected error checking child2 deletion: %v", err)
+	}
+	if child2Issue != nil {
+		t.Error("Wisp child2 should have been deleted")
+	}
+}
+
+// TestSquashWispToPermanentWithSummary tests that agent summaries override auto-generation
+func TestSquashWispToPermanentWithSummary(t *testing.T) {
+	ctx := context.Background()
+
+	wispPath := t.TempDir() + "/wisp.db"
+	permPath := t.TempDir() + "/permanent.db"
+
+	wispStore, err := sqlite.New(ctx, wispPath)
+	if err != nil {
+		t.Fatalf("Failed to create wisp store: %v", err)
+	}
+	defer wispStore.Close()
+	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set wisp config: %v", err)
+	}
+
+	permStore, err := sqlite.New(ctx, permPath)
+	if err != nil {
+		t.Fatalf("Failed to create permanent store: %v", err)
+	}
+	defer permStore.Close()
+	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set permanent config: %v", err)
+	}
+
+	// Create a simple wisp molecule
+	wispRoot := &types.Issue{
+		Title:     "Patrol Cycle",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Wisp:      true,
+	}
+	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
+		t.Fatalf("Failed to create wisp root: %v", err)
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   wispRoot,
+		Issues: []*types.Issue{wispRoot},
+	}
+
+	// Squash with agent-provided summary
+	agentSummary := "## AI-Generated Patrol Summary\n\nAll systems healthy. No issues found."
+	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, true, agentSummary, "test")
+	if err != nil {
+		t.Fatalf("squashWispToPermanent failed: %v", err)
+	}
+
+	// Verify digest uses agent summary
+	digest, err := permStore.GetIssue(ctx, result.DigestID)
+	if err != nil {
+		t.Fatalf("Failed to get digest: %v", err)
+	}
+	if digest.Description != agentSummary {
+		t.Errorf("Digest should use agent summary.\nGot: %s\nWant: %s", digest.Description, agentSummary)
+	}
+}
+
+// TestSquashWispToPermanentKeepChildren tests --keep-children flag
+func TestSquashWispToPermanentKeepChildren(t *testing.T) {
+	ctx := context.Background()
+
+	wispPath := t.TempDir() + "/wisp.db"
+	permPath := t.TempDir() + "/permanent.db"
+
+	wispStore, err := sqlite.New(ctx, wispPath)
+	if err != nil {
+		t.Fatalf("Failed to create wisp store: %v", err)
+	}
+	defer wispStore.Close()
+	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set wisp config: %v", err)
+	}
+
+	permStore, err := sqlite.New(ctx, permPath)
+	if err != nil {
+		t.Fatalf("Failed to create permanent store: %v", err)
+	}
+	defer permStore.Close()
+	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set permanent config: %v", err)
+	}
+
+	// Create a wisp molecule
+	wispRoot := &types.Issue{
+		Title:     "Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Wisp:      true,
+	}
+	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
+		t.Fatalf("Failed to create wisp root: %v", err)
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   wispRoot,
+		Issues: []*types.Issue{wispRoot},
+	}
+
+	// Squash with keepChildren=true
+	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, true, "", "test")
+	if err != nil {
+		t.Fatalf("squashWispToPermanent failed: %v", err)
+	}
+
+	// Verify no deletion
+	if result.DeletedCount != 0 {
+		t.Errorf("DeletedCount = %d, want 0 (keep-children)", result.DeletedCount)
+	}
+	if !result.KeptChildren {
+		t.Error("KeptChildren should be true")
+	}
+
+	// Wisp should still exist
+	_, err = wispStore.GetIssue(ctx, wispRoot.ID)
+	if err != nil {
+		t.Error("Wisp should still exist with --keep-children")
+	}
+
+	// Digest should still be created
+	_, err = permStore.GetIssue(ctx, result.DigestID)
+	if err != nil {
+		t.Error("Digest should be created even with --keep-children")
+	}
+}
+
 // TestWispFilteringFromExport verifies that wisp issues are filtered
 // from JSONL export (bd-687g). Wisp issues should only exist in SQLite,
 // not in issues.jsonl, to prevent "zombie" resurrection after mol squash.

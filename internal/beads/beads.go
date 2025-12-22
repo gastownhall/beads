@@ -625,7 +625,7 @@ func FindAllDatabases() []DatabaseInfo {
 // WispDirName is the default name for the wisp storage directory.
 // This directory is a sibling to .beads/ and should be gitignored.
 // Wisps are ephemeral molecules - the "steam" in Gas Town's engine metaphor.
-const WispDirName = ".beads-wisps"
+const WispDirName = ".beads-wisp"
 
 // FindWispDir locates or determines the wisp storage directory.
 // The wisp directory is a sibling to the .beads directory.
@@ -639,7 +639,7 @@ func FindWispDir() string {
 	}
 
 	// Wisp dir is a sibling to .beads
-	// e.g., /project/.beads -> /project/.beads-wisps
+	// e.g., /project/.beads -> /project/.beads-wisp
 	projectRoot := filepath.Dir(beadsDir)
 	return filepath.Join(projectRoot, WispDirName)
 }
@@ -720,7 +720,7 @@ func EnsureWispGitignore() error {
 }
 
 // IsWispDatabase checks if a database path is a wisp database.
-// Returns true if the database is in a .beads-wisps directory.
+// Returns true if the database is in a .beads-wisp directory.
 func IsWispDatabase(dbPath string) bool {
 	if dbPath == "" {
 		return false

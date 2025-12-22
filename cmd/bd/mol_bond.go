@@ -33,7 +33,7 @@ Bond types:
   conditional         - B runs only if A fails
 
 Wisp storage (ephemeral molecules):
-  Use --wisp to create molecules in .beads-wisps/ instead of .beads/.
+  Use --wisp to create molecules in .beads-wisp/ instead of .beads/.
   Wisps are local-only, gitignored, and not synced - the "steam" of Gas Town.
   Use bd mol squash to convert a wisp to a digest in permanent storage.
   Use bd mol burn to delete a wisp without creating a digest.
@@ -149,7 +149,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 		fmt.Printf("  Bond type: %s\n", bondType)
 		if wisp {
-			fmt.Printf("  Storage: wisp (.beads-wisps/)\n")
+			fmt.Printf("  Storage: wisp (.beads-wisp/)\n")
 		}
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
@@ -203,7 +203,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Spawned: %d issues\n", result.Spawned)
 	}
 	if wisp {
-		fmt.Printf("  Storage: wisp (.beads-wisps/)\n")
+		fmt.Printf("  Storage: wisp (.beads-wisp/)\n")
 	}
 }
 
@@ -418,7 +418,7 @@ func init() {
 	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
 	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("wisp", false, "Create molecule in wisp storage (.beads-wisps/)")
+	molBondCmd.Flags().Bool("wisp", false, "Create molecule in wisp storage (.beads-wisp/)")
 
 	molCmd.AddCommand(molBondCmd)
 }
