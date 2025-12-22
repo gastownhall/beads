@@ -92,7 +92,7 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "Error resolving molecule ID %s: %v\n", args[0], err)
 			os.Exit(1)
 		}
-		defer wispStore.Close()
+		defer func() { _ = wispStore.Close() }()
 
 		wispMolID, wispResolveErr := utils.ResolvePartialID(ctx, wispStore, args[0])
 		if wispResolveErr != nil {
@@ -119,7 +119,7 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 		// Check if there's a corresponding wisp in wisp storage
 		wispStore, wispErr := beads.NewWispStorage(ctx)
 		if wispErr == nil {
-			defer wispStore.Close()
+			defer func() { _ = wispStore.Close() }()
 			if wispIssue, _ := wispStore.GetIssue(ctx, moleculeID); wispIssue != nil {
 				// Found in wisp storage - do cross-store squash
 				runWispSquash(ctx, cmd, wispStore, store, moleculeID, dryRun, keepChildren, summary)
@@ -208,7 +208,7 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 
 // runWispSquash handles squashing a wisp from wisp storage into permanent storage.
 // This is the cross-store squash operation: load from wisp, create digest in permanent, delete wisp.
-func runWispSquash(ctx context.Context, cmd *cobra.Command, wispStore, permanentStore storage.Storage, moleculeID string, dryRun, keepChildren bool, summary string) {
+func runWispSquash(ctx context.Context, _ *cobra.Command, wispStore, permanentStore storage.Storage, moleculeID string, dryRun, keepChildren bool, summary string) {
 	// Load the molecule subgraph from wisp storage
 	subgraph, err := loadTemplateSubgraph(ctx, wispStore, moleculeID)
 	if err != nil {

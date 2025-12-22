@@ -216,7 +216,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: failed to open wisp storage: %v\n", err)
 		os.Exit(1)
 	}
-	defer wispStore.Close()
+	defer func() { _ = wispStore.Close() }()
 
 	// Ensure wisp directory is gitignored
 	if err := beads.EnsureWispGitignore(); err != nil {
@@ -358,7 +358,7 @@ func runWispList(cmd *cobra.Command, args []string) {
 		}
 		return
 	}
-	defer wispStore.Close()
+	defer func() { _ = wispStore.Close() }()
 
 	// List all issues from wisp storage
 	issues, err := listWispIssues(ctx, wispStore, showAll)
@@ -597,7 +597,7 @@ func runWispGC(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error opening wisp storage: %v\n", err)
 		os.Exit(1)
 	}
-	defer wispStore.Close()
+	defer func() { _ = wispStore.Close() }()
 
 	// Get all issues from wisp storage
 	filter := types.IssueFilter{}

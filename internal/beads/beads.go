@@ -684,11 +684,11 @@ func NewWispStorage(ctx context.Context) (Storage, error) {
 		if mainDBPath != "" {
 			mainStore, mainErr := sqlite.New(ctx, mainDBPath)
 			if mainErr == nil {
-				defer mainStore.Close()
+				defer func() { _ = mainStore.Close() }()
 				mainPrefix, _ := mainStore.GetConfig(ctx, "issue_prefix")
 				if mainPrefix != "" {
 					if setErr := wispStore.SetConfig(ctx, "issue_prefix", mainPrefix); setErr != nil {
-						wispStore.Close()
+						_ = wispStore.Close()
 						return nil, fmt.Errorf("setting wisp issue_prefix: %w", setErr)
 					}
 				}

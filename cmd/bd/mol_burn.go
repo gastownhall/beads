@@ -91,7 +91,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error opening wisp storage: %v\n", err)
 		os.Exit(1)
 	}
-	defer wispStore.Close()
+	defer func() { _ = wispStore.Close() }()
 
 	// Resolve molecule ID in wisp storage
 	resolvedID, err := utils.ResolvePartialID(ctx, wispStore, moleculeID)
@@ -140,9 +140,9 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 		fmt.Printf("\nContinue? [y/N] ")
 
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response)
 		if response != "y" && response != "Y" {
-			fmt.Println("Cancelled.")
+			fmt.Println("Canceled.")
 			return
 		}
 	}

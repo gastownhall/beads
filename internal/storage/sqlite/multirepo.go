@@ -408,12 +408,12 @@ func (s *SQLiteStorage) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, fmt.Errorf("failed to scan issue ID: %w", err)
 		}
 		issueIDs = append(issueIDs, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("failed to iterate issues: %w", err)
 	}
