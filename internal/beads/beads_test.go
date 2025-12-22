@@ -1255,8 +1255,8 @@ func TestFindDatabasePath_WorktreeNoLocalDB(t *testing.T) {
 	}
 }
 
-// TestFindEphemeralDir tests that FindEphemeralDir returns the correct path
-func TestFindEphemeralDir(t *testing.T) {
+// TestFindWispDir tests that FindWispDir returns the correct path
+func TestFindWispDir(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
 	defer func() {
@@ -1268,7 +1268,7 @@ func TestFindEphemeralDir(t *testing.T) {
 	}()
 
 	// Create temporary directory with .beads
-	tmpDir, err := os.MkdirTemp("", "beads-ephemeral-test-*")
+	tmpDir, err := os.MkdirTemp("", "beads-wisp-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1286,22 +1286,22 @@ func TestFindEphemeralDir(t *testing.T) {
 	// Set BEADS_DIR
 	os.Setenv("BEADS_DIR", beadsDir)
 
-	// FindEphemeralDir should return sibling directory
-	result := FindEphemeralDir()
-	expected := filepath.Join(tmpDir, EphemeralDirName)
+	// FindWispDir should return sibling directory
+	result := FindWispDir()
+	expected := filepath.Join(tmpDir, WispDirName)
 
 	// Resolve symlinks for comparison
 	resultResolved, _ := filepath.EvalSymlinks(result)
 	expectedResolved, _ := filepath.EvalSymlinks(expected)
 
 	if resultResolved != expectedResolved {
-		t.Errorf("FindEphemeralDir() = %q, want %q", result, expected)
+		t.Errorf("FindWispDir() = %q, want %q", result, expected)
 	}
 }
 
-// TestFindEphemeralDir_NoBeadsDir tests that FindEphemeralDir returns empty string
+// TestFindWispDir_NoBeadsDir tests that FindWispDir returns empty string
 // when no .beads directory exists
-func TestFindEphemeralDir_NoBeadsDir(t *testing.T) {
+func TestFindWispDir_NoBeadsDir(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
 	defer func() {
@@ -1314,7 +1314,7 @@ func TestFindEphemeralDir_NoBeadsDir(t *testing.T) {
 	os.Unsetenv("BEADS_DIR")
 
 	// Create temporary directory without .beads
-	tmpDir, err := os.MkdirTemp("", "beads-no-ephemeral-test-*")
+	tmpDir, err := os.MkdirTemp("", "beads-no-wisp-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1322,16 +1322,16 @@ func TestFindEphemeralDir_NoBeadsDir(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	// FindEphemeralDir should return empty string
-	result := FindEphemeralDir()
+	// FindWispDir should return empty string
+	result := FindWispDir()
 	if result != "" {
-		t.Errorf("FindEphemeralDir() = %q, want empty string", result)
+		t.Errorf("FindWispDir() = %q, want empty string", result)
 	}
 }
 
-// TestFindEphemeralDatabasePath tests that FindEphemeralDatabasePath creates
-// the ephemeral directory and returns the correct database path
-func TestFindEphemeralDatabasePath(t *testing.T) {
+// TestFindWispDatabasePath tests that FindWispDatabasePath creates
+// the wisp directory and returns the correct database path
+func TestFindWispDatabasePath(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
 	defer func() {
@@ -1343,7 +1343,7 @@ func TestFindEphemeralDatabasePath(t *testing.T) {
 	}()
 
 	// Create temporary directory with .beads
-	tmpDir, err := os.MkdirTemp("", "beads-ephdb-test-*")
+	tmpDir, err := os.MkdirTemp("", "beads-wispdb-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1359,32 +1359,32 @@ func TestFindEphemeralDatabasePath(t *testing.T) {
 
 	os.Setenv("BEADS_DIR", beadsDir)
 
-	// FindEphemeralDatabasePath should create directory and return path
-	result, err := FindEphemeralDatabasePath()
+	// FindWispDatabasePath should create directory and return path
+	result, err := FindWispDatabasePath()
 	if err != nil {
-		t.Fatalf("FindEphemeralDatabasePath() error = %v", err)
+		t.Fatalf("FindWispDatabasePath() error = %v", err)
 	}
 
-	expected := filepath.Join(tmpDir, EphemeralDirName, CanonicalDatabaseName)
+	expected := filepath.Join(tmpDir, WispDirName, CanonicalDatabaseName)
 
 	// Resolve symlinks for comparison
 	resultResolved, _ := filepath.EvalSymlinks(result)
 	expectedResolved, _ := filepath.EvalSymlinks(expected)
 
 	if resultResolved != expectedResolved {
-		t.Errorf("FindEphemeralDatabasePath() = %q, want %q", result, expected)
+		t.Errorf("FindWispDatabasePath() = %q, want %q", result, expected)
 	}
 
 	// Verify the directory was created
-	ephemeralDir := filepath.Join(tmpDir, EphemeralDirName)
-	if _, err := os.Stat(ephemeralDir); os.IsNotExist(err) {
-		t.Errorf("Ephemeral directory was not created: %q", ephemeralDir)
+	wispDir := filepath.Join(tmpDir, WispDirName)
+	if _, err := os.Stat(wispDir); os.IsNotExist(err) {
+		t.Errorf("Wisp directory was not created: %q", wispDir)
 	}
 }
 
-// TestIsEphemeralDatabase tests that IsEphemeralDatabase correctly identifies
-// ephemeral database paths
-func TestIsEphemeralDatabase(t *testing.T) {
+// TestIsWispDatabase tests that IsWispDatabase correctly identifies
+// wisp database paths
+func TestIsWispDatabase(t *testing.T) {
 	tests := []struct {
 		name     string
 		dbPath   string
@@ -1401,35 +1401,35 @@ func TestIsEphemeralDatabase(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "ephemeral database",
-			dbPath:   "/project/.beads-ephemeral/beads.db",
+			name:     "wisp database",
+			dbPath:   "/project/.beads-wisps/beads.db",
 			expected: true,
 		},
 		{
-			name:     "nested ephemeral",
-			dbPath:   "/some/deep/path/.beads-ephemeral/beads.db",
+			name:     "nested wisp",
+			dbPath:   "/some/deep/path/.beads-wisps/beads.db",
 			expected: true,
 		},
 		{
-			name:     "similar but not ephemeral",
-			dbPath:   "/project/.beads-ephemeral-backup/beads.db",
+			name:     "similar but not wisp",
+			dbPath:   "/project/.beads-wisps-backup/beads.db",
 			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsEphemeralDatabase(tt.dbPath)
+			result := IsWispDatabase(tt.dbPath)
 			if result != tt.expected {
-				t.Errorf("IsEphemeralDatabase(%q) = %v, want %v", tt.dbPath, result, tt.expected)
+				t.Errorf("IsWispDatabase(%q) = %v, want %v", tt.dbPath, result, tt.expected)
 			}
 		})
 	}
 }
 
-// TestEnsureEphemeralGitignore tests that EnsureEphemeralGitignore correctly
-// adds the ephemeral directory to .gitignore
-func TestEnsureEphemeralGitignore(t *testing.T) {
+// TestEnsureWispGitignore tests that EnsureWispGitignore correctly
+// adds the wisp directory to .gitignore
+func TestEnsureWispGitignore(t *testing.T) {
 	// Save original state
 	originalEnv := os.Getenv("BEADS_DIR")
 	defer func() {
@@ -1452,12 +1452,12 @@ func TestEnsureEphemeralGitignore(t *testing.T) {
 		},
 		{
 			name:            "already gitignored",
-			existingContent: ".beads-ephemeral/\n",
+			existingContent: ".beads-wisps/\n",
 			expectAppend:    false,
 		},
 		{
 			name:            "already gitignored without slash",
-			existingContent: ".beads-ephemeral\n",
+			existingContent: ".beads-wisps\n",
 			expectAppend:    false,
 		},
 		{
@@ -1499,9 +1499,9 @@ func TestEnsureEphemeralGitignore(t *testing.T) {
 				}
 			}
 
-			// Call EnsureEphemeralGitignore
-			if err := EnsureEphemeralGitignore(); err != nil {
-				t.Fatalf("EnsureEphemeralGitignore() error = %v", err)
+			// Call EnsureWispGitignore
+			if err := EnsureWispGitignore(); err != nil {
+				t.Fatalf("EnsureWispGitignore() error = %v", err)
 			}
 
 			// Read result
@@ -1510,30 +1510,30 @@ func TestEnsureEphemeralGitignore(t *testing.T) {
 				t.Fatalf("Failed to read .gitignore: %v", err)
 			}
 
-			// Check if ephemeral dir is in gitignore
+			// Check if wisp dir is in gitignore
 			hasEntry := false
 			lines := strings.Split(string(content), "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
-				if line == EphemeralDirName || line == EphemeralDirName+"/" {
+				if line == WispDirName || line == WispDirName+"/" {
 					hasEntry = true
 					break
 				}
 			}
 
 			if !hasEntry {
-				t.Errorf("EnsureEphemeralGitignore() did not add %s to .gitignore", EphemeralDirName)
+				t.Errorf("EnsureWispGitignore() did not add %s to .gitignore", WispDirName)
 			}
 
 			// Verify idempotent: calling again should not duplicate
-			if err := EnsureEphemeralGitignore(); err != nil {
-				t.Fatalf("EnsureEphemeralGitignore() second call error = %v", err)
+			if err := EnsureWispGitignore(); err != nil {
+				t.Fatalf("EnsureWispGitignore() second call error = %v", err)
 			}
 
 			content2, _ := os.ReadFile(gitignorePath)
-			count := strings.Count(string(content2), EphemeralDirName)
+			count := strings.Count(string(content2), WispDirName)
 			if count > 1 {
-				t.Errorf("EnsureEphemeralGitignore() added duplicate entry (count=%d)", count)
+				t.Errorf("EnsureWispGitignore() added duplicate entry (count=%d)", count)
 			}
 		})
 	}

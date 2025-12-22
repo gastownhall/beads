@@ -622,49 +622,50 @@ func FindAllDatabases() []DatabaseInfo {
 	return databases
 }
 
-// EphemeralDirName is the default name for the ephemeral storage directory.
+// WispDirName is the default name for the wisp storage directory.
 // This directory is a sibling to .beads/ and should be gitignored.
-const EphemeralDirName = ".beads-ephemeral"
+// Wisps are ephemeral molecules - the "steam" in Gas Town's engine metaphor.
+const WispDirName = ".beads-wisps"
 
-// FindEphemeralDir locates or determines the ephemeral storage directory.
-// The ephemeral directory is a sibling to the .beads directory.
+// FindWispDir locates or determines the wisp storage directory.
+// The wisp directory is a sibling to the .beads directory.
 //
-// Returns the path to the ephemeral directory (which may not exist yet).
+// Returns the path to the wisp directory (which may not exist yet).
 // Returns empty string if no .beads directory can be found.
-func FindEphemeralDir() string {
+func FindWispDir() string {
 	beadsDir := FindBeadsDir()
 	if beadsDir == "" {
 		return ""
 	}
 
-	// Ephemeral dir is a sibling to .beads
-	// e.g., /project/.beads -> /project/.beads-ephemeral
+	// Wisp dir is a sibling to .beads
+	// e.g., /project/.beads -> /project/.beads-wisps
 	projectRoot := filepath.Dir(beadsDir)
-	return filepath.Join(projectRoot, EphemeralDirName)
+	return filepath.Join(projectRoot, WispDirName)
 }
 
-// FindEphemeralDatabasePath returns the path to the ephemeral database file.
-// Creates the ephemeral directory if it doesn't exist.
+// FindWispDatabasePath returns the path to the wisp database file.
+// Creates the wisp directory if it doesn't exist.
 // Returns empty string if no .beads directory can be found.
-func FindEphemeralDatabasePath() (string, error) {
-	ephemeralDir := FindEphemeralDir()
-	if ephemeralDir == "" {
+func FindWispDatabasePath() (string, error) {
+	wispDir := FindWispDir()
+	if wispDir == "" {
 		return "", fmt.Errorf("no .beads directory found")
 	}
 
-	// Create ephemeral directory if it doesn't exist
-	if err := os.MkdirAll(ephemeralDir, 0755); err != nil {
-		return "", fmt.Errorf("creating ephemeral directory: %w", err)
+	// Create wisp directory if it doesn't exist
+	if err := os.MkdirAll(wispDir, 0755); err != nil {
+		return "", fmt.Errorf("creating wisp directory: %w", err)
 	}
 
-	return filepath.Join(ephemeralDir, CanonicalDatabaseName), nil
+	return filepath.Join(wispDir, CanonicalDatabaseName), nil
 }
 
-// NewEphemeralStorage opens the ephemeral database for wisp storage.
+// NewWispStorage opens the wisp database for ephemeral molecule storage.
 // Creates the database and directory if they don't exist.
-// The ephemeral database uses the same schema as the main database.
-func NewEphemeralStorage(ctx context.Context) (Storage, error) {
-	dbPath, err := FindEphemeralDatabasePath()
+// The wisp database uses the same schema as the main database.
+func NewWispStorage(ctx context.Context) (Storage, error) {
+	dbPath, err := FindWispDatabasePath()
 	if err != nil {
 		return nil, err
 	}
@@ -672,9 +673,9 @@ func NewEphemeralStorage(ctx context.Context) (Storage, error) {
 	return sqlite.New(ctx, dbPath)
 }
 
-// EnsureEphemeralGitignore ensures the ephemeral directory is gitignored.
-// This should be called after creating the ephemeral directory.
-func EnsureEphemeralGitignore() error {
+// EnsureWispGitignore ensures the wisp directory is gitignored.
+// This should be called after creating the wisp directory.
+func EnsureWispGitignore() error {
 	beadsDir := FindBeadsDir()
 	if beadsDir == "" {
 		return fmt.Errorf("no .beads directory found")
@@ -683,14 +684,14 @@ func EnsureEphemeralGitignore() error {
 	projectRoot := filepath.Dir(beadsDir)
 	gitignorePath := filepath.Join(projectRoot, ".gitignore")
 
-	// Check if .gitignore exists and already contains the ephemeral dir
+	// Check if .gitignore exists and already contains the wisp dir
 	content, err := os.ReadFile(gitignorePath)
 	if err == nil {
 		// File exists, check if already gitignored
 		lines := strings.Split(string(content), "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
-			if line == EphemeralDirName || line == EphemeralDirName+"/" {
+			if line == WispDirName || line == WispDirName+"/" {
 				return nil // Already gitignored
 			}
 		}
@@ -710,20 +711,20 @@ func EnsureEphemeralGitignore() error {
 		}
 	}
 
-	// Add the ephemeral directory
-	if _, err := f.WriteString(EphemeralDirName + "/\n"); err != nil {
+	// Add the wisp directory
+	if _, err := f.WriteString(WispDirName + "/\n"); err != nil {
 		return fmt.Errorf("writing to .gitignore: %w", err)
 	}
 
 	return nil
 }
 
-// IsEphemeralDatabase checks if a database path is an ephemeral database.
-// Returns true if the database is in a .beads-ephemeral directory.
-func IsEphemeralDatabase(dbPath string) bool {
+// IsWispDatabase checks if a database path is a wisp database.
+// Returns true if the database is in a .beads-wisps directory.
+func IsWispDatabase(dbPath string) bool {
 	if dbPath == "" {
 		return false
 	}
 	dir := filepath.Dir(dbPath)
-	return filepath.Base(dir) == EphemeralDirName
+	return filepath.Base(dir) == WispDirName
 }

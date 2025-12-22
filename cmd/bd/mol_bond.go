@@ -32,9 +32,9 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
-Ephemeral storage (wisps):
-  Use --ephemeral to create molecules in .beads-ephemeral/ instead of .beads/.
-  Ephemeral molecules (wisps) are local-only, gitignored, and not synced.
+Wisp storage (ephemeral molecules):
+  Use --wisp to create molecules in .beads-wisps/ instead of .beads/.
+  Wisps are local-only, gitignored, and not synced - the "steam" of Gas Town.
   Use bd mol squash to convert a wisp to a digest in permanent storage.
   Use bd mol burn to delete a wisp without creating a digest.
 
@@ -43,7 +43,7 @@ Examples:
   bd mol bond mol-feature mol-deploy --type parallel    # Run in parallel
   bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
   bd mol bond bd-abc123 bd-def456                       # Join two molecules
-  bd mol bond mol-patrol --ephemeral                    # Create wisp for patrol cycle`,
+  bd mol bond mol-patrol --wisp                         # Create wisp for patrol cycle`,
 	Args: cobra.ExactArgs(2),
 	Run:  runMolBond,
 }
@@ -78,22 +78,22 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	customTitle, _ := cmd.Flags().GetString("as")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
-	ephemeral, _ := cmd.Flags().GetBool("ephemeral")
+	wisp, _ := cmd.Flags().GetBool("wisp")
 
 	// Determine which store to use for spawning
 	targetStore := store
-	if ephemeral {
-		// Open ephemeral storage for wisp creation
-		ephStore, err := beads.NewEphemeralStorage(ctx)
+	if wisp {
+		// Open wisp storage for ephemeral molecule creation
+		wispStore, err := beads.NewWispStorage(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to open ephemeral storage: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to open wisp storage: %v\n", err)
 			os.Exit(1)
 		}
-		defer ephStore.Close()
-		targetStore = ephStore
+		defer wispStore.Close()
+		targetStore = wispStore
 
-		// Ensure ephemeral directory is gitignored
-		if err := beads.EnsureEphemeralGitignore(); err != nil {
+		// Ensure wisp directory is gitignored
+		if err := beads.EnsureWispGitignore(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not update .gitignore: %v\n", err)
 		}
 	}
@@ -148,16 +148,16 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  A: %s (%s)\n", issueA.Title, operandType(aIsProto))
 		fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 		fmt.Printf("  Bond type: %s\n", bondType)
-		if ephemeral {
-			fmt.Printf("  Storage: ephemeral (.beads-ephemeral/)\n")
+		if wisp {
+			fmt.Printf("  Storage: wisp (.beads-wisps/)\n")
 		}
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
 			if customTitle != "" {
 				fmt.Printf("  Custom title: %s\n", customTitle)
 			}
-			if ephemeral {
-				fmt.Printf("  Note: --ephemeral ignored for proto+proto (templates stay in permanent storage)\n")
+			if wisp {
+				fmt.Printf("  Note: --wisp ignored for proto+proto (templates stay in permanent storage)\n")
 			}
 		} else if aIsProto || bIsProto {
 			fmt.Printf("  Result: spawn proto, attach to molecule\n")
@@ -187,8 +187,8 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Schedule auto-flush (only for non-ephemeral, ephemeral doesn't sync)
-	if !ephemeral {
+	// Schedule auto-flush (only for non-wisp, wisps don't sync)
+	if !wisp {
 		markDirtyAndScheduleFlush()
 	}
 
@@ -202,8 +202,8 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	if result.Spawned > 0 {
 		fmt.Printf("  Spawned: %d issues\n", result.Spawned)
 	}
-	if ephemeral {
-		fmt.Printf("  Storage: ephemeral (wisp)\n")
+	if wisp {
+		fmt.Printf("  Storage: wisp (.beads-wisps/)\n")
 	}
 }
 
@@ -418,7 +418,7 @@ func init() {
 	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
 	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("ephemeral", false, "Create molecule in ephemeral storage (wisp)")
+	molBondCmd.Flags().Bool("wisp", false, "Create molecule in wisp storage (.beads-wisps/)")
 
 	molCmd.AddCommand(molBondCmd)
 }
