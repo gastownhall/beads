@@ -72,3 +72,4 @@ Beads supports hierarchical IDs for epics:
 ## 📝 Documentation
 
 * [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [FAQ](docs/FAQ.md)
+* [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
