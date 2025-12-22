@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -31,11 +32,18 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
+Ephemeral storage (wisps):
+  Use --ephemeral to create molecules in .beads-ephemeral/ instead of .beads/.
+  Ephemeral molecules (wisps) are local-only, gitignored, and not synced.
+  Use bd mol squash to convert a wisp to a digest in permanent storage.
+  Use bd mol burn to delete a wisp without creating a digest.
+
 Examples:
   bd mol bond mol-feature mol-deploy                    # Compound proto
   bd mol bond mol-feature mol-deploy --type parallel    # Run in parallel
   bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
-  bd mol bond bd-abc123 bd-def456                       # Join two molecules`,
+  bd mol bond bd-abc123 bd-def456                       # Join two molecules
+  bd mol bond mol-patrol --ephemeral                    # Create wisp for patrol cycle`,
 	Args: cobra.ExactArgs(2),
 	Run:  runMolBond,
 }
@@ -70,6 +78,25 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	customTitle, _ := cmd.Flags().GetString("as")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
+	ephemeral, _ := cmd.Flags().GetBool("ephemeral")
+
+	// Determine which store to use for spawning
+	targetStore := store
+	if ephemeral {
+		// Open ephemeral storage for wisp creation
+		ephStore, err := beads.NewEphemeralStorage(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to open ephemeral storage: %v\n", err)
+			os.Exit(1)
+		}
+		defer ephStore.Close()
+		targetStore = ephStore
+
+		// Ensure ephemeral directory is gitignored
+		if err := beads.EnsureEphemeralGitignore(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not update .gitignore: %v\n", err)
+		}
+	}
 
 	// Validate bond type
 	if bondType != types.BondTypeSequential && bondType != types.BondTypeParallel && bondType != types.BondTypeConditional {
@@ -121,10 +148,16 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  A: %s (%s)\n", issueA.Title, operandType(aIsProto))
 		fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 		fmt.Printf("  Bond type: %s\n", bondType)
+		if ephemeral {
+			fmt.Printf("  Storage: ephemeral (.beads-ephemeral/)\n")
+		}
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
 			if customTitle != "" {
 				fmt.Printf("  Custom title: %s\n", customTitle)
+			}
+			if ephemeral {
+				fmt.Printf("  Note: --ephemeral ignored for proto+proto (templates stay in permanent storage)\n")
 			}
 		} else if aIsProto || bIsProto {
 			fmt.Printf("  Result: spawn proto, attach to molecule\n")
@@ -135,16 +168,18 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	}
 
 	// Dispatch based on operand types
+	// Note: proto+proto creates templates (permanent storage), others use targetStore
 	var result *BondResult
 	switch {
 	case aIsProto && bIsProto:
+		// Compound protos are templates - always use permanent storage
 		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
-		result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, actor)
+		result, err = bondProtoMol(ctx, targetStore, issueA, issueB, bondType, vars, actor)
 	case !aIsProto && bIsProto:
-		result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, actor)
+		result, err = bondMolProto(ctx, targetStore, issueA, issueB, bondType, vars, actor)
 	default:
-		result, err = bondMolMol(ctx, store, issueA, issueB, bondType, actor)
+		result, err = bondMolMol(ctx, targetStore, issueA, issueB, bondType, actor)
 	}
 
 	if err != nil {
@@ -152,8 +187,10 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
+	// Schedule auto-flush (only for non-ephemeral, ephemeral doesn't sync)
+	if !ephemeral {
+		markDirtyAndScheduleFlush()
+	}
 
 	if jsonOutput {
 		outputJSON(result)
@@ -164,6 +201,9 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	fmt.Printf("  Result: %s (%s)\n", result.ResultID, result.ResultType)
 	if result.Spawned > 0 {
 		fmt.Printf("  Spawned: %d issues\n", result.Spawned)
+	}
+	if ephemeral {
+		fmt.Printf("  Storage: ephemeral (wisp)\n")
 	}
 }
 
@@ -378,6 +418,7 @@ func init() {
 	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
 	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
+	molBondCmd.Flags().Bool("ephemeral", false, "Create molecule in ephemeral storage (wisp)")
 
 	molCmd.AddCommand(molBondCmd)
 }
