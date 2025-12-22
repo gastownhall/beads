@@ -67,7 +67,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	}
 
 	bondType, _ := cmd.Flags().GetString("type")
-	customID, _ := cmd.Flags().GetString("as")
+	customTitle, _ := cmd.Flags().GetString("as")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
 
@@ -123,8 +123,8 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Bond type: %s\n", bondType)
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
-			if customID != "" {
-				fmt.Printf("  Custom ID: %s\n", customID)
+			if customTitle != "" {
+				fmt.Printf("  Custom title: %s\n", customTitle)
 			}
 		} else if aIsProto || bIsProto {
 			fmt.Printf("  Result: spawn proto, attach to molecule\n")
@@ -138,7 +138,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	var result *BondResult
 	switch {
 	case aIsProto && bIsProto:
-		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customID, actor)
+		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
 		result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, actor)
 	case !aIsProto && bIsProto:
@@ -186,12 +186,12 @@ func operandType(isProtoIssue bool) string {
 }
 
 // bondProtoProto bonds two protos to create a compound proto
-func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *types.Issue, bondType, customID, actorName string) (*BondResult, error) {
+func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *types.Issue, bondType, customTitle, actorName string) (*BondResult, error) {
 	// Create compound proto: a new root that references both protos as children
 	// The compound root will be a new issue that ties them together
 	compoundTitle := fmt.Sprintf("Compound: %s + %s", protoA.Title, protoB.Title)
-	if customID != "" {
-		compoundTitle = customID
+	if customTitle != "" {
+		compoundTitle = customTitle
 	}
 
 	var compoundID string
