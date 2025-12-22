@@ -83,21 +83,11 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
 
-	// Ensure worktree exists
+	// Ensure worktree exists and is healthy
+	// CreateBeadsWorktree performs a full health check internally and
+	// automatically repairs unhealthy worktrees by removing and recreating them
 	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to create worktree: %w", err)
-	}
-
-	// Check worktree health and repair if needed
-	if err := wtMgr.CheckWorktreeHealth(worktreePath); err != nil {
-		// Try to recreate worktree
-		if err := wtMgr.RemoveBeadsWorktree(worktreePath); err != nil {
-			// Log but continue - removal might fail but recreation might work
-			_ = err
-		}
-		if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
-			return nil, fmt.Errorf("failed to recreate worktree after health check: %w", err)
-		}
 	}
 
 	// Get remote name

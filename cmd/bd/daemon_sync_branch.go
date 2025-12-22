@@ -62,21 +62,11 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
 	
-	// Ensure worktree exists
+	// Ensure worktree exists and is healthy
+	// CreateBeadsWorktree now performs a full health check internally and
+	// automatically repairs unhealthy worktrees by removing and recreating them
 	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
 		return false, fmt.Errorf("failed to create worktree: %w", err)
-	}
-	
-	// Check worktree health and repair if needed
-	if err := wtMgr.CheckWorktreeHealth(worktreePath); err != nil {
-		log.log("Worktree health check failed, attempting repair: %v", err)
-		// Try to recreate worktree
-		if err := wtMgr.RemoveBeadsWorktree(worktreePath); err != nil {
-			log.log("Failed to remove unhealthy worktree: %v", err)
-		}
-		if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
-			return false, fmt.Errorf("failed to recreate worktree after health check: %w", err)
-		}
 	}
 	
 	// Sync JSONL file to worktree

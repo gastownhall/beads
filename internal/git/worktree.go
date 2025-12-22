@@ -35,11 +35,20 @@ func (wm *WorktreeManager) CreateBeadsWorktree(branch, worktreePath string) erro
 	if _, err := os.Stat(worktreePath); err == nil {
 		// Worktree path exists, check if it's a valid worktree
 		if valid, err := wm.isValidWorktree(worktreePath); err == nil && valid {
-			return nil // Already exists and is valid
-		}
-		// Path exists but isn't a valid worktree, remove it
-		if err := os.RemoveAll(worktreePath); err != nil {
-			return fmt.Errorf("failed to remove invalid worktree path: %w", err)
+			// Worktree exists and is in git worktree list, verify full health
+			if err := wm.CheckWorktreeHealth(worktreePath); err == nil {
+				return nil // Already exists and is fully healthy
+			}
+			// Health check failed, try to repair by removing and recreating
+			if err := wm.RemoveBeadsWorktree(worktreePath); err != nil {
+				// Log but continue - we'll try to recreate anyway
+				_ = os.RemoveAll(worktreePath)
+			}
+		} else {
+			// Path exists but isn't a valid worktree, remove it
+			if err := os.RemoveAll(worktreePath); err != nil {
+				return fmt.Errorf("failed to remove invalid worktree path: %w", err)
+			}
 		}
 	}
 
