@@ -250,6 +250,7 @@ func (s *SQLiteStorage) GetDependenciesWithMetadata(ctx context.Context, issueID
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.depends_on_id
@@ -272,6 +273,7 @@ func (s *SQLiteStorage) GetDependentsWithMetadata(ctx context.Context, issueID s
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
@@ -827,6 +829,11 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var pinned sql.NullInt64
 		// Template field (beads-1ra)
 		var isTemplate sql.NullInt64
+		// Gate fields (bd-udsi)
+		var awaitType sql.NullString
+		var awaitID sql.NullString
+		var timeoutNs sql.NullInt64
+		var waiters sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -835,6 +842,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate,
+			&awaitType, &awaitID, &timeoutNs, &waiters,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -887,6 +895,19 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
 		}
+		// Gate fields (bd-udsi)
+		if awaitType.Valid {
+			issue.AwaitType = awaitType.String
+		}
+		if awaitID.Valid {
+			issue.AwaitID = awaitID.String
+		}
+		if timeoutNs.Valid {
+			issue.Timeout = time.Duration(timeoutNs.Int64)
+		}
+		if waiters.Valid && waiters.String != "" {
+			issue.Waiters = parseJSONStringArray(waiters.String)
+		}
 
 		issues = append(issues, &issue)
 		issueIDs = append(issueIDs, issue.ID)
@@ -930,6 +951,11 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		var pinned sql.NullInt64
 		// Template field (beads-1ra)
 		var isTemplate sql.NullInt64
+		// Gate fields (bd-udsi)
+		var awaitType sql.NullString
+		var awaitID sql.NullString
+		var timeoutNs sql.NullInt64
+		var waiters sql.NullString
 		var depType types.DependencyType
 
 		err := rows.Scan(
@@ -939,6 +965,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate,
+			&awaitType, &awaitID, &timeoutNs, &waiters,
 			&depType,
 		)
 		if err != nil {
@@ -988,6 +1015,19 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		// Template field (beads-1ra)
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
+		}
+		// Gate fields (bd-udsi)
+		if awaitType.Valid {
+			issue.AwaitType = awaitType.String
+		}
+		if awaitID.Valid {
+			issue.AwaitID = awaitID.String
+		}
+		if timeoutNs.Valid {
+			issue.Timeout = time.Duration(timeoutNs.Int64)
+		}
+		if waiters.Valid && waiters.String != "" {
+			issue.Waiters = parseJSONStringArray(waiters.String)
 		}
 
 		// Fetch labels for this issue

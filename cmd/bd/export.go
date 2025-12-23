@@ -537,7 +537,7 @@ func init() {
 
 	// Filter flags
 	exportCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore)")
+	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate)")
 	exportCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	exportCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 

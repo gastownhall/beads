@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
@@ -111,7 +112,8 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		i.sender, i.ephemeral, i.pinned, i.is_template
+		i.sender, i.ephemeral, i.pinned, i.is_template,
+		i.await_type, i.await_id, i.timeout_ns, i.waiters
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -247,7 +249,8 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template
+			sender, ephemeral, pinned, is_template,
+			await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE status != 'closed'
 		  AND datetime(updated_at) < datetime('now', '-' || ? || ' days')
@@ -300,6 +303,11 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var pinned sql.NullInt64
 		// Template field (beads-1ra)
 		var isTemplate sql.NullInt64
+		// Gate fields (bd-udsi)
+		var awaitType sql.NullString
+		var awaitID sql.NullString
+		var timeoutNs sql.NullInt64
+		var waiters sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -309,6 +317,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &ephemeral, &pinned, &isTemplate,
+			&awaitType, &awaitID, &timeoutNs, &waiters,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
@@ -372,6 +381,19 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		// Template field (beads-1ra)
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
+		}
+		// Gate fields (bd-udsi)
+		if awaitType.Valid {
+			issue.AwaitType = awaitType.String
+		}
+		if awaitID.Valid {
+			issue.AwaitID = awaitID.String
+		}
+		if timeoutNs.Valid {
+			issue.Timeout = time.Duration(timeoutNs.Int64)
+		}
+		if waiters.Valid && waiters.String != "" {
+			issue.Waiters = parseJSONStringArray(waiters.String)
 		}
 
 		issues = append(issues, &issue)

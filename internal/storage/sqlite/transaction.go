@@ -306,7 +306,8 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -1122,7 +1123,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1169,6 +1171,11 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var pinned sql.NullInt64
 	// Template field (beads-1ra)
 	var isTemplate sql.NullInt64
+	// Gate fields (bd-udsi)
+	var awaitType sql.NullString
+	var awaitID sql.NullString
+	var timeoutNs sql.NullInt64
+	var waiters sql.NullString
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1178,6 +1185,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1238,6 +1246,19 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	// Template field (beads-1ra)
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
+	}
+	// Gate fields (bd-udsi)
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if waiters.Valid && waiters.String != "" {
+		issue.Waiters = parseJSONStringArray(waiters.String)
 	}
 
 	return &issue, nil

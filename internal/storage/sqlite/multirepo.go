@@ -302,8 +302,9 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 				status, priority, issue_type, assignee, estimated_minutes,
 				created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 				deleted_at, deleted_by, delete_reason, original_type,
-				sender, ephemeral, pinned, is_template
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				sender, ephemeral, pinned, is_template,
+				await_type, await_id, timeout_ns, waiters
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 			issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -312,6 +313,7 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 			issue.ClosedAt, issue.ExternalRef, issue.SourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, wisp, pinned, isTemplate,
+			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert issue: %w", err)
@@ -335,7 +337,8 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 					issue_type = ?, assignee = ?, estimated_minutes = ?,
 					updated_at = ?, closed_at = ?, external_ref = ?, source_repo = ?,
 					deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?,
-					sender = ?, ephemeral = ?, pinned = ?, is_template = ?
+					sender = ?, ephemeral = ?, pinned = ?, is_template = ?,
+					await_type = ?, await_id = ?, timeout_ns = ?, waiters = ?
 				WHERE id = ?
 			`,
 				issue.ContentHash, issue.Title, issue.Description, issue.Design,
@@ -344,6 +347,7 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 				issue.UpdatedAt, issue.ClosedAt, issue.ExternalRef, issue.SourceRepo,
 				issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 				issue.Sender, wisp, pinned, isTemplate,
+				issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 				issue.ID,
 			)
 			if err != nil {

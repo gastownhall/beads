@@ -252,6 +252,11 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var pinned sql.NullInt64
 	// Template field (beads-1ra)
 	var isTemplate sql.NullInt64
+	// Gate fields (bd-udsi)
+	var awaitType sql.NullString
+	var awaitID sql.NullString
+	var timeoutNs sql.NullInt64
+	var waiters sql.NullString
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -261,7 +266,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -272,6 +278,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 
 	if err == sql.ErrNoRows {
@@ -336,6 +343,19 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Template field (beads-1ra)
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
+	}
+	// Gate fields (bd-udsi)
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if waiters.Valid && waiters.String != "" {
+		issue.Waiters = parseJSONStringArray(waiters.String)
 	}
 
 	// Fetch labels for this issue
@@ -447,6 +467,11 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var pinned sql.NullInt64
 	// Template field (beads-1ra)
 	var isTemplate sql.NullInt64
+	// Gate fields (bd-udsi)
+	var awaitType sql.NullString
+	var awaitID sql.NullString
+	var timeoutNs sql.NullInt64
+	var waiters sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -454,7 +479,8 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -465,6 +491,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 
 	if err == sql.ErrNoRows {
@@ -529,6 +556,19 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	// Template field (beads-1ra)
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
+	}
+	// Gate fields (bd-udsi)
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if waiters.Valid && waiters.String != "" {
+		issue.Waiters = parseJSONStringArray(waiters.String)
 	}
 
 	// Fetch labels for this issue
@@ -1646,7 +1686,8 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

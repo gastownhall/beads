@@ -527,7 +527,7 @@ var updateCmd = &cobra.Command{
 			issueType, _ := cmd.Flags().GetString("type")
 			// Validate issue type
 			if !types.IssueType(issueType).IsValid() {
-				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore\n", issueType)
+				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore, merge-request, molecule, gate\n", issueType)
 				os.Exit(1)
 			}
 			updates["issue_type"] = issueType
@@ -1390,7 +1390,7 @@ func init() {
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	registerPriorityFlag(updateCmd, "")
 	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request|molecule)")
+	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request|molecule|gate)")
 	registerCommonIssueFlags(updateCmd)
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")

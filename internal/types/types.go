@@ -59,6 +59,12 @@ type Issue struct {
 	// HOP fields (bd-7pwh): entity tracking for CV chains
 	Creator     *EntityRef   `json:"creator,omitempty"`     // Who created this issue (human, agent, or org)
 	Validations []Validation `json:"validations,omitempty"` // Who validated/approved this work
+
+	// Gate fields (bd-udsi): async coordination primitives
+	AwaitType string        `json:"await_type,omitempty"` // Condition type: gh:run, gh:pr, timer, human, mail
+	AwaitID   string        `json:"await_id,omitempty"`   // Condition identifier (e.g., run ID, PR number)
+	Timeout   time.Duration `json:"timeout,omitempty"`    // Max wait time before escalation
+	Waiters   []string      `json:"waiters,omitempty"`    // Mail addresses to notify when gate clears
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -138,6 +144,17 @@ func (i *Issue) ComputeContentHash() string {
 		if v.Score != nil {
 			h.Write([]byte(fmt.Sprintf("%f", *v.Score)))
 		}
+		h.Write([]byte{0})
+	}
+	// Hash gate fields for async coordination (bd-udsi)
+	h.Write([]byte(i.AwaitType))
+	h.Write([]byte{0})
+	h.Write([]byte(i.AwaitID))
+	h.Write([]byte{0})
+	h.Write([]byte(fmt.Sprintf("%d", i.Timeout)))
+	h.Write([]byte{0})
+	for _, waiter := range i.Waiters {
+		h.Write([]byte(waiter))
 		h.Write([]byte{0})
 	}
 
@@ -313,12 +330,13 @@ const (
 	TypeMessage      IssueType = "message"       // Ephemeral communication between workers
 	TypeMergeRequest IssueType = "merge-request" // Merge queue entry for refinery processing
 	TypeMolecule     IssueType = "molecule"      // Template molecule for issue hierarchies (beads-1ra)
+	TypeGate         IssueType = "gate"          // Async coordination gate (bd-udsi)
 )
 
 // IsValid checks if the issue type value is valid
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule, TypeGate:
 		return true
 	}
 	return false
