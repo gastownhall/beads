@@ -69,13 +69,23 @@ const (
 	MutationUpdate  = "update"
 	MutationDelete  = "delete"
 	MutationComment = "comment"
+	// Molecule-specific event types for activity feed
+	MutationBonded   = "bonded"   // Molecule bonded to parent (dynamic bond)
+	MutationSquashed = "squashed" // Wisp squashed to digest
+	MutationBurned   = "burned"   // Wisp discarded without digest
+	MutationStatus   = "status"   // Status change (in_progress, completed, failed)
 )
 
 // MutationEvent represents a database mutation for event-driven sync
 type MutationEvent struct {
-	Type      string    // One of: MutationCreate, MutationUpdate, MutationDelete, MutationComment
+	Type      string    // One of the Mutation* constants
 	IssueID   string    // e.g., "bd-42"
 	Timestamp time.Time
+	// Optional metadata for richer events (used by status, bonded, etc.)
+	OldStatus string `json:"old_status,omitempty"` // Previous status (for status events)
+	NewStatus string `json:"new_status,omitempty"` // New status (for status events)
+	ParentID  string `json:"parent_id,omitempty"`  // Parent molecule (for bonded events)
+	StepCount int    `json:"step_count,omitempty"` // Number of steps (for bonded events)
 }
 
 // NewServer creates a new RPC server
