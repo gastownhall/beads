@@ -158,9 +158,14 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	runCmd(t, dir, "git", "add", ".beads/issues.jsonl")
 	runCmd(t, dir, "git", "commit", "-m", "Add issues")
 
-	// Simulate rm -rf .beads/
+	// Simulate rm -rf .beads/ followed by partial bd init
+	// (in practice, bd init creates config.yaml before auto-import)
 	os.RemoveAll(beadsDir)
 	os.MkdirAll(beadsDir, 0755)
+	// Create minimal config so FindBeadsDir recognizes this as a beads directory
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: test\n"), 0644); err != nil {
+		t.Fatalf("Failed to write config.yaml: %v", err)
+	}
 
 	// Change to test directory
 	t.Chdir(dir)
