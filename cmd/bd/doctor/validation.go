@@ -3,6 +3,7 @@ package doctor
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,7 +192,8 @@ func CheckDuplicateIssues(path string) DoctorCheck {
 	}
 
 	// Open store to use existing duplicate detection
-	store, err := sqlite.New(nil, dbPath)
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
@@ -201,7 +203,7 @@ func CheckDuplicateIssues(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	issues, err := store.SearchIssues(nil, "", types.IssueFilter{})
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
