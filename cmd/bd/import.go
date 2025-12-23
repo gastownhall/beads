@@ -375,7 +375,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		// Without this, daemon FileWatcher won't detect the import for up to 30s
 		// Only flush if there were actual changes to avoid unnecessary I/O
 		if result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 {
-			flushToJSONL()
+			flushToJSONLWithState(flushState{forceDirty: true})
 		}
 
 		// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)

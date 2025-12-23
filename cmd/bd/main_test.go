@@ -16,9 +16,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestAutoFlushOnExit tests that PersistentPostRun performs final flush before exit
+// TestAutoFlushOnExit tests that FlushManager.Shutdown() performs final flush before exit
 func TestAutoFlushOnExit(t *testing.T) {
-	// FIX: Initialize rootCtx for flush operations
+	// Initialize rootCtx for flush operations
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -48,15 +48,16 @@ func TestAutoFlushOnExit(t *testing.T) {
 	storeActive = true
 	storeMutex.Unlock()
 
-	// Reset auto-flush state
+	// Initialize FlushManager for this test (short debounce for testing)
 	autoFlushEnabled = true
-	isDirty = false
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
-	}
-
-	// ctx already declared above for rootCtx initialization
+	oldFlushManager := flushManager
+	flushManager = NewFlushManager(true, 50*time.Millisecond)
+	defer func() {
+		if flushManager != nil {
+			_ = flushManager.Shutdown()
+		}
+		flushManager = oldFlushManager
+	}()
 
 	// Create test issue
 	issue := &types.Issue{
@@ -75,50 +76,12 @@ func TestAutoFlushOnExit(t *testing.T) {
 	// Mark dirty (simulating CRUD operation)
 	markDirtyAndScheduleFlush()
 
-	// Simulate PersistentPostRun (exit behavior)
-	storeMutex.Lock()
-	storeActive = false
-	storeMutex.Unlock()
-
-	flushMutex.Lock()
-	needsFlush := isDirty && autoFlushEnabled
-	if needsFlush {
-		if flushTimer != nil {
-			flushTimer.Stop()
-			flushTimer = nil
-		}
-		isDirty = false
+	// Simulate PersistentPostRun exit behavior - shutdown FlushManager
+	// This performs the final flush before exit
+	if err := flushManager.Shutdown(); err != nil {
+		t.Fatalf("FlushManager shutdown failed: %v", err)
 	}
-	flushMutex.Unlock()
-
-	if needsFlush {
-		// Manually perform flush logic (simulating PersistentPostRun)
-		storeMutex.Lock()
-		storeActive = true // Temporarily re-enable for this test
-		storeMutex.Unlock()
-
-		issues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
-		if err == nil {
-			allDeps, _ := testStore.GetAllDependencyRecords(ctx)
-			for _, iss := range issues {
-				iss.Dependencies = allDeps[iss.ID]
-			}
-			tempPath := jsonlPath + ".tmp"
-			f, err := os.Create(tempPath)
-			if err == nil {
-				encoder := json.NewEncoder(f)
-				for _, iss := range issues {
-					encoder.Encode(iss)
-				}
-				f.Close()
-				os.Rename(tempPath, jsonlPath)
-			}
-		}
-
-		storeMutex.Lock()
-		storeActive = false
-		storeMutex.Unlock()
-	}
+	flushManager = nil // Prevent double shutdown in defer
 
 	testStore.Close()
 
@@ -223,12 +186,8 @@ func TestAutoFlushJSONLContent(t *testing.T) {
 		}
 	}
 
-	// Mark dirty and flush immediately
-	flushMutex.Lock()
-	isDirty = true
-	flushMutex.Unlock()
-
-	flushToJSONL()
+	// Flush immediately (forces export)
+	flushToJSONLWithState(flushState{forceDirty: true})
 
 	// Verify JSONL file exists
 	if _, err := os.Stat(expectedJSONLPath); os.IsNotExist(err) {

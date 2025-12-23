@@ -129,14 +129,13 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 	sandboxMode = false
 	noDb = false
 	autoFlushEnabled = true
-	isDirty = false
-	needsFullExport = false
 	storeActive = false
 	flushFailureCount = 0
 	lastFlushError = nil
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
+	// Shutdown any existing FlushManager
+	if flushManager != nil {
+		_ = flushManager.Shutdown()
+		flushManager = nil
 	}
 	// Reset context state
 	rootCtx = nil

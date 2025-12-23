@@ -283,94 +283,36 @@ func autoImportIfNewer() {
 // Thread-safe: Safe to call from multiple goroutines (no shared mutable state).
 // No-op if auto-flush is disabled via --no-auto-flush flag.
 func markDirtyAndScheduleFlush() {
-	// Use FlushManager if available (new path, fixes bd-52)
+	// Use FlushManager if available
+	// No FlushManager means sandbox mode or test without flush setup - no-op is correct
 	if flushManager != nil {
 		flushManager.MarkDirty(false) // Incremental export
-		return
 	}
-
-	// Legacy path for backward compatibility with tests
-	if !autoFlushEnabled {
-		return
-	}
-
-	flushMutex.Lock()
-	defer flushMutex.Unlock()
-
-	isDirty = true
-
-	// Cancel existing timer if any
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
-	}
-
-	// Schedule new flush
-	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
-		flushToJSONL()
-	})
 }
 
 // markDirtyAndScheduleFullExport marks DB as needing a full export (for ID-changing operations)
 func markDirtyAndScheduleFullExport() {
-	// Use FlushManager if available (new path, fixes bd-52)
+	// Use FlushManager if available
+	// No FlushManager means sandbox mode or test without flush setup - no-op is correct
 	if flushManager != nil {
 		flushManager.MarkDirty(true) // Full export
-		return
 	}
-
-	// Legacy path for backward compatibility with tests
-	if !autoFlushEnabled {
-		return
-	}
-
-	flushMutex.Lock()
-	defer flushMutex.Unlock()
-
-	isDirty = true
-	needsFullExport = true // Force full export, not incremental
-
-	// Cancel existing timer if any
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
-	}
-
-	// Schedule new flush
-	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
-		flushToJSONL()
-	})
 }
 
 // clearAutoFlushState cancels pending flush and marks DB as clean (after manual export)
 func clearAutoFlushState() {
-	// With FlushManager, clearing state is unnecessary (new path)
+	// With FlushManager, clearing state is unnecessary
 	// If a flush is pending and fires after manual export, flushToJSONLWithState()
 	// will detect nothing is dirty and skip the flush. This is harmless.
-	if flushManager != nil {
-		return
-	}
-
-	// Legacy path for backward compatibility with tests
+	// Reset failure counters on manual export success
 	flushMutex.Lock()
-	defer flushMutex.Unlock()
-
-	// Cancel pending timer
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
-	}
-
-	// Clear dirty flag
-	isDirty = false
-
-	// Reset failure counter (manual export succeeded)
 	flushFailureCount = 0
 	lastFlushError = nil
+	flushMutex.Unlock()
 }
 
 // writeJSONLAtomic writes issues to a JSONL file atomically using temp file + rename.
-// This is the common implementation used by both flushToJSONL (SQLite mode) and
+// This is the common implementation used by flushToJSONLWithState (SQLite mode) and
 // writeIssuesToJSONL (--no-db mode).
 //
 // Atomic write pattern:
@@ -807,38 +749,6 @@ func flushToJSONLWithState(state flushState) {
 		}
 	}
 
-	// Success! Don't clear global flags here - let the caller manage its own state.
-	// FlushManager manages its local state in run() goroutine.
-	// Legacy path clears global state in flushToJSONL() wrapper.
+	// Success! FlushManager manages its local state in run() goroutine.
 	recordSuccess()
-}
-
-// flushToJSONL is a backward-compatible wrapper that reads global state.
-// New code should use FlushManager instead of calling this directly.
-//
-// Reads global isDirty and needsFullExport flags, then calls flushToJSONLWithState.
-// Invoked by the debounce timer or immediately on command exit (for legacy code).
-func flushToJSONL() {
-	// Read current state and failure count
-	flushMutex.Lock()
-	forceDirty := isDirty
-	forceFullExport := needsFullExport
-	beforeFailCount := flushFailureCount
-	flushMutex.Unlock()
-
-	// Call new implementation
-	flushToJSONLWithState(flushState{
-		forceDirty:      forceDirty,
-		forceFullExport: forceFullExport,
-	})
-
-	// Clear global state only if flush succeeded (legacy path only)
-	// Success is indicated by failure count not increasing
-	flushMutex.Lock()
-	if flushFailureCount == beforeFailCount {
-		// Flush succeeded - clear dirty flags
-		isDirty = false
-		needsFullExport = false
-	}
-	flushMutex.Unlock()
 }

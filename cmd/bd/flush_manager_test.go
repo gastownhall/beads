@@ -402,8 +402,6 @@ func TestFlushManagerIdempotentShutdown(t *testing.T) {
 func setupTestEnvironment(t *testing.T) {
 	autoFlushEnabled = true
 	storeActive = true
-	isDirty = false
-	needsFullExport = false
 }
 
 // teardownTestEnvironment cleans up test environment

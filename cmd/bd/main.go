@@ -74,17 +74,14 @@ var (
 	rootCancel context.CancelFunc
 
 	// Auto-flush state
-	autoFlushEnabled  = true  // Can be disabled with --no-auto-flush
-	isDirty           = false // Tracks if DB has changes needing export (used by legacy code)
-	needsFullExport   = false // Set to true when IDs change (used by legacy code)
+	autoFlushEnabled  = true // Can be disabled with --no-auto-flush
 	flushMutex        sync.Mutex
-	flushTimer        *time.Timer // DEPRECATED: Use flushManager instead
-	storeMutex        sync.Mutex  // Protects store access from background goroutine
-	storeActive       = false     // Tracks if store is available
-	flushFailureCount = 0         // Consecutive flush failures
-	lastFlushError    error       // Last flush error for debugging
+	storeMutex        sync.Mutex // Protects store access from background goroutine
+	storeActive       = false    // Tracks if store is available
+	flushFailureCount = 0        // Consecutive flush failures
+	lastFlushError    error      // Last flush error for debugging
 
-	// Auto-flush manager (replaces timer-based approach to fix bd-52)
+	// Auto-flush manager (event-driven, fixes bd-52 race condition)
 	flushManager *FlushManager
 
 	// Hook runner for extensibility (bd-kwro.8)

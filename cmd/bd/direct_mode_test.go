@@ -28,17 +28,15 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	origDBPath := dbPath
 	origAutoImport := autoImportEnabled
 	origAutoFlush := autoFlushEnabled
-	origIsDirty := isDirty
-	origNeedsFull := needsFullExport
 	origFlushFailures := flushFailureCount
 	origLastFlushErr := lastFlushError
+	origFlushManager := flushManager
 
-	flushMutex.Lock()
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
+	// Shutdown any existing FlushManager
+	if flushManager != nil {
+		_ = flushManager.Shutdown()
+		flushManager = nil
 	}
-	flushMutex.Unlock()
 
 	defer func() {
 		if store != nil && store != origStore {
@@ -54,17 +52,14 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 		dbPath = origDBPath
 		autoImportEnabled = origAutoImport
 		autoFlushEnabled = origAutoFlush
-		isDirty = origIsDirty
-		needsFullExport = origNeedsFull
 		flushFailureCount = origFlushFailures
 		lastFlushError = origLastFlushErr
 
-		flushMutex.Lock()
-		if flushTimer != nil {
-			flushTimer.Stop()
-			flushTimer = nil
+		// Restore FlushManager
+		if flushManager != nil {
+			_ = flushManager.Shutdown()
 		}
-		flushMutex.Unlock()
+		flushManager = origFlushManager
 	}()
 
 	tmpDir := t.TempDir()
@@ -112,8 +107,6 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	daemonStatus = DaemonStatus{}
 	autoImportEnabled = false
 	autoFlushEnabled = true
-	isDirty = false
-	needsFullExport = false
 
 	if err := fallbackToDirectMode("test fallback"); err != nil {
 		t.Fatalf("fallbackToDirectMode failed: %v", err)
@@ -131,14 +124,7 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	}
 
 	// Force a full export and flush synchronously
-	markDirtyAndScheduleFullExport()
-	flushMutex.Lock()
-	if flushTimer != nil {
-		flushTimer.Stop()
-		flushTimer = nil
-	}
-	flushMutex.Unlock()
-	flushToJSONL()
+	flushToJSONLWithState(flushState{forceDirty: true, forceFullExport: true})
 
 	jsonlPath := findJSONLPath()
 	data, err := os.ReadFile(jsonlPath)
