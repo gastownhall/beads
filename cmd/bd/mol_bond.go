@@ -227,9 +227,9 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		// Compound protos are templates - always use permanent storage
 		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
-		result, err = bondProtoMol(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor)
+		result, err = bondProtoMol(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor, pour)
 	case !aIsProto && bIsProto:
-		result, err = bondMolProto(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor)
+		result, err = bondMolProto(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor, pour)
 	default:
 		result, err = bondMolMol(ctx, targetStore, issueA, issueB, bondType, actor)
 	}
@@ -366,7 +366,7 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 
 // bondProtoMol bonds a proto to an existing molecule by spawning the proto.
 // If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
-func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string) (*BondResult, error) {
+func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, pour bool) (*BondResult, error) {
 	// Load proto subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, s, proto.ID)
 	if err != nil {
@@ -389,7 +389,7 @@ func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issu
 	opts := CloneOptions{
 		Vars:  vars,
 		Actor: actorName,
-		Wisp:  true, // wisp by default for molecule execution - bd-2vh3
+		Wisp:  !pour, // wisp by default, but --pour makes persistent (bd-l7y3)
 	}
 
 	// Dynamic bonding: use custom IDs if childRef is provided
@@ -444,9 +444,9 @@ func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issu
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)
-func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string) (*BondResult, error) {
+func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, pour bool) (*BondResult, error) {
 	// Same as bondProtoMol but with arguments swapped
-	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName)
+	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, pour)
 }
 
 // bondMolMol bonds two molecules together
