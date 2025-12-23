@@ -111,6 +111,16 @@ func TestFindJSONLInDir(t *testing.T) {
 			expected: "issues.jsonl",
 		},
 		{
+			name:     "only interactions.jsonl - returns default issues.jsonl",
+			files:    []string{"interactions.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
+			name:     "interactions.jsonl with issues.jsonl - prefers issues",
+			files:    []string{"interactions.jsonl", "issues.jsonl"},
+			expected: "issues.jsonl",
+		},
+		{
 			name:     "only merge artifacts - returns default issues.jsonl",
 			files:    []string{"beads.base.jsonl", "beads.left.jsonl", "beads.right.jsonl"},
 			expected: "issues.jsonl",
