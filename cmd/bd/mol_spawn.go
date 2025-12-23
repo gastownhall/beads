@@ -256,7 +256,7 @@ func init() {
 	molSpawnCmd.Flags().String("attach-type", types.BondTypeSequential, "Bond type for attachments: sequential, parallel, or conditional")
 	molSpawnCmd.Flags().Bool("pour", false, "Create persistent mol in .beads/ (default: wisp in .beads-wisp/)")
 	molSpawnCmd.Flags().Bool("persistent", false, "Deprecated: use --pour instead")
-	_ = molSpawnCmd.Flags().MarkDeprecated("persistent", "use --pour instead")
+	_ = molSpawnCmd.Flags().MarkDeprecated("persistent", "use --pour instead") // Only fails if flag missing
 
 	molCmd.AddCommand(molSpawnCmd)
 }

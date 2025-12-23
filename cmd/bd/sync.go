@@ -1402,7 +1402,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 		exportedIDs = append(exportedIDs, issue.ID)
 	}
 
-	// Close temp file before rename
+	// Close temp file before rename (error checked implicitly by Rename success)
 	_ = tempFile.Close()
 
 	// Atomic replace

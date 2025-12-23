@@ -1,5 +1,4 @@
 # Tests to skip due to known issues
 # Format: one test name per line (regex patterns supported)
 
-# Issue #356: Expects wrong JSONL filename (issues.jsonl vs beads.jsonl)
-TestFindJSONLPathDefault
+# (no tests currently skipped)

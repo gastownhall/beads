@@ -721,9 +721,9 @@ func cleanupWALFiles(dbPath string) {
 	walPath := dbPath + "-wal"
 	shmPath := dbPath + "-shm"
 	
-	// Best effort - don't fail if these don't exist
-	_ = os.Remove(walPath)
-	_ = os.Remove(shmPath)
+	// Best effort cleanup - don't fail if these don't exist
+	_ = os.Remove(walPath) // WAL may not exist
+	_ = os.Remove(shmPath) // SHM may not exist
 }
 
 // handleInspect shows migration plan and database state for AI agent analysis

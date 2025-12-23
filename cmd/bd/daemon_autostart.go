@@ -224,7 +224,7 @@ func acquireStartLock(lockPath, socketPath string) bool {
 	}
 
 	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-	_ = lockFile.Close()
+	_ = lockFile.Close() // Best-effort close during startup
 	return true
 }
 
@@ -257,9 +257,9 @@ func handleExistingSocket(socketPath string) bool {
 	}
 
 	debugLog("socket is stale, cleaning up")
-	_ = os.Remove(socketPath)
+	_ = os.Remove(socketPath) // Best-effort cleanup, file may not exist
 	if pidFile != "" {
-		_ = os.Remove(pidFile)
+		_ = os.Remove(pidFile) // Best-effort cleanup, file may not exist
 	}
 	return false
 }
@@ -353,7 +353,7 @@ func canDialSocket(socketPath string, timeout time.Duration) bool {
 	if err != nil || client == nil {
 		return false
 	}
-	_ = client.Close()
+	_ = client.Close() // Best-effort close after health check
 	return true
 }
 

@@ -49,11 +49,11 @@ var (
 
 func init() {
 	duplicateCmd.Flags().StringVar(&duplicateOf, "of", "", "Canonical issue ID (required)")
-	_ = duplicateCmd.MarkFlagRequired("of")
+	_ = duplicateCmd.MarkFlagRequired("of") // Only fails if flag missing (caught in tests)
 	rootCmd.AddCommand(duplicateCmd)
 
 	supersedeCmd.Flags().StringVar(&supersededWith, "with", "", "Replacement issue ID (required)")
-	_ = supersedeCmd.MarkFlagRequired("with")
+	_ = supersedeCmd.MarkFlagRequired("with") // Only fails if flag missing (caught in tests)
 	rootCmd.AddCommand(supersedeCmd)
 }
 

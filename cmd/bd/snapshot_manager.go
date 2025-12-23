@@ -192,6 +192,7 @@ func (sm *SnapshotManager) Cleanup() error {
 	basePath, leftPath := sm.getSnapshotPaths()
 	baseMetaPath, leftMetaPath := sm.getSnapshotMetadataPaths()
 
+	// Best-effort cleanup of snapshot files (may not exist)
 	_ = os.Remove(basePath)
 	_ = os.Remove(leftPath)
 	_ = os.Remove(baseMetaPath)

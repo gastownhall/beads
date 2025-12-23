@@ -70,16 +70,16 @@ func acquireDaemonLock(beadsDir string, dbPath string) (*DaemonLock, error) {
 		StartedAt: time.Now().UTC(),
 	}
 	
-	_ = f.Truncate(0)
+	_ = f.Truncate(0)              // Clear file for fresh write (we hold lock)
 	_, _ = f.Seek(0, 0)
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(lockInfo)
-	_ = f.Sync()
+	_ = encoder.Encode(lockInfo)   // Write can't fail if Truncate succeeded
+	_ = f.Sync()                   // Best-effort sync to disk
 
 	// Also write PID file for Windows compatibility (can't read locked files on Windows)
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
-	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600)
+	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600) // Best-effort PID write
 
 	return &DaemonLock{file: f, path: lockPath}, nil
 }

@@ -322,7 +322,7 @@ func stopDaemonQuiet(pidFile string) {
 		return
 	}
 
-	_ = sendStopSignal(process)
+	_ = sendStopSignal(process) // Best-effort graceful stop
 
 	// Wait for daemon to stop gracefully
 	for i := 0; i < daemonShutdownAttempts; i++ {
@@ -333,7 +333,7 @@ func stopDaemonQuiet(pidFile string) {
 	}
 
 	// Force kill if still running
-	_ = process.Kill()
+	_ = process.Kill() // Best-effort force kill, process may have already exited
 }
 
 func removeGitattributesEntry() error {

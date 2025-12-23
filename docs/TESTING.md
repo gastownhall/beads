@@ -67,11 +67,6 @@ Tests in `.test-skip` are automatically skipped. Current broken tests:
    - Issue: Database deadlock, hangs for 5 minutes
    - Impact: Makes test suite extremely slow
 
-2. **TestFindJSONLPathDefault** (GH #356)
-   - Location: `internal/beads/beads_test.go:175`
-   - Issue: Expects `issues.jsonl` but code returns `beads.jsonl`
-   - Impact: Assertion failure
-
 ## For Claude Code / AI Agents
 
 When running tests during development:

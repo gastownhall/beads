@@ -708,6 +708,6 @@ func init() {
 	migrateIssuesCmd.Flags().Bool("strict", false, "Fail on orphaned dependencies or missing repos")
 	migrateIssuesCmd.Flags().Bool("yes", false, "Skip confirmation prompt")
 
-	_ = migrateIssuesCmd.MarkFlagRequired("from")
-	_ = migrateIssuesCmd.MarkFlagRequired("to")
+	_ = migrateIssuesCmd.MarkFlagRequired("from") // Only fails if flag missing (caught in tests)
+	_ = migrateIssuesCmd.MarkFlagRequired("to")   // Only fails if flag missing (caught in tests)
 }

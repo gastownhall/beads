@@ -154,7 +154,7 @@ func getLastShown(store storage.Storage, tipID string) time.Time {
 func recordTipShown(store storage.Storage, tipID string) {
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)
 	value := time.Now().Format(time.RFC3339)
-	_ = store.SetMetadata(context.Background(), key, value)
+	_ = store.SetMetadata(context.Background(), key, value) // Non-critical metadata, ok to fail silently
 }
 
 // InjectTip adds a dynamic tip to the registry at runtime.

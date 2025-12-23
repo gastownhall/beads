@@ -303,7 +303,7 @@ func stopDaemon(pidFile string) {
 	}
 	
 	// Clean up stale artifacts after forced kill
-	_ = os.Remove(pidFile)
+	_ = os.Remove(pidFile) // Best-effort cleanup, file may not exist
 	
 	// Also remove socket file if it exists
 	if _, err := os.Stat(socketPath); err == nil {
