@@ -12,7 +12,11 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
+// showDetectPollutionDeprecationHint shows a hint about bd doctor consolidation (bd-bqcc)
+func showDetectPollutionDeprecationHint() {
+	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor' now detects test pollution in the Metadata section"))
+}
+
 var detectPollutionCmd = &cobra.Command{
 	Use:     "detect-pollution",
 	GroupID: "maint",
@@ -134,6 +138,8 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 
 		if !clean {
 			fmt.Printf("Run 'bd detect-pollution --clean' to delete these issues (with confirmation).\n")
+			// bd-bqcc: Show hint about doctor consolidation
+			showDetectPollutionDeprecationHint()
 			return
 		}
 

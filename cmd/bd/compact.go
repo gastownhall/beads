@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var (
@@ -109,7 +110,11 @@ type CompactApplyResponse struct {
 	TombstonesPruned *TombstonePrunedInfo `json:"tombstones_pruned,omitempty"`
 }
 
-// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
+// showCompactDeprecationHint shows a hint about bd doctor consolidation (bd-bqcc)
+func showCompactDeprecationHint() {
+	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor' now shows compaction candidates in the Maintenance section"))
+}
+
 var compactCmd = &cobra.Command{
 	Use:     "compact",
 	GroupID: "maint",
@@ -578,6 +583,9 @@ func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if tier2Size > 0 {
 		fmt.Printf("  Estimated savings: %d bytes (95%%)\n", tier2Size*95/100)
 	}
+
+	// bd-bqcc: Show hint about doctor consolidation
+	showCompactDeprecationHint()
 }
 
 func progressBar(current, total int) string {

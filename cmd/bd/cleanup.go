@@ -20,7 +20,11 @@ type CleanupEmptyResponse struct {
 
 // Hard delete mode: bypass tombstone TTL safety, use --older-than days directly
 
-// TODO: Consider consolidating into 'bd doctor --fix' for simpler maintenance UX
+// showCleanupDeprecationHint shows a hint about bd doctor --fix (bd-bqcc)
+func showCleanupDeprecationHint() {
+	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor --fix' can now cleanup stale issues and prune tombstones"))
+}
+
 var cleanupCmd = &cobra.Command{
 	Use:     "cleanup",
 	GroupID: "maint",
@@ -251,6 +255,11 @@ SEE ALSO:
 						ui.RenderPass("✓"), tombstoneResult.PrunedCount, ttlMsg)
 				}
 			}
+		}
+
+		// bd-bqcc: Show hint about doctor --fix consolidation
+		if !jsonOutput {
+			showCleanupDeprecationHint()
 		}
 	},
 }

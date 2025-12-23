@@ -412,6 +412,16 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// No auto-fix: git conflicts require manual resolution
 			fmt.Printf("  ⚠ Resolve conflicts manually: git checkout --ours or --theirs .beads/issues.jsonl\n")
 			continue
+		case "Stale Closed Issues":
+			// bd-bqcc: consolidate cleanup into doctor --fix
+			err = fix.StaleClosedIssues(path)
+		case "Expired Tombstones":
+			// bd-bqcc: consolidate cleanup into doctor --fix
+			err = fix.ExpiredTombstones(path)
+		case "Compaction Candidates":
+			// No auto-fix: compaction requires agent review
+			fmt.Printf("  ⚠ Run 'bd compact --analyze' to review candidates\n")
+			continue
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
@@ -791,6 +801,21 @@ func runDiagnostics(path string) doctorResult {
 	if conflictsCheck.Status == statusError {
 		result.OverallOK = false
 	}
+
+	// Check 26: Stale closed issues (maintenance, bd-bqcc)
+	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
+	result.Checks = append(result.Checks, staleClosedCheck)
+	// Don't fail overall check for stale issues, just warn
+
+	// Check 27: Expired tombstones (maintenance, bd-bqcc)
+	tombstonesExpiredCheck := convertDoctorCheck(doctor.CheckExpiredTombstones(path))
+	result.Checks = append(result.Checks, tombstonesExpiredCheck)
+	// Don't fail overall check for expired tombstones, just warn
+
+	// Check 28: Compaction candidates (maintenance, bd-bqcc)
+	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))
+	result.Checks = append(result.Checks, compactionCheck)
+	// Info only, not a warning - compaction requires human review
 
 	return result
 }
