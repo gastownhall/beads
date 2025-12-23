@@ -306,43 +306,6 @@ func ResolveExternalProjectPath(projectName string) string {
 	return path
 }
 
-// HookEntry represents a single config-based hook
-type HookEntry struct {
-	Command string `yaml:"command" mapstructure:"command"` // Shell command to run
-	Name    string `yaml:"name" mapstructure:"name"`       // Optional display name
-}
-
-// GetCloseHooks returns the on_close hooks from config
-func GetCloseHooks() []HookEntry {
-	if v == nil {
-		return nil
-	}
-	var hooks []HookEntry
-	raw := v.Get("hooks.on_close")
-	if raw == nil {
-		return nil
-	}
-
-	// Handle slice of maps (from YAML parsing)
-	if rawSlice, ok := raw.([]interface{}); ok {
-		for _, item := range rawSlice {
-			if m, ok := item.(map[string]interface{}); ok {
-				entry := HookEntry{}
-				if cmd, ok := m["command"].(string); ok {
-					entry.Command = cmd
-				}
-				if name, ok := m["name"].(string); ok {
-					entry.Name = name
-				}
-				if entry.Command != "" {
-					hooks = append(hooks, entry)
-				}
-			}
-		}
-	}
-	return hooks
-}
-
 // GetIdentity resolves the user's identity for messaging.
 // Priority chain:
 //  1. flagValue (if non-empty, from --identity flag)

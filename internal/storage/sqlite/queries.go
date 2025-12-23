@@ -16,6 +16,49 @@ import (
 // Graph edges (replies-to, relates-to, duplicates, supersedes) are now managed
 // exclusively through the dependency API. Use AddDependency() instead.
 
+// parseNullableTimeString parses a nullable time string from database TEXT columns.
+// The ncruces/go-sqlite3 driver only auto-converts TEXT→time.Time for columns declared
+// as DATETIME/DATE/TIME/TIMESTAMP. For TEXT columns (like deleted_at), we must parse manually.
+// Supports RFC3339, RFC3339Nano, and SQLite's native format.
+func parseNullableTimeString(ns sql.NullString) *time.Time {
+	if !ns.Valid || ns.String == "" {
+		return nil
+	}
+	// Try RFC3339Nano first (more precise), then RFC3339, then SQLite format
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, ns.String); err == nil {
+			return &t
+		}
+	}
+	return nil // Unparseable - shouldn't happen with valid data
+}
+
+// parseJSONStringArray parses a JSON string array from database TEXT column.
+// Returns empty slice if the string is empty or invalid JSON.
+func parseJSONStringArray(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		return nil // Invalid JSON - shouldn't happen with valid data
+	}
+	return result
+}
+
+// formatJSONStringArray formats a string slice as JSON for database storage.
+// Returns empty string if the slice is nil or empty.
+func formatJSONStringArray(arr []string) string {
+	if len(arr) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(arr)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 // REMOVED (bd-8e05): getNextIDForPrefix and AllocateNextID - sequential ID generation
 // no longer needed with hash-based IDs
 // Migration functions moved to migrations.go (bd-fc2d, bd-b245)
@@ -260,6 +303,219 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if externalRef.Valid {
 		issue.ExternalRef = &externalRef.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if compactedAtCommit.Valid {
+		issue.CompactedAtCommit = &compactedAtCommit.String
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
+	}
+	if sourceRepo.Valid {
+		issue.SourceRepo = sourceRepo.String
+	}
+	if closeReason.Valid {
+		issue.CloseReason = closeReason.String
+	}
+	issue.DeletedAt = parseNullableTimeString(deletedAt)
+	if deletedBy.Valid {
+		issue.DeletedBy = deletedBy.String
+	}
+	if deleteReason.Valid {
+		issue.DeleteReason = deleteReason.String
+	}
+	if originalType.Valid {
+		issue.OriginalType = originalType.String
+	}
+	// Messaging fields (bd-kwro)
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if wisp.Valid && wisp.Int64 != 0 {
+		issue.Wisp = true
+	}
+	// Pinned field (bd-7h5)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
+	}
+	// Template field (beads-1ra)
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
+	}
+	// Gate fields (bd-udsi)
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if waiters.Valid && waiters.String != "" {
+		issue.Waiters = parseJSONStringArray(waiters.String)
+	}
+
+	// Fetch labels for this issue
+	labels, err := s.GetLabels(ctx, issue.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get labels: %w", err)
+	}
+	issue.Labels = labels
+
+	return &issue, nil
+}
+
+// GetCloseReason retrieves the close reason from the most recent closed event for an issue
+func (s *SQLiteStorage) GetCloseReason(ctx context.Context, issueID string) (string, error) {
+	var comment sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT comment FROM events
+		WHERE issue_id = ? AND event_type = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, issueID, types.EventClosed).Scan(&comment)
+
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get close reason: %w", err)
+	}
+	if comment.Valid {
+		return comment.String, nil
+	}
+	return "", nil
+}
+
+// GetCloseReasonsForIssues retrieves close reasons for multiple issues in a single query
+func (s *SQLiteStorage) GetCloseReasonsForIssues(ctx context.Context, issueIDs []string) (map[string]string, error) {
+	result := make(map[string]string)
+	if len(issueIDs) == 0 {
+		return result, nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(issueIDs))
+	args := make([]interface{}, len(issueIDs)+1)
+	args[0] = types.EventClosed
+	for i, id := range issueIDs {
+		placeholders[i] = "?"
+		args[i+1] = id
+	}
+
+	// Use a subquery to get the most recent closed event for each issue
+	// #nosec G201 - safe SQL with controlled formatting
+	query := fmt.Sprintf(`
+		SELECT e.issue_id, e.comment
+		FROM events e
+		INNER JOIN (
+			SELECT issue_id, MAX(created_at) as max_created_at
+			FROM events
+			WHERE event_type = ? AND issue_id IN (%s)
+			GROUP BY issue_id
+		) latest ON e.issue_id = latest.issue_id AND e.created_at = latest.max_created_at
+		WHERE e.event_type = ?
+	`, strings.Join(placeholders, ", "))
+
+	// Append event_type again for the outer WHERE clause
+	args = append(args, types.EventClosed)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get close reasons: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var issueID string
+		var comment sql.NullString
+		if err := rows.Scan(&issueID, &comment); err != nil {
+			return nil, fmt.Errorf("failed to scan close reason: %w", err)
+		}
+		if comment.Valid && comment.String != "" {
+			result[issueID] = comment.String
+		}
+	}
+
+	return result, nil
+}
+
+// GetIssueByExternalRef retrieves an issue by external reference
+func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
+	var issue types.Issue
+	var closedAt sql.NullTime
+	var estimatedMinutes sql.NullInt64
+	var assignee sql.NullString
+	var externalRefCol sql.NullString
+	var compactedAt sql.NullTime
+	var originalSize sql.NullInt64
+	var contentHash sql.NullString
+	var compactedAtCommit sql.NullString
+	var sourceRepo sql.NullString
+	var closeReason sql.NullString
+	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
+	var deletedBy sql.NullString
+	var deleteReason sql.NullString
+	var originalType sql.NullString
+	// Messaging fields (bd-kwro)
+	var sender sql.NullString
+	var wisp sql.NullInt64
+	// Pinned field (bd-7h5)
+	var pinned sql.NullInt64
+	// Template field (beads-1ra)
+	var isTemplate sql.NullInt64
+	// Gate fields (bd-udsi)
+	var awaitType sql.NullString
+	var awaitID sql.NullString
+	var timeoutNs sql.NullInt64
+	var waiters sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
+		       status, priority, issue_type, assignee, estimated_minutes,
+		       created_at, updated_at, closed_at, external_ref,
+		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
+		FROM issues
+		WHERE external_ref = ?
+	`, externalRef).Scan(
+		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
+		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
+		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
+		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&deletedAt, &deletedBy, &deleteReason, &originalType,
+		&sender, &wisp, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs, &waiters,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issue by external_ref: %w", err)
+	}
+
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
+	if closedAt.Valid {
+		issue.ClosedAt = &closedAt.Time
+	}
+	if estimatedMinutes.Valid {
+		mins := int(estimatedMinutes.Int64)
+		issue.EstimatedMinutes = &mins
+	}
+	if assignee.Valid {
+		issue.Assignee = assignee.String
+	}
+	if externalRefCol.Valid {
+		issue.ExternalRef = &externalRefCol.String
 	}
 	if compactedAt.Valid {
 		issue.CompactedAt = &compactedAt.Time
@@ -591,6 +847,146 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	return tx.Commit()
 }
 
+// UpdateIssueID updates an issue ID and all its text fields in a single transaction
+func (s *SQLiteStorage) UpdateIssueID(ctx context.Context, oldID, newID string, issue *types.Issue, actor string) error {
+	// Get exclusive connection to ensure PRAGMA applies
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Disable foreign keys on this specific connection
+	_, err = conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`)
+	if err != nil {
+		return fmt.Errorf("failed to disable foreign keys: %w", err)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE issues
+		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?
+		WHERE id = ?
+	`, newID, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes, time.Now(), oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update issue ID: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("issue not found: %s", oldID)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE dependencies SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update issue_id in dependencies: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE dependencies SET depends_on_id = ? WHERE depends_on_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update depends_on_id in dependencies: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE events SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update events: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE labels SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update labels: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE comments SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update comments: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE dirty_issues SET issue_id = ? WHERE issue_id = ?
+	`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update dirty_issues: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE issue_snapshots SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update issue_snapshots: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE compaction_snapshots SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("failed to update compaction_snapshots: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at)
+		VALUES (?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+	`, newID, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, 'renamed', ?, ?, ?)
+	`, newID, actor, oldID, newID)
+	if err != nil {
+		return fmt.Errorf("failed to record rename event: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// RenameDependencyPrefix updates the prefix in all dependency records
+// GH#630: This was previously a no-op, causing dependencies to break after rename-prefix
+func (s *SQLiteStorage) RenameDependencyPrefix(ctx context.Context, oldPrefix, newPrefix string) error {
+	// Update issue_id column
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE dependencies 
+		SET issue_id = ? || substr(issue_id, length(?) + 1)
+		WHERE issue_id LIKE ? || '%'
+	`, newPrefix, oldPrefix, oldPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to update issue_id in dependencies: %w", err)
+	}
+
+	// Update depends_on_id column
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE dependencies 
+		SET depends_on_id = ? || substr(depends_on_id, length(?) + 1)
+		WHERE depends_on_id LIKE ? || '%'
+	`, newPrefix, oldPrefix, oldPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to update depends_on_id in dependencies: %w", err)
+	}
+
+	return nil
+}
+
+// RenameCounterPrefix is a no-op with hash-based IDs (bd-8e05)
+// Kept for backward compatibility with rename-prefix command
+func (s *SQLiteStorage) RenameCounterPrefix(ctx context.Context, oldPrefix, newPrefix string) error {
+	// Hash-based IDs don't use counters, so nothing to update
+	return nil
+}
+
+// ResetCounter is a no-op with hash-based IDs (bd-8e05)
+// Kept for backward compatibility
+func (s *SQLiteStorage) ResetCounter(ctx context.Context, prefix string) error {
+	// Hash-based IDs don't use counters, so nothing to reset
+	return nil
+}
+
 // CloseIssue closes an issue with a reason
 func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string, actor string) error {
 	now := time.Now()
@@ -647,4 +1043,662 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	}
 
 	return tx.Commit()
+}
+
+// CreateTombstone converts an existing issue to a tombstone record.
+// This is a soft-delete that preserves the issue in the database with status="tombstone".
+// The issue will still appear in exports but be excluded from normal queries.
+// Dependencies must be removed separately before calling this method.
+func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
+	// Get the issue to preserve its original type
+	issue, err := s.GetIssue(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to get issue: %w", err)
+	}
+	if issue == nil {
+		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+	originalType := string(issue.IssueType)
+
+	// Convert issue to tombstone
+	// Note: closed_at must be set to NULL because of CHECK constraint:
+	// (status = 'closed') = (closed_at IS NOT NULL)
+	_, err = tx.ExecContext(ctx, `
+		UPDATE issues
+		SET status = ?,
+		    closed_at = NULL,
+		    deleted_at = ?,
+		    deleted_by = ?,
+		    delete_reason = ?,
+		    original_type = ?,
+		    updated_at = ?
+		WHERE id = ?
+	`, types.StatusTombstone, now, actor, reason, originalType, now, id)
+	if err != nil {
+		return fmt.Errorf("failed to create tombstone: %w", err)
+	}
+
+	// Record tombstone creation event
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?)
+	`, id, "deleted", actor, reason)
+	if err != nil {
+		return fmt.Errorf("failed to record tombstone event: %w", err)
+	}
+
+	// Mark issue as dirty for incremental export
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at)
+		VALUES (?, ?)
+		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+	`, id, now)
+	if err != nil {
+		return fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
+	// Invalidate blocked issues cache since status changed (bd-5qim)
+	// Tombstone issues don't block others, so this affects blocking calculations
+	if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+		return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return wrapDBError("commit tombstone transaction", err)
+	}
+
+	return nil
+}
+
+// DeleteIssue permanently removes an issue from the database
+func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete dependencies (both directions)
+	_, err = tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete dependencies: %w", err)
+	}
+
+	// Delete events
+	_, err = tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete events: %w", err)
+	}
+
+	// Delete comments (no FK cascade on this table) (bd-687g)
+	_, err = tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete comments: %w", err)
+	}
+
+	// Delete from dirty_issues
+	_, err = tx.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete dirty marker: %w", err)
+	}
+
+	// Delete the issue itself
+	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete issue: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return wrapDBError("commit delete transaction", err)
+	}
+
+	// REMOVED (bd-c7af): Counter sync after deletion - no longer needed with hash IDs
+	return nil
+}
+
+// DeleteIssuesResult contains statistics about a batch deletion operation
+type DeleteIssuesResult struct {
+	DeletedCount      int
+	DependenciesCount int
+	LabelsCount       int
+	EventsCount       int
+	OrphanedIssues    []string
+}
+
+// DeleteIssues deletes multiple issues in a single transaction
+// If cascade is true, recursively deletes dependents
+// If cascade is false but force is true, deletes issues and orphans their dependents
+// If cascade and force are both false, returns an error if any issue has dependents
+// If dryRun is true, only computes statistics without deleting
+func (s *SQLiteStorage) DeleteIssues(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*DeleteIssuesResult, error) {
+	if len(ids) == 0 {
+		return &DeleteIssuesResult{}, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	idSet := buildIDSet(ids)
+	result := &DeleteIssuesResult{}
+
+	expandedIDs, err := s.resolveDeleteSet(ctx, tx, ids, idSet, cascade, force, result)
+	if err != nil {
+		return nil, wrapDBError("resolve delete set", err)
+	}
+
+	inClause, args := buildSQLInClause(expandedIDs)
+	if err := s.populateDeleteStats(ctx, tx, inClause, args, result); err != nil {
+		return nil, err
+	}
+
+	if dryRun {
+		return result, nil
+	}
+
+	if err := s.executeDelete(ctx, tx, inClause, args, result); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// REMOVED (bd-c7af): Counter sync after deletion - no longer needed with hash IDs
+
+	return result, nil
+}
+
+func buildIDSet(ids []string) map[string]bool {
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	return idSet
+}
+
+func (s *SQLiteStorage) resolveDeleteSet(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, cascade bool, force bool, result *DeleteIssuesResult) ([]string, error) {
+	if cascade {
+		return s.expandWithDependents(ctx, tx, ids, idSet)
+	}
+	if !force {
+		return ids, s.validateNoDependents(ctx, tx, ids, idSet, result)
+	}
+	return ids, s.trackOrphanedIssues(ctx, tx, ids, idSet, result)
+}
+
+func (s *SQLiteStorage) expandWithDependents(ctx context.Context, tx *sql.Tx, ids []string, _ map[string]bool) ([]string, error) {
+	allToDelete, err := s.findAllDependentsRecursive(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find dependents: %w", err)
+	}
+	expandedIDs := make([]string, 0, len(allToDelete))
+	for id := range allToDelete {
+		expandedIDs = append(expandedIDs, id)
+	}
+	return expandedIDs, nil
+}
+
+func (s *SQLiteStorage) validateNoDependents(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	for _, id := range ids {
+		if err := s.checkSingleIssueValidation(ctx, tx, id, idSet, result); err != nil {
+			return wrapDBError("check dependents", err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) checkSingleIssueValidation(ctx context.Context, tx *sql.Tx, id string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	var depCount int
+	err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE depends_on_id = ?`, id).Scan(&depCount)
+	if err != nil {
+		return fmt.Errorf("failed to check dependents for %s: %w", id, err)
+	}
+	if depCount == 0 {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	hasExternal := false
+	for rows.Next() {
+		var depID string
+		if err := rows.Scan(&depID); err != nil {
+			return fmt.Errorf("failed to scan dependent: %w", err)
+		}
+		if !idSet[depID] {
+			hasExternal = true
+			result.OrphanedIssues = append(result.OrphanedIssues, depID)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate dependents for %s: %w", id, err)
+	}
+
+	if hasExternal {
+		return fmt.Errorf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", id)
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) trackOrphanedIssues(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool, result *DeleteIssuesResult) error {
+	orphanSet := make(map[string]bool)
+	for _, id := range ids {
+		if err := s.collectOrphansForID(ctx, tx, id, idSet, orphanSet); err != nil {
+			return wrapDBError("collect orphans", err)
+		}
+	}
+	for orphanID := range orphanSet {
+		result.OrphanedIssues = append(result.OrphanedIssues, orphanID)
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) collectOrphansForID(ctx context.Context, tx *sql.Tx, id string, idSet map[string]bool, orphanSet map[string]bool) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to get dependents for %s: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var depID string
+		if err := rows.Scan(&depID); err != nil {
+			return fmt.Errorf("failed to scan dependent: %w", err)
+		}
+		if !idSet[depID] {
+			orphanSet[depID] = true
+		}
+	}
+	return rows.Err()
+}
+
+func buildSQLInClause(ids []string) (string, []interface{}) {
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(placeholders, ","), args
+}
+
+func (s *SQLiteStorage) populateDeleteStats(ctx context.Context, tx *sql.Tx, inClause string, args []interface{}, result *DeleteIssuesResult) error {
+	counts := []struct {
+		query string
+		dest  *int
+	}{
+		{fmt.Sprintf(`SELECT COUNT(*) FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`, inClause, inClause), &result.DependenciesCount},
+		{fmt.Sprintf(`SELECT COUNT(*) FROM labels WHERE issue_id IN (%s)`, inClause), &result.LabelsCount},
+		{fmt.Sprintf(`SELECT COUNT(*) FROM events WHERE issue_id IN (%s)`, inClause), &result.EventsCount},
+	}
+
+	for _, c := range counts {
+		queryArgs := args
+		if c.dest == &result.DependenciesCount {
+			queryArgs = append(args, args...)
+		}
+		if err := tx.QueryRowContext(ctx, c.query, queryArgs...).Scan(c.dest); err != nil {
+			return fmt.Errorf("failed to count: %w", err)
+		}
+	}
+
+	result.DeletedCount = len(args)
+	return nil
+}
+
+func (s *SQLiteStorage) executeDelete(ctx context.Context, tx *sql.Tx, inClause string, args []interface{}, result *DeleteIssuesResult) error {
+	// Note: This method now creates tombstones instead of hard-deleting (bd-3b4)
+	// Only dependencies are deleted - issues are converted to tombstones
+
+	// 1. Delete dependencies - tombstones don't block other issues
+	_, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`, inClause, inClause),
+		append(args, args...)...)
+	if err != nil {
+		return fmt.Errorf("failed to delete dependencies: %w", err)
+	}
+
+	// 2. Get issue types before converting to tombstones (need for original_type)
+	issueTypes := make(map[string]string)
+	rows, err := tx.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, issue_type FROM issues WHERE id IN (%s)`, inClause),
+		args...)
+	if err != nil {
+		return fmt.Errorf("failed to get issue types: %w", err)
+	}
+	for rows.Next() {
+		var id, issueType string
+		if err := rows.Scan(&id, &issueType); err != nil {
+			_ = rows.Close() // #nosec G104 - error handling not critical in error path
+			return fmt.Errorf("failed to scan issue type: %w", err)
+		}
+		issueTypes[id] = issueType
+	}
+	_ = rows.Close()
+
+	// 3. Convert issues to tombstones (only for issues that exist)
+	// Note: closed_at must be set to NULL because of CHECK constraint:
+	// (status = 'closed') = (closed_at IS NOT NULL)
+	now := time.Now()
+	deletedCount := 0
+	for id, originalType := range issueTypes {
+		execResult, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET status = ?,
+			    closed_at = NULL,
+			    deleted_at = ?,
+			    deleted_by = ?,
+			    delete_reason = ?,
+			    original_type = ?,
+			    updated_at = ?
+			WHERE id = ?
+		`, types.StatusTombstone, now, "batch delete", "batch delete", originalType, now, id)
+		if err != nil {
+			return fmt.Errorf("failed to create tombstone for %s: %w", id, err)
+		}
+
+		rowsAffected, _ := execResult.RowsAffected()
+		if rowsAffected == 0 {
+			continue // Issue doesn't exist, skip
+		}
+		deletedCount++
+
+		// Record tombstone creation event
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO events (issue_id, event_type, actor, comment)
+			VALUES (?, ?, ?, ?)
+		`, id, "deleted", "batch delete", "batch delete")
+		if err != nil {
+			return fmt.Errorf("failed to record tombstone event for %s: %w", id, err)
+		}
+
+		// Mark issue as dirty for incremental export
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO dirty_issues (issue_id, marked_at)
+			VALUES (?, ?)
+			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
+		`, id, now)
+		if err != nil {
+			return fmt.Errorf("failed to mark issue dirty for %s: %w", id, err)
+		}
+	}
+
+	// 4. Invalidate blocked issues cache since statuses changed (bd-5qim)
+	if err := s.invalidateBlockedCache(ctx, tx); err != nil {
+		return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+	}
+
+	result.DeletedCount = deletedCount
+	return nil
+}
+
+// findAllDependentsRecursive finds all issues that depend on the given issues, recursively
+func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+	result := make(map[string]bool)
+	for _, id := range ids {
+		result[id] = true
+	}
+
+	toProcess := make([]string, len(ids))
+	copy(toProcess, ids)
+
+	for len(toProcess) > 0 {
+		current := toProcess[0]
+		toProcess = toProcess[1:]
+
+		rows, err := tx.QueryContext(ctx,
+			`SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, current)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var depID string
+			if err := rows.Scan(&depID); err != nil {
+				return nil, err
+			}
+			if !result[depID] {
+				result[depID] = true
+				toProcess = append(toProcess, depID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// SearchIssues finds issues matching query and filters
+func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	// Check for external database file modifications (daemon mode)
+	s.checkFreshness()
+
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
+	whereClauses := []string{}
+	args := []interface{}{}
+
+	if query != "" {
+		whereClauses = append(whereClauses, "(title LIKE ? OR description LIKE ? OR id LIKE ?)")
+		pattern := "%" + query + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+
+	if filter.TitleSearch != "" {
+		whereClauses = append(whereClauses, "title LIKE ?")
+		pattern := "%" + filter.TitleSearch + "%"
+		args = append(args, pattern)
+	}
+
+	// Pattern matching
+	if filter.TitleContains != "" {
+		whereClauses = append(whereClauses, "title LIKE ?")
+		args = append(args, "%"+filter.TitleContains+"%")
+	}
+	if filter.DescriptionContains != "" {
+		whereClauses = append(whereClauses, "description LIKE ?")
+		args = append(args, "%"+filter.DescriptionContains+"%")
+	}
+	if filter.NotesContains != "" {
+		whereClauses = append(whereClauses, "notes LIKE ?")
+		args = append(args, "%"+filter.NotesContains+"%")
+	}
+
+	if filter.Status != nil {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, *filter.Status)
+	} else if !filter.IncludeTombstones {
+		// Exclude tombstones by default unless explicitly filtering for them (bd-1bu)
+		whereClauses = append(whereClauses, "status != ?")
+		args = append(args, types.StatusTombstone)
+	}
+
+	if filter.Priority != nil {
+		whereClauses = append(whereClauses, "priority = ?")
+		args = append(args, *filter.Priority)
+	}
+
+	// Priority ranges
+	if filter.PriorityMin != nil {
+		whereClauses = append(whereClauses, "priority >= ?")
+		args = append(args, *filter.PriorityMin)
+	}
+	if filter.PriorityMax != nil {
+		whereClauses = append(whereClauses, "priority <= ?")
+		args = append(args, *filter.PriorityMax)
+	}
+
+	if filter.IssueType != nil {
+		whereClauses = append(whereClauses, "issue_type = ?")
+		args = append(args, *filter.IssueType)
+	}
+
+	if filter.Assignee != nil {
+		whereClauses = append(whereClauses, "assignee = ?")
+		args = append(args, *filter.Assignee)
+	}
+
+	// Date ranges
+	if filter.CreatedAfter != nil {
+		whereClauses = append(whereClauses, "created_at > ?")
+		args = append(args, filter.CreatedAfter.Format(time.RFC3339))
+	}
+	if filter.CreatedBefore != nil {
+		whereClauses = append(whereClauses, "created_at < ?")
+		args = append(args, filter.CreatedBefore.Format(time.RFC3339))
+	}
+	if filter.UpdatedAfter != nil {
+		whereClauses = append(whereClauses, "updated_at > ?")
+		args = append(args, filter.UpdatedAfter.Format(time.RFC3339))
+	}
+	if filter.UpdatedBefore != nil {
+		whereClauses = append(whereClauses, "updated_at < ?")
+		args = append(args, filter.UpdatedBefore.Format(time.RFC3339))
+	}
+	if filter.ClosedAfter != nil {
+		whereClauses = append(whereClauses, "closed_at > ?")
+		args = append(args, filter.ClosedAfter.Format(time.RFC3339))
+	}
+	if filter.ClosedBefore != nil {
+		whereClauses = append(whereClauses, "closed_at < ?")
+		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
+	}
+
+	// Empty/null checks
+	if filter.EmptyDescription {
+		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")
+	}
+	if filter.NoAssignee {
+		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
+	}
+	if filter.NoLabels {
+		whereClauses = append(whereClauses, "id NOT IN (SELECT DISTINCT issue_id FROM labels)")
+	}
+
+	// Label filtering: issue must have ALL specified labels
+	if len(filter.Labels) > 0 {
+		for _, label := range filter.Labels {
+			whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label = ?)")
+			args = append(args, label)
+		}
+	}
+
+	// Label filtering (OR): issue must have AT LEAST ONE of these labels
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i, label := range filter.LabelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(placeholders, ", ")))
+	}
+
+	// ID filtering: match specific issue IDs
+	if len(filter.IDs) > 0 {
+		placeholders := make([]string, len(filter.IDs))
+		for i, id := range filter.IDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
+	// Wisp filtering (bd-kwro.9)
+	if filter.Wisp != nil {
+		if *filter.Wisp {
+			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
+		} else {
+			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
+		}
+	}
+
+	// Pinned filtering (bd-7h5)
+	if filter.Pinned != nil {
+		if *filter.Pinned {
+			whereClauses = append(whereClauses, "pinned = 1")
+		} else {
+			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
+		}
+	}
+
+	// Template filtering (beads-1ra)
+	if filter.IsTemplate != nil {
+		if *filter.IsTemplate {
+			whereClauses = append(whereClauses, "is_template = 1")
+		} else {
+			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
+		}
+	}
+
+	// Parent filtering (bd-yqhh): filter children by parent issue
+	if filter.ParentID != nil {
+		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?)")
+		args = append(args, *filter.ParentID)
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	limitSQL := ""
+	if filter.Limit > 0 {
+		limitSQL = " LIMIT ?"
+		args = append(args, filter.Limit)
+	}
+
+	// #nosec G201 - safe SQL with controlled formatting
+	querySQL := fmt.Sprintf(`
+		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
+		       status, priority, issue_type, assignee, estimated_minutes,
+		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
+		FROM issues
+		%s
+		ORDER BY priority ASC, created_at DESC
+		%s
+	`, whereSQL, limitSQL)
+
+	rows, err := s.db.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return s.scanIssues(ctx, rows)
 }
