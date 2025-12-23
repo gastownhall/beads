@@ -134,6 +134,7 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 	// Failure close reasons are detected by matching keywords in close_reason:
 	// failed, rejected, wontfix, won't fix, canceled, abandoned,
 	// blocked, error, timeout, aborted
+	//nolint:misspell // SQL contains both "cancelled" and "canceled" for British/US spelling
 	query := `
 		INSERT INTO blocked_issues_cache (issue_id)
 		WITH RECURSIVE
