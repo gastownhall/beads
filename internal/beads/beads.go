@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -442,15 +441,10 @@ type DatabaseInfo struct {
 // or empty string if not in a git repository. Used to limit directory
 // tree walking to within the current git repo (bd-c8x).
 //
-// This function is worktree-aware and will correctly identify the repository
-// root in both regular repositories and git worktrees.
+// This function delegates to git.GetRepoRoot() which is worktree-aware
+// and handles Windows path normalization.
 func findGitRoot() string {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	return git.GetRepoRoot()
 }
 
 // findDatabaseInTree walks up the directory tree looking for .beads/*.db

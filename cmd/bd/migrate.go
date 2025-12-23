@@ -67,7 +67,7 @@ This command:
 		}
 
 		// Find .beads directory
-		beadsDir := findBeadsDir()
+		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 		if jsonOutput {
 		outputJSON(map[string]interface{}{
@@ -729,7 +729,7 @@ func cleanupWALFiles(dbPath string) {
 // handleInspect shows migration plan and database state for AI agent analysis
 func handleInspect() {
 	// Find .beads directory
-	beadsDir := findBeadsDir()
+	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -927,7 +927,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	}
 
 	// Find .beads directory
-	beadsDir := findBeadsDir()
+	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{

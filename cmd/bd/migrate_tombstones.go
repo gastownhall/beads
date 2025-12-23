@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -102,7 +103,7 @@ Examples:
 		}
 
 		// Find .beads directory
-		beadsDir := findBeadsDir()
+		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -568,7 +569,7 @@ func findJiraScript(name string) (string, error) {
 	}
 
 	// Check BEADS_DIR or current .beads location
-	if beadsDir := findBeadsDir(); beadsDir != "" {
+	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
 		repoRoot := filepath.Dir(beadsDir)
 		locations = append(locations, filepath.Join(repoRoot, "examples", "jira-import", name))
 	}

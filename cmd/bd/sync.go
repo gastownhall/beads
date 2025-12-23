@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
@@ -863,7 +864,7 @@ func getRepoRootForWorktree(_ context.Context) string {
 // gitHasBeadsChanges checks if any tracked files in .beads/ have uncommitted changes
 func gitHasBeadsChanges(ctx context.Context) (bool, error) {
 	// Get the absolute path to .beads directory
-	beadsDir := findBeadsDir()
+	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return false, fmt.Errorf("no .beads directory found")
 	}
@@ -961,7 +962,7 @@ func gitCommit(ctx context.Context, filePath string, message string) error {
 // to avoid staging gitignored snapshot files that may be tracked. (bd-guc fix)
 // Worktree-aware: handles cases where .beads is in the main repo but we're running from a worktree.
 func gitCommitBeadsDir(ctx context.Context, message string) error {
-	beadsDir := findBeadsDir()
+	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return fmt.Errorf("no .beads directory found")
 	}
@@ -1185,7 +1186,7 @@ func gitPush(ctx context.Context) error {
 // This is used after sync when sync.branch is configured to keep the working directory clean.
 // The actual beads data lives on the sync branch; the main branch's .beads/ is just a snapshot.
 func restoreBeadsDirFromBranch(ctx context.Context) error {
-	beadsDir := findBeadsDir()
+	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return fmt.Errorf("no .beads directory found")
 	}

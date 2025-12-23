@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -181,17 +182,21 @@ func TestCheckAndAutoImport_EmptyDatabaseNoGit(t *testing.T) {
 }
 
 func TestFindBeadsDir(t *testing.T) {
-	// Create temp directory with .beads
+	// Create temp directory with .beads and a valid project file
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
 	}
+	// Create a config.yaml so beads.FindBeadsDir() recognizes this as a valid project
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: test\n"), 0600); err != nil {
+		t.Fatalf("Failed to create config.yaml: %v", err)
+	}
 
 	// Change to tmpDir
 	t.Chdir(tmpDir)
 
-	found := findBeadsDir()
+	found := beads.FindBeadsDir()
 	if found == "" {
 		t.Error("Expected to find .beads directory")
 	}
@@ -209,7 +214,7 @@ func TestFindBeadsDir_NotFound(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	found := findBeadsDir()
+	found := beads.FindBeadsDir()
 	// findBeadsDir walks up to root, so it might find .beads in parent dirs
 	// (e.g., user's home directory). Just verify it's not in tmpDir itself.
 	if found != "" && filepath.Dir(found) == tmpDir {
@@ -224,6 +229,10 @@ func TestFindBeadsDir_ParentDirectory(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
 	}
+	// Create a config.yaml so beads.FindBeadsDir() recognizes this as a valid project
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: test\n"), 0600); err != nil {
+		t.Fatalf("Failed to create config.yaml: %v", err)
+	}
 
 	subDir := filepath.Join(tmpDir, "subdir")
 	if err := os.MkdirAll(subDir, 0755); err != nil {
@@ -233,7 +242,7 @@ func TestFindBeadsDir_ParentDirectory(t *testing.T) {
 	// Change to subdir
 	t.Chdir(subDir)
 
-	found := findBeadsDir()
+	found := beads.FindBeadsDir()
 	if found == "" {
 		t.Error("Expected to find .beads directory in parent")
 	}

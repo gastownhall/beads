@@ -103,6 +103,50 @@ func GetMainRepoRoot() (string, error) {
 	return mainRepoRoot, nil
 }
 
+// GetRepoRoot returns the root directory of the current git repository.
+// Returns empty string if not in a git repository.
+//
+// This function is worktree-aware and handles Windows path normalization
+// (Git on Windows may return paths like /c/Users/... or C:/Users/...).
+// It also resolves symlinks to get the canonical path.
+func GetRepoRoot() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	root := strings.TrimSpace(string(output))
+
+	// Normalize Windows paths from Git
+	// Git on Windows may return /c/Users/... or C:/Users/...
+	root = NormalizePath(root)
+
+	// Resolve symlinks to get canonical path (fixes macOS /var -> /private/var)
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return root
+}
+
+// NormalizePath converts Git's Windows path formats to native format.
+// Git on Windows may return paths like /c/Users/... or C:/Users/...
+// This function converts them to native Windows format (C:\Users\...).
+// On non-Windows systems, this is a no-op.
+func NormalizePath(path string) string {
+	// Only apply Windows normalization on Windows
+	if filepath.Separator != '\\' {
+		return path
+	}
+
+	// Convert /c/Users/... to C:\Users\...
+	if len(path) >= 3 && path[0] == '/' && path[2] == '/' {
+		return strings.ToUpper(string(path[1])) + ":" + filepath.FromSlash(path[2:])
+	}
+
+	// Convert C:/Users/... to C:\Users\...
+	return filepath.FromSlash(path)
+}
+
 // getGitDirNoError is a helper that returns empty string on error
 // to avoid cluttering code with error handling for simple checks.
 func getGitDirNoError(flag string) string {

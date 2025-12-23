@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // ensureForkProtection prevents contributors from accidentally committing
@@ -16,8 +17,8 @@ import (
 // .beads/issues.jsonl to .git/info/exclude so it won't be staged.
 // This is a per-clone setting that doesn't modify tracked files.
 func ensureForkProtection() {
-	// Find git root (reuses existing findGitRoot from autoimport.go)
-	gitRoot := findGitRoot()
+	// Find git root
+	gitRoot := git.GetRepoRoot()
 	if gitRoot == "" {
 		return // Not in a git repo
 	}
