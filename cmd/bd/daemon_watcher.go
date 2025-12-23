@@ -30,6 +30,11 @@ type FileWatcher struct {
 	lastHeadExists bool
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup // Track goroutines for graceful shutdown (bd-jo38)
+	// Log deduplication: track last log times to avoid duplicate messages
+	lastFileLogTime   time.Time
+	lastGitRefLogTime time.Time
+	logDedupeWindow   time.Duration
+	logMu             sync.Mutex
 }
 
 // NewFileWatcher creates a file watcher for the given JSONL path.
@@ -37,10 +42,11 @@ type FileWatcher struct {
 // Falls back to polling mode if fsnotify fails (controlled by BEADS_WATCHER_FALLBACK env var).
 func NewFileWatcher(jsonlPath string, onChanged func()) (*FileWatcher, error) {
 	fw := &FileWatcher{
-		jsonlPath:    jsonlPath,
-		parentDir:    filepath.Dir(jsonlPath),
-		debouncer:    NewDebouncer(500*time.Millisecond, onChanged),
-		pollInterval: 5 * time.Second,
+		jsonlPath:       jsonlPath,
+		parentDir:       filepath.Dir(jsonlPath),
+		debouncer:       NewDebouncer(500*time.Millisecond, onChanged),
+		pollInterval:    5 * time.Second,
+		logDedupeWindow: 500 * time.Millisecond, // Deduplicate logs within this window
 	}
 
 	// Get initial file state for polling fallback
@@ -120,6 +126,30 @@ func NewFileWatcher(jsonlPath string, onChanged func()) (*FileWatcher, error) {
 	return fw, nil
 }
 
+// shouldLogFileChange returns true if enough time has passed since last file change log
+func (fw *FileWatcher) shouldLogFileChange() bool {
+	fw.logMu.Lock()
+	defer fw.logMu.Unlock()
+	now := time.Now()
+	if now.Sub(fw.lastFileLogTime) >= fw.logDedupeWindow {
+		fw.lastFileLogTime = now
+		return true
+	}
+	return false
+}
+
+// shouldLogGitRefChange returns true if enough time has passed since last git ref change log
+func (fw *FileWatcher) shouldLogGitRefChange() bool {
+	fw.logMu.Lock()
+	defer fw.logMu.Unlock()
+	now := time.Now()
+	if now.Sub(fw.lastGitRefLogTime) >= fw.logDedupeWindow {
+		fw.lastGitRefLogTime = now
+		return true
+	}
+	return false
+}
+
 // Start begins monitoring filesystem events or polling.
 // Runs in background goroutine until context is canceled.
 // Should only be called once per FileWatcher instance.
@@ -156,7 +186,9 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle JSONL write/chmod events
 				if event.Name == fw.jsonlPath && event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Chmod) != 0 {
-					log.log("File change detected: %s (op: %v)", event.Name, event.Op)
+					if fw.shouldLogFileChange() {
+						log.log("File change detected: %s", event.Name)
+					}
 					fw.debouncer.Trigger()
 					continue
 				}
@@ -179,7 +211,9 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle git ref changes (only events under gitRefsPath)
 				if event.Op&fsnotify.Write != 0 && strings.HasPrefix(event.Name, fw.gitRefsPath) {
-					log.log("Git ref change detected: %s", event.Name)
+					if fw.shouldLogGitRefChange() {
+						log.log("Git ref change detected: %s", event.Name)
+					}
 					fw.debouncer.Trigger()
 					continue
 				}
