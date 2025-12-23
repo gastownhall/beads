@@ -114,37 +114,23 @@ func TestParentChildValidation(t *testing.T) {
 }
 
 func TestRemoveDependency(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
-
-	// Create and link issues
-	issue1 := &types.Issue{Title: "First", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Second", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-
-	dep := &types.Dependency{
-		IssueID:     issue2.ID,
-		DependsOnID: issue1.ID,
-		Type:        types.DepBlocks,
-	}
-	store.AddDependency(ctx, dep, "test-user")
+	issue1 := env.CreateIssue("First")
+	issue2 := env.CreateIssue("Second")
+	env.AddDep(issue2, issue1)
 
 	// Remove the dependency
-	err := store.RemoveDependency(ctx, issue2.ID, issue1.ID, "test-user")
+	err := env.Store.RemoveDependency(env.Ctx, issue2.ID, issue1.ID, "test-user")
 	if err != nil {
 		t.Fatalf("RemoveDependency failed: %v", err)
 	}
 
 	// Verify dependency was removed
-	deps, err := store.GetDependencies(ctx, issue2.ID)
+	deps, err := env.Store.GetDependencies(env.Ctx, issue2.ID)
 	if err != nil {
 		t.Fatalf("GetDependencies failed: %v", err)
 	}
-
 	if len(deps) != 0 {
 		t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
 	}
@@ -192,29 +178,21 @@ func TestAddDependencyPreservesProvidedMetadata(t *testing.T) {
 }
 
 func TestGetDependents(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
+	// Create issues: issue2 and issue3 both depend on issue1
+	issue1 := env.CreateIssue("Foundation")
+	issue2 := env.CreateIssue("Feature A")
+	issue3 := env.CreateIssue("Feature B")
 
-	// Create issues: bd-2 and bd-3 both depend on bd-1
-	issue1 := &types.Issue{Title: "Foundation", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Feature A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue3 := &types.Issue{Title: "Feature B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-	store.CreateIssue(ctx, issue3, "test-user")
-
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue2.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
+	env.AddDep(issue2, issue1)
+	env.AddDep(issue3, issue1)
 
 	// Get dependents of issue1
-	dependents, err := store.GetDependents(ctx, issue1.ID)
+	dependents, err := env.Store.GetDependents(env.Ctx, issue1.ID)
 	if err != nil {
 		t.Fatalf("GetDependents failed: %v", err)
 	}
-
 	if len(dependents) != 2 {
 		t.Fatalf("Expected 2 dependents, got %d", len(dependents))
 	}
@@ -224,36 +202,27 @@ func TestGetDependents(t *testing.T) {
 	for _, dep := range dependents {
 		foundIDs[dep.ID] = true
 	}
-
 	if !foundIDs[issue2.ID] || !foundIDs[issue3.ID] {
 		t.Errorf("Expected dependents %s and %s", issue2.ID, issue3.ID)
 	}
 }
 
 func TestGetDependencyTree(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
+	// Create a chain: issue3 → issue2 → issue1
+	issue1 := env.CreateIssue("Level 0")
+	issue2 := env.CreateIssue("Level 1")
+	issue3 := env.CreateIssue("Level 2")
 
-	// Create a chain: bd-3 → bd-2 → bd-1
-	issue1 := &types.Issue{Title: "Level 0", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Level 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue3 := &types.Issue{Title: "Level 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-	store.CreateIssue(ctx, issue3, "test-user")
-
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue2.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue2.ID, Type: types.DepBlocks}, "test-user")
+	env.AddDep(issue2, issue1)
+	env.AddDep(issue3, issue2)
 
 	// Get tree starting from issue3
-	tree, err := store.GetDependencyTree(ctx, issue3.ID, 10, false, false)
+	tree, err := env.Store.GetDependencyTree(env.Ctx, issue3.ID, 10, false, false)
 	if err != nil {
 		t.Fatalf("GetDependencyTree failed: %v", err)
 	}
-
 	if len(tree) != 3 {
 		t.Fatalf("Expected 3 nodes in tree, got %d", len(tree))
 	}
@@ -263,15 +232,12 @@ func TestGetDependencyTree(t *testing.T) {
 	for _, node := range tree {
 		depthMap[node.ID] = node.Depth
 	}
-
 	if depthMap[issue3.ID] != 0 {
 		t.Errorf("Expected depth 0 for %s, got %d", issue3.ID, depthMap[issue3.ID])
 	}
-
 	if depthMap[issue2.ID] != 1 {
 		t.Errorf("Expected depth 1 for %s, got %d", issue2.ID, depthMap[issue2.ID])
 	}
-
 	if depthMap[issue1.ID] != 2 {
 		t.Errorf("Expected depth 2 for %s, got %d", issue1.ID, depthMap[issue1.ID])
 	}
