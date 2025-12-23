@@ -772,13 +772,11 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 // Helper types for testing
 
 func newTestSyncBranchLogger() (daemonLogger, *string) {
+	// Note: With slog, we can't easily capture formatted messages like before.
+	// For tests that need to verify log output, use strings.Builder and newTestLoggerWithWriter.
+	// This helper is kept for backward compatibility but messages won't be captured.
 	messages := ""
-	logger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			messages += "\n" + format
-		},
-	}
-	return logger, &messages
+	return newTestLogger(), &messages
 }
 
 // TestSyncBranchConfigChange tests changing sync.branch after worktree exists

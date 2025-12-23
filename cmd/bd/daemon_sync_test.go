@@ -335,11 +335,7 @@ func TestExportUpdatesMetadata(t *testing.T) {
 
 	// Update metadata using the actual daemon helper function (bd-ar2.3 fix)
 	// This verifies that updateExportMetadata (used by createExportFunc and createSyncFunc) works correctly
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// Verify metadata was set (renamed from last_import_hash to jsonl_content_hash - bd-39o)
@@ -438,11 +434,7 @@ func TestUpdateExportMetadataMultiRepo(t *testing.T) {
 	}
 
 	// Create mock logger
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 
 	// Update metadata for each repo with different keys (bd-ar2.2 multi-repo support)
 	updateExportMetadata(ctx, store, jsonlPath1, mockLogger, jsonlPath1)
@@ -554,11 +546,7 @@ func TestExportWithMultiRepoConfigUpdatesAllMetadata(t *testing.T) {
 
 	// Simulate multi-repo export flow (as in createExportFunc)
 	// This tests the full integration: getMultiRepoJSONLPaths -> getRepoKeyForPath -> updateExportMetadata
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 
 	// Simulate multi-repo mode with stable keys
 	multiRepoPaths := []string{primaryJSONL, additionalJSONL}
@@ -676,11 +664,7 @@ func TestUpdateExportMetadataInvalidKeySuffix(t *testing.T) {
 	}
 
 	// Create mock logger
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 
 	// Update metadata with keySuffix containing ':' (bd-web8: should be auto-sanitized)
 	// This simulates Windows absolute paths like "C:\Users\..."
