@@ -2,28 +2,31 @@
 set -e
 
 # =============================================================================
-# MOLECULE WORKFLOW (Recommended)
+# VERSION BUMP SCRIPT FOR BEADS
 # =============================================================================
 #
-# This script handles the mechanical version updates, but the full release
-# workflow is captured as a molecule. For guided, resumable releases:
+# This script handles all version bumping and local installation for beads
+# releases. It updates version numbers across all components and can install
+# everything locally for testing before pushing.
 #
+# QUICK START (for typical release):
+#
+#   # 1. Update CHANGELOG.md and cmd/bd/info.go with release notes (manual)
+#   # 2. Run version bump with all local installations:
+#   ./scripts/bump-version.sh X.Y.Z --commit --all
+#   # 3. Test locally, then push:
+#   git push origin main && git push origin vX.Y.Z
+#
+# WHAT --all DOES:
+#   --install          - Build bd and install to ~/go/bin AND ~/.local/bin
+#   --mcp-local        - Install beads-mcp from local source via uv/pip
+#   --restart-daemons  - Restart all bd daemons to pick up new version
+#
+# MOLECULE WORKFLOW (Alternative):
+#   For guided, resumable releases with multiple agents:
 #   bd template instantiate bd-6s61 --var version=X.Y.Z --assignee <identity>
 #
-# This creates child beads for each release step. The molecule survives
-# session restarts - any agent can pick up where another left off.
-#
-# The molecule (bd-6s61 "Version Bump: {{version}}") includes:
-#   1. Update CHANGELOG.md and info.go
-#   2. Run this script (bump-version.sh)
-#   3. Run tests and linting
-#   4. Commit, tag, push
-#   5. Update Homebrew formula
-#   6. Verify installation
-#
-# Until bd mol bond is implemented (bd-usro), use bd molecule instantiate.
-#
-# IMPORTANT: Run from mayor/rig to avoid git conflicts with bd sync
+# IMPORTANT: In Gas Town, run from mayor/rig to avoid git conflicts with bd sync
 # =============================================================================
 #
 # Gas Town agents share a beads database at mayor/rig/.beads/. The bd sync
@@ -32,7 +35,7 @@ set -e
 #
 # Always run releases from the rig root:
 #
-#   cd ~/gt/beads/mayor/rig && ./scripts/bump-version.sh X.Y.Z --commit --tag --push
+#   cd ~/gt/beads/mayor/rig && ./scripts/bump-version.sh X.Y.Z --commit --tag --push --all
 #
 # =============================================================================
 
@@ -44,26 +47,31 @@ NC='\033[0m' # No Color
 
 # Usage message
 usage() {
-    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install] [--upgrade-mcp]"
+    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install] [--upgrade-mcp] [--mcp-local] [--restart-daemons] [--all]"
     echo ""
     echo "Bump version across all beads components."
     echo ""
     echo "Arguments:"
-    echo "  <version>      Semantic version (e.g., 0.9.3, 1.0.0)"
-    echo "  --commit       Automatically create a git commit (optional)"
-    echo "  --tag          Create annotated git tag after commit (requires --commit)"
-    echo "  --push         Push commit and tag to origin (requires --commit and --tag)"
-    echo "  --install      Rebuild and install bd binary to GOPATH/bin after version bump"
-    echo "  --upgrade-mcp  Upgrade local beads-mcp installation via pip after version bump"
+    echo "  <version>        Semantic version (e.g., 0.9.3, 1.0.0)"
+    echo "  --commit         Automatically create a git commit (optional)"
+    echo "  --tag            Create annotated git tag after commit (requires --commit)"
+    echo "  --push           Push commit and tag to origin (requires --commit and --tag)"
+    echo "  --install        Rebuild and install bd binary to GOPATH/bin AND ~/.local/bin"
+    echo "  --upgrade-mcp    Upgrade local beads-mcp installation via pip after version bump"
+    echo "  --mcp-local      Install beads-mcp from local source (for pre-PyPI testing)"
+    echo "  --restart-daemons  Restart all bd daemons to pick up new version"
+    echo "  --all            Shorthand for --install --mcp-local --restart-daemons"
     echo ""
     echo "Examples:"
     echo "  $0 0.9.3                            # Update versions and show diff"
     echo "  $0 0.9.3 --install                  # Update versions and rebuild/install bd"
-    echo "  $0 0.9.3 --upgrade-mcp              # Update versions and upgrade beads-mcp"
+    echo "  $0 0.9.3 --upgrade-mcp              # Update versions and upgrade beads-mcp from PyPI"
+    echo "  $0 0.9.3 --mcp-local                # Update versions and install beads-mcp from local source"
     echo "  $0 0.9.3 --commit                   # Update versions and commit"
     echo "  $0 0.9.3 --commit --tag             # Update, commit, and tag"
     echo "  $0 0.9.3 --commit --tag --push      # Full release preparation"
-    echo "  $0 0.9.3 --commit --install --upgrade-mcp  # Update, commit, and install all"
+    echo "  $0 0.9.3 --all                      # Install bd, local MCP, and restart daemons"
+    echo "  $0 0.9.3 --commit --all             # Commit and install everything locally"
     exit 1
 }
 
@@ -137,6 +145,8 @@ main() {
     AUTO_PUSH=false
     AUTO_INSTALL=false
     AUTO_UPGRADE_MCP=false
+    AUTO_MCP_LOCAL=false
+    AUTO_RESTART_DAEMONS=false
 
     # Parse flags
     shift  # Remove version argument
@@ -156,6 +166,17 @@ main() {
                 ;;
             --upgrade-mcp)
                 AUTO_UPGRADE_MCP=true
+                ;;
+            --mcp-local)
+                AUTO_MCP_LOCAL=true
+                ;;
+            --restart-daemons)
+                AUTO_RESTART_DAEMONS=true
+                ;;
+            --all)
+                AUTO_INSTALL=true
+                AUTO_MCP_LOCAL=true
+                AUTO_RESTART_DAEMONS=true
                 ;;
             *)
                 echo -e "${RED}Error: Unknown option '$1'${NC}"
@@ -310,35 +331,47 @@ main() {
     # Auto-install if requested
     if [ "$AUTO_INSTALL" = true ]; then
         echo "Rebuilding and installing bd..."
-        if command -v make &> /dev/null; then
-            if make install; then
-                echo -e "${GREEN}✓ bd installed to $(go env GOPATH)/bin/bd${NC}"
-                echo ""
-                INSTALLED_VERSION=$($(go env GOPATH)/bin/bd --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-                if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ]; then
-                    echo -e "${GREEN}✓ Verified: bd --version reports $INSTALLED_VERSION${NC}"
-                else
-                    echo -e "${YELLOW}⚠ Warning: bd --version reports $INSTALLED_VERSION (expected $NEW_VERSION)${NC}"
-                    echo -e "${YELLOW}  You may need to restart your shell or check your PATH${NC}"
-                fi
-            else
-                echo -e "${RED}✗ make install failed${NC}"
-                exit 1
-            fi
+        GOPATH_BIN="$(go env GOPATH)/bin"
+        LOCAL_BIN="$HOME/.local/bin"
+
+        # Build the binary
+        if ! go build -o /tmp/bd-new ./cmd/bd; then
+            echo -e "${RED}✗ go build failed${NC}"
+            exit 1
+        fi
+
+        # Install to GOPATH/bin (typically ~/go/bin)
+        cp /tmp/bd-new "$GOPATH_BIN/bd"
+        echo -e "${GREEN}✓ bd installed to $GOPATH_BIN/bd${NC}"
+
+        # Install to ~/.local/bin if it exists or we can create it
+        if [ -d "$LOCAL_BIN" ] || mkdir -p "$LOCAL_BIN" 2>/dev/null; then
+            cp /tmp/bd-new "$LOCAL_BIN/bd"
+            echo -e "${GREEN}✓ bd installed to $LOCAL_BIN/bd${NC}"
         else
-            if go install ./cmd/bd; then
-                echo -e "${GREEN}✓ bd installed to $(go env GOPATH)/bin/bd${NC}"
-                echo ""
-                INSTALLED_VERSION=$($(go env GOPATH)/bin/bd --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-                if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ]; then
-                    echo -e "${GREEN}✓ Verified: bd --version reports $INSTALLED_VERSION${NC}"
-                else
-                    echo -e "${YELLOW}⚠ Warning: bd --version reports $INSTALLED_VERSION (expected $NEW_VERSION)${NC}"
-                    echo -e "${YELLOW}  You may need to restart your shell or check your PATH${NC}"
-                fi
+            echo -e "${YELLOW}⚠ Could not install to $LOCAL_BIN (directory doesn't exist)${NC}"
+        fi
+
+        # Clean up temp file
+        rm -f /tmp/bd-new
+
+        # Verify installation
+        echo ""
+        echo "Verifying installed versions..."
+        if [ -f "$GOPATH_BIN/bd" ]; then
+            GOPATH_VERSION=$("$GOPATH_BIN/bd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ "$GOPATH_VERSION" = "$NEW_VERSION" ]; then
+                echo -e "${GREEN}✓ $GOPATH_BIN/bd reports $GOPATH_VERSION${NC}"
             else
-                echo -e "${RED}✗ go install failed${NC}"
-                exit 1
+                echo -e "${YELLOW}⚠ $GOPATH_BIN/bd reports $GOPATH_VERSION (expected $NEW_VERSION)${NC}"
+            fi
+        fi
+        if [ -f "$LOCAL_BIN/bd" ]; then
+            LOCAL_VERSION=$("$LOCAL_BIN/bd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ "$LOCAL_VERSION" = "$NEW_VERSION" ]; then
+                echo -e "${GREEN}✓ $LOCAL_BIN/bd reports $LOCAL_VERSION${NC}"
+            else
+                echo -e "${YELLOW}⚠ $LOCAL_BIN/bd reports $LOCAL_VERSION (expected $NEW_VERSION)${NC}"
             fi
         fi
         echo ""
@@ -382,6 +415,77 @@ main() {
         else
             echo -e "${YELLOW}⚠ Neither pip nor uv found${NC}"
             echo -e "${YELLOW}  Install beads-mcp with: pip install beads-mcp${NC}"
+        fi
+        echo ""
+    fi
+
+    # Install MCP from local source if requested
+    if [ "$AUTO_MCP_LOCAL" = true ]; then
+        echo "Installing beads-mcp from local source..."
+        MCP_DIR="integrations/beads-mcp"
+
+        if [ ! -d "$MCP_DIR" ]; then
+            echo -e "${RED}✗ MCP directory not found: $MCP_DIR${NC}"
+            exit 1
+        fi
+
+        # Use uv tool for installation (preferred for CLI tools)
+        if command -v uv &> /dev/null; then
+            if uv tool install --reinstall "./$MCP_DIR"; then
+                echo -e "${GREEN}✓ beads-mcp installed from local source via uv${NC}"
+
+                # Verify the installed version
+                if command -v beads-mcp &> /dev/null; then
+                    LOCAL_MCP_VERSION=$(python -c "import beads_mcp; print(beads_mcp.__version__)" 2>/dev/null || echo "unknown")
+                    if [ "$LOCAL_MCP_VERSION" = "$NEW_VERSION" ]; then
+                        echo -e "${GREEN}✓ Verified: beads-mcp version is $LOCAL_MCP_VERSION${NC}"
+                    else
+                        echo -e "${YELLOW}⚠ beads-mcp version is $LOCAL_MCP_VERSION (expected $NEW_VERSION)${NC}"
+                    fi
+                fi
+            else
+                echo -e "${RED}✗ uv tool install failed${NC}"
+                echo -e "${YELLOW}  Try manually: uv tool install --reinstall ./$MCP_DIR${NC}"
+            fi
+        # Fallback to pip
+        elif command -v pip &> /dev/null; then
+            if pip install -e "./$MCP_DIR"; then
+                echo -e "${GREEN}✓ beads-mcp installed from local source via pip${NC}"
+                INSTALLED_MCP_VERSION=$(pip show beads-mcp 2>/dev/null | grep Version | awk '{print $2}')
+                if [ "$INSTALLED_MCP_VERSION" = "$NEW_VERSION" ]; then
+                    echo -e "${GREEN}✓ Verified: beads-mcp version is $INSTALLED_MCP_VERSION${NC}"
+                else
+                    echo -e "${YELLOW}⚠ beads-mcp version is $INSTALLED_MCP_VERSION (expected $NEW_VERSION)${NC}"
+                fi
+            else
+                echo -e "${RED}✗ pip install failed${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ Neither uv nor pip found${NC}"
+            echo -e "${YELLOW}  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
+        fi
+        echo ""
+    fi
+
+    # Restart daemons if requested
+    if [ "$AUTO_RESTART_DAEMONS" = true ]; then
+        echo "Restarting bd daemons..."
+
+        # Use the bd that was just installed (prefer GOPATH/bin which should be in PATH)
+        BD_CMD="bd"
+        if [ "$AUTO_INSTALL" = true ]; then
+            # Use the freshly installed binary
+            BD_CMD="$(go env GOPATH)/bin/bd"
+        fi
+
+        if command -v "$BD_CMD" &> /dev/null || [ -x "$BD_CMD" ]; then
+            if "$BD_CMD" daemons killall --json 2>/dev/null; then
+                echo -e "${GREEN}✓ All bd daemons killed (will auto-restart on next bd command)${NC}"
+            else
+                echo -e "${YELLOW}⚠ No daemons running or daemon killall failed${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ bd command not found, cannot restart daemons${NC}"
         fi
         echo ""
     fi
@@ -454,43 +558,50 @@ Generated by scripts/bump-version.sh"
         elif [ "$AUTO_TAG" = true ]; then
             echo "Next steps:"
             if [ "$AUTO_INSTALL" = false ]; then
-                echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary!"
+                echo -e "  ${YELLOW}--install${NC}  # Install bd to ~/go/bin AND ~/.local/bin"
             fi
-            if [ "$AUTO_UPGRADE_MCP" = false ]; then
-                echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
+            if [ "$AUTO_MCP_LOCAL" = false ]; then
+                echo -e "  ${YELLOW}--mcp-local${NC}  # Install beads-mcp from local source"
+            fi
+            if [ "$AUTO_RESTART_DAEMONS" = false ]; then
+                echo -e "  ${YELLOW}--restart-daemons${NC}  # Restart daemons to pick up new version"
             fi
             echo "  git push origin main"
             echo "  git push origin v$NEW_VERSION"
         else
             echo "Next steps:"
             if [ "$AUTO_INSTALL" = false ]; then
-                echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary!"
+                echo -e "  ${YELLOW}--install${NC}  # Install bd to ~/go/bin AND ~/.local/bin"
             fi
-            if [ "$AUTO_UPGRADE_MCP" = false ]; then
-                echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
+            if [ "$AUTO_MCP_LOCAL" = false ]; then
+                echo -e "  ${YELLOW}--mcp-local${NC}  # Install beads-mcp from local source"
+            fi
+            if [ "$AUTO_RESTART_DAEMONS" = false ]; then
+                echo -e "  ${YELLOW}--restart-daemons${NC}  # Restart daemons to pick up new version"
             fi
             echo "  git push origin main"
             echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
             echo "  git push origin v$NEW_VERSION"
         fi
     else
-        echo "Review the changes above. To commit:"
-        if [ "$AUTO_INSTALL" = false ]; then
-            echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary first!"
-            echo ""
-        fi
-        if [ "$AUTO_UPGRADE_MCP" = false ]; then
-            echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
-            echo ""
-        fi
-        echo "  git add -A"
-        echo "  git commit -m 'chore: Bump version to $NEW_VERSION'"
-        echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
-        echo "  git push origin main"
-        echo "  git push origin v$NEW_VERSION"
+        echo "Review the changes above."
         echo ""
-        echo "Or run with flags to automate:"
-        echo "  $0 $NEW_VERSION --commit --tag --push --install --upgrade-mcp"
+        echo "Quick local setup (use --all for all local steps):"
+        echo -e "  $0 $NEW_VERSION ${YELLOW}--all${NC}"
+        echo ""
+        echo "Or step by step:"
+        if [ "$AUTO_INSTALL" = false ]; then
+            echo -e "  ${YELLOW}--install${NC}         # Install bd to ~/go/bin AND ~/.local/bin"
+        fi
+        if [ "$AUTO_MCP_LOCAL" = false ]; then
+            echo -e "  ${YELLOW}--mcp-local${NC}       # Install beads-mcp from local source"
+        fi
+        if [ "$AUTO_RESTART_DAEMONS" = false ]; then
+            echo -e "  ${YELLOW}--restart-daemons${NC} # Restart daemons to pick up new version"
+        fi
+        echo ""
+        echo "Full release (with git commit/tag/push):"
+        echo "  $0 $NEW_VERSION --commit --tag --push --all"
     fi
 }
 

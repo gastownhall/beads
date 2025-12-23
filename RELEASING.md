@@ -113,17 +113,34 @@ Use the version bump script to update all version references and create the rele
 # Dry run - shows what will change
 ./scripts/bump-version.sh 0.22.0
 
-# Review the diff, then commit, tag, and push in one command
-./scripts/bump-version.sh 0.22.0 --commit --tag --push
+# Full release with all local installations
+./scripts/bump-version.sh 0.22.0 --commit --tag --push --all
 ```
+
+**Available flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--commit` | Create a git commit with version changes |
+| `--tag` | Create annotated git tag (requires --commit) |
+| `--push` | Push commit and tag to origin (requires --tag) |
+| `--install` | Build and install bd to `~/go/bin` AND `~/.local/bin` |
+| `--mcp-local` | Install beads-mcp from local source via uv/pip |
+| `--upgrade-mcp` | Upgrade beads-mcp from PyPI (after PyPI publish) |
+| `--restart-daemons` | Restart all bd daemons to pick up new version |
+| `--all` | Shorthand for `--install --mcp-local --restart-daemons` |
 
 This updates:
 - `cmd/bd/version.go` - CLI version constant
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
+- `integrations/beads-mcp/src/beads_mcp/__init__.py` - MCP Python version
 - `.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
+- `npm-package/package.json` - npm package version
+- `cmd/bd/templates/hooks/*` - Git hook versions
 - `README.md` - Documentation version
 - `PLUGIN.md` - Version requirements
+- `CHANGELOG.md` - Creates release entry from [Unreleased]
 
 The `--commit --tag --push` flags will:
 1. Create a git commit with all version changes
@@ -131,6 +148,20 @@ The `--commit --tag --push` flags will:
 3. Push both commit and tag to origin
 
 This triggers GitHub Actions to build release artifacts automatically.
+
+**Recommended workflow:**
+
+```bash
+# 1. Update CHANGELOG.md and cmd/bd/info.go with release notes (manual step)
+
+# 2. Bump version and install everything locally
+./scripts/bump-version.sh 0.22.0 --commit --all
+
+# 3. Test locally, then tag and push
+git tag -a v0.22.0 -m "Release v0.22.0"
+git push origin main
+git push origin v0.22.0
+```
 
 **Alternative (step-by-step):**
 
