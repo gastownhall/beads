@@ -64,7 +64,19 @@ Commands:
 // Wraps cloneSubgraph from template.go and returns InstantiateResult.
 // If ephemeral is true, spawned issues are marked for bulk deletion when closed.
 func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, vars map[string]string, assignee string, actorName string, ephemeral bool) (*InstantiateResult, error) {
-	return cloneSubgraph(ctx, s, subgraph, vars, assignee, actorName, ephemeral)
+	opts := CloneOptions{
+		Vars:     vars,
+		Assignee: assignee,
+		Actor:    actorName,
+		Wisp:     ephemeral,
+	}
+	return cloneSubgraph(ctx, s, subgraph, opts)
+}
+
+// spawnMoleculeWithOptions creates new issues from the proto using CloneOptions.
+// This allows full control over dynamic bonding, variable substitution, and wisp phase.
+func spawnMoleculeWithOptions(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, opts CloneOptions) (*InstantiateResult, error) {
+	return cloneSubgraph(ctx, s, subgraph, opts)
 }
 
 // printMoleculeTree prints the molecule structure as a tree

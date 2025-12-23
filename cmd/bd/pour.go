@@ -200,7 +200,7 @@ func runPour(cmd *cobra.Command, args []string) {
 		}
 
 		for _, attach := range attachments {
-			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, attachType, vars, actor)
+			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, attachType, vars, "", actor)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error attaching %s: %v\n", attach.id, err)
 				os.Exit(1)

@@ -41,9 +41,18 @@ Phase control:
   --pour  Force spawn as liquid (persistent), even when attaching to wisp
   --wisp  Force spawn as vapor (ephemeral), even when attaching to mol
 
+Dynamic bonding (Christmas Ornament pattern):
+  Use --ref to specify a custom child reference with variable substitution.
+  This creates IDs like "parent.child-ref" instead of random hashes.
+
+  Example:
+    bd mol bond mol-polecat-arm bd-patrol --ref arm-{{polecat_name}} --var polecat_name=ace
+    # Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
+
 Use cases:
   - Found important bug during patrol? Use --pour to persist it
   - Need ephemeral diagnostic on persistent feature? Use --wisp
+  - Spawning per-worker arms on a patrol? Use --ref for readable IDs
 
 Examples:
   bd mol bond mol-feature mol-deploy                    # Compound proto
@@ -51,7 +60,8 @@ Examples:
   bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
   bd mol bond bd-abc123 bd-def456                       # Join two molecules
   bd mol bond mol-critical-bug wisp-patrol --pour       # Persist found bug
-  bd mol bond mol-temp-check bd-feature --wisp          # Ephemeral diagnostic`,
+  bd mol bond mol-temp-check bd-feature --wisp          # Ephemeral diagnostic
+  bd mol bond mol-arm bd-patrol --ref arm-{{name}} --var name=ace  # Dynamic child ID`,
 	Args: cobra.ExactArgs(2),
 	Run:  runMolBond,
 }
@@ -88,6 +98,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
 	wisp, _ := cmd.Flags().GetBool("wisp")
 	pour, _ := cmd.Flags().GetBool("pour")
+	childRef, _ := cmd.Flags().GetString("ref")
 
 	// Validate phase flags are not both set
 	if wisp && pour {
@@ -170,6 +181,10 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		} else if pour {
 			fmt.Printf("  Phase override: liquid (--pour)\n")
 		}
+		if childRef != "" {
+			resolvedRef := substituteVariables(childRef, vars)
+			fmt.Printf("  Child ref: %s (resolved: %s)\n", childRef, resolvedRef)
+		}
 		if aIsProto && bIsProto {
 			fmt.Printf("  Result: compound proto\n")
 			if customTitle != "" {
@@ -178,13 +193,28 @@ func runMolBond(cmd *cobra.Command, args []string) {
 			if wisp || pour {
 				fmt.Printf("  Note: phase flags ignored for proto+proto (templates stay in permanent storage)\n")
 			}
+			if childRef != "" {
+				fmt.Printf("  Note: --ref ignored for proto+proto (use when bonding to molecule)\n")
+			}
 		} else if aIsProto || bIsProto {
 			fmt.Printf("  Result: spawn proto, attach to molecule\n")
 			if !wisp && !pour {
 				fmt.Printf("  Phase: follows target's phase\n")
 			}
+			if childRef != "" {
+				// Determine parent molecule
+				parentID := idB
+				if bIsProto {
+					parentID = idA
+				}
+				resolvedRef := substituteVariables(childRef, vars)
+				fmt.Printf("  Bonded ID: %s.%s\n", parentID, resolvedRef)
+			}
 		} else {
 			fmt.Printf("  Result: compound molecule\n")
+			if childRef != "" {
+				fmt.Printf("  Note: --ref ignored for mol+mol (use when bonding proto to molecule)\n")
+			}
 		}
 		return
 	}
@@ -197,9 +227,9 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		// Compound protos are templates - always use permanent storage
 		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
-		result, err = bondProtoMol(ctx, targetStore, issueA, issueB, bondType, vars, actor)
+		result, err = bondProtoMol(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor)
 	case !aIsProto && bIsProto:
-		result, err = bondMolProto(ctx, targetStore, issueA, issueB, bondType, vars, actor)
+		result, err = bondMolProto(ctx, targetStore, issueA, issueB, bondType, vars, childRef, actor)
 	default:
 		result, err = bondMolMol(ctx, targetStore, issueA, issueB, bondType, actor)
 	}
@@ -334,8 +364,9 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 	}, nil
 }
 
-// bondProtoMol bonds a proto to an existing molecule by spawning the proto
-func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, actorName string) (*BondResult, error) {
+// bondProtoMol bonds a proto to an existing molecule by spawning the proto.
+// If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
+func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string) (*BondResult, error) {
 	// Load proto subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, s, proto.ID)
 	if err != nil {
@@ -354,8 +385,21 @@ func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issu
 		return nil, fmt.Errorf("missing required variables: %s (use --var)", strings.Join(missingVars, ", "))
 	}
 
-	// Spawn the proto (wisp by default for molecule execution - bd-2vh3)
-	spawnResult, err := spawnMolecule(ctx, s, subgraph, vars, "", actorName, true)
+	// Build CloneOptions for spawning
+	opts := CloneOptions{
+		Vars:  vars,
+		Actor: actorName,
+		Wisp:  true, // wisp by default for molecule execution - bd-2vh3
+	}
+
+	// Dynamic bonding: use custom IDs if childRef is provided
+	if childRef != "" {
+		opts.ParentID = mol.ID
+		opts.ChildRef = childRef
+	}
+
+	// Spawn the proto with options
+	spawnResult, err := spawnMoleculeWithOptions(ctx, s, subgraph, opts)
 	if err != nil {
 		return nil, fmt.Errorf("spawning proto: %w", err)
 	}
@@ -400,9 +444,9 @@ func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issu
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)
-func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, actorName string) (*BondResult, error) {
+func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string) (*BondResult, error) {
 	// Same as bondProtoMol but with arguments swapped
-	return bondProtoMol(ctx, s, proto, mol, bondType, vars, actorName)
+	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName)
 }
 
 // bondMolMol bonds two molecules together
@@ -462,6 +506,7 @@ func init() {
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
 	molBondCmd.Flags().Bool("wisp", false, "Force spawn as vapor (ephemeral in .beads-wisp/)")
 	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent in .beads/)")
+	molBondCmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
 
 	molCmd.AddCommand(molBondCmd)
 }

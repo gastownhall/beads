@@ -343,7 +343,7 @@ func TestBondProtoMol(t *testing.T) {
 
 	// Bond proto to molecule
 	vars := map[string]string{"name": "auth-feature"}
-	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "test")
+	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "", "test")
 	if err != nil {
 		t.Fatalf("bondProtoMol failed: %v", err)
 	}
@@ -840,7 +840,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 	}
 
 	// Attach the second proto (simulating --attach flag behavior)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test")
 	if err != nil {
 		t.Fatalf("Failed to bond attachment: %v", err)
 	}
@@ -945,12 +945,12 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 	}
 
 	// Attach both protos (simulating --attach A --attach B)
-	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "test")
+	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "", "test")
 	if err != nil {
 		t.Fatalf("Failed to bond attachA: %v", err)
 	}
 
-	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "test")
+	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "", "test")
 	if err != nil {
 		t.Fatalf("Failed to bond attachB: %v", err)
 	}
@@ -1063,7 +1063,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 			}
 
 			// Bond with specified type
-			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "test")
+			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "", "test")
 			if err != nil {
 				t.Fatalf("Failed to bond: %v", err)
 			}
@@ -1228,7 +1228,7 @@ func TestSpawnVariableAggregation(t *testing.T) {
 
 	// Bond attachment with same variables
 	spawnedMol, _ := s.GetIssue(ctx, spawnResult.NewEpicID)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test")
 	if err != nil {
 		t.Fatalf("Failed to bond: %v", err)
 	}
@@ -2022,5 +2022,326 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	}
 	if result != nil {
 		t.Error("result should be nil for orphan issue")
+	}
+}
+
+// =============================================================================
+// Dynamic Bonding Tests (bd-xo1o.1)
+// =============================================================================
+
+// TestGenerateBondedID tests the custom ID generation for dynamic bonding
+func TestGenerateBondedID(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldID    string
+		rootID   string
+		opts     CloneOptions
+		wantID   string
+		wantErr  bool
+		errMatch string
+	}{
+		{
+			name:   "root issue with simple childRef",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace",
+		},
+		{
+			name:   "root issue with variable substitution",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-{{polecat_name}}",
+				Vars:     map[string]string{"polecat_name": "ace"},
+			},
+			wantID: "patrol-x7k.arm-ace",
+		},
+		{
+			name:   "child issue with relative ID",
+			oldID:  "mol-arm.capture",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace.capture",
+		},
+		{
+			name:   "nested child issue",
+			oldID:  "mol-arm.capture.sub",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace.capture.sub",
+		},
+		{
+			name:   "no parent ID returns empty (not a bonded operation)",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts:   CloneOptions{},
+			wantID: "",
+		},
+		{
+			name:   "empty childRef after substitution is error",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "{{missing_var}}",
+			},
+			wantErr:  true,
+			errMatch: "invalid childRef",
+		},
+		{
+			name:   "childRef with special chars is error",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm/ace",
+			},
+			wantErr:  true,
+			errMatch: "invalid childRef",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, err := generateBondedID(tt.oldID, tt.rootID, tt.opts)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("generateBondedID() expected error containing %q, got nil", tt.errMatch)
+				} else if !strings.Contains(err.Error(), tt.errMatch) {
+					t.Errorf("generateBondedID() error = %q, want error containing %q", err.Error(), tt.errMatch)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("generateBondedID() unexpected error: %v", err)
+				return
+			}
+
+			if gotID != tt.wantID {
+				t.Errorf("generateBondedID() = %q, want %q", gotID, tt.wantID)
+			}
+		})
+	}
+}
+
+// TestGetRelativeID tests extracting relative portion from child IDs
+func TestGetRelativeID(t *testing.T) {
+	tests := []struct {
+		name   string
+		oldID  string
+		rootID string
+		want   string
+	}{
+		{
+			name:   "same ID returns empty",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			want:   "",
+		},
+		{
+			name:   "child with single step",
+			oldID:  "mol-arm.capture",
+			rootID: "mol-arm",
+			want:   "capture",
+		},
+		{
+			name:   "child with nested steps",
+			oldID:  "mol-arm.capture.sub.deep",
+			rootID: "mol-arm",
+			want:   "capture.sub.deep",
+		},
+		{
+			name:   "unrelated IDs returns empty",
+			oldID:  "other-123",
+			rootID: "mol-arm",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getRelativeID(tt.oldID, tt.rootID)
+			if got != tt.want {
+				t.Errorf("getRelativeID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBondProtoMolWithRef tests dynamic bonding with custom child references
+func TestBondProtoMolWithRef(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a proto with child steps (mol-polecat-arm template)
+	protoRoot := &types.Issue{
+		Title:     "Polecat Arm: {{polecat_name}}",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, protoRoot, "test"); err != nil {
+		t.Fatalf("Failed to create proto root: %v", err)
+	}
+
+	// Add proto steps
+	protoCapture := &types.Issue{
+		Title:     "Capture {{polecat_name}}",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := s.CreateIssue(ctx, protoCapture, "test"); err != nil {
+		t.Fatalf("Failed to create proto capture: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     protoCapture.ID,
+		DependsOnID: protoRoot.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add proto dependency: %v", err)
+	}
+
+	// Create target molecule (patrol-xxx)
+	patrol := &types.Issue{
+		Title:     "Witness Patrol",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusInProgress,
+		Priority:  1,
+	}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("Failed to create patrol: %v", err)
+	}
+
+	// Bond proto to patrol with custom child ref
+	vars := map[string]string{"polecat_name": "ace"}
+	childRef := "arm-{{polecat_name}}"
+	result, err := bondProtoMol(ctx, s, protoRoot, patrol, types.BondTypeSequential, vars, childRef, "test")
+	if err != nil {
+		t.Fatalf("bondProtoMol failed: %v", err)
+	}
+
+	// Verify spawned count
+	if result.Spawned != 2 {
+		t.Errorf("Spawned = %d, want 2", result.Spawned)
+	}
+
+	// Verify root ID follows pattern: patrol.arm-ace
+	expectedRootID := patrol.ID + ".arm-ace"
+	if result.IDMapping[protoRoot.ID] != expectedRootID {
+		t.Errorf("Root ID = %q, want %q", result.IDMapping[protoRoot.ID], expectedRootID)
+	}
+
+	// Verify child ID follows pattern: patrol.arm-ace.relative
+	// The child's ID should be patrol.arm-ace.capture (but relative part depends on proto structure)
+	childID := result.IDMapping[protoCapture.ID]
+	if !strings.HasPrefix(childID, expectedRootID+".") {
+		t.Errorf("Child ID %q should start with %q", childID, expectedRootID+".")
+	}
+
+	// Verify the spawned issues exist and have correct titles
+	spawnedRoot, err := s.GetIssue(ctx, expectedRootID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned root: %v", err)
+	}
+	if !strings.Contains(spawnedRoot.Title, "ace") {
+		t.Errorf("Spawned root title %q should contain 'ace'", spawnedRoot.Title)
+	}
+}
+
+// TestBondProtoMolMultipleArms tests bonding multiple arms to the same parent
+func TestBondProtoMolMultipleArms(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create simple proto
+	proto := &types.Issue{
+		Title:     "Arm: {{name}}",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("Failed to create proto: %v", err)
+	}
+
+	// Create parent patrol
+	patrol := &types.Issue{
+		Title:     "Patrol",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+		Priority:  1,
+	}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("Failed to create patrol: %v", err)
+	}
+
+	// Bond arm-ace
+	varsAce := map[string]string{"name": "ace"}
+	resultAce, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsAce, "arm-{{name}}", "test")
+	if err != nil {
+		t.Fatalf("bondProtoMol (ace) failed: %v", err)
+	}
+
+	// Bond arm-nux
+	varsNux := map[string]string{"name": "nux"}
+	resultNux, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsNux, "arm-{{name}}", "test")
+	if err != nil {
+		t.Fatalf("bondProtoMol (nux) failed: %v", err)
+	}
+
+	// Verify IDs are correct and distinct
+	aceID := resultAce.IDMapping[proto.ID]
+	nuxID := resultNux.IDMapping[proto.ID]
+
+	expectedAceID := patrol.ID + ".arm-ace"
+	expectedNuxID := patrol.ID + ".arm-nux"
+
+	if aceID != expectedAceID {
+		t.Errorf("Ace ID = %q, want %q", aceID, expectedAceID)
+	}
+	if nuxID != expectedNuxID {
+		t.Errorf("Nux ID = %q, want %q", nuxID, expectedNuxID)
+	}
+
+	// Verify both exist
+	aceIssue, err := s.GetIssue(ctx, aceID)
+	if err != nil || aceIssue == nil {
+		t.Errorf("Ace issue not found: %v", err)
+	}
+	nuxIssue, err := s.GetIssue(ctx, nuxID)
+	if err != nil || nuxIssue == nil {
+		t.Errorf("Nux issue not found: %v", err)
 	}
 }

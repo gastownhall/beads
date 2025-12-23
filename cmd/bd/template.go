@@ -38,6 +38,21 @@ type InstantiateResult struct {
 	Created   int               `json:"created"`    // number of issues created
 }
 
+// CloneOptions controls how the subgraph is cloned during spawn/bond
+type CloneOptions struct {
+	Vars     map[string]string // Variable substitutions for {{key}} placeholders
+	Assignee string            // Assign the root epic to this agent/user
+	Actor    string            // Actor performing the operation
+	Wisp     bool              // If true, spawned issues are marked for bulk deletion
+
+	// Dynamic bonding fields (for Christmas Ornament pattern)
+	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
+	ChildRef string // Child reference with variables (e.g., "arm-{{polecat_name}}")
+}
+
+// bondedIDPattern validates bonded IDs (alphanumeric, dash, underscore, dot)
+var bondedIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
 var templateCmd = &cobra.Command{
 	Use:        "template",
 	GroupID:    "setup",
@@ -293,7 +308,13 @@ Example:
 		}
 
 		// Clone the subgraph (deprecated command, non-wisp for backwards compatibility)
-		result, err := cloneSubgraph(ctx, store, subgraph, vars, assignee, actor, false)
+		opts := CloneOptions{
+			Vars:     vars,
+			Assignee: assignee,
+			Actor:    actor,
+			Wisp:     false,
+		}
+		result, err := cloneSubgraph(ctx, store, subgraph, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error instantiating template: %v\n", err)
 			os.Exit(1)
@@ -451,10 +472,85 @@ func substituteVariables(text string, vars map[string]string) string {
 	})
 }
 
-// cloneSubgraph creates new issues from the template with variable substitution
-// If assignee is non-empty, it will be set on the root epic
-// If wisp is true, spawned issues are marked for bulk deletion when closed (bd-2vh3)
-func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, vars map[string]string, assignee string, actorName string, wisp bool) (*InstantiateResult, error) {
+// generateBondedID creates a custom ID for dynamically bonded molecules.
+// When bonding a proto to a parent molecule, this generates IDs like:
+//   - Root: parent.childref (e.g., "patrol-x7k.arm-ace")
+//   - Children: parent.childref.step (e.g., "patrol-x7k.arm-ace.capture")
+//
+// The childRef is variable-substituted before use.
+// Returns empty string if not a bonded operation (opts.ParentID empty).
+func generateBondedID(oldID string, rootID string, opts CloneOptions) (string, error) {
+	if opts.ParentID == "" {
+		return "", nil // Not a bonded operation
+	}
+
+	// Substitute variables in childRef
+	childRef := substituteVariables(opts.ChildRef, opts.Vars)
+
+	// Validate childRef after substitution
+	if childRef == "" {
+		return "", fmt.Errorf("childRef is empty after variable substitution")
+	}
+	if !bondedIDPattern.MatchString(childRef) {
+		return "", fmt.Errorf("invalid childRef '%s': must be alphanumeric, dash, underscore, or dot only", childRef)
+	}
+
+	if oldID == rootID {
+		// Root issue: parent.childref
+		newID := fmt.Sprintf("%s.%s", opts.ParentID, childRef)
+		return newID, nil
+	}
+
+	// Child issue: parent.childref.relative
+	// Extract the relative portion of the old ID (part after root)
+	relativeID := getRelativeID(oldID, rootID)
+	if relativeID == "" {
+		// No hierarchical relationship - use a suffix from the old ID to ensure uniqueness.
+		// Extract the last part of the old ID (after any prefix or dash)
+		suffix := extractIDSuffix(oldID)
+		newID := fmt.Sprintf("%s.%s.%s", opts.ParentID, childRef, suffix)
+		return newID, nil
+	}
+
+	newID := fmt.Sprintf("%s.%s.%s", opts.ParentID, childRef, relativeID)
+	return newID, nil
+}
+
+// extractIDSuffix extracts a suffix from an ID for use when IDs aren't hierarchical.
+// For "patrol-abc123", returns "abc123".
+// For "bd-xyz.1", returns "1".
+// This ensures child IDs remain unique when bonding.
+func extractIDSuffix(id string) string {
+	// First try to get the part after the last dot (for hierarchical IDs)
+	if lastDot := strings.LastIndex(id, "."); lastDot >= 0 {
+		return id[lastDot+1:]
+	}
+	// Otherwise, get the part after the last dash (for prefix-hash IDs)
+	if lastDash := strings.LastIndex(id, "-"); lastDash >= 0 {
+		return id[lastDash+1:]
+	}
+	// Fallback: use the whole ID
+	return id
+}
+
+// getRelativeID extracts the relative portion of a child ID from its parent.
+// For example: getRelativeID("bd-abc.step1.sub", "bd-abc") returns "step1.sub"
+// Returns empty string if oldID equals rootID or doesn't start with rootID.
+func getRelativeID(oldID, rootID string) string {
+	if oldID == rootID {
+		return ""
+	}
+	// Check if oldID starts with rootID followed by a dot
+	prefix := rootID + "."
+	if strings.HasPrefix(oldID, prefix) {
+		return oldID[len(prefix):]
+	}
+	return ""
+}
+
+// cloneSubgraph creates new issues from the template with variable substitution.
+// Uses CloneOptions to control all spawn/bond behavior including dynamic bonding.
+func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -468,28 +564,37 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 		for _, oldIssue := range subgraph.Issues {
 			// Determine assignee: use override for root epic, otherwise keep template's
 			issueAssignee := oldIssue.Assignee
-			if oldIssue.ID == subgraph.Root.ID && assignee != "" {
-				issueAssignee = assignee
+			if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
+				issueAssignee = opts.Assignee
 			}
 
 			newIssue := &types.Issue{
-				// Don't set ID - let the system generate it
-				Title:              substituteVariables(oldIssue.Title, vars),
-				Description:        substituteVariables(oldIssue.Description, vars),
-				Design:             substituteVariables(oldIssue.Design, vars),
-				AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, vars),
-				Notes:              substituteVariables(oldIssue.Notes, vars),
+				// ID will be set below based on bonding options
+				Title:              substituteVariables(oldIssue.Title, opts.Vars),
+				Description:        substituteVariables(oldIssue.Description, opts.Vars),
+				Design:             substituteVariables(oldIssue.Design, opts.Vars),
+				AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
+				Notes:              substituteVariables(oldIssue.Notes, opts.Vars),
 				Status:             types.StatusOpen, // Always start fresh
 				Priority:           oldIssue.Priority,
 				IssueType:          oldIssue.IssueType,
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Wisp:               wisp, // bd-2vh3: mark for cleanup when closed
+				Wisp:               opts.Wisp, // bd-2vh3: mark for cleanup when closed
 				CreatedAt:          time.Now(),
 				UpdatedAt:          time.Now(),
 			}
 
-			if err := tx.CreateIssue(ctx, newIssue, actorName); err != nil {
+			// Generate custom ID for dynamic bonding if ParentID is set
+			if opts.ParentID != "" {
+				bondedID, err := generateBondedID(oldIssue.ID, subgraph.Root.ID, opts)
+				if err != nil {
+					return fmt.Errorf("failed to generate bonded ID for %s: %w", oldIssue.ID, err)
+				}
+				newIssue.ID = bondedID
+			}
+
+			if err := tx.CreateIssue(ctx, newIssue, opts.Actor); err != nil {
 				return fmt.Errorf("failed to create issue from %s: %w", oldIssue.ID, err)
 			}
 
@@ -509,7 +614,7 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				DependsOnID: newToID,
 				Type:        dep.Type,
 			}
-			if err := tx.AddDependency(ctx, newDep, actorName); err != nil {
+			if err := tx.AddDependency(ctx, newDep, opts.Actor); err != nil {
 				return fmt.Errorf("failed to create dependency: %w", err)
 			}
 		}
