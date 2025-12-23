@@ -221,8 +221,13 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 			return fmt.Errorf("failed to record event: %w", err)
 		}
 
-		// Mark both issues as dirty for incremental export
-		if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
+		// Mark issues as dirty for incremental export
+		// For external refs, only mark the source issue (target doesn't exist locally)
+		issueIDsToMark := []string{issueID}
+		if !strings.HasPrefix(dependsOnID, "external:") {
+			issueIDsToMark = append(issueIDsToMark, dependsOnID)
+		}
+		if err := markIssuesDirtyTx(ctx, tx, issueIDsToMark); err != nil {
 			return wrapDBError("mark issues dirty after removing dependency", err)
 		}
 

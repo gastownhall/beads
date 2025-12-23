@@ -4,6 +4,7 @@ package types
 import (
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,6 +55,10 @@ type Issue struct {
 
 	// Bonding fields (bd-rnnr): compound molecule lineage
 	BondedFrom []BondRef `json:"bonded_from,omitempty"` // For compounds: constituent protos
+
+	// HOP fields (bd-7pwh): entity tracking for CV chains
+	Creator     *EntityRef   `json:"creator,omitempty"`     // Who created this issue (human, agent, or org)
+	Validations []Validation `json:"validations,omitempty"` // Who validated/approved this work
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -101,6 +106,38 @@ func (i *Issue) ComputeContentHash() string {
 		h.Write([]byte(br.BondType))
 		h.Write([]byte{0})
 		h.Write([]byte(br.BondPoint))
+		h.Write([]byte{0})
+	}
+	// Hash creator for HOP entity tracking (bd-m7ib)
+	if i.Creator != nil {
+		h.Write([]byte(i.Creator.Name))
+		h.Write([]byte{0})
+		h.Write([]byte(i.Creator.Platform))
+		h.Write([]byte{0})
+		h.Write([]byte(i.Creator.Org))
+		h.Write([]byte{0})
+		h.Write([]byte(i.Creator.ID))
+		h.Write([]byte{0})
+	}
+	// Hash validations for HOP proof-of-stake (bd-du9h)
+	for _, v := range i.Validations {
+		if v.Validator != nil {
+			h.Write([]byte(v.Validator.Name))
+			h.Write([]byte{0})
+			h.Write([]byte(v.Validator.Platform))
+			h.Write([]byte{0})
+			h.Write([]byte(v.Validator.Org))
+			h.Write([]byte{0})
+			h.Write([]byte(v.Validator.ID))
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(v.Outcome))
+		h.Write([]byte{0})
+		h.Write([]byte(v.Timestamp.Format(time.RFC3339)))
+		h.Write([]byte{0})
+		if v.Score != nil {
+			h.Write([]byte(fmt.Sprintf("%f", *v.Score)))
+		}
 		h.Write([]byte{0})
 	}
 
@@ -576,4 +613,119 @@ func (i *Issue) IsCompound() bool {
 // Returns nil for non-compound issues.
 func (i *Issue) GetConstituents() []BondRef {
 	return i.BondedFrom
+}
+
+// EntityRef is a structured reference to an entity (human, agent, or org).
+// This is the foundation for HOP entity tracking and CV chains.
+// Can be rendered as a URI: entity://hop/<platform>/<org>/<id>
+//
+// Example usage:
+//
+//	ref := &EntityRef{
+//	    Name:     "polecat/Nux",
+//	    Platform: "gastown",
+//	    Org:      "steveyegge",
+//	    ID:       "polecat-nux",
+//	}
+//	uri := ref.URI() // "entity://hop/gastown/steveyegge/polecat-nux"
+type EntityRef struct {
+	// Name is the human-readable identifier (e.g., "polecat/Nux", "mayor")
+	Name string `json:"name,omitempty"`
+
+	// Platform identifies the execution context (e.g., "gastown", "github")
+	Platform string `json:"platform,omitempty"`
+
+	// Org identifies the organization (e.g., "steveyegge", "anthropics")
+	Org string `json:"org,omitempty"`
+
+	// ID is the unique identifier within the platform/org (e.g., "polecat-nux")
+	ID string `json:"id,omitempty"`
+}
+
+// IsEmpty returns true if all fields are empty.
+func (e *EntityRef) IsEmpty() bool {
+	if e == nil {
+		return true
+	}
+	return e.Name == "" && e.Platform == "" && e.Org == "" && e.ID == ""
+}
+
+// URI returns the entity as a HOP URI.
+// Format: entity://hop/<platform>/<org>/<id>
+// Returns empty string if Platform, Org, or ID is missing.
+func (e *EntityRef) URI() string {
+	if e == nil || e.Platform == "" || e.Org == "" || e.ID == "" {
+		return ""
+	}
+	return fmt.Sprintf("entity://hop/%s/%s/%s", e.Platform, e.Org, e.ID)
+}
+
+// String returns a human-readable representation.
+// Prefers Name if set, otherwise returns URI or ID.
+func (e *EntityRef) String() string {
+	if e == nil {
+		return ""
+	}
+	if e.Name != "" {
+		return e.Name
+	}
+	if uri := e.URI(); uri != "" {
+		return uri
+	}
+	return e.ID
+}
+
+// Validation records who validated/approved work completion.
+// This is core to HOP's proof-of-stake concept - validators stake
+// their reputation on approvals.
+type Validation struct {
+	// Validator is who approved/rejected the work
+	Validator *EntityRef `json:"validator"`
+
+	// Outcome is the validation result: accepted, rejected, revision_requested
+	Outcome string `json:"outcome"`
+
+	// Timestamp is when the validation occurred
+	Timestamp time.Time `json:"timestamp"`
+
+	// Score is an optional quality score (0.0-1.0)
+	Score *float32 `json:"score,omitempty"`
+}
+
+// Validation outcome constants
+const (
+	ValidationAccepted          = "accepted"
+	ValidationRejected          = "rejected"
+	ValidationRevisionRequested = "revision_requested"
+)
+
+// IsValidOutcome checks if the outcome is a known validation outcome.
+func (v *Validation) IsValidOutcome() bool {
+	switch v.Outcome {
+	case ValidationAccepted, ValidationRejected, ValidationRevisionRequested:
+		return true
+	}
+	return false
+}
+
+// ParseEntityURI parses a HOP entity URI into an EntityRef.
+// Format: entity://hop/<platform>/<org>/<id>
+// Returns nil and error if the URI is invalid.
+func ParseEntityURI(uri string) (*EntityRef, error) {
+	const prefix = "entity://hop/"
+	if !strings.HasPrefix(uri, prefix) {
+		return nil, fmt.Errorf("invalid entity URI: must start with %q", prefix)
+	}
+
+	rest := uri[len(prefix):]
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return nil, fmt.Errorf("invalid entity URI: expected entity://hop/<platform>/<org>/<id>, got %q", uri)
+	}
+
+	return &EntityRef{
+		Platform: parts[0],
+		Org:      parts[1],
+		ID:       parts[2],
+	}, nil
 }

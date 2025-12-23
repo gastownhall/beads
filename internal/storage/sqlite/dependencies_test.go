@@ -1610,3 +1610,50 @@ func TestDetectCycles_RelatesTypeAllowsBidirectionalWithoutCycleReport(t *testin
 		t.Error("Expected B to relate-to A")
 	}
 }
+
+// TestRemoveDependencyExternal verifies that removing an external dependency
+// doesn't cause FK violation (bd-a3sj). External refs like external:project:capability
+// don't exist in the issues table, so we must not mark them as dirty.
+func TestRemoveDependencyExternal(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create an issue
+	issue := &types.Issue{
+		Title:     "Issue with external dep",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Add an external dependency
+	externalRef := "external:other-project:some-capability"
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: externalRef,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// This should NOT cause FK violation (the bug was marking external ref as dirty)
+	err := store.RemoveDependency(ctx, issue.ID, externalRef, "test-user")
+	if err != nil {
+		t.Fatalf("RemoveDependency on external ref should succeed, got: %v", err)
+	}
+
+	// Verify dependency was actually removed
+	deps, err := store.GetDependencyRecords(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords failed: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
+	}
+}

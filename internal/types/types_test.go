@@ -959,3 +959,311 @@ func TestSetDefaults(t *testing.T) {
 		})
 	}
 }
+
+// EntityRef tests (bd-nmch: HOP entity tracking foundation)
+
+func TestEntityRefIsEmpty(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    *EntityRef
+		expect bool
+	}{
+		{"nil ref", nil, true},
+		{"empty ref", &EntityRef{}, true},
+		{"only name", &EntityRef{Name: "test"}, false},
+		{"only platform", &EntityRef{Platform: "gastown"}, false},
+		{"only org", &EntityRef{Org: "steveyegge"}, false},
+		{"only id", &EntityRef{ID: "polecat-nux"}, false},
+		{"full ref", &EntityRef{Name: "polecat/Nux", Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ref.IsEmpty(); got != tt.expect {
+				t.Errorf("EntityRef.IsEmpty() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestEntityRefURI(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    *EntityRef
+		expect string
+	}{
+		{"nil ref", nil, ""},
+		{"empty ref", &EntityRef{}, ""},
+		{"missing platform", &EntityRef{Org: "steveyegge", ID: "polecat-nux"}, ""},
+		{"missing org", &EntityRef{Platform: "gastown", ID: "polecat-nux"}, ""},
+		{"missing id", &EntityRef{Platform: "gastown", Org: "steveyegge"}, ""},
+		{"full ref", &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}, "entity://hop/gastown/steveyegge/polecat-nux"},
+		{"with name", &EntityRef{Name: "polecat/Nux", Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}, "entity://hop/gastown/steveyegge/polecat-nux"},
+		{"github platform", &EntityRef{Platform: "github", Org: "anthropics", ID: "claude-code"}, "entity://hop/github/anthropics/claude-code"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ref.URI(); got != tt.expect {
+				t.Errorf("EntityRef.URI() = %q, want %q", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestEntityRefString(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    *EntityRef
+		expect string
+	}{
+		{"nil ref", nil, ""},
+		{"empty ref", &EntityRef{}, ""},
+		{"only name", &EntityRef{Name: "polecat/Nux"}, "polecat/Nux"},
+		{"full ref with name", &EntityRef{Name: "polecat/Nux", Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}, "polecat/Nux"},
+		{"full ref without name", &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}, "entity://hop/gastown/steveyegge/polecat-nux"},
+		{"only id", &EntityRef{ID: "polecat-nux"}, "polecat-nux"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ref.String(); got != tt.expect {
+				t.Errorf("EntityRef.String() = %q, want %q", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestParseEntityURI(t *testing.T) {
+	tests := []struct {
+		name      string
+		uri       string
+		expect    *EntityRef
+		expectErr bool
+	}{
+		{
+			name:   "valid URI",
+			uri:    "entity://hop/gastown/steveyegge/polecat-nux",
+			expect: &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"},
+		},
+		{
+			name:   "github URI",
+			uri:    "entity://hop/github/anthropics/claude-code",
+			expect: &EntityRef{Platform: "github", Org: "anthropics", ID: "claude-code"},
+		},
+		{
+			name:   "id with slashes",
+			uri:    "entity://hop/gastown/steveyegge/polecat/nux",
+			expect: &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "polecat/nux"},
+		},
+		{
+			name:      "wrong prefix",
+			uri:       "beads://hop/gastown/steveyegge/polecat-nux",
+			expectErr: true,
+		},
+		{
+			name:      "missing hop",
+			uri:       "entity://gastown/steveyegge/polecat-nux",
+			expectErr: true,
+		},
+		{
+			name:      "too few parts",
+			uri:       "entity://hop/gastown/steveyegge",
+			expectErr: true,
+		},
+		{
+			name:      "empty platform",
+			uri:       "entity://hop//steveyegge/polecat-nux",
+			expectErr: true,
+		},
+		{
+			name:      "empty org",
+			uri:       "entity://hop/gastown//polecat-nux",
+			expectErr: true,
+		},
+		{
+			name:      "empty id",
+			uri:       "entity://hop/gastown/steveyegge/",
+			expectErr: true,
+		},
+		{
+			name:      "empty string",
+			uri:       "",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseEntityURI(tt.uri)
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("ParseEntityURI(%q) expected error, got nil", tt.uri)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ParseEntityURI(%q) unexpected error: %v", tt.uri, err)
+				return
+			}
+			if got.Platform != tt.expect.Platform || got.Org != tt.expect.Org || got.ID != tt.expect.ID {
+				t.Errorf("ParseEntityURI(%q) = %+v, want %+v", tt.uri, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestEntityRefRoundTrip(t *testing.T) {
+	// Test that URI() and ParseEntityURI() are inverses
+	original := &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"}
+	uri := original.URI()
+	parsed, err := ParseEntityURI(uri)
+	if err != nil {
+		t.Fatalf("ParseEntityURI(%q) error: %v", uri, err)
+	}
+	if parsed.Platform != original.Platform || parsed.Org != original.Org || parsed.ID != original.ID {
+		t.Errorf("Round trip failed: got %+v, want %+v", parsed, original)
+	}
+}
+
+func TestComputeContentHashWithCreator(t *testing.T) {
+	// Test that Creator field affects the content hash (bd-m7ib)
+	issue1 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusOpen,
+		Priority:  2,
+		IssueType: TypeTask,
+	}
+
+	issue2 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusOpen,
+		Priority:  2,
+		IssueType: TypeTask,
+		Creator:   &EntityRef{Name: "polecat/Nux", Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"},
+	}
+
+	hash1 := issue1.ComputeContentHash()
+	hash2 := issue2.ComputeContentHash()
+
+	if hash1 == hash2 {
+		t.Error("Expected different hash when Creator is set")
+	}
+
+	// Same creator should produce same hash
+	issue3 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusOpen,
+		Priority:  2,
+		IssueType: TypeTask,
+		Creator:   &EntityRef{Name: "polecat/Nux", Platform: "gastown", Org: "steveyegge", ID: "polecat-nux"},
+	}
+
+	hash3 := issue3.ComputeContentHash()
+	if hash2 != hash3 {
+		t.Error("Expected same hash for identical Creator")
+	}
+}
+
+// Validation tests (bd-du9h: HOP proof-of-stake)
+
+func TestValidationIsValidOutcome(t *testing.T) {
+	tests := []struct {
+		outcome string
+		valid   bool
+	}{
+		{ValidationAccepted, true},
+		{ValidationRejected, true},
+		{ValidationRevisionRequested, true},
+		{"unknown", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.outcome, func(t *testing.T) {
+			v := &Validation{Outcome: tt.outcome}
+			if got := v.IsValidOutcome(); got != tt.valid {
+				t.Errorf("Validation{Outcome: %q}.IsValidOutcome() = %v, want %v", tt.outcome, got, tt.valid)
+			}
+		})
+	}
+}
+
+func TestComputeContentHashWithValidations(t *testing.T) {
+	// Test that Validations field affects the content hash (bd-du9h)
+	ts := time.Date(2025, 12, 22, 10, 30, 0, 0, time.UTC)
+
+	issue1 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusClosed,
+		Priority:  2,
+		IssueType: TypeTask,
+		ClosedAt:  &ts,
+	}
+
+	issue2 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusClosed,
+		Priority:  2,
+		IssueType: TypeTask,
+		ClosedAt:  &ts,
+		Validations: []Validation{
+			{
+				Validator: &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "refinery"},
+				Outcome:   ValidationAccepted,
+				Timestamp: ts,
+			},
+		},
+	}
+
+	hash1 := issue1.ComputeContentHash()
+	hash2 := issue2.ComputeContentHash()
+
+	if hash1 == hash2 {
+		t.Error("Expected different hash when Validations is set")
+	}
+
+	// Same validations should produce same hash
+	issue3 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusClosed,
+		Priority:  2,
+		IssueType: TypeTask,
+		ClosedAt:  &ts,
+		Validations: []Validation{
+			{
+				Validator: &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "refinery"},
+				Outcome:   ValidationAccepted,
+				Timestamp: ts,
+			},
+		},
+	}
+
+	hash3 := issue3.ComputeContentHash()
+	if hash2 != hash3 {
+		t.Error("Expected same hash for identical Validations")
+	}
+
+	// Test with score
+	score := float32(0.95)
+	issue4 := Issue{
+		Title:     "Test Issue",
+		Status:    StatusClosed,
+		Priority:  2,
+		IssueType: TypeTask,
+		ClosedAt:  &ts,
+		Validations: []Validation{
+			{
+				Validator: &EntityRef{Platform: "gastown", Org: "steveyegge", ID: "refinery"},
+				Outcome:   ValidationAccepted,
+				Timestamp: ts,
+				Score:     &score,
+			},
+		},
+	}
+
+	hash4 := issue4.ComputeContentHash()
+	if hash2 == hash4 {
+		t.Error("Expected different hash when Score is added")
+	}
+}
