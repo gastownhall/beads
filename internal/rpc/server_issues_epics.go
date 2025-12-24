@@ -350,7 +350,7 @@ func (s *Server) handleCreate(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationCreate, issue.ID)
+	s.emitMutation(MutationCreate, issue.ID, issue.Title, issue.Assignee)
 
 	data, _ := json.Marshal(issue)
 	return Response{
@@ -470,11 +470,13 @@ func (s *Server) handleUpdate(req *Request) Response {
 			s.emitRichMutation(MutationEvent{
 				Type:      MutationStatus,
 				IssueID:   updateArgs.ID,
+				Title:     issue.Title,
+				Assignee:  issue.Assignee,
 				OldStatus: string(issue.Status),
 				NewStatus: *updateArgs.Status,
 			})
 		} else {
-			s.emitMutation(MutationUpdate, updateArgs.ID)
+			s.emitMutation(MutationUpdate, updateArgs.ID, issue.Title, issue.Assignee)
 		}
 	}
 
@@ -544,6 +546,8 @@ func (s *Server) handleClose(req *Request) Response {
 	s.emitRichMutation(MutationEvent{
 		Type:      MutationStatus,
 		IssueID:   closeArgs.ID,
+		Title:     issue.Title,
+		Assignee:  issue.Assignee,
 		OldStatus: oldStatus,
 		NewStatus: "closed",
 	})
@@ -640,7 +644,7 @@ func (s *Server) handleDelete(req *Request) Response {
 		}
 
 		// Emit mutation event for event-driven daemon
-		s.emitMutation(MutationDelete, issueID)
+		s.emitMutation(MutationDelete, issueID, issue.Title, issue.Assignee)
 		deletedCount++
 	}
 
@@ -1421,7 +1425,7 @@ func (s *Server) handleGateCreate(req *Request) Response {
 	}
 
 	// Emit mutation event
-	s.emitMutation(MutationCreate, gate.ID)
+	s.emitMutation(MutationCreate, gate.ID, gate.Title, gate.Assignee)
 
 	data, _ := json.Marshal(GateCreateResult{ID: gate.ID})
 	return Response{
@@ -1702,7 +1706,7 @@ func (s *Server) handleGateWait(req *Request) Response {
 		}
 
 		// Emit mutation event
-		s.emitMutation(MutationUpdate, gateID)
+		s.emitMutation(MutationUpdate, gateID, gate.Title, gate.Assignee)
 	}
 
 	data, _ := json.Marshal(GateWaitResult{AddedCount: addedCount})

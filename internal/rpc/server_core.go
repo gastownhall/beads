@@ -80,6 +80,8 @@ const (
 type MutationEvent struct {
 	Type      string    // One of the Mutation* constants
 	IssueID   string    // e.g., "bd-42"
+	Title     string    // Issue title for display context (may be empty for some operations)
+	Assignee  string    // Issue assignee for display context (may be empty)
 	Timestamp time.Time
 	// Optional metadata for richer events (used by status, bonded, etc.)
 	OldStatus string `json:"old_status,omitempty"` // Previous status (for status events)
@@ -138,10 +140,13 @@ func NewServer(socketPath string, store storage.Storage, workspacePath string, d
 // emitMutation sends a mutation event to the daemon's event-driven loop.
 // Non-blocking: drops event if channel is full (sync will happen eventually).
 // Also stores in recent mutations buffer for polling.
-func (s *Server) emitMutation(eventType, issueID string) {
+// Title and assignee provide context for activity feeds; pass empty strings if unknown.
+func (s *Server) emitMutation(eventType, issueID, title, assignee string) {
 	s.emitRichMutation(MutationEvent{
-		Type:    eventType,
-		IssueID: issueID,
+		Type:     eventType,
+		IssueID:  issueID,
+		Title:    title,
+		Assignee: assignee,
 	})
 }
 

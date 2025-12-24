@@ -13,7 +13,7 @@ func TestEmitMutation(t *testing.T) {
 	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
 
 	// Emit a mutation
-	server.emitMutation(MutationCreate, "bd-123")
+	server.emitMutation(MutationCreate, "bd-123", "Test Issue", "")
 
 	// Check that mutation was stored in buffer
 	mutations := server.GetRecentMutations(0)
@@ -45,14 +45,14 @@ func TestGetRecentMutations_TimestampFiltering(t *testing.T) {
 	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
 
 	// Emit mutations with delays
-	server.emitMutation(MutationCreate, "bd-1")
+	server.emitMutation(MutationCreate, "bd-1", "Issue 1", "")
 	time.Sleep(10 * time.Millisecond)
 
 	checkpoint := time.Now().UnixMilli()
 	time.Sleep(10 * time.Millisecond)
 
-	server.emitMutation(MutationUpdate, "bd-2")
-	server.emitMutation(MutationUpdate, "bd-3")
+	server.emitMutation(MutationUpdate, "bd-2", "Issue 2", "")
+	server.emitMutation(MutationUpdate, "bd-3", "Issue 3", "")
 
 	// Get mutations after checkpoint
 	mutations := server.GetRecentMutations(checkpoint)
@@ -82,7 +82,7 @@ func TestGetRecentMutations_CircularBuffer(t *testing.T) {
 
 	// Emit more than maxMutationBuffer (100) mutations
 	for i := 0; i < 150; i++ {
-		server.emitMutation(MutationCreate, "bd-"+string(rune(i)))
+		server.emitMutation(MutationCreate, "bd-"+string(rune(i)), "", "")
 		time.Sleep(time.Millisecond) // Ensure different timestamps
 	}
 
@@ -110,7 +110,7 @@ func TestGetRecentMutations_ConcurrentAccess(t *testing.T) {
 	// Writer goroutine
 	go func() {
 		for i := 0; i < 50; i++ {
-			server.emitMutation(MutationUpdate, "bd-write")
+			server.emitMutation(MutationUpdate, "bd-write", "", "")
 			time.Sleep(time.Millisecond)
 		}
 		done <- true
@@ -141,11 +141,11 @@ func TestHandleGetMutations(t *testing.T) {
 	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
 
 	// Emit some mutations
-	server.emitMutation(MutationCreate, "bd-1")
+	server.emitMutation(MutationCreate, "bd-1", "Issue 1", "")
 	time.Sleep(10 * time.Millisecond)
 	checkpoint := time.Now().UnixMilli()
 	time.Sleep(10 * time.Millisecond)
-	server.emitMutation(MutationUpdate, "bd-2")
+	server.emitMutation(MutationUpdate, "bd-2", "Issue 2", "")
 
 	// Create RPC request
 	args := GetMutationsArgs{Since: checkpoint}
@@ -213,7 +213,7 @@ func TestMutationEventTypes(t *testing.T) {
 	}
 
 	for _, mutationType := range types {
-		server.emitMutation(mutationType, "bd-test")
+		server.emitMutation(mutationType, "bd-test", "", "")
 	}
 
 	mutations := server.GetRecentMutations(0)
@@ -305,7 +305,7 @@ func TestMutationTimestamps(t *testing.T) {
 	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
 
 	before := time.Now()
-	server.emitMutation(MutationCreate, "bd-123")
+	server.emitMutation(MutationCreate, "bd-123", "Test Issue", "")
 	after := time.Now()
 
 	mutations := server.GetRecentMutations(0)
@@ -327,7 +327,7 @@ func TestEmitMutation_NonBlocking(t *testing.T) {
 	// Fill the buffer (default size is 512 from BEADS_MUTATION_BUFFER or default)
 	for i := 0; i < 600; i++ {
 		// This should not block even when channel is full
-		server.emitMutation(MutationCreate, "bd-test")
+		server.emitMutation(MutationCreate, "bd-test", "", "")
 	}
 
 	// Verify mutations were still stored in recent buffer
