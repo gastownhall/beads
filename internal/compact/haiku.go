@@ -38,7 +38,7 @@ type HaikuClient struct {
 }
 
 // NewHaikuClient creates a new Haiku API client. Env var ANTHROPIC_API_KEY takes precedence over explicit apiKey.
-func NewHaikuClient(apiKey string, opts ...option.RequestOption) (*HaikuClient, error) {
+func NewHaikuClient(apiKey string) (*HaikuClient, error) {
 	envKey := os.Getenv("ANTHROPIC_API_KEY")
 	if envKey != "" {
 		apiKey = envKey
@@ -47,10 +47,7 @@ func NewHaikuClient(apiKey string, opts ...option.RequestOption) (*HaikuClient, 
 		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or provide via config", ErrAPIKeyRequired)
 	}
 
-	// Build options: API key first, then any additional options (for testing)
-	allOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
-	allOpts = append(allOpts, opts...)
-	client := anthropic.NewClient(allOpts...)
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
 	if err != nil {

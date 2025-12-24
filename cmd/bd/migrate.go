@@ -74,11 +74,10 @@ This command:
 		"error":   "no_beads_directory",
 		"message": "No .beads directory found. Run 'bd init' first.",
 		})
-		} else {
-		fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
-		fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to initialize bd\n")
-		}
 		os.Exit(1)
+		} else {
+		FatalErrorWithHint("no .beads directory found", "run 'bd init' to initialize bd")
+		}
 		}
 
 		// Load config to get target database name (respects user's config.json)
@@ -103,10 +102,10 @@ This command:
 					"error":   "detection_failed",
 					"message": err.Error(),
 				})
+				os.Exit(1)
 			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				FatalError("%v", err)
 			}
-			os.Exit(1)
 		}
 
 		if len(databases) == 0 {
@@ -174,14 +173,15 @@ This command:
 					"message":   "Multiple old database files found",
 					"databases": formatDBList(oldDBs),
 				})
+				os.Exit(1)
 			} else {
 				fmt.Fprintf(os.Stderr, "Error: multiple old database files found:\n")
 				for _, db := range oldDBs {
 					fmt.Fprintf(os.Stderr, "  - %s (version: %s)\n", filepath.Base(db.path), db.version)
 				}
 				fmt.Fprintf(os.Stderr, "\nPlease manually rename the correct database to %s and remove others.\n", cfg.Database)
+				os.Exit(1)
 			}
-			os.Exit(1)
 		} else if currentDB != nil && currentDB.version != Version {
 			// Update version metadata
 			needsVersionUpdate = true

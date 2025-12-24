@@ -272,3 +272,330 @@ func countJSONLIssuesTest(t *testing.T, jsonlPath string) int {
 	}
 	return count
 }
+
+// TestCreateTombstoneWrapper tests the createTombstone wrapper function
+func TestCreateTombstoneWrapper(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	testDB := filepath.Join(beadsDir, "beads.db")
+
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Save and restore global store
+	oldStore := store
+	defer func() { store = oldStore }()
+	store = s
+
+	t.Run("successful tombstone creation", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:       "Test Issue",
+			Description: "Issue to be tombstoned",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   "task",
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		err := createTombstone(ctx, issue.ID, "test-actor", "Test deletion reason")
+		if err != nil {
+			t.Fatalf("createTombstone failed: %v", err)
+		}
+
+		// Verify tombstone status
+		updated, err := s.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if updated == nil {
+			t.Fatal("Issue should still exist as tombstone")
+		}
+		if updated.Status != types.StatusTombstone {
+			t.Errorf("Expected status %s, got %s", types.StatusTombstone, updated.Status)
+		}
+	})
+
+	t.Run("tombstone with actor and reason tracking", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:       "Issue with tracking",
+			Description: "Check actor/reason",
+			Status:      types.StatusOpen,
+			Priority:    1,
+			IssueType:   "bug",
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		actor := "admin-user"
+		reason := "Duplicate issue"
+		err := createTombstone(ctx, issue.ID, actor, reason)
+		if err != nil {
+			t.Fatalf("createTombstone failed: %v", err)
+		}
+
+		// Verify actor and reason were recorded
+		updated, err := s.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if updated.DeletedBy != actor {
+			t.Errorf("Expected DeletedBy %q, got %q", actor, updated.DeletedBy)
+		}
+		if updated.DeleteReason != reason {
+			t.Errorf("Expected DeleteReason %q, got %q", reason, updated.DeleteReason)
+		}
+	})
+
+	t.Run("error when issue does not exist", func(t *testing.T) {
+		err := createTombstone(ctx, "nonexistent-issue-id", "actor", "reason")
+		if err == nil {
+			t.Error("Expected error for non-existent issue")
+		}
+	})
+
+	t.Run("verify tombstone preserves original type", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:       "Feature issue",
+			Description: "Should preserve type",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeFeature,
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		err := createTombstone(ctx, issue.ID, "actor", "reason")
+		if err != nil {
+			t.Fatalf("createTombstone failed: %v", err)
+		}
+
+		updated, err := s.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if updated.OriginalType != string(types.TypeFeature) {
+			t.Errorf("Expected OriginalType %q, got %q", types.TypeFeature, updated.OriginalType)
+		}
+	})
+
+	t.Run("verify audit trail recorded", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:       "Issue for audit",
+			Description: "Check event recording",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   "task",
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		err := createTombstone(ctx, issue.ID, "audit-actor", "audit-reason")
+		if err != nil {
+			t.Fatalf("createTombstone failed: %v", err)
+		}
+
+		// Verify an event was recorded
+		events, err := s.GetEvents(ctx, issue.ID, 100)
+		if err != nil {
+			t.Fatalf("GetEvents failed: %v", err)
+		}
+
+		found := false
+		for _, e := range events {
+			if e.EventType == "deleted" && e.Actor == "audit-actor" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("Expected 'deleted' event in audit trail")
+		}
+	})
+}
+
+// TestDeleteIssueWrapper tests the deleteIssue wrapper function
+func TestDeleteIssueWrapper(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	testDB := filepath.Join(beadsDir, "beads.db")
+
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Save and restore global store
+	oldStore := store
+	defer func() { store = oldStore }()
+	store = s
+
+	t.Run("successful issue deletion", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:       "Issue to delete",
+			Description: "Will be permanently deleted",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   "task",
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		err := deleteIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("deleteIssue failed: %v", err)
+		}
+
+		// Verify issue is gone
+		deleted, err := s.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if deleted != nil {
+			t.Error("Issue should be completely deleted")
+		}
+	})
+
+	t.Run("error on non-existent issue", func(t *testing.T) {
+		err := deleteIssue(ctx, "nonexistent-issue-id")
+		if err == nil {
+			t.Error("Expected error for non-existent issue")
+		}
+	})
+
+	t.Run("verify dependencies are removed", func(t *testing.T) {
+		// Create two issues with a dependency
+		issue1 := &types.Issue{
+			Title:     "Blocker issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: "task",
+		}
+		issue2 := &types.Issue{
+			Title:     "Dependent issue",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: "task",
+		}
+		if err := s.CreateIssue(ctx, issue1, "test"); err != nil {
+			t.Fatalf("Failed to create issue1: %v", err)
+		}
+		if err := s.CreateIssue(ctx, issue2, "test"); err != nil {
+			t.Fatalf("Failed to create issue2: %v", err)
+		}
+
+		// Add dependency: issue2 depends on issue1
+		dep := &types.Dependency{
+			IssueID:     issue2.ID,
+			DependsOnID: issue1.ID,
+			Type:        types.DepBlocks,
+		}
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("Failed to add dependency: %v", err)
+		}
+
+		// Delete issue1 (the blocker)
+		err := deleteIssue(ctx, issue1.ID)
+		if err != nil {
+			t.Fatalf("deleteIssue failed: %v", err)
+		}
+
+		// Verify issue2 no longer has dependencies
+		deps, err := s.GetDependencies(ctx, issue2.ID)
+		if err != nil {
+			t.Fatalf("GetDependencies failed: %v", err)
+		}
+		if len(deps) > 0 {
+			t.Errorf("Expected no dependencies after deleting blocker, got %d", len(deps))
+		}
+	})
+
+	t.Run("verify issue removed from database", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Verify removal",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: "task",
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+
+		// Get statistics before delete
+		statsBefore, err := s.GetStatistics(ctx)
+		if err != nil {
+			t.Fatalf("GetStatistics failed: %v", err)
+		}
+
+		err = deleteIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("deleteIssue failed: %v", err)
+		}
+
+		// Get statistics after delete
+		statsAfter, err := s.GetStatistics(ctx)
+		if err != nil {
+			t.Fatalf("GetStatistics failed: %v", err)
+		}
+
+		if statsAfter.TotalIssues != statsBefore.TotalIssues-1 {
+			t.Errorf("Expected total issues to decrease by 1, was %d now %d",
+				statsBefore.TotalIssues, statsAfter.TotalIssues)
+		}
+	})
+}
+
+func TestCreateTombstoneUnsupportedStorage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	oldStore := store
+	defer func() { store = oldStore }()
+
+	// Set store to nil - the type assertion will fail
+	store = nil
+
+	ctx := context.Background()
+	err := createTombstone(ctx, "any-id", "actor", "reason")
+	if err == nil {
+		t.Error("Expected error when storage is nil")
+	}
+	expectedMsg := "tombstone operation not supported by this storage backend"
+	if err.Error() != expectedMsg {
+		t.Errorf("Expected error %q, got %q", expectedMsg, err.Error())
+	}
+}
+
+func TestDeleteIssueUnsupportedStorage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	oldStore := store
+	defer func() { store = oldStore }()
+
+	// Set store to nil - the type assertion will fail
+	store = nil
+
+	ctx := context.Background()
+	err := deleteIssue(ctx, "any-id")
+	if err == nil {
+		t.Error("Expected error when storage is nil")
+	}
+	expectedMsg := "delete operation not supported by this storage backend"
+	if err.Error() != expectedMsg {
+		t.Errorf("Expected error %q, got %q", expectedMsg, err.Error())
+	}
+}

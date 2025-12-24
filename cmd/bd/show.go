@@ -972,10 +972,6 @@ var closeCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("close")
 		reason, _ := cmd.Flags().GetString("reason")
-		// Check --resolution alias if --reason not provided
-		if reason == "" {
-			reason, _ = cmd.Flags().GetString("resolution")
-		}
 		if reason == "" {
 			reason = "Closed"
 		}
@@ -1057,8 +1053,6 @@ var closeCmd = &cobra.Command{
 					if hookRunner != nil {
 						hookRunner.Run(hooks.EventClose, &issue)
 					}
-					// Run config-based close hooks (bd-g4b4)
-					hooks.RunConfigCloseHooks(ctx, &issue)
 					if jsonOutput {
 						closedIssues = append(closedIssues, &issue)
 					}
@@ -1111,12 +1105,8 @@ var closeCmd = &cobra.Command{
 
 			// Run close hook (bd-kwro.8)
 			closedIssue, _ := store.GetIssue(ctx, id)
-			if closedIssue != nil {
-				if hookRunner != nil {
-					hookRunner.Run(hooks.EventClose, closedIssue)
-				}
-				// Run config-based close hooks (bd-g4b4)
-				hooks.RunConfigCloseHooks(ctx, closedIssue)
+			if closedIssue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventClose, closedIssue)
 			}
 
 			if jsonOutput {
@@ -1421,8 +1411,6 @@ func init() {
 	rootCmd.AddCommand(editCmd)
 
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
-	closeCmd.Flags().String("resolution", "", "Alias for --reason (Jira CLI convention)")
-	_ = closeCmd.Flags().MarkHidden("resolution") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().Bool("json", false, "Output JSON format")
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")

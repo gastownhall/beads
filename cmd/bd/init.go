@@ -33,8 +33,8 @@ and database file. Optionally specify a custom issue prefix.
 
 With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.
 
-With --stealth: configures global git settings for invisible beads usage:
-  • Global gitignore to prevent beads files from being committed
+With --stealth: configures per-repository git settings for invisible beads usage:
+  • .git/info/exclude to prevent beads files from being committed
   • Claude Code settings with bd onboard instruction
   Perfect for personal use without affecting repo collaborators.`,
 	Run: func(cmd *cobra.Command, _ []string) {
@@ -1361,22 +1361,15 @@ func readFirstIssueFromGit(jsonlPath, gitRef string) (*types.Issue, error) {
 	return nil, nil
 }
 
-// setupStealthMode configures global git settings for stealth operation
+// setupStealthMode configures git settings for stealth operation
+// Uses .git/info/exclude (per-repository) instead of global gitignore because:
+// - Global gitignore doesn't support absolute paths (GitHub #704)
+// - .git/info/exclude is designed for user-specific, repo-local ignores
+// - Patterns are relative to repo root, so ".beads/" works correctly
 func setupStealthMode(verbose bool) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
-	}
-
-	// Get the absolute path of the current project
-	projectPath, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current working directory: %w", err)
-	}
-
-	// Setup global gitignore with project-specific paths
-	if err := setupGlobalGitIgnore(homeDir, projectPath, verbose); err != nil {
-		return fmt.Errorf("failed to setup global gitignore: %w", err)
+	// Setup per-repository git exclude file
+	if err := setupGitExclude(verbose); err != nil {
+		return fmt.Errorf("failed to setup git exclude: %w", err)
 	}
 
 	// Setup claude settings
@@ -1386,7 +1379,7 @@ func setupStealthMode(verbose bool) error {
 
 	if verbose {
 		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", ui.RenderPass("✓"))
-		fmt.Printf("  Global gitignore: %s\n", ui.RenderAccent(projectPath+"/.beads/ ignored"))
+		fmt.Printf("  Git exclude: %s\n", ui.RenderAccent(".git/info/exclude configured"))
 		fmt.Printf("  Claude settings: %s\n\n", ui.RenderAccent("configured with bd onboard instruction"))
 		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", ui.RenderAccent("invisible"))
 	}
@@ -1394,7 +1387,80 @@ func setupStealthMode(verbose bool) error {
 	return nil
 }
 
+// setupGitExclude configures .git/info/exclude to ignore beads and claude files
+// This is the correct approach for per-repository user-specific ignores (GitHub #704).
+// Unlike global gitignore, patterns here are relative to the repo root.
+func setupGitExclude(verbose bool) error {
+	// Find the .git directory (handles both regular repos and worktrees)
+	gitDir, err := exec.Command("git", "rev-parse", "--git-dir").Output()
+	if err != nil {
+		return fmt.Errorf("not a git repository")
+	}
+	gitDirPath := strings.TrimSpace(string(gitDir))
+
+	// Path to the exclude file
+	excludePath := filepath.Join(gitDirPath, "info", "exclude")
+
+	// Ensure the info directory exists
+	infoDir := filepath.Join(gitDirPath, "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return fmt.Errorf("failed to create git info directory: %w", err)
+	}
+
+	// Read existing exclude file if it exists
+	var existingContent string
+	// #nosec G304 - git config path
+	if content, err := os.ReadFile(excludePath); err == nil {
+		existingContent = string(content)
+	}
+
+	// Use relative patterns (these work correctly in .git/info/exclude)
+	beadsPattern := ".beads/"
+	claudePattern := ".claude/settings.local.json"
+
+	hasBeads := strings.Contains(existingContent, beadsPattern)
+	hasClaude := strings.Contains(existingContent, claudePattern)
+
+	if hasBeads && hasClaude {
+		if verbose {
+			fmt.Printf("Git exclude already configured for stealth mode\n")
+		}
+		return nil
+	}
+
+	// Append missing patterns
+	newContent := existingContent
+	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+		newContent += "\n"
+	}
+
+	if !hasBeads || !hasClaude {
+		newContent += "\n# Beads stealth mode (added by bd init --stealth)\n"
+	}
+
+	if !hasBeads {
+		newContent += beadsPattern + "\n"
+	}
+	if !hasClaude {
+		newContent += claudePattern + "\n"
+	}
+
+	// Write the updated exclude file
+	// #nosec G306 - config file needs 0644
+	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write git exclude file: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("Configured git exclude for stealth mode: %s\n", excludePath)
+	}
+
+	return nil
+}
+
 // setupGlobalGitIgnore configures global gitignore to ignore beads and claude files for a specific project
+// DEPRECATED: This function uses absolute paths which don't work in gitignore (GitHub #704).
+// Use setupGitExclude instead for new code.
 func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) error {
 	// Check if user already has a global gitignore file configured
 	cmd := exec.Command("git", "config", "--global", "core.excludesfile")

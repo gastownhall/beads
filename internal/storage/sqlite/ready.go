@@ -33,6 +33,14 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	if filter.Type != "" {
 		whereClauses = append(whereClauses, "i.issue_type = ?")
 		args = append(args, filter.Type)
+	} else {
+		// Exclude workflow types from ready work by default (gt-7xtn)
+		// These are internal workflow items, not work for polecats to claim:
+		// - merge-request: processed by Refinery
+		// - gate: async wait conditions
+		// - molecule: workflow containers
+		// - message: mail/communication items
+		whereClauses = append(whereClauses, "i.issue_type NOT IN ('merge-request', 'gate', 'molecule', 'message')")
 	}
 
 	if filter.Priority != nil {

@@ -1479,7 +1479,151 @@ func TestImportMixedPrefixMismatch(t *testing.T) {
 	}
 }
 
-// TestMultiRepoPrefixValidation tests GH#686: multi-repo allows foreign prefixes.
+// TestImportPreservesPinnedField tests that importing from JSONL (which has omitempty
+// for the pinned field) does NOT reset an existing pinned=true issue to pinned=false.
+//
+// Bug scenario (bd-phtv):
+// 1. User runs `bd pin <issue-id>` which sets pinned=true in SQLite
+// 2. Any subsequent bd command (e.g., `bd show`) triggers auto-import from JSONL
+// 3. JSONL has pinned=false due to omitempty (field absent means false in Go)
+// 4. Import overwrites pinned=true with pinned=false, losing the pinned state
+//
+// Expected: Import should preserve existing pinned=true when incoming pinned=false
+// (since false just means "field was absent in JSONL due to omitempty").
+func TestImportPreservesPinnedField(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDB := t.TempDir() + "/test.db"
+	store, err := sqlite.New(context.Background(), tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Create an issue with pinned=true (simulates `bd pin` command)
+	pinnedIssue := &types.Issue{
+		ID:        "test-abc123",
+		Title:     "Pinned Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Pinned:    true, // This is set by `bd pin`
+		CreatedAt: time.Now().Add(-time.Hour),
+		UpdatedAt: time.Now().Add(-time.Hour),
+	}
+	pinnedIssue.ContentHash = pinnedIssue.ComputeContentHash()
+	if err := store.CreateIssue(ctx, pinnedIssue, "test-setup"); err != nil {
+		t.Fatalf("Failed to create pinned issue: %v", err)
+	}
+
+	// Verify issue is pinned before import
+	before, err := store.GetIssue(ctx, "test-abc123")
+	if err != nil {
+		t.Fatalf("Failed to get issue before import: %v", err)
+	}
+	if !before.Pinned {
+		t.Fatal("Issue should be pinned before import")
+	}
+
+	// Import same issue from JSONL (simulates auto-import after git pull)
+	// JSONL has pinned=false because omitempty means absent fields are false
+	importedIssue := &types.Issue{
+		ID:        "test-abc123",
+		Title:     "Pinned Issue", // Same content
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Pinned:    false, // This is what JSONL deserialization produces due to omitempty
+		CreatedAt: time.Now().Add(-time.Hour),
+		UpdatedAt: time.Now(), // Newer timestamp to trigger update
+	}
+	importedIssue.ContentHash = importedIssue.ComputeContentHash()
+
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{importedIssue}, Options{})
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+
+	// Import should recognize this as an update (same ID, different timestamp)
+	// The unchanged count may vary based on whether other fields changed
+	t.Logf("Import result: Created=%d Updated=%d Unchanged=%d", result.Created, result.Updated, result.Unchanged)
+
+	// CRITICAL: Verify pinned field was preserved
+	after, err := store.GetIssue(ctx, "test-abc123")
+	if err != nil {
+		t.Fatalf("Failed to get issue after import: %v", err)
+	}
+	if !after.Pinned {
+		t.Error("FAIL (bd-phtv): pinned=true was reset to false by import. " +
+			"Import should preserve existing pinned field when incoming is false (omitempty).")
+	}
+}
+
+// TestImportSetsPinnedTrue tests that importing an issue with pinned=true
+// correctly sets the pinned field in the database.
+func TestImportSetsPinnedTrue(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDB := t.TempDir() + "/test.db"
+	store, err := sqlite.New(context.Background(), tmpDB)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Create an unpinned issue
+	unpinnedIssue := &types.Issue{
+		ID:        "test-abc123",
+		Title:     "Unpinned Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Pinned:    false,
+		CreatedAt: time.Now().Add(-time.Hour),
+		UpdatedAt: time.Now().Add(-time.Hour),
+	}
+	unpinnedIssue.ContentHash = unpinnedIssue.ComputeContentHash()
+	if err := store.CreateIssue(ctx, unpinnedIssue, "test-setup"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	// Import with pinned=true (from JSONL that explicitly has "pinned": true)
+	importedIssue := &types.Issue{
+		ID:        "test-abc123",
+		Title:     "Unpinned Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Pinned:    true, // Explicitly set to true in JSONL
+		CreatedAt: time.Now().Add(-time.Hour),
+		UpdatedAt: time.Now(), // Newer timestamp
+	}
+	importedIssue.ContentHash = importedIssue.ComputeContentHash()
+
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{importedIssue}, Options{})
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+	t.Logf("Import result: Created=%d Updated=%d Unchanged=%d", result.Created, result.Updated, result.Unchanged)
+
+	// Verify pinned field was set to true
+	after, err := store.GetIssue(ctx, "test-abc123")
+	if err != nil {
+		t.Fatalf("Failed to get issue after import: %v", err)
+	}
+	if !after.Pinned {
+		t.Error("FAIL: pinned=true from JSONL should set the field to true in database")
+	}
+}
+
 func TestMultiRepoPrefixValidation(t *testing.T) {
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("Failed to initialize config: %v", err)

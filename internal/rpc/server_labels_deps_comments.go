@@ -41,7 +41,8 @@ func (s *Server) handleDepAdd(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationUpdate, depArgs.FromID)
+	// Title/assignee empty for dependency operations (would require extra lookup)
+	s.emitMutation(MutationUpdate, depArgs.FromID, "", "")
 
 	return Response{Success: true}
 }
@@ -73,7 +74,8 @@ func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc 
 	}
 
 	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationUpdate, issueID)
+	// Title/assignee empty for simple store operations (would require extra lookup)
+	s.emitMutation(MutationUpdate, issueID, "", "")
 
 	return Response{Success: true}
 }
@@ -147,7 +149,8 @@ func (s *Server) handleCommentAdd(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationComment, commentArgs.ID)
+	// Title/assignee empty for comment operations (would require extra lookup)
+	s.emitMutation(MutationComment, commentArgs.ID, "", "")
 
 	data, _ := json.Marshal(comment)
 	return Response{
