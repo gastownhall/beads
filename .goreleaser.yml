@@ -93,6 +93,11 @@ builds:
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
       - -buildmode=exe
+    hooks:
+      post:
+        # Sign Windows executable with Authenticode certificate
+        # Requires WINDOWS_SIGNING_CERT_PFX_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD secrets
+        - ./scripts/sign-windows.sh "{{ .Path }}"
 
 archives:
   - id: bd-archive

@@ -26,10 +26,10 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Install cross-compilation toolchains
+      - name: Install cross-compilation toolchains and signing tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
@@ -39,6 +39,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Windows code signing (optional - signing is skipped if not set)
+          WINDOWS_SIGNING_CERT_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
 
   publish-pypi:
     runs-on: ubuntu-latest

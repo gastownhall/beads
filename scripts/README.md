@@ -187,6 +187,56 @@ This script fixes all those issues and is now used by `release.sh`.
 
 ---
 
+## sign-windows.sh
+
+Signs Windows executables with an Authenticode certificate using osslsigncode.
+
+### Usage
+
+```bash
+# Sign a Windows executable
+./scripts/sign-windows.sh path/to/bd.exe
+
+# Environment variables required for signing:
+export WINDOWS_SIGNING_CERT_PFX_BASE64="<base64-encoded-pfx>"
+export WINDOWS_SIGNING_CERT_PASSWORD="<certificate-password>"
+```
+
+### What It Does
+
+This script is called automatically by GoReleaser during the release process:
+
+1. **Decodes** the PFX certificate from base64
+2. **Signs** the Windows executable using osslsigncode
+3. **Timestamps** the signature using DigiCert's RFC3161 server
+4. **Replaces** the original binary with the signed version
+5. **Verifies** the signature was applied correctly
+
+### Prerequisites
+
+- `osslsigncode` installed (`apt install osslsigncode` or `brew install osslsigncode`)
+- EV code signing certificate exported as PFX file
+- GitHub secrets configured:
+  - `WINDOWS_SIGNING_CERT_PFX_BASE64` - base64-encoded PFX file
+  - `WINDOWS_SIGNING_CERT_PASSWORD` - certificate password
+
+### Graceful Degradation
+
+If the signing secrets are not configured:
+- The script prints a warning and exits successfully
+- GoReleaser continues without signing
+- The release proceeds with unsigned Windows binaries
+
+This allows releases to work before a certificate is acquired.
+
+### Why This Script Exists
+
+Windows code signing helps reduce antivirus false positives that affect Go binaries.
+Kaspersky and other AV software commonly flag unsigned Go executables as potentially
+malicious due to heuristic detection. See `docs/ANTIVIRUS.md` for details.
+
+---
+
 ## Future Scripts
 
 Additional maintenance scripts may be added here as needed.

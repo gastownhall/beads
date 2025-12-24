@@ -101,12 +101,33 @@ ldflags:
 
 These flags are already applied in the official builds.
 
-### Code Signing (Future)
+### Code Signing
 
-Future releases may include Windows code signing to improve trust scores with antivirus vendors. Code signing:
+Windows releases are signed with an Authenticode certificate when available. Code signing:
 - Reduces false positive rates over time
 - Builds reputation with SmartScreen/antivirus vendors
 - Provides tamper verification
+
+**Verify a signed binary (Windows PowerShell):**
+```powershell
+# Check if the binary is signed
+Get-AuthenticodeSignature .\bd.exe
+
+# Expected output for signed binary:
+# SignerCertificate: [Certificate details]
+# Status: Valid
+```
+
+**Verify a signed binary (Linux/macOS with osslsigncode):**
+```bash
+# Install osslsigncode if not available
+# Ubuntu/Debian: apt-get install osslsigncode
+# macOS: brew install osslsigncode
+
+osslsigncode verify -in bd.exe
+```
+
+**Note:** Code signing requires an EV (Extended Validation) certificate, which involves a verification process. If a release is not signed, it means the certificate was not available at build time. Follow the checksum verification steps above to verify authenticity.
 
 ### Alternative Build Methods
 
@@ -136,12 +157,16 @@ The issue isn't specific to beads' code - it's a characteristic of Go binaries i
 
 ### Will this be fixed in future releases?
 
-We're working on:
-- Submitting beads to antivirus vendor whitelists
-- Adding code signing for Windows releases
-- Continuing to use build optimizations
+We've implemented:
+- **Code signing infrastructure** for Windows releases (requires EV certificate)
+- **Build optimizations** to reduce heuristic triggers
+- **Documentation** for users to add exclusions and report false positives
 
-However, false positives may still occur with new releases until reputation is established.
+Still in progress:
+- Acquiring an EV code signing certificate
+- Submitting beads to antivirus vendor whitelists
+
+False positives may still occur with new releases until the certificate builds reputation with antivirus vendors. This typically takes several months of consistent signed releases.
 
 ### Should I disable my antivirus?
 
