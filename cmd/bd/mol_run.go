@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -27,15 +25,9 @@ This command:
 After a crash or session reset, the pinned root issue ensures the agent
 can resume from where it left off by checking 'bd ready'.
 
-The --template-db flag enables cross-database spawning: read templates from
-one database (e.g., main) while writing spawned instances to another (e.g., wisp).
-This is essential for wisp molecule spawning where templates exist in the main
-database but instances should be ephemeral.
-
 Example:
   bd mol run mol-version-bump --var version=1.2.0
-  bd mol run bd-qqc --var version=0.32.0 --var date=2025-01-01
-  bd --db .beads-wisp/beads.db mol run mol-patrol --template-db .beads/beads.db`,
+  bd mol run bd-qqc --var version=0.32.0 --var date=2025-01-01`,
 	Args: cobra.ExactArgs(1),
 	Run:  runMolRun,
 }
@@ -57,7 +49,6 @@ func runMolRun(cmd *cobra.Command, args []string) {
 	}
 
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
-	templateDB, _ := cmd.Flags().GetString("template-db")
 
 	// Parse variables
 	vars := make(map[string]string)
@@ -70,42 +61,15 @@ func runMolRun(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Determine which store to use for reading the template
-	// If --template-db is set, open a separate connection for reading the template
-	// This enables cross-database spawning (read from main, write to wisp)
-	//
-	// Auto-discovery: if --db contains ".beads-wisp" (wisp storage) but --template-db
-	// is not set, automatically use the main database for templates. This handles the
-	// common case of spawning patrol molecules from main DB into wisp storage.
-	templateStore := store
-	if templateDB == "" && strings.Contains(dbPath, ".beads-wisp") {
-		// Auto-discover main database for templates
-		templateDB = beads.FindDatabasePath()
-		if templateDB == "" {
-			fmt.Fprintf(os.Stderr, "Error: cannot find main database for templates\n")
-			fmt.Fprintf(os.Stderr, "Hint: specify --template-db explicitly\n")
-			os.Exit(1)
-		}
-	}
-	if templateDB != "" {
-		var err error
-		templateStore, err = sqlite.NewWithTimeout(ctx, templateDB, lockTimeout)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening template database %s: %v\n", templateDB, err)
-			os.Exit(1)
-		}
-		defer templateStore.Close()
-	}
-
-	// Resolve molecule ID from template store
-	moleculeID, err := utils.ResolvePartialID(ctx, templateStore, args[0])
+	// Resolve molecule ID
+	moleculeID, err := utils.ResolvePartialID(ctx, store, args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving molecule ID %s: %v\n", args[0], err)
 		os.Exit(1)
 	}
 
-	// Load the molecule subgraph from template store
-	subgraph, err := loadTemplateSubgraph(ctx, templateStore, moleculeID)
+	// Load the molecule subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading molecule: %v\n", err)
 		os.Exit(1)
@@ -168,7 +132,6 @@ func runMolRun(cmd *cobra.Command, args []string) {
 
 func init() {
 	molRunCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value)")
-	molRunCmd.Flags().String("template-db", "", "Database to read templates from (enables cross-database spawning)")
 
 	molCmd.AddCommand(molRunCmd)
 }

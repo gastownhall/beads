@@ -350,7 +350,7 @@ func (s *Server) handleCreate(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	s.emitMutation(MutationCreate, issue.ID, issue.Title, issue.Assignee)
+	s.emitMutation(MutationCreate, issue.ID)
 
 	data, _ := json.Marshal(issue)
 	return Response{
@@ -470,13 +470,11 @@ func (s *Server) handleUpdate(req *Request) Response {
 			s.emitRichMutation(MutationEvent{
 				Type:      MutationStatus,
 				IssueID:   updateArgs.ID,
-				Title:     issue.Title,
-				Assignee:  issue.Assignee,
 				OldStatus: string(issue.Status),
 				NewStatus: *updateArgs.Status,
 			})
 		} else {
-			s.emitMutation(MutationUpdate, updateArgs.ID, issue.Title, issue.Assignee)
+			s.emitMutation(MutationUpdate, updateArgs.ID)
 		}
 	}
 
@@ -546,8 +544,6 @@ func (s *Server) handleClose(req *Request) Response {
 	s.emitRichMutation(MutationEvent{
 		Type:      MutationStatus,
 		IssueID:   closeArgs.ID,
-		Title:     issue.Title,
-		Assignee:  issue.Assignee,
 		OldStatus: oldStatus,
 		NewStatus: "closed",
 	})
@@ -644,7 +640,7 @@ func (s *Server) handleDelete(req *Request) Response {
 		}
 
 		// Emit mutation event for event-driven daemon
-		s.emitMutation(MutationDelete, issueID, issue.Title, issue.Assignee)
+		s.emitMutation(MutationDelete, issueID)
 		deletedCount++
 	}
 
@@ -1372,344 +1368,6 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 		}
 	}
 
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-// Gate handlers (bd-likt)
-
-func (s *Server) handleGateCreate(req *Request) Response {
-	var args GateCreateArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid gate create args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available",
-		}
-	}
-
-	ctx := s.reqCtx(req)
-	now := time.Now()
-
-	// Create gate issue
-	gate := &types.Issue{
-		Title:     args.Title,
-		IssueType: types.TypeGate,
-		Status:    types.StatusOpen,
-		Priority:  1, // Gates are typically high priority
-		Assignee:  "deacon/",
-		Wisp:      true, // Gates are wisps (ephemeral)
-		AwaitType: args.AwaitType,
-		AwaitID:   args.AwaitID,
-		Timeout:   args.Timeout,
-		Waiters:   args.Waiters,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	gate.ContentHash = gate.ComputeContentHash()
-
-	if err := store.CreateIssue(ctx, gate, s.reqActor(req)); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to create gate: %v", err),
-		}
-	}
-
-	// Emit mutation event
-	s.emitMutation(MutationCreate, gate.ID, gate.Title, gate.Assignee)
-
-	data, _ := json.Marshal(GateCreateResult{ID: gate.ID})
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-func (s *Server) handleGateList(req *Request) Response {
-	var args GateListArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid gate list args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available",
-		}
-	}
-
-	ctx := s.reqCtx(req)
-
-	// Build filter for gates
-	gateType := types.TypeGate
-	filter := types.IssueFilter{
-		IssueType: &gateType,
-	}
-	if !args.All {
-		openStatus := types.StatusOpen
-		filter.Status = &openStatus
-	}
-
-	gates, err := store.SearchIssues(ctx, "", filter)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to list gates: %v", err),
-		}
-	}
-
-	data, _ := json.Marshal(gates)
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-func (s *Server) handleGateShow(req *Request) Response {
-	var args GateShowArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid gate show args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available",
-		}
-	}
-
-	ctx := s.reqCtx(req)
-
-	// Resolve partial ID
-	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to resolve gate ID: %v", err),
-		}
-	}
-
-	gate, err := store.GetIssue(ctx, gateID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get gate: %v", err),
-		}
-	}
-	if gate == nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("gate %s not found", gateID),
-		}
-	}
-	if gate.IssueType != types.TypeGate {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),
-		}
-	}
-
-	data, _ := json.Marshal(gate)
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-func (s *Server) handleGateClose(req *Request) Response {
-	var args GateCloseArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid gate close args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available",
-		}
-	}
-
-	ctx := s.reqCtx(req)
-
-	// Resolve partial ID
-	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to resolve gate ID: %v", err),
-		}
-	}
-
-	// Verify it's a gate
-	gate, err := store.GetIssue(ctx, gateID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get gate: %v", err),
-		}
-	}
-	if gate == nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("gate %s not found", gateID),
-		}
-	}
-	if gate.IssueType != types.TypeGate {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),
-		}
-	}
-
-	reason := args.Reason
-	if reason == "" {
-		reason = "Gate closed"
-	}
-
-	oldStatus := string(gate.Status)
-
-	if err := store.CloseIssue(ctx, gateID, reason, s.reqActor(req)); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to close gate: %v", err),
-		}
-	}
-
-	// Emit rich status change event
-	s.emitRichMutation(MutationEvent{
-		Type:      MutationStatus,
-		IssueID:   gateID,
-		OldStatus: oldStatus,
-		NewStatus: "closed",
-	})
-
-	closedGate, _ := store.GetIssue(ctx, gateID)
-	data, _ := json.Marshal(closedGate)
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-func (s *Server) handleGateWait(req *Request) Response {
-	var args GateWaitArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid gate wait args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available",
-		}
-	}
-
-	ctx := s.reqCtx(req)
-
-	// Resolve partial ID
-	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to resolve gate ID: %v", err),
-		}
-	}
-
-	// Get existing gate
-	gate, err := store.GetIssue(ctx, gateID)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get gate: %v", err),
-		}
-	}
-	if gate == nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("gate %s not found", gateID),
-		}
-	}
-	if gate.IssueType != types.TypeGate {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),
-		}
-	}
-	if gate.Status == types.StatusClosed {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("gate %s is already closed", gateID),
-		}
-	}
-
-	// Add new waiters (avoiding duplicates)
-	waiterSet := make(map[string]bool)
-	for _, w := range gate.Waiters {
-		waiterSet[w] = true
-	}
-	newWaiters := []string{}
-	for _, addr := range args.Waiters {
-		if !waiterSet[addr] {
-			newWaiters = append(newWaiters, addr)
-			waiterSet[addr] = true
-		}
-	}
-
-	addedCount := len(newWaiters)
-
-	if addedCount > 0 {
-		// Update waiters using SQLite directly
-		sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-		if !ok {
-			return Response{
-				Success: false,
-				Error:   "gate wait requires SQLite storage",
-			}
-		}
-
-		allWaiters := append(gate.Waiters, newWaiters...)
-		waitersJSON, _ := json.Marshal(allWaiters)
-
-		// Use raw SQL to update the waiters field
-		_, err = sqliteStore.UnderlyingDB().ExecContext(ctx, `UPDATE issues SET waiters = ?, updated_at = ? WHERE id = ?`,
-			string(waitersJSON), time.Now(), gateID)
-		if err != nil {
-			return Response{
-				Success: false,
-				Error:   fmt.Sprintf("failed to add waiters: %v", err),
-			}
-		}
-
-		// Emit mutation event
-		s.emitMutation(MutationUpdate, gateID, gate.Title, gate.Assignee)
-	}
-
-	data, _ := json.Marshal(GateWaitResult{AddedCount: addedCount})
 	return Response{
 		Success: true,
 		Data:    data,

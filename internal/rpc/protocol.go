@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Operation constants for all bd commands
@@ -35,18 +34,9 @@ const (
 	OpExport          = "export"
 	OpImport          = "import"
 	OpEpicStatus      = "epic_status"
-	OpGetMutations        = "get_mutations"
-	OpGetMoleculeProgress = "get_molecule_progress"
-	OpShutdown            = "shutdown"
-	OpDelete              = "delete"
-	OpGetWorkerStatus     = "get_worker_status"
-
-	// Gate operations (bd-likt)
-	OpGateCreate = "gate_create"
-	OpGateList   = "gate_list"
-	OpGateShow   = "gate_show"
-	OpGateClose  = "gate_close"
-	OpGateWait   = "gate_wait"
+	OpGetMutations    = "get_mutations"
+	OpShutdown        = "shutdown"
+	OpDelete          = "delete"
 )
 
 // Request represents an RPC request from client to daemon
@@ -422,93 +412,4 @@ type ImportArgs struct {
 // GetMutationsArgs represents arguments for retrieving recent mutations
 type GetMutationsArgs struct {
 	Since int64 `json:"since"` // Unix timestamp in milliseconds (0 for all recent)
-}
-
-// Gate operations (bd-likt)
-
-// GateCreateArgs represents arguments for creating a gate
-type GateCreateArgs struct {
-	Title     string        `json:"title"`
-	AwaitType string        `json:"await_type"` // gh:run, gh:pr, timer, human, mail
-	AwaitID   string        `json:"await_id"`   // ID/value for the await type
-	Timeout   time.Duration `json:"timeout"`    // Timeout duration
-	Waiters   []string      `json:"waiters"`    // Mail addresses to notify when gate clears
-}
-
-// GateCreateResult represents the result of creating a gate
-type GateCreateResult struct {
-	ID string `json:"id"` // Created gate ID
-}
-
-// GateListArgs represents arguments for listing gates
-type GateListArgs struct {
-	All bool `json:"all"` // Include closed gates
-}
-
-// GateShowArgs represents arguments for showing a gate
-type GateShowArgs struct {
-	ID string `json:"id"` // Gate ID (partial or full)
-}
-
-// GateCloseArgs represents arguments for closing a gate
-type GateCloseArgs struct {
-	ID     string `json:"id"`               // Gate ID (partial or full)
-	Reason string `json:"reason,omitempty"` // Close reason
-}
-
-// GateWaitArgs represents arguments for adding waiters to a gate
-type GateWaitArgs struct {
-	ID      string   `json:"id"`      // Gate ID (partial or full)
-	Waiters []string `json:"waiters"` // Additional waiters to add
-}
-
-// GateWaitResult represents the result of adding waiters
-type GateWaitResult struct {
-	AddedCount int `json:"added_count"` // Number of new waiters added
-}
-
-// GetWorkerStatusArgs represents arguments for retrieving worker status
-type GetWorkerStatusArgs struct {
-	// Assignee filters to a specific worker (optional, empty = all workers)
-	Assignee string `json:"assignee,omitempty"`
-}
-
-// WorkerStatus represents the status of a single worker and their current work
-type WorkerStatus struct {
-	Assignee      string `json:"assignee"`                 // Worker identifier
-	MoleculeID    string `json:"molecule_id,omitempty"`    // Parent molecule/epic ID (if working on a step)
-	MoleculeTitle string `json:"molecule_title,omitempty"` // Parent molecule/epic title
-	CurrentStep   int    `json:"current_step,omitempty"`   // Current step number (1-indexed)
-	TotalSteps    int    `json:"total_steps,omitempty"`    // Total number of steps in molecule
-	StepID        string `json:"step_id,omitempty"`        // Current step issue ID
-	StepTitle     string `json:"step_title,omitempty"`     // Current step issue title
-	LastActivity  string `json:"last_activity"`            // ISO 8601 timestamp of last update
-	Status        string `json:"status"`                   // Current work status (in_progress, blocked, etc.)
-}
-
-// GetWorkerStatusResponse is the response for get_worker_status operation
-type GetWorkerStatusResponse struct {
-	Workers []WorkerStatus `json:"workers"`
-}
-
-// GetMoleculeProgressArgs represents arguments for the get_molecule_progress operation
-type GetMoleculeProgressArgs struct {
-	MoleculeID string `json:"molecule_id"` // The ID of the molecule (parent issue)
-}
-
-// MoleculeStep represents a single step within a molecule
-type MoleculeStep struct {
-	ID        string  `json:"id"`
-	Title     string  `json:"title"`
-	Status    string  `json:"status"`     // "done", "current", "ready", "blocked"
-	StartTime *string `json:"start_time"` // ISO 8601 timestamp when step was created
-	CloseTime *string `json:"close_time"` // ISO 8601 timestamp when step was closed (if done)
-}
-
-// MoleculeProgress represents the progress of a molecule (parent issue with steps)
-type MoleculeProgress struct {
-	MoleculeID string         `json:"molecule_id"`
-	Title      string         `json:"title"`
-	Assignee   string         `json:"assignee"`
-	Steps      []MoleculeStep `json:"steps"`
 }

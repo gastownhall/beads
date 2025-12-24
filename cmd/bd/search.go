@@ -26,9 +26,14 @@ Examples:
   bd search "database" --label backend --limit 10
   bd search --query "performance" --assignee alice
   bd search "bd-5q" # Search by partial ID
-  bd search "security" --priority-min 0 --priority-max 2
+  bd search "security" --priority 1                        # Exact priority match
+  bd search "security" --priority-min 0 --priority-max 2   # Priority range
   bd search "bug" --created-after 2025-01-01
   bd search "refactor" --updated-after 2025-01-01 --priority-min 1
+  bd search "bug" --desc-contains "authentication"         # Search in description
+  bd search "" --empty-description                         # Issues without description
+  bd search "" --no-assignee                               # Unassigned issues
+  bd search "" --no-labels                                 # Issues without labels
   bd search "bug" --sort priority
   bd search "task" --sort created --reverse`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -41,9 +46,31 @@ Examples:
 			query = queryFlag
 		}
 
-		// If no query provided, show help
-		if query == "" {
-			fmt.Fprintf(os.Stderr, "Error: search query is required\n")
+		// Check if any filter flags are set (allows empty query with filters)
+		hasFilters := cmd.Flags().Changed("status") ||
+			cmd.Flags().Changed("priority") ||
+			cmd.Flags().Changed("assignee") ||
+			cmd.Flags().Changed("type") ||
+			cmd.Flags().Changed("label") ||
+			cmd.Flags().Changed("label-any") ||
+			cmd.Flags().Changed("created-after") ||
+			cmd.Flags().Changed("created-before") ||
+			cmd.Flags().Changed("updated-after") ||
+			cmd.Flags().Changed("updated-before") ||
+			cmd.Flags().Changed("closed-after") ||
+			cmd.Flags().Changed("closed-before") ||
+			cmd.Flags().Changed("priority-min") ||
+			cmd.Flags().Changed("priority-max") ||
+			cmd.Flags().Changed("title-contains") ||
+			cmd.Flags().Changed("desc-contains") ||
+			cmd.Flags().Changed("notes-contains") ||
+			cmd.Flags().Changed("empty-description") ||
+			cmd.Flags().Changed("no-assignee") ||
+			cmd.Flags().Changed("no-labels")
+
+		// If no query and no filters provided, show help
+		if query == "" && !hasFilters {
+			fmt.Fprintf(os.Stderr, "Error: search query or filter is required\n")
 			if err := cmd.Help(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
 			}
@@ -61,6 +88,11 @@ Examples:
 		sortBy, _ := cmd.Flags().GetString("sort")
 		reverse, _ := cmd.Flags().GetBool("reverse")
 
+		// Pattern matching flags
+		titleContains, _ := cmd.Flags().GetString("title-contains")
+		descContains, _ := cmd.Flags().GetString("desc-contains")
+		notesContains, _ := cmd.Flags().GetString("notes-contains")
+
 		// Date range flags
 		createdAfter, _ := cmd.Flags().GetString("created-after")
 		createdBefore, _ := cmd.Flags().GetString("created-before")
@@ -68,6 +100,11 @@ Examples:
 		updatedBefore, _ := cmd.Flags().GetString("updated-before")
 		closedAfter, _ := cmd.Flags().GetString("closed-after")
 		closedBefore, _ := cmd.Flags().GetString("closed-before")
+
+		// Empty/null check flags
+		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
+		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
+		noLabels, _ := cmd.Flags().GetBool("no-labels")
 
 		// Priority range flags
 		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
@@ -102,6 +139,39 @@ Examples:
 
 		if len(labelsAny) > 0 {
 			filter.LabelsAny = labelsAny
+		}
+
+		// Exact priority match (use Changed() to properly handle P0)
+		if cmd.Flags().Changed("priority") {
+			priorityStr, _ := cmd.Flags().GetString("priority")
+			priority, err := validation.ValidatePriority(priorityStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			filter.Priority = &priority
+		}
+
+		// Pattern matching
+		if titleContains != "" {
+			filter.TitleContains = titleContains
+		}
+		if descContains != "" {
+			filter.DescriptionContains = descContains
+		}
+		if notesContains != "" {
+			filter.NotesContains = notesContains
+		}
+
+		// Empty/null checks
+		if emptyDesc {
+			filter.EmptyDescription = true
+		}
+		if noAssignee {
+			filter.NoAssignee = true
+		}
+		if noLabels {
+			filter.NoLabels = true
 		}
 
 		// Date ranges
@@ -199,6 +269,21 @@ Examples:
 			if len(labelsAny) > 0 {
 				listArgs.LabelsAny = labelsAny
 			}
+
+			// Exact priority match
+			if filter.Priority != nil {
+				listArgs.Priority = filter.Priority
+			}
+
+			// Pattern matching
+			listArgs.TitleContains = titleContains
+			listArgs.DescriptionContains = descContains
+			listArgs.NotesContains = notesContains
+
+			// Empty/null checks
+			listArgs.EmptyDescription = filter.EmptyDescription
+			listArgs.NoAssignee = filter.NoAssignee
+			listArgs.NoLabels = filter.NoLabels
 
 			// Date ranges
 			if filter.CreatedAfter != nil {
@@ -372,6 +457,7 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
 	searchCmd.Flags().StringP("status", "s", "", "Filter by status (open, in_progress, blocked, deferred, closed)")
+	registerPriorityFlag(searchCmd, "")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate)")
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
@@ -381,6 +467,11 @@ func init() {
 	searchCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
 	searchCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
 
+	// Pattern matching flags
+	searchCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
+	searchCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
+	searchCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
+
 	// Date range flags
 	searchCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
 	searchCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
@@ -388,6 +479,11 @@ func init() {
 	searchCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
 	searchCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
 	searchCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+
+	// Empty/null check flags
+	searchCmd.Flags().Bool("empty-description", false, "Filter issues with empty or missing description")
+	searchCmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
+	searchCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 
 	// Priority range flags
 	searchCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")

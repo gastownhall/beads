@@ -1,0 +1,16 @@
+# Test bd close --resolution alias (GH#721)
+# Jira CLI convention: --resolution instead of --reason
+bd init --prefix test
+
+# Create issue
+bd create 'Issue to close with resolution'
+cp stdout issue.txt
+exec sh -c 'grep -oE "test-[a-z0-9]+" issue.txt > issue_id.txt'
+
+# Close using --resolution alias
+exec sh -c 'bd close $(cat issue_id.txt) --resolution "Fixed via resolution alias"'
+stdout 'Closed test-'
+
+# Verify close_reason is set correctly
+exec sh -c 'bd show $(cat issue_id.txt) --json'
+stdout 'Fixed via resolution alias'

@@ -15,7 +15,9 @@ import (
 
 // newMockLogger creates a daemonLogger that does nothing
 func newMockLogger() daemonLogger {
-	return newTestLogger()
+	return daemonLogger{
+		logFunc: func(format string, args ...interface{}) {},
+	}
 }
 
 func TestFileWatcher_JSONLChangeDetection(t *testing.T) {

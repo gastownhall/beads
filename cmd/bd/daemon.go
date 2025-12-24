@@ -56,8 +56,6 @@ Run 'bd daemon' with no flags to see available options.`,
 		localMode, _ := cmd.Flags().GetBool("local")
 		logFile, _ := cmd.Flags().GetString("log")
 		foreground, _ := cmd.Flags().GetBool("foreground")
-		logLevel, _ := cmd.Flags().GetString("log-level")
-		logJSON, _ := cmd.Flags().GetBool("log-json")
 
 		// If no operation flags provided, show help
 		if !start && !stop && !stopAll && !status && !health && !metrics {
@@ -247,7 +245,7 @@ Run 'bd daemon' with no flags to see available options.`,
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON)
+		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile)
 	},
 }
 
@@ -265,8 +263,6 @@ func init() {
 	daemonCmd.Flags().Bool("metrics", false, "Show detailed daemon metrics")
 	daemonCmd.Flags().String("log", "", "Log file path (default: .beads/daemon.log)")
 	daemonCmd.Flags().Bool("foreground", false, "Run in foreground (don't daemonize)")
-	daemonCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
-	daemonCmd.Flags().Bool("log-json", false, "Output logs in JSON format (structured logging)")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -283,9 +279,8 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON bool) {
-	level := parseLogLevel(logLevel)
-	logF, log := setupDaemonLogger(logPath, logJSON, level)
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile string) {
+	logF, log := setupDaemonLogger(logPath)
 	defer func() { _ = logF.Close() }()
 
 	// Set up signal-aware context for graceful shutdown
@@ -295,13 +290,13 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	// Top-level panic recovery to ensure clean shutdown and diagnostics
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("daemon crashed", "panic", r)
+			log.log("PANIC: daemon crashed: %v", r)
 
 			// Capture stack trace
 			stackBuf := make([]byte, 4096)
 			stackSize := runtime.Stack(stackBuf, false)
 			stackTrace := string(stackBuf[:stackSize])
-			log.Error("stack trace", "trace", stackTrace)
+			log.log("Stack trace:\n%s", stackTrace)
 
 			// Write crash report to daemon-error file for user visibility
 			var beadsDir string
@@ -310,21 +305,21 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			} else if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				beadsDir = filepath.Dir(foundDB)
 			}
-
+			
 			if beadsDir != "" {
 				errFile := filepath.Join(beadsDir, "daemon-error")
 				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
 					time.Now().Format(time.RFC3339), r, stackTrace)
 				// nolint:gosec // G306: Error file needs to be readable for debugging
 				if err := os.WriteFile(errFile, []byte(crashReport), 0644); err != nil {
-					log.Warn("could not write crash report", "error", err)
+					log.log("Warning: could not write crash report: %v", err)
 				}
 			}
-
+			
 			// Clean up PID file
 			_ = os.Remove(pidFile)
-
-			log.Info("daemon terminated after panic")
+			
+			log.log("Daemon terminated after panic")
 		}
 	}()
 
@@ -334,8 +329,8 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		if foundDB := beads.FindDatabasePath(); foundDB != "" {
 			daemonDBPath = foundDB
 		} else {
-			log.Error("no beads database found")
-			log.Info("hint: run 'bd init' to create a database or set BEADS_DB environment variable")
+			log.log("Error: no beads database found")
+			log.log("Hint: run 'bd init' to create a database or set BEADS_DB environment variable")
 			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
@@ -381,7 +376,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			errFile := filepath.Join(beadsDir, "daemon-error")
 			// nolint:gosec // G306: Error file needs to be readable for debugging
 			if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
-				log.Warn("could not write daemon-error file", "error", err)
+				log.log("Warning: could not write daemon-error file: %v", err)
 			}
 
 			return // Use return instead of os.Exit to allow defers to run
@@ -391,22 +386,24 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	// Validate using canonical name
 	dbBaseName := filepath.Base(daemonDBPath)
 	if dbBaseName != beads.CanonicalDatabaseName {
-		log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
-		log.Info("run 'bd init' to migrate to canonical name")
+		log.log("Error: Non-canonical database name: %s", dbBaseName)
+		log.log("Expected: %s", beads.CanonicalDatabaseName)
+		log.log("")
+		log.log("Run 'bd init' to migrate to canonical name")
 		return // Use return instead of os.Exit to allow defers to run
 	}
 
-	log.Info("using database", "path", daemonDBPath)
+	log.log("Using database: %s", daemonDBPath)
 
 	// Clear any previous daemon-error file on successful startup
 	errFile := filepath.Join(beadsDir, "daemon-error")
 	if err := os.Remove(errFile); err != nil && !os.IsNotExist(err) {
-		log.Warn("could not remove daemon-error file", "error", err)
+		log.log("Warning: could not remove daemon-error file: %v", err)
 	}
 
 	store, err := sqlite.New(ctx, daemonDBPath)
 	if err != nil {
-		log.Error("cannot open database", "error", err)
+		log.log("Error: cannot open database: %v", err)
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
@@ -414,71 +411,73 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	// Enable freshness checking to detect external database file modifications
 	// (e.g., when git merge replaces the database file)
 	store.EnableFreshnessChecking()
-	log.Info("database opened", "path", daemonDBPath, "freshness_checking", true)
+	log.log("Database opened: %s (freshness checking enabled)", daemonDBPath)
 
 	// Auto-upgrade .beads/.gitignore if outdated
 	gitignoreCheck := doctor.CheckGitignore()
 	if gitignoreCheck.Status == "warning" || gitignoreCheck.Status == "error" {
-		log.Info("upgrading .beads/.gitignore")
+		log.log("Upgrading .beads/.gitignore...")
 		if err := doctor.FixGitignore(); err != nil {
-			log.Warn("failed to upgrade .gitignore", "error", err)
+			log.log("Warning: failed to upgrade .gitignore: %v", err)
 		} else {
-			log.Info("successfully upgraded .beads/.gitignore")
+			log.log("Successfully upgraded .beads/.gitignore")
 		}
 	}
 
 	// Hydrate from multi-repo if configured
 	if results, err := store.HydrateFromMultiRepo(ctx); err != nil {
-		log.Error("multi-repo hydration failed", "error", err)
+		log.log("Error: multi-repo hydration failed: %v", err)
 		return // Use return instead of os.Exit to allow defers to run
 	} else if results != nil {
-		log.Info("multi-repo hydration complete")
+		log.log("Multi-repo hydration complete:")
 		for repo, count := range results {
-			log.Info("hydrated issues", "repo", repo, "count", count)
+			log.log("  %s: %d issues", repo, count)
 		}
 	}
 
 	// Validate database fingerprint (skip in local mode - no git available)
 	if localMode {
-		log.Info("skipping fingerprint validation (local mode)")
+		log.log("Skipping fingerprint validation (local mode)")
 	} else if err := validateDatabaseFingerprint(ctx, store, &log); err != nil {
 		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
-			log.Error("repository fingerprint validation failed", "error", err)
+			log.log("Error: %v", err)
 			return // Use return instead of os.Exit to allow defers to run
 		}
-		log.Warn("repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")
+		log.log("Warning: repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")
 	}
 
 	// Validate schema version matches daemon version
 	versionCtx := context.Background()
 	dbVersion, err := store.GetMetadata(versionCtx, "bd_version")
 	if err != nil && err.Error() != "metadata key not found: bd_version" {
-		log.Error("failed to read database version", "error", err)
+		log.log("Error: failed to read database version: %v", err)
 		return // Use return instead of os.Exit to allow defers to run
 	}
 
 	if dbVersion != "" && dbVersion != Version {
-		log.Warn("database schema version mismatch", "db_version", dbVersion, "daemon_version", Version)
-		log.Info("auto-upgrading database to daemon version")
+		log.log("Warning: Database schema version mismatch")
+		log.log("  Database version: %s", dbVersion)
+		log.log("  Daemon version: %s", Version)
+		log.log("  Auto-upgrading database to daemon version...")
 
 		// Auto-upgrade database to daemon version
 		// The daemon operates on its own database, so it should always use its own version
 		if err := store.SetMetadata(versionCtx, "bd_version", Version); err != nil {
-			log.Error("failed to update database version", "error", err)
+			log.log("Error: failed to update database version: %v", err)
 
 			// Allow override via environment variable for emergencies
 			if os.Getenv("BEADS_IGNORE_VERSION_MISMATCH") != "1" {
 				return // Use return instead of os.Exit to allow defers to run
 			}
-			log.Warn("proceeding despite version update failure (BEADS_IGNORE_VERSION_MISMATCH=1)")
+			log.log("Warning: Proceeding despite version update failure (BEADS_IGNORE_VERSION_MISMATCH=1)")
 		} else {
-			log.Info("database version updated", "version", Version)
+			log.log("  Database version updated to %s", Version)
 		}
 	} else if dbVersion == "" {
 		// Old database without version metadata - set it now
-		log.Warn("database missing version metadata", "setting_to", Version)
+		log.log("Warning: Database missing version metadata, setting to %s", Version)
 		if err := store.SetMetadata(versionCtx, "bd_version", Version); err != nil {
-			log.Error("failed to set database version", "error", err)
+			log.log("Error: failed to set database version: %v", err)
 			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
@@ -507,7 +506,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	// Register daemon in global registry
 	registry, err := daemon.NewRegistry()
 	if err != nil {
-		log.Warn("failed to create registry", "error", err)
+		log.log("Warning: failed to create registry: %v", err)
 	} else {
 		entry := daemon.RegistryEntry{
 			WorkspacePath: workspacePath,
@@ -518,14 +517,14 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			StartedAt:     time.Now(),
 		}
 		if err := registry.Register(entry); err != nil {
-			log.Warn("failed to register daemon", "error", err)
+			log.log("Warning: failed to register daemon: %v", err)
 		} else {
-			log.Info("registered in global registry")
+			log.log("Registered in global registry")
 		}
 		// Ensure we unregister on exit
 		defer func() {
 			if err := registry.Unregister(workspacePath, os.Getpid()); err != nil {
-				log.Warn("failed to unregister daemon", "error", err)
+				log.log("Warning: failed to unregister daemon: %v", err)
 			}
 		}()
 	}
@@ -544,16 +543,16 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 
 	// Get parent PID for monitoring (exit if parent dies)
 	parentPID := computeDaemonParentPID()
-	log.Info("monitoring parent process", "pid", parentPID)
+	log.log("Monitoring parent process (PID %d)", parentPID)
 
 	// daemonMode already determined above for SetConfig
 	switch daemonMode {
 	case "events":
-		log.Info("using event-driven mode")
+		log.log("Using event-driven mode")
 		jsonlPath := findJSONLPath()
 		if jsonlPath == "" {
-			log.Error("JSONL path not found, cannot use event-driven mode")
-			log.Info("falling back to polling mode")
+			log.log("Error: JSONL path not found, cannot use event-driven mode")
+			log.log("Falling back to polling mode")
 			runEventLoop(ctx, cancel, ticker, doSync, server, serverErrChan, parentPID, log)
 		} else {
 			// Event-driven mode uses separate export-only and import-only functions
@@ -568,10 +567,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			runEventDrivenLoop(ctx, cancel, server, serverErrChan, store, jsonlPath, doExport, doAutoImport, autoPull, parentPID, log)
 		}
 	case "poll":
-		log.Info("using polling mode", "interval", interval)
+		log.log("Using polling mode (interval: %v)", interval)
 		runEventLoop(ctx, cancel, ticker, doSync, server, serverErrChan, parentPID, log)
 	default:
-		log.Warn("unknown BEADS_DAEMON_MODE, defaulting to poll", "mode", daemonMode, "valid", "poll, events")
+		log.log("Unknown BEADS_DAEMON_MODE: %s (valid: poll, events), defaulting to poll", daemonMode)
 		runEventLoop(ctx, cancel, ticker, doSync, server, serverErrChan, parentPID, log)
 	}
 }

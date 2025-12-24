@@ -348,7 +348,7 @@ type Dependency struct {
 	DependsOnID string         `json:"depends_on_id"`
 	Type        DependencyType `json:"type"`
 	CreatedAt   time.Time      `json:"created_at"`
-	CreatedBy   string         `json:"created_by,omitempty"`
+	CreatedBy   string         `json:"created_by"`
 	// Metadata contains type-specific edge data (JSON blob)
 	// Examples: similarity scores, approval details, skill proficiency
 	Metadata string `json:"metadata,omitempty"`

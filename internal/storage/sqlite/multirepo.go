@@ -330,9 +330,6 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 		}
 
 		if existingHash != issue.ContentHash {
-			// Pinned field fix (bd-phtv): Use COALESCE(NULLIF(?, 0), pinned) to preserve
-			// existing pinned=1 when incoming pinned=0 (which means field was absent in
-			// JSONL due to omitempty). This prevents auto-import from resetting pinned issues.
 			_, err = tx.ExecContext(ctx, `
 				UPDATE issues SET
 					content_hash = ?, title = ?, description = ?, design = ?,
@@ -340,7 +337,7 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 					issue_type = ?, assignee = ?, estimated_minutes = ?,
 					updated_at = ?, closed_at = ?, external_ref = ?, source_repo = ?,
 					deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?,
-					sender = ?, ephemeral = ?, pinned = COALESCE(NULLIF(?, 0), pinned), is_template = ?,
+					sender = ?, ephemeral = ?, pinned = ?, is_template = ?,
 					await_type = ?, await_id = ?, timeout_ns = ?, waiters = ?
 				WHERE id = ?
 			`,

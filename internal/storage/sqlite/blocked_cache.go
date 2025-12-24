@@ -246,22 +246,3 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 func (s *SQLiteStorage) invalidateBlockedCache(ctx context.Context, exec execer) error {
 	return s.rebuildBlockedCache(ctx, exec)
 }
-
-// GetBlockedIssueIDs returns all issue IDs currently in the blocked cache
-func (s *SQLiteStorage) GetBlockedIssueIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT issue_id FROM blocked_issues_cache")
-	if err != nil {
-		return nil, fmt.Errorf("failed to query blocked_issues_cache: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("failed to scan blocked issue ID: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}

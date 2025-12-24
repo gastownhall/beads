@@ -145,6 +145,8 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: "Pre-push hook is not a bd hook",
 			Detail:  "Cannot verify sync-branch compatibility with custom hooks",
+			Fix: "Either run 'bd hooks install --force' to use bd hooks,\n" +
+				"  or ensure your custom hook skips validation when pushing to sync-branch",
 		}
 	}
 

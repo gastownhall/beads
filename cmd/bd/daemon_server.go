@@ -19,21 +19,21 @@ func startRPCServer(ctx context.Context, socketPath string, store storage.Storag
 	serverErrChan := make(chan error, 1)
 
 	go func() {
-		log.Info("starting RPC server", "socket", socketPath)
+		log.log("Starting RPC server: %s", socketPath)
 		if err := server.Start(ctx); err != nil {
-			log.Error("RPC server error", "error", err)
+			log.log("RPC server error: %v", err)
 			serverErrChan <- err
 		}
 	}()
 
 	select {
 	case err := <-serverErrChan:
-		log.Error("RPC server failed to start", "error", err)
+		log.log("RPC server failed to start: %v", err)
 		return nil, nil, err
 	case <-server.WaitReady():
-		log.Info("RPC server ready (socket listening)")
+		log.log("RPC server ready (socket listening)")
 	case <-time.After(5 * time.Second):
-		log.Warn("server didn't signal ready after 5 seconds (may still be starting)")
+		log.log("WARNING: Server didn't signal ready after 5 seconds (may still be starting)")
 	}
 
 	return server, serverErrChan, nil
@@ -78,35 +78,35 @@ func runEventLoop(ctx context.Context, cancel context.CancelFunc, ticker *time.T
 		case <-parentCheckTicker.C:
 			// Check if parent process is still alive
 			if !checkParentProcessAlive(parentPID) {
-				log.Info("parent process died, shutting down daemon", "parent_pid", parentPID)
+				log.log("Parent process (PID %d) died, shutting down daemon", parentPID)
 				cancel()
 				if err := server.Stop(); err != nil {
-					log.Error("stopping server", "error", err)
+					log.log("Error stopping server: %v", err)
 				}
 				return
 			}
 		case sig := <-sigChan:
 			if isReloadSignal(sig) {
-				log.Info("received reload signal, ignoring (daemon continues running)")
+				log.log("Received reload signal, ignoring (daemon continues running)")
 				continue
 			}
-			log.Info("received signal, shutting down gracefully", "signal", sig)
+			log.log("Received signal %v, shutting down gracefully...", sig)
 			cancel()
 			if err := server.Stop(); err != nil {
-				log.Error("stopping RPC server", "error", err)
+				log.log("Error stopping RPC server: %v", err)
 			}
 			return
 		case <-ctx.Done():
-			log.Info("context canceled, shutting down")
+			log.log("Context canceled, shutting down")
 			if err := server.Stop(); err != nil {
-				log.Error("stopping RPC server", "error", err)
+				log.log("Error stopping RPC server: %v", err)
 			}
 			return
 		case err := <-serverErrChan:
-			log.Error("RPC server failed", "error", err)
+			log.log("RPC server failed: %v", err)
 			cancel()
 			if err := server.Stop(); err != nil {
-				log.Error("stopping RPC server", "error", err)
+				log.log("Error stopping RPC server: %v", err)
 			}
 			return
 		}

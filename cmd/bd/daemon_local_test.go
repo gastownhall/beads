@@ -122,8 +122,12 @@ func TestCreateLocalSyncFunc(t *testing.T) {
 		t.Fatalf("Failed to create issue: %v", err)
 	}
 
-	// Create logger (test output via newTestLogger)
-	log := newTestLogger()
+	// Create logger
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
 
 	// Create and run local sync function
 	doSync := createLocalSyncFunc(ctx, testStore, log)
@@ -189,7 +193,11 @@ func TestCreateLocalExportFunc(t *testing.T) {
 		}
 	}
 
-	log := newTestLogger()
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
 
 	doExport := createLocalExportFunc(ctx, testStore, log)
 	doExport()
@@ -250,7 +258,11 @@ func TestCreateLocalAutoImportFunc(t *testing.T) {
 		t.Fatalf("Failed to write JSONL: %v", err)
 	}
 
-	log := newTestLogger()
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
 
 	doImport := createLocalAutoImportFunc(ctx, testStore, log)
 	doImport()
@@ -367,7 +379,11 @@ func TestLocalModeInNonGitDirectory(t *testing.T) {
 		t.Fatalf("Failed to create issue: %v", err)
 	}
 
-	log := newTestLogger()
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
 
 	// Run local sync (should work without git)
 	doSync := createLocalSyncFunc(ctx, testStore, log)
@@ -421,7 +437,11 @@ func TestLocalModeExportImportRoundTrip(t *testing.T) {
 	defer func() { dbPath = oldDBPath }()
 	dbPath = testDBPath
 
-	log := newTestLogger()
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
 
 	// Create issues
 	for i := 0; i < 5; i++ {

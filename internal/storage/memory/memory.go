@@ -935,20 +935,6 @@ func (m *MemoryStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 			continue
 		}
 
-		// Type filtering (gt-7xtn)
-		if filter.Type != "" {
-			if string(issue.IssueType) != filter.Type {
-				continue
-			}
-		} else {
-			// Exclude workflow types from ready work by default
-			// These are internal workflow items, not work for polecats to claim
-			switch issue.IssueType {
-			case types.TypeMergeRequest, types.TypeGate, types.TypeMolecule, types.TypeMessage:
-				continue
-			}
-		}
-
 		// Unassigned takes precedence over Assignee filter
 		if filter.Unassigned {
 			if issue.Assignee != "" {

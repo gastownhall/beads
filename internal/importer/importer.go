@@ -231,13 +231,8 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 	var tombstonesToRemove []string
 
 	for _, issue := range issues {
-		// GH#422: Check if issue ID starts with configured prefix directly
-		// rather than extracting/guessing. This handles multi-hyphen prefixes
-		// like "asianops-audit-" correctly.
-		prefixMatches := strings.HasPrefix(issue.ID, configuredPrefix+"-")
-		if !prefixMatches {
-			// Extract prefix for error reporting (best effort)
-			prefix := utils.ExtractIssuePrefix(issue.ID)
+		prefix := utils.ExtractIssuePrefix(issue.ID)
+		if !allowedPrefixes[prefix] {
 			if issue.IsTombstone() {
 				tombstoneMismatchPrefixes[prefix]++
 				tombstonesToRemove = append(tombstonesToRemove, issue.ID)
@@ -572,11 +567,8 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 					updates["notes"] = incoming.Notes
 					updates["closed_at"] = incoming.ClosedAt
-					// Pinned field (bd-phtv): Only update if explicitly true in JSONL
-					// (omitempty means false values are absent, so false = don't change existing)
-					if incoming.Pinned {
-						updates["pinned"] = incoming.Pinned
-					}
+					// Pinned field (bd-7h5)
+					updates["pinned"] = incoming.Pinned
 
 					if incoming.Assignee != "" {
 						updates["assignee"] = incoming.Assignee
@@ -670,11 +662,8 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 				updates["notes"] = incoming.Notes
 				updates["closed_at"] = incoming.ClosedAt
-				// Pinned field (bd-phtv): Only update if explicitly true in JSONL
-				// (omitempty means false values are absent, so false = don't change existing)
-				if incoming.Pinned {
-					updates["pinned"] = incoming.Pinned
-				}
+				// Pinned field (bd-7h5)
+				updates["pinned"] = incoming.Pinned
 
 				if incoming.Assignee != "" {
 					updates["assignee"] = incoming.Assignee

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -53,6 +52,7 @@ var (
 	doctorInteractive bool   // bd-3xl: per-fix confirmation mode
 	doctorDryRun      bool   // bd-a5z: preview fixes without applying
 	doctorOutput      string // bd-9cc: export diagnostics to file
+	doctorVerbose     bool   // bd-4qfb: show all checks including passed
 	perfMode          bool
 	checkHealthMode   bool
 )
@@ -421,6 +421,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Compaction Candidates":
 			// No auto-fix: compaction requires agent review
 			fmt.Printf("  ⚠ Run 'bd compact --analyze' to review candidates\n")
+			continue
+		case "Large Database":
+			// No auto-fix: pruning deletes data, must be user-controlled
+			fmt.Printf("  ⚠ Run 'bd cleanup --older-than 90' to prune old closed issues\n")
 			continue
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
@@ -817,6 +821,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, compactionCheck)
 	// Info only, not a warning - compaction requires human review
 
+	// Check 29: Database size (pruning suggestion)
+	// Note: This check has no auto-fix - pruning is destructive and user-controlled
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))
+	result.Checks = append(result.Checks, sizeCheck)
+	// Don't fail overall check for size warning, just inform
+
 	return result
 }
 
@@ -858,136 +868,118 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 }
 
 func printDiagnostics(result doctorResult) {
-	// Print header with version
-	fmt.Printf("\nbd doctor v%s\n\n", result.CLIVersion)
-
-	// Group checks by category
-	checksByCategory := make(map[string][]doctorCheck)
-	for _, check := range result.Checks {
-		cat := check.Category
-		if cat == "" {
-			cat = "Other"
-		}
-		checksByCategory[cat] = append(checksByCategory[cat], check)
-	}
-
-	// Track counts
+	// Count checks by status and collect into categories
 	var passCount, warnCount, failCount int
-	var warnings []doctorCheck
+	var errors, warnings []doctorCheck
+	passedByCategory := make(map[string][]doctorCheck)
 
-	// Print checks by category in defined order
-	for _, category := range doctor.CategoryOrder {
-		checks, exists := checksByCategory[category]
-		if !exists || len(checks) == 0 {
-			continue
+	for _, check := range result.Checks {
+		switch check.Status {
+		case statusOK:
+			passCount++
+			cat := check.Category
+			if cat == "" {
+				cat = "Other"
+			}
+			passedByCategory[cat] = append(passedByCategory[cat], check)
+		case statusWarning:
+			warnCount++
+			warnings = append(warnings, check)
+		case statusError:
+			failCount++
+			errors = append(errors, check)
 		}
-
-		// Print category header
-		fmt.Println(ui.RenderCategory(category))
-
-		// Print each check in this category
-		for _, check := range checks {
-			// Determine status icon
-			var statusIcon string
-			switch check.Status {
-			case statusOK:
-				statusIcon = ui.RenderPassIcon()
-				passCount++
-			case statusWarning:
-				statusIcon = ui.RenderWarnIcon()
-				warnCount++
-				warnings = append(warnings, check)
-			case statusError:
-				statusIcon = ui.RenderFailIcon()
-				failCount++
-				warnings = append(warnings, check)
-			}
-
-			// Print check line: icon + name + message
-			fmt.Printf("  %s  %s", statusIcon, check.Name)
-			if check.Message != "" {
-				fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
-			}
-			fmt.Println()
-
-			// Print detail if present (indented)
-			if check.Detail != "" {
-				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(check.Detail))
-			}
-		}
-		fmt.Println()
 	}
 
-	// Print any checks without a category
-	if otherChecks, exists := checksByCategory["Other"]; exists && len(otherChecks) > 0 {
-		fmt.Println(ui.RenderCategory("Other"))
-		for _, check := range otherChecks {
-			var statusIcon string
-			switch check.Status {
-			case statusOK:
-				statusIcon = ui.RenderPassIcon()
-				passCount++
-			case statusWarning:
-				statusIcon = ui.RenderWarnIcon()
-				warnCount++
-				warnings = append(warnings, check)
-			case statusError:
-				statusIcon = ui.RenderFailIcon()
-				failCount++
-				warnings = append(warnings, check)
-			}
-			fmt.Printf("  %s  %s", statusIcon, check.Name)
-			if check.Message != "" {
-				fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
-			}
-			fmt.Println()
+	// Print header with version and summary at TOP
+	fmt.Printf("\nbd doctor v%s\n\n", result.CLIVersion)
+	fmt.Printf("Summary: %d checks passed, %d warnings, %d errors\n", passCount, warnCount, failCount)
+
+	// Print errors section (always shown if any)
+	if failCount > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderSeparator())
+		fmt.Printf("%s Errors (%d)\n", ui.RenderFailIcon(), failCount)
+		fmt.Println(ui.RenderSeparator())
+		fmt.Println()
+
+		for _, check := range errors {
+			fmt.Printf("[%s] %s\n", check.Name, check.Message)
 			if check.Detail != "" {
-				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(check.Detail))
-			}
-		}
-		fmt.Println()
-	}
-
-	// Print summary line
-	fmt.Println(ui.RenderSeparator())
-	summary := fmt.Sprintf("%s %d passed  %s %d warnings  %s %d failed",
-		ui.RenderPassIcon(), passCount,
-		ui.RenderWarnIcon(), warnCount,
-		ui.RenderFailIcon(), failCount,
-	)
-	fmt.Println(summary)
-
-	// Print warnings/errors section with fixes
-	if len(warnings) > 0 {
-		fmt.Println()
-		fmt.Println(ui.RenderWarn(ui.IconWarn + "  WARNINGS"))
-
-		// Sort by severity: errors first, then warnings
-		slices.SortStableFunc(warnings, func(a, b doctorCheck) int {
-			// Errors (statusError) come before warnings (statusWarning)
-			if a.Status == statusError && b.Status != statusError {
-				return -1
-			}
-			if a.Status != statusError && b.Status == statusError {
-				return 1
-			}
-			return 0 // maintain original order within same severity
-		})
-
-		for i, check := range warnings {
-			// Show numbered items with icon and color based on status
-			// Errors get entire line in red, warnings just the number in yellow
-			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
-			if check.Status == statusError {
-				fmt.Printf("  %s  %s %s\n", ui.RenderFailIcon(), ui.RenderFail(fmt.Sprintf("%d.", i+1)), ui.RenderFail(line))
-			} else {
-				fmt.Printf("  %s  %s %s\n", ui.RenderWarnIcon(), ui.RenderWarn(fmt.Sprintf("%d.", i+1)), line)
+				fmt.Printf("  %s\n", check.Detail)
 			}
 			if check.Fix != "" {
-				fmt.Printf("        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.Fix)
+				fmt.Printf("  Fix: %s\n", check.Fix)
 			}
+			fmt.Println()
 		}
-	} else {
+	}
+
+	// Print warnings section (always shown if any)
+	if warnCount > 0 {
+		fmt.Println(ui.RenderSeparator())
+		fmt.Printf("%s Warnings (%d)\n", ui.RenderWarnIcon(), warnCount)
+		fmt.Println(ui.RenderSeparator())
+		fmt.Println()
+
+		for _, check := range warnings {
+			fmt.Printf("[%s] %s\n", check.Name, check.Message)
+			if check.Detail != "" {
+				fmt.Printf("  %s\n", check.Detail)
+			}
+			if check.Fix != "" {
+				fmt.Printf("  Fix: %s\n", check.Fix)
+			}
+			fmt.Println()
+		}
+	}
+
+	// Print passed section
+	if passCount > 0 {
+		fmt.Println(ui.RenderSeparator())
+		if doctorVerbose {
+			// Verbose mode: show all passed checks grouped by category
+			fmt.Printf("%s Passed (%d)\n", ui.RenderPassIcon(), passCount)
+			fmt.Println(ui.RenderSeparator())
+			fmt.Println()
+
+			for _, category := range doctor.CategoryOrder {
+				checks, exists := passedByCategory[category]
+				if !exists || len(checks) == 0 {
+					continue
+				}
+				fmt.Printf("  %s\n", category)
+				for _, check := range checks {
+					fmt.Printf("    %s %s", ui.RenderPassIcon(), check.Name)
+					if check.Message != "" {
+						fmt.Printf(" %s", ui.RenderMuted(check.Message))
+					}
+					fmt.Println()
+				}
+				fmt.Println()
+			}
+
+			// Print "Other" category if exists
+			if otherChecks, exists := passedByCategory["Other"]; exists && len(otherChecks) > 0 {
+				fmt.Printf("  %s\n", "Other")
+				for _, check := range otherChecks {
+					fmt.Printf("    %s %s", ui.RenderPassIcon(), check.Name)
+					if check.Message != "" {
+						fmt.Printf(" %s", ui.RenderMuted(check.Message))
+					}
+					fmt.Println()
+				}
+				fmt.Println()
+			}
+		} else {
+			// Default mode: collapsed summary
+			fmt.Printf("%s Passed (%d)  %s\n", ui.RenderPassIcon(), passCount, ui.RenderMuted("[use --verbose to show details]"))
+			fmt.Println(ui.RenderSeparator())
+		}
+	}
+
+	// Final status message
+	if failCount == 0 && warnCount == 0 {
 		fmt.Println()
 		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
 	}
@@ -998,4 +990,5 @@ func init() {
 	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
 	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file (bd-9cc)")
+	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show all checks including passed (bd-4qfb)")
 }

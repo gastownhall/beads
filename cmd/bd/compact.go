@@ -166,7 +166,8 @@ Examples:
 			} else {
 				sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 				if !ok {
-					FatalError("compact requires SQLite storage")
+					fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
+					os.Exit(1)
 				}
 				runCompactStats(ctx, sqliteStore)
 			}
@@ -187,20 +188,26 @@ Examples:
 
 		// Check for exactly one mode
 		if activeModes == 0 {
-			FatalError("must specify one mode: --analyze, --apply, or --auto")
+			fmt.Fprintf(os.Stderr, "Error: must specify one mode: --analyze, --apply, or --auto\n")
+			os.Exit(1)
 		}
 		if activeModes > 1 {
-			FatalError("cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)")
+			fmt.Fprintf(os.Stderr, "Error: cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)\n")
+			os.Exit(1)
 		}
 
 		// Handle analyze mode (requires direct database access)
 		if compactAnalyze {
 			if err := ensureDirectMode("compact --analyze requires direct database access"); err != nil {
-				FatalErrorWithHint(fmt.Sprintf("%v", err), "Use --no-daemon flag to bypass daemon and access database directly")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
+				os.Exit(1)
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				FatalErrorWithHint("failed to open database in direct mode", "Ensure .beads/beads.db exists and is readable")
+				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
+				os.Exit(1)
 			}
 			runCompactAnalyze(ctx, sqliteStore)
 			return
@@ -209,17 +216,23 @@ Examples:
 		// Handle apply mode (requires direct database access)
 		if compactApply {
 			if err := ensureDirectMode("compact --apply requires direct database access"); err != nil {
-				FatalErrorWithHint(fmt.Sprintf("%v", err), "Use --no-daemon flag to bypass daemon and access database directly")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
+				os.Exit(1)
 			}
 			if compactID == "" {
-				FatalError("--apply requires --id")
+				fmt.Fprintf(os.Stderr, "Error: --apply requires --id\n")
+				os.Exit(1)
 			}
 			if compactSummary == "" {
-				FatalError("--apply requires --summary")
+				fmt.Fprintf(os.Stderr, "Error: --apply requires --summary\n")
+				os.Exit(1)
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				FatalErrorWithHint("failed to open database in direct mode", "Ensure .beads/beads.db exists and is readable")
+				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
+				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
+				os.Exit(1)
 			}
 			runCompactApply(ctx, sqliteStore)
 			return
@@ -235,13 +248,16 @@ Examples:
 
 			// Validation checks
 			if compactID != "" && compactAll {
-				FatalError("cannot use --id and --all together")
+				fmt.Fprintf(os.Stderr, "Error: cannot use --id and --all together\n")
+				os.Exit(1)
 			}
 			if compactForce && compactID == "" {
-				FatalError("--force requires --id")
+				fmt.Fprintf(os.Stderr, "Error: --force requires --id\n")
+				os.Exit(1)
 			}
 			if compactID == "" && !compactAll && !compactDryRun {
-				FatalError("must specify --all, --id, or --dry-run")
+				fmt.Fprintf(os.Stderr, "Error: must specify --all, --id, or --dry-run\n")
+				os.Exit(1)
 			}
 
 			// Use RPC if daemon available, otherwise direct mode
@@ -253,12 +269,14 @@ Examples:
 			// Fallback to direct mode
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" && !compactDryRun {
-				FatalError("--auto mode requires ANTHROPIC_API_KEY environment variable")
+				fmt.Fprintf(os.Stderr, "Error: --auto mode requires ANTHROPIC_API_KEY environment variable\n")
+				os.Exit(1)
 			}
 
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				FatalError("compact requires SQLite storage")
+				fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
+				os.Exit(1)
 			}
 
 			config := &compact.Config{
@@ -271,7 +289,8 @@ Examples:
 
 			compactor, err := compact.New(sqliteStore, apiKey, config)
 			if err != nil {
-				FatalError("failed to create compactor: %v", err)
+				fmt.Fprintf(os.Stderr, "Error: failed to create compactor: %v\n", err)
+				os.Exit(1)
 			}
 
 			if compactID != "" {
@@ -290,16 +309,19 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	if !compactForce {
 		eligible, reason, err := store.CheckEligibility(ctx, issueID, compactTier)
 		if err != nil {
-			FatalError("failed to check eligibility: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to check eligibility: %v\n", err)
+			os.Exit(1)
 		}
 		if !eligible {
-			FatalError("%s is not eligible for Tier %d compaction: %s", issueID, compactTier, reason)
+			fmt.Fprintf(os.Stderr, "Error: %s is not eligible for Tier %d compaction: %s\n", issueID, compactTier, reason)
+			os.Exit(1)
 		}
 	}
 
 	issue, err := store.GetIssue(ctx, issueID)
 	if err != nil {
-		FatalError("failed to get issue: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
+		os.Exit(1)
 	}
 
 	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
@@ -327,16 +349,19 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	if compactTier == 1 {
 		compactErr = compactor.CompactTier1(ctx, issueID)
 	} else {
-		FatalError("Tier 2 compaction not yet implemented")
+		fmt.Fprintf(os.Stderr, "Error: Tier 2 compaction not yet implemented\n")
+		os.Exit(1)
 	}
 
 	if compactErr != nil {
-		FatalError("%v", compactErr)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", compactErr)
+		os.Exit(1)
 	}
 
 	issue, err = store.GetIssue(ctx, issueID)
 	if err != nil {
-		FatalError("failed to get updated issue: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to get updated issue: %v\n", err)
+		os.Exit(1)
 	}
 
 	compactedSize := len(issue.Description)
@@ -382,7 +407,8 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 	if compactTier == 1 {
 		tier1, err := store.GetTier1Candidates(ctx)
 		if err != nil {
-			FatalError("failed to get candidates: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
+			os.Exit(1)
 		}
 		for _, c := range tier1 {
 			candidates = append(candidates, c.IssueID)
@@ -390,7 +416,8 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 	} else {
 		tier2, err := store.GetTier2Candidates(ctx)
 		if err != nil {
-			FatalError("failed to get candidates: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
+			os.Exit(1)
 		}
 		for _, c := range tier2 {
 			candidates = append(candidates, c.IssueID)
@@ -444,7 +471,8 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 
 	results, err := compactor.CompactTier1Batch(ctx, candidates)
 	if err != nil {
-		FatalError("batch compaction failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: batch compaction failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	successCount := 0
@@ -507,12 +535,14 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	tier1, err := store.GetTier1Candidates(ctx)
 	if err != nil {
-		FatalError("failed to get Tier 1 candidates: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 1 candidates: %v\n", err)
+		os.Exit(1)
 	}
 
 	tier2, err := store.GetTier2Candidates(ctx)
 	if err != nil {
-		FatalError("failed to get Tier 2 candidates: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 2 candidates: %v\n", err)
+		os.Exit(1)
 	}
 
 	tier1Size := 0
@@ -578,20 +608,24 @@ func progressBar(current, total int) string {
 //nolint:unparam // ctx may be used in future for cancellation
 func runCompactRPC(_ context.Context) {
 	if compactID != "" && compactAll {
-		FatalError("cannot use --id and --all together")
+		fmt.Fprintf(os.Stderr, "Error: cannot use --id and --all together\n")
+		os.Exit(1)
 	}
 
 	if compactForce && compactID == "" {
-		FatalError("--force requires --id")
+		fmt.Fprintf(os.Stderr, "Error: --force requires --id\n")
+		os.Exit(1)
 	}
 
 	if compactID == "" && !compactAll && !compactDryRun {
-		FatalError("must specify --all, --id, or --dry-run")
+		fmt.Fprintf(os.Stderr, "Error: must specify --all, --id, or --dry-run\n")
+		os.Exit(1)
 	}
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" && !compactDryRun {
-		FatalError("ANTHROPIC_API_KEY environment variable not set")
+		fmt.Fprintf(os.Stderr, "Error: ANTHROPIC_API_KEY environment variable not set\n")
+		os.Exit(1)
 	}
 
 	args := map[string]interface{}{
@@ -609,11 +643,13 @@ func runCompactRPC(_ context.Context) {
 
 	resp, err := daemonClient.Execute("compact", args)
 	if err != nil {
-		FatalError("%v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if !resp.Success {
-		FatalError("%s", resp.Error)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
 	}
 
 	if jsonOutput {
@@ -640,7 +676,8 @@ func runCompactRPC(_ context.Context) {
 	}
 
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
-		FatalError("parsing response: %v", err)
+		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+		os.Exit(1)
 	}
 
 	if compactID != "" {
@@ -685,11 +722,13 @@ func runCompactStatsRPC() {
 
 	resp, err := daemonClient.Execute("compact_stats", args)
 	if err != nil {
-		FatalError("%v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if !resp.Success {
-		FatalError("%s", resp.Error)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
 	}
 
 	if jsonOutput {
@@ -710,7 +749,8 @@ func runCompactStatsRPC() {
 	}
 
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
-		FatalError("parsing response: %v", err)
+		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+		os.Exit(1)
 	}
 
 	fmt.Printf("\nCompaction Statistics\n")
@@ -744,7 +784,8 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if compactID != "" {
 		issue, err := store.GetIssue(ctx, compactID)
 		if err != nil {
-			FatalError("failed to get issue: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
+			os.Exit(1)
 		}
 
 		sizeBytes := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
@@ -775,7 +816,8 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 			tierCandidates, err = store.GetTier2Candidates(ctx)
 		}
 		if err != nil {
-			FatalError("failed to get candidates: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
+			os.Exit(1)
 		}
 
 		// Apply limit if specified
@@ -837,13 +879,15 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 		// Read from stdin
 		summaryBytes, err = io.ReadAll(os.Stdin)
 		if err != nil {
-			FatalError("failed to read summary from stdin: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to read summary from stdin: %v\n", err)
+			os.Exit(1)
 		}
 	} else {
 		// #nosec G304 -- summary file path provided explicitly by operator
 		summaryBytes, err = os.ReadFile(compactSummary)
 		if err != nil {
-			FatalError("failed to read summary file: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to read summary file: %v\n", err)
+			os.Exit(1)
 		}
 	}
 	summary := string(summaryBytes)
@@ -851,7 +895,8 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	// Get issue
 	issue, err := store.GetIssue(ctx, compactID)
 	if err != nil {
-		FatalError("failed to get issue: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Calculate sizes
@@ -862,15 +907,20 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if !compactForce {
 		eligible, reason, err := store.CheckEligibility(ctx, compactID, compactTier)
 		if err != nil {
-			FatalError("failed to check eligibility: %v", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to check eligibility: %v\n", err)
+			os.Exit(1)
 		}
 		if !eligible {
-			FatalErrorWithHint(fmt.Sprintf("%s is not eligible for Tier %d compaction: %s", compactID, compactTier, reason), "use --force to bypass eligibility checks")
+			fmt.Fprintf(os.Stderr, "Error: %s is not eligible for Tier %d compaction: %s\n", compactID, compactTier, reason)
+			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass eligibility checks\n")
+			os.Exit(1)
 		}
 
 		// Enforce size reduction unless --force
 		if compactedSize >= originalSize {
-			FatalErrorWithHint(fmt.Sprintf("summary (%d bytes) is not shorter than original (%d bytes)", compactedSize, originalSize), "use --force to bypass size validation")
+			fmt.Fprintf(os.Stderr, "Error: summary (%d bytes) is not shorter than original (%d bytes)\n", compactedSize, originalSize)
+			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass size validation\n")
+			os.Exit(1)
 		}
 	}
 
@@ -888,23 +938,27 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 
 	if err := store.UpdateIssue(ctx, compactID, updates, actor); err != nil {
-		FatalError("failed to update issue: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to update issue: %v\n", err)
+		os.Exit(1)
 	}
 
 	commitHash := compact.GetCurrentCommitHash()
 	if err := store.ApplyCompaction(ctx, compactID, compactTier, originalSize, compactedSize, commitHash); err != nil {
-		FatalError("failed to apply compaction: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to apply compaction: %v\n", err)
+		os.Exit(1)
 	}
 
 	savingBytes := originalSize - compactedSize
 	reductionPct := float64(savingBytes) / float64(originalSize) * 100
 	eventData := fmt.Sprintf("Tier %d compaction: %d → %d bytes (saved %d, %.1f%%)", compactTier, originalSize, compactedSize, savingBytes, reductionPct)
 	if err := store.AddComment(ctx, compactID, actor, eventData); err != nil {
-		FatalError("failed to record event: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to record event: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := store.MarkIssueDirty(ctx, compactID); err != nil {
-		FatalError("failed to mark dirty: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to mark dirty: %v\n", err)
+		os.Exit(1)
 	}
 
 	elapsed := time.Since(start)
