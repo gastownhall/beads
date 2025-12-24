@@ -766,7 +766,7 @@ def _truncate_description(issue: Issue, max_length: int) -> Issue:
     return issue
 
 
-@mcp.tool(name="ready", description="Find tasks that have no blockers and are ready to be worked on. Returns minimal format for context efficiency.")
+@mcp.tool(name="ready", description="Find tasks that have no blockers and are ready to be worked on. Returns minimal format for context efficiency.", output_schema=None)
 @with_workspace
 async def ready_work(
     limit: int = 10,
@@ -840,6 +840,7 @@ async def ready_work(
 @mcp.tool(
     name="list",
     description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
+    output_schema=None,
 )
 @with_workspace
 async def list_issues(
@@ -920,6 +921,7 @@ async def list_issues(
 @mcp.tool(
     name="show",
     description="Show detailed information about a specific issue including dependencies and dependents.",
+    output_schema=None,
 )
 @with_workspace
 async def show_issue(
@@ -966,6 +968,7 @@ async def show_issue(
     name="create",
     description="""Create a new issue (bug, feature, task, epic, or chore) with optional design,
 acceptance criteria, and dependencies.""",
+    output_schema=None,
 )
 @with_workspace
 @require_context
@@ -1012,6 +1015,7 @@ async def create_issue(
     name="update",
     description="""Update an existing issue's status, priority, assignee, description, design notes,
 or acceptance criteria. Use this to claim work (set status=in_progress).""",
+    output_schema=None,
 )
 @with_workspace
 @require_context
@@ -1066,6 +1070,7 @@ async def update_issue(
 @mcp.tool(
     name="close",
     description="Close (complete) an issue. Mark work as done when you've finished implementing/fixing it.",
+    output_schema=None,
 )
 @with_workspace
 @require_context
@@ -1091,6 +1096,7 @@ async def close_issue(
 @mcp.tool(
     name="reopen",
     description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
+    output_schema=None,
 )
 @with_workspace
 @require_context
@@ -1146,6 +1152,7 @@ async def stats(workspace_root: str | None = None) -> Stats:
 @mcp.tool(
     name="blocked",
     description="Get blocked issues showing what dependencies are blocking them from being worked on.",
+    output_schema=None,
 )
 @with_workspace
 async def blocked(
