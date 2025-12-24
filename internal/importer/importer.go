@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/linear"
@@ -892,7 +893,10 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 		for _, comment := range issue.Comments {
 			key := fmt.Sprintf("%s:%s", comment.Author, strings.TrimSpace(comment.Text))
 			if !existingComments[key] {
-				if _, err := sqliteStore.AddIssueComment(ctx, issue.ID, comment.Author, comment.Text); err != nil {
+				// Use ImportIssueComment to preserve original timestamp (GH#735)
+				// Format timestamp as RFC3339 for SQLite compatibility
+				createdAt := comment.CreatedAt.UTC().Format(time.RFC3339)
+				if _, err := sqliteStore.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, createdAt); err != nil {
 					if opts.Strict {
 						return fmt.Errorf("error adding comment to %s: %w", issue.ID, err)
 					}

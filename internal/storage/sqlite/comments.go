@@ -52,6 +52,54 @@ func (s *SQLiteStorage) AddIssueComment(ctx context.Context, issueID, author, te
 	return comment, nil
 }
 
+// ImportIssueComment adds a comment during import, preserving the original timestamp.
+// Unlike AddIssueComment which uses CURRENT_TIMESTAMP, this method uses the provided
+// createdAt time from the JSONL file. This prevents timestamp drift during sync cycles.
+// GH#735: Comment created_at timestamps were being overwritten with current time during import.
+func (s *SQLiteStorage) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt string) (*types.Comment, error) {
+	// Verify issue exists
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check issue existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	// Insert comment with provided timestamp
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO comments (issue_id, author, text, created_at)
+		VALUES (?, ?, ?, ?)
+	`, issueID, author, text, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert comment: %w", err)
+	}
+
+	// Get the inserted comment ID
+	commentID, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get comment ID: %w", err)
+	}
+
+	// Fetch the complete comment
+	comment := &types.Comment{}
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, issue_id, author, text, created_at
+		FROM comments WHERE id = ?
+	`, commentID).Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch comment: %w", err)
+	}
+
+	// Mark issue as dirty for JSONL export
+	if err := s.MarkIssueDirty(ctx, issueID); err != nil {
+		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
+	return comment, nil
+}
+
 // GetIssueComments retrieves all comments for an issue
 func (s *SQLiteStorage) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
