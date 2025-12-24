@@ -77,6 +77,7 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	}
 
 	// Read and parse the file
+	// #nosec G304 -- absPath comes from controlled search paths or explicit user input
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)

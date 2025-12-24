@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Formula system** (bd-weu8, bd-wa2l) - Declarative workflow templates
+  - `bd cook <formula>` - Execute a formula template with variable interpolation
+  - Formula files (`.formula.yaml`) support inheritance via `extends:`
+  - `needs:` and `waits_for:` fields for dependency declarations
+  - `--prefix` flag for custom issue prefix when cooking
+  - Search paths: `.beads/formulas/`, `~/.beads/formulas/`, `~/gt/.beads/formulas/`
+
+- **Gate issue type** (bd-udsi) - Async coordination primitives
+  - `bd gate create <name>` - Create a gate for coordinating parallel work
+  - `bd gate open <id>` - Open a gate (unblock waiters)
+  - `bd gate close <id>` - Close a gate (block new work)
+  - Gates integrate with `waits-for` dependencies for fanout patterns
+
+- **`bd list` viewer enhancements** (#729) - Built-in terminal UI
+  - `--pretty` - Colorized, formatted output for human viewing
+  - `--watch` - Live-updating view (refreshes on changes)
+
+- **`bd search` filters** (bd-au0.5) - Enhanced search capabilities
+  - `--after`, `--before` - Date range filtering
+  - `--priority` - Exact priority match
+  - `--content` - Full-text content search
+
+- **`bd compact --prune`** (bd-c7y5) - Standalone tombstone pruning
+  - Prune old tombstones without full compaction
+  - Configurable retention period
+
+- **`bd export --priority`** (bd-au0.6) - Exact priority filter for exports
+
+- **`--resolution` alias** (GH#721) - Alternative to `--reason` on `bd close`
+  - `bd close bd-42 --resolution "Fixed in commit abc123"`
+
+- **Database size check in doctor** (#724) - Issue count threshold warnings
+  - Warns when issue count exceeds configurable threshold
+  - Helps identify when cleanup or compaction is needed
+
+- **Config override notifications** (#731) - Transparency for config sources
+  - Shows when environment variables override config file values
+  - Helps debug unexpected behavior from env overrides
+
+- **Windows code signing infrastructure** (bd-14v0) - Signed Windows binaries
+  - Code signing certificate integration for Windows releases
+  - Improved trust and installation experience on Windows
+
+- **RPC endpoints for monitoring** (bd-0oqz, bd-l13p)
+  - `GetMoleculeProgress` - Query molecule execution state
+  - `GetWorkerStatus` - Query worker health and current task
+
+- **Cross-database molecule spawning** (gt-jsup)
+  - `bd mol run` can spawn in external beads databases
+  - Enables cross-project workflow orchestration
+
+- **Config-based close hooks** (bd-g4b4) - Custom scripts on issue close
+  - Configure hooks in `.beads/config.yaml`
+  - Run validation or notification scripts when issues close
+
+### Changed
+
+- **Removed `bd mol spawn`** (bd-8y9t) - Use pour/wisp only
+  - `bd pour <proto>` for persistent molecules
+  - `bd wisp create <proto>` for ephemeral molecules
+  - Simplifies mental model: pour = liquid (persistent), wisp = vapor (ephemeral)
+
+- **`bd ready` excludes workflow types** (gt-7xtn) - Cleaner ready queue
+  - Gates and other workflow coordination types excluded by default
+  - Use `--include-workflow` to see all types
+
+- **Natural language activation** (#718) - Improved Claude integration
+  - Enhanced activation patterns for natural language commands
+  - Anthropic 2025 API compliance updates
+
+### Fixed
+
+- **Dots in prefix handling** (GH#664) - SQLite extractParentChain fix
+  - Prefixes containing dots (e.g., `my.project`) now work correctly
+  - Parent chain extraction uses proper escaping
+
+- **allowed_prefixes config respected** (gt-2z6s) - Import validation
+  - Import now respects `allowed_prefixes` configuration
+  - Prevents importing issues with unauthorized prefixes
+
+- **Child counter updates** (GH#728) - Explicit child ID creation
+  - `child_counters` table updated when explicit child IDs created
+  - Prevents ID collision when mixing auto and explicit child IDs
+
+- **Comment timestamps preserved** (#735) - Import fidelity
+  - `created_at` timestamps on comments preserved during import
+  - Maintains audit trail for imported issues
+
+- **sync.remote config respected** (#736) - Daemon sync operations
+  - Daemon respects configured remote for sync operations
+  - Fixes sync to wrong remote when multiple remotes configured
+
+- **Export requires -o flag** (#733) - Explicit output control
+  - `bd export` now requires `-o` flag to write to file
+  - Prevents accidental stdout pollution in scripts
+
+- **YAML config key normalization** (#732) - Consistent config parsing
+  - Config keys normalized to canonical format (snake_case)
+  - `sync.remote` and `sync_remote` both work
+
+- **JSON output standardization** (bd-au0.7) - Consistent API
+  - Empty arrays return `[]` not `null`
+  - Error responses have consistent structure
+  - All commands with `--json` follow same patterns
+
+- **MCP Claude Code compatibility** (bd-49kw) - Tool schema fix
+  - Added `output_schema=None` to MCP tools
+  - Fixes "Invalid schema" errors in Claude Code
+
+- **Windows file locking** (bd-401h) - Better Windows support
+  - Proper file handle cleanup prevents locking issues
+  - Fixes "file in use" errors on Windows
+
+- **Template commands with daemon** (bd-indn) - Daemon mode compatibility
+  - `bd pour`, `bd wisp create` work correctly with daemon running
+
+- **Startup config to config.yaml** (GH#536) - Config persistence
+  - Startup wizard writes to config.yaml, not SQLite
+  - Configuration survives database recreation
+
+- **Multi-hyphen prefixes** (GH#422) - Prefix parsing
+  - Prefixes like `my-project-name` parsed correctly
+  - Fixes issue ID extraction with complex prefixes
+
+- **`--pour` flag in bond operations** (bd-l7y3) - Phase control
+  - `bd mol bond --pour` correctly forces liquid phase
+
+- **Stealth mode gitignore** (GH#704) - Local-only exclusion
+  - Uses `.git/info/exclude` instead of global gitignore
+  - Stealth mode truly local to the repository
+
+- **Pinned field import** (bd-phtv) - Field preservation
+  - `pinned` field preserved during JSONL import
+
+- **External deps in orphan check** (bd-ucgz) - Migration fix
+  - External dependencies excluded from orphan validation
+  - Fixes spurious migration warnings
+
+- **Child→parent dependency detection** (bd-nim5) - Anti-pattern prevention
+  - Detects and prevents circular child→parent dependencies
+  - Clear error message explaining the issue
+
+### Improved
+
+- **Test coverage** - Significant improvements across codebase
+  - daemon: 27% → 72%
+  - compact: 17% → 82%
+  - setup: 28% → 54%
+  - storage: interface conformance tests
+  - RPC: comprehensive delete handler tests
+
+- **Structured logging** (bd-u2sc.4) - Better observability
+  - Daemon uses `slog` for structured logging
+  - Consistent log format across components
+
+- **Code organization** - Modular refactoring
+  - Split `sync.go` into focused modules
+  - Split `queries.go` into focused modules
+  - Typed JSON response structs (no more `map[string]interface{}`)
+
+- **JSONL size reduction** - Smaller exports
+  - `omitempty` on all JSONL fields
+  - Removes null/empty values from exports
+
 ## [0.35.0] - 2025-12-23
 
 ### Added
