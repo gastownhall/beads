@@ -109,14 +109,14 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 
 	// Step 1: Fetch from main
 	fmt.Printf("→ Fetching from %s/%s...\n", remote, defaultBranch)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, defaultBranch)
+	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, defaultBranch) //nolint:gosec // remote and defaultBranch from config
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s %s failed: %w\n%s", remote, defaultBranch, err, output)
 	}
 
 	// Step 2: Checkout .beads/ directory from main
 	fmt.Printf("→ Checking out beads from %s/%s...\n", remote, defaultBranch)
-	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/")
+	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/") //nolint:gosec // remote and defaultBranch from config
 	if output, err := checkoutCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout .beads/ from %s/%s failed: %w\n%s", remote, defaultBranch, err, output)
 	}

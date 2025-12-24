@@ -58,7 +58,7 @@ func showSyncStatus(ctx context.Context) error {
 	}
 
 	// Check if sync branch exists
-	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
 	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
 	}
@@ -68,7 +68,7 @@ func showSyncStatus(ctx context.Context) error {
 
 	// Show commit diff
 	fmt.Println("Commits in sync branch not in main:")
-	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch)
+	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch) //nolint:gosec // branch names from git
 	logOutput, err := logCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
@@ -81,7 +81,7 @@ func showSyncStatus(ctx context.Context) error {
 	}
 
 	fmt.Println("\nCommits in main not in sync branch:")
-	logCmd = exec.CommandContext(ctx, "git", "log", "--oneline", syncBranch+".."+currentBranch)
+	logCmd = exec.CommandContext(ctx, "git", "log", "--oneline", syncBranch+".."+currentBranch) //nolint:gosec // branch names from git
 	logOutput, err = logCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
@@ -95,7 +95,7 @@ func showSyncStatus(ctx context.Context) error {
 
 	// Show file diff for .beads/issues.jsonl
 	fmt.Println("\nFile differences in .beads/issues.jsonl:")
-	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/issues.jsonl")
+	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/issues.jsonl") //nolint:gosec // branch names from git
 	diffOutput, err := diffCmd.CombinedOutput()
 	if err != nil {
 		// diff returns non-zero when there are differences, which is fine
@@ -130,7 +130,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	}
 
 	// Check if sync branch exists
-	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
 	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
 	}
@@ -150,7 +150,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	if dryRun {
 		fmt.Println("→ [DRY RUN] Would merge sync branch")
 		// Show what would be merged
-		logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch)
+		logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch) //nolint:gosec // branch names from git
 		logOutput, _ := logCmd.CombinedOutput()
 		if len(strings.TrimSpace(string(logOutput))) > 0 {
 			fmt.Println("\nCommits that would be merged:")
@@ -162,7 +162,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	}
 
 	// Perform the merge
-	mergeCmd := exec.CommandContext(ctx, "git", "merge", syncBranch, "-m", fmt.Sprintf("Merge sync branch '%s'", syncBranch))
+	mergeCmd := exec.CommandContext(ctx, "git", "merge", syncBranch, "-m", fmt.Sprintf("Merge sync branch '%s'", syncBranch)) //nolint:gosec // syncBranch from config
 	mergeOutput, err := mergeCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("merge failed: %w\n%s", err, mergeOutput)
@@ -228,13 +228,13 @@ func commitToExternalBeadsRepo(ctx context.Context, beadsDir, message string, pu
 		relBeadsDir = beadsDir // Fallback to absolute path
 	}
 
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", relBeadsDir)
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", relBeadsDir) //nolint:gosec // paths from trusted sources
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("git add failed: %w\n%s", err, output)
 	}
 
 	// Check if there are staged changes
-	diffCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "diff", "--cached", "--quiet")
+	diffCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "diff", "--cached", "--quiet") //nolint:gosec // repoRoot from git
 	if diffCmd.Run() == nil {
 		return false, nil // No changes to commit
 	}
@@ -244,14 +244,14 @@ func commitToExternalBeadsRepo(ctx context.Context, beadsDir, message string, pu
 		message = fmt.Sprintf("bd sync: %s", time.Now().Format("2006-01-02 15:04:05"))
 	}
 	commitArgs := buildGitCommitArgs(repoRoot, message)
-	commitCmd := exec.CommandContext(ctx, "git", commitArgs...)
+	commitCmd := exec.CommandContext(ctx, "git", commitArgs...) //nolint:gosec // args from buildGitCommitArgs
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("git commit failed: %w\n%s", err, output)
 	}
 
 	// Push if requested
 	if push {
-		pushCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "push")
+		pushCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "push") //nolint:gosec // repoRoot from git
 		if pushOutput, err := runGitCmdWithTimeoutMsg(ctx, pushCmd, "git push", 5*time.Second); err != nil {
 			return true, fmt.Errorf("git push failed: %w\n%s", err, pushOutput)
 		}
@@ -270,13 +270,13 @@ func pullFromExternalBeadsRepo(ctx context.Context, beadsDir string) error {
 	}
 
 	// Check if remote exists
-	remoteCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote")
+	remoteCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote") //nolint:gosec // repoRoot from git
 	remoteOutput, err := remoteCmd.Output()
 	if err != nil || len(strings.TrimSpace(string(remoteOutput))) == 0 {
 		return nil // No remote, skip pull
 	}
 
-	pullCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "pull")
+	pullCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "pull") //nolint:gosec // repoRoot from git
 	if output, err := pullCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git pull failed: %w\n%s", err, output)
 	}

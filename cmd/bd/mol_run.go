@@ -94,7 +94,7 @@ func runMolRun(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "Error opening template database %s: %v\n", templateDB, err)
 			os.Exit(1)
 		}
-		defer templateStore.Close()
+		defer func() { _ = templateStore.Close() }()
 	}
 
 	// Resolve molecule ID from template store

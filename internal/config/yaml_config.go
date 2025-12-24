@@ -83,7 +83,7 @@ func SetYamlConfig(key, value string) error {
 	}
 
 	// Read existing config
-	content, err := os.ReadFile(configPath)
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
 	if err != nil {
 		return fmt.Errorf("failed to read config.yaml: %w", err)
 	}
@@ -95,7 +95,7 @@ func SetYamlConfig(key, value string) error {
 	}
 
 	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
@@ -132,6 +132,8 @@ func findProjectConfigYaml() (string, error) {
 // updateYamlKey updates a key in yaml content, handling commented-out keys.
 // If the key exists (commented or not), it updates it in place.
 // If the key doesn't exist, it appends it at the end.
+//
+//nolint:unparam // error return kept for future validation
 func updateYamlKey(content, key, value string) (string, error) {
 	// Format the value appropriately
 	formattedValue := formatYamlValue(value)

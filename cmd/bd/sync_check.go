@@ -130,14 +130,14 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Check if sync branch exists locally
-	checkLocalCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
+	checkLocalCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
 	if checkLocalCmd.Run() != nil {
 		result.Message = fmt.Sprintf("Sync branch '%s' does not exist locally", syncBranch)
 		return result
 	}
 
 	// Get local ref
-	localRefCmd := exec.CommandContext(ctx, "git", "rev-parse", syncBranch)
+	localRefCmd := exec.CommandContext(ctx, "git", "rev-parse", syncBranch) //nolint:gosec // syncBranch from config
 	localRefOutput, err := localRefCmd.Output()
 	if err != nil {
 		result.Message = "Failed to get local sync branch ref"
@@ -153,7 +153,7 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Get remote ref
-	remoteRefCmd := exec.CommandContext(ctx, "git", "rev-parse", remote+"/"+syncBranch)
+	remoteRefCmd := exec.CommandContext(ctx, "git", "rev-parse", remote+"/"+syncBranch) //nolint:gosec // remote and syncBranch from config
 	remoteRefOutput, err := remoteRefCmd.Output()
 	if err != nil {
 		result.Message = fmt.Sprintf("Remote tracking branch '%s/%s' does not exist", remote, syncBranch)
@@ -169,14 +169,14 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Check if local is ahead of remote (normal case)
-	aheadCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", remoteRef, localRef)
+	aheadCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", remoteRef, localRef) //nolint:gosec // refs from git rev-parse
 	if aheadCmd.Run() == nil {
 		result.Message = "Local sync branch is ahead of remote (normal)"
 		return result
 	}
 
 	// Check if remote is ahead of local (behind, needs pull)
-	behindCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", localRef, remoteRef)
+	behindCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", localRef, remoteRef) //nolint:gosec // refs from git rev-parse
 	if behindCmd.Run() == nil {
 		result.Message = "Local sync branch is behind remote (needs pull)"
 		return result
