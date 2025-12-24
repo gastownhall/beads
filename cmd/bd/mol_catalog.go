@@ -60,12 +60,13 @@ var molCatalogCmd = &cobra.Command{
 			fmt.Println("  1. Create an epic with child issues")
 			fmt.Println("  2. Add the 'template' label: bd label add <epic-id> template")
 			fmt.Println("  3. Use {{variable}} placeholders in titles/descriptions")
-			fmt.Println("\nTo spawn (instantiate) a molecule from a proto:")
-			fmt.Println("  bd mol spawn <id> --var key=value")
+			fmt.Println("\nTo instantiate a molecule from a proto:")
+			fmt.Println("  bd pour <id> --var key=value          # persistent mol")
+			fmt.Println("  bd wisp create <id> --var key=value   # ephemeral wisp")
 			return
 		}
 
-		fmt.Printf("%s\n", ui.RenderPass("Protos (for bd mol spawn):"))
+		fmt.Printf("%s\n", ui.RenderPass("Protos (for bd pour / bd wisp create):"))
 		for _, mol := range molecules {
 			vars := extractVariables(mol.Title + " " + mol.Description)
 			varStr := ""

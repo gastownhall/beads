@@ -156,10 +156,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Wisp molecules** (bd-2vh3) - Spawn molecules as wisps by default
-  - `bd mol spawn` creates wisp issues that live only in SQLite
+- **Wisp molecules** (bd-2vh3) - Support for ephemeral wisps
+  - `bd wisp create` creates wisp issues that live only in SQLite
   - Wisp issues never export to JSONL (prevents zombie resurrection)
-  - Use `--persistent` flag to opt out of wisp spawning
+  - Use `bd pour` for persistent mols, `bd wisp create` for ephemeral wisps
   - `bd mol squash` compresses wisp children into a digest issue
   - `--summary` flag allows agents to provide AI-generated summaries
 

@@ -341,9 +341,9 @@ var versionChanges = []VersionChange{
 		Version: "0.33.0",
 		Date:    "2025-12-21",
 		Changes: []string{
-			"NEW: Wisp molecules (bd-2vh3) - bd mol spawn creates wisp issues by default",
+			"NEW: Wisp molecules (bd-2vh3) - use 'bd wisp create' for ephemeral wisps",
 			"NEW: Wisp issues live only in SQLite, never export to JSONL (prevents zombie resurrection)",
-			"NEW: --persistent flag on bd mol spawn to opt out of wisp spawning",
+			"NEW: Use 'bd pour' for persistent mols, 'bd wisp create' for ephemeral wisps",
 			"NEW: bd mol squash compresses wisp children into digest issue",
 			"NEW: --summary flag on bd mol squash for agent-provided AI summaries",
 			"FIX: DeleteIssue now cascades to comments table (bd-687g)",

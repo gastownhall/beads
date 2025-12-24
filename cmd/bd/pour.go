@@ -12,7 +12,6 @@ import (
 )
 
 // pourCmd is a top-level command for instantiating protos as persistent mols.
-// It's the "chemistry" alias for: bd mol spawn <proto> --pour
 //
 // In the molecular chemistry metaphor:
 //   - Proto (solid) -> pour -> Mol (liquid)
@@ -31,8 +30,6 @@ Use pour for:
   - Feature work that spans sessions
   - Important work needing audit trail
   - Anything you might need to reference later
-
-Equivalent to: bd mol spawn <proto> --pour
 
 Examples:
   bd pour mol-feature --var name=auth    # Create persistent mol from proto

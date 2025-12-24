@@ -93,8 +93,6 @@ The wisp will:
   - NOT sync to remote
   - Either evaporate (burn) or condense to digest (squash)
 
-Equivalent to: bd mol spawn <proto>
-
 Examples:
   bd wisp create mol-patrol                    # Ephemeral patrol cycle
   bd wisp create mol-health-check              # One-time health check

@@ -202,7 +202,7 @@ The 1-hour grace period ensures tombstones propagate even with minor clock drift
 
 ## Wisps: Intentional Tombstone Bypass
 
-**Wisps** (ephemeral issues created by `bd mol spawn`) are intentionally excluded from tombstone tracking.
+**Wisps** (ephemeral issues created by `bd wisp create`) are intentionally excluded from tombstone tracking.
 
 ### Why Wisps Don't Need Tombstones
 

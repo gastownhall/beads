@@ -20,7 +20,8 @@ import (
 // Usage:
 //   bd mol catalog                        # List available protos
 //   bd mol show <id>                      # Show proto/molecule structure
-//   bd mol spawn <id> --var key=value     # Instantiate proto → molecule
+//   bd pour <id> --var key=value          # Instantiate proto → persistent mol
+//   bd wisp create <id> --var key=value   # Instantiate proto → ephemeral wisp
 
 // MoleculeLabel is the label used to identify molecules (templates)
 // Molecules use the same label as templates - they ARE templates with workflow semantics
@@ -49,10 +50,13 @@ The molecule metaphor:
 Commands:
   catalog  List available protos
   show     Show proto/molecule structure and variables
-  spawn    Instantiate a proto → molecule
   bond     Polymorphic combine: proto+proto, proto+mol, mol+mol
-  run      Spawn + assign + pin for durable execution
-  distill  Extract proto from ad-hoc epic (reverse of spawn)`,
+  run      Pour + assign + pin for durable execution
+  distill  Extract proto from ad-hoc epic
+
+See also:
+  bd pour <proto>          # Instantiate as persistent mol (liquid phase)
+  bd wisp create <proto>   # Instantiate as ephemeral wisp (vapor phase)`,
 }
 
 // =============================================================================

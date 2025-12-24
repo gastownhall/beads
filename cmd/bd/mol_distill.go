@@ -190,8 +190,8 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 	if len(result.Variables) > 0 {
 		fmt.Printf("  Variables: %s\n", strings.Join(result.Variables, ", "))
 	}
-	fmt.Printf("\nTo spawn this proto:\n")
-	fmt.Printf("  bd mol spawn %s", result.ProtoID[:8])
+	fmt.Printf("\nTo instantiate this proto:\n")
+	fmt.Printf("  bd pour %s", result.ProtoID[:8])
 	for _, v := range result.Variables {
 		fmt.Printf(" --var %s=<value>", v)
 	}

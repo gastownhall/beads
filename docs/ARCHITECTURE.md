@@ -273,12 +273,12 @@ open ──▶ in_progress ──▶ closed
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   bd mol spawn  │───▶│  Wisp Issues    │───▶│  bd mol squash  │
-│   (from template)│    │  (local-only)   │    │  (→ digest)     │
+│ bd wisp create  │───▶│  Wisp Issues    │───▶│  bd mol squash  │
+│ (from template) │    │  (local-only)   │    │  (→ digest)     │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-1. **Spawn:** Create wisps from a molecule template
+1. **Create:** Create wisps from a molecule template
 2. **Execute:** Agent works through wisp steps (local SQLite only)
 3. **Squash:** Compress wisps into a permanent digest issue
 
