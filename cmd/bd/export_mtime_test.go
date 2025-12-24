@@ -65,11 +65,7 @@ func TestExportUpdatesDatabaseMtime(t *testing.T) {
 	}
 
 	// Update metadata after export (bd-ymj fix)
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// Get JSONL mtime
@@ -170,11 +166,7 @@ func TestDaemonExportScenario(t *testing.T) {
 	}
 
 	// Daemon updates metadata after export (bd-ymj fix)
-	mockLogger := daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf(format, args...)
-		},
-	}
+	mockLogger := newTestLogger()
 	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// THIS IS THE FIX: daemon now calls TouchDatabaseFile after export
@@ -249,11 +241,7 @@ func TestMultipleExportCycles(t *testing.T) {
 		}
 
 		// Update metadata after export (bd-ymj fix)
-		mockLogger := daemonLogger{
-			logFunc: func(format string, args ...interface{}) {
-				t.Logf(format, args...)
-			},
-		}
+		mockLogger := newTestLogger()
 		updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 		// Apply fix

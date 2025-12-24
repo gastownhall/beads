@@ -457,11 +457,7 @@ func TestEventLoopSignalHandling(t *testing.T) {
 
 // createTestLogger creates a daemonLogger for testing
 func createTestLogger(t *testing.T) daemonLogger {
-	return daemonLogger{
-		logFunc: func(format string, args ...interface{}) {
-			t.Logf("[daemon] "+format, args...)
-		},
-	}
+	return newTestLogger()
 }
 
 // TestDaemonIntegration_SocketCleanup verifies socket cleanup after daemon stops

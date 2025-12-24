@@ -219,8 +219,23 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleEpicStatus(req)
 	case OpGetMutations:
 		resp = s.handleGetMutations(req)
+	case OpGetMoleculeProgress:
+		resp = s.handleGetMoleculeProgress(req)
+	case OpGetWorkerStatus:
+		resp = s.handleGetWorkerStatus(req)
 	case OpShutdown:
 		resp = s.handleShutdown(req)
+	// Gate operations (bd-likt)
+	case OpGateCreate:
+		resp = s.handleGateCreate(req)
+	case OpGateList:
+		resp = s.handleGateList(req)
+	case OpGateShow:
+		resp = s.handleGateShow(req)
+	case OpGateClose:
+		resp = s.handleGateClose(req)
+	case OpGateWait:
+		resp = s.handleGateWait(req)
 	default:
 		s.metrics.RecordError(req.Operation)
 		return Response{
@@ -374,6 +389,110 @@ func (s *Server) handleMetrics(_ *Request) Response {
 	)
 
 	data, _ := json.Marshal(snapshot)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleGetWorkerStatus(req *Request) Response {
+	ctx := s.reqCtx(req)
+
+	// Parse optional args
+	var args GetWorkerStatusArgs
+	if len(req.Args) > 0 {
+		if err := json.Unmarshal(req.Args, &args); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid args: %v", err),
+			}
+		}
+	}
+
+	// Build filter: find all in_progress issues with assignees
+	filter := types.IssueFilter{
+		Status: func() *types.Status { s := types.StatusInProgress; return &s }(),
+	}
+	if args.Assignee != "" {
+		filter.Assignee = &args.Assignee
+	}
+
+	// Get all in_progress issues (potential workers)
+	issues, err := s.storage.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to search issues: %v", err),
+		}
+	}
+
+	var workers []WorkerStatus
+	for _, issue := range issues {
+		// Skip issues without assignees
+		if issue.Assignee == "" {
+			continue
+		}
+
+		worker := WorkerStatus{
+			Assignee:     issue.Assignee,
+			LastActivity: issue.UpdatedAt.Format(time.RFC3339),
+			Status:       string(issue.Status),
+		}
+
+		// Check if this issue is a child of a molecule/epic (has parent-child dependency)
+		deps, err := s.storage.GetDependencyRecords(ctx, issue.ID)
+		if err == nil {
+			for _, dep := range deps {
+				if dep.Type == types.DepParentChild {
+					// This issue is a child - get the parent molecule
+					parentIssue, err := s.storage.GetIssue(ctx, dep.DependsOnID)
+					if err == nil && parentIssue != nil {
+						worker.MoleculeID = parentIssue.ID
+						worker.MoleculeTitle = parentIssue.Title
+						worker.StepID = issue.ID
+						worker.StepTitle = issue.Title
+
+						// Count total steps and determine current step number
+						// by getting all children of the molecule
+						children, err := s.storage.GetDependents(ctx, parentIssue.ID)
+						if err == nil {
+							// Filter to only parent-child dependencies
+							var steps []*types.Issue
+							for _, child := range children {
+								childDeps, err := s.storage.GetDependencyRecords(ctx, child.ID)
+								if err == nil {
+									for _, childDep := range childDeps {
+										if childDep.Type == types.DepParentChild && childDep.DependsOnID == parentIssue.ID {
+											steps = append(steps, child)
+											break
+										}
+									}
+								}
+							}
+							worker.TotalSteps = len(steps)
+
+							// Find current step number (1-indexed)
+							for i, step := range steps {
+								if step.ID == issue.ID {
+									worker.CurrentStep = i + 1
+									break
+								}
+							}
+						}
+					}
+					break // Found the parent, no need to check other deps
+				}
+			}
+		}
+
+		workers = append(workers, worker)
+	}
+
+	resp := GetWorkerStatusResponse{
+		Workers: workers,
+	}
+
+	data, _ := json.Marshal(resp)
 	return Response{
 		Success: true,
 		Data:    data,

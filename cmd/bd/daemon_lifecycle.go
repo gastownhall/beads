@@ -369,7 +369,7 @@ func stopAllDaemons() {
 }
 
 // startDaemon starts the daemon (in foreground if requested, otherwise background)
-func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile string) {
+func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile, logLevel string, logJSON bool) {
 	logPath, err := getLogFilePath(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -378,7 +378,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 
 	// Run in foreground if --foreground flag set or if we're the forked child process
 	if foreground || os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile)
+		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON)
 		return
 	}
 
@@ -405,6 +405,12 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 	}
 	if logFile != "" {
 		args = append(args, "--log", logFile)
+	}
+	if logLevel != "" && logLevel != "info" {
+		args = append(args, "--log-level", logLevel)
+	}
+	if logJSON {
+		args = append(args, "--log-json")
 	}
 
 	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary
@@ -455,18 +461,18 @@ func setupDaemonLock(pidFile string, dbPath string, log daemonLogger) (*DaemonLo
 	// Detect nested .beads directories (e.g., .beads/.beads/.beads/)
 	cleanPath := filepath.Clean(beadsDir)
 	if strings.Contains(cleanPath, string(filepath.Separator)+".beads"+string(filepath.Separator)+".beads") {
-		log.log("Error: Nested .beads directory detected: %s", cleanPath)
-		log.log("Hint: Do not run 'bd daemon' from inside .beads/ directory")
-		log.log("Hint: Use absolute paths for BEADS_DB or run from workspace root")
+		log.Error("nested .beads directory detected", "path", cleanPath)
+		log.Info("hint: do not run 'bd daemon' from inside .beads/ directory")
+		log.Info("hint: use absolute paths for BEADS_DB or run from workspace root")
 		return nil, fmt.Errorf("nested .beads directory detected")
 	}
 	
 	lock, err := acquireDaemonLock(beadsDir, dbPath)
 	if err != nil {
 		if err == ErrDaemonLocked {
-			log.log("Daemon already running (lock held), exiting")
+			log.Info("daemon already running (lock held), exiting")
 		} else {
-			log.log("Error acquiring daemon lock: %v", err)
+			log.Error("acquiring daemon lock", "error", err)
 		}
 		return nil, err
 	}
@@ -477,11 +483,11 @@ func setupDaemonLock(pidFile string, dbPath string, log daemonLogger) (*DaemonLo
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid == myPID {
 			// PID file is correct, continue
 		} else {
-			log.log("PID file has wrong PID (expected %d, got %d), overwriting", myPID, pid)
+			log.Warn("PID file has wrong PID, overwriting", "expected", myPID, "got", pid)
 			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
 		}
 	} else {
-		log.log("PID file missing after lock acquisition, creating")
+		log.Info("PID file missing after lock acquisition, creating")
 		_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", myPID)), 0600)
 	}
 

@@ -740,6 +740,17 @@ bd close bd-42 --reason "Completed" --json
 - `3` - Low (polish, optimization)
 - `4` - Backlog (future ideas)
 
+### Dependencies: Avoid the Temporal Trap
+
+When adding dependencies, think "X **needs** Y" not "X **comes before** Y":
+
+```bash
+# ❌ WRONG: "Phase 1 blocks Phase 2" → bd dep add phase1 phase2
+# ✅ RIGHT: "Phase 2 needs Phase 1" → bd dep add phase2 phase1
+```
+
+Verify with `bd blocked` - tasks should be blocked by prerequisites, not dependents.
+
 ### Workflow for AI Agents
 
 1. **Check your inbox**: `gt mail inbox` (from your cwd, not ~/gt)
