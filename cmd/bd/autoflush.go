@@ -33,6 +33,24 @@ func outputJSON(v interface{}) {
 	}
 }
 
+// outputJSONError outputs an error as JSON to stderr and exits with code 1.
+// Use this when jsonOutput is true and an error occurs, to ensure consistent
+// machine-readable error output. The error is formatted as:
+//
+//	{"error": "error message", "code": "error_code"}
+//
+// The code parameter is optional (pass "" to omit).
+func outputJSONError(err error, code string) {
+	errObj := map[string]string{"error": err.Error()}
+	if code != "" {
+		errObj["code"] = code
+	}
+	encoder := json.NewEncoder(os.Stderr)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(errObj)
+	os.Exit(1)
+}
+
 // findJSONLPath finds the JSONL file path for the current database
 // findJSONLPath discovers the JSONL file path for the current database and ensures
 // the parent directory exists. Uses beads.FindJSONLPath() for discovery (checking

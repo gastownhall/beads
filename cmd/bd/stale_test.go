@@ -403,7 +403,8 @@ func TestStaleCommandInit(t *testing.T) {
 	if flags.Lookup("limit") == nil {
 		t.Error("staleCmd should have --limit flag")
 	}
-	if flags.Lookup("json") == nil {
-		t.Error("staleCmd should have --json flag")
+	// --json is inherited from rootCmd as a persistent flag
+	if staleCmd.InheritedFlags().Lookup("json") == nil {
+		t.Error("staleCmd should inherit --json flag from rootCmd")
 	}
 }
