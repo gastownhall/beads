@@ -24,16 +24,26 @@ func TestMain(m *testing.M) {
 	if runtime.GOOS == "windows" {
 		binName = "bd.exe"
 	}
-	
+
 	tmpDir, err := os.MkdirTemp("", "bd-test-bin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create temp dir for bd binary: %v\n", err)
 		os.Exit(1)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
+	// Find module root directory (where go.mod lives)
+	modRootCmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
+	modRootOut, err := modRootCmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to find module root: %v\n", err)
+		os.Exit(1)
+	}
+	modRoot := strings.TrimSpace(string(modRootOut))
+
 	testBDBinary = filepath.Join(tmpDir, binName)
 	cmd := exec.Command("go", "build", "-o", testBDBinary, "./cmd/bd")
+	cmd.Dir = modRoot // Build from module root where ./cmd/bd exists
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to build bd binary: %v\n%s\n", err, out)
 		os.Exit(1)
