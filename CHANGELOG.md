@@ -147,9 +147,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - External dependencies excluded from orphan validation
   - Fixes spurious migration warnings
 
-- **Child→parent dependency detection** (bd-nim5) - Anti-pattern prevention
-  - Detects and prevents circular child→parent dependencies
-  - Clear error message explaining the issue
+- **Child→parent dependency detection** (bd-nim5) - Prevents LLM temporal reasoning trap
+  - Epic children can no longer depend on their parent epic
+  - Blocks a common AI mistake: LLMs use temporal reasoning for "phases" and invert dependencies
+  - Example: "Phase 1 before Phase 2" triggers "Phase 1 blocks Phase 2" → WRONG
+  - Correct model: "Phase 2 needs Phase 1" → `bd dep add phase2 phase1`
+  - Clear error message explains the anti-pattern when detected
 
 ### Improved
 
