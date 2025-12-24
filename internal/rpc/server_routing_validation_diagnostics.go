@@ -219,6 +219,8 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleEpicStatus(req)
 	case OpGetMutations:
 		resp = s.handleGetMutations(req)
+	case OpGetMoleculeProgress:
+		resp = s.handleGetMoleculeProgress(req)
 	case OpGetWorkerStatus:
 		resp = s.handleGetWorkerStatus(req)
 	case OpShutdown:

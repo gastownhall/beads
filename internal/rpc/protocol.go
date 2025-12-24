@@ -35,10 +35,11 @@ const (
 	OpExport          = "export"
 	OpImport          = "import"
 	OpEpicStatus      = "epic_status"
-	OpGetMutations    = "get_mutations"
-	OpShutdown        = "shutdown"
-	OpDelete          = "delete"
-	OpGetWorkerStatus = "get_worker_status"
+	OpGetMutations        = "get_mutations"
+	OpGetMoleculeProgress = "get_molecule_progress"
+	OpShutdown            = "shutdown"
+	OpDelete              = "delete"
+	OpGetWorkerStatus     = "get_worker_status"
 
 	// Gate operations (bd-likt)
 	OpGateCreate = "gate_create"
@@ -488,4 +489,26 @@ type WorkerStatus struct {
 // GetWorkerStatusResponse is the response for get_worker_status operation
 type GetWorkerStatusResponse struct {
 	Workers []WorkerStatus `json:"workers"`
+}
+
+// GetMoleculeProgressArgs represents arguments for the get_molecule_progress operation
+type GetMoleculeProgressArgs struct {
+	MoleculeID string `json:"molecule_id"` // The ID of the molecule (parent issue)
+}
+
+// MoleculeStep represents a single step within a molecule
+type MoleculeStep struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Status    string  `json:"status"`     // "done", "current", "ready", "blocked"
+	StartTime *string `json:"start_time"` // ISO 8601 timestamp when step was created
+	CloseTime *string `json:"close_time"` // ISO 8601 timestamp when step was closed (if done)
+}
+
+// MoleculeProgress represents the progress of a molecule (parent issue with steps)
+type MoleculeProgress struct {
+	MoleculeID string         `json:"molecule_id"`
+	Title      string         `json:"title"`
+	Assignee   string         `json:"assignee"`
+	Steps      []MoleculeStep `json:"steps"`
 }
