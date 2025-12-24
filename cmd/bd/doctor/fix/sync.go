@@ -105,7 +105,9 @@ func DBJSONLSync(path string) error {
 	// Run the appropriate sync command
 	var cmd *exec.Cmd
 	if syncDirection == "export" {
-		cmd = exec.Command(bdBinary, "export") // #nosec G204 -- bdBinary from validated executable path
+		// Export DB to JSONL file (must specify -o to write to file, not stdout)
+		jsonlOutputPath := filepath.Join(beadsDir, "issues.jsonl")
+		cmd = exec.Command(bdBinary, "export", "-o", jsonlOutputPath, "--force") // #nosec G204 -- bdBinary from validated executable path
 	} else {
 		cmd = exec.Command(bdBinary, "sync", "--import-only") // #nosec G204 -- bdBinary from validated executable path
 	}
