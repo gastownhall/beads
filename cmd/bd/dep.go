@@ -15,6 +15,23 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// isChildOf returns true if childID is a hierarchical child of parentID.
+// For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
+func isChildOf(childID, parentID string) bool {
+	// A child ID has the format "parentID.N" or "parentID.N.M" etc.
+	// Use ParseHierarchicalID to get the actual parent
+	_, actualParentID, depth := types.ParseHierarchicalID(childID)
+	if depth == 0 {
+		return false // Not a hierarchical ID
+	}
+	// Check if the immediate parent matches
+	if actualParentID == parentID {
+		return true
+	}
+	// Also check if parentID is an ancestor (e.g., "bd-abc" is parent of "bd-abc.1.2")
+	return strings.HasPrefix(childID, parentID+".")
+}
+
 var depCmd = &cobra.Command{
 	Use:     "dep",
 	GroupID: "deps",
@@ -105,6 +122,15 @@ Examples:
 					os.Exit(1)
 				}
 			}
+		}
+
+		// Check for child→parent dependency anti-pattern (bd-nim5)
+		// This creates a deadlock: child can't start (parent open), parent can't close (children not done)
+		if isChildOf(fromID, toID) {
+			fmt.Fprintf(os.Stderr, "Error: Cannot add dependency: %s is already a child of %s.\n", fromID, toID)
+			fmt.Fprintf(os.Stderr, "Children inherit dependency on parent completion via hierarchy.\n")
+			fmt.Fprintf(os.Stderr, "Adding an explicit dependency would create a deadlock.\n")
+			os.Exit(1)
 		}
 
 		// If daemon is running, use RPC

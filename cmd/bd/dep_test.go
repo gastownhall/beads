@@ -956,3 +956,86 @@ func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
 		}
 	}
 }
+
+// Tests for child→parent dependency detection (bd-nim5)
+func TestIsChildOf(t *testing.T) {
+	tests := []struct {
+		name     string
+		childID  string
+		parentID string
+		want     bool
+	}{
+		// Positive cases: should be detected as child
+		{
+			name:     "direct child",
+			childID:  "bd-abc.1",
+			parentID: "bd-abc",
+			want:     true,
+		},
+		{
+			name:     "grandchild",
+			childID:  "bd-abc.1.2",
+			parentID: "bd-abc",
+			want:     true,
+		},
+		{
+			name:     "nested grandchild direct parent",
+			childID:  "bd-abc.1.2",
+			parentID: "bd-abc.1",
+			want:     true,
+		},
+		{
+			name:     "deeply nested child",
+			childID:  "bd-abc.1.2.3",
+			parentID: "bd-abc",
+			want:     true,
+		},
+
+		// Negative cases: should NOT be detected as child
+		{
+			name:     "same ID",
+			childID:  "bd-abc",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not a child - unrelated IDs",
+			childID:  "bd-xyz",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not a child - sibling",
+			childID:  "bd-abc.2",
+			parentID: "bd-abc.1",
+			want:     false,
+		},
+		{
+			name:     "reversed - parent is not child of child",
+			childID:  "bd-abc",
+			parentID: "bd-abc.1",
+			want:     false,
+		},
+		{
+			name:     "prefix but not hierarchical",
+			childID:  "bd-abcd",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not hierarchical ID",
+			childID:  "bd-abc",
+			parentID: "bd-xyz",
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isChildOf(tt.childID, tt.parentID)
+			if got != tt.want {
+				t.Errorf("isChildOf(%q, %q) = %v, want %v", tt.childID, tt.parentID, got, tt.want)
+			}
+		})
+	}
+}

@@ -4,10 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// isChildOf returns true if childID is a hierarchical child of parentID.
+// For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
+func isChildOf(childID, parentID string) bool {
+	_, actualParentID, depth := types.ParseHierarchicalID(childID)
+	if depth == 0 {
+		return false // Not a hierarchical ID
+	}
+	if actualParentID == parentID {
+		return true
+	}
+	return strings.HasPrefix(childID, parentID+".")
+}
 
 func (s *Server) handleDepAdd(req *Request) Response {
 	var depArgs DepAddArgs
@@ -15,6 +29,15 @@ func (s *Server) handleDepAdd(req *Request) Response {
 		return Response{
 			Success: false,
 			Error:   fmt.Sprintf("invalid dep add args: %v", err),
+		}
+	}
+
+	// Check for child→parent dependency anti-pattern (bd-nim5)
+	// This creates a deadlock: child can't start (parent open), parent can't close (children not done)
+	if isChildOf(depArgs.FromID, depArgs.ToID) {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("cannot add dependency: %s is already a child of %s (children inherit dependency via hierarchy)", depArgs.FromID, depArgs.ToID),
 		}
 	}
 

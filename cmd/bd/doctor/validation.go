@@ -308,6 +308,79 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 }
 
+// CheckChildParentDependencies detects the child→parent dependency anti-pattern.
+// This creates a deadlock: child can't start (parent open), parent can't close (children not done).
+func CheckChildParentDependencies(path string) DoctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+
+	db, err := openDBReadOnly(dbPath)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  "ok",
+			Message: "N/A (unable to open database)",
+		}
+	}
+	defer db.Close()
+
+	// Query for child→parent dependencies where issue_id starts with depends_on_id + "."
+	// This uses SQLite's LIKE pattern matching
+	query := `
+		SELECT d.issue_id, d.depends_on_id
+		FROM dependencies d
+		WHERE d.issue_id LIKE d.depends_on_id || '.%'
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  "ok",
+			Message: "N/A (query failed)",
+		}
+	}
+	defer rows.Close()
+
+	var badDeps []string
+	for rows.Next() {
+		var issueID, dependsOnID string
+		if err := rows.Scan(&issueID, &dependsOnID); err == nil {
+			badDeps = append(badDeps, fmt.Sprintf("%s→%s", issueID, dependsOnID))
+		}
+	}
+
+	if len(badDeps) == 0 {
+		return DoctorCheck{
+			Name:     "Child-Parent Dependencies",
+			Status:   "ok",
+			Message:  "No child→parent dependencies",
+			Category: CategoryMetadata,
+		}
+	}
+
+	detail := strings.Join(badDeps, ", ")
+	if len(detail) > 200 {
+		detail = detail[:200] + "..."
+	}
+
+	return DoctorCheck{
+		Name:     "Child-Parent Dependencies",
+		Status:   "warning",
+		Message:  fmt.Sprintf("%d child→parent dependency anti-pattern(s) detected", len(badDeps)),
+		Detail:   detail,
+		Fix:      "Run 'bd doctor --fix' to remove child→parent dependencies",
+		Category: CategoryMetadata,
+	}
+}
+
 // CheckGitConflicts detects git conflict markers in JSONL file.
 func CheckGitConflicts(path string) DoctorCheck {
 	beadsDir := filepath.Join(path, ".beads")

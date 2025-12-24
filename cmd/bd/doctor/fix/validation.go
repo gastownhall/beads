@@ -162,6 +162,70 @@ func OrphanedDependencies(path string) error {
 	return nil
 }
 
+// ChildParentDependencies removes child→parent dependencies (anti-pattern).
+// This fixes the deadlock where children depend on their parent epic.
+func ChildParentDependencies(path string) error {
+	if err := validateBeadsWorkspace(path); err != nil {
+		return err
+	}
+
+	beadsDir := filepath.Join(path, ".beads")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+
+	// Open database
+	db, err := openDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	// Find child→parent dependencies where issue_id starts with depends_on_id + "."
+	query := `
+		SELECT d.issue_id, d.depends_on_id
+		FROM dependencies d
+		WHERE d.issue_id LIKE d.depends_on_id || '.%'
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query child-parent dependencies: %w", err)
+	}
+	defer rows.Close()
+
+	type badDep struct {
+		issueID     string
+		dependsOnID string
+	}
+	var badDeps []badDep
+
+	for rows.Next() {
+		var d badDep
+		if err := rows.Scan(&d.issueID, &d.dependsOnID); err == nil {
+			badDeps = append(badDeps, d)
+		}
+	}
+
+	if len(badDeps) == 0 {
+		fmt.Println("  No child→parent dependencies to fix")
+		return nil
+	}
+
+	// Delete child→parent dependencies
+	for _, d := range badDeps {
+		_, err := db.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
+			d.issueID, d.dependsOnID)
+		if err != nil {
+			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", d.issueID, d.dependsOnID, err)
+		} else {
+			// Mark issue as dirty for export
+			_, _ = db.Exec("INSERT OR IGNORE INTO dirty_issues (issue_id) VALUES (?)", d.issueID)
+			fmt.Printf("  Removed child→parent dependency: %s→%s\n", d.issueID, d.dependsOnID)
+		}
+	}
+
+	fmt.Printf("  Fixed %d child→parent dependency anti-pattern(s)\n", len(badDeps))
+	return nil
+}
+
 // openDB opens a SQLite database for read-write access
 func openDB(dbPath string) (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)

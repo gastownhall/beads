@@ -400,6 +400,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.MergeArtifacts(path)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path)
+		case "Child-Parent Dependencies":
+			err = fix.ChildParentDependencies(path)
 		case "Duplicate Issues":
 			// No auto-fix: duplicates require user review
 			fmt.Printf("  ⚠ Run 'bd duplicates' to review and merge duplicates\n")
@@ -784,6 +786,11 @@ func runDiagnostics(path string) doctorResult {
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
+
+	// Check 22a: Child→parent dependencies (anti-pattern, bd-nim5)
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	result.Checks = append(result.Checks, childParentDepsCheck)
+	// Don't fail overall check for child→parent deps, just warn
 
 	// Check 23: Duplicate issues (from bd validate)
 	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path))
