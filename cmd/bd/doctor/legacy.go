@@ -154,6 +154,8 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 			strings.Contains(lowerName, "~") ||
 			strings.HasPrefix(lowerName, "backup_") ||
 			name == "deletions.jsonl" ||
+			name == "interactions.jsonl" ||
+			name == "molecules.jsonl" ||
 			// Git merge conflict artifacts (e.g., issues.base.jsonl, issues.left.jsonl)
 			strings.Contains(lowerName, ".base.jsonl") ||
 			strings.Contains(lowerName, ".left.jsonl") ||

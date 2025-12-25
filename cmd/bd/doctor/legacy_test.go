@@ -278,6 +278,24 @@ func TestCheckLegacyJSONLFilename(t *testing.T) {
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
+		{
+			name:           "interactions.jsonl ignored as system file (GH#709)",
+			files:          []string{"issues.jsonl", "interactions.jsonl"},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "molecules.jsonl ignored as system file",
+			files:          []string{"issues.jsonl", "molecules.jsonl"},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "all system files ignored together",
+			files:          []string{"issues.jsonl", "deletions.jsonl", "interactions.jsonl", "molecules.jsonl"},
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
 	}
 
 	for _, tt := range tests {
