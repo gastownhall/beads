@@ -39,6 +39,7 @@ var YamlOnlyKeys = map[string]bool{
 	"git.author":       true,
 	"git.no-gpg-sign":  true,
 	"no-push":          true,
+	"no-git-ops":       true, // Disable git ops in bd prime session close protocol (GH#593)
 
 	// Sync settings
 	"sync-branch":                           true,

@@ -31,7 +31,12 @@ Automatically detects if MCP server is active and adapts output:
 - CLI mode: Full command reference (~1-2k tokens)
 
 Designed for Claude Code hooks (SessionStart, PreCompact) to prevent
-agents from forgetting bd workflow after context compaction.`,
+agents from forgetting bd workflow after context compaction.
+
+Config options:
+- no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
+  Set via: bd config set no-git-ops true
+  Useful when you want to control when commits happen manually.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Find .beads/ directory (supports both database and JSONL-only mode)
 		beadsDir := beads.FindBeadsDir()
@@ -51,8 +56,12 @@ agents from forgetting bd workflow after context compaction.`,
 			mcpMode = true
 		}
 
+		// Check for stealth mode: flag OR config (GH#593)
+		// This allows users to disable git ops in session close protocol via config
+		stealthMode := primeStealthMode || config.GetBool("no-git-ops")
+
 		// Output workflow context (adaptive based on MCP and stealth mode)
-		if err := outputPrimeContext(os.Stdout, mcpMode, primeStealthMode); err != nil {
+		if err := outputPrimeContext(os.Stdout, mcpMode, stealthMode); err != nil {
 			// Suppress all errors - silent exit with success
 			// Never write to stderr (breaks Windows compatibility)
 			os.Exit(0)
