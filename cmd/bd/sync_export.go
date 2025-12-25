@@ -60,6 +60,18 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 		}
 	}
 
+	// Filter out wisps - they should never be exported to JSONL (bd-687g)
+	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
+	// This prevents "zombie" issues that resurrect after mol squash deletes them.
+	filteredIssues := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Wisp {
+			continue
+		}
+		filteredIssues = append(filteredIssues, issue)
+	}
+	issues = filteredIssues
+
 	// Sort by ID for consistent output
 	slices.SortFunc(issues, func(a, b *types.Issue) int {
 		return cmp.Compare(a.ID, b.ID)
