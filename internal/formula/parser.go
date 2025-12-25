@@ -209,6 +209,12 @@ func (p *Parser) loadFormula(name string) (*Formula, error) {
 	return nil, fmt.Errorf("formula %q not found in search paths", name)
 }
 
+// LoadByName loads a formula by name from search paths.
+// This is the public API for loading formulas used by expansion operators.
+func (p *Parser) LoadByName(name string) (*Formula, error) {
+	return p.loadFormula(name)
+}
+
 // mergeComposeRules merges two compose rule sets.
 func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 	if overlay == nil {
@@ -221,6 +227,8 @@ func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 	result := &ComposeRules{
 		BondPoints: append([]*BondPoint{}, base.BondPoints...),
 		Hooks:      append([]*Hook{}, base.Hooks...),
+		Expand:     append([]*ExpandRule{}, base.Expand...),
+		Map:        append([]*MapRule{}, base.Map...),
 	}
 
 	// Add overlay bond points (override by ID)
@@ -238,6 +246,12 @@ func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 
 	// Add overlay hooks (append, no override)
 	result.Hooks = append(result.Hooks, overlay.Hooks...)
+
+	// Add overlay expand rules (append, no override)
+	result.Expand = append(result.Expand, overlay.Expand...)
+
+	// Add overlay map rules (append, no override)
+	result.Map = append(result.Map, overlay.Map...)
 
 	return result
 }

@@ -98,6 +98,16 @@ func runCook(cmd *cobra.Command, args []string) {
 		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
+	// Apply expansion operators (gt-8tmz.3)
+	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
+		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error applying expansions: %v\n", err)
+			os.Exit(1)
+		}
+		resolved.Steps = expandedSteps
+	}
+
 	// Apply prefix to proto ID if specified (bd-47qx)
 	protoID := resolved.Formula
 	if prefix != "" {

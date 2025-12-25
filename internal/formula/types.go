@@ -83,6 +83,11 @@ type Formula struct {
 	// Steps defines the work items to create.
 	Steps []*Step `json:"steps,omitempty"`
 
+	// Template defines expansion template steps (for TypeExpansion formulas).
+	// Template steps use {target} and {target.description} placeholders
+	// that get substituted when the expansion is applied to a target step.
+	Template []*Step `json:"template,omitempty"`
+
 	// Compose defines composition/bonding rules.
 	Compose *ComposeRules `json:"compose,omitempty"`
 
@@ -197,6 +202,39 @@ type ComposeRules struct {
 
 	// Hooks are automatic attachments triggered by labels or conditions.
 	Hooks []*Hook `json:"hooks,omitempty"`
+
+	// Expand applies an expansion template to a single target step.
+	// The target step is replaced by the expanded template steps.
+	Expand []*ExpandRule `json:"expand,omitempty"`
+
+	// Map applies an expansion template to all steps matching a pattern.
+	// Each matching step is replaced by the expanded template steps.
+	Map []*MapRule `json:"map,omitempty"`
+}
+
+// ExpandRule applies an expansion template to a single target step.
+type ExpandRule struct {
+	// Target is the step ID to expand.
+	Target string `json:"target"`
+
+	// With is the name of the expansion formula to apply.
+	With string `json:"with"`
+
+	// Vars are variable overrides for the expansion.
+	Vars map[string]string `json:"vars,omitempty"`
+}
+
+// MapRule applies an expansion template to all matching steps.
+type MapRule struct {
+	// Select is a glob pattern matching step IDs to expand.
+	// Examples: "*.implement", "shiny.*"
+	Select string `json:"select"`
+
+	// With is the name of the expansion formula to apply.
+	With string `json:"with"`
+
+	// Vars are variable overrides for the expansion.
+	Vars map[string]string `json:"vars,omitempty"`
 }
 
 // BondPoint is a named attachment site for composition.
