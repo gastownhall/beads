@@ -10,11 +10,10 @@ import (
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var molRunCmd = &cobra.Command{
-	Use:   "run <proto-id>",
+	Use:   "run <proto-id-or-title>",
 	Short: "Spawn proto and start execution (spawn + assign + pin)",
 	Long: `Run a molecule by spawning a proto and setting up for durable execution.
 
@@ -23,6 +22,9 @@ This command:
   2. Assigns the root issue to the caller
   3. Sets root status to in_progress
   4. Pins the root issue for session recovery
+
+The proto can be specified by ID or title. Title matching is case-insensitive
+and supports partial matches (e.g., "polecat" matches "mol-polecat-work").
 
 After a crash or session reset, the pinned root issue ensures the agent
 can resume from where it left off by checking 'bd ready'.
@@ -33,8 +35,9 @@ This is essential for wisp molecule spawning where templates exist in the main
 database but instances should be ephemeral.
 
 Example:
-  bd mol run mol-version-bump --var version=1.2.0
-  bd mol run bd-qqc --var version=0.32.0 --var date=2025-01-01
+  bd mol run mol-polecat-work --var issue=gt-xxx     # By title
+  bd mol run gt-lwuu --var issue=gt-xxx              # By ID
+  bd mol run polecat --var issue=gt-xxx              # By partial title
   bd --db .beads-wisp/beads.db mol run mol-patrol --template-db .beads/beads.db`,
 	Args: cobra.ExactArgs(1),
 	Run:  runMolRun,
@@ -97,10 +100,10 @@ func runMolRun(cmd *cobra.Command, args []string) {
 		defer func() { _ = templateStore.Close() }()
 	}
 
-	// Resolve molecule ID from template store
-	moleculeID, err := utils.ResolvePartialID(ctx, templateStore, args[0])
+	// Resolve molecule ID from template store (supports both ID and title - bd-drcx)
+	moleculeID, err := resolveProtoIDOrTitle(ctx, templateStore, args[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving molecule ID %s: %v\n", args[0], err)
+		fmt.Fprintf(os.Stderr, "Error resolving molecule %s: %v\n", args[0], err)
 		os.Exit(1)
 	}
 

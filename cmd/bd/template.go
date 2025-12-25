@@ -409,8 +409,14 @@ func loadTemplateSubgraph(ctx context.Context, s storage.Storage, templateID str
 }
 
 // loadDescendants recursively loads all child issues
+// It uses two strategies to find children:
+// 1. Check dependency records for parent-child relationships
+// 2. Check for hierarchical IDs (parent.N) to catch children with missing/wrong deps (bd-c8d5)
 func loadDescendants(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, parentID string) error {
-	// GetDependents returns issues that depend on parentID
+	// Track children we've already added to avoid duplicates
+	addedChildren := make(map[string]bool)
+
+	// Strategy 1: GetDependents returns issues that depend on parentID
 	dependents, err := s.GetDependents(ctx, parentID)
 	if err != nil {
 		return fmt.Errorf("failed to get dependents of %s: %w", parentID, err)
@@ -443,6 +449,7 @@ func loadDescendants(ctx context.Context, s storage.Storage, subgraph *TemplateS
 		// Add to subgraph
 		subgraph.Issues = append(subgraph.Issues, dependent)
 		subgraph.IssueMap[dependent.ID] = dependent
+		addedChildren[dependent.ID] = true
 
 		// Recurse to get children of this child
 		if err := loadDescendants(ctx, s, subgraph, dependent.ID); err != nil {
@@ -450,7 +457,130 @@ func loadDescendants(ctx context.Context, s storage.Storage, subgraph *TemplateS
 		}
 	}
 
+	// Strategy 2: Find hierarchical children by ID pattern (bd-c8d5)
+	// This catches children that have missing or incorrect dependency types.
+	// Hierarchical IDs follow the pattern: parentID.N (e.g., "gt-abc.1", "gt-abc.2")
+	hierarchicalChildren, err := findHierarchicalChildren(ctx, s, parentID)
+	if err != nil {
+		// Non-fatal: continue with what we have
+		return nil
+	}
+
+	for _, child := range hierarchicalChildren {
+		if addedChildren[child.ID] {
+			continue // Already added via dependency
+		}
+		if _, exists := subgraph.IssueMap[child.ID]; exists {
+			continue // Already in subgraph
+		}
+
+		// Add to subgraph
+		subgraph.Issues = append(subgraph.Issues, child)
+		subgraph.IssueMap[child.ID] = child
+		addedChildren[child.ID] = true
+
+		// Recurse to get children of this child
+		if err := loadDescendants(ctx, s, subgraph, child.ID); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// findHierarchicalChildren finds issues with IDs that match the pattern parentID.N
+// This catches hierarchical children that may be missing parent-child dependencies.
+func findHierarchicalChildren(ctx context.Context, s storage.Storage, parentID string) ([]*types.Issue, error) {
+	// Look for issues with IDs starting with "parentID."
+	// We need to query by ID pattern, which requires listing issues
+	pattern := parentID + "."
+
+	// Use the storage's search capability with a filter
+	allIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, err
+	}
+
+	var children []*types.Issue
+	for _, issue := range allIssues {
+		// Check if ID starts with pattern and is a direct child (no further dots after the pattern)
+		if len(issue.ID) > len(pattern) && issue.ID[:len(pattern)] == pattern {
+			// Check it's a direct child, not a grandchild
+			// e.g., "parent.1" is a child, "parent.1.2" is a grandchild
+			remaining := issue.ID[len(pattern):]
+			if !strings.Contains(remaining, ".") {
+				children = append(children, issue)
+			}
+		}
+	}
+
+	return children, nil
+}
+
+// =============================================================================
+// Proto Lookup Functions (bd-drcx)
+// =============================================================================
+
+// resolveProtoIDOrTitle resolves a proto by ID or title.
+// It first tries to resolve as an ID (via ResolvePartialID).
+// If that fails, it searches for protos with matching titles.
+// Returns the proto ID if found, or an error if not found or ambiguous.
+func resolveProtoIDOrTitle(ctx context.Context, s storage.Storage, input string) (string, error) {
+	// Strategy 1: Try to resolve as an ID
+	protoID, err := utils.ResolvePartialID(ctx, s, input)
+	if err == nil {
+		// Verify it's a proto (has template label)
+		issue, getErr := s.GetIssue(ctx, protoID)
+		if getErr == nil && issue != nil {
+			labels, _ := s.GetLabels(ctx, protoID)
+			for _, label := range labels {
+				if label == BeadsTemplateLabel {
+					return protoID, nil // Found a valid proto by ID
+				}
+			}
+		}
+		// ID resolved but not a proto - continue to title search
+	}
+
+	// Strategy 2: Search for protos by title
+	protos, err := s.GetIssuesByLabel(ctx, BeadsTemplateLabel)
+	if err != nil {
+		return "", fmt.Errorf("failed to search protos: %w", err)
+	}
+
+	var matches []*types.Issue
+	var exactMatch *types.Issue
+
+	for _, proto := range protos {
+		// Check for exact title match (case-insensitive)
+		if strings.EqualFold(proto.Title, input) {
+			exactMatch = proto
+			break
+		}
+		// Check for partial title match (case-insensitive)
+		if strings.Contains(strings.ToLower(proto.Title), strings.ToLower(input)) {
+			matches = append(matches, proto)
+		}
+	}
+
+	if exactMatch != nil {
+		return exactMatch.ID, nil
+	}
+
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no proto found matching %q (by ID or title)", input)
+	}
+
+	if len(matches) == 1 {
+		return matches[0].ID, nil
+	}
+
+	// Multiple matches - show them all for disambiguation
+	var matchNames []string
+	for _, m := range matches {
+		matchNames = append(matchNames, fmt.Sprintf("%s: %s", m.ID, m.Title))
+	}
+	return "", fmt.Errorf("ambiguous: %q matches %d protos:\n  %s\nUse the ID or a more specific title", input, len(matches), strings.Join(matchNames, "\n  "))
 }
 
 // =============================================================================
