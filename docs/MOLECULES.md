@@ -1,302 +1,286 @@
-# Molecular Chemistry in Beads
+# Molecules: Work Graphs in Beads
 
-This document explains beads' molecular chemistry metaphor for template-based workflows.
+This doc explains how beads structures and executes work. Start here if you're building workflows.
 
-## The Layer Cake
+## TL;DR
 
-Beads has a layered architecture where each layer builds on the one below:
+1. **Work = issues with dependencies.** That's it. No special types needed.
+2. **Dependencies control execution.** `blocks` = sequential. No dep = parallel.
+3. **Molecules are just epics.** Any epic with children is a molecule. Templates are optional.
+4. **Bonding = adding dependencies.** `bd mol bond A B` creates a dependency between work graphs.
+5. **Agents execute until blocked.** When all ready work is done, the workflow is complete.
+
+## The Execution Model
+
+### How Work Flows
+
+An agent picks up a molecule (epic with children). They execute ready children in parallel until everything closes:
 
 ```
-Formulas (YAML compile-time macros)
-    ↓
-Protos (template issues, read-only)
-    ↓
-Molecules (pour, bond, squash, burn)
-    ↓
-Epics (parent-child, dependencies) ← DATA PLANE
-    ↓
-Issues (JSONL, git-backed) ← STORAGE
+epic-root (assigned to agent)
+├── child.1 (no deps → ready)      ← execute in parallel
+├── child.2 (no deps → ready)      ← execute in parallel
+├── child.3 (needs child.1) → blocked until child.1 closes
+└── child.4 (needs child.2, child.3) → blocked until both close
 ```
 
-**Key insight:** Molecules work without protos. You can create ad-hoc molecules (epics with children) directly. Protos are templates FOR molecules, not the other way around.
+**Ready work:** `bd ready` shows issues with no open blockers.
+**Blocked work:** `bd blocked` shows what's waiting.
 
-## Phase Metaphor
+### Dependency Types That Block
 
-The chemistry metaphor uses phase transitions to describe where work lives:
+| Type | Semantics | Use Case |
+|------|-----------|----------|
+| `blocks` | B can't start until A closes | Sequencing work |
+| `parent-child` | If parent blocked, children blocked | Hierarchy (children parallel by default) |
+| `conditional-blocks` | B runs only if A fails | Error handling paths |
+| `waits-for` | B waits for all of A's children | Fanout gates |
 
-| Phase | State | Storage | Synced | Use Case |
-|-------|-------|---------|--------|----------|
-| **Solid** | Proto | `.beads/` | Yes | Reusable templates |
-| **Liquid** | Mol | `.beads/` | Yes | Persistent work |
+**Non-blocking types:** `related`, `discovered-from`, `replies-to` - these link issues without affecting execution.
+
+### Default Parallelism
+
+**Children are parallel by default.** Only explicit dependencies create sequence:
+
+```bash
+# These three tasks run in PARALLEL (no deps between them)
+bd create "Task A" -t task
+bd create "Task B" -t task
+bd create "Task C" -t task
+
+# Add dependency to make B wait for A
+bd dep add <B-id> <A-id>   # B depends on A (B needs A)
+```
+
+### Multi-Day Execution
+
+An agent works through a molecule by:
+1. Getting ready work (`bd ready`)
+2. Claiming it (`bd update <id> --status in_progress`)
+3. Doing the work
+4. Closing it (`bd close <id>`)
+5. Repeat until molecule is done
+
+If the molecule is blocked by another molecule:
+- Agent either waits, or
+- Agent continues into the blocking molecule (compound execution)
+
+**Bonding enables compound execution:** When you bond molecule A to molecule B, the agent can traverse both as one logical unit of work.
+
+## Molecules vs Epics
+
+**They're the same thing.** A molecule is just an epic (parent + children) with workflow semantics.
+
+| Term | Meaning | When to Use |
+|------|---------|-------------|
+| **Epic** | Parent issue with children | General term for hierarchical work |
+| **Molecule** | Epic with execution intent | When discussing workflow traversal |
+| **Proto** | Epic with `template` label | Reusable pattern (optional) |
+
+You can create molecules without protos - just create an epic and add children:
+
+```bash
+bd create "Feature X" -t epic
+bd create "Design" -t task --parent <epic-id>
+bd create "Implement" -t task --parent <epic-id>
+bd create "Test" -t task --parent <epic-id>
+bd dep add <implement-id> <design-id>   # implement needs design
+bd dep add <test-id> <implement-id>      # test needs implement
+```
+
+## Bonding: Connecting Work Graphs
+
+**Bond = create a dependency between two work graphs.**
+
+```bash
+bd mol bond A B                    # B depends on A (sequential by default)
+bd mol bond A B --type parallel    # Organizational link, no blocking
+bd mol bond A B --type conditional # B runs only if A fails
+```
+
+### What Bonding Does
+
+| Operands | What Happens |
+|----------|--------------|
+| epic + epic | Creates dependency edge between them |
+| proto + epic | Spawns proto as new issues, attaches to epic |
+| proto + proto | Creates compound template |
+
+### The Key Insight
+
+**Bonding lets agents traverse compound workflows.** When A blocks B:
+- Completing A unblocks B
+- Agent can continue from A into B seamlessly
+- The compound work graph can span days
+
+This is how Gas Town runs autonomous workflows - agents follow the dependency graph, handing off between sessions, until all work closes.
+
+## Phase Metaphor (Templates)
+
+For reusable workflows, beads uses a chemistry metaphor:
+
+| Phase | Name | Storage | Synced | Purpose |
+|-------|------|---------|--------|---------|
+| **Solid** | Proto | `.beads/` | Yes | Frozen template |
+| **Liquid** | Mol | `.beads/` | Yes | Active persistent work |
 | **Vapor** | Wisp | `.beads-wisp/` | No | Ephemeral operations |
 
-### Phase Transitions
-
-```
-Proto (solid) ──pour──→ Mol (liquid)    # Persistent instantiation
-Proto (solid) ──wisp──→ Wisp (vapor)    # Ephemeral instantiation
-Wisp (vapor) ──squash──→ Digest (solid) # Compress to permanent record
-Wisp (vapor) ──burn──→ (nothing)        # Discard without trace
-```
-
-## Core Concepts
-
-### Protos (Templates)
-
-A proto is an issue with the `template` label. It defines a reusable pattern of work:
+### Phase Commands
 
 ```bash
-# List available protos
-bd mol catalog
-
-# Show proto structure
-bd mol show <proto-id>
+bd pour <proto>                  # Proto → Mol (persistent instance)
+bd wisp create <proto>           # Proto → Wisp (ephemeral instance)
+bd mol squash <id>               # Mol/Wisp → Digest (permanent record)
+bd mol burn <id>                 # Wisp → nothing (discard)
 ```
 
-Protos can contain:
-- Template variables using `{{variable}}` syntax
-- Hierarchical child issues (subtasks)
-- Dependencies between children
+### When to Use Each Phase
 
-### Molecules (Instances)
+| Use Case | Phase | Why |
+|----------|-------|-----|
+| Feature work | Mol (pour) | Persists across sessions, audit trail |
+| Patrol cycles | Wisp | Routine, no audit value |
+| One-shot ops | Wisp | Scaffolding, not the work itself |
+| Important discovery during wisp | Mol (--pour) | "This matters, save it" |
 
-A molecule is a spawned instance of a proto (or an ad-hoc epic). When you "pour" a proto, you create real issues from the template:
+## Common Patterns
+
+### Sequential Pipeline
 
 ```bash
-# Pour: proto → persistent mol (liquid phase)
-bd pour <proto-id> --var key=value
-
-# The mol lives in .beads/ and is synced with git
+bd create "Pipeline" -t epic
+bd create "Step 1" -t task --parent <pipeline>
+bd create "Step 2" -t task --parent <pipeline>
+bd create "Step 3" -t task --parent <pipeline>
+bd dep add <step2> <step1>
+bd dep add <step3> <step2>
 ```
 
-### Wisps (Ephemeral Molecules)
-
-Wisps are ephemeral molecules for operational workflows that shouldn't accumulate:
+### Parallel Fanout with Gate
 
 ```bash
-# Wisp: proto → ephemeral wisp (vapor phase)
-bd wisp create <proto-id> --var key=value
-
-# The wisp lives in .beads-wisp/ and is NOT synced
+bd create "Process files" -t epic
+bd create "File A" -t task --parent <epic>
+bd create "File B" -t task --parent <epic>
+bd create "File C" -t task --parent <epic>
+bd create "Aggregate" -t task --parent <epic>
+# Aggregate needs all three (waits-for gate)
+bd dep add <aggregate> <fileA> --type waits-for
 ```
 
-Use wisps for:
-- Patrol cycles (deacon, witness)
-- Health checks and monitoring
-- One-shot orchestration runs
-- Routine operations with no audit value
+### Dynamic Bonding (Christmas Ornament)
 
-### Bonding (Combining Work)
-
-The `bond` command polymorphically combines protos and molecules:
+When the number of children isn't known until runtime:
 
 ```bash
-# proto + proto → compound proto (reusable template)
-bd mol bond mol-feature mol-deploy
-
-# proto + mol → spawn proto, attach to molecule
-bd mol bond mol-review bd-abc123
-
-# mol + mol → join into compound molecule
-bd mol bond bd-abc123 bd-def456
+# In a survey step, discover polecats and bond arms dynamically
+for polecat in $(gt polecat list); do
+  bd mol bond mol-polecat-arm $PATROL_ID --ref arm-$polecat --var name=$polecat
+done
 ```
 
-Bond types:
-- `sequential` (default) - B runs after A completes
-- `parallel` - B runs alongside A
-- `conditional` - B runs only if A fails
-
-Phase control for bonding:
-```bash
-# Force spawn as liquid (persistent), even when attaching to wisp
-bd mol bond mol-critical-bug wisp-patrol --pour
-
-# Force spawn as vapor (ephemeral), even when attaching to mol
-bd mol bond mol-temp-check bd-feature --wisp
+Creates:
+```
+patrol-x7k (wisp)
+├── preflight
+├── survey-workers
+│   ├── patrol-x7k.arm-ace (dynamically bonded)
+│   ├── patrol-x7k.arm-nux (dynamically bonded)
+│   └── patrol-x7k.arm-toast (dynamically bonded)
+└── aggregate (waits for all arms)
 ```
 
-### Squashing (Compressing)
+## Agent Pitfalls
 
-Squash compresses a wisp's execution into a permanent digest:
+### 1. Temporal Language Inverts Dependencies
 
-```bash
-# Squash wisp → permanent digest
-bd mol squash <wisp-id>
+**Wrong:** "Phase 1 comes before Phase 2" → `bd dep add phase1 phase2`
+**Right:** "Phase 2 needs Phase 1" → `bd dep add phase2 phase1`
 
-# With agent-provided summary
-bd mol squash <wisp-id> --summary "Brief description of what was done"
+Use requirement language. Verify with `bd blocked`.
 
-# Preview what would be squashed
-bd mol squash <wisp-id> --dry-run
-```
+### 2. Assuming Order = Sequence
 
-### Burning (Discarding)
-
-Burn deletes a wisp without creating any digest:
+Numbered steps don't create sequence. Dependencies do:
 
 ```bash
-# Delete wisp with no trace
-bd mol burn <wisp-id>
+# These run in PARALLEL despite names
+bd create "Step 1" ...
+bd create "Step 2" ...
+bd create "Step 3" ...
 
-# Preview what would be deleted
-bd mol burn <wisp-id> --dry-run
+# Add deps to sequence them
+bd dep add step2 step1
+bd dep add step3 step2
 ```
 
-## Lifecycle Patterns
+### 3. Forgetting to Close Work
 
-### Patrol Cycle (Ephemeral)
-
-```
-1. bd wisp create mol-patrol    # Create ephemeral wisp
-2. (execute patrol steps)       # Work through children
-3. bd mol squash <id>           # Compress to digest
-   # or
-   bd mol burn <id>             # Discard without trace
-```
-
-### Feature Work (Persistent)
-
-```
-1. bd pour mol-feature --var name=auth    # Create persistent mol
-2. (implement feature)                     # Work through children
-3. bd close <children>                     # Complete subtasks
-4. bd close <root>                         # Complete the feature
-```
-
-### Dynamic Bonding (Christmas Ornament Pattern)
-
-Attach work dynamically using custom IDs:
+Blocked issues stay blocked forever if their blockers aren't closed. Always close completed work:
 
 ```bash
-# Spawn per-worker arms on a patrol
-bd mol bond mol-polecat-arm bd-patrol --ref arm-{{name}} --var name=ace
-# Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
+bd close <id> --reason "Done"
 ```
 
-## Progress Tracking
+### 4. Orphaned Wisps
 
-Molecule progress is **computed, not stored**:
-
-- `progress.Completed` = count of closed children
-- `progress.Total` = count of all children
-
-This means:
-- No state to get out of sync
-- Dynamic fanout works automatically (new children increase Total)
-- Closing children increases Completed
-
-## Parallelism Model
-
-**Default: Parallel.** Issues without `depends_on` relationships run in parallel.
-
-**Opt-in Sequential:** Add blocking dependencies to create sequence:
+Wisps accumulate if not squashed/burned:
 
 ```bash
-# phase-2 depends on phase-1 (phase-1 must complete first)
-bd dep add phase-2 phase-1
+bd wisp list           # Check for orphans
+bd mol squash <id>     # Create digest
+bd mol burn <id>       # Or discard
+bd wisp gc             # Garbage collect old wisps
 ```
 
-**Cognitive trap:** Temporal language ("Phase 1 comes before Phase 2") inverts dependencies. Think requirements: "Phase 2 **needs** Phase 1."
+## Layer Cake Architecture
 
-## Common Agent Pitfalls
+For reference, here's how the layers stack:
 
-### 1. Temporal Language Inverting Dependencies
+```
+Formulas (YAML compile-time macros)      ← optional, for complex composition
+    ↓
+Protos (template issues)                  ← optional, for reusable patterns
+    ↓
+Molecules (bond, squash, burn)            ← workflow operations
+    ↓
+Epics (parent-child, dependencies)        ← DATA PLANE (the core)
+    ↓
+Issues (JSONL, git-backed)                ← STORAGE
+```
 
-**Wrong thinking:** "Phase 1 comes before Phase 2" → `bd dep add phase1 phase2`
+**Most users only need the bottom two layers.** Protos and formulas are for reusable patterns and complex composition.
 
-**Right thinking:** "Phase 2 needs Phase 1" → `bd dep add phase2 phase1`
+## Commands Quick Reference
 
-**Solution:** Use requirement language, not temporal language. Verify with `bd blocked`.
-
-### 2. Confusing Protos with Molecules
-
-- **Proto** = Template (has `template` label, read-only pattern)
-- **Molecule** = Instance (real work, created by pour/wisp)
-
-You can create molecules without protos (ad-hoc epics). Protos are just reusable patterns.
-
-### 3. Forgetting to Squash/Burn Wisps
-
-Wisps accumulate in `.beads-wisp/` if not cleaned up. At session end:
+### Execution
 
 ```bash
-bd wisp list                    # Check for orphaned wisps
-bd mol squash <id> --summary "" # Compress to digest
-# or
-bd mol burn <id>                # Discard if not needed
-# or
-bd wisp gc                      # Garbage collect old wisps
+bd ready                         # What's ready to work
+bd blocked                       # What's blocked
+bd update <id> --status in_progress
+bd close <id>
 ```
 
-### 4. Thinking Phases Imply Sequence
-
-Phases, steps, or numbered items in a plan do NOT create sequence. Only dependencies do.
+### Dependencies
 
 ```bash
-# These tasks run in PARALLEL (no dependencies)
-bd create "Step 1: Do X" ...
-bd create "Step 2: Do Y" ...
-bd create "Step 3: Do Z" ...
-
-# Add dependencies to create sequence
-bd dep add step2 step1    # step2 needs step1
-bd dep add step3 step2    # step3 needs step2
+bd dep add <issue> <depends-on>  # issue needs depends-on
+bd dep tree <id>                 # Show dependency tree
 ```
 
-## Orphan vs Stale Matrix
-
-A molecule can be in one of four states based on two dimensions:
-
-| | Assigned | Unassigned |
-|---|---|---|
-| **Blocking** | Active work | Orphaned (needs pickup) |
-| **Not blocking** | In progress | Stale (complete but unclosed) |
-
-- **Orphaned:** Complete-but-unclosed molecules blocking other assigned work
-- **Stale:** Complete-but-unclosed molecules not blocking anything
-
-Graph pressure (blocking other work) determines urgency, not time.
-
-## Commands Reference
-
-### Proto/Template Commands
+### Molecules
 
 ```bash
-bd mol catalog                  # List available protos
-bd mol show <id>                # Show proto/molecule structure
-bd mol distill <epic-id>        # Extract proto from ad-hoc epic
+bd pour <proto> --var k=v        # Template → persistent mol
+bd wisp create <proto>           # Template → ephemeral wisp
+bd mol bond A B                  # Connect work graphs
+bd mol squash <id>               # Compress to digest
+bd mol burn <id>                 # Discard without record
 ```
 
-### Phase Transition Commands
+## Related Docs
 
-```bash
-bd pour <proto> --var k=v       # Proto → Mol (liquid)
-bd wisp create <proto> --var k=v # Proto → Wisp (vapor)
-bd mol squash <id>              # Wisp → Digest (solid)
-bd mol burn <id>                # Wisp → nothing
-```
-
-### Bonding Commands
-
-```bash
-bd mol bond <A> <B>             # Polymorphic combine
-bd mol bond <A> <B> --type parallel
-bd mol bond <A> <B> --pour      # Force persistent
-bd mol bond <A> <B> --wisp      # Force ephemeral
-bd mol bond <A> <B> --ref <ref> # Dynamic child ID
-```
-
-### Wisp Management
-
-```bash
-bd wisp list                    # List all wisps
-bd wisp list --all              # Include closed
-bd wisp gc                      # Garbage collect orphaned wisps
-bd wisp gc --age 24h            # Custom age threshold
-```
-
-## Related Documentation
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Overall bd architecture
-- [CLI_REFERENCE.md](CLI_REFERENCE.md) - Complete command reference
-- [../CLAUDE.md](../CLAUDE.md) - Quick reference for agents
+- [CLI_REFERENCE.md](CLI_REFERENCE.md) - Full command reference
+- [ARCHITECTURE.md](ARCHITECTURE.md) - System internals
+- [../CLAUDE.md](../CLAUDE.md) - Quick agent reference
