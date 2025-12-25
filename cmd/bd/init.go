@@ -138,7 +138,12 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		}
 
 		// Check if we're in a git worktree
-		isWorktree := git.IsWorktree()
+		// Guard with isGitRepo() check first - on Windows, git commands may hang
+		// when run outside a git repository (GH#727)
+		isWorktree := false
+		if isGitRepo() {
+			isWorktree = git.IsWorktree()
+		}
 		var beadsDir string
 		if isWorktree {
 			// For worktrees, .beads should be in the main repository root
@@ -1590,8 +1595,10 @@ func checkExistingBeadsData(prefix string) error {
 	}
 
 	// Determine where to check for .beads directory
+	// Guard with isGitRepo() check first - on Windows, git commands may hang
+	// when run outside a git repository (GH#727)
 	var beadsDir string
-	if git.IsWorktree() {
+	if isGitRepo() && git.IsWorktree() {
 		// For worktrees, .beads should be in the main repository root
 		mainRepoRoot, err := git.GetMainRepoRoot()
 		if err != nil {
@@ -1599,7 +1606,7 @@ func checkExistingBeadsData(prefix string) error {
 		}
 		beadsDir = filepath.Join(mainRepoRoot, ".beads")
 	} else {
-		// For regular repos, check current directory
+		// For regular repos (or non-git directories), check current directory
 		beadsDir = filepath.Join(cwd, ".beads")
 	}
 
