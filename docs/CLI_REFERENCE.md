@@ -10,6 +10,7 @@
 - [Dependencies & Labels](#dependencies--labels)
 - [Filtering & Search](#filtering--search)
 - [Advanced Operations](#advanced-operations)
+- [Molecular Chemistry](#molecular-chemistry)
 - [Database Management](#database-management)
 - [Editor Integration](#editor-integration)
 
@@ -340,6 +341,116 @@ bd rename-prefix kw- --dry-run  # Preview changes
 bd rename-prefix kw- --json     # Apply rename
 ```
 
+## Molecular Chemistry
+
+Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md](MOLECULES.md) for full documentation.
+
+### Phase Transitions
+
+| Phase | State | Storage | Command |
+|-------|-------|---------|---------|
+| Solid | Proto | `.beads/` | `bd mol catalog` |
+| Liquid | Mol | `.beads/` | `bd pour` |
+| Vapor | Wisp | `.beads-wisp/` | `bd wisp create` |
+
+### Proto/Template Commands
+
+```bash
+# List available protos (templates)
+bd mol catalog --json
+
+# Show proto structure and variables
+bd mol show <proto-id> --json
+
+# Extract proto from ad-hoc epic
+bd mol distill <epic-id> --json
+```
+
+### Pour (Proto to Mol)
+
+```bash
+# Instantiate proto as persistent mol (solid → liquid)
+bd pour <proto-id> --var key=value --json
+
+# Preview what would be created
+bd pour <proto-id> --var key=value --dry-run
+
+# Assign root issue
+bd pour <proto-id> --var key=value --assignee alice --json
+
+# Attach additional protos during pour
+bd pour <proto-id> --attach <other-proto> --json
+```
+
+### Wisp Commands
+
+```bash
+# Instantiate proto as ephemeral wisp (solid → vapor)
+bd wisp create <proto-id> --var key=value --json
+
+# List all wisps
+bd wisp list --json
+bd wisp list --all --json    # Include closed
+
+# Garbage collect orphaned wisps
+bd wisp gc --json
+bd wisp gc --age 24h --json  # Custom age threshold
+bd wisp gc --dry-run         # Preview what would be cleaned
+```
+
+### Bonding (Combining Work)
+
+```bash
+# Polymorphic combine - handles proto+proto, proto+mol, mol+mol
+bd mol bond <A> <B> --json
+
+# Bond types
+bd mol bond <A> <B> --type sequential --json   # B runs after A (default)
+bd mol bond <A> <B> --type parallel --json     # B runs alongside A
+bd mol bond <A> <B> --type conditional --json  # B runs only if A fails
+
+# Phase control
+bd mol bond <proto> <mol> --pour --json   # Force persistent spawn
+bd mol bond <proto> <mol> --wisp --json   # Force ephemeral spawn
+
+# Dynamic bonding (custom child IDs)
+bd mol bond <proto> <mol> --ref arm-{{name}} --var name=ace --json
+
+# Preview bonding
+bd mol bond <A> <B> --dry-run
+```
+
+### Squash (Wisp to Digest)
+
+```bash
+# Compress wisp to permanent digest
+bd mol squash <wisp-id> --json
+
+# With agent-provided summary
+bd mol squash <wisp-id> --summary "Work completed" --json
+
+# Preview
+bd mol squash <wisp-id> --dry-run
+
+# Keep wisp children after squash
+bd mol squash <wisp-id> --keep-children --json
+```
+
+### Burn (Discard Wisp)
+
+```bash
+# Delete wisp without digest (destructive)
+bd mol burn <wisp-id> --json
+
+# Preview
+bd mol burn <wisp-id> --dry-run
+
+# Skip confirmation
+bd mol burn <wisp-id> --force --json
+```
+
+**Note:** Most mol commands require `--no-daemon` flag when daemon is running.
+
 ## Database Management
 
 ### Import/Export
@@ -604,6 +715,7 @@ See also:
 ## See Also
 
 - [AGENTS.md](../AGENTS.md) - Main agent workflow guide
+- [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
 - [DAEMON.md](DAEMON.md) - Daemon management and event-driven mode
 - [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git workflows and merge strategies
 - [LABELS.md](../LABELS.md) - Label system guide

@@ -269,6 +269,8 @@ open ──▶ in_progress ──▶ closed
 
 **Molecules** are template work items that define structured workflows. When spawned, they create **wisps** - ephemeral child issues that track execution steps.
 
+> **For full documentation** on the molecular chemistry metaphor (protos, pour, bond, squash, burn), see [MOLECULES.md](MOLECULES.md).
+
 ### Wisp Lifecycle
 
 ```
@@ -317,6 +319,7 @@ The `bd mol squash` command uses hard delete intentionally - tombstones would be
 
 ## Related Documentation
 
+- [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
 - [INTERNALS.md](INTERNALS.md) - FlushManager, Blocked Cache implementation details
 - [DAEMON.md](DAEMON.md) - Daemon management and configuration
 - [EXTENDING.md](EXTENDING.md) - Adding custom tables to SQLite
