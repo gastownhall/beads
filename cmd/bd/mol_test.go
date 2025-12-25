@@ -824,7 +824,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 	}
 
 	vars := map[string]string{"feature": "auth"}
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}
@@ -934,7 +934,7 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 		t.Fatalf("Failed to load primary subgraph: %v", err)
 	}
 
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}
@@ -1052,7 +1052,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 				t.Fatalf("Failed to load primary subgraph: %v", err)
 			}
 
-			spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+			spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true, "")
 			if err != nil {
 				t.Fatalf("Failed to spawn primary: %v", err)
 			}
@@ -1212,7 +1212,7 @@ func TestSpawnVariableAggregation(t *testing.T) {
 	}
 
 	// Spawn primary with variables
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}

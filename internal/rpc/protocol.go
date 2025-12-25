@@ -89,6 +89,8 @@ type CreateArgs struct {
 	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
 	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
+	// ID generation (bd-hobo)
+	IDPrefix string `json:"id_prefix,omitempty"` // Override prefix for ID generation (mol, wisp, etc.)
 }
 
 // UpdateArgs represents arguments for the update operation

@@ -66,12 +66,14 @@ See also:
 // This instantiates a proto (template) into a molecule (real issues).
 // Wraps cloneSubgraph from template.go and returns InstantiateResult.
 // If ephemeral is true, spawned issues are marked for bulk deletion when closed.
-func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, vars map[string]string, assignee string, actorName string, ephemeral bool) (*InstantiateResult, error) {
+// The prefix parameter overrides the default issue prefix (bd-hobo: distinct prefixes).
+func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, vars map[string]string, assignee string, actorName string, ephemeral bool, prefix string) (*InstantiateResult, error) {
 	opts := CloneOptions{
 		Vars:     vars,
 		Assignee: assignee,
 		Actor:    actorName,
 		Wisp:     ephemeral,
+		Prefix:   prefix,
 	}
 	return cloneSubgraph(ctx, s, subgraph, opts)
 }

@@ -181,7 +181,8 @@ func runPour(cmd *cobra.Command, args []string) {
 	}
 
 	// Spawn as persistent mol (ephemeral=false)
-	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false)
+	// bd-hobo: Use "mol" prefix for distinct visual recognition
+	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false, "mol")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error pouring proto: %v\n", err)
 		os.Exit(1)

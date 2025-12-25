@@ -32,6 +32,7 @@ type Issue struct {
 	CompactedAtCommit  *string        `json:"compacted_at_commit,omitempty"` // Git commit hash when compacted
 	OriginalSize       int            `json:"original_size,omitempty"`
 	SourceRepo         string         `json:"-"` // Internal: Which repo owns this issue (multi-repo support) - NOT exported to JSONL
+	IDPrefix           string         `json:"-"` // Internal: Override prefix for ID generation (bd-hobo) - NOT exported to JSONL
 	Labels             []string       `json:"labels,omitempty"` // Populated only for export/import
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import

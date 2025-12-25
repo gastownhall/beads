@@ -44,6 +44,7 @@ type CloneOptions struct {
 	Assignee string            // Assign the root epic to this agent/user
 	Actor    string            // Actor performing the operation
 	Wisp     bool              // If true, spawned issues are marked for bulk deletion
+	Prefix   string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
@@ -711,6 +712,7 @@ func cloneSubgraphViaDaemon(client *rpc.Client, subgraph *TemplateSubgraph, opts
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
 			Wisp:               opts.Wisp,
+			IDPrefix:           opts.Prefix, // bd-hobo: distinct prefixes for mols/wisps
 		}
 
 		// Generate custom ID for dynamic bonding if ParentID is set
@@ -905,7 +907,8 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				IssueType:          oldIssue.IssueType,
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Wisp:               opts.Wisp, // bd-2vh3: mark for cleanup when closed
+				Wisp:               opts.Wisp,   // bd-2vh3: mark for cleanup when closed
+				IDPrefix:           opts.Prefix, // bd-hobo: distinct prefixes for mols/wisps
 				CreatedAt:          time.Now(),
 				UpdatedAt:          time.Now(),
 			}
