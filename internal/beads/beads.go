@@ -620,6 +620,9 @@ func FindAllDatabases() []DatabaseInfo {
 // WispDirName is the default name for the wisp storage directory.
 // This directory is a sibling to .beads/ and should be gitignored.
 // Wisps are ephemeral molecules - the "steam" in Gas Town's engine metaphor.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 const WispDirName = ".beads-wisp"
 
 // FindWispDir locates or determines the wisp storage directory.
@@ -627,6 +630,9 @@ const WispDirName = ".beads-wisp"
 //
 // Returns the path to the wisp directory (which may not exist yet).
 // Returns empty string if no .beads directory can be found.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 func FindWispDir() string {
 	beadsDir := FindBeadsDir()
 	if beadsDir == "" {
@@ -642,6 +648,9 @@ func FindWispDir() string {
 // FindWispDatabasePath returns the path to the wisp database file.
 // Creates the wisp directory if it doesn't exist.
 // Returns empty string if no .beads directory can be found.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 func FindWispDatabasePath() (string, error) {
 	wispDir := FindWispDir()
 	if wispDir == "" {
@@ -660,6 +669,9 @@ func FindWispDatabasePath() (string, error) {
 // Creates the database and directory if they don't exist.
 // The wisp database uses the same schema as the main database.
 // Automatically copies issue_prefix from the main beads config if not set.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 func NewWispStorage(ctx context.Context) (Storage, error) {
 	dbPath, err := FindWispDatabasePath()
 	if err != nil {
@@ -696,6 +708,9 @@ func NewWispStorage(ctx context.Context) (Storage, error) {
 
 // EnsureWispGitignore ensures the wisp directory is gitignored.
 // This should be called after creating the wisp directory.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 func EnsureWispGitignore() error {
 	beadsDir := FindBeadsDir()
 	if beadsDir == "" {
@@ -743,6 +758,9 @@ func EnsureWispGitignore() error {
 
 // IsWispDatabase checks if a database path is a wisp database.
 // Returns true if the database is in a .beads-wisp directory.
+//
+// Deprecated: Wisps are now stored in the main database with Wisp=true.
+// The separate .beads-wisp/ directory is no longer used ("bd-bkul").
 func IsWispDatabase(dbPath string) bool {
 	if dbPath == "" {
 		return false

@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -24,8 +23,8 @@ completely removes the wisp with no trace. Use this for:
   - Test/debug wisps you don't want to preserve
 
 The burn operation:
-  1. Verifies the molecule is in wisp storage (.beads-wisp/)
-  2. Deletes the molecule and all its children
+  1. Verifies the molecule has Wisp=true (is ephemeral)
+  2. Deletes the molecule and all its wisp children
   3. No digest is created (use 'bd mol squash' if you want a digest)
 
 CAUTION: This is a destructive operation. The wisp's data will be
@@ -44,7 +43,6 @@ type BurnResult struct {
 	MoleculeID   string   `json:"molecule_id"`
 	DeletedIDs   []string `json:"deleted_ids"`
 	DeletedCount int      `json:"deleted_count"`
-	WispDir      string   `json:"wisp_dir"`
 }
 
 func runMolBurn(cmd *cobra.Command, args []string) {
@@ -52,75 +50,79 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
+	// mol burn requires direct store access
+	if store == nil {
+		if daemonClient != nil {
+			fmt.Fprintf(os.Stderr, "Error: mol burn requires direct database access\n")
+			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon mol burn %s ...\n", args[0])
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+		}
+		os.Exit(1)
+	}
+
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	force, _ := cmd.Flags().GetBool("force")
 
 	moleculeID := args[0]
 
-	// Find wisp storage
-	wispDir := beads.FindWispDir()
-	if wispDir == "" {
-		if jsonOutput {
-			outputJSON(BurnResult{
-				MoleculeID:   moleculeID,
-				DeletedCount: 0,
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: no .beads directory found\n")
-		}
-		os.Exit(1)
-	}
-
-	// Check if wisp directory exists
-	if _, err := os.Stat(wispDir); os.IsNotExist(err) {
-		if jsonOutput {
-			outputJSON(BurnResult{
-				MoleculeID:   moleculeID,
-				DeletedCount: 0,
-				WispDir:      wispDir,
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: no wisp storage found at %s\n", wispDir)
-		}
-		os.Exit(1)
-	}
-
-	// Open wisp storage
-	wispStore, err := beads.NewWispStorage(ctx)
+	// Resolve molecule ID in main store
+	resolvedID, err := utils.ResolvePartialID(ctx, store, moleculeID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening wisp storage: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error resolving molecule ID %s: %v\n", moleculeID, err)
 		os.Exit(1)
 	}
-	defer func() { _ = wispStore.Close() }()
 
-	// Resolve molecule ID in wisp storage
-	resolvedID, err := utils.ResolvePartialID(ctx, wispStore, moleculeID)
+	// Load the molecule
+	rootIssue, err := store.GetIssue(ctx, resolvedID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: molecule %s not found in wisp storage\n", moleculeID)
-		fmt.Fprintf(os.Stderr, "Hint: mol burn only works with wisps in .beads-wisp/\n")
-		fmt.Fprintf(os.Stderr, "      Use 'bd wisp list' to see available wisps\n")
+		fmt.Fprintf(os.Stderr, "Error loading molecule: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Verify it's a wisp
+	if !rootIssue.Wisp {
+		fmt.Fprintf(os.Stderr, "Error: molecule %s is not a wisp (Wisp=false)\n", resolvedID)
+		fmt.Fprintf(os.Stderr, "Hint: mol burn only works with wisp molecules\n")
+		fmt.Fprintf(os.Stderr, "      Use 'bd delete' to remove non-wisp issues\n")
 		os.Exit(1)
 	}
 
 	// Load the molecule subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, wispStore, resolvedID)
+	subgraph, err := loadTemplateSubgraph(ctx, store, resolvedID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading wisp molecule: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Collect all issue IDs to delete
-	var allIDs []string
+	// Collect wisp issue IDs to delete (only delete wisps, not regular children)
+	var wispIDs []string
 	for _, issue := range subgraph.Issues {
-		allIDs = append(allIDs, issue.ID)
+		if issue.Wisp {
+			wispIDs = append(wispIDs, issue.ID)
+		}
+	}
+
+	if len(wispIDs) == 0 {
+		if jsonOutput {
+			outputJSON(BurnResult{
+				MoleculeID:   resolvedID,
+				DeletedCount: 0,
+			})
+		} else {
+			fmt.Printf("No wisp issues found for molecule %s\n", resolvedID)
+		}
+		return
 	}
 
 	if dryRun {
 		fmt.Printf("\nDry run: would burn wisp %s\n\n", resolvedID)
 		fmt.Printf("Root: %s\n", subgraph.Root.Title)
-		fmt.Printf("Storage: .beads-wisp/\n")
-		fmt.Printf("\nIssues to delete (%d total):\n", len(allIDs))
+		fmt.Printf("\nWisp issues to delete (%d total):\n", len(wispIDs))
 		for _, issue := range subgraph.Issues {
+			if !issue.Wisp {
+				continue
+			}
 			status := string(issue.Status)
 			if issue.ID == subgraph.Root.ID {
 				fmt.Printf("  - [%s] %s (%s) [ROOT]\n", status, issue.Title, issue.ID)
@@ -134,8 +136,8 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 
 	// Confirm unless --force
 	if !force && !jsonOutput {
-		fmt.Printf("About to burn wisp %s (%d issues)\n", resolvedID, len(allIDs))
-		fmt.Printf("This will permanently delete all data with no digest.\n")
+		fmt.Printf("About to burn wisp %s (%d issues)\n", resolvedID, len(wispIDs))
+		fmt.Printf("This will permanently delete all wisp data with no digest.\n")
 		fmt.Printf("Use 'bd mol squash' instead if you want to preserve a summary.\n")
 		fmt.Printf("\nContinue? [y/N] ")
 
@@ -148,12 +150,15 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	}
 
 	// Perform the burn
-	result, err := burnWisp(ctx, wispStore, allIDs, wispDir)
+	result, err := burnWisps(ctx, store, wispIDs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error burning wisp: %v\n", err)
 		os.Exit(1)
 	}
 	result.MoleculeID = resolvedID
+
+	// Schedule auto-flush
+	markDirtyAndScheduleFlush()
 
 	if jsonOutput {
 		outputJSON(result)
@@ -165,17 +170,16 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	fmt.Printf("  No digest created.\n")
 }
 
-// burnWisp deletes all wisp issues without creating a digest
-func burnWisp(ctx context.Context, wispStore beads.Storage, ids []string, wispDir string) (*BurnResult, error) {
+// burnWisps deletes all wisp issues without creating a digest
+func burnWisps(ctx context.Context, s interface{}, ids []string) (*BurnResult, error) {
 	// Type assert to SQLite storage for delete access
-	sqliteStore, ok := wispStore.(*sqlite.SQLiteStorage)
+	sqliteStore, ok := s.(*sqlite.SQLiteStorage)
 	if !ok {
 		return nil, fmt.Errorf("burn requires SQLite storage backend")
 	}
 
 	result := &BurnResult{
 		DeletedIDs: make([]string, 0, len(ids)),
-		WispDir:    wispDir,
 	}
 
 	for _, id := range ids {
