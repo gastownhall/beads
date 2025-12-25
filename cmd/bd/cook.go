@@ -108,6 +108,24 @@ func runCook(cmd *cobra.Command, args []string) {
 		resolved.Steps = expandedSteps
 	}
 
+	// Apply aspects from compose.aspects (gt-8tmz.5)
+	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
+		for _, aspectName := range resolved.Compose.Aspects {
+			aspectFormula, err := parser.LoadByName(aspectName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading aspect %q: %v\n", aspectName, err)
+				os.Exit(1)
+			}
+			if aspectFormula.Type != formula.TypeAspect {
+				fmt.Fprintf(os.Stderr, "Error: %q is not an aspect formula (type=%s)\n", aspectName, aspectFormula.Type)
+				os.Exit(1)
+			}
+			if len(aspectFormula.Advice) > 0 {
+				resolved.Steps = formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+			}
+		}
+	}
+
 	// Apply prefix to proto ID if specified (bd-47qx)
 	protoID := resolved.Formula
 	if prefix != "" {

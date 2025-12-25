@@ -210,6 +210,12 @@ type ComposeRules struct {
 	// Map applies an expansion template to all steps matching a pattern.
 	// Each matching step is replaced by the expanded template steps.
 	Map []*MapRule `json:"map,omitempty"`
+
+	// Aspects lists aspect formula names to apply to this formula.
+	// Aspects are applied after expansions, adding before/after/around
+	// steps to matching targets based on the aspect's advice rules.
+	// Example: ["security-audit", "logging"]
+	Aspects []string `json:"aspects,omitempty"`
 }
 
 // ExpandRule applies an expansion template to a single target step.
