@@ -814,6 +814,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, staleClosedCheck)
 	// Don't fail overall check for stale issues, just warn
 
+	// Check 26a: Stale molecules (complete but unclosed, bd-6a5z)
+	staleMoleculesCheck := convertDoctorCheck(doctor.CheckStaleMolecules(path))
+	result.Checks = append(result.Checks, staleMoleculesCheck)
+	// Don't fail overall check for stale molecules, just warn
+
 	// Check 27: Expired tombstones (maintenance, bd-bqcc)
 	tombstonesExpiredCheck := convertDoctorCheck(doctor.CheckExpiredTombstones(path))
 	result.Checks = append(result.Checks, tombstonesExpiredCheck)

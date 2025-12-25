@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -157,6 +158,87 @@ func CheckExpiredTombstones(path string) DoctorCheck {
 	}
 }
 
+// CheckStaleMolecules detects complete-but-unclosed molecules (bd-6a5z).
+// A molecule is stale if all children are closed but the root is still open.
+func CheckStaleMolecules(path string) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	// Check metadata.json first for custom database name
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (unable to open database)",
+			Category: CategoryMaintenance,
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	// Get all epics eligible for closure (complete but unclosed)
+	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (query failed)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	// Count stale molecules (eligible for close with at least 1 child)
+	var staleCount int
+	var staleIDs []string
+	for _, es := range epicStatuses {
+		if es.EligibleForClose && es.TotalChildren > 0 {
+			staleCount++
+			if len(staleIDs) < 3 {
+				staleIDs = append(staleIDs, es.Epic.ID)
+			}
+		}
+	}
+
+	if staleCount == 0 {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "No stale molecules",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	detail := fmt.Sprintf("Example: %v", staleIDs)
+	if staleCount > 3 {
+		detail += fmt.Sprintf(" (+%d more)", staleCount-3)
+	}
+
+	return DoctorCheck{
+		Name:     "Stale Molecules",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("%d complete-but-unclosed molecule(s)", staleCount),
+		Detail:   detail,
+		Fix:      "Run 'bd mol stale' to review, then 'bd close <id>' for each",
+		Category: CategoryMaintenance,
+	}
+}
+
 // CheckCompactionCandidates detects issues eligible for compaction.
 func CheckCompactionCandidates(path string) DoctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
@@ -223,4 +305,45 @@ func CheckCompactionCandidates(path string) DoctorCheck {
 		Fix:      "Run 'bd compact --analyze' to review candidates",
 		Category: CategoryMaintenance,
 	}
+}
+
+// resolveBeadsDir follows a redirect file if present in the beads directory.
+// This handles Gas Town's redirect mechanism where .beads/redirect points to
+// the actual beads directory location.
+func resolveBeadsDir(beadsDir string) string {
+	redirectFile := filepath.Join(beadsDir, "redirect")
+	data, err := os.ReadFile(redirectFile)
+	if err != nil {
+		// No redirect file - use original path
+		return beadsDir
+	}
+
+	// Parse the redirect target
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return beadsDir
+	}
+
+	// Skip comments
+	lines := strings.Split(target, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			target = line
+			break
+		}
+	}
+
+	// Resolve relative paths from the parent of the .beads directory
+	if !filepath.IsAbs(target) {
+		projectRoot := filepath.Dir(beadsDir)
+		target = filepath.Join(projectRoot, target)
+	}
+
+	// Verify the target exists
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		return beadsDir
+	}
+
+	return target
 }
