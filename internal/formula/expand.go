@@ -112,10 +112,12 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("map: %q has no template steps", rule.With)
 		}
 
-		// Find all matching steps
+		// Find all matching steps (including nested children - gt-8tmz.33)
+		// Rebuild stepMap to capture any changes from previous expansions
+		stepMap = buildStepMap(result)
 		var toExpand []*Step
-		for _, step := range result {
-			if MatchGlob(rule.Select, step.ID) && !expanded[step.ID] {
+		for id, step := range stepMap {
+			if MatchGlob(rule.Select, id) && !expanded[id] {
 				toExpand = append(toExpand, step)
 			}
 		}

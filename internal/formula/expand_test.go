@@ -287,6 +287,59 @@ func TestApplyExpansions(t *testing.T) {
 		}
 	})
 
+	// Test map over nested children (gt-8tmz.33)
+	t.Run("map over nested children", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{
+				ID:    "phase",
+				Title: "Implementation Phase",
+				Children: []*Step{
+					{ID: "implement.auth", Title: "Implement auth"},
+					{ID: "implement.api", Title: "Implement API"},
+				},
+			},
+			{ID: "test", Title: "Test"},
+		}
+
+		compose := &ComposeRules{
+			Map: []*MapRule{
+				{Select: "*.auth", With: "rule-of-five"},
+			},
+		}
+
+		result, err := ApplyExpansions(steps, compose, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+
+		// The nested implement.auth should be expanded
+		// Result should have: design, phase (with expanded children), test
+		if len(result) != 3 {
+			t.Fatalf("expected 3 top-level steps, got %d", len(result))
+		}
+
+		// Check that phase has expanded children
+		phase := result[1]
+		if phase.ID != "phase" {
+			t.Fatalf("expected phase step, got %q", phase.ID)
+		}
+
+		// implement.auth expanded to 2 steps + implement.api unchanged = 3 children
+		if len(phase.Children) != 3 {
+			t.Fatalf("expected 3 children in phase, got %d: %v", len(phase.Children), getChildIDs(phase.Children))
+		}
+
+		// Verify expanded IDs
+		childIDs := getChildIDs(phase.Children)
+		expectedChildren := []string{"implement.auth.draft", "implement.auth.refine", "implement.api"}
+		for i, exp := range expectedChildren {
+			if childIDs[i] != exp {
+				t.Errorf("phase.Children[%d].ID = %q, want %q", i, childIDs[i], exp)
+			}
+		}
+	})
+
 	// Test missing formula
 	t.Run("missing expansion formula", func(t *testing.T) {
 		steps := []*Step{{ID: "test", Title: "Test"}}
@@ -369,4 +422,13 @@ func TestUpdateDependenciesForExpansion(t *testing.T) {
 	if result[2].DependsOn[1] != "test" {
 		t.Errorf("deploy step DependsOn[1] = %q, want %q", result[2].DependsOn[1], "test")
 	}
+}
+
+// getChildIDs extracts IDs from a slice of steps (helper for tests).
+func getChildIDs(steps []*Step) []string {
+	ids := make([]string, len(steps))
+	for i, s := range steps {
+		ids[i] = s.ID
+	}
+	return ids
 }
