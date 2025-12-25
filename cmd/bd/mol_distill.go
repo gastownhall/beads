@@ -256,6 +256,7 @@ func distillMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeS
 				IssueType:          oldIssue.IssueType,
 				Labels:             labels,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
+				IDPrefix:           "proto", // bd-hobo: distinct prefix for protos
 			}
 
 			if err := tx.CreateIssue(ctx, newIssue, actorName); err != nil {
