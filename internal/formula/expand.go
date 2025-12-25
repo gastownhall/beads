@@ -82,6 +82,13 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		result = replaceStep(result, rule.Target, expandedSteps)
 		expanded[rule.Target] = true
 
+		// Update dependencies: any step that depended on the target should now
+		// depend on the last step of the expansion
+		if len(expandedSteps) > 0 {
+			lastStepID := expandedSteps[len(expandedSteps)-1].ID
+			result = UpdateDependenciesForExpansion(result, rule.Target, lastStepID)
+		}
+
 		// Update step map with new steps
 		for _, s := range expandedSteps {
 			stepMap[s.ID] = s
@@ -121,6 +128,13 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			}
 			result = replaceStep(result, targetStep.ID, expandedSteps)
 			expanded[targetStep.ID] = true
+
+			// Update dependencies: any step that depended on the target should now
+			// depend on the last step of the expansion
+			if len(expandedSteps) > 0 {
+				lastStepID := expandedSteps[len(expandedSteps)-1].ID
+				result = UpdateDependenciesForExpansion(result, targetStep.ID, lastStepID)
+			}
 
 			// Update step map
 			for _, s := range expandedSteps {
