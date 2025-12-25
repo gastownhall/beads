@@ -242,7 +242,7 @@ func buildStepMap(steps []*Step) map[string]*Step {
 }
 
 // replaceStep replaces a step with the given ID with a slice of new steps.
-// This is done at the top level only; children are not searched.
+// Searches recursively through children to find and replace the target.
 func replaceStep(steps []*Step, targetID string, replacement []*Step) []*Step {
 	result := make([]*Step, 0, len(steps)+len(replacement)-1)
 
