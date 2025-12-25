@@ -48,13 +48,14 @@ type doctorResult struct {
 }
 
 var (
-	doctorFix         bool
-	doctorYes         bool
-	doctorInteractive bool   // bd-3xl: per-fix confirmation mode
-	doctorDryRun      bool   // bd-a5z: preview fixes without applying
-	doctorOutput      string // bd-9cc: export diagnostics to file
-	perfMode          bool
-	checkHealthMode   bool
+	doctorFix            bool
+	doctorYes            bool
+	doctorInteractive    bool   // bd-3xl: per-fix confirmation mode
+	doctorDryRun         bool   // bd-a5z: preview fixes without applying
+	doctorOutput         string // bd-9cc: export diagnostics to file
+	doctorFixChildParent bool   // bd-cuek: opt-in fix for child→parent deps
+	perfMode             bool
+	checkHealthMode      bool
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -104,6 +105,7 @@ Examples:
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually (bd-3xl)
+  bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file`,
@@ -182,6 +184,7 @@ func init() {
 	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
 	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually (bd-3xl)")
 	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes (bd-a5z)")
+	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in, bd-cuek)")
 }
 
 // previewFixes shows what would be fixed without applying changes (bd-a5z)
@@ -401,6 +404,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path)
 		case "Child-Parent Dependencies":
+			// bd-cuek: Requires explicit opt-in flag (destructive, may remove intentional deps)
+			if !doctorFixChildParent {
+				fmt.Printf("  ⚠ Child→parent deps require explicit opt-in: bd doctor --fix --fix-child-parent\n")
+				continue
+			}
 			err = fix.ChildParentDependencies(path)
 		case "Duplicate Issues":
 			// No auto-fix: duplicates require user review

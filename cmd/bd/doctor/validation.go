@@ -308,8 +308,9 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 }
 
-// CheckChildParentDependencies detects the child→parent dependency anti-pattern.
-// This creates a deadlock: child can't start (parent open), parent can't close (children not done).
+// CheckChildParentDependencies detects child→parent blocking dependencies.
+// These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
+// However, they may be intentional in some workflows, so removal requires explicit opt-in.
 func CheckChildParentDependencies(path string) DoctorCheck {
 	beadsDir := filepath.Join(path, ".beads")
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
@@ -374,9 +375,9 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Child-Parent Dependencies",
 		Status:   "warning",
-		Message:  fmt.Sprintf("%d child→parent dependency anti-pattern(s) detected", len(badDeps)),
+		Message:  fmt.Sprintf("%d child→parent dependency detected (may cause deadlock)", len(badDeps)),
 		Detail:   detail,
-		Fix:      "Run 'bd doctor --fix' to remove child→parent dependencies",
+		Fix:      "Run 'bd doctor --fix --fix-child-parent' to remove (if unintentional)",
 		Category: CategoryMetadata,
 	}
 }

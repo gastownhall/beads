@@ -162,8 +162,9 @@ func OrphanedDependencies(path string) error {
 	return nil
 }
 
-// ChildParentDependencies removes child→parent dependencies (anti-pattern).
-// This fixes the deadlock where children depend on their parent epic.
+// ChildParentDependencies removes child→parent blocking dependencies.
+// These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
+// Requires explicit opt-in via --fix-child-parent flag since some workflows may use these intentionally.
 func ChildParentDependencies(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
