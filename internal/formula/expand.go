@@ -10,12 +10,20 @@
 //
 // Templates use {target} and {target.description} placeholders that are
 // substituted with the target step's values during expansion.
+//
+// A maximum expansion depth (default 5) prevents runaway nested expansions.
+// This allows massive work generation while providing a safety bound.
 package formula
 
 import (
 	"fmt"
 	"strings"
 )
+
+// DefaultMaxExpansionDepth is the maximum depth for recursive template expansion.
+// This prevents runaway nested expansions while still allowing substantial work
+// generation. The limit applies to template children, not to expansion rules.
+const DefaultMaxExpansionDepth = 5
 
 // ApplyExpansions applies all expand and map rules to a formula's steps.
 // Returns a new steps slice with expansions applied.
@@ -64,8 +72,11 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("expand: %q has no template steps", rule.With)
 		}
 
-		// Expand the target step
-		expandedSteps := expandStep(targetStep, expFormula.Template)
+		// Expand the target step (start at depth 0)
+		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0)
+		if err != nil {
+			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
+		}
 
 		// Replace the target step with expanded steps
 		result = replaceStep(result, rule.Target, expandedSteps)
@@ -104,7 +115,10 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
-			expandedSteps := expandStep(targetStep, expFormula.Template)
+			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0)
+			if err != nil {
+				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
+			}
 			result = replaceStep(result, targetStep.ID, expandedSteps)
 			expanded[targetStep.ID] = true
 
@@ -121,7 +135,14 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 // expandStep expands a target step using the given template.
 // Returns the expanded steps with placeholders substituted.
-func expandStep(target *Step, template []*Step) []*Step {
+// The depth parameter tracks recursion depth for children; if it exceeds
+// DefaultMaxExpansionDepth, an error is returned.
+func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
+	if depth > DefaultMaxExpansionDepth {
+		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
+			DefaultMaxExpansionDepth, depth, target.ID)
+	}
+
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
@@ -157,15 +178,19 @@ func expandStep(target *Step, template []*Step) []*Step {
 			}
 		}
 
-		// Handle children recursively
+		// Handle children recursively with depth tracking
 		if len(tmpl.Children) > 0 {
-			expanded.Children = expandStep(target, tmpl.Children)
+			children, err := expandStep(target, tmpl.Children, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			expanded.Children = children
 		}
 
 		result = append(result, expanded)
 	}
 
-	return result
+	return result, nil
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.

@@ -1,8 +1,10 @@
 package formula
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,7 +87,10 @@ func TestExpandStep(t *testing.T) {
 		},
 	}
 
-	result := expandStep(target, template)
+	result, err := expandStep(target, template, 0)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 steps, got %d", len(result))
@@ -108,6 +113,59 @@ func TestExpandStep(t *testing.T) {
 	}
 	if len(result[1].Needs) != 1 || result[1].Needs[0] != "implement.draft" {
 		t.Errorf("step 1 Needs = %v, want [implement.draft]", result[1].Needs)
+	}
+}
+
+func TestExpandStepDepthLimit(t *testing.T) {
+	target := &Step{
+		ID:          "root",
+		Title:       "Root step",
+		Description: "A deeply nested template",
+	}
+
+	// Create a deeply nested template that exceeds the depth limit
+	// Build from inside out: depth 6 is the deepest
+	deepChild := &Step{ID: "level-6", Title: "Level 6"}
+	for i := 5; i >= 0; i-- {
+		deepChild = &Step{
+			ID:       fmt.Sprintf("level-%d", i),
+			Title:    fmt.Sprintf("Level %d", i),
+			Children: []*Step{deepChild},
+		}
+	}
+
+	template := []*Step{deepChild}
+
+	// With depth 0 start, going to level 6 means 7 levels total (0-6)
+	// DefaultMaxExpansionDepth is 5, so this should fail
+	_, err := expandStep(target, template, 0)
+	if err == nil {
+		t.Fatal("expected depth limit error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "expansion depth limit exceeded") {
+		t.Errorf("expected depth limit error, got: %v", err)
+	}
+
+	// Verify that templates within the limit succeed
+	// Build a 5-level deep template (levels 0-4, which is exactly at the limit)
+	shallowChild := &Step{ID: "level-4", Title: "Level 4"}
+	for i := 3; i >= 0; i-- {
+		shallowChild = &Step{
+			ID:       fmt.Sprintf("level-%d", i),
+			Title:    fmt.Sprintf("Level %d", i),
+			Children: []*Step{shallowChild},
+		}
+	}
+
+	shallowTemplate := []*Step{shallowChild}
+	result, err := expandStep(target, shallowTemplate, 0)
+	if err != nil {
+		t.Fatalf("expected shallow template to succeed, got: %v", err)
+	}
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 top-level step, got %d", len(result))
 	}
 }
 
