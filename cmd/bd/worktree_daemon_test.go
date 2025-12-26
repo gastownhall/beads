@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 
 	// Import SQLite driver for test database creation
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -78,6 +79,7 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// No sync-branch configured
 		os.Unsetenv("BEADS_SYNC_BRANCH")
@@ -113,6 +115,7 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -144,6 +147,7 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -194,6 +198,7 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// Clear all daemon-related env vars
 		os.Unsetenv("BEADS_NO_DAEMON")
@@ -227,6 +232,7 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -260,6 +266,7 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {

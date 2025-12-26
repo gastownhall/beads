@@ -26,7 +26,7 @@ VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
 COVERAGE="${TEST_COVER:-}"
 COVERPROFILE="${TEST_COVERPROFILE:-/tmp/beads.coverage.out}"
-COVERPKG="${TEST_COVERPKG:-./...}"
+COVERPKG="${TEST_COVERPKG:-}"
 
 # Parse arguments
 PACKAGES=()
@@ -81,7 +81,10 @@ if [[ -n "$RUN_PATTERN" ]]; then
 fi
 
 if [[ -n "$COVERAGE" ]]; then
-    CMD+=(-covermode=atomic -coverpkg "$COVERPKG" -coverprofile "$COVERPROFILE")
+    CMD+=(-covermode=atomic -coverprofile "$COVERPROFILE")
+    if [[ -n "$COVERPKG" ]]; then
+        CMD+=(-coverpkg "$COVERPKG")
+    fi
 fi
 
 CMD+=("${PACKAGES[@]}")

@@ -793,7 +793,7 @@ func TestMemoryStorage_UpdateIssue_SearchIssues_ReadyWork_BlockedIssues(t *testi
 	}
 
 	// Blocked issues: child is blocked by an open blocker.
-	blocked, err := store.GetBlockedIssues(ctx)
+	blocked, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues: %v", err)
 	}
@@ -810,7 +810,7 @@ func TestMemoryStorage_UpdateIssue_SearchIssues_ReadyWork_BlockedIssues(t *testi
 	store.mu.Lock()
 	store.dependencies[missing.ID] = append(store.dependencies[missing.ID], &types.Dependency{IssueID: missing.ID, DependsOnID: "bd-does-not-exist", Type: types.DepBlocks})
 	store.mu.Unlock()
-	blocked, err = store.GetBlockedIssues(ctx)
+	blocked, err = store.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues: %v", err)
 	}
