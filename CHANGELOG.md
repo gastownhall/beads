@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Control flow operators** (gt-8tmz.4) - Advanced formula composition
+  - `loop` operator for iterating over collections
+  - `gate` operator for conditional execution
+  - Condition evaluator for gates and loops (gt-8tmz.7)
+  - Control flow integrates with aspect composition
+
+- **Aspect composition** (gt-8tmz.5) - Cross-cutting workflow concerns
+  - `aspects` field in formulas for reusable patterns
+  - Aspects match steps by type, title pattern, or custom criteria
+  - Enables logging, retries, notifications as composable concerns
+
+- **Runtime expansion types** (gt-8tmz.8) - Dynamic step generation
+  - `on_complete` - Generate steps when a step completes
+  - `for-each` - Expand steps for each item in a collection
+  - Enables dynamic workflows based on runtime state
+
+- **`bd formula list/show`** (gt-8tmz.14) - Formula discovery commands
+  - `bd formula list` - List available formulas in search paths
+  - `bd formula show <name>` - Display formula definition and metadata
+
+- **`bd mol stale`** (bd-anv2) - Detect complete-but-unclosed molecules
+  - Finds molecules where all children are closed but molecule is open
+  - Helps identify forgotten cleanup tasks
+
+- **Stale molecules check in doctor** (bd-6a5z) - Proactive detection
+  - `bd doctor` now warns about stale molecules
+  - Integrated with `bd mol stale` detection
+
+- **Distinct ID prefixes** (bd-hobo) - Clear entity type identification
+  - Protos: `bd-proto-xxx` prefix
+  - Molecules: `bd-mol-xxx` prefix
+  - Wisps: `bd-wisp-xxx` prefix
+  - Makes entity type immediately visible in IDs
+
+- **`no-git-ops` config** (GH#593) - Manual git control
+  - `bd config set no-git-ops true` to disable auto git operations
+  - `bd prime` outputs stealth-mode protocol when enabled
+  - Useful for custom git workflows or manual commit review
+
+### Changed
+
+- **Formula format: YAML → JSON** - Standardized format
+  - Formulas now use `.formula.json` extension
+  - JSON provides better tooling support and validation
+  - Existing YAML formulas need migration
+
+- **Removed `bd mol run`** - Orchestration moved to Gas Town
+  - Molecule execution now handled by `gt` commands
+  - `bd` focuses on issue tracking primitives
+  - Use `gt mol run` for molecule orchestration
+
+- **Simplified wisp architecture** (bd-bkul) - Single database model
+  - Wisps stored in main database with `Wisp=true` flag
+  - Removed separate `.beads-wisp/` directory
+  - Wisps filtered from JSONL export automatically
+
+### Fixed
+
+- **installed_plugins.json v2 format** (GH#741) - Claude Code compatibility
+  - `bd doctor` now handles both v1 and v2 plugin file formats
+  - Fixes "cannot unmarshal array" error on newer Claude Code versions
+
+- **git.IsWorktree() hang on Windows** (GH#727) - Init safety
+  - Added isGitRepo() guard before calling git.IsWorktree()
+  - Fixes `bd init` hanging outside git repositories on Windows
+
+- **Skill files deleted by bd sync** (GH#738) - Sync safety
+  - `bd sync` no longer deletes skill files in .claude/
+  - Prevents accidental removal of Claude Code configuration
+
+- **doctor check false positives** (GH#709) - Cleaner diagnostics
+  - Skips interactions.jsonl and molecules.jsonl in sync checks
+  - These files are runtime state, not sync targets
+
+- **FatalErrorRespectJSON** (bd-28sq) - Consistent error output
+  - All commands respect `--json` flag for error output
+  - Errors return proper JSON structure when flag is set
+
+- **bd sync commits non-.beads files** (bd-trgb) - Sync isolation
+  - Sync operations now only commit .beads/ directory changes
+  - Prevents unintended commits of working directory files
+
+- **Content-level merge for divergence** (bd-kpy) - Better conflict resolution
+  - Divergence recovery uses content-level merging
+  - Reduces false conflicts during multi-clone sync
+
+- **Child→parent dep fix opt-in** (bd-cuek) - Migration control
+  - `--fix-child-parent` flag required for automatic fix
+  - Prevents unexpected dependency modifications
+
+- **Aspect self-matching recursion** (gt-8tmz.16) - Formula safety
+  - Aspects cannot match themselves during expansion
+  - Prevents infinite recursion in aspect composition
+
+- **Map expansion nested matching** (gt-8tmz.33) - Correct child handling
+  - Map expansion now correctly matches nested child steps
+  - Fixes missing expansions in hierarchical formulas
+
+- **Mol/wisp ID prefix combination** (bd-hobo) - Correct ID generation
+  - Database prefix combined with type prefix correctly
+  - IDs like `bd-mol-xxx` instead of `bdmol-xxx`
+
+- **mol run hierarchical children** (bd-c8d5, bd-drcx) - Complete loading
+  - `bd mol run` loads all hierarchical children
+  - Supports title lookup for molecule identification
+
+- **Wisps excluded from sync** (bd-687g, bd-9avq) - Export correctness
+  - Wisps filtered from JSONL export and nodb operations
+  - Ephemeral molecules don't pollute shared state
+
+### Documentation
+
+- **MOLECULES.md rewrite** (bd-ul59) - Workflow-first structure
+  - Reorganized around practical workflows
+  - Clearer distinction between protos, molecules, wisps
+
+- **Molecular chemistry docs** (bd-ul59) - Conceptual foundation
+  - Phase metaphor: solid (proto) → liquid (mol) → vapor (wisp)
+  - Pour, bond, distill, squash operations explained
+
 ## [0.36.0] - 2025-12-24
 
 ### Added
