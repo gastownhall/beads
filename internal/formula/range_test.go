@@ -92,6 +92,21 @@ func TestEvaluateExpr(t *testing.T) {
 			want: -9,
 		},
 		{
+			name: "unary minus in expression",
+			expr: "3*-2",
+			want: -6,
+		},
+		{
+			name: "parenthesized negative",
+			expr: "(-5)",
+			want: -5,
+		},
+		{
+			name: "unary minus after power",
+			expr: "2^-1",
+			want: 0, // 0.5 truncated to int
+		},
+		{
 			name: "division by zero",
 			expr: "10/0",
 			wantErr: true,
