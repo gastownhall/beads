@@ -25,6 +25,18 @@ var cookCmd = &cobra.Command{
 By default, cook outputs the resolved formula as JSON to stdout for
 ephemeral use. The output can be inspected, piped, or saved to a file.
 
+Two cooking modes are available (gt-8tmz.23):
+
+  COMPILE-TIME (default, --mode=compile):
+    Produces a proto with {{variable}} placeholders intact.
+    Use for: modeling, estimation, contractor handoff, planning.
+    Variables are NOT substituted - the output shows the template structure.
+
+  RUNTIME (--mode=runtime or when --var flags provided):
+    Produces a fully-resolved proto with variables substituted.
+    Use for: final validation before pour, seeing exact output.
+    Requires all variables to have values (via --var or defaults).
+
 Formulas are high-level workflow templates that support:
   - Variable definitions with defaults and validation
   - Step definitions that become issue hierarchies
@@ -39,7 +51,9 @@ For most workflows, prefer ephemeral protos: pour and wisp commands
 accept formula names directly and cook inline (bd-rciw).
 
 Examples:
-  bd cook mol-feature.formula.json                    # Output JSON to stdout
+  bd cook mol-feature.formula.json                    # Compile-time: keep {{vars}}
+  bd cook mol-feature --var name=auth                 # Runtime: substitute vars
+  bd cook mol-feature --mode=runtime --var name=auth  # Explicit runtime mode
   bd cook mol-feature --dry-run                       # Preview steps
   bd cook mol-release.formula.json --persist          # Write to database
   bd cook mol-release.formula.json --persist --force  # Replace existing
@@ -72,6 +86,27 @@ func runCook(cmd *cobra.Command, args []string) {
 	force, _ := cmd.Flags().GetBool("force")
 	searchPaths, _ := cmd.Flags().GetStringSlice("search-path")
 	prefix, _ := cmd.Flags().GetString("prefix")
+	varFlags, _ := cmd.Flags().GetStringSlice("var")
+	mode, _ := cmd.Flags().GetString("mode")
+
+	// Parse variables (gt-8tmz.23)
+	inputVars := make(map[string]string)
+	for _, v := range varFlags {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "Error: invalid variable format '%s', expected 'key=value'\n", v)
+			os.Exit(1)
+		}
+		inputVars[parts[0]] = parts[1]
+	}
+
+	// Determine cooking mode (gt-8tmz.23)
+	// Runtime mode is triggered by: explicit --mode=runtime OR providing --var flags
+	runtimeMode := mode == "runtime" || len(inputVars) > 0
+	if mode != "" && mode != "compile" && mode != "runtime" {
+		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s', must be 'compile' or 'runtime'\n", mode)
+		os.Exit(1)
+	}
 
 	// Only need store access if persisting
 	if persist {
@@ -168,19 +203,48 @@ func runCook(cmd *cobra.Command, args []string) {
 	}
 
 	if dryRun {
-		fmt.Printf("\nDry run: would cook formula %s as proto %s\n\n", resolved.Formula, protoID)
-		fmt.Printf("Steps (%d):\n", len(resolved.Steps))
+		// Determine mode label for display
+		modeLabel := "compile-time"
+		if runtimeMode {
+			modeLabel = "runtime"
+			// Apply defaults for runtime mode display
+			for name, def := range resolved.Vars {
+				if _, provided := inputVars[name]; !provided && def.Default != "" {
+					inputVars[name] = def.Default
+				}
+			}
+		}
+
+		fmt.Printf("\nDry run: would cook formula %s as proto %s (%s mode)\n\n", resolved.Formula, protoID, modeLabel)
+
+		// In runtime mode, show substituted steps
+		if runtimeMode {
+			// Create a copy with substituted values for display
+			substituteFormulaVars(resolved, inputVars)
+			fmt.Printf("Steps (%d) [variables substituted]:\n", len(resolved.Steps))
+		} else {
+			fmt.Printf("Steps (%d) [{{variables}} shown as placeholders]:\n", len(resolved.Steps))
+		}
 		printFormulaSteps(resolved.Steps, "  ")
 
 		if len(vars) > 0 {
-			fmt.Printf("\nVariables: %s\n", strings.Join(vars, ", "))
+			fmt.Printf("\nVariables used: %s\n", strings.Join(vars, ", "))
 		}
+
+		// Show variable values in runtime mode
+		if runtimeMode && len(inputVars) > 0 {
+			fmt.Printf("\nVariable values:\n")
+			for name, value := range inputVars {
+				fmt.Printf("  {{%s}} = %s\n", name, value)
+			}
+		}
+
 		if len(bondPoints) > 0 {
 			fmt.Printf("Bond points: %s\n", strings.Join(bondPoints, ", "))
 		}
 
-		// Show variable definitions
-		if len(resolved.Vars) > 0 {
+		// Show variable definitions (more useful in compile-time mode)
+		if !runtimeMode && len(resolved.Vars) > 0 {
 			fmt.Printf("\nVariable definitions:\n")
 			for name, def := range resolved.Vars {
 				attrs := []string{}
@@ -205,6 +269,32 @@ func runCook(cmd *cobra.Command, args []string) {
 
 	// Ephemeral mode (default): output resolved formula as JSON to stdout (bd-rciw)
 	if !persist {
+		// Runtime mode (gt-8tmz.23): substitute variables before output
+		if runtimeMode {
+			// Apply defaults from formula variable definitions
+			for name, def := range resolved.Vars {
+				if _, provided := inputVars[name]; !provided && def.Default != "" {
+					inputVars[name] = def.Default
+				}
+			}
+
+			// Check for missing required variables
+			var missingVars []string
+			for _, v := range vars {
+				if _, ok := inputVars[v]; !ok {
+					missingVars = append(missingVars, v)
+				}
+			}
+			if len(missingVars) > 0 {
+				fmt.Fprintf(os.Stderr, "Error: runtime mode requires all variables to have values\n")
+				fmt.Fprintf(os.Stderr, "Missing: %s\n", strings.Join(missingVars, ", "))
+				fmt.Fprintf(os.Stderr, "Provide with: --var %s=<value>\n", missingVars[0])
+				os.Exit(1)
+			}
+
+			// Substitute variables in the formula
+			substituteFormulaVars(resolved, inputVars)
+		}
 		outputJSON(resolved)
 		return
 	}
@@ -857,12 +947,35 @@ func printFormulaSteps(steps []*formula.Step, indent string) {
 	}
 }
 
+// substituteFormulaVars substitutes {{variable}} placeholders in a formula (gt-8tmz.23).
+// This is used in runtime mode to fully resolve the formula before output.
+func substituteFormulaVars(f *formula.Formula, vars map[string]string) {
+	// Substitute in top-level fields
+	f.Description = substituteVariables(f.Description, vars)
+
+	// Substitute in all steps recursively
+	substituteStepVars(f.Steps, vars)
+}
+
+// substituteStepVars recursively substitutes variables in step titles and descriptions.
+func substituteStepVars(steps []*formula.Step, vars map[string]string) {
+	for _, step := range steps {
+		step.Title = substituteVariables(step.Title, vars)
+		step.Description = substituteVariables(step.Description, vars)
+		if len(step.Children) > 0 {
+			substituteStepVars(step.Children, vars)
+		}
+	}
+}
+
 func init() {
 	cookCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	cookCmd.Flags().Bool("persist", false, "Persist proto to database (legacy behavior)")
 	cookCmd.Flags().Bool("force", false, "Replace existing proto if it exists (requires --persist)")
 	cookCmd.Flags().StringSlice("search-path", []string{}, "Additional paths to search for formula inheritance")
 	cookCmd.Flags().String("prefix", "", "Prefix to prepend to proto ID (e.g., 'gt-' creates 'gt-mol-feature')")
+	cookCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value), enables runtime mode")
+	cookCmd.Flags().String("mode", "", "Cooking mode: compile (keep placeholders) or runtime (substitute vars)")
 
 	rootCmd.AddCommand(cookCmd)
 }
