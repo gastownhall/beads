@@ -12,7 +12,11 @@ func mkTmpDirInTmp(t *testing.T, prefix string) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", prefix)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		// Fallback for platforms without /tmp (e.g. Windows).
+		dir, err = os.MkdirTemp("", prefix)
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir

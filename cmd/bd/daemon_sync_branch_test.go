@@ -48,12 +48,12 @@ func TestSyncBranchCommitAndPush_NotConfigured(t *testing.T) {
 
 	// Create test issue
 	issue := &types.Issue{
-		Title:       "Test issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Test issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -122,12 +122,12 @@ func TestSyncBranchCommitAndPush_Success(t *testing.T) {
 
 	// Create test issue
 	issue := &types.Issue{
-		Title:       "Test sync branch issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Test sync branch issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -228,12 +228,12 @@ func TestSyncBranchCommitAndPush_EnvOverridesDB(t *testing.T) {
 
 	// Create test issue and export JSONL
 	issue := &types.Issue{
-		Title:       "Env override issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Env override issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -303,12 +303,12 @@ func TestSyncBranchCommitAndPush_NoChanges(t *testing.T) {
 	}
 
 	issue := &types.Issue{
-		Title:       "Test issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Test issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -380,12 +380,12 @@ func TestSyncBranchCommitAndPush_WorktreeHealthCheck(t *testing.T) {
 	}
 
 	issue := &types.Issue{
-		Title:       "Test issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Test issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -497,7 +497,7 @@ func TestSyncBranchPull_Success(t *testing.T) {
 	if err := os.MkdirAll(remoteDir, 0755); err != nil {
 		t.Fatalf("Failed to create remote dir: %v", err)
 	}
-	runGitCmd(t, remoteDir, "init", "--bare")
+	runGitCmd(t, remoteDir, "init", "--bare", "-b", "master")
 
 	// Create clone1 (will push changes)
 	clone1Dir := filepath.Join(tmpDir, "clone1")
@@ -528,12 +528,12 @@ func TestSyncBranchPull_Success(t *testing.T) {
 
 	// Create issue in clone1
 	issue := &types.Issue{
-		Title:       "Test sync pull issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "Test sync pull issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store1.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("Failed to create issue: %v", err)
@@ -639,7 +639,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
 	remoteDir := filepath.Join(tmpDir, "remote")
 	os.MkdirAll(remoteDir, 0755)
-	runGitCmd(t, remoteDir, "init", "--bare")
+	runGitCmd(t, remoteDir, "init", "--bare", "-b", "master")
 
 	// Clone1: Agent A
 	clone1Dir := filepath.Join(tmpDir, "clone1")
@@ -660,12 +660,12 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 
 	// Agent A creates issue
 	issue := &types.Issue{
-		Title:       "E2E test issue",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Title:     "E2E test issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	store1.CreateIssue(ctx, issue, "agent-a")
 	issueID := issue.ID
@@ -914,7 +914,7 @@ func TestSyncBranchMultipleConcurrentClones(t *testing.T) {
 	tmpDir := t.TempDir()
 	remoteDir := filepath.Join(tmpDir, "remote")
 	os.MkdirAll(remoteDir, 0755)
-	runGitCmd(t, remoteDir, "init", "--bare")
+	runGitCmd(t, remoteDir, "init", "--bare", "-b", "master")
 
 	syncBranch := "beads-sync"
 
@@ -1454,7 +1454,7 @@ func TestGitPushFromWorktree_FetchRebaseRetry(t *testing.T) {
 
 	// Create a "remote" bare repository
 	remoteDir := t.TempDir()
-	runGitCmd(t, remoteDir, "init", "--bare")
+	runGitCmd(t, remoteDir, "init", "--bare", "-b", "master")
 
 	// Create first clone (simulates another developer's clone)
 	clone1Dir := t.TempDir()
@@ -1524,7 +1524,7 @@ func TestGitPushFromWorktree_FetchRebaseRetry(t *testing.T) {
 
 	// Now try to push from worktree - this should trigger the fetch-rebase-retry logic
 	// because the remote has commits that the local worktree doesn't have
-	err := gitPushFromWorktree(ctx, worktreePath, "beads-sync")
+	err := gitPushFromWorktree(ctx, worktreePath, "beads-sync", "")
 	if err != nil {
 		t.Fatalf("gitPushFromWorktree failed: %v (expected fetch-rebase-retry to succeed)", err)
 	}

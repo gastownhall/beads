@@ -48,10 +48,10 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "Failed to build bd binary: %v\n%s\n", err, out)
 		os.Exit(1)
 	}
-	
+
 	// Optimize git for tests
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	
+
 	os.Exit(m.Run())
 }
 
@@ -85,35 +85,35 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 	}
 	t.Parallel()
 	tmpDir := testutil.TempDirInMemory(t)
-	
+
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
 		t.Fatalf("bd binary not found at %s", bdPath)
 	}
-	
+
 	// Setup remote and 3 clones
 	remoteDir := setupBareRepo(t, tmpDir)
 	cloneA := setupClone(t, tmpDir, remoteDir, "A", bdPath)
 	cloneB := setupClone(t, tmpDir, remoteDir, "B", bdPath)
 	cloneC := setupClone(t, tmpDir, remoteDir, "C", bdPath)
-	
+
 	// Each clone creates unique issue (different content = different hash ID)
 	createIssueInClone(t, cloneA, "Issue from clone A")
 	createIssueInClone(t, cloneB, "Issue from clone B")
 	createIssueInClone(t, cloneC, "Issue from clone C")
-	
+
 	// Sync all clones once (hash IDs prevent collisions, don't need multiple rounds)
 	for _, clone := range []string{cloneA, cloneB, cloneC} {
 		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	}
-	
+
 	// Verify all clones have all 3 issues
 	expectedTitles := map[string]bool{
 		"Issue from clone A": true,
 		"Issue from clone B": true,
 		"Issue from clone C": true,
 	}
-	
+
 	allConverged := true
 	for name, dir := range map[string]string{"A": cloneA, "B": cloneB, "C": cloneC} {
 		titles := getTitlesFromClone(t, dir)
@@ -122,7 +122,7 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 			allConverged = false
 		}
 	}
-	
+
 	if allConverged {
 		t.Log("✓ All 3 clones converged with hash-based IDs")
 	} else {
@@ -138,26 +138,26 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 	}
 	t.Parallel()
 	tmpDir := testutil.TempDirInMemory(t)
-	
+
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
 		t.Fatalf("bd binary not found at %s", bdPath)
 	}
-	
+
 	// Setup remote and 2 clones
 	remoteDir := setupBareRepo(t, tmpDir)
 	cloneA := setupClone(t, tmpDir, remoteDir, "A", bdPath)
 	cloneB := setupClone(t, tmpDir, remoteDir, "B", bdPath)
-	
+
 	// Both clones create identical issue (same content = same hash ID)
 	createIssueInClone(t, cloneA, "Identical issue")
 	createIssueInClone(t, cloneB, "Identical issue")
-	
+
 	// Sync both clones once (hash IDs handle dedup automatically)
 	for _, clone := range []string{cloneA, cloneB} {
 		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
 	}
-	
+
 	// Verify both clones have exactly 1 issue (deduplication worked)
 	for name, dir := range map[string]string{"A": cloneA, "B": cloneB} {
 		titles := getTitlesFromClone(t, dir)
@@ -168,7 +168,7 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 			t.Errorf("Clone %s missing expected issue: %v", name, sortedKeys(titles))
 		}
 	}
-	
+
 	t.Log("✓ Identical content deduplicated correctly with hash-based IDs")
 }
 
@@ -177,36 +177,36 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 func setupBareRepo(t *testing.T, tmpDir string) string {
 	t.Helper()
 	remoteDir := filepath.Join(tmpDir, "remote.git")
-	runCmd(t, tmpDir, "git", "init", "--bare", remoteDir)
-	
+	runCmd(t, tmpDir, "git", "init", "--bare", "-b", "master", remoteDir)
+
 	tempClone := filepath.Join(tmpDir, "temp-init")
 	runCmd(t, tmpDir, "git", "clone", remoteDir, tempClone)
 	runCmd(t, tempClone, "git", "commit", "--allow-empty", "-m", "Initial commit")
 	runCmd(t, tempClone, "git", "push", "origin", "master")
-	
+
 	return remoteDir
 }
 
 func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 	t.Helper()
 	cloneDir := filepath.Join(tmpDir, "clone-"+strings.ToLower(name))
-	
+
 	// Use shallow, shared clones for speed
 	runCmd(t, tmpDir, "git", "clone", "--shared", "--depth=1", "--no-tags", remoteDir, cloneDir)
-	
+
 	// Disable hooks to avoid overhead
 	emptyHooks := filepath.Join(cloneDir, ".empty-hooks")
 	os.MkdirAll(emptyHooks, 0755)
 	runCmd(t, cloneDir, "git", "config", "core.hooksPath", emptyHooks)
-	
+
 	// Speed configs
 	runCmd(t, cloneDir, "git", "config", "gc.auto", "0")
 	runCmd(t, cloneDir, "git", "config", "core.fsync", "false")
 	runCmd(t, cloneDir, "git", "config", "commit.gpgSign", "false")
-	
+
 	bdCmd := getBDCommand()
 	copyFile(t, bdPath, filepath.Join(cloneDir, filepath.Base(bdCmd)))
-	
+
 	if name == "A" {
 		runCmd(t, cloneDir, bdCmd, "init", "--quiet", "--prefix", "test")
 		runCmd(t, cloneDir, "git", "add", ".beads")
@@ -216,7 +216,7 @@ func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 		runCmd(t, cloneDir, "git", "pull", "origin", "master")
 		runCmd(t, cloneDir, bdCmd, "init", "--quiet", "--prefix", "test")
 	}
-	
+
 	return cloneDir
 }
 
@@ -231,13 +231,13 @@ func getTitlesFromClone(t *testing.T, cloneDir string) map[string]bool {
 		"BEADS_NO_DAEMON":   "1",
 		"BD_NO_AUTO_IMPORT": "1",
 	}, getBDCommand(), "list", "--json")
-	
+
 	jsonStart := strings.Index(listJSON, "[")
 	if jsonStart == -1 {
 		return make(map[string]bool)
 	}
 	listJSON = listJSON[jsonStart:]
-	
+
 	var issues []struct {
 		Title string `json:"title"`
 	}
@@ -245,7 +245,7 @@ func getTitlesFromClone(t *testing.T, cloneDir string) map[string]bool {
 		t.Logf("Failed to parse JSON: %v", err)
 		return make(map[string]bool)
 	}
-	
+
 	titles := make(map[string]bool)
 	for _, issue := range issues {
 		titles[issue.Title] = true
@@ -280,7 +280,7 @@ func installGitHooks(t *testing.T, repoDir string) {
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	// Ensure POSIX-style path for sh scripts (even on Windows)
 	bdCmd := strings.ReplaceAll(getBDCommand(), "\\", "/")
-	
+
 	preCommit := fmt.Sprintf(`#!/bin/sh
 %s --no-daemon export -o .beads/issues.jsonl >/dev/null 2>&1 || true
 git add .beads/issues.jsonl >/dev/null 2>&1 || true
