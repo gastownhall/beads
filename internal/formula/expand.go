@@ -152,7 +152,37 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		}
 	}
 
+	// Validate no duplicate step IDs after expansion (gt-8tmz.36)
+	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
+		return nil, fmt.Errorf("duplicate step IDs after expansion: %v", dups)
+	}
+
 	return result, nil
+}
+
+// findDuplicateStepIDs returns any duplicate step IDs found in the steps slice.
+// It recursively checks all children.
+func findDuplicateStepIDs(steps []*Step) []string {
+	seen := make(map[string]int)
+	countStepIDs(steps, seen)
+
+	var dups []string
+	for id, count := range seen {
+		if count > 1 {
+			dups = append(dups, id)
+		}
+	}
+	return dups
+}
+
+// countStepIDs counts occurrences of each step ID recursively.
+func countStepIDs(steps []*Step, counts map[string]int) {
+	for _, step := range steps {
+		counts[step.ID]++
+		if len(step.Children) > 0 {
+			countStepIDs(step.Children, counts)
+		}
+	}
 }
 
 // expandStep expands a target step using the given template.

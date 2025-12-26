@@ -652,3 +652,167 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyExpansionsDuplicateIDs(t *testing.T) {
+	// Create a temporary directory with an expansion formula
+	tmpDir := t.TempDir()
+
+	// Create expansion formula that generates "{target}.draft"
+	ruleOfFive := `{
+		"formula": "rule-of-five",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.draft", "title": "Draft: {target.title}"},
+			{"id": "{target}.refine", "title": "Refine", "needs": ["{target}.draft"]}
+		]
+	}`
+	err := os.WriteFile(filepath.Join(tmpDir, "rule-of-five.formula.json"), []byte(ruleOfFive), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+
+	// Test: expansion creates duplicate with existing step
+	t.Run("duplicate with existing step", func(t *testing.T) {
+		// "implement.draft" already exists, expansion will try to create it again
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{ID: "implement", Title: "Implement the feature"},
+			{ID: "implement.draft", Title: "Existing draft"}, // Conflicts with expansion
+			{ID: "test", Title: "Test"},
+		}
+
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "implement", With: "rule-of-five"},
+			},
+		}
+
+		_, err := ApplyExpansions(steps, compose, parser)
+		if err == nil {
+			t.Fatal("expected error for duplicate step IDs, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "duplicate step IDs") {
+			t.Errorf("expected duplicate step IDs error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "implement.draft") {
+			t.Errorf("expected error to mention 'implement.draft', got: %v", err)
+		}
+	})
+
+	// Test: map creates duplicates across multiple expansions
+	t.Run("map creates cross-expansion duplicates", func(t *testing.T) {
+		// Create a formula that generates static IDs (not using {target})
+		staticExpansion := `{
+			"formula": "static-ids",
+			"type": "expansion",
+			"version": 1,
+			"template": [
+				{"id": "shared-step", "title": "Shared step"},
+				{"id": "another-shared", "title": "Another shared"}
+			]
+		}`
+		err := os.WriteFile(filepath.Join(tmpDir, "static-ids.formula.json"), []byte(staticExpansion), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		steps := []*Step{
+			{ID: "impl.auth", Title: "Implement auth"},
+			{ID: "impl.api", Title: "Implement API"},
+		}
+
+		compose := &ComposeRules{
+			Map: []*MapRule{
+				{Select: "impl.*", With: "static-ids"},
+			},
+		}
+
+		_, err = ApplyExpansions(steps, compose, parser)
+		if err == nil {
+			t.Fatal("expected error for duplicate step IDs from map, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "duplicate step IDs") {
+			t.Errorf("expected duplicate step IDs error, got: %v", err)
+		}
+	})
+}
+
+func TestFindDuplicateStepIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		steps    []*Step
+		expected []string
+	}{
+		{
+			name: "no duplicates",
+			steps: []*Step{
+				{ID: "a"},
+				{ID: "b"},
+				{ID: "c"},
+			},
+			expected: nil,
+		},
+		{
+			name: "top-level duplicate",
+			steps: []*Step{
+				{ID: "a"},
+				{ID: "b"},
+				{ID: "a"},
+			},
+			expected: []string{"a"},
+		},
+		{
+			name: "nested duplicate",
+			steps: []*Step{
+				{ID: "parent", Children: []*Step{
+					{ID: "child"},
+				}},
+				{ID: "child"}, // Duplicate with nested child
+			},
+			expected: []string{"child"},
+		},
+		{
+			name: "deeply nested duplicate",
+			steps: []*Step{
+				{ID: "root", Children: []*Step{
+					{ID: "level1", Children: []*Step{
+						{ID: "level2"},
+					}},
+				}},
+				{ID: "other", Children: []*Step{
+					{ID: "level2"}, // Duplicate with deeply nested
+				}},
+			},
+			expected: []string{"level2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dups := findDuplicateStepIDs(tt.steps)
+
+			if len(dups) != len(tt.expected) {
+				t.Fatalf("expected %d duplicates, got %d: %v", len(tt.expected), len(dups), dups)
+			}
+
+			// Check all expected duplicates are found (order may vary)
+			for _, exp := range tt.expected {
+				found := false
+				for _, dup := range dups {
+					if dup == exp {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected duplicate %q not found in %v", exp, dups)
+				}
+			}
+		})
+	}
+}
