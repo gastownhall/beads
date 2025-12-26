@@ -445,6 +445,129 @@ var gateCloseCmd = &cobra.Command{
 	},
 }
 
+var gateApproveCmd = &cobra.Command{
+	Use:   "approve <gate-id>",
+	Short: "Approve a human gate",
+	Long: `Approve a human gate, closing it and notifying waiters.
+
+Human gates (created with --await human:<prompt>) require explicit approval
+to close. This is the command that provides that approval.
+
+Example:
+  bd gate create --await human:approve-deploy --notify gastown/witness
+  # ... later, when ready to approve ...
+  bd gate approve <gate-id>
+  bd gate approve <gate-id> --comment "Reviewed and approved by Steve"`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		CheckReadonly("gate approve")
+		ctx := rootCtx
+		comment, _ := cmd.Flags().GetString("comment")
+
+		var closedGate *types.Issue
+		var gateID string
+
+		// Try daemon first, fall back to direct store access
+		if daemonClient != nil {
+			// First get the gate to verify it's a human gate
+			showResp, err := daemonClient.GateShow(&rpc.GateShowArgs{ID: args[0]})
+			if err != nil {
+				FatalError("gate approve: %v", err)
+			}
+			var gate types.Issue
+			if err := json.Unmarshal(showResp.Data, &gate); err != nil {
+				FatalError("failed to parse gate: %v", err)
+			}
+			if gate.AwaitType != "human" {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a human gate (type: %s:%s)\n", args[0], gate.AwaitType, gate.AwaitID)
+				os.Exit(1)
+			}
+			if gate.Status == types.StatusClosed {
+				fmt.Fprintf(os.Stderr, "Error: gate %s is already closed\n", args[0])
+				os.Exit(1)
+			}
+
+			// Close with approval reason
+			reason := fmt.Sprintf("Human approval granted: %s", gate.AwaitID)
+			if comment != "" {
+				reason = fmt.Sprintf("Human approval granted: %s (%s)", gate.AwaitID, comment)
+			}
+
+			resp, err := daemonClient.GateClose(&rpc.GateCloseArgs{
+				ID:     args[0],
+				Reason: reason,
+			})
+			if err != nil {
+				FatalError("gate approve: %v", err)
+			}
+			if err := json.Unmarshal(resp.Data, &closedGate); err != nil {
+				FatalError("failed to parse gate: %v", err)
+			}
+			gateID = closedGate.ID
+		} else if store != nil {
+			var err error
+			gateID, err = utils.ResolvePartialID(ctx, store, args[0])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Get gate and verify it's a human gate
+			gate, err := store.GetIssue(ctx, gateID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if gate == nil {
+				fmt.Fprintf(os.Stderr, "Error: gate %s not found\n", gateID)
+				os.Exit(1)
+			}
+			if gate.IssueType != types.TypeGate {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a gate (type: %s)\n", gateID, gate.IssueType)
+				os.Exit(1)
+			}
+			if gate.AwaitType != "human" {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a human gate (type: %s:%s)\n", gateID, gate.AwaitType, gate.AwaitID)
+				os.Exit(1)
+			}
+			if gate.Status == types.StatusClosed {
+				fmt.Fprintf(os.Stderr, "Error: gate %s is already closed\n", gateID)
+				os.Exit(1)
+			}
+
+			// Close with approval reason
+			reason := fmt.Sprintf("Human approval granted: %s", gate.AwaitID)
+			if comment != "" {
+				reason = fmt.Sprintf("Human approval granted: %s (%s)", gate.AwaitID, comment)
+			}
+
+			if err := store.CloseIssue(ctx, gateID, reason, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing gate: %v\n", err)
+				os.Exit(1)
+			}
+
+			markDirtyAndScheduleFlush()
+			closedGate, _ = store.GetIssue(ctx, gateID)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+			os.Exit(1)
+		}
+
+		if jsonOutput {
+			outputJSON(closedGate)
+			return
+		}
+
+		fmt.Printf("%s Approved gate: %s\n", ui.RenderPass("✓"), gateID)
+		if closedGate != nil && closedGate.CloseReason != "" {
+			fmt.Printf("   %s\n", closedGate.CloseReason)
+		}
+		if closedGate != nil && len(closedGate.Waiters) > 0 {
+			fmt.Printf("   Waiters notified: %s\n", strings.Join(closedGate.Waiters, ", "))
+		}
+	},
+}
+
 var gateWaitCmd = &cobra.Command{
 	Use:   "wait <gate-id>",
 	Short: "Add a waiter to an existing gate",
@@ -627,6 +750,8 @@ This command is idempotent and safe to run repeatedly.`,
 
 		var closed []string
 		var skipped []string
+		var awaitingHuman []string
+		var awaitingMail []string
 		now := time.Now()
 
 		for _, gate := range gates {
@@ -640,6 +765,14 @@ This command is idempotent and safe to run repeatedly.`,
 				shouldClose, reason = evalGHRunGate(gate)
 			case "gh:pr":
 				shouldClose, reason = evalGHPRGate(gate)
+			case "human":
+				// Human gates require explicit approval via 'bd gate approve'
+				awaitingHuman = append(awaitingHuman, gate.ID)
+				continue
+			case "mail":
+				// Mail gates will be evaluated when mail gate support is added
+				awaitingMail = append(awaitingMail, gate.ID)
+				continue
 			default:
 				// Unsupported gate type - skip
 				skipped = append(skipped, gate.ID)
@@ -679,9 +812,11 @@ This command is idempotent and safe to run repeatedly.`,
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
-				"evaluated": len(gates),
-				"closed":    closed,
-				"skipped":   skipped,
+				"evaluated":      len(gates),
+				"closed":         closed,
+				"awaiting_human": awaitingHuman,
+				"awaiting_mail":  awaitingMail,
+				"skipped":        skipped,
 			})
 			return
 		}
@@ -697,6 +832,13 @@ This command is idempotent and safe to run repeatedly.`,
 			for _, id := range closed {
 				fmt.Printf("   %s\n", id)
 			}
+		}
+		if len(awaitingHuman) > 0 {
+			fmt.Printf("Awaiting human approval: %s\n", strings.Join(awaitingHuman, ", "))
+			fmt.Printf("   Use 'bd gate approve <id>' to approve\n")
+		}
+		if len(awaitingMail) > 0 {
+			fmt.Printf("Awaiting mail: %s\n", strings.Join(awaitingMail, ", "))
 		}
 		if len(skipped) > 0 {
 			fmt.Printf("Skipped %d unsupported gate(s): %s\n", len(skipped), strings.Join(skipped, ", "))
@@ -824,6 +966,10 @@ func init() {
 	gateCloseCmd.Flags().StringP("reason", "r", "", "Reason for closing")
 	gateCloseCmd.Flags().Bool("json", false, "Output JSON format")
 
+	// Gate approve flags
+	gateApproveCmd.Flags().String("comment", "", "Optional approval comment")
+	gateApproveCmd.Flags().Bool("json", false, "Output JSON format")
+
 	// Gate wait flags
 	gateWaitCmd.Flags().StringSlice("notify", nil, "Mail addresses to add as waiters (repeatable, required)")
 	gateWaitCmd.Flags().Bool("json", false, "Output JSON format")
@@ -833,6 +979,7 @@ func init() {
 	gateCmd.AddCommand(gateShowCmd)
 	gateCmd.AddCommand(gateListCmd)
 	gateCmd.AddCommand(gateCloseCmd)
+	gateCmd.AddCommand(gateApproveCmd)
 	gateCmd.AddCommand(gateWaitCmd)
 	gateCmd.AddCommand(gateEvalCmd)
 
