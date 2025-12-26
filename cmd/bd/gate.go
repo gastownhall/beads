@@ -762,12 +762,12 @@ func evalGHRunGate(gate *types.Issue) (bool, string) {
 
 // ghPRStatus represents the JSON output of `gh pr view --json`
 type ghPRStatus struct {
-	State  string `json:"state"`  // OPEN, CLOSED, MERGED
-	Merged bool   `json:"merged"` // true if merged
+	State    string `json:"state"`    // OPEN, CLOSED, MERGED
+	MergedAt string `json:"mergedAt"` // non-empty if merged
 }
 
 // evalGHPRGate checks if a GitHub PR has been merged or closed.
-// Uses `gh pr view <pr_number> --json state,merged` to check status.
+// Uses `gh pr view <pr_number> --json state,mergedAt` to check status.
 func evalGHPRGate(gate *types.Issue) (bool, string) {
 	prNumber := gate.AwaitID
 	if prNumber == "" {
@@ -775,7 +775,7 @@ func evalGHPRGate(gate *types.Issue) (bool, string) {
 	}
 
 	// Run gh CLI to get PR status
-	cmd := exec.Command("gh", "pr", "view", prNumber, "--json", "state,merged")
+	cmd := exec.Command("gh", "pr", "view", prNumber, "--json", "state,mergedAt")
 	output, err := cmd.Output()
 	if err != nil {
 		// gh CLI failed - could be network issue, invalid PR, or gh not installed
@@ -789,13 +789,11 @@ func evalGHPRGate(gate *types.Issue) (bool, string) {
 	}
 
 	// Close gate if PR is no longer OPEN
+	// State is "MERGED" for merged PRs, "CLOSED" for closed-without-merge
 	switch status.State {
 	case "MERGED":
 		return true, fmt.Sprintf("PR #%s merged", prNumber)
 	case "CLOSED":
-		if status.Merged {
-			return true, fmt.Sprintf("PR #%s merged", prNumber)
-		}
 		return true, fmt.Sprintf("PR #%s closed without merge", prNumber)
 	default:
 		// Still OPEN
