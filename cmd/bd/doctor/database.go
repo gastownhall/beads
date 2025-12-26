@@ -155,9 +155,9 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 		}
 	}
 
-	// Open database (bd-ckvw: This will run migrations and schema probe)
+	// Open database (bd-ckvw: schema probe)
 	// Note: We can't use the global 'store' because doctor can check arbitrary paths
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
@@ -244,7 +244,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	}
 
 	// Open database in read-only mode for integrity check
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(30000)")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Database Integrity",
@@ -350,7 +350,7 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 	jsonlCount, jsonlPrefixes, jsonlErr := CountJSONLIssues(jsonlPath)
 
 	// Single database open for all queries (instead of 3 separate opens)
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		// Database can't be opened. If JSONL has issues, suggest recovery.
 		if jsonlErr == nil && jsonlCount > 0 {
@@ -523,7 +523,7 @@ func FixDBJSONLSync(path string) error {
 
 // getDatabaseVersionFromPath reads the database version from the given path
 func getDatabaseVersionFromPath(dbPath string) string {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return "unknown"
 	}

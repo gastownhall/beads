@@ -65,10 +65,10 @@ func DatabaseIntegrity(path string) error {
 	// Back up corrupt DB and its sidecar files.
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	backupDB := dbPath + "." + ts + ".corrupt.backup.db"
-	if err := os.Rename(dbPath, backupDB); err != nil {
+	if err := moveFile(dbPath, backupDB); err != nil {
 		// Retry once after attempting to kill daemons again (helps on platforms with strict file locks).
 		_ = Daemon(absPath)
-		if err2 := os.Rename(dbPath, backupDB); err2 != nil {
+		if err2 := moveFile(dbPath, backupDB); err2 != nil {
 			// Prefer the original error (more likely root cause).
 			return fmt.Errorf("failed to back up database: %w", err)
 		}
@@ -76,7 +76,7 @@ func DatabaseIntegrity(path string) error {
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		sidecar := dbPath + suffix
 		if _, err := os.Stat(sidecar); err == nil {
-			_ = os.Rename(sidecar, backupDB+suffix) // best effort
+			_ = moveFile(sidecar, backupDB+suffix) // best effort
 		}
 	}
 
@@ -98,9 +98,9 @@ func DatabaseIntegrity(path string) error {
 		failedTS := time.Now().UTC().Format("20060102T150405Z")
 		if _, statErr := os.Stat(dbPath); statErr == nil {
 			failedDB := dbPath + "." + failedTS + ".failed.init.db"
-			_ = os.Rename(dbPath, failedDB)
+			_ = moveFile(dbPath, failedDB)
 			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-				_ = os.Rename(dbPath+suffix, failedDB+suffix)
+				_ = moveFile(dbPath+suffix, failedDB+suffix)
 			}
 		}
 		_ = copyFile(backupDB, dbPath)

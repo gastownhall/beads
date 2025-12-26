@@ -357,7 +357,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	}
 
 	// Open database in read-only mode
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return issues // Can't open database, skip
 	}

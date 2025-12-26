@@ -2,7 +2,6 @@ package fix
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -58,13 +57,13 @@ func JSONLIntegrity(path string) error {
 	// Back up the JSONL.
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	backup := jsonlPath + "." + ts + ".corrupt.backup.jsonl"
-	if err := os.Rename(jsonlPath, backup); err != nil {
+	if err := moveFile(jsonlPath, backup); err != nil {
 		return fmt.Errorf("failed to back up JSONL: %w", err)
 	}
 
 	binary, err := getBdBinary()
 	if err != nil {
-		_ = os.Rename(backup, jsonlPath)
+		_ = moveFile(backup, jsonlPath)
 		return err
 	}
 
@@ -78,28 +77,11 @@ func JSONLIntegrity(path string) error {
 		failedTS := time.Now().UTC().Format("20060102T150405Z")
 		if _, statErr := os.Stat(jsonlPath); statErr == nil {
 			failed := jsonlPath + "." + failedTS + ".failed.regen.jsonl"
-			_ = os.Rename(jsonlPath, failed)
+			_ = moveFile(jsonlPath, failed)
 		}
 		_ = copyFile(backup, jsonlPath)
 		return fmt.Errorf("failed to regenerate JSONL from database: %w (backup: %s)", err, backup)
 	}
 
 	return nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src) // #nosec G304 -- src is within the workspace
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
 }

@@ -829,5 +829,5 @@ func CheckOrphanedIssues(path string) DoctorCheck {
 
 // openDBReadOnly opens a SQLite database in read-only mode
 func openDBReadOnly(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	return sql.Open("sqlite3", sqliteConnString(dbPath, true))
 }

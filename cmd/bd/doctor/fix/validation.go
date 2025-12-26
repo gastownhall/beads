@@ -229,5 +229,5 @@ func ChildParentDependencies(path string) error {
 
 // openDB opens a SQLite database for read-write access
 func openDB(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite3", dbPath)
+	return sql.Open("sqlite3", sqliteConnString(dbPath, false))
 }

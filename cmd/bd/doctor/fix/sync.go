@@ -149,7 +149,7 @@ func DBJSONLSync(path string) error {
 
 // countDatabaseIssues counts the number of issues in the database.
 func countDatabaseIssues(dbPath string) (int, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return 0, fmt.Errorf("failed to open database: %w", err)
 	}
