@@ -668,3 +668,66 @@ func TestApplyLoops_ThreeLevelNesting(t *testing.T) {
 		t.Errorf("Last step ID wrong: %s", result[7].ID)
 	}
 }
+
+func TestApplyLoops_NestedLoopsOuterChaining(t *testing.T) {
+	// Verify that outer iterations are chained AFTER nested loop expansion.
+	// outer.iter2's first step should depend on outer.iter1's LAST step.
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer loop",
+			Loop: &LoopSpec{
+				Count: 2,
+				Body: []*Step{
+					{
+						ID:    "inner",
+						Title: "Inner loop",
+						Loop: &LoopSpec{
+							Count: 2,
+							Body: []*Step{
+								{ID: "work", Title: "Do work"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	// Should have 4 steps
+	if len(result) != 4 {
+		t.Fatalf("Expected 4 steps, got %d", len(result))
+	}
+
+	// Expected order:
+	// 0: outer.iter1.inner.iter1.work
+	// 1: outer.iter1.inner.iter2.work (depends on above via inner chaining)
+	// 2: outer.iter2.inner.iter1.work (should depend on step 1 via outer chaining!)
+	// 3: outer.iter2.inner.iter2.work (depends on above via inner chaining)
+
+	// Verify outer chaining: step 2 should depend on step 1
+	step2 := result[2]
+	if step2.ID != "outer.iter2.inner.iter1.work" {
+		t.Fatalf("Step 2 ID wrong: %s", step2.ID)
+	}
+
+	// This is the key assertion: outer.iter2's first step must depend on
+	// outer.iter1's last step (outer.iter1.inner.iter2.work)
+	expectedDep := "outer.iter1.inner.iter2.work"
+	found := false
+	for _, need := range step2.Needs {
+		if need == expectedDep {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("outer.iter2 first step should depend on outer.iter1 last step.\n"+
+			"Expected Needs to contain %q, got %v", expectedDep, step2.Needs)
+	}
+}

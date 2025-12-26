@@ -12,6 +12,7 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ApplyLoops expands loop bodies in a formula's steps.
@@ -102,9 +103,17 @@ func expandLoop(step *Step) ([]*Step, error) {
 			result = append(result, iterSteps...)
 		}
 
-		// Chain iterations: each iteration depends on previous
-		if len(step.Loop.Body) > 0 && step.Loop.Count > 1 {
-			result = chainLoopIterations(result, step.Loop.Body, step.Loop.Count)
+		// Recursively expand any nested loops FIRST (gt-zn35j)
+		var err error
+		result, err = ApplyLoops(result)
+		if err != nil {
+			return nil, err
+		}
+
+		// THEN chain iterations on the expanded result
+		// This must happen AFTER recursive expansion so we chain the final steps
+		if step.Loop.Count > 1 {
+			result = chainExpandedIterations(result, step.ID, step.Loop.Count)
 		}
 	} else {
 		// Conditional loop: expand once with loop metadata
@@ -126,11 +135,14 @@ func expandLoop(step *Step) ([]*Step, error) {
 			firstStep.Labels = append(firstStep.Labels, fmt.Sprintf("loop:%s", string(loopJSON)))
 		}
 
-		result = iterSteps
+		// Recursively expand any nested loops (gt-zn35j)
+		result, err = ApplyLoops(iterSteps)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Recursively expand any nested loops in the result (gt-zn35j)
-	return ApplyLoops(result)
+	return result, nil
 }
 
 // expandLoopIteration expands a single iteration of a loop.
@@ -265,6 +277,46 @@ func chainLoopIterations(steps []*Step, body []*Step, count int) []*Step {
 
 		if firstIdx < len(steps) {
 			steps[firstIdx].Needs = appendUnique(steps[firstIdx].Needs, lastStep.ID)
+		}
+	}
+
+	return steps
+}
+
+// chainExpandedIterations chains iterations AFTER nested loop expansion (gt-zn35j).
+// Unlike chainLoopIterations, this handles variable step counts per iteration
+// by finding iteration boundaries via ID prefix matching.
+func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
+	if len(steps) == 0 || count < 2 {
+		return steps
+	}
+
+	// Find the first and last step index of each iteration
+	// Iteration N has steps with ID prefix: {loopID}.iter{N}.
+	iterFirstIdx := make(map[int]int) // iteration -> index of first step
+	iterLastIdx := make(map[int]int)  // iteration -> index of last step
+
+	for i, s := range steps {
+		for iter := 1; iter <= count; iter++ {
+			prefix := fmt.Sprintf("%s.iter%d.", loopID, iter)
+			if strings.HasPrefix(s.ID, prefix) {
+				if _, found := iterFirstIdx[iter]; !found {
+					iterFirstIdx[iter] = i
+				}
+				iterLastIdx[iter] = i
+				break
+			}
+		}
+	}
+
+	// Chain: first step of iteration N+1 depends on last step of iteration N
+	for iter := 2; iter <= count; iter++ {
+		firstIdx, hasFirst := iterFirstIdx[iter]
+		prevLastIdx, hasPrevLast := iterLastIdx[iter-1]
+
+		if hasFirst && hasPrevLast {
+			lastStepID := steps[prevLastIdx].ID
+			steps[firstIdx].Needs = appendUnique(steps[firstIdx].Needs, lastStepID)
 		}
 	}
 
