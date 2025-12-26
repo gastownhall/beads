@@ -522,11 +522,11 @@ func (f *Formula) Validate() error {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): needs references unknown step %q", i, step.ID, need))
 			}
 		}
-		// Validate waits_for field (bd-j4cr) - must be a known gate type
+		// Validate waits_for field (bd-j4cr, gt-8tmz.38)
+		// Valid formats: "all-children", "any-children", "children-of(step-id)"
 		if step.WaitsFor != "" {
-			validGates := map[string]bool{"all-children": true, "any-children": true}
-			if !validGates[step.WaitsFor] {
-				errs = append(errs, fmt.Sprintf("steps[%d] (%s): waits_for has invalid value %q (must be all-children or any-children)", i, step.ID, step.WaitsFor))
+			if err := validateWaitsFor(step.WaitsFor, stepIDLocations); err != nil {
+				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
 		// Validate on_complete field (gt-8tmz.8) - runtime expansion
@@ -603,6 +603,66 @@ func collectChildIDs(children []*Step, idLocations map[string]string, errs *[]st
 	}
 }
 
+// WaitsForSpec holds the parsed waits_for field (gt-8tmz.38).
+type WaitsForSpec struct {
+	// Gate is the gate type: "all-children" or "any-children"
+	Gate string
+	// SpawnerID is the step ID whose children to wait for.
+	// Empty means infer from context (typically first step in needs).
+	SpawnerID string
+}
+
+// ParseWaitsFor parses a waits_for value into its components (gt-8tmz.38).
+// Returns nil if the value is empty.
+func ParseWaitsFor(value string) *WaitsForSpec {
+	if value == "" {
+		return nil
+	}
+
+	// Simple gate types - spawner inferred from needs
+	if value == "all-children" || value == "any-children" {
+		return &WaitsForSpec{Gate: value}
+	}
+
+	// children-of(step-id) syntax
+	if strings.HasPrefix(value, "children-of(") && strings.HasSuffix(value, ")") {
+		stepID := value[len("children-of(") : len(value)-1]
+		return &WaitsForSpec{
+			Gate:      "all-children", // Default gate type
+			SpawnerID: stepID,
+		}
+	}
+
+	// Invalid - return nil (validation should have caught this)
+	return nil
+}
+
+// validateWaitsFor validates the waits_for field value (gt-8tmz.38).
+// Valid formats:
+//   - "all-children": wait for all dynamically-bonded children
+//   - "any-children": wait for first child to complete
+//   - "children-of(step-id)": wait for children of a specific step
+func validateWaitsFor(value string, stepIDLocations map[string]string) error {
+	// Simple gate types
+	if value == "all-children" || value == "any-children" {
+		return nil
+	}
+
+	// children-of(step-id) syntax
+	if strings.HasPrefix(value, "children-of(") && strings.HasSuffix(value, ")") {
+		stepID := value[len("children-of(") : len(value)-1]
+		if stepID == "" {
+			return fmt.Errorf("waits_for children-of() requires a step ID")
+		}
+		if _, exists := stepIDLocations[stepID]; !exists {
+			return fmt.Errorf("waits_for references unknown step %q in children-of()", stepID)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("waits_for has invalid value %q (must be all-children, any-children, or children-of(step-id))", value)
+}
+
 // validateChildDependsOn recursively validates depends_on and needs references for children.
 func validateChildDependsOn(children []*Step, idLocations map[string]string, errs *[]string, prefix string) {
 	for i, child := range children {
@@ -618,11 +678,10 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 				*errs = append(*errs, fmt.Sprintf("%s (%s): needs references unknown step %q", childPrefix, child.ID, need))
 			}
 		}
-		// Validate waits_for field (bd-j4cr)
+		// Validate waits_for field (bd-j4cr, gt-8tmz.38)
 		if child.WaitsFor != "" {
-			validGates := map[string]bool{"all-children": true, "any-children": true}
-			if !validGates[child.WaitsFor] {
-				*errs = append(*errs, fmt.Sprintf("%s (%s): waits_for has invalid value %q (must be all-children or any-children)", childPrefix, child.ID, child.WaitsFor))
+			if err := validateWaitsFor(child.WaitsFor, idLocations); err != nil {
+				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}
 		// Validate on_complete field (gt-8tmz.8)

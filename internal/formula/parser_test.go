@@ -681,6 +681,90 @@ func TestValidate_WaitsForField(t *testing.T) {
 	}
 }
 
+// TestValidate_WaitsForChildrenOf tests the children-of(step) syntax (gt-8tmz.38)
+func TestValidate_WaitsForChildrenOf(t *testing.T) {
+	// Valid children-of() syntax
+	formula := &Formula{
+		Formula: "mol-children-of",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "survey-workers", Title: "Survey Workers"},
+			{ID: "aggregate", Title: "Aggregate", Needs: []string{"survey-workers"}, WaitsFor: "children-of(survey-workers)"},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate failed for valid children-of(): %v", err)
+	}
+
+	// Invalid: reference to unknown step
+	formulaBad := &Formula{
+		Formula: "mol-bad-children-of",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", WaitsFor: "children-of(unknown-step)"},
+		},
+	}
+
+	if err := formulaBad.Validate(); err == nil {
+		t.Error("Validate should fail for children-of() with unknown step")
+	}
+
+	// Invalid: empty step ID
+	formulaEmpty := &Formula{
+		Formula: "mol-empty-children-of",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", WaitsFor: "children-of()"},
+		},
+	}
+
+	if err := formulaEmpty.Validate(); err == nil {
+		t.Error("Validate should fail for children-of() with empty step ID")
+	}
+}
+
+// TestParseWaitsFor tests the ParseWaitsFor helper function (gt-8tmz.38)
+func TestParseWaitsFor(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantGate  string
+		wantSpawn string
+		wantNil   bool
+	}{
+		{"", "", "", true},
+		{"all-children", "all-children", "", false},
+		{"any-children", "any-children", "", false},
+		{"children-of(survey)", "all-children", "survey", false},
+		{"children-of(my-step)", "all-children", "my-step", false},
+		{"invalid", "", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			spec := ParseWaitsFor(tt.input)
+			if tt.wantNil {
+				if spec != nil {
+					t.Errorf("ParseWaitsFor(%q) = %+v, want nil", tt.input, spec)
+				}
+				return
+			}
+			if spec == nil {
+				t.Fatalf("ParseWaitsFor(%q) = nil, want non-nil", tt.input)
+			}
+			if spec.Gate != tt.wantGate {
+				t.Errorf("ParseWaitsFor(%q).Gate = %q, want %q", tt.input, spec.Gate, tt.wantGate)
+			}
+			if spec.SpawnerID != tt.wantSpawn {
+				t.Errorf("ParseWaitsFor(%q).SpawnerID = %q, want %q", tt.input, spec.SpawnerID, tt.wantSpawn)
+			}
+		})
+	}
+}
+
 // TestValidate_ChildNeedsAndWaitsFor tests needs and waits_for in child steps
 func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	formula := &Formula{

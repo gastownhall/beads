@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -718,6 +719,36 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 			DependsOnID: needIssueID,
 			Type:        types.DepBlocks,
 		})
+	}
+
+	// Process waits_for field (gt-8tmz.38) - fanout gate dependency
+	if step.WaitsFor != "" {
+		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
+		if waitsForSpec != nil {
+			// Determine spawner ID
+			spawnerStepID := waitsForSpec.SpawnerID
+			if spawnerStepID == "" && len(step.Needs) > 0 {
+				// Infer spawner from first need
+				spawnerStepID = step.Needs[0]
+			}
+
+			if spawnerStepID != "" {
+				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
+					// Create WaitsFor dependency with metadata
+					meta := types.WaitsForMeta{
+						Gate: waitsForSpec.Gate,
+					}
+					metaJSON, _ := json.Marshal(meta)
+
+					*deps = append(*deps, &types.Dependency{
+						IssueID:     issueID,
+						DependsOnID: spawnerIssueID,
+						Type:        types.DepWaitsFor,
+						Metadata:    string(metaJSON),
+					})
+				}
+			}
+		}
 	}
 
 	// Recursively handle children
