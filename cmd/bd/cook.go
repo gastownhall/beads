@@ -374,16 +374,18 @@ func collectStepsRecursive(steps []*formula.Step, parentID string, idMapping map
 		}
 
 		issue := &types.Issue{
-			ID:          issueID,
-			Title:       step.Title, // Keep {{variables}} for substitution at pour time
-			Description: step.Description,
-			Status:      types.StatusOpen,
-			Priority:    priority,
-			IssueType:   issueType,
-			Assignee:    step.Assignee,
-			IsTemplate:  true,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			ID:             issueID,
+			Title:          step.Title, // Keep {{variables}} for substitution at pour time
+			Description:    step.Description,
+			Status:         types.StatusOpen,
+			Priority:       priority,
+			IssueType:      issueType,
+			Assignee:       step.Assignee,
+			IsTemplate:     true,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+			SourceFormula:  step.SourceFormula,  // Source tracing (gt-8tmz.18)
+			SourceLocation: step.SourceLocation, // Source tracing (gt-8tmz.18)
 		}
 		*issues = append(*issues, issue)
 
@@ -502,7 +504,13 @@ func printFormulaSteps(steps []*formula.Step, indent string) {
 			typeStr = fmt.Sprintf(" (%s)", step.Type)
 		}
 
-		fmt.Printf("%s%s %s: %s%s%s\n", indent, connector, step.ID, step.Title, typeStr, depStr)
+		// Source tracing info (gt-8tmz.18)
+		sourceStr := ""
+		if step.SourceFormula != "" || step.SourceLocation != "" {
+			sourceStr = fmt.Sprintf(" [from: %s@%s]", step.SourceFormula, step.SourceLocation)
+		}
+
+		fmt.Printf("%s%s %s: %s%s%s%s\n", indent, connector, step.ID, step.Title, typeStr, depStr, sourceStr)
 
 		if len(step.Children) > 0 {
 			childIndent := indent

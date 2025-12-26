@@ -163,12 +163,14 @@ func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
 
 	for _, tmpl := range template {
 		expanded := &Step{
-			ID:          substituteTargetPlaceholders(tmpl.ID, target),
-			Title:       substituteTargetPlaceholders(tmpl.Title, target),
-			Description: substituteTargetPlaceholders(tmpl.Description, target),
-			Type:        tmpl.Type,
-			Priority:    tmpl.Priority,
-			Assignee:    tmpl.Assignee,
+			ID:             substituteTargetPlaceholders(tmpl.ID, target),
+			Title:          substituteTargetPlaceholders(tmpl.Title, target),
+			Description:    substituteTargetPlaceholders(tmpl.Description, target),
+			Type:           tmpl.Type,
+			Priority:       tmpl.Priority,
+			Assignee:       tmpl.Assignee,
+			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template (gt-8tmz.18)
+			SourceLocation: tmpl.SourceLocation, // Preserve source location (gt-8tmz.18)
 		}
 
 		// Substitute placeholders in labels

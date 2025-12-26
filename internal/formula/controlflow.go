@@ -146,18 +146,20 @@ func expandLoopIteration(step *Step, iteration int) ([]*Step, error) {
 		iterID := fmt.Sprintf("%s.iter%d.%s", step.ID, iteration, bodyStep.ID)
 
 		clone := &Step{
-			ID:          iterID,
-			Title:       bodyStep.Title,
-			Description: bodyStep.Description,
-			Type:        bodyStep.Type,
-			Priority:    bodyStep.Priority,
-			Assignee:    bodyStep.Assignee,
-			Condition:   bodyStep.Condition,
-			WaitsFor:    bodyStep.WaitsFor,
-			Expand:      bodyStep.Expand,
-			Gate:        bodyStep.Gate,
-			Loop:        cloneLoopSpec(bodyStep.Loop), // Support nested loops (gt-zn35j)
-			OnComplete:  cloneOnComplete(bodyStep.OnComplete),
+			ID:             iterID,
+			Title:          bodyStep.Title,
+			Description:    bodyStep.Description,
+			Type:           bodyStep.Type,
+			Priority:       bodyStep.Priority,
+			Assignee:       bodyStep.Assignee,
+			Condition:      bodyStep.Condition,
+			WaitsFor:       bodyStep.WaitsFor,
+			Expand:         bodyStep.Expand,
+			Gate:           bodyStep.Gate,
+			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops (gt-zn35j)
+			OnComplete:     cloneOnComplete(bodyStep.OnComplete),
+			SourceFormula:  bodyStep.SourceFormula,                                                     // Preserve source (gt-8tmz.18)
+			SourceLocation: fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration), // Track iteration
 		}
 
 		// Clone ExpandVars if present

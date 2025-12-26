@@ -188,6 +188,17 @@ type Step struct {
 	// OnComplete defines actions triggered when this step completes (gt-8tmz.8).
 	// Used for runtime expansion over step output (the for-each construct).
 	OnComplete *OnCompleteSpec `json:"on_complete,omitempty"`
+
+	// Source tracing fields (gt-8tmz.18): track where this step came from.
+	// These are set during parsing/transformation and copied to Issues during cooking.
+
+	// SourceFormula is the formula name where this step was defined.
+	// For inherited steps, this is the parent formula, not the final composed formula.
+	SourceFormula string `json:"-"` // Internal only, not serialized to JSON
+
+	// SourceLocation is the path within the source formula.
+	// Format: "steps[0]", "steps[2].children[1]", "advice[0].after", "loop.body[0]"
+	SourceLocation string `json:"-"` // Internal only, not serialized to JSON
 }
 
 // Gate defines an async wait condition (integrates with bd-udsi).

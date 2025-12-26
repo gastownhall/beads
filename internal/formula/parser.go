@@ -92,6 +92,10 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	}
 
 	formula.Source = absPath
+
+	// Set source tracing info on all steps (gt-8tmz.18)
+	SetSourceInfo(formula)
+
 	p.cache[absPath] = formula
 
 	// Also cache by name for extends resolution
@@ -392,4 +396,31 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 	}
 
 	return result
+}
+
+// SetSourceInfo sets SourceFormula and SourceLocation on all steps in a formula.
+// Called after parsing to enable source tracing during cooking (gt-8tmz.18).
+func SetSourceInfo(formula *Formula) {
+	setSourceInfoRecursive(formula.Steps, formula.Formula, "steps")
+	// Also set source info on template steps for expansion formulas
+	setSourceInfoRecursive(formula.Template, formula.Formula, "template")
+}
+
+// setSourceInfoRecursive recursively sets source info on steps.
+func setSourceInfoRecursive(steps []*Step, formulaName, pathPrefix string) {
+	for i, step := range steps {
+		step.SourceFormula = formulaName
+		step.SourceLocation = fmt.Sprintf("%s[%d]", pathPrefix, i)
+
+		if len(step.Children) > 0 {
+			childPath := fmt.Sprintf("%s[%d].children", pathPrefix, i)
+			setSourceInfoRecursive(step.Children, formulaName, childPath)
+		}
+
+		// Handle loop body steps
+		if step.Loop != nil && len(step.Loop.Body) > 0 {
+			bodyPath := fmt.Sprintf("%s[%d].loop.body", pathPrefix, i)
+			setSourceInfoRecursive(step.Loop.Body, formulaName, bodyPath)
+		}
+	}
 }

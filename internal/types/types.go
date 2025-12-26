@@ -66,6 +66,10 @@ type Issue struct {
 	AwaitID   string        `json:"await_id,omitempty"`   // Condition identifier (e.g., run ID, PR number)
 	Timeout   time.Duration `json:"timeout,omitempty"`    // Max wait time before escalation
 	Waiters   []string      `json:"waiters,omitempty"`    // Mail addresses to notify when gate clears
+
+	// Source tracing fields (gt-8tmz.18): track where this issue came from during cooking
+	SourceFormula   string `json:"source_formula,omitempty"`   // Formula name where this step was defined
+	SourceLocation  string `json:"source_location,omitempty"`  // Path within source: "steps[0]", "advice[0].after"
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.

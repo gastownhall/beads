@@ -166,10 +166,13 @@ func adviceStepToStep(as *AdviceStep, target *Step) *Step {
 	desc := substituteStepRef(as.Description, target)
 
 	return &Step{
-		ID:          id,
-		Title:       title,
-		Description: desc,
-		Type:        as.Type,
+		ID:            id,
+		Title:         title,
+		Description:   desc,
+		Type:          as.Type,
+		SourceFormula: target.SourceFormula, // Inherit source formula from target (gt-8tmz.18)
+		// SourceLocation will be "advice" to indicate this came from advice transformation
+		SourceLocation: "advice",
 	}
 }
 
