@@ -88,14 +88,17 @@ var showCmd = &cobra.Command{
 			// First, handle routed IDs via direct mode
 			for _, id := range routedArgs {
 				result, err := resolveAndGetIssueWithRouting(ctx, store, id)
-				if result != nil {
-					defer result.Close()
-				}
 				if err != nil {
+					if result != nil {
+						result.Close()
+					}
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 					continue
 				}
 				if result == nil || result.Issue == nil {
+					if result != nil {
+						result.Close()
+					}
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 					continue
 				}
@@ -130,6 +133,7 @@ var showCmd = &cobra.Command{
 					fmt.Println()
 					displayIdx++
 				}
+				result.Close() // Close immediately after processing each routed ID
 			}
 
 			// Then, handle local IDs via daemon
@@ -314,19 +318,23 @@ var showCmd = &cobra.Command{
 		for idx, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to gastown)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
-			if result != nil {
-				defer result.Close()
-			}
 			if err != nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 				continue
 			}
 			if result == nil || result.Issue == nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 				continue
 			}
 			issue := result.Issue
 			issueStore := result.Store // Use the store that contains this issue
+			// Note: result.Close() called at end of loop iteration
 
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
@@ -358,6 +366,7 @@ var showCmd = &cobra.Command{
 
 				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
 				allDetails = append(allDetails, details)
+				result.Close() // Close before continuing to next iteration
 				continue
 			}
 
@@ -518,6 +527,7 @@ var showCmd = &cobra.Command{
 			}
 
 			fmt.Println()
+			result.Close() // Close routed storage after each iteration
 		}
 
 		if jsonOutput && len(allDetails) > 0 {
