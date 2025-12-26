@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -242,28 +241,6 @@ func isProtoIssue(issue *types.Issue) bool {
 		}
 	}
 	return false
-}
-
-// resolvePartialIDDirect resolves a partial ID directly from store
-func resolvePartialIDDirect(ctx context.Context, partial string) (string, error) {
-	// Try direct lookup first
-	if issue, err := store.GetIssue(ctx, partial); err == nil {
-		return issue.ID, nil
-	}
-	// Search by prefix
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
-		IDs: []string{partial + "*"},
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(issues) == 1 {
-		return issues[0].ID, nil
-	}
-	if len(issues) > 1 {
-		return "", fmt.Errorf("ambiguous ID: %s matches %d issues", partial, len(issues))
-	}
-	return "", fmt.Errorf("not found: %s", partial)
 }
 
 var wispListCmd = &cobra.Command{
