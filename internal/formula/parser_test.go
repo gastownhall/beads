@@ -777,3 +777,244 @@ func TestParse_NeedsAndWaitsFor(t *testing.T) {
 		t.Errorf("Steps[2].WaitsFor = %q, want 'all-children'", formula.Steps[2].WaitsFor)
 	}
 }
+
+// gt-8tmz.8: Tests for on_complete/for-each runtime expansion
+
+func TestParse_OnComplete(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-patrol",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "survey-workers",
+      "title": "Survey workers",
+      "on_complete": {
+        "for_each": "output.polecats",
+        "bond": "mol-polecat-arm",
+        "vars": {
+          "polecat_name": "{item.name}",
+          "rig": "{item.rig}"
+        },
+        "parallel": true
+      }
+    },
+    {
+      "id": "aggregate",
+      "title": "Aggregate results",
+      "needs": ["survey-workers"],
+      "waits_for": "all-children"
+    }
+  ]
+}`
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Validate parsed formula
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate failed: %v", err)
+	}
+
+	// Check on_complete field
+	oc := formula.Steps[0].OnComplete
+	if oc == nil {
+		t.Fatal("Steps[0].OnComplete is nil")
+	}
+	if oc.ForEach != "output.polecats" {
+		t.Errorf("ForEach = %q, want 'output.polecats'", oc.ForEach)
+	}
+	if oc.Bond != "mol-polecat-arm" {
+		t.Errorf("Bond = %q, want 'mol-polecat-arm'", oc.Bond)
+	}
+	if len(oc.Vars) != 2 {
+		t.Errorf("len(Vars) = %d, want 2", len(oc.Vars))
+	}
+	if oc.Vars["polecat_name"] != "{item.name}" {
+		t.Errorf("Vars[polecat_name] = %q, want '{item.name}'", oc.Vars["polecat_name"])
+	}
+	if !oc.Parallel {
+		t.Error("Parallel should be true")
+	}
+}
+
+func TestValidate_OnComplete_Valid(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-valid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					Bond:    "mol-item",
+				},
+			},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate failed for valid on_complete: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_MissingBond(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-invalid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					// Bond is missing
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Error("expected validation error for missing bond")
+	}
+	if !strings.Contains(err.Error(), "bond is required") {
+		t.Errorf("expected 'bond is required' error, got: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_MissingForEach(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-invalid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					Bond: "mol-item",
+					// ForEach is missing
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Error("expected validation error for missing for_each")
+	}
+	if !strings.Contains(err.Error(), "for_each is required") {
+		t.Errorf("expected 'for_each is required' error, got: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-invalid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "items", // Should start with "output."
+					Bond:    "mol-item",
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Error("expected validation error for invalid for_each path")
+	}
+	if !strings.Contains(err.Error(), "must start with 'output.'") {
+		t.Errorf("expected 'must start with output.' error, got: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-invalid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach:    "output.items",
+					Bond:       "mol-item",
+					Parallel:   true,
+					Sequential: true, // Can't have both
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Error("expected validation error for parallel + sequential")
+	}
+	if !strings.Contains(err.Error(), "cannot set both parallel and sequential") {
+		t.Errorf("expected 'cannot set both' error, got: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_Sequential(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-valid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "process-queue",
+				Title: "Process queue",
+				OnComplete: &OnCompleteSpec{
+					ForEach:    "output.branches",
+					Bond:       "mol-merge",
+					Sequential: true,
+				},
+			},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate failed for sequential on_complete: %v", err)
+	}
+}
+
+func TestValidate_OnComplete_InChildren(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-valid",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "parent",
+				Title: "Parent",
+				Children: []*Step{
+					{
+						ID:    "child",
+						Title: "Child",
+						OnComplete: &OnCompleteSpec{
+							ForEach: "output.items",
+							Bond:    "mol-item",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate failed for on_complete in child: %v", err)
+	}
+}

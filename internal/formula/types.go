@@ -184,6 +184,10 @@ type Step struct {
 	// Loop defines iteration for this step (gt-8tmz.4).
 	// When set, the step becomes a container that expands its body.
 	Loop *LoopSpec `json:"loop,omitempty"`
+
+	// OnComplete defines actions triggered when this step completes (gt-8tmz.8).
+	// Used for runtime expansion over step output (the for-each construct).
+	OnComplete *OnCompleteSpec `json:"on_complete,omitempty"`
 }
 
 // Gate defines an async wait condition (integrates with bd-udsi).
@@ -216,6 +220,46 @@ type LoopSpec struct {
 
 	// Body contains the steps to repeat.
 	Body []*Step `json:"body"`
+}
+
+// OnCompleteSpec defines actions triggered when a step completes (gt-8tmz.8).
+// Used for runtime expansion over step output (the for-each construct).
+//
+// Example YAML:
+//
+//	step: survey-workers
+//	on_complete:
+//	  for_each: output.polecats
+//	  bond: mol-polecat-arm
+//	  vars:
+//	    polecat_name: "{item.name}"
+//	    rig: "{item.rig}"
+//	  parallel: true
+type OnCompleteSpec struct {
+	// ForEach is the path to the iterable collection in step output.
+	// Format: "output.<field>" or "output.<field>.<nested>"
+	// The collection must be an array at runtime.
+	ForEach string `json:"for_each,omitempty"`
+
+	// Bond is the formula to instantiate for each item.
+	// A new molecule is created for each element in the ForEach collection.
+	Bond string `json:"bond,omitempty"`
+
+	// Vars are variable bindings for each iteration.
+	// Supports placeholders:
+	//   - {item} - the current item value (for primitives)
+	//   - {item.field} - a field from the current item (for objects)
+	//   - {index} - the zero-based iteration index
+	Vars map[string]string `json:"vars,omitempty"`
+
+	// Parallel runs all bonded molecules concurrently (default behavior).
+	// Set to true to make this explicit.
+	Parallel bool `json:"parallel,omitempty"`
+
+	// Sequential runs bonded molecules one at a time.
+	// Each molecule starts only after the previous one completes.
+	// Mutually exclusive with Parallel.
+	Sequential bool `json:"sequential,omitempty"`
 }
 
 // BranchRule defines parallel execution paths that rejoin (gt-8tmz.4).
@@ -474,6 +518,10 @@ func (f *Formula) Validate() error {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): waits_for has invalid value %q (must be all-children or any-children)", i, step.ID, step.WaitsFor))
 			}
 		}
+		// Validate on_complete field (gt-8tmz.8) - runtime expansion
+		if step.OnComplete != nil {
+			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
+		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
 	}
@@ -566,7 +614,34 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 				*errs = append(*errs, fmt.Sprintf("%s (%s): waits_for has invalid value %q (must be all-children or any-children)", childPrefix, child.ID, child.WaitsFor))
 			}
 		}
+		// Validate on_complete field (gt-8tmz.8)
+		if child.OnComplete != nil {
+			validateOnComplete(child.OnComplete, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID))
+		}
 		validateChildDependsOn(child.Children, idLocations, errs, childPrefix)
+	}
+}
+
+// validateOnComplete validates an OnCompleteSpec (gt-8tmz.8).
+func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
+	// Check that for_each and bond are both present or both absent
+	if oc.ForEach != "" && oc.Bond == "" {
+		*errs = append(*errs, fmt.Sprintf("%s.on_complete: bond is required when for_each is set", prefix))
+	}
+	if oc.ForEach == "" && oc.Bond != "" {
+		*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each is required when bond is set", prefix))
+	}
+
+	// Validate for_each path format
+	if oc.ForEach != "" {
+		if !strings.HasPrefix(oc.ForEach, "output.") {
+			*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each must start with 'output.' (got %q)", prefix, oc.ForEach))
+		}
+	}
+
+	// Check parallel and sequential are mutually exclusive
+	if oc.Parallel && oc.Sequential {
+		*errs = append(*errs, fmt.Sprintf("%s.on_complete: cannot set both parallel and sequential", prefix))
 	}
 }
 
