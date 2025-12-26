@@ -328,37 +328,54 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 //   - All branch steps depend on the 'from' step
 //   - The 'join' step depends on all branch steps
 //
-// Returns the modified steps slice (steps are modified in place for dependencies).
+// Returns a new steps slice with dependencies added.
+// The original steps slice is not modified.
 func ApplyBranches(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 	if compose == nil || len(compose.Branch) == 0 {
 		return steps, nil
 	}
 
-	// Build step map for quick lookup
-	stepMap := buildStepMap(steps)
+	// Clone steps to avoid mutating input (gt-v1pcg)
+	cloned := cloneStepsRecursive(steps)
+	stepMap := buildStepMap(cloned)
+
+	if err := applyBranchesWithMap(stepMap, compose); err != nil {
+		return nil, err
+	}
+
+	return cloned, nil
+}
+
+// applyBranchesWithMap applies branch rules using a pre-built stepMap.
+// This is the internal implementation used by both ApplyBranches and ApplyControlFlow.
+// The stepMap entries are modified in place.
+func applyBranchesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
+	if compose == nil || len(compose.Branch) == 0 {
+		return nil
+	}
 
 	for _, branch := range compose.Branch {
 		// Validate the branch rule
 		if branch.From == "" {
-			return nil, fmt.Errorf("branch: from is required")
+			return fmt.Errorf("branch: from is required")
 		}
 		if len(branch.Steps) == 0 {
-			return nil, fmt.Errorf("branch: steps is required")
+			return fmt.Errorf("branch: steps is required")
 		}
 		if branch.Join == "" {
-			return nil, fmt.Errorf("branch: join is required")
+			return fmt.Errorf("branch: join is required")
 		}
 
 		// Verify all steps exist
 		if _, ok := stepMap[branch.From]; !ok {
-			return nil, fmt.Errorf("branch: from step %q not found", branch.From)
+			return fmt.Errorf("branch: from step %q not found", branch.From)
 		}
 		if _, ok := stepMap[branch.Join]; !ok {
-			return nil, fmt.Errorf("branch: join step %q not found", branch.Join)
+			return fmt.Errorf("branch: join step %q not found", branch.Join)
 		}
 		for _, stepID := range branch.Steps {
 			if _, ok := stepMap[stepID]; !ok {
-				return nil, fmt.Errorf("branch: parallel step %q not found", stepID)
+				return fmt.Errorf("branch: parallel step %q not found", stepID)
 			}
 		}
 
@@ -375,7 +392,7 @@ func ApplyBranches(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 		}
 	}
 
-	return steps, nil
+	return nil
 }
 
 // ApplyGates adds gate conditions to steps.
@@ -383,34 +400,51 @@ func ApplyBranches(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 //   - The target step gets a "gate:condition" label
 //   - At runtime, the patrol executor evaluates the condition
 //
-// Returns the modified steps slice.
+// Returns a new steps slice with gate labels added.
+// The original steps slice is not modified.
 func ApplyGates(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 	if compose == nil || len(compose.Gate) == 0 {
 		return steps, nil
 	}
 
-	// Build step map for quick lookup
-	stepMap := buildStepMap(steps)
+	// Clone steps to avoid mutating input (gt-v1pcg)
+	cloned := cloneStepsRecursive(steps)
+	stepMap := buildStepMap(cloned)
+
+	if err := applyGatesWithMap(stepMap, compose); err != nil {
+		return nil, err
+	}
+
+	return cloned, nil
+}
+
+// applyGatesWithMap applies gate rules using a pre-built stepMap.
+// This is the internal implementation used by both ApplyGates and ApplyControlFlow.
+// The stepMap entries are modified in place.
+func applyGatesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
+	if compose == nil || len(compose.Gate) == 0 {
+		return nil
+	}
 
 	for _, gate := range compose.Gate {
 		// Validate the gate rule
 		if gate.Before == "" {
-			return nil, fmt.Errorf("gate: before is required")
+			return fmt.Errorf("gate: before is required")
 		}
 		if gate.Condition == "" {
-			return nil, fmt.Errorf("gate: condition is required")
+			return fmt.Errorf("gate: condition is required")
 		}
 
 		// Validate the condition syntax
 		_, err := ParseCondition(gate.Condition)
 		if err != nil {
-			return nil, fmt.Errorf("gate: invalid condition %q: %w", gate.Condition, err)
+			return fmt.Errorf("gate: invalid condition %q: %w", gate.Condition, err)
 		}
 
 		// Find the target step
 		step, ok := stepMap[gate.Before]
 		if !ok {
-			return nil, fmt.Errorf("gate: target step %q not found", gate.Before)
+			return fmt.Errorf("gate: target step %q not found", gate.Before)
 		}
 
 		// Add gate label for runtime evaluation using JSON for unambiguous parsing
@@ -420,31 +454,35 @@ func ApplyGates(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 		step.Labels = appendUnique(step.Labels, gateLabel)
 	}
 
-	return steps, nil
+	return nil
 }
 
 // ApplyControlFlow applies all control flow operators in the correct order:
 // 1. Loops (expand iterations)
 // 2. Branches (wire fork-join dependencies)
 // 3. Gates (add condition labels)
+//
+// Returns a new steps slice. The original steps slice is not modified.
 func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 	var err error
 
-	// Apply loops first (expands steps)
+	// Apply loops first (expands steps) - ApplyLoops already returns new slice
 	steps, err = ApplyLoops(steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}
 
+	// Build stepMap once for branches and gates (gt-gpgdv optimization)
+	// No need to clone here since ApplyLoops already returned a new slice
+	stepMap := buildStepMap(steps)
+
 	// Apply branches (wires dependencies)
-	steps, err = ApplyBranches(steps, compose)
-	if err != nil {
+	if err := applyBranchesWithMap(stepMap, compose); err != nil {
 		return nil, fmt.Errorf("applying branches: %w", err)
 	}
 
 	// Apply gates (adds labels)
-	steps, err = ApplyGates(steps, compose)
-	if err != nil {
+	if err := applyGatesWithMap(stepMap, compose); err != nil {
 		return nil, fmt.Errorf("applying gates: %w", err)
 	}
 
@@ -463,6 +501,15 @@ func cloneStepDeep(s *Step) *Step {
 	}
 
 	return clone
+}
+
+// cloneStepsRecursive creates a deep copy of a slice of steps (gt-v1pcg).
+func cloneStepsRecursive(steps []*Step) []*Step {
+	result := make([]*Step, len(steps))
+	for i, step := range steps {
+		result[i] = cloneStepDeep(step)
+	}
+	return result
 }
 
 // cloneLoopSpec creates a deep copy of a LoopSpec (gt-zn35j).

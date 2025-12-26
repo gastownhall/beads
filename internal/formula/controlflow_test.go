@@ -731,3 +731,94 @@ func TestApplyLoops_NestedLoopsOuterChaining(t *testing.T) {
 			"Expected Needs to contain %q, got %v", expectedDep, step2.Needs)
 	}
 }
+
+// gt-v1pcg: Tests for immutability of ApplyBranches and ApplyGates
+
+func TestApplyBranches_Immutability(t *testing.T) {
+	// Create steps with no initial dependencies
+	steps := []*Step{
+		{ID: "setup", Title: "Setup", Needs: nil},
+		{ID: "test", Title: "Run tests", Needs: nil},
+		{ID: "deploy", Title: "Deploy", Needs: nil},
+	}
+
+	compose := &ComposeRules{
+		Branch: []*BranchRule{
+			{From: "setup", Steps: []string{"test"}, Join: "deploy"},
+		},
+	}
+
+	// Call ApplyBranches
+	result, err := ApplyBranches(steps, compose)
+	if err != nil {
+		t.Fatalf("ApplyBranches failed: %v", err)
+	}
+
+	// Verify original steps are NOT mutated
+	for _, step := range steps {
+		if len(step.Needs) != 0 {
+			t.Errorf("Original step %q was mutated: Needs = %v (expected nil)", step.ID, step.Needs)
+		}
+	}
+
+	// Verify result has the expected dependencies
+	resultMap := make(map[string]*Step)
+	for _, s := range result {
+		resultMap[s.ID] = s
+	}
+
+	if len(resultMap["test"].Needs) != 1 || resultMap["test"].Needs[0] != "setup" {
+		t.Errorf("Result test step should need setup, got %v", resultMap["test"].Needs)
+	}
+}
+
+func TestApplyGates_Immutability(t *testing.T) {
+	// Create steps with no initial labels
+	steps := []*Step{
+		{ID: "tests", Title: "Run tests", Labels: nil},
+		{ID: "deploy", Title: "Deploy", Labels: nil},
+	}
+
+	compose := &ComposeRules{
+		Gate: []*GateRule{
+			{Before: "deploy", Condition: "tests.status == 'complete'"},
+		},
+	}
+
+	// Call ApplyGates
+	result, err := ApplyGates(steps, compose)
+	if err != nil {
+		t.Fatalf("ApplyGates failed: %v", err)
+	}
+
+	// Verify original steps are NOT mutated
+	for _, step := range steps {
+		if len(step.Labels) != 0 {
+			t.Errorf("Original step %q was mutated: Labels = %v (expected nil)", step.ID, step.Labels)
+		}
+	}
+
+	// Verify result has the expected labels
+	var deployResult *Step
+	for _, s := range result {
+		if s.ID == "deploy" {
+			deployResult = s
+			break
+		}
+	}
+
+	if deployResult == nil {
+		t.Fatal("deploy step not found in result")
+	}
+
+	hasGate := false
+	for _, label := range deployResult.Labels {
+		if len(label) > 5 && label[:5] == "gate:" {
+			hasGate = true
+			break
+		}
+	}
+	if !hasGate {
+		t.Errorf("Result deploy step should have gate label, got %v", deployResult.Labels)
+	}
+}
