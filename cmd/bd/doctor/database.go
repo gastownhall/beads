@@ -246,11 +246,28 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	// Open database in read-only mode for integrity check
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(30000)")
 	if err != nil {
+		// Check if JSONL recovery is possible
+		jsonlCount, _, jsonlErr := CountJSONLIssues(filepath.Join(beadsDir, "issues.jsonl"))
+		if jsonlErr != nil {
+			jsonlCount, _, jsonlErr = CountJSONLIssues(filepath.Join(beadsDir, "beads.jsonl"))
+		}
+
+		if jsonlErr == nil && jsonlCount > 0 {
+			return DoctorCheck{
+				Name:    "Database Integrity",
+				Status:  StatusError,
+				Message: fmt.Sprintf("Failed to open database (JSONL has %d issues for recovery)", jsonlCount),
+				Detail:  err.Error(),
+				Fix:     "Run 'bd doctor --fix' to recover from JSONL backup",
+			}
+		}
+
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
 			Message: "Failed to open database for integrity check",
 			Detail:  err.Error(),
+			Fix:     "Database may be corrupted. Restore JSONL from git history, then run 'bd doctor --fix'",
 		}
 	}
 	defer db.Close()
@@ -259,11 +276,28 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	// This checks the entire database for corruption
 	rows, err := db.Query("PRAGMA integrity_check")
 	if err != nil {
+		// Check if JSONL recovery is possible
+		jsonlCount, _, jsonlErr := CountJSONLIssues(filepath.Join(beadsDir, "issues.jsonl"))
+		if jsonlErr != nil {
+			jsonlCount, _, jsonlErr = CountJSONLIssues(filepath.Join(beadsDir, "beads.jsonl"))
+		}
+
+		if jsonlErr == nil && jsonlCount > 0 {
+			return DoctorCheck{
+				Name:    "Database Integrity",
+				Status:  StatusError,
+				Message: fmt.Sprintf("Failed to run integrity check (JSONL has %d issues for recovery)", jsonlCount),
+				Detail:  err.Error(),
+				Fix:     "Run 'bd doctor --fix' to recover from JSONL backup",
+			}
+		}
+
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
 			Message: "Failed to run integrity check",
 			Detail:  err.Error(),
+			Fix:     "Database may be corrupted. Restore JSONL from git history, then run 'bd doctor --fix'",
 		}
 	}
 	defer rows.Close()
@@ -286,13 +320,29 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		}
 	}
 
-	// Any other result indicates corruption
+	// Any other result indicates corruption - check if JSONL recovery is possible
+	jsonlCount, _, jsonlErr := CountJSONLIssues(filepath.Join(beadsDir, "issues.jsonl"))
+	if jsonlErr != nil {
+		// Try alternate name
+		jsonlCount, _, jsonlErr = CountJSONLIssues(filepath.Join(beadsDir, "beads.jsonl"))
+	}
+
+	if jsonlErr == nil && jsonlCount > 0 {
+		return DoctorCheck{
+			Name:    "Database Integrity",
+			Status:  StatusError,
+			Message: fmt.Sprintf("Database corruption detected (JSONL has %d issues for recovery)", jsonlCount),
+			Detail:  strings.Join(results, "; "),
+			Fix:     "Run 'bd doctor --fix' to recover from JSONL backup",
+		}
+	}
+
 	return DoctorCheck{
 		Name:    "Database Integrity",
 		Status:  StatusError,
 		Message: "Database corruption detected",
 		Detail:  strings.Join(results, "; "),
-		Fix:     "Database may need recovery. Export with 'bd export' if possible, then restore from backup or reinitialize",
+		Fix:     "Database may need recovery. Restore JSONL from git history, then run 'bd doctor --fix'",
 	}
 }
 
@@ -619,4 +669,93 @@ func isNoDbModeConfigured(beadsDir string) bool {
 	}
 
 	return cfg.NoDb
+}
+
+// CheckDatabaseSize warns when the database has accumulated many closed issues.
+// This is purely informational - pruning is NEVER auto-fixed because it
+// permanently deletes data. Users must explicitly run 'bd cleanup' to prune.
+//
+// Config: doctor.suggest_pruning_issue_count (default: 5000, 0 = disabled)
+//
+// DESIGN NOTE: This check intentionally has NO auto-fix. Unlike other doctor
+// checks that fix configuration or sync issues, pruning is destructive and
+// irreversible. The user must make an explicit decision to delete their
+// closed issue history. We only provide guidance, never action.
+func CheckDatabaseSize(path string) DoctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Get database path
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// If no database, skip this check
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+
+	// Read threshold from config (default 5000, 0 = disabled)
+	threshold := 5000
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(30000)")
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (unable to open database)",
+		}
+	}
+	defer db.Close()
+
+	// Check for custom threshold in config table
+	var thresholdStr string
+	err = db.QueryRow("SELECT value FROM config WHERE key = ?", "doctor.suggest_pruning_issue_count").Scan(&thresholdStr)
+	if err == nil {
+		if _, err := fmt.Sscanf(thresholdStr, "%d", &threshold); err != nil {
+			threshold = 5000 // Reset to default on parse error
+		}
+	}
+
+	// If disabled, return OK
+	if threshold == 0 {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "Check disabled (threshold = 0)",
+		}
+	}
+
+	// Count closed issues
+	var closedCount int
+	err = db.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'closed'").Scan(&closedCount)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (unable to count issues)",
+		}
+	}
+
+	// Check against threshold
+	if closedCount > threshold {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%d closed issues (threshold: %d)", closedCount, threshold),
+			Detail:  "Large number of closed issues may impact performance",
+			Fix:     "Consider running 'bd cleanup --older-than 90' to prune old closed issues",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Large Database",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("%d closed issues (threshold: %d)", closedCount, threshold),
+	}
 }

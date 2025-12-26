@@ -375,6 +375,9 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.DatabaseVersion(path)
 		case "Schema Compatibility":
 			err = fix.SchemaCompatibility(path)
+		case "Database Integrity":
+			// Corruption detected - try recovery from JSONL
+			err = fix.DatabaseCorruptionRecovery(path)
 		case "Repo Fingerprint":
 			err = fix.RepoFingerprint(path)
 		case "Git Merge Driver":
@@ -431,6 +434,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Compaction Candidates":
 			// No auto-fix: compaction requires agent review
 			fmt.Printf("  ⚠ Run 'bd compact --analyze' to review candidates\n")
+			continue
+		case "Large Database":
+			// No auto-fix: pruning deletes data, must be user-controlled
+			fmt.Printf("  ⚠ Run 'bd cleanup --older-than 90' to prune old closed issues\n")
 			continue
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
@@ -836,6 +843,12 @@ func runDiagnostics(path string) doctorResult {
 	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))
 	result.Checks = append(result.Checks, compactionCheck)
 	// Info only, not a warning - compaction requires human review
+
+	// Check 29: Database size (pruning suggestion)
+	// Note: This check has no auto-fix - pruning is destructive and user-controlled
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))
+	result.Checks = append(result.Checks, sizeCheck)
+	// Don't fail overall check for size warning, just inform
 
 	return result
 }
