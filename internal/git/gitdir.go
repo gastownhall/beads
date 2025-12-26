@@ -212,6 +212,8 @@ func getGitDirNoError(flag string) string {
 // by tests that need to change directory between subtests.
 // In production, these caches are safe because the working directory
 // doesn't change during a single command execution.
+//
+// WARNING: Not thread-safe. Only call from single-threaded test contexts.
 func ResetCaches() {
 	isWorktreeOnce = sync.Once{}
 	isWorktreeResult = false
