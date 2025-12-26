@@ -140,6 +140,9 @@ var showCmd = &cobra.Command{
 						fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
 					}
 					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+					if issue.CreatedBy != "" {
+						fmt.Printf("Created by: %s\n", issue.CreatedBy)
+					}
 					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
 					// Show compaction status
@@ -319,6 +322,9 @@ var showCmd = &cobra.Command{
 				fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
 			}
 			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+			if issue.CreatedBy != "" {
+				fmt.Printf("Created by: %s\n", issue.CreatedBy)
+			}
 			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
 			// Show compaction status footer

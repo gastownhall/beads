@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS issues (
     assignee TEXT,
     estimated_minutes INTEGER,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT DEFAULT '',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     closed_at DATETIME,
     external_ref TEXT,

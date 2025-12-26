@@ -23,6 +23,7 @@ type Issue struct {
 	Assignee           string         `json:"assignee,omitempty"`
 	EstimatedMinutes   *int           `json:"estimated_minutes,omitempty"`
 	CreatedAt          time.Time      `json:"created_at"`
+	CreatedBy          string         `json:"created_by,omitempty"` // Who created this issue (GH#748)
 	UpdatedAt          time.Time      `json:"updated_at"`
 	ClosedAt           *time.Time     `json:"closed_at,omitempty"`
 	CloseReason        string         `json:"close_reason,omitempty"` // Reason provided when closing the issue
@@ -97,7 +98,9 @@ func (i *Issue) ComputeContentHash() string {
 	h.Write([]byte{0})
 	h.Write([]byte(i.Assignee))
 	h.Write([]byte{0})
-	
+	h.Write([]byte(i.CreatedBy))
+	h.Write([]byte{0})
+
 	if i.ExternalRef != nil {
 		h.Write([]byte(*i.ExternalRef))
 	}

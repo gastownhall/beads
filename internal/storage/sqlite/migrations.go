@@ -45,6 +45,7 @@ var migrationsList = []Migration{
 	{"additional_indexes", migrations.MigrateAdditionalIndexes},
 	{"gate_columns", migrations.MigrateGateColumns},
 	{"tombstone_closed_at", migrations.MigrateTombstoneClosedAt},
+	{"created_by_column", migrations.MigrateCreatedByColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection

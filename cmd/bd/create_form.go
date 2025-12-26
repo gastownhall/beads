@@ -111,6 +111,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.Storage, fv *creat
 		IssueType:          types.IssueType(fv.IssueType),
 		Assignee:           fv.Assignee,
 		ExternalRef:        externalRefPtr,
+		CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
 	}
 
 	// Check if any dependencies are discovered-from type

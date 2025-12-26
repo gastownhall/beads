@@ -137,7 +137,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	query := fmt.Sprintf(`
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
+		i.created_at, i.created_by, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		i.sender, i.ephemeral, i.pinned, i.is_template,
 		i.await_type, i.await_id, i.timeout_ns, i.waiters
@@ -476,7 +476,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		    i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
+		    i.created_at, i.created_by, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		    COALESCE(COUNT(d.depends_on_id), 0) as blocked_by_count,
 		    COALESCE(GROUP_CONCAT(d.depends_on_id, ','), '') as blocker_ids
 		FROM issues i
@@ -537,7 +537,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &issue.BlockedByCount,
+			&issue.CreatedAt, &issue.CreatedBy, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &issue.BlockedByCount,
 			&blockerIDsStr,
 		)
 		if err != nil {
@@ -665,7 +665,7 @@ func (s *SQLiteStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssu
 	query := `
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
+		       i.created_at, i.created_by, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters

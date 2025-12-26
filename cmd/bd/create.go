@@ -268,6 +268,7 @@ var createCmd = &cobra.Command{
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
 			Wisp:               wisp,
+			CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
 		}
 
 		ctx := rootCtx
