@@ -215,7 +215,7 @@ type Gate struct {
 }
 
 // LoopSpec defines iteration over a body of steps (gt-8tmz.4).
-// Either Count or Until must be specified (not both).
+// One of Count, Until, or Range must be specified.
 type LoopSpec struct {
 	// Count is the fixed number of iterations.
 	// When set, the loop body is expanded Count times.
@@ -228,6 +228,19 @@ type LoopSpec struct {
 	// Max is the maximum iterations for conditional loops.
 	// Required when Until is set, to prevent unbounded loops.
 	Max int `json:"max,omitempty"`
+
+	// Range specifies a computed range for iteration (gt-8tmz.27).
+	// Format: "start..end" where start and end can be:
+	//   - Integers: "1..10"
+	//   - Expressions: "1..2^{disks}" (evaluated at cook time)
+	//   - Variables: "{start}..{count}" (substituted from Vars)
+	// Supports: + - * / ^ (power) and parentheses.
+	Range string `json:"range,omitempty"`
+
+	// Var is the variable name exposed to body steps (gt-8tmz.27).
+	// For Range loops, this is set to the current iteration value.
+	// Example: var: "move_num" with range: "1..7" exposes {move_num}=1,2,...,7
+	Var string `json:"var,omitempty"`
 
 	// Body contains the steps to repeat.
 	Body []*Step `json:"body"`

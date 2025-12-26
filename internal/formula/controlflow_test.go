@@ -822,3 +822,159 @@ func TestApplyGates_Immutability(t *testing.T) {
 		t.Errorf("Result deploy step should have gate label, got %v", deployResult.Labels)
 	}
 }
+
+// TestApplyLoops_Range tests computed range expansion (gt-8tmz.27).
+func TestApplyLoops_Range(t *testing.T) {
+	// Create a step with a range loop
+	steps := []*Step{
+		{
+			ID:    "moves",
+			Title: "Tower moves",
+			Loop: &LoopSpec{
+				Range: "1..3",
+				Var:   "move_num",
+				Body: []*Step{
+					{ID: "move", Title: "Move {move_num}"},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	// Should have 3 steps (range 1..3 = 3 iterations)
+	if len(result) != 3 {
+		t.Errorf("Expected 3 steps, got %d", len(result))
+	}
+
+	// Check step IDs and titles
+	expectedIDs := []string{
+		"moves.iter1.move",
+		"moves.iter2.move",
+		"moves.iter3.move",
+	}
+	expectedTitles := []string{
+		"Move 1",
+		"Move 2",
+		"Move 3",
+	}
+
+	for i, expected := range expectedIDs {
+		if i >= len(result) {
+			t.Errorf("Missing step %d: %s", i, expected)
+			continue
+		}
+		if result[i].ID != expected {
+			t.Errorf("Step %d: expected ID %s, got %s", i, expected, result[i].ID)
+		}
+		if result[i].Title != expectedTitles[i] {
+			t.Errorf("Step %d: expected Title %q, got %q", i, expectedTitles[i], result[i].Title)
+		}
+	}
+}
+
+// TestApplyLoops_RangeComputed tests computed range with expressions.
+func TestApplyLoops_RangeComputed(t *testing.T) {
+	// Create a step with a computed range loop (like Towers of Hanoi)
+	steps := []*Step{
+		{
+			ID:    "hanoi",
+			Title: "Hanoi moves",
+			Loop: &LoopSpec{
+				Range: "1..2^3-1", // 1..7 (2^3-1 moves for 3 disks)
+				Var:   "step_num",
+				Body: []*Step{
+					{ID: "step", Title: "Step {step_num}"},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	// Should have 7 steps (2^3-1 = 7)
+	if len(result) != 7 {
+		t.Errorf("Expected 7 steps, got %d", len(result))
+	}
+
+	// Check first and last step
+	if len(result) >= 1 {
+		if result[0].Title != "Step 1" {
+			t.Errorf("First step title: expected 'Step 1', got %q", result[0].Title)
+		}
+	}
+	if len(result) >= 7 {
+		if result[6].Title != "Step 7" {
+			t.Errorf("Last step title: expected 'Step 7', got %q", result[6].Title)
+		}
+	}
+}
+
+// TestValidateLoopSpec_Range tests validation of range loops.
+func TestValidateLoopSpec_Range(t *testing.T) {
+	tests := []struct {
+		name    string
+		loop    *LoopSpec
+		wantErr bool
+	}{
+		{
+			name: "valid range",
+			loop: &LoopSpec{
+				Range: "1..10",
+				Body:  []*Step{{ID: "step"}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid computed range",
+			loop: &LoopSpec{
+				Range: "1..2^3",
+				Var:   "n",
+				Body:  []*Step{{ID: "step"}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid - both count and range",
+			loop: &LoopSpec{
+				Count: 5,
+				Range: "1..10",
+				Body:  []*Step{{ID: "step"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid - both until and range",
+			loop: &LoopSpec{
+				Until: "step.status == 'complete'",
+				Max:   10,
+				Range: "1..10",
+				Body:  []*Step{{ID: "step"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid range syntax",
+			loop: &LoopSpec{
+				Range: "invalid",
+				Body:  []*Step{{ID: "step"}},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLoopSpec(tt.loop, "test")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateLoopSpec() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

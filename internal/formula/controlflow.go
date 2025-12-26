@@ -59,12 +59,23 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 		return fmt.Errorf("loop %q: body is required", stepID)
 	}
 
-	if loop.Count > 0 && loop.Until != "" {
-		return fmt.Errorf("loop %q: cannot have both count and until", stepID)
+	// Count the number of loop types specified
+	loopTypes := 0
+	if loop.Count > 0 {
+		loopTypes++
+	}
+	if loop.Until != "" {
+		loopTypes++
+	}
+	if loop.Range != "" {
+		loopTypes++
 	}
 
-	if loop.Count == 0 && loop.Until == "" {
-		return fmt.Errorf("loop %q: either count or until is required", stepID)
+	if loopTypes == 0 {
+		return fmt.Errorf("loop %q: one of count, until, or range is required", stepID)
+	}
+	if loopTypes > 1 {
+		return fmt.Errorf("loop %q: only one of count, until, or range can be specified", stepID)
 	}
 
 	if loop.Until != "" && loop.Max == 0 {
@@ -86,17 +97,30 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 		}
 	}
 
+	// Validate range syntax if present (gt-8tmz.27)
+	if loop.Range != "" {
+		if err := ValidateRange(loop.Range); err != nil {
+			return fmt.Errorf("loop %q: invalid range %q: %w", stepID, loop.Range, err)
+		}
+	}
+
 	return nil
 }
 
 // expandLoop expands a loop step into its constituent steps.
 func expandLoop(step *Step) ([]*Step, error) {
+	return expandLoopWithVars(step, nil)
+}
+
+// expandLoopWithVars expands a loop step using the given variable context.
+// The vars map is used to resolve range expressions with variables.
+func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 	var result []*Step
 
 	if step.Loop.Count > 0 {
 		// Fixed-count loop: expand body N times
 		for i := 1; i <= step.Loop.Count; i++ {
-			iterSteps, err := expandLoopIteration(step, i)
+			iterSteps, err := expandLoopIteration(step, i, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -115,10 +139,50 @@ func expandLoop(step *Step) ([]*Step, error) {
 		if step.Loop.Count > 1 {
 			result = chainExpandedIterations(result, step.ID, step.Loop.Count)
 		}
+	} else if step.Loop.Range != "" {
+		// Range loop (gt-8tmz.27): expand body for each value in the computed range
+		rangeSpec, err := ParseRange(step.Loop.Range, vars)
+		if err != nil {
+			return nil, fmt.Errorf("loop %q: %w", step.ID, err)
+		}
+
+		// Validate range
+		if rangeSpec.End < rangeSpec.Start {
+			return nil, fmt.Errorf("loop %q: range end (%d) is less than start (%d)",
+				step.ID, rangeSpec.End, rangeSpec.Start)
+		}
+
+		// Expand body for each value in range
+		count := rangeSpec.End - rangeSpec.Start + 1
+		iterNum := 0
+		for val := rangeSpec.Start; val <= rangeSpec.End; val++ {
+			iterNum++
+			// Build iteration vars: include the loop variable if specified
+			iterVars := make(map[string]string)
+			if step.Loop.Var != "" {
+				iterVars[step.Loop.Var] = fmt.Sprintf("%d", val)
+			}
+			iterSteps, err := expandLoopIteration(step, iterNum, iterVars)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, iterSteps...)
+		}
+
+		// Recursively expand any nested loops FIRST (gt-zn35j)
+		result, err = ApplyLoops(result)
+		if err != nil {
+			return nil, err
+		}
+
+		// THEN chain iterations on the expanded result
+		if count > 1 {
+			result = chainExpandedIterations(result, step.ID, count)
+		}
 	} else {
 		// Conditional loop: expand once with loop metadata
 		// The runtime executor will re-run until condition is met or max reached
-		iterSteps, err := expandLoopIteration(step, 1)
+		iterSteps, err := expandLoopIteration(step, 1, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +211,8 @@ func expandLoop(step *Step) ([]*Step, error) {
 
 // expandLoopIteration expands a single iteration of a loop.
 // The iteration index is used to generate unique step IDs.
-func expandLoopIteration(step *Step, iteration int) ([]*Step, error) {
+// The iterVars map contains loop variable bindings for this iteration (gt-8tmz.27).
+func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) ([]*Step, error) {
 	result := make([]*Step, 0, len(step.Loop.Body))
 
 	// Build set of step IDs within the loop body (for dependency rewriting)
@@ -157,10 +222,14 @@ func expandLoopIteration(step *Step, iteration int) ([]*Step, error) {
 		// Create unique ID for this iteration
 		iterID := fmt.Sprintf("%s.iter%d.%s", step.ID, iteration, bodyStep.ID)
 
+		// Substitute loop variables in title and description (gt-8tmz.27)
+		title := substituteLoopVars(bodyStep.Title, iterVars)
+		description := substituteLoopVars(bodyStep.Description, iterVars)
+
 		clone := &Step{
 			ID:             iterID,
-			Title:          bodyStep.Title,
-			Description:    bodyStep.Description,
+			Title:          title,
+			Description:    description,
 			Type:           bodyStep.Type,
 			Priority:       bodyStep.Priority,
 			Assignee:       bodyStep.Assignee,
@@ -170,14 +239,18 @@ func expandLoopIteration(step *Step, iteration int) ([]*Step, error) {
 			Gate:           bodyStep.Gate,
 			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops (gt-zn35j)
 			OnComplete:     cloneOnComplete(bodyStep.OnComplete),
-			SourceFormula:  bodyStep.SourceFormula,                                                     // Preserve source (gt-8tmz.18)
+			SourceFormula:  bodyStep.SourceFormula,                                       // Preserve source (gt-8tmz.18)
 			SourceLocation: fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration), // Track iteration
 		}
 
-		// Clone ExpandVars if present
-		if len(bodyStep.ExpandVars) > 0 {
-			clone.ExpandVars = make(map[string]string, len(bodyStep.ExpandVars))
+		// Clone ExpandVars if present, adding loop vars (gt-8tmz.27)
+		if len(bodyStep.ExpandVars) > 0 || len(iterVars) > 0 {
+			clone.ExpandVars = make(map[string]string)
 			for k, v := range bodyStep.ExpandVars {
+				clone.ExpandVars[k] = v
+			}
+			// Add loop variables to ExpandVars for nested expansion
+			for k, v := range iterVars {
 				clone.ExpandVars[k] = v
 			}
 		}
@@ -201,6 +274,17 @@ func expandLoopIteration(step *Step, iteration int) ([]*Step, error) {
 	}
 
 	return result, nil
+}
+
+// substituteLoopVars replaces {varname} placeholders with values from vars map.
+func substituteLoopVars(s string, vars map[string]string) string {
+	if vars == nil || s == "" {
+		return s
+	}
+	for k, v := range vars {
+		s = strings.ReplaceAll(s, "{"+k+"}", v)
+	}
+	return s
 }
 
 // collectBodyStepIDs collects all step IDs within a loop body (including nested children).
@@ -521,6 +605,8 @@ func cloneLoopSpec(loop *LoopSpec) *LoopSpec {
 		Count: loop.Count,
 		Until: loop.Until,
 		Max:   loop.Max,
+		Range: loop.Range, // gt-8tmz.27
+		Var:   loop.Var,   // gt-8tmz.27
 	}
 	if len(loop.Body) > 0 {
 		clone.Body = make([]*Step, len(loop.Body))
