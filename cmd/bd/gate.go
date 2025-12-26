@@ -101,6 +101,16 @@ Examples:
 			}
 		}
 
+		// For timer gates, the await_id IS the duration - use it as timeout if not explicitly set
+		if awaitType == "timer" && timeout == 0 {
+			var err error
+			timeout, err = time.ParseDuration(awaitID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid timer duration %q: %v\n", awaitID, err)
+				os.Exit(1)
+			}
+		}
+
 		// Generate title if not provided
 		if title == "" {
 			title = fmt.Sprintf("Gate: %s:%s", awaitType, awaitID)
@@ -564,7 +574,142 @@ var gateWaitCmd = &cobra.Command{
 	},
 }
 
+var gateEvalCmd = &cobra.Command{
+	Use:   "eval",
+	Short: "Evaluate pending gates and close elapsed ones",
+	Long: `Evaluate all open gates and close those whose conditions are met.
+
+Currently supports:
+  - timer gates: closed when elapsed time exceeds timeout
+
+Future:
+  - gh:run gates: closed when GitHub Actions run completes
+  - gh:pr gates: closed when PR is merged/closed
+
+This command is idempotent and safe to run repeatedly.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		CheckReadonly("gate eval")
+		ctx := rootCtx
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		var gates []*types.Issue
+
+		// Get all open gates
+		if daemonClient != nil {
+			resp, err := daemonClient.GateList(&rpc.GateListArgs{All: false})
+			if err != nil {
+				FatalError("gate eval: %v", err)
+			}
+			if err := json.Unmarshal(resp.Data, &gates); err != nil {
+				FatalError("failed to parse gates: %v", err)
+			}
+		} else if store != nil {
+			gateType := types.TypeGate
+			openStatus := types.StatusOpen
+			filter := types.IssueFilter{
+				IssueType: &gateType,
+				Status:    &openStatus,
+			}
+			var err error
+			gates, err = store.SearchIssues(ctx, "", filter)
+			if err != nil {
+				FatalError("listing gates: %v", err)
+			}
+		} else {
+			FatalError("no database connection")
+		}
+
+		if len(gates) == 0 {
+			if !jsonOutput {
+				fmt.Println("No open gates to evaluate")
+			}
+			return
+		}
+
+		var closed []string
+		var timedOut []string
+		now := time.Now()
+
+		for _, gate := range gates {
+			// Only evaluate timer gates for now
+			if gate.AwaitType != "timer" {
+				continue
+			}
+
+			// Check if timer has elapsed
+			if gate.Timeout <= 0 {
+				continue // No timeout set
+			}
+
+			elapsed := now.Sub(gate.CreatedAt)
+			if elapsed < gate.Timeout {
+				continue // Not yet elapsed
+			}
+
+			// Timer has elapsed - close the gate
+			if dryRun {
+				fmt.Printf("Would close gate %s (timer elapsed: %v >= %v)\n",
+					gate.ID, elapsed.Round(time.Second), gate.Timeout)
+				closed = append(closed, gate.ID)
+				continue
+			}
+
+			reason := fmt.Sprintf("Timer elapsed (%v)", gate.Timeout)
+
+			if daemonClient != nil {
+				_, err := daemonClient.GateClose(&rpc.GateCloseArgs{
+					ID:     gate.ID,
+					Reason: reason,
+				})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to close gate %s: %v\n", gate.ID, err)
+					continue
+				}
+			} else if store != nil {
+				if err := store.CloseIssue(ctx, gate.ID, reason, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to close gate %s: %v\n", gate.ID, err)
+					continue
+				}
+				markDirtyAndScheduleFlush()
+			}
+
+			closed = append(closed, gate.ID)
+
+			// Check if gate exceeded its timeout (for reporting)
+			if elapsed > gate.Timeout*2 {
+				timedOut = append(timedOut, gate.ID)
+			}
+		}
+
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"evaluated": len(gates),
+				"closed":    closed,
+				"timed_out": timedOut,
+			})
+			return
+		}
+
+		if len(closed) == 0 {
+			fmt.Printf("Evaluated %d gates, none ready to close\n", len(gates))
+		} else {
+			action := "Closed"
+			if dryRun {
+				action = "Would close"
+			}
+			fmt.Printf("%s %s %d timer gate(s)\n", ui.RenderPass("✓"), action, len(closed))
+			for _, id := range closed {
+				fmt.Printf("   %s\n", id)
+			}
+		}
+	},
+}
+
 func init() {
+	// Gate eval flags
+	gateEvalCmd.Flags().Bool("dry-run", false, "Show what would be closed without actually closing")
+	gateEvalCmd.Flags().Bool("json", false, "Output JSON format")
+
 	// Gate create flags
 	gateCreateCmd.Flags().String("await", "", "Await spec: gh:run:<id>, gh:pr:<id>, timer:<duration>, human:<prompt>, mail:<pattern> (required)")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 30m, 1h)")
@@ -593,6 +738,7 @@ func init() {
 	gateCmd.AddCommand(gateListCmd)
 	gateCmd.AddCommand(gateCloseCmd)
 	gateCmd.AddCommand(gateWaitCmd)
+	gateCmd.AddCommand(gateEvalCmd)
 
 	// Add gate command to root
 	rootCmd.AddCommand(gateCmd)
