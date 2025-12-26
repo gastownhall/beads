@@ -433,20 +433,46 @@ func GetClaudePluginVersion() (version string, installed bool, err error) {
 		return "", false, fmt.Errorf("unable to read plugin file: %w", err)
 	}
 
-	// Parse JSON - handle nested structure
-	var pluginData struct {
+	// First, determine the format version
+	var versionCheck struct {
 		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &versionCheck); err != nil {
+		return "", false, fmt.Errorf("unable to parse plugin file: %w", err)
+	}
+
+	// Handle version 2 format (GH#741): plugins map contains arrays
+	if versionCheck.Version == 2 {
+		var pluginDataV2 struct {
+			Plugins map[string][]struct {
+				Version string `json:"version"`
+				Scope   string `json:"scope"`
+			} `json:"plugins"`
+		}
+		if err := json.Unmarshal(data, &pluginDataV2); err != nil {
+			return "", false, fmt.Errorf("unable to parse plugin file v2: %w", err)
+		}
+
+		// Look for beads plugin - take first entry from the array
+		if entries, ok := pluginDataV2.Plugins["beads@beads-marketplace"]; ok && len(entries) > 0 {
+			return entries[0].Version, true, nil
+		}
+		return "", false, nil
+	}
+
+	// Handle version 1 format (original): plugins map contains structs directly
+	var pluginDataV1 struct {
 		Plugins map[string]struct {
 			Version string `json:"version"`
 		} `json:"plugins"`
 	}
 
-	if err := json.Unmarshal(data, &pluginData); err != nil {
+	if err := json.Unmarshal(data, &pluginDataV1); err != nil {
 		return "", false, fmt.Errorf("unable to parse plugin file: %w", err)
 	}
 
 	// Look for beads plugin
-	if plugin, ok := pluginData.Plugins["beads@beads-marketplace"]; ok {
+	if plugin, ok := pluginDataV1.Plugins["beads@beads-marketplace"]; ok {
 		return plugin.Version, true, nil
 	}
 

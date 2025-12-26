@@ -804,7 +804,7 @@ func TestGetClaudePluginVersion(t *testing.T) {
 		expectError     bool
 	}{
 		{
-			name: "plugin installed",
+			name: "plugin installed v1 format",
 			pluginJSON: `{
 				"version": 1,
 				"plugins": {
@@ -818,7 +818,46 @@ func TestGetClaudePluginVersion(t *testing.T) {
 			expectError:     false,
 		},
 		{
-			name: "plugin not installed",
+			name: "plugin installed v2 format (GH#741)",
+			pluginJSON: `{
+				"version": 2,
+				"plugins": {
+					"beads@beads-marketplace": [
+						{
+							"scope": "user",
+							"installPath": "/path/to/plugin",
+							"version": "1.0.0",
+							"installedAt": "2025-11-25T19:20:27.889Z",
+							"lastUpdated": "2025-11-25T19:20:27.889Z",
+							"gitCommitSha": "abc123",
+							"isLocal": true
+						}
+					]
+				}
+			}`,
+			expectInstalled: true,
+			expectVersion:   "1.0.0",
+			expectError:     false,
+		},
+		{
+			name: "plugin not installed v2 format",
+			pluginJSON: `{
+				"version": 2,
+				"plugins": {
+					"other-plugin@marketplace": [
+						{
+							"scope": "user",
+							"version": "2.0.0"
+						}
+					]
+				}
+			}`,
+			expectInstalled: false,
+			expectVersion:   "",
+			expectError:     false,
+		},
+		{
+			name: "plugin not installed v1 format",
 			pluginJSON: `{
 				"version": 1,
 				"plugins": {
