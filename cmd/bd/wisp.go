@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -69,7 +70,7 @@ const OldThreshold = 24 * time.Hour
 
 // wispCreateCmd instantiates a proto as an ephemeral wisp
 var wispCreateCmd = &cobra.Command{
-	Use:   "create <proto-id-or-formula>",
+	Use:   "create <proto-id>",
 	Short: "Instantiate a proto as an ephemeral wisp (solid -> vapor)",
 	Long: `Create a wisp from a proto - sublimation from solid to vapor.
 
@@ -77,13 +78,6 @@ This is the chemistry-inspired command for creating ephemeral work from template
 The resulting wisp is stored in the main database with Wisp=true and NOT exported to JSONL.
 
 Phase transition: Proto (solid) -> Wisp (vapor)
-
-The argument can be:
-  - A proto ID (existing proto in database): bd wisp create mol-patrol
-  - A formula name (cooked inline): bd wisp create mol-patrol --var name=ace
-
-When given a formula name, wisp cooks it inline as an ephemeral proto,
-creates the wisp, then cleans up the temporary proto (bd-rciw).
 
 Use wisp create for:
   - Patrol cycles (deacon, witness)
@@ -97,8 +91,8 @@ The wisp will:
   - Either evaporate (burn) or condense to digest (squash)
 
 Examples:
-  bd wisp create mol-patrol                       # Formula cooked inline
-  bd wisp create mol-health-check                 # One-time health check
+  bd wisp create mol-patrol                    # Ephemeral patrol cycle
+  bd wisp create mol-health-check              # One-time health check
   bd wisp create mol-diagnostics --var target=db  # Diagnostic run`,
 	Args: cobra.ExactArgs(1),
 	Run:  runWispCreate,
@@ -134,42 +128,79 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Resolve proto ID or cook formula inline (bd-rciw)
-	// This accepts either:
-	// - An existing proto ID: bd wisp create mol-patrol
-	// - A formula name: bd wisp create mol-patrol (cooked inline as ephemeral proto)
-	protoIssue, cookedProto, err := resolveOrCookFormula(ctx, store, args[0], actor)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// Try to load as formula first (ephemeral proto - gt-4v1eo)
+	// If that fails, fall back to loading from DB (legacy proto beads)
+	var subgraph *TemplateSubgraph
+	var protoID string
+
+	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
+	// This works for any valid formula name, not just "mol-" prefixed ones
+	sg, err := resolveAndCookFormula(args[0], nil)
+	if err == nil {
+		subgraph = sg
+		protoID = sg.Root.ID
 	}
 
-	// Track cooked formula for cleanup
-	cleanupCooked := func() {
-		if cookedProto {
-			_ = deleteProtoSubgraph(ctx, store, protoIssue.ID)
+	if subgraph == nil {
+		// Resolve proto ID (legacy path)
+		protoID = args[0]
+		// Try to resolve partial ID if it doesn't look like a full ID
+		if !strings.HasPrefix(protoID, "bd-") && !strings.HasPrefix(protoID, "gt-") && !strings.HasPrefix(protoID, "mol-") {
+			// Might be a partial ID, try to resolve
+			if resolved, err := resolvePartialIDDirect(ctx, protoID); err == nil {
+				protoID = resolved
+			}
+		}
+
+		// Check if it's a named molecule (mol-xxx) - look up in catalog
+		if strings.HasPrefix(protoID, "mol-") {
+			// Find the proto by name
+			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+				Labels: []string{MoleculeLabel},
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error searching for proto: %v\n", err)
+				os.Exit(1)
+			}
+			found := false
+			for _, issue := range issues {
+				if strings.Contains(issue.Title, protoID) || issue.ID == protoID {
+					protoID = issue.ID
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "Error: '%s' not found as formula or proto\n", args[0])
+				fmt.Fprintf(os.Stderr, "Hint: run 'bd formula list' to see available formulas\n")
+				os.Exit(1)
+			}
+		}
+
+		// Load the proto
+		protoIssue, err := store.GetIssue(ctx, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+			os.Exit(1)
+		}
+		if !isProtoIssue(protoIssue) {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
+			os.Exit(1)
+		}
+
+		// Load the proto subgraph from DB
+		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
-	protoID := protoIssue.ID
+	// Apply variable defaults from formula (gt-4v1eo)
+	vars = applyVariableDefaults(vars, subgraph)
 
-	// Verify it's a proto
-	if !isProtoIssue(protoIssue) {
-		cleanupCooked()
-		fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
-		os.Exit(1)
-	}
-
-	// Load the proto subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, store, protoID)
-	if err != nil {
-		cleanupCooked()
-		fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Check for missing variables
-	requiredVars := extractAllVariables(subgraph)
+	// Check for missing required variables (those without defaults)
+	requiredVars := extractRequiredVariables(subgraph)
 	var missingVars []string
 	for _, v := range requiredVars {
 		if _, ok := vars[v]; !ok {
@@ -177,7 +208,6 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		}
 	}
 	if len(missingVars) > 0 {
-		cleanupCooked()
 		fmt.Fprintf(os.Stderr, "Error: missing required variables: %s\n", strings.Join(missingVars, ", "))
 		fmt.Fprintf(os.Stderr, "Provide them with: --var %s=<value>\n", missingVars[0])
 		os.Exit(1)
@@ -190,10 +220,6 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 			newTitle := substituteVariables(issue.Title, vars)
 			fmt.Printf("  - %s (from %s)\n", newTitle, issue.ID)
 		}
-		if cookedProto {
-			fmt.Printf("\n  Note: Formula cooked inline as ephemeral proto.\n")
-		}
-		cleanupCooked()
 		return
 	}
 
@@ -201,32 +227,24 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 	// bd-hobo: Use "wisp" prefix for distinct visual recognition
 	result, err := spawnMolecule(ctx, store, subgraph, vars, "", actor, true, "wisp")
 	if err != nil {
-		cleanupCooked()
 		fmt.Fprintf(os.Stderr, "Error creating wisp: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Clean up ephemeral proto after successful spawn (bd-rciw)
-	cleanupCooked()
 
 	// Wisps are in main db but don't trigger JSONL export (Wisp flag excludes them)
 
 	if jsonOutput {
 		type wispCreateResult struct {
 			*InstantiateResult
-			Phase        string `json:"phase"`
-			CookedInline bool   `json:"cooked_inline,omitempty"`
+			Phase string `json:"phase"`
 		}
-		outputJSON(wispCreateResult{result, "vapor", cookedProto})
+		outputJSON(wispCreateResult{result, "vapor"})
 		return
 	}
 
 	fmt.Printf("%s Created wisp: %d issues\n", ui.RenderPass("✓"), result.Created)
 	fmt.Printf("  Root issue: %s\n", result.NewEpicID)
 	fmt.Printf("  Phase: vapor (ephemeral, not exported to JSONL)\n")
-	if cookedProto {
-		fmt.Printf("  Ephemeral proto cleaned up after use.\n")
-	}
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  bd close %s.<step>       # Complete steps\n", result.NewEpicID)
 	fmt.Printf("  bd mol squash %s         # Condense to digest (promotes to persistent)\n", result.NewEpicID)
@@ -241,6 +259,28 @@ func isProtoIssue(issue *types.Issue) bool {
 		}
 	}
 	return false
+}
+
+// resolvePartialIDDirect resolves a partial ID directly from store
+func resolvePartialIDDirect(ctx context.Context, partial string) (string, error) {
+	// Try direct lookup first
+	if issue, err := store.GetIssue(ctx, partial); err == nil {
+		return issue.ID, nil
+	}
+	// Search by prefix
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		IDs: []string{partial + "*"},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(issues) == 1 {
+		return issues[0].ID, nil
+	}
+	if len(issues) > 1 {
+		return "", fmt.Errorf("ambiguous ID: %s matches %d issues", partial, len(issues))
+	}
+	return "", fmt.Errorf("not found: %s", partial)
 }
 
 var wispListCmd = &cobra.Command{

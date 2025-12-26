@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
@@ -208,38 +207,27 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	}
 
 	// Resolve both operands - can be issue IDs or formula names
-	// Formula names are cooked inline to ephemeral protos (gt-8tmz.25)
-	issueA, cookedA, err := resolveOrCookFormula(ctx, store, args[0], actor)
+	// Formula names are cooked inline to in-memory subgraphs (gt-4v1eo)
+	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, store, args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	issueB, cookedB, err := resolveOrCookFormula(ctx, store, args[1], actor)
+	subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, store, args[1])
 	if err != nil {
-		// Clean up first cooked formula if second one fails
-		if cookedA {
-			_ = deleteProtoSubgraph(ctx, store, issueA.ID)
-		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Track cooked formulas for cleanup (ephemeral protos deleted after use)
-	cleanupCooked := func() {
-		if cookedA {
-			_ = deleteProtoSubgraph(ctx, store, issueA.ID)
-		}
-		if cookedB {
-			_ = deleteProtoSubgraph(ctx, store, issueB.ID)
-		}
-	}
-
+	// No cleanup needed - in-memory subgraphs don't pollute the DB
+	issueA := subgraphA.Root
+	issueB := subgraphB.Root
 	idA := issueA.ID
 	idB := issueB.ID
 
 	// Determine operand types
-	aIsProto := isProto(issueA)
-	bIsProto := isProto(issueB)
+	aIsProto := issueA.IsTemplate || cookedA
+	bIsProto := issueB.IsTemplate || cookedB
 
 	// Dispatch based on operand types
 	// All operations use the main store; wisp flag determines ephemeral vs persistent
@@ -247,27 +235,33 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	switch {
 	case aIsProto && bIsProto:
 		// Compound protos are templates - always persistent
+		// Note: Proto+proto bonding from formulas is a DB operation, not in-memory
 		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
-		result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+		// Pass subgraph directly if cooked from formula
+		if cookedA {
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+		} else {
+			result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+		}
 	case !aIsProto && bIsProto:
-		result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+		// Pass subgraph directly if cooked from formula
+		if cookedB {
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, bondType, vars, childRef, actor, wisp, pour)
+		} else {
+			result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+		}
 	default:
 		result, err = bondMolMol(ctx, store, issueA, issueB, bondType, actor)
 	}
 
 	if err != nil {
-		cleanupCooked()
 		fmt.Fprintf(os.Stderr, "Error bonding: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Schedule auto-flush - wisps are in main DB now, but JSONL export skips them
 	markDirtyAndScheduleFlush()
-
-	// Clean up ephemeral protos after successful bond
-	// These were only needed to get the proto structure; the spawned issues persist
-	cleanupCooked()
 
 	if jsonOutput {
 		outputJSON(result)
@@ -283,9 +277,6 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Phase: vapor (ephemeral, Wisp=true)\n")
 	} else if pour {
 		fmt.Printf("  Phase: liquid (persistent, Wisp=false)\n")
-	}
-	if cookedA || cookedB {
-		fmt.Printf("  Ephemeral protos cleaned up after use.\n")
 	}
 }
 
@@ -394,11 +385,21 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 
 // bondProtoMol bonds a proto to an existing molecule by spawning the proto.
 // If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
+// protoSubgraph can be nil if proto is from DB (will be loaded), or pre-loaded for formulas.
 func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, wispFlag, pourFlag bool) (*BondResult, error) {
-	// Load proto subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, s, proto.ID)
-	if err != nil {
-		return nil, fmt.Errorf("loading proto: %w", err)
+	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, wispFlag, pourFlag)
+}
+
+// bondProtoMolWithSubgraph is the internal implementation that accepts a pre-loaded subgraph.
+func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, wispFlag, pourFlag bool) (*BondResult, error) {
+	// Use provided subgraph or load from DB
+	subgraph := protoSubgraph
+	if subgraph == nil {
+		var err error
+		subgraph, err = loadTemplateSubgraph(ctx, s, proto.ID)
+		if err != nil {
+			return nil, fmt.Errorf("loading proto: %w", err)
+		}
 	}
 
 	// Check for missing variables
@@ -564,18 +565,31 @@ func resolveOrDescribe(ctx context.Context, s storage.Storage, operand string) (
 	return nil, f.Formula, nil
 }
 
-// resolveOrCookFormula tries to resolve an operand as an issue ID.
-// If not found and it looks like a formula name, cooks the formula inline.
-// Returns the issue, whether it was cooked (ephemeral proto), and any error.
+// resolveOrCookToSubgraph tries to resolve an operand as an issue ID or formula.
+// If it's an issue, loads the subgraph from DB. If it's a formula, cooks inline to subgraph.
+// Returns the subgraph, whether it was cooked from formula, and any error.
 //
-// This implements gt-8tmz.25: formula names are cooked inline as ephemeral protos.
-func resolveOrCookFormula(ctx context.Context, s storage.Storage, operand string, actorName string) (*types.Issue, bool, error) {
+// This implements gt-4v1eo: formulas are cooked to in-memory subgraphs (no DB storage).
+func resolveOrCookToSubgraph(ctx context.Context, s storage.Storage, operand string) (*TemplateSubgraph, bool, error) {
 	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {
 		issue, err := s.GetIssue(ctx, id)
 		if err == nil {
-			return issue, false, nil
+			// Check if it's a proto (template)
+			if isProto(issue) {
+				subgraph, err := loadTemplateSubgraph(ctx, s, id)
+				if err != nil {
+					return nil, false, fmt.Errorf("loading proto subgraph '%s': %w", id, err)
+				}
+				return subgraph, false, nil
+			}
+			// It's a molecule, not a proto - wrap it as a single-issue subgraph
+			return &TemplateSubgraph{
+				Root:     issue,
+				Issues:   []*types.Issue{issue},
+				IssueMap: map[string]*types.Issue{issue.ID: issue},
+			}, false, nil
 		}
 	}
 
@@ -584,72 +598,13 @@ func resolveOrCookFormula(ctx context.Context, s storage.Storage, operand string
 		return nil, false, fmt.Errorf("'%s' not found (not an issue ID or formula name)", operand)
 	}
 
-	// Try to load and cook the formula
-	parser := formula.NewParser()
-	f, err := parser.LoadByName(operand)
+	// Try to cook formula inline to in-memory subgraph (gt-4v1eo)
+	subgraph, err := resolveAndCookFormula(operand, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 
-	// Resolve formula (inheritance, etc)
-	resolved, err := parser.Resolve(f)
-	if err != nil {
-		return nil, false, fmt.Errorf("resolving formula '%s': %w", operand, err)
-	}
-
-	// Apply control flow operators (gt-8tmz.4)
-	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
-	if err != nil {
-		return nil, false, fmt.Errorf("applying control flow to '%s': %w", operand, err)
-	}
-	resolved.Steps = controlFlowSteps
-
-	// Apply advice transformations (gt-8tmz.2)
-	if len(resolved.Advice) > 0 {
-		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
-	}
-
-	// Apply expansion operators (gt-8tmz.3)
-	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
-		if err != nil {
-			return nil, false, fmt.Errorf("applying expansions to '%s': %w", operand, err)
-		}
-		resolved.Steps = expandedSteps
-	}
-
-	// Apply aspects (gt-8tmz.5)
-	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
-		for _, aspectName := range resolved.Compose.Aspects {
-			aspectFormula, err := parser.LoadByName(aspectName)
-			if err != nil {
-				return nil, false, fmt.Errorf("loading aspect '%s': %w", aspectName, err)
-			}
-			if aspectFormula.Type != formula.TypeAspect {
-				return nil, false, fmt.Errorf("'%s' is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
-			}
-			if len(aspectFormula.Advice) > 0 {
-				resolved.Steps = formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
-			}
-		}
-	}
-
-	// Cook the formula to create an ephemeral proto
-	// Use a unique ID to avoid collision with existing protos
-	// Format: _ephemeral-<formula>-<timestamp> (underscore prefix marks it as ephemeral)
-	protoID := fmt.Sprintf("_ephemeral-%s-%d", resolved.Formula, time.Now().UnixNano())
-	result, err := cookFormula(ctx, s, resolved, protoID)
-	if err != nil {
-		return nil, false, fmt.Errorf("cooking formula '%s': %w", operand, err)
-	}
-
-	// Load the cooked proto
-	issue, err := s.GetIssue(ctx, result.ProtoID)
-	if err != nil {
-		return nil, false, fmt.Errorf("loading cooked proto '%s': %w", result.ProtoID, err)
-	}
-
-	return issue, true, nil
+	return subgraph, true, nil
 }
 
 // looksLikeFormulaName checks if an operand looks like a formula name.

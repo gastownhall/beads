@@ -262,6 +262,257 @@ type cookFormulaResult struct {
 	Created int
 }
 
+// cookFormulaToSubgraph creates an in-memory TemplateSubgraph from a resolved formula.
+// This is the ephemeral proto implementation - no database storage.
+// The returned subgraph can be passed directly to cloneSubgraph for instantiation.
+func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgraph, error) {
+	// Map step ID -> created issue
+	issueMap := make(map[string]*types.Issue)
+
+	// Collect all issues and dependencies
+	var issues []*types.Issue
+	var deps []*types.Dependency
+
+	// Create root proto epic
+	rootIssue := &types.Issue{
+		ID:          protoID,
+		Title:       f.Formula, // Title is the original formula name
+		Description: f.Description,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeEpic,
+		IsTemplate:  true,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	issues = append(issues, rootIssue)
+	issueMap[protoID] = rootIssue
+
+	// Collect issues for each step (use protoID as parent for step IDs)
+	collectStepsToSubgraph(f.Steps, protoID, issueMap, &issues, &deps)
+
+	// Collect dependencies from depends_on
+	stepIDMapping := make(map[string]string)
+	for _, step := range f.Steps {
+		collectStepIDMappings(step, protoID, stepIDMapping)
+	}
+	for _, step := range f.Steps {
+		collectDependenciesToSubgraph(step, stepIDMapping, &deps)
+	}
+
+	return &TemplateSubgraph{
+		Root:         rootIssue,
+		Issues:       issues,
+		Dependencies: deps,
+		IssueMap:     issueMap,
+	}, nil
+}
+
+// collectStepsToSubgraph collects issues and dependencies for steps and their children.
+// This is the in-memory version that doesn't create labels (since those require DB).
+func collectStepsToSubgraph(steps []*formula.Step, parentID string, issueMap map[string]*types.Issue,
+	issues *[]*types.Issue, deps *[]*types.Dependency) {
+
+	for _, step := range steps {
+		// Generate issue ID (formula-name.step-id)
+		issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
+
+		// Determine issue type
+		issueType := types.TypeTask
+		if step.Type != "" {
+			switch step.Type {
+			case "task":
+				issueType = types.TypeTask
+			case "bug":
+				issueType = types.TypeBug
+			case "feature":
+				issueType = types.TypeFeature
+			case "epic":
+				issueType = types.TypeEpic
+			case "chore":
+				issueType = types.TypeChore
+			}
+		}
+
+		// If step has children, it's an epic
+		if len(step.Children) > 0 {
+			issueType = types.TypeEpic
+		}
+
+		// Determine priority
+		priority := 2
+		if step.Priority != nil {
+			priority = *step.Priority
+		}
+
+		issue := &types.Issue{
+			ID:             issueID,
+			Title:          step.Title, // Keep {{variables}} for substitution at pour time
+			Description:    step.Description,
+			Status:         types.StatusOpen,
+			Priority:       priority,
+			IssueType:      issueType,
+			Assignee:       step.Assignee,
+			IsTemplate:     true,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+			SourceFormula:  step.SourceFormula,  // Source tracing (gt-8tmz.18)
+			SourceLocation: step.SourceLocation, // Source tracing (gt-8tmz.18)
+		}
+
+		// Store labels in the issue's Labels field for in-memory use
+		issue.Labels = append(issue.Labels, step.Labels...)
+
+		// Add gate label for waits_for field (bd-j4cr)
+		if step.WaitsFor != "" {
+			gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
+			issue.Labels = append(issue.Labels, gateLabel)
+		}
+
+		*issues = append(*issues, issue)
+		issueMap[issueID] = issue
+
+		// Add parent-child dependency
+		*deps = append(*deps, &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: parentID,
+			Type:        types.DepParentChild,
+		})
+
+		// Recursively collect children
+		if len(step.Children) > 0 {
+			collectStepsToSubgraph(step.Children, issueID, issueMap, issues, deps)
+		}
+	}
+}
+
+// collectStepIDMappings builds a map from step ID to full issue ID
+func collectStepIDMappings(step *formula.Step, parentID string, mapping map[string]string) {
+	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
+	mapping[step.ID] = issueID
+
+	for _, child := range step.Children {
+		collectStepIDMappings(child, issueID, mapping)
+	}
+}
+
+// collectDependenciesToSubgraph collects blocking dependencies from depends_on and needs fields.
+func collectDependenciesToSubgraph(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
+	issueID := idMapping[step.ID]
+
+	// Process depends_on field
+	for _, depID := range step.DependsOn {
+		depIssueID, ok := idMapping[depID]
+		if !ok {
+			continue // Will be caught during validation
+		}
+
+		*deps = append(*deps, &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: depIssueID,
+			Type:        types.DepBlocks,
+		})
+	}
+
+	// Process needs field (bd-hr39) - simpler alias for sibling dependencies
+	for _, needID := range step.Needs {
+		needIssueID, ok := idMapping[needID]
+		if !ok {
+			continue // Will be caught during validation
+		}
+
+		*deps = append(*deps, &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: needIssueID,
+			Type:        types.DepBlocks,
+		})
+	}
+
+	// Recursively handle children
+	for _, child := range step.Children {
+		collectDependenciesToSubgraph(child, idMapping, deps)
+	}
+}
+
+// resolveAndCookFormula loads a formula by name, resolves it, applies all transformations,
+// and returns an in-memory TemplateSubgraph ready for instantiation.
+// This is the main entry point for ephemeral proto cooking.
+func resolveAndCookFormula(formulaName string, searchPaths []string) (*TemplateSubgraph, error) {
+	// Create parser with search paths
+	parser := formula.NewParser(searchPaths...)
+
+	// Load formula by name
+	f, err := parser.LoadByName(formulaName)
+	if err != nil {
+		return nil, fmt.Errorf("loading formula %q: %w", formulaName, err)
+	}
+
+	// Resolve inheritance
+	resolved, err := parser.Resolve(f)
+	if err != nil {
+		return nil, fmt.Errorf("resolving formula %q: %w", formulaName, err)
+	}
+
+	// Apply control flow operators (gt-8tmz.4) - loops, branches, gates
+	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
+	if err != nil {
+		return nil, fmt.Errorf("applying control flow to %q: %w", formulaName, err)
+	}
+	resolved.Steps = controlFlowSteps
+
+	// Apply advice transformations (gt-8tmz.2)
+	if len(resolved.Advice) > 0 {
+		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+	}
+
+	// Apply expansion operators (gt-8tmz.3)
+	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
+		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
+		if err != nil {
+			return nil, fmt.Errorf("applying expansions to %q: %w", formulaName, err)
+		}
+		resolved.Steps = expandedSteps
+	}
+
+	// Apply aspects from compose.aspects (gt-8tmz.5)
+	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
+		for _, aspectName := range resolved.Compose.Aspects {
+			aspectFormula, err := parser.LoadByName(aspectName)
+			if err != nil {
+				return nil, fmt.Errorf("loading aspect %q: %w", aspectName, err)
+			}
+			if aspectFormula.Type != formula.TypeAspect {
+				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
+			}
+			if len(aspectFormula.Advice) > 0 {
+				resolved.Steps = formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+			}
+		}
+	}
+
+	// Cook to in-memory subgraph, including variable definitions for default handling
+	return cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+}
+
+// cookFormulaToSubgraphWithVars creates an in-memory subgraph with variable info attached
+func cookFormulaToSubgraphWithVars(f *formula.Formula, protoID string, vars map[string]*formula.VarDef) (*TemplateSubgraph, error) {
+	subgraph, err := cookFormulaToSubgraph(f, protoID)
+	if err != nil {
+		return nil, err
+	}
+	// Attach variable definitions to the subgraph for default handling during pour
+	// Convert from *VarDef to VarDef for simpler handling
+	if vars != nil {
+		subgraph.VarDefs = make(map[string]formula.VarDef)
+		for k, v := range vars {
+			if v != nil {
+				subgraph.VarDefs[k] = *v
+			}
+		}
+	}
+	return subgraph, nil
+}
+
 // cookFormula creates a proto bead from a resolved formula.
 // protoID is the final ID for the proto (may include a prefix).
 func cookFormula(ctx context.Context, s storage.Storage, f *formula.Formula, protoID string) (*cookFormulaResult, error) {

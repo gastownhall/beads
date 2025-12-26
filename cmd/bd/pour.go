@@ -17,7 +17,7 @@ import (
 //   - Proto (solid) -> pour -> Mol (liquid)
 //   - Pour creates persistent, auditable work in .beads/
 var pourCmd = &cobra.Command{
-	Use:   "pour <proto-id-or-formula>",
+	Use:   "pour <proto-id>",
 	Short: "Instantiate a proto as a persistent mol (solid -> liquid)",
 	Long: `Pour a proto into a persistent mol - like pouring molten metal into a mold.
 
@@ -26,20 +26,13 @@ The resulting mol lives in .beads/ (permanent storage) and is synced with git.
 
 Phase transition: Proto (solid) -> pour -> Mol (liquid)
 
-The argument can be:
-  - A proto ID (existing proto in database): bd pour mol-feature
-  - A formula name (cooked inline): bd pour mol-feature --var name=auth
-
-When given a formula name, pour cooks it inline as an ephemeral proto,
-spawns the mol, then cleans up the temporary proto (bd-rciw).
-
 Use pour for:
   - Feature work that spans sessions
   - Important work needing audit trail
   - Anything you might need to reference later
 
 Examples:
-  bd pour mol-feature --var name=auth    # Formula cooked inline
+  bd pour mol-feature --var name=auth    # Create persistent mol from proto
   bd pour mol-release --var version=1.0  # Release workflow
   bd pour mol-review --var pr=123        # Code review workflow`,
 	Args: cobra.ExactArgs(1),
@@ -51,7 +44,7 @@ func runPour(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// Pour requires direct store access for subgraph loading and cloning
+	// Pour requires direct store access for cloning
 	if store == nil {
 		if daemonClient != nil {
 			fmt.Fprintf(os.Stderr, "Error: pour requires direct database access\n")
@@ -79,68 +72,75 @@ func runPour(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Resolve proto ID or cook formula inline (bd-rciw)
-	// This accepts either:
-	// - An existing proto ID: bd pour mol-feature
-	// - A formula name: bd pour mol-feature (cooked inline as ephemeral proto)
-	protoIssue, cookedProto, err := resolveOrCookFormula(ctx, store, args[0], actor)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// Try to load as formula first (ephemeral proto - gt-4v1eo)
+	// If that fails, fall back to loading from DB (legacy proto beads)
+	var subgraph *TemplateSubgraph
+	var protoID string
+	isFormula := false
+
+	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
+	// This works for any valid formula name, not just "mol-" prefixed ones
+	sg, err := resolveAndCookFormula(args[0], nil)
+	if err == nil {
+		subgraph = sg
+		protoID = sg.Root.ID
+		isFormula = true
 	}
 
-	// Track cooked formula for cleanup
-	cleanupCooked := func() {
-		if cookedProto {
-			_ = deleteProtoSubgraph(ctx, store, protoIssue.ID)
+	if subgraph == nil {
+		// Try to load as existing proto bead (legacy path)
+		resolvedID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s not found as formula or proto ID\n", args[0])
+			os.Exit(1)
+		}
+		protoID = resolvedID
+
+		// Verify it's a proto
+		protoIssue, err := store.GetIssue(ctx, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+			os.Exit(1)
+		}
+		if !isProto(protoIssue) {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
+			os.Exit(1)
+		}
+
+		// Load the proto subgraph from DB
+		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
-	protoID := protoIssue.ID
-
-	// Verify it's a proto
-	if !isProto(protoIssue) {
-		cleanupCooked()
-		fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
-		os.Exit(1)
-	}
-
-	// Load the proto subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, store, protoID)
-	if err != nil {
-		cleanupCooked()
-		fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
-		os.Exit(1)
-	}
+	_ = isFormula // For future use (e.g., logging)
 
 	// Resolve and load attached protos
 	type attachmentInfo struct {
 		id       string
 		issue    *types.Issue
-		subgraph *MoleculeSubgraph
+		subgraph *TemplateSubgraph
 	}
 	var attachments []attachmentInfo
 	for _, attachArg := range attachFlags {
 		attachID, err := utils.ResolvePartialID(ctx, store, attachArg)
 		if err != nil {
-			cleanupCooked()
 			fmt.Fprintf(os.Stderr, "Error resolving attachment ID %s: %v\n", attachArg, err)
 			os.Exit(1)
 		}
 		attachIssue, err := store.GetIssue(ctx, attachID)
 		if err != nil {
-			cleanupCooked()
 			fmt.Fprintf(os.Stderr, "Error loading attachment %s: %v\n", attachID, err)
 			os.Exit(1)
 		}
 		if !isProto(attachIssue) {
-			cleanupCooked()
 			fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", attachID, MoleculeLabel)
 			os.Exit(1)
 		}
 		attachSubgraph, err := loadTemplateSubgraph(ctx, store, attachID)
 		if err != nil {
-			cleanupCooked()
 			fmt.Fprintf(os.Stderr, "Error loading attachment subgraph %s: %v\n", attachID, err)
 			os.Exit(1)
 		}
@@ -151,10 +151,13 @@ func runPour(cmd *cobra.Command, args []string) {
 		})
 	}
 
-	// Check for missing variables
-	requiredVars := extractAllVariables(subgraph)
+	// Apply variable defaults from formula (gt-4v1eo)
+	vars = applyVariableDefaults(vars, subgraph)
+
+	// Check for missing required variables (those without defaults)
+	requiredVars := extractRequiredVariables(subgraph)
 	for _, attach := range attachments {
-		attachVars := extractAllVariables(attach.subgraph)
+		attachVars := extractRequiredVariables(attach.subgraph)
 		for _, v := range attachVars {
 			found := false
 			for _, rv := range requiredVars {
@@ -175,7 +178,6 @@ func runPour(cmd *cobra.Command, args []string) {
 		}
 	}
 	if len(missingVars) > 0 {
-		cleanupCooked()
 		fmt.Fprintf(os.Stderr, "Error: missing required variables: %s\n", strings.Join(missingVars, ", "))
 		fmt.Fprintf(os.Stderr, "Provide them with: --var %s=<value>\n", missingVars[0])
 		os.Exit(1)
@@ -198,10 +200,6 @@ func runPour(cmd *cobra.Command, args []string) {
 				fmt.Printf("  + %s (%d issues)\n", attach.issue.Title, len(attach.subgraph.Issues))
 			}
 		}
-		if cookedProto {
-			fmt.Printf("\n  Note: Formula cooked inline as ephemeral proto.\n")
-		}
-		cleanupCooked()
 		return
 	}
 
@@ -209,7 +207,6 @@ func runPour(cmd *cobra.Command, args []string) {
 	// bd-hobo: Use "mol" prefix for distinct visual recognition
 	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false, "mol")
 	if err != nil {
-		cleanupCooked()
 		fmt.Fprintf(os.Stderr, "Error pouring proto: %v\n", err)
 		os.Exit(1)
 	}
@@ -219,7 +216,6 @@ func runPour(cmd *cobra.Command, args []string) {
 	if len(attachments) > 0 {
 		spawnedMol, err := store.GetIssue(ctx, result.NewEpicID)
 		if err != nil {
-			cleanupCooked()
 			fmt.Fprintf(os.Stderr, "Error loading spawned mol: %v\n", err)
 			os.Exit(1)
 		}
@@ -228,7 +224,6 @@ func runPour(cmd *cobra.Command, args []string) {
 			// pour command always creates persistent (Wisp=false) issues
 			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, attachType, vars, "", actor, false, true)
 			if err != nil {
-				cleanupCooked()
 				fmt.Fprintf(os.Stderr, "Error attaching %s: %v\n", attach.id, err)
 				os.Exit(1)
 			}
@@ -236,20 +231,16 @@ func runPour(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Clean up ephemeral proto after successful spawn (bd-rciw)
-	cleanupCooked()
-
 	// Schedule auto-flush
 	markDirtyAndScheduleFlush()
 
 	if jsonOutput {
 		type pourResult struct {
 			*InstantiateResult
-			Attached     int    `json:"attached"`
-			Phase        string `json:"phase"`
-			CookedInline bool   `json:"cooked_inline,omitempty"`
+			Attached int    `json:"attached"`
+			Phase    string `json:"phase"`
 		}
-		outputJSON(pourResult{result, totalAttached, "liquid", cookedProto})
+		outputJSON(pourResult{result, totalAttached, "liquid"})
 		return
 	}
 
@@ -258,9 +249,6 @@ func runPour(cmd *cobra.Command, args []string) {
 	fmt.Printf("  Phase: liquid (persistent in .beads/)\n")
 	if totalAttached > 0 {
 		fmt.Printf("  Attached: %d issues from %d protos\n", totalAttached, len(attachments))
-	}
-	if cookedProto {
-		fmt.Printf("  Ephemeral proto cleaned up after use.\n")
 	}
 }
 
