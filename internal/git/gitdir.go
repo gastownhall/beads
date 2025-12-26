@@ -93,6 +93,13 @@ func isWorktreeUncached() bool {
 	return absGit != absCommon
 }
 
+// mainRepoRootOnce ensures we only get main repo root once per process.
+var (
+	mainRepoRootOnce   sync.Once
+	mainRepoRootResult string
+	mainRepoRootErr    error
+)
+
 // GetMainRepoRoot returns the main repository root directory.
 // When in a worktree, this returns the main repository root.
 // Otherwise, it returns the regular repository root.
@@ -101,7 +108,16 @@ func isWorktreeUncached() bool {
 // /project/.worktrees/feature/), this correctly returns the main repo
 // root (/project/) by using git rev-parse --git-common-dir which always
 // points to the main repo's .git directory. (GH#509)
+// The result is cached after the first call.
 func GetMainRepoRoot() (string, error) {
+	mainRepoRootOnce.Do(func() {
+		mainRepoRootResult, mainRepoRootErr = getMainRepoRootUncached()
+	})
+	return mainRepoRootResult, mainRepoRootErr
+}
+
+// getMainRepoRootUncached performs the actual main repo root lookup without caching.
+func getMainRepoRootUncached() (string, error) {
 	// Use --git-common-dir which always returns the main repo's .git directory,
 	// even when running from within a worktree or its subdirectories.
 	// This is the most reliable method for finding the main repo root.
@@ -190,4 +206,18 @@ func getGitDirNoError(flag string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// ResetCaches resets all cached git information. This is intended for use
+// by tests that need to change directory between subtests.
+// In production, these caches are safe because the working directory
+// doesn't change during a single command execution.
+func ResetCaches() {
+	isWorktreeOnce = sync.Once{}
+	isWorktreeResult = false
+	mainRepoRootOnce = sync.Once{}
+	mainRepoRootResult = ""
+	mainRepoRootErr = nil
+	repoRootOnce = sync.Once{}
+	repoRootResult = ""
 }
