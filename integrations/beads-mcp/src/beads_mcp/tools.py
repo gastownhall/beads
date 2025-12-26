@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from .models import (
     AddDependencyParams,
     BlockedIssue,
+    BlockedParams,
     CloseIssueParams,
     CreateIssueParams,
     DependencyType,
@@ -309,11 +310,14 @@ async def beads_ready_work(
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
     unassigned: Annotated[bool, "Filter to only unassigned issues"] = False,
     sort_policy: Annotated[str | None, "Sort policy: hybrid (default), priority, oldest"] = None,
+    parent: Annotated[str | None, "Filter to descendants of this bead/epic"] = None,
 ) -> list[Issue]:
     """Find issues with no blocking dependencies that are ready to work on.
 
     Ready work = status is 'open' AND no blocking dependencies.
     Perfect for agents to claim next work!
+
+    Use 'parent' to filter to all descendants of an epic/bead.
     """
     client = await _get_client()
     params = ReadyWorkParams(
@@ -324,6 +328,7 @@ async def beads_ready_work(
         labels_any=labels_any,
         unassigned=unassigned,
         sort_policy=sort_policy,
+        parent_id=parent,
     )
     return await client.ready(params)
 
@@ -535,13 +540,18 @@ async def beads_stats() -> Stats:
     return await client.stats()
 
 
-async def beads_blocked() -> list[BlockedIssue]:
+async def beads_blocked(
+    parent: Annotated[str | None, "Filter to descendants of this bead/epic"] = None,
+) -> list[BlockedIssue]:
     """Get blocked issues.
 
     Returns issues that have blocking dependencies, showing what blocks them.
+
+    Use 'parent' to filter to all descendants of an epic/bead.
     """
     client = await _get_client()
-    return await client.blocked()
+    params = BlockedParams(parent_id=parent)
+    return await client.blocked(params)
 
 
 async def beads_inspect_migration() -> dict[str, Any]:

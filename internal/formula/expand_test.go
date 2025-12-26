@@ -87,7 +87,7 @@ func TestExpandStep(t *testing.T) {
 		},
 	}
 
-	result, err := expandStep(target, template, 0)
+	result, err := expandStep(target, template, 0, nil)
 	if err != nil {
 		t.Fatalf("expandStep failed: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 
 	// With depth 0 start, going to level 6 means 7 levels total (0-6)
 	// DefaultMaxExpansionDepth is 5, so this should fail
-	_, err := expandStep(target, template, 0)
+	_, err := expandStep(target, template, 0, nil)
 	if err == nil {
 		t.Fatal("expected depth limit error, got nil")
 	}
@@ -159,7 +159,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 	}
 
 	shallowTemplate := []*Step{shallowChild}
-	result, err := expandStep(target, shallowTemplate, 0)
+	result, err := expandStep(target, shallowTemplate, 0, nil)
 	if err != nil {
 		t.Fatalf("expected shallow template to succeed, got: %v", err)
 	}
@@ -431,4 +431,388 @@ func getChildIDs(steps []*Step) []string {
 		ids[i] = s.ID
 	}
 	return ids
+}
+
+func TestSubstituteVars(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		vars     map[string]string
+		expected string
+	}{
+		{
+			name:     "single var substitution",
+			input:    "Deploy to {environment}",
+			vars:     map[string]string{"environment": "production"},
+			expected: "Deploy to production",
+		},
+		{
+			name:     "multiple var substitution",
+			input:    "{component} v{version}",
+			vars:     map[string]string{"component": "auth", "version": "2.0"},
+			expected: "auth v2.0",
+		},
+		{
+			name:     "unmatched placeholder stays",
+			input:    "{known} and {unknown}",
+			vars:     map[string]string{"known": "replaced"},
+			expected: "replaced and {unknown}",
+		},
+		{
+			name:     "empty vars map",
+			input:    "no {change}",
+			vars:     nil,
+			expected: "no {change}",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			vars:     map[string]string{"foo": "bar"},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := substituteVars(tt.input, tt.vars)
+			if result != tt.expected {
+				t.Errorf("substituteVars(%q, %v) = %q, want %q", tt.input, tt.vars, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMergeVars(t *testing.T) {
+	formula := &Formula{
+		Vars: map[string]*VarDef{
+			"env":     {Default: "staging"},
+			"version": {Default: "1.0"},
+			"name":    {Required: true}, // No default
+		},
+	}
+
+	t.Run("overrides take precedence", func(t *testing.T) {
+		overrides := map[string]string{"env": "production"}
+		result := mergeVars(formula, overrides)
+
+		if result["env"] != "production" {
+			t.Errorf("env = %q, want 'production'", result["env"])
+		}
+		if result["version"] != "1.0" {
+			t.Errorf("version = %q, want '1.0'", result["version"])
+		}
+	})
+
+	t.Run("override adds new var", func(t *testing.T) {
+		overrides := map[string]string{"custom": "value"}
+		result := mergeVars(formula, overrides)
+
+		if result["custom"] != "value" {
+			t.Errorf("custom = %q, want 'value'", result["custom"])
+		}
+	})
+
+	t.Run("nil overrides uses defaults", func(t *testing.T) {
+		result := mergeVars(formula, nil)
+
+		if result["env"] != "staging" {
+			t.Errorf("env = %q, want 'staging'", result["env"])
+		}
+	})
+}
+
+func TestApplyExpansionsWithVars(t *testing.T) {
+	// Create a temporary directory with an expansion formula that uses vars
+	tmpDir := t.TempDir()
+
+	// Create an expansion formula with variables
+	envExpansion := `{
+		"formula": "env-deploy",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"environment": {"default": "staging"},
+			"replicas": {"default": "1"}
+		},
+		"template": [
+			{"id": "{target}.prepare-{environment}", "title": "Prepare {environment} for {target.title}"},
+			{"id": "{target}.deploy-{environment}", "title": "Deploy to {environment} with {replicas} replicas", "needs": ["{target}.prepare-{environment}"]}
+		]
+	}`
+	err := os.WriteFile(filepath.Join(tmpDir, "env-deploy.formula.json"), []byte(envExpansion), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+
+	t.Run("expand with var overrides", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{ID: "release", Title: "Release v2"},
+			{ID: "test", Title: "Test"},
+		}
+
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{
+					Target: "release",
+					With:   "env-deploy",
+					Vars:   map[string]string{"environment": "production", "replicas": "3"},
+				},
+			},
+		}
+
+		result, err := ApplyExpansions(steps, compose, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+
+		if len(result) != 4 {
+			t.Fatalf("expected 4 steps, got %d", len(result))
+		}
+
+		// Check expanded step IDs include var substitution
+		expectedIDs := []string{"design", "release.prepare-production", "release.deploy-production", "test"}
+		for i, exp := range expectedIDs {
+			if result[i].ID != exp {
+				t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, exp)
+			}
+		}
+
+		// Check title includes both target and var substitution
+		if result[2].Title != "Deploy to production with 3 replicas" {
+			t.Errorf("deploy title = %q, want 'Deploy to production with 3 replicas'", result[2].Title)
+		}
+
+		// Check that needs was also substituted correctly
+		if len(result[2].Needs) != 1 || result[2].Needs[0] != "release.prepare-production" {
+			t.Errorf("deploy needs = %v, want [release.prepare-production]", result[2].Needs)
+		}
+	})
+
+	t.Run("expand with default vars", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "release", Title: "Release"},
+		}
+
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "release", With: "env-deploy"},
+			},
+		}
+
+		result, err := ApplyExpansions(steps, compose, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+
+		// Check that defaults are used
+		if result[0].ID != "release.prepare-staging" {
+			t.Errorf("result[0].ID = %q, want 'release.prepare-staging'", result[0].ID)
+		}
+		if result[1].Title != "Deploy to staging with 1 replicas" {
+			t.Errorf("deploy title = %q, want 'Deploy to staging with 1 replicas'", result[1].Title)
+		}
+	})
+
+	t.Run("map with var overrides", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "deploy.api", Title: "Deploy API"},
+			{ID: "deploy.web", Title: "Deploy Web"},
+		}
+
+		compose := &ComposeRules{
+			Map: []*MapRule{
+				{
+					Select: "deploy.*",
+					With:   "env-deploy",
+					Vars:   map[string]string{"environment": "prod"},
+				},
+			},
+		}
+
+		result, err := ApplyExpansions(steps, compose, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+
+		// Each deploy.* step should expand with prod environment
+		expectedIDs := []string{
+			"deploy.api.prepare-prod", "deploy.api.deploy-prod",
+			"deploy.web.prepare-prod", "deploy.web.deploy-prod",
+		}
+		if len(result) != len(expectedIDs) {
+			t.Fatalf("expected %d steps, got %d", len(expectedIDs), len(result))
+		}
+		for i, exp := range expectedIDs {
+			if result[i].ID != exp {
+				t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, exp)
+			}
+		}
+	})
+}
+
+func TestApplyExpansionsDuplicateIDs(t *testing.T) {
+	// Create a temporary directory with an expansion formula
+	tmpDir := t.TempDir()
+
+	// Create expansion formula that generates "{target}.draft"
+	ruleOfFive := `{
+		"formula": "rule-of-five",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.draft", "title": "Draft: {target.title}"},
+			{"id": "{target}.refine", "title": "Refine", "needs": ["{target}.draft"]}
+		]
+	}`
+	err := os.WriteFile(filepath.Join(tmpDir, "rule-of-five.formula.json"), []byte(ruleOfFive), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+
+	// Test: expansion creates duplicate with existing step
+	t.Run("duplicate with existing step", func(t *testing.T) {
+		// "implement.draft" already exists, expansion will try to create it again
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{ID: "implement", Title: "Implement the feature"},
+			{ID: "implement.draft", Title: "Existing draft"}, // Conflicts with expansion
+			{ID: "test", Title: "Test"},
+		}
+
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "implement", With: "rule-of-five"},
+			},
+		}
+
+		_, err := ApplyExpansions(steps, compose, parser)
+		if err == nil {
+			t.Fatal("expected error for duplicate step IDs, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "duplicate step IDs") {
+			t.Errorf("expected duplicate step IDs error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "implement.draft") {
+			t.Errorf("expected error to mention 'implement.draft', got: %v", err)
+		}
+	})
+
+	// Test: map creates duplicates across multiple expansions
+	t.Run("map creates cross-expansion duplicates", func(t *testing.T) {
+		// Create a formula that generates static IDs (not using {target})
+		staticExpansion := `{
+			"formula": "static-ids",
+			"type": "expansion",
+			"version": 1,
+			"template": [
+				{"id": "shared-step", "title": "Shared step"},
+				{"id": "another-shared", "title": "Another shared"}
+			]
+		}`
+		err := os.WriteFile(filepath.Join(tmpDir, "static-ids.formula.json"), []byte(staticExpansion), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		steps := []*Step{
+			{ID: "impl.auth", Title: "Implement auth"},
+			{ID: "impl.api", Title: "Implement API"},
+		}
+
+		compose := &ComposeRules{
+			Map: []*MapRule{
+				{Select: "impl.*", With: "static-ids"},
+			},
+		}
+
+		_, err = ApplyExpansions(steps, compose, parser)
+		if err == nil {
+			t.Fatal("expected error for duplicate step IDs from map, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "duplicate step IDs") {
+			t.Errorf("expected duplicate step IDs error, got: %v", err)
+		}
+	})
+}
+
+func TestFindDuplicateStepIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		steps    []*Step
+		expected []string
+	}{
+		{
+			name: "no duplicates",
+			steps: []*Step{
+				{ID: "a"},
+				{ID: "b"},
+				{ID: "c"},
+			},
+			expected: nil,
+		},
+		{
+			name: "top-level duplicate",
+			steps: []*Step{
+				{ID: "a"},
+				{ID: "b"},
+				{ID: "a"},
+			},
+			expected: []string{"a"},
+		},
+		{
+			name: "nested duplicate",
+			steps: []*Step{
+				{ID: "parent", Children: []*Step{
+					{ID: "child"},
+				}},
+				{ID: "child"}, // Duplicate with nested child
+			},
+			expected: []string{"child"},
+		},
+		{
+			name: "deeply nested duplicate",
+			steps: []*Step{
+				{ID: "root", Children: []*Step{
+					{ID: "level1", Children: []*Step{
+						{ID: "level2"},
+					}},
+				}},
+				{ID: "other", Children: []*Step{
+					{ID: "level2"}, // Duplicate with deeply nested
+				}},
+			},
+			expected: []string{"level2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dups := findDuplicateStepIDs(tt.steps)
+
+			if len(dups) != len(tt.expected) {
+				t.Fatalf("expected %d duplicates, got %d: %v", len(tt.expected), len(dups), dups)
+			}
+
+			// Check all expected duplicates are found (order may vary)
+			for _, exp := range tt.expected {
+				found := false
+				for _, dup := range dups {
+					if dup == exp {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected duplicate %q not found in %v", exp, dups)
+				}
+			}
+		})
+	}
 }

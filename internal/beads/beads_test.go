@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/git"
 )
 
 func TestFindDatabasePathEnvVar(t *testing.T) {
@@ -821,6 +823,7 @@ func TestFindGitRoot_RegularRepo(t *testing.T) {
 	}
 
 	t.Chdir(subDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// findGitRoot should return the repo root
 	result := findGitRoot()
@@ -897,6 +900,7 @@ func TestFindGitRoot_Worktree(t *testing.T) {
 
 	// Change to the worktree directory
 	t.Chdir(worktreeDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// findGitRoot should return the WORKTREE root, not the main repo root
 	result := findGitRoot()
@@ -927,6 +931,7 @@ func TestFindGitRoot_NotGitRepo(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	t.Chdir(tmpDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// findGitRoot should return empty string
 	result := findGitRoot()
@@ -1024,6 +1029,7 @@ func TestFindBeadsDir_Worktree(t *testing.T) {
 
 	// Change to worktree
 	t.Chdir(worktreeDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// FindBeadsDir should prioritize the main repo's .beads for worktrees (bd-de6)
 	result := FindBeadsDir()
@@ -1134,6 +1140,7 @@ func TestFindDatabasePath_Worktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(worktreeSubDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// FindDatabasePath should find the main repo's shared database
 	result := FindDatabasePath()
@@ -1241,6 +1248,7 @@ func TestFindDatabasePath_WorktreeNoLocalDB(t *testing.T) {
 
 	// Change to worktree
 	t.Chdir(worktreeDir)
+	git.ResetCaches() // Reset after chdir for caching tests
 
 	// FindDatabasePath should find the main repo's shared database
 	result := FindDatabasePath()

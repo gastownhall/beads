@@ -44,7 +44,7 @@ func runPour(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// Pour requires direct store access for subgraph loading and cloning
+	// Pour requires direct store access for cloning
 	if store == nil {
 		if daemonClient != nil {
 			fmt.Fprintf(os.Stderr, "Error: pour requires direct database access\n")
@@ -72,36 +72,56 @@ func runPour(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Resolve proto ID
-	protoID, err := utils.ResolvePartialID(ctx, store, args[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving proto ID %s: %v\n", args[0], err)
-		os.Exit(1)
+	// Try to load as formula first (ephemeral proto - gt-4v1eo)
+	// If that fails, fall back to loading from DB (legacy proto beads)
+	var subgraph *TemplateSubgraph
+	var protoID string
+	isFormula := false
+
+	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
+	// This works for any valid formula name, not just "mol-" prefixed ones
+	sg, err := resolveAndCookFormula(args[0], nil)
+	if err == nil {
+		subgraph = sg
+		protoID = sg.Root.ID
+		isFormula = true
 	}
 
-	// Verify it's a proto
-	protoIssue, err := store.GetIssue(ctx, protoID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
-		os.Exit(1)
-	}
-	if !isProto(protoIssue) {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
-		os.Exit(1)
+	if subgraph == nil {
+		// Try to load as existing proto bead (legacy path)
+		resolvedID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s not found as formula or proto ID\n", args[0])
+			os.Exit(1)
+		}
+		protoID = resolvedID
+
+		// Verify it's a proto
+		protoIssue, err := store.GetIssue(ctx, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+			os.Exit(1)
+		}
+		if !isProto(protoIssue) {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
+			os.Exit(1)
+		}
+
+		// Load the proto subgraph from DB
+		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
-	// Load the proto subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, store, protoID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
-		os.Exit(1)
-	}
+	_ = isFormula // For future use (e.g., logging)
 
 	// Resolve and load attached protos
 	type attachmentInfo struct {
 		id       string
 		issue    *types.Issue
-		subgraph *MoleculeSubgraph
+		subgraph *TemplateSubgraph
 	}
 	var attachments []attachmentInfo
 	for _, attachArg := range attachFlags {
@@ -131,10 +151,13 @@ func runPour(cmd *cobra.Command, args []string) {
 		})
 	}
 
-	// Check for missing variables
-	requiredVars := extractAllVariables(subgraph)
+	// Apply variable defaults from formula (gt-4v1eo)
+	vars = applyVariableDefaults(vars, subgraph)
+
+	// Check for missing required variables (those without defaults)
+	requiredVars := extractRequiredVariables(subgraph)
 	for _, attach := range attachments {
-		attachVars := extractAllVariables(attach.subgraph)
+		attachVars := extractRequiredVariables(attach.subgraph)
 		for _, v := range attachVars {
 			found := false
 			for _, rv := range requiredVars {

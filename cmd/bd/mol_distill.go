@@ -1,28 +1,29 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var molDistillCmd = &cobra.Command{
-	Use:   "distill <epic-id>",
-	Short: "Extract a reusable proto from an existing epic",
-	Long: `Distill a molecule by extracting a reusable proto from an existing epic.
+	Use:   "distill <epic-id> [formula-name]",
+	Short: "Extract a formula from an existing epic",
+	Long: `Distill a molecule by extracting a reusable formula from an existing epic.
 
-This is the reverse of spawn: instead of proto → molecule, it's molecule → proto.
+This is the reverse of pour: instead of formula → molecule, it's molecule → formula.
 
 The distill command:
   1. Loads the existing epic and all its children
-  2. Clones the structure as a new proto (adds "template" label)
+  2. Converts the structure to a .formula.json file
   3. Replaces concrete values with {{variable}} placeholders (via --var flags)
 
 Use cases:
@@ -34,19 +35,23 @@ Variable syntax (both work - we detect which side is the concrete value):
   --var branch=feature-auth    Spawn-style: variable=value (recommended)
   --var feature-auth=branch    Substitution-style: value=variable
 
+Output locations (first writable wins):
+  1. .beads/formulas/       (project-level, default)
+  2. ~/.beads/formulas/     (user-level, if project not writable)
+
 Examples:
-  bd mol distill bd-o5xe --as "Release Workflow"
-  bd mol distill bd-abc --var feature_name=auth-refactor --var version=1.0.0`,
-	Args: cobra.ExactArgs(1),
+  bd mol distill bd-o5xe my-workflow
+  bd mol distill bd-abc release-workflow --var feature_name=auth-refactor`,
+	Args: cobra.RangeArgs(1, 2),
 	Run:  runMolDistill,
 }
 
 // DistillResult holds the result of a distill operation
 type DistillResult struct {
-	ProtoID   string            `json:"proto_id"`
-	IDMapping map[string]string `json:"id_mapping"` // old ID -> new ID
-	Created   int               `json:"created"`    // number of issues created
-	Variables []string          `json:"variables"`  // variables introduced
+	FormulaName string   `json:"formula_name"`
+	FormulaPath string   `json:"formula_path"`
+	Steps       int      `json:"steps"`     // number of steps in formula
+	Variables   []string `json:"variables"` // variables introduced
 }
 
 // collectSubgraphText gathers all searchable text from a molecule subgraph
@@ -95,11 +100,9 @@ func parseDistillVar(varFlag, searchableText string) (string, string, error) {
 
 // runMolDistill implements the distill command
 func runMolDistill(cmd *cobra.Command, args []string) {
-	CheckReadonly("mol distill")
-
 	ctx := rootCtx
 
-	// mol distill requires direct store access
+	// mol distill requires direct store access for reading the epic
 	if store == nil {
 		if daemonClient != nil {
 			fmt.Fprintf(os.Stderr, "Error: mol distill requires direct database access\n")
@@ -110,9 +113,9 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	customTitle, _ := cmd.Flags().GetString("as")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	outputDir, _ := cmd.Flags().GetString("output")
 
 	// Resolve epic ID
 	epicID, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -121,15 +124,23 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Load the epic subgraph (needed for smart var detection)
+	// Load the epic subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, store, epicID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading epic: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Determine formula name
+	formulaName := ""
+	if len(args) > 1 {
+		formulaName = args[1]
+	} else {
+		// Derive from epic title
+		formulaName = sanitizeFormulaName(subgraph.Root.Title)
+	}
+
 	// Parse variable substitutions with smart detection
-	// Accepts both spawn-style (variable=value) and substitution-style (value=variable)
 	replacements := make(map[string]string)
 	if len(varFlags) > 0 {
 		searchableText := collectSubgraphText(subgraph)
@@ -143,76 +154,127 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if dryRun {
-		fmt.Printf("\nDry run: would distill %d issues from %s into a proto\n\n", len(subgraph.Issues), epicID)
-		fmt.Printf("Source: %s\n", subgraph.Root.Title)
-		if customTitle != "" {
-			fmt.Printf("Proto title: %s\n", customTitle)
+	// Convert to formula
+	f := subgraphToFormula(subgraph, formulaName, replacements)
+
+	// Determine output path
+	outputPath := ""
+	if outputDir != "" {
+		outputPath = filepath.Join(outputDir, formulaName+formula.FormulaExt)
+	} else {
+		// Find first writable formula directory
+		outputPath = findWritableFormulaDir(formulaName)
+		if outputPath == "" {
+			fmt.Fprintf(os.Stderr, "Error: no writable formula directory found\n")
+			fmt.Fprintf(os.Stderr, "Try: mkdir -p .beads/formulas\n")
+			os.Exit(1)
 		}
+	}
+
+	if dryRun {
+		fmt.Printf("\nDry run: would distill %d steps from %s into formula\n\n", countSteps(f.Steps), epicID)
+		fmt.Printf("Formula: %s\n", formulaName)
+		fmt.Printf("Output: %s\n", outputPath)
 		if len(replacements) > 0 {
-			fmt.Printf("\nVariable substitutions:\n")
+			fmt.Printf("\nVariables:\n")
 			for value, varName := range replacements {
-				fmt.Printf("  \"%s\" → {{%s}}\n", value, varName)
+				fmt.Printf("  %s: \"%s\" → {{%s}}\n", varName, value, varName)
 			}
 		}
 		fmt.Printf("\nStructure:\n")
-		for _, issue := range subgraph.Issues {
-			title := issue.Title
-			for value, varName := range replacements {
-				title = strings.ReplaceAll(title, value, "{{"+varName+"}}")
-			}
-			prefix := "  "
-			if issue.ID == subgraph.Root.ID {
-				prefix = "→ "
-			}
-			fmt.Printf("%s%s\n", prefix, title)
-		}
+		printFormulaStepsTree(f.Steps, "")
 		return
 	}
 
-	// Distill the molecule into a proto
-	result, err := distillMolecule(ctx, store, subgraph, customTitle, replacements, actor)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error distilling molecule: %v\n", err)
+	// Ensure output directory exists
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating directory %s: %v\n", dir, err)
 		os.Exit(1)
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
+	// Write formula
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error encoding formula: %v\n", err)
+		os.Exit(1)
+	}
+
+	// #nosec G306 -- Formula files are not sensitive
+	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing formula: %v\n", err)
+		os.Exit(1)
+	}
+
+	result := &DistillResult{
+		FormulaName: formulaName,
+		FormulaPath: outputPath,
+		Steps:       countSteps(f.Steps),
+		Variables:   getVarNames(replacements),
+	}
 
 	if jsonOutput {
 		outputJSON(result)
 		return
 	}
 
-	fmt.Printf("%s Distilled proto: created %d issues\n", ui.RenderPass("✓"), result.Created)
-	fmt.Printf("  Proto ID: %s\n", result.ProtoID)
+	fmt.Printf("%s Distilled formula: %d steps\n", ui.RenderPass("✓"), result.Steps)
+	fmt.Printf("  Formula: %s\n", result.FormulaName)
+	fmt.Printf("  Path: %s\n", result.FormulaPath)
 	if len(result.Variables) > 0 {
 		fmt.Printf("  Variables: %s\n", strings.Join(result.Variables, ", "))
 	}
-	fmt.Printf("\nTo instantiate this proto:\n")
-	fmt.Printf("  bd pour %s", result.ProtoID[:8])
+	fmt.Printf("\nTo instantiate:\n")
+	fmt.Printf("  bd pour %s", result.FormulaName)
 	for _, v := range result.Variables {
 		fmt.Printf(" --var %s=<value>", v)
 	}
 	fmt.Println()
 }
 
-// distillMolecule creates a new proto from an existing epic
-func distillMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, customTitle string, replacements map[string]string, actorName string) (*DistillResult, error) {
-	if s == nil {
-		return nil, fmt.Errorf("no database connection")
+// sanitizeFormulaName converts a title to a valid formula name
+func sanitizeFormulaName(title string) string {
+	// Convert to lowercase and replace spaces/special chars with hyphens
+	re := regexp.MustCompile(`[^a-zA-Z0-9-]+`)
+	name := re.ReplaceAllString(strings.ToLower(title), "-")
+	// Remove leading/trailing hyphens and collapse multiple hyphens
+	name = regexp.MustCompile(`-+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-")
+	if name == "" {
+		name = "untitled"
 	}
+	return name
+}
 
-	// Build the reverse mapping for tracking variables introduced
-	var variables []string
+// findWritableFormulaDir finds the first writable formula directory
+func findWritableFormulaDir(formulaName string) string {
+	searchPaths := getFormulaSearchPaths()
+	for _, dir := range searchPaths {
+		// Try to create the directory if it doesn't exist
+		if err := os.MkdirAll(dir, 0755); err == nil {
+			// Check if we can write to it
+			testPath := filepath.Join(dir, ".write-test")
+			if f, err := os.Create(testPath); err == nil {
+				f.Close()
+				os.Remove(testPath)
+				return filepath.Join(dir, formulaName+formula.FormulaExt)
+			}
+		}
+	}
+	return ""
+}
+
+// getVarNames extracts variable names from replacements map
+func getVarNames(replacements map[string]string) []string {
+	var names []string
 	for _, varName := range replacements {
-		variables = append(variables, varName)
+		names = append(names, varName)
 	}
+	return names
+}
 
-	// Generate new IDs and create mapping
-	idMapping := make(map[string]string)
-
+// subgraphToFormula converts a molecule subgraph to a formula
+func subgraphToFormula(subgraph *TemplateSubgraph, name string, replacements map[string]string) *formula.Formula {
 	// Helper to apply replacements
 	applyReplacements := func(text string) string {
 		result := text
@@ -222,87 +284,88 @@ func distillMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeS
 		return result
 	}
 
-	// Use transaction for atomicity
-	err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
-		// First pass: create all issues with new IDs
-		for _, oldIssue := range subgraph.Issues {
-			// Determine title
-			title := applyReplacements(oldIssue.Title)
-			if oldIssue.ID == subgraph.Root.ID && customTitle != "" {
-				title = customTitle
-			}
-
-			// Add template label to all issues
-			labels := append([]string{}, oldIssue.Labels...)
-			hasTemplateLabel := false
-			for _, l := range labels {
-				if l == MoleculeLabel {
-					hasTemplateLabel = true
-					break
-				}
-			}
-			if !hasTemplateLabel {
-				labels = append(labels, MoleculeLabel)
-			}
-
-			newIssue := &types.Issue{
-				Title:              title,
-				Description:        applyReplacements(oldIssue.Description),
-				Design:             applyReplacements(oldIssue.Design),
-				AcceptanceCriteria: applyReplacements(oldIssue.AcceptanceCriteria),
-				Notes:              applyReplacements(oldIssue.Notes),
-				Status:             types.StatusOpen, // Protos start fresh
-				Priority:           oldIssue.Priority,
-				IssueType:          oldIssue.IssueType,
-				Labels:             labels,
-				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				IDPrefix:           "proto", // bd-hobo: distinct prefix for protos
-			}
-
-			if err := tx.CreateIssue(ctx, newIssue, actorName); err != nil {
-				return fmt.Errorf("failed to create proto issue from %s: %w", oldIssue.ID, err)
-			}
-
-			idMapping[oldIssue.ID] = newIssue.ID
+	// Build ID mapping for step references
+	idToStepID := make(map[string]string)
+	for _, issue := range subgraph.Issues {
+		// Create a sanitized step ID from the issue ID
+		stepID := sanitizeFormulaName(issue.Title)
+		if stepID == "" {
+			stepID = issue.ID
 		}
-
-		// Second pass: recreate dependencies with new IDs
-		for _, dep := range subgraph.Dependencies {
-			newFromID, ok1 := idMapping[dep.IssueID]
-			newToID, ok2 := idMapping[dep.DependsOnID]
-			if !ok1 || !ok2 {
-				continue // Skip if either end is outside the subgraph
-			}
-
-			newDep := &types.Dependency{
-				IssueID:     newFromID,
-				DependsOnID: newToID,
-				Type:        dep.Type,
-			}
-			if err := tx.AddDependency(ctx, newDep, actorName); err != nil {
-				return fmt.Errorf("failed to create dependency: %w", err)
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
+		idToStepID[issue.ID] = stepID
 	}
 
-	return &DistillResult{
-		ProtoID:   idMapping[subgraph.Root.ID],
-		IDMapping: idMapping,
-		Created:   len(subgraph.Issues),
-		Variables: variables,
-	}, nil
+	// Build dependency map (issue ID -> list of depends-on IDs)
+	depsByIssue := make(map[string][]string)
+	for _, dep := range subgraph.Dependencies {
+		depsByIssue[dep.IssueID] = append(depsByIssue[dep.IssueID], dep.DependsOnID)
+	}
+
+	// Convert issues to steps
+	var steps []*formula.Step
+	for _, issue := range subgraph.Issues {
+		if issue.ID == subgraph.Root.ID {
+			continue // Root becomes the formula itself
+		}
+
+		step := &formula.Step{
+			ID:          idToStepID[issue.ID],
+			Title:       applyReplacements(issue.Title),
+			Description: applyReplacements(issue.Description),
+			Type:        string(issue.IssueType),
+		}
+
+		// Copy priority if set
+		if issue.Priority > 0 {
+			p := issue.Priority
+			step.Priority = &p
+		}
+
+		// Copy labels (excluding internal ones)
+		for _, label := range issue.Labels {
+			if label != MoleculeLabel && !strings.HasPrefix(label, "mol:") {
+				step.Labels = append(step.Labels, label)
+			}
+		}
+
+		// Convert dependencies to depends_on (skip root)
+		if deps, ok := depsByIssue[issue.ID]; ok {
+			for _, depID := range deps {
+				if depID == subgraph.Root.ID {
+					continue // Skip dependency on root (becomes formula itself)
+				}
+				if stepID, ok := idToStepID[depID]; ok {
+					step.DependsOn = append(step.DependsOn, stepID)
+				}
+			}
+		}
+
+		steps = append(steps, step)
+	}
+
+	// Build variable definitions
+	vars := make(map[string]*formula.VarDef)
+	for _, varName := range replacements {
+		vars[varName] = &formula.VarDef{
+			Description: fmt.Sprintf("Value for %s", varName),
+			Required:    true,
+		}
+	}
+
+	return &formula.Formula{
+		Formula:     name,
+		Description: applyReplacements(subgraph.Root.Description),
+		Version:     1,
+		Type:        formula.TypeWorkflow,
+		Vars:        vars,
+		Steps:       steps,
+	}
 }
 
 func init() {
-	molDistillCmd.Flags().String("as", "", "Custom title for the new proto")
-	molDistillCmd.Flags().StringSlice("var", []string{}, "Replace value with {{variable}} placeholder (value=variable)")
+	molDistillCmd.Flags().StringSlice("var", []string{}, "Replace value with {{variable}} placeholder (variable=value)")
 	molDistillCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	molDistillCmd.Flags().String("output", "", "Output directory for formula file")
 
 	molCmd.AddCommand(molDistillCmd)
 }

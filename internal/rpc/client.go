@@ -333,6 +333,11 @@ func (c *Client) Ready(args *ReadyArgs) (*Response, error) {
 	return c.Execute(OpReady, args)
 }
 
+// Blocked gets blocked issues via the daemon
+func (c *Client) Blocked(args *BlockedArgs) (*Response, error) {
+	return c.Execute(OpBlocked, args)
+}
+
 // Stale gets stale issues via the daemon
 func (c *Client) Stale(args *StaleArgs) (*Response, error) {
 	return c.Execute(OpStale, args)

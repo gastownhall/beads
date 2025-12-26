@@ -5,9 +5,31 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.37.0] - 2025-12-26
 
 ### Added
+
+- **Gate commands** (bd-udsi, gt-twjr5) - Async coordination for agent workflows
+  - `bd gate create` - Create gates with await conditions (gh:run, gh:pr, timer, human, mail)
+  - `bd gate eval` - Evaluate timer and GitHub gates (checks run completion, PR merge)
+  - `bd gate approve` - Approve human gates
+  - `bd gate show/list/close/wait` - Full gate lifecycle management
+
+- **`bd close --suggest-next`** (GH#679) - Smart workflow continuation
+  - Shows newly unblocked issues after closing
+  - Helps agents find next actionable work
+
+- **`bd ready/blocked --parent`** (GH#743) - Epic-scoped filtering
+  - Filter issues by parent bead or epic
+  - Enables focused work within a subtree
+
+- **TOML support for formulas** (gt-xmyha) - Alternative format
+  - `.formula.toml` files alongside JSON support
+  - Human-friendly authoring option
+
+- **Fork repo auto-detection** (GH#742) - Contributor workflow
+  - Detects fork repositories during init
+  - Offers to configure .git/info/exclude for stealth mode
 
 - **Control flow operators** (gt-8tmz.4) - Advanced formula composition
   - `loop` operator for iterating over collections
@@ -66,6 +88,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Wisps filtered from JSONL export automatically
 
 ### Fixed
+
+- **Gate await fields preserved during upsert** (bd-gr4q) - Multirepo sync
+  - Gate fields no longer cleared during multi-repo sync operations
+  - Enables reliable gate coordination across clones
+
+- **Tombstones retain closed_at timestamp** - Soft delete metadata
+  - Tombstones preserve the original close time
+  - Maintains accurate timeline for deleted issues
+
+- **Git detection caching** (bd-7di) - Performance improvement
+  - Cache git worktree/repo detection results
+  - Eliminates repeated slowness on worktree checks
+
+- **Windows MCP graceful fallback** (GH#387) - Platform compatibility
+  - Daemon mode falls back gracefully on Windows
+  - Prevents crashes when daemon unavailable
+
+- **Windows npm postinstall file locking** (GH#670) - Install reliability
+  - Handles file lock errors during npm install
+  - Improves installation success on Windows
 
 - **installed_plugins.json v2 format** (GH#741) - Claude Code compatibility
   - `bd doctor` now handles both v1 and v2 plugin file formats

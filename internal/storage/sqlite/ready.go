@@ -86,6 +86,25 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		}
 	}
 
+	// Parent filtering: filter to all descendants of a root issue (epic/molecule)
+	// Uses recursive CTE to find all descendants via parent-child dependencies
+	if filter.ParentID != nil {
+		whereClauses = append(whereClauses, `
+			i.id IN (
+				WITH RECURSIVE descendants AS (
+					SELECT issue_id FROM dependencies
+					WHERE type = 'parent-child' AND depends_on_id = ?
+					UNION ALL
+					SELECT d.issue_id FROM dependencies d
+					JOIN descendants dt ON d.depends_on_id = dt.issue_id
+					WHERE d.type = 'parent-child'
+				)
+				SELECT issue_id FROM descendants
+			)
+		`)
+		args = append(args, *filter.ParentID)
+	}
+
 	// Build WHERE clause properly
 	whereSQL := strings.Join(whereClauses, " AND ")
 
@@ -413,7 +432,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 // GetBlockedIssues returns issues that are blocked by dependencies or have status=blocked
 // Note: Pinned issues are excluded from the output (beads-ei4)
 // Note: Includes external: references in blocked_by list (bd-om4a)
-func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
+func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	// Use UNION to combine:
 	// 1. Issues with open/in_progress/blocked status that have dependency blockers
 	// 2. Issues with status=blocked (even if they have no dependency blockers)
@@ -423,7 +442,37 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 	// For blocked_by_count and blocker_ids:
 	// - Count local blockers (open issues) + external refs (external:*)
 	// - External refs are always considered "open" until resolved (bd-om4a)
-	rows, err := s.db.QueryContext(ctx, `
+
+	// Build additional WHERE clauses for filtering
+	var filterClauses []string
+	var args []any
+
+	// Parent filtering: filter to all descendants of a root issue (epic/molecule)
+	if filter.ParentID != nil {
+		filterClauses = append(filterClauses, `
+			i.id IN (
+				WITH RECURSIVE descendants AS (
+					SELECT issue_id FROM dependencies
+					WHERE type = 'parent-child' AND depends_on_id = ?
+					UNION ALL
+					SELECT d.issue_id FROM dependencies d
+					JOIN descendants dt ON d.depends_on_id = dt.issue_id
+					WHERE d.type = 'parent-child'
+				)
+				SELECT issue_id FROM descendants
+			)
+		`)
+		args = append(args, *filter.ParentID)
+	}
+
+	// Build filter clause SQL
+	filterSQL := ""
+	if len(filterClauses) > 0 {
+		filterSQL = " AND " + strings.Join(filterClauses, " AND ")
+	}
+
+	// nolint:gosec // G201: filterSQL contains only parameterized WHERE clauses with ? placeholders, not user input
+	query := fmt.Sprintf(`
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
@@ -441,7 +490,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		            AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
 		        )
 		        -- External refs: always included (resolution happens at query time)
-		        OR d.depends_on_id LIKE 'external:%'
+		        OR d.depends_on_id LIKE 'external:%%'
 		    )
 		WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred')
 		  AND i.pinned = 0
@@ -461,12 +510,14 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		          SELECT 1 FROM dependencies d3
 		          WHERE d3.issue_id = i.id
 		            AND d3.type = 'blocks'
-		            AND d3.depends_on_id LIKE 'external:%'
+		            AND d3.depends_on_id LIKE 'external:%%'
 		      )
 		  )
+		  %s
 		GROUP BY i.id
 		ORDER BY i.priority ASC
-	`)
+	`, filterSQL)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocked issues: %w", err)
 	}
@@ -594,6 +645,49 @@ func filterBlockedByExternalDeps(ctx context.Context, blocked []*types.BlockedIs
 	}
 
 	return result
+}
+
+// GetNewlyUnblockedByClose returns issues that became unblocked when the given issue was closed.
+// This is used by the --suggest-next flag on bd close to show what work is now available.
+// An issue is "newly unblocked" if:
+//   - It had a 'blocks' dependency on the closed issue
+//   - It is now unblocked (not in blocked_issues_cache)
+//   - It has status open or in_progress (ready to work on)
+//
+// The cache is already rebuilt by CloseIssue before this is called, so we just need to
+// find dependents that are no longer blocked.
+func (s *SQLiteStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
+	// Find issues that:
+	// 1. Had a 'blocks' dependency on the closed issue
+	// 2. Are now NOT in blocked_issues_cache (unblocked)
+	// 3. Have status open or in_progress
+	// 4. Are not pinned
+	query := `
+		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
+		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
+		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters
+		FROM issues i
+		JOIN dependencies d ON i.id = d.issue_id
+		WHERE d.depends_on_id = ?
+		  AND d.type = 'blocks'
+		  AND i.status IN ('open', 'in_progress')
+		  AND i.pinned = 0
+		  AND NOT EXISTS (
+		      SELECT 1 FROM blocked_issues_cache WHERE issue_id = i.id
+		  )
+		ORDER BY i.priority ASC
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, closedIssueID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get newly unblocked issues: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return s.scanIssues(ctx, rows)
 }
 
 // buildOrderByClause generates the ORDER BY clause based on sort policy

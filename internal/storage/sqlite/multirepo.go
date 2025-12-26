@@ -330,9 +330,23 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 		}
 
 		if existingHash != issue.ContentHash {
-			// Pinned field fix (bd-phtv): Use COALESCE(NULLIF(?, 0), pinned) to preserve
-			// existing pinned=1 when incoming pinned=0 (which means field was absent in
-			// JSONL due to omitempty). This prevents auto-import from resetting pinned issues.
+			// Clone-local field protection pattern (bd-phtv, bd-gr4q):
+			//
+			// Some fields are clone-local state that shouldn't be overwritten by JSONL import:
+			//   - pinned: Local hook attachment (not synced between clones)
+			//   - await_type, await_id, timeout_ns, waiters: Gate state (wisps, never exported)
+			//
+			// Problem: Go's omitempty causes zero values to be absent from JSONL.
+			// When importing, absent fields unmarshal as zero, which would overwrite local state.
+			//
+			// Solution: COALESCE(NULLIF(incoming, zero_value), existing_column)
+			//   - For strings: COALESCE(NULLIF(?, ''), column)  -- preserve if incoming is ""
+			//   - For integers: COALESCE(NULLIF(?, 0), column)  -- preserve if incoming is 0
+			//
+			// When to use this pattern:
+			//   1. Field is clone-local (not part of shared issue ledger)
+			//   2. Field uses omitempty (so zero value means "absent", not "clear")
+			//   3. Accidental clearing would cause data loss or incorrect behavior
 			_, err = tx.ExecContext(ctx, `
 				UPDATE issues SET
 					content_hash = ?, title = ?, description = ?, design = ?,
@@ -341,7 +355,10 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 					updated_at = ?, closed_at = ?, external_ref = ?, source_repo = ?,
 					deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?,
 					sender = ?, ephemeral = ?, pinned = COALESCE(NULLIF(?, 0), pinned), is_template = ?,
-					await_type = ?, await_id = ?, timeout_ns = ?, waiters = ?
+					await_type = COALESCE(NULLIF(?, ''), await_type),
+					await_id = COALESCE(NULLIF(?, ''), await_id),
+					timeout_ns = COALESCE(NULLIF(?, 0), timeout_ns),
+					waiters = COALESCE(NULLIF(?, ''), waiters)
 				WHERE id = ?
 			`,
 				issue.ContentHash, issue.Title, issue.Description, issue.Design,

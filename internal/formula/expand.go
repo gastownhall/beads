@@ -72,8 +72,11 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("expand: %q has no template steps", rule.With)
 		}
 
+		// Merge formula default vars with rule overrides (gt-8tmz.34)
+		vars := mergeVars(expFormula, rule.Vars)
+
 		// Expand the target step (start at depth 0)
-		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0)
+		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
 		}
@@ -112,6 +115,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("map: %q has no template steps", rule.With)
 		}
 
+		// Merge formula default vars with rule overrides (gt-8tmz.34)
+		vars := mergeVars(expFormula, rule.Vars)
+
 		// Find all matching steps (including nested children - gt-8tmz.33)
 		// Rebuild stepMap to capture any changes from previous expansions
 		stepMap = buildStepMap(result)
@@ -124,7 +130,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
-			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0)
+			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
 			}
@@ -146,14 +152,45 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		}
 	}
 
+	// Validate no duplicate step IDs after expansion (gt-8tmz.36)
+	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
+		return nil, fmt.Errorf("duplicate step IDs after expansion: %v", dups)
+	}
+
 	return result, nil
+}
+
+// findDuplicateStepIDs returns any duplicate step IDs found in the steps slice.
+// It recursively checks all children.
+func findDuplicateStepIDs(steps []*Step) []string {
+	seen := make(map[string]int)
+	countStepIDs(steps, seen)
+
+	var dups []string
+	for id, count := range seen {
+		if count > 1 {
+			dups = append(dups, id)
+		}
+	}
+	return dups
+}
+
+// countStepIDs counts occurrences of each step ID recursively.
+func countStepIDs(steps []*Step, counts map[string]int) {
+	for _, step := range steps {
+		counts[step.ID]++
+		if len(step.Children) > 0 {
+			countStepIDs(step.Children, counts)
+		}
+	}
 }
 
 // expandStep expands a target step using the given template.
 // Returns the expanded steps with placeholders substituted.
 // The depth parameter tracks recursion depth for children; if it exceeds
 // DefaultMaxExpansionDepth, an error is returned.
-func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
+// The vars parameter provides variable values for {varname} substitution.
+func expandStep(target *Step, template []*Step, depth int, vars map[string]string) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
 			DefaultMaxExpansionDepth, depth, target.ID)
@@ -163,12 +200,12 @@ func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
 
 	for _, tmpl := range template {
 		expanded := &Step{
-			ID:             substituteTargetPlaceholders(tmpl.ID, target),
-			Title:          substituteTargetPlaceholders(tmpl.Title, target),
-			Description:    substituteTargetPlaceholders(tmpl.Description, target),
+			ID:             substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars),
+			Title:          substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars),
+			Description:    substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars),
 			Type:           tmpl.Type,
 			Priority:       tmpl.Priority,
-			Assignee:       tmpl.Assignee,
+			Assignee:       substituteVars(tmpl.Assignee, vars),
 			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template (gt-8tmz.18)
 			SourceLocation: tmpl.SourceLocation, // Preserve source location (gt-8tmz.18)
 		}
@@ -177,7 +214,7 @@ func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
 		if len(tmpl.Labels) > 0 {
 			expanded.Labels = make([]string, len(tmpl.Labels))
 			for i, l := range tmpl.Labels {
-				expanded.Labels[i] = substituteTargetPlaceholders(l, target)
+				expanded.Labels[i] = substituteVars(substituteTargetPlaceholders(l, target), vars)
 			}
 		}
 
@@ -185,20 +222,20 @@ func expandStep(target *Step, template []*Step, depth int) ([]*Step, error) {
 		if len(tmpl.DependsOn) > 0 {
 			expanded.DependsOn = make([]string, len(tmpl.DependsOn))
 			for i, d := range tmpl.DependsOn {
-				expanded.DependsOn[i] = substituteTargetPlaceholders(d, target)
+				expanded.DependsOn[i] = substituteVars(substituteTargetPlaceholders(d, target), vars)
 			}
 		}
 
 		if len(tmpl.Needs) > 0 {
 			expanded.Needs = make([]string, len(tmpl.Needs))
 			for i, n := range tmpl.Needs {
-				expanded.Needs[i] = substituteTargetPlaceholders(n, target)
+				expanded.Needs[i] = substituteVars(substituteTargetPlaceholders(n, target), vars)
 			}
 		}
 
 		// Handle children recursively with depth tracking
 		if len(tmpl.Children) > 0 {
-			children, err := expandStep(target, tmpl.Children, depth+1)
+			children, err := expandStep(target, tmpl.Children, depth+1, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -230,6 +267,26 @@ func substituteTargetPlaceholders(s string, target *Step) string {
 	s = strings.ReplaceAll(s, "{target.description}", target.Description)
 
 	return s
+}
+
+// mergeVars merges formula default vars with rule overrides.
+// Override values take precedence over defaults.
+func mergeVars(formula *Formula, overrides map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	// Start with formula defaults
+	for name, def := range formula.Vars {
+		if def.Default != "" {
+			result[name] = def.Default
+		}
+	}
+
+	// Apply overrides (these win)
+	for name, value := range overrides {
+		result[name] = value
+	}
+
+	return result
 }
 
 // buildStepMap creates a map of step ID to step (recursive).
@@ -302,4 +359,83 @@ func UpdateDependenciesForExpansion(steps []*Step, expandedID string, lastExpand
 	}
 
 	return result
+}
+
+// ApplyInlineExpansions applies Step.Expand fields to inline expansions (gt-8tmz.35).
+// Steps with the Expand field set are replaced by the referenced expansion template.
+// The step's ExpandVars are passed as variable overrides to the expansion.
+//
+// This differs from compose.Expand in that the expansion is declared inline on the
+// step itself rather than in a central compose section.
+//
+// Returns a new steps slice with inline expansions applied.
+// The original steps slice is not modified.
+func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
+	if parser == nil {
+		return steps, nil
+	}
+
+	return applyInlineExpansionsRecursive(steps, parser, 0)
+}
+
+// applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
+// depth tracks recursion to prevent infinite expansion loops.
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+	if depth > DefaultMaxExpansionDepth {
+		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
+	}
+
+	var result []*Step
+
+	for _, step := range steps {
+		// Check if this step has an inline expansion
+		if step.Expand != "" {
+			// Load the expansion formula
+			expFormula, err := parser.LoadByName(step.Expand)
+			if err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: loading %q: %w", step.ID, step.Expand, err)
+			}
+
+			if expFormula.Type != TypeExpansion {
+				return nil, fmt.Errorf("inline expand on step %q: %q is not an expansion formula (type=%s)",
+					step.ID, step.Expand, expFormula.Type)
+			}
+
+			if len(expFormula.Template) == 0 {
+				return nil, fmt.Errorf("inline expand on step %q: %q has no template steps", step.ID, step.Expand)
+			}
+
+			// Merge formula default vars with step's ExpandVars overrides
+			vars := mergeVars(expFormula, step.ExpandVars)
+
+			// Expand the step using the template (reuse existing expandStep)
+			expandedSteps, err := expandStep(step, expFormula.Template, 0, vars)
+			if err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+
+			// Recursively process expanded steps for nested inline expansions
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			if err != nil {
+				return nil, err
+			}
+
+			result = append(result, processedSteps...)
+		} else {
+			// No inline expansion - keep the step, but process children recursively
+			clone := cloneStep(step)
+
+			if len(step.Children) > 0 {
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				if err != nil {
+					return nil, err
+				}
+				clone.Children = processedChildren
+			}
+
+			result = append(result, clone)
+		}
+	}
+
+	return result, nil
 }

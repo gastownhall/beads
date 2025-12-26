@@ -182,7 +182,7 @@ func TestGetBlockedIssues(t *testing.T) {
 	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue2.ID, Type: types.DepBlocks}, "test-user")
 
 	// Get blocked issues
-	blocked, err := store.GetBlockedIssues(ctx)
+	blocked, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues failed: %v", err)
 	}
@@ -1215,7 +1215,7 @@ func TestGetBlockedIssuesFiltersExternalDeps(t *testing.T) {
 	}
 
 	// Test 1: External dep not satisfied - issue should appear as blocked
-	blocked, err := mainStore.GetBlockedIssues(ctx)
+	blocked, err := mainStore.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues failed: %v", err)
 	}
@@ -1260,7 +1260,7 @@ func TestGetBlockedIssuesFiltersExternalDeps(t *testing.T) {
 	}
 
 	// Now GetBlockedIssues should NOT show the issue (external dep satisfied)
-	blocked, err = mainStore.GetBlockedIssues(ctx)
+	blocked, err = mainStore.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues failed after shipping: %v", err)
 	}
@@ -1379,7 +1379,7 @@ func TestGetBlockedIssuesPartialExternalDeps(t *testing.T) {
 	externalStore.Close()
 
 	// Issue should still be blocked (cap2 not satisfied)
-	blocked, err := mainStore.GetBlockedIssues(ctx)
+	blocked, err := mainStore.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues failed: %v", err)
 	}
@@ -1510,5 +1510,214 @@ func TestCheckExternalDepInvalidFormats(t *testing.T) {
 				t.Errorf("Expected reason %q, got %q", tt.wantReason, status.Reason)
 			}
 		})
+	}
+}
+
+// TestGetNewlyUnblockedByClose tests the --suggest-next functionality (GH#679)
+func TestGetNewlyUnblockedByClose(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create a blocker issue
+	blocker := env.CreateIssueWith("Blocker", types.StatusOpen, 1, types.TypeTask)
+
+	// Create two issues blocked by the blocker
+	blocked1 := env.CreateIssueWith("Blocked 1", types.StatusOpen, 2, types.TypeTask)
+	blocked2 := env.CreateIssueWith("Blocked 2", types.StatusOpen, 3, types.TypeTask)
+
+	// Create one issue blocked by multiple issues (blocker + another)
+	otherBlocker := env.CreateIssueWith("Other Blocker", types.StatusOpen, 1, types.TypeTask)
+	multiBlocked := env.CreateIssueWith("Multi Blocked", types.StatusOpen, 2, types.TypeTask)
+
+	// Add dependencies (issue depends on blocker)
+	env.AddDep(blocked1, blocker)
+	env.AddDep(blocked2, blocker)
+	env.AddDep(multiBlocked, blocker)
+	env.AddDep(multiBlocked, otherBlocker)
+
+	// Close the blocker
+	env.Close(blocker, "Done")
+
+	// Get newly unblocked issues
+	ctx := context.Background()
+	unblocked, err := env.Store.GetNewlyUnblockedByClose(ctx, blocker.ID)
+	if err != nil {
+		t.Fatalf("GetNewlyUnblockedByClose failed: %v", err)
+	}
+
+	// Should return blocked1 and blocked2 (but not multiBlocked, which is still blocked by otherBlocker)
+	if len(unblocked) != 2 {
+		t.Errorf("Expected 2 unblocked issues, got %d", len(unblocked))
+	}
+
+	// Check that the right issues are unblocked
+	unblockedIDs := make(map[string]bool)
+	for _, issue := range unblocked {
+		unblockedIDs[issue.ID] = true
+	}
+
+	if !unblockedIDs[blocked1.ID] {
+		t.Errorf("Expected %s to be unblocked", blocked1.ID)
+	}
+	if !unblockedIDs[blocked2.ID] {
+		t.Errorf("Expected %s to be unblocked", blocked2.ID)
+	}
+	if unblockedIDs[multiBlocked.ID] {
+		t.Errorf("Expected %s to still be blocked (has another blocker)", multiBlocked.ID)
+	}
+}
+
+// TestParentIDFilterDescendants tests that ParentID filter returns all descendants of an epic
+func TestParentIDFilterDescendants(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create hierarchy:
+	// epic1 (root)
+	//   ├── task1 (child of epic1)
+	//   ├── task2 (child of epic1)
+	//   └── epic2 (child of epic1)
+	//         └── task3 (grandchild of epic1)
+	// task4 (unrelated, should not appear in results)
+	epic1 := env.CreateEpic("Epic 1")
+	task1 := env.CreateIssue("Task 1")
+	task2 := env.CreateIssue("Task 2")
+	epic2 := env.CreateEpic("Epic 2")
+	task3 := env.CreateIssue("Task 3")
+	task4 := env.CreateIssue("Task 4 - unrelated")
+
+	env.AddParentChild(task1, epic1)
+	env.AddParentChild(task2, epic1)
+	env.AddParentChild(epic2, epic1)
+	env.AddParentChild(task3, epic2)
+
+	// Query with ParentID = epic1
+	parentID := epic1.ID
+	ready := env.GetReadyWork(types.WorkFilter{ParentID: &parentID})
+
+	// Should include task1, task2, epic2, task3 (all descendants of epic1)
+	// Should NOT include epic1 itself or task4
+	if len(ready) != 4 {
+		t.Fatalf("Expected 4 ready issues in parent scope, got %d", len(ready))
+	}
+
+	// Verify the returned issues are the expected ones
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	if !readyIDs[task1.ID] {
+		t.Errorf("Expected task1 to be in results")
+	}
+	if !readyIDs[task2.ID] {
+		t.Errorf("Expected task2 to be in results")
+	}
+	if !readyIDs[epic2.ID] {
+		t.Errorf("Expected epic2 to be in results")
+	}
+	if !readyIDs[task3.ID] {
+		t.Errorf("Expected task3 to be in results")
+	}
+	if readyIDs[epic1.ID] {
+		t.Errorf("Expected epic1 (root) to NOT be in results")
+	}
+	if readyIDs[task4.ID] {
+		t.Errorf("Expected task4 (unrelated) to NOT be in results")
+	}
+}
+
+// TestParentIDWithOtherFilters tests that ParentID can be combined with other filters
+func TestParentIDWithOtherFilters(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create hierarchy:
+	// epic1 (root)
+	//   ├── task1 (priority 0)
+	//   ├── task2 (priority 1)
+	//   └── task3 (priority 2)
+	epic1 := env.CreateEpic("Epic 1")
+	task1 := env.CreateIssueWith("Task 1 - P0", types.StatusOpen, 0, types.TypeTask)
+	task2 := env.CreateIssueWith("Task 2 - P1", types.StatusOpen, 1, types.TypeTask)
+	task3 := env.CreateIssueWith("Task 3 - P2", types.StatusOpen, 2, types.TypeTask)
+
+	env.AddParentChild(task1, epic1)
+	env.AddParentChild(task2, epic1)
+	env.AddParentChild(task3, epic1)
+
+	// Query with ParentID = epic1 AND priority = 1
+	parentID := epic1.ID
+	priority := 1
+	ready := env.GetReadyWork(types.WorkFilter{ParentID: &parentID, Priority: &priority})
+
+	// Should only include task2 (parent + priority 1)
+	if len(ready) != 1 {
+		t.Fatalf("Expected 1 issue with parent + priority filter, got %d", len(ready))
+	}
+	if ready[0].ID != task2.ID {
+		t.Errorf("Expected task2, got %s", ready[0].ID)
+	}
+}
+
+// TestParentIDWithBlockedDescendants tests that blocked descendants are excluded
+func TestParentIDWithBlockedDescendants(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create hierarchy:
+	// epic1 (root)
+	//   ├── task1 (ready)
+	//   ├── task2 (blocked by blocker)
+	//   └── task3 (ready)
+	// blocker (unrelated)
+	epic1 := env.CreateEpic("Epic 1")
+	task1 := env.CreateIssue("Task 1 - ready")
+	task2 := env.CreateIssue("Task 2 - blocked")
+	task3 := env.CreateIssue("Task 3 - ready")
+	blocker := env.CreateIssue("Blocker")
+
+	env.AddParentChild(task1, epic1)
+	env.AddParentChild(task2, epic1)
+	env.AddParentChild(task3, epic1)
+	env.AddDep(task2, blocker) // task2 is blocked
+
+	// Query with ParentID = epic1
+	parentID := epic1.ID
+	ready := env.GetReadyWork(types.WorkFilter{ParentID: &parentID})
+
+	// Should include task1, task3 (ready descendants)
+	// Should NOT include task2 (blocked)
+	if len(ready) != 2 {
+		t.Fatalf("Expected 2 ready descendants, got %d", len(ready))
+	}
+
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	if !readyIDs[task1.ID] {
+		t.Errorf("Expected task1 to be ready")
+	}
+	if !readyIDs[task3.ID] {
+		t.Errorf("Expected task3 to be ready")
+	}
+	if readyIDs[task2.ID] {
+		t.Errorf("Expected task2 to be blocked")
+	}
+}
+
+// TestParentIDEmptyParent tests that empty parent returns nothing
+func TestParentIDEmptyParent(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create an epic with no children
+	epic1 := env.CreateEpic("Epic 1 - no children")
+	env.CreateIssue("Unrelated task")
+
+	// Query with ParentID = epic1 (which has no children)
+	parentID := epic1.ID
+	ready := env.GetReadyWork(types.WorkFilter{ParentID: &parentID})
+
+	// Should return empty since epic1 has no descendants
+	if len(ready) != 0 {
+		t.Fatalf("Expected 0 ready issues for empty parent, got %d", len(ready))
 	}
 }

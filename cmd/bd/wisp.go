@@ -128,61 +128,79 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Resolve proto ID
-	protoID := args[0]
-	// Try to resolve partial ID if it doesn't look like a full ID
-	if !strings.HasPrefix(protoID, "bd-") && !strings.HasPrefix(protoID, "gt-") && !strings.HasPrefix(protoID, "mol-") {
-		// Might be a partial ID, try to resolve
-		if resolved, err := resolvePartialIDDirect(ctx, protoID); err == nil {
-			protoID = resolved
-		}
+	// Try to load as formula first (ephemeral proto - gt-4v1eo)
+	// If that fails, fall back to loading from DB (legacy proto beads)
+	var subgraph *TemplateSubgraph
+	var protoID string
+
+	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
+	// This works for any valid formula name, not just "mol-" prefixed ones
+	sg, err := resolveAndCookFormula(args[0], nil)
+	if err == nil {
+		subgraph = sg
+		protoID = sg.Root.ID
 	}
 
-	// Check if it's a named molecule (mol-xxx) - look up in catalog
-	if strings.HasPrefix(protoID, "mol-") {
-		// Find the proto by name
-		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
-			Labels: []string{MoleculeLabel},
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error searching for proto: %v\n", err)
-			os.Exit(1)
-		}
-		found := false
-		for _, issue := range issues {
-			if strings.Contains(issue.Title, protoID) || issue.ID == protoID {
-				protoID = issue.ID
-				found = true
-				break
+	if subgraph == nil {
+		// Resolve proto ID (legacy path)
+		protoID = args[0]
+		// Try to resolve partial ID if it doesn't look like a full ID
+		if !strings.HasPrefix(protoID, "bd-") && !strings.HasPrefix(protoID, "gt-") && !strings.HasPrefix(protoID, "mol-") {
+			// Might be a partial ID, try to resolve
+			if resolved, err := resolvePartialIDDirect(ctx, protoID); err == nil {
+				protoID = resolved
 			}
 		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Error: proto '%s' not found in catalog\n", args[0])
-			fmt.Fprintf(os.Stderr, "Hint: run 'bd mol catalog' to see available protos\n")
+
+		// Check if it's a named molecule (mol-xxx) - look up in catalog
+		if strings.HasPrefix(protoID, "mol-") {
+			// Find the proto by name
+			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+				Labels: []string{MoleculeLabel},
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error searching for proto: %v\n", err)
+				os.Exit(1)
+			}
+			found := false
+			for _, issue := range issues {
+				if strings.Contains(issue.Title, protoID) || issue.ID == protoID {
+					protoID = issue.ID
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "Error: '%s' not found as formula or proto\n", args[0])
+				fmt.Fprintf(os.Stderr, "Hint: run 'bd formula list' to see available formulas\n")
+				os.Exit(1)
+			}
+		}
+
+		// Load the proto
+		protoIssue, err := store.GetIssue(ctx, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+			os.Exit(1)
+		}
+		if !isProtoIssue(protoIssue) {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
+			os.Exit(1)
+		}
+
+		// Load the proto subgraph from DB
+		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
 			os.Exit(1)
 		}
 	}
 
-	// Load the proto
-	protoIssue, err := store.GetIssue(ctx, protoID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
-		os.Exit(1)
-	}
-	if !isProtoIssue(protoIssue) {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a proto (missing '%s' label)\n", protoID, MoleculeLabel)
-		os.Exit(1)
-	}
+	// Apply variable defaults from formula (gt-4v1eo)
+	vars = applyVariableDefaults(vars, subgraph)
 
-	// Load the proto subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, store, protoID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading proto: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Check for missing variables
-	requiredVars := extractAllVariables(subgraph)
+	// Check for missing required variables (those without defaults)
+	requiredVars := extractRequiredVariables(subgraph)
 	var missingVars []string
 	for _, v := range requiredVars {
 		if _, ok := vars[v]; !ok {

@@ -12,6 +12,7 @@ from .config import load_config
 from .models import (
     AddDependencyParams,
     BlockedIssue,
+    BlockedParams,
     CloseIssueParams,
     CreateIssueParams,
     InitParams,
@@ -126,7 +127,7 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def blocked(self) -> List[BlockedIssue]:
+    async def blocked(self, params: Optional[BlockedParams] = None) -> List[BlockedIssue]:
         """Get blocked issues."""
         pass
 
@@ -395,6 +396,8 @@ class BdCliClient(BdClientBase):
             args.append("--unassigned")
         if params.sort_policy:
             args.extend(["--sort", params.sort_policy])
+        if params.parent_id:
+            args.extend(["--parent", params.parent_id])
 
         data = await self._run_command(*args)
         if not isinstance(data, list):
@@ -664,13 +667,21 @@ class BdCliClient(BdClientBase):
 
         return Stats.model_validate(data)
 
-    async def blocked(self) -> list[BlockedIssue]:
+    async def blocked(self, params: BlockedParams | None = None) -> list[BlockedIssue]:
         """Get blocked issues.
+
+        Args:
+            params: Query parameters
 
         Returns:
             List of blocked issues with blocking information
         """
-        data = await self._run_command("blocked")
+        params = params or BlockedParams()
+        args = ["blocked"]
+        if params.parent_id:
+            args.extend(["--parent", params.parent_id])
+
+        data = await self._run_command(*args)
         if not isinstance(data, list):
             return []
 

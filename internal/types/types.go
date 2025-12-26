@@ -246,10 +246,11 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
 	// Enforce closed_at invariant: closed_at should be set if and only if status is closed
+	// Exception: tombstones may retain closed_at from before deletion
 	if i.Status == StatusClosed && i.ClosedAt == nil {
 		return fmt.Errorf("closed issues must have closed_at timestamp")
 	}
-	if i.Status != StatusClosed && i.ClosedAt != nil {
+	if i.Status != StatusClosed && i.Status != StatusTombstone && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
 	// Enforce tombstone invariants (bd-md2): deleted_at must be set for tombstones, and only for tombstones
@@ -646,6 +647,9 @@ type WorkFilter struct {
 	LabelsAny  []string   // OR semantics: issue must have AT LEAST ONE of these labels
 	Limit      int
 	SortPolicy SortPolicy
+
+	// Parent filtering: filter to descendants of a bead/epic (recursive)
+	ParentID *string // Show all descendants of this issue
 }
 
 // StaleFilter is used to filter stale issue queries

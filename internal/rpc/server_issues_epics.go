@@ -555,6 +555,26 @@ func (s *Server) handleClose(req *Request) Response {
 	})
 
 	closedIssue, _ := store.GetIssue(ctx, closeArgs.ID)
+
+	// If SuggestNext is requested, find newly unblocked issues (GH#679)
+	if closeArgs.SuggestNext {
+		unblocked, err := store.GetNewlyUnblockedByClose(ctx, closeArgs.ID)
+		if err != nil {
+			// Non-fatal: still return the closed issue
+			unblocked = nil
+		}
+		result := CloseResult{
+			Closed:    closedIssue,
+			Unblocked: unblocked,
+		}
+		data, _ := json.Marshal(result)
+		return Response{
+			Success: true,
+			Data:    data,
+		}
+	}
+
+	// Backward compatible: just return the closed issue
 	data, _ := json.Marshal(closedIssue)
 	return Response{
 		Success: true,
@@ -1242,6 +1262,7 @@ func (s *Server) handleReady(req *Request) Response {
 
 	wf := types.WorkFilter{
 		Status:     types.StatusOpen,
+		Type:       readyArgs.Type,
 		Priority:   readyArgs.Priority,
 		Unassigned: readyArgs.Unassigned,
 		Limit:      readyArgs.Limit,
@@ -1251,6 +1272,9 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 	if readyArgs.Assignee != "" && !readyArgs.Unassigned {
 		wf.Assignee = &readyArgs.Assignee
+	}
+	if readyArgs.ParentID != "" {
+		wf.ParentID = &readyArgs.ParentID
 	}
 
 	ctx := s.reqCtx(req)
@@ -1263,6 +1287,44 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 
 	data, _ := json.Marshal(issues)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleBlocked(req *Request) Response {
+	var blockedArgs BlockedArgs
+	if err := json.Unmarshal(req.Args, &blockedArgs); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid blocked args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
+
+	var wf types.WorkFilter
+	if blockedArgs.ParentID != "" {
+		wf.ParentID = &blockedArgs.ParentID
+	}
+
+	ctx := s.reqCtx(req)
+	blocked, err := store.GetBlockedIssues(ctx, wf)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get blocked issues: %v", err),
+		}
+	}
+
+	data, _ := json.Marshal(blocked)
 	return Response{
 		Success: true,
 		Data:    data,

@@ -44,6 +44,7 @@ var migrationsList = []Migration{
 	{"remove_depends_on_fk", migrations.MigrateRemoveDependsOnFK},
 	{"additional_indexes", migrations.MigrateAdditionalIndexes},
 	{"gate_columns", migrations.MigrateGateColumns},
+	{"tombstone_closed_at", migrations.MigrateTombstoneClosedAt},
 }
 
 // MigrationInfo contains metadata about a migration for inspection

@@ -1,0 +1,174 @@
+package migrations
+
+import (
+	"database/sql"
+	"fmt"
+)
+
+// MigrateTombstoneClosedAt updates the closed_at constraint to allow tombstones
+// to retain their closed_at timestamp from before deletion.
+//
+// Previously: CHECK ((status = 'closed') = (closed_at IS NOT NULL))
+// - This required clearing closed_at when creating tombstones from closed issues
+//
+// Now: CHECK (closed + tombstone OR non-closed/tombstone with no closed_at)
+// - closed issues must have closed_at
+// - tombstones may have closed_at (from before deletion) or not
+// - other statuses must NOT have closed_at
+//
+// This allows importing tombstones that were closed before being deleted,
+// preserving the historical closed_at timestamp for audit purposes.
+func MigrateTombstoneClosedAt(db *sql.DB) error {
+	// SQLite doesn't support ALTER TABLE to modify CHECK constraints
+	// We must recreate the table with the new constraint
+
+	// Step 0: Drop views that depend on the issues table
+	_, err := db.Exec(`DROP VIEW IF EXISTS ready_issues`)
+	if err != nil {
+		return fmt.Errorf("failed to drop ready_issues view: %w", err)
+	}
+	_, err = db.Exec(`DROP VIEW IF EXISTS blocked_issues`)
+	if err != nil {
+		return fmt.Errorf("failed to drop blocked_issues view: %w", err)
+	}
+
+	// Step 1: Create new table with updated constraint
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS issues_new (
+			id TEXT PRIMARY KEY,
+			content_hash TEXT,
+			title TEXT NOT NULL CHECK(length(title) <= 500),
+			description TEXT NOT NULL DEFAULT '',
+			design TEXT NOT NULL DEFAULT '',
+			acceptance_criteria TEXT NOT NULL DEFAULT '',
+			notes TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			priority INTEGER NOT NULL DEFAULT 2 CHECK(priority >= 0 AND priority <= 4),
+			issue_type TEXT NOT NULL DEFAULT 'task',
+			assignee TEXT,
+			estimated_minutes INTEGER,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			closed_at DATETIME,
+			external_ref TEXT,
+			source_repo TEXT DEFAULT '',
+			compaction_level INTEGER DEFAULT 0,
+			compacted_at DATETIME,
+			compacted_at_commit TEXT,
+			original_size INTEGER,
+			deleted_at DATETIME,
+			deleted_by TEXT DEFAULT '',
+			delete_reason TEXT DEFAULT '',
+			original_type TEXT DEFAULT '',
+			sender TEXT DEFAULT '',
+			ephemeral INTEGER DEFAULT 0,
+			close_reason TEXT DEFAULT '',
+			pinned INTEGER DEFAULT 0,
+			is_template INTEGER DEFAULT 0,
+			await_type TEXT,
+			await_id TEXT,
+			timeout_ns INTEGER,
+			waiters TEXT,
+			CHECK (
+				(status = 'closed' AND closed_at IS NOT NULL) OR
+				(status = 'tombstone') OR
+				(status NOT IN ('closed', 'tombstone') AND closed_at IS NULL)
+			)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create new issues table: %w", err)
+	}
+
+	// Step 2: Copy data from old table to new table
+	_, err = db.Exec(`
+		INSERT INTO issues_new
+		SELECT * FROM issues
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to copy issues data: %w", err)
+	}
+
+	// Step 3: Drop old table
+	_, err = db.Exec(`DROP TABLE issues`)
+	if err != nil {
+		return fmt.Errorf("failed to drop old issues table: %w", err)
+	}
+
+	// Step 4: Rename new table to original name
+	_, err = db.Exec(`ALTER TABLE issues_new RENAME TO issues`)
+	if err != nil {
+		return fmt.Errorf("failed to rename new issues table: %w", err)
+	}
+
+	// Step 5: Recreate indexes (they were dropped with the table)
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_external_ref ON issues(external_ref) WHERE external_ref IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_pinned ON issues(pinned) WHERE pinned = 1`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_is_template ON issues(is_template) WHERE is_template = 1`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_status_priority ON issues(status, priority)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_gate ON issues(issue_type) WHERE issue_type = 'gate'`,
+	}
+
+	for _, idx := range indexes {
+		if _, err := db.Exec(idx); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	// Step 6: Recreate views that we dropped
+	_, err = db.Exec(`
+		CREATE VIEW IF NOT EXISTS ready_issues AS
+		WITH RECURSIVE
+		  blocked_directly AS (
+		    SELECT DISTINCT d.issue_id
+		    FROM dependencies d
+		    JOIN issues blocker ON d.depends_on_id = blocker.id
+		    WHERE d.type = 'blocks'
+		      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		  ),
+		  blocked_transitively AS (
+		    SELECT issue_id, 0 as depth
+		    FROM blocked_directly
+		    UNION ALL
+		    SELECT d.issue_id, bt.depth + 1
+		    FROM blocked_transitively bt
+		    JOIN dependencies d ON d.depends_on_id = bt.issue_id
+		    WHERE d.type = 'parent-child'
+		      AND bt.depth < 50
+		  )
+		SELECT i.*
+		FROM issues i
+		WHERE i.status = 'open'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
+		  )
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to recreate ready_issues view: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE VIEW IF NOT EXISTS blocked_issues AS
+		SELECT
+		    i.*,
+		    COUNT(d.depends_on_id) as blocked_by_count
+		FROM issues i
+		JOIN dependencies d ON i.id = d.issue_id
+		JOIN issues blocker ON d.depends_on_id = blocker.id
+		WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		  AND d.type = 'blocks'
+		  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
+		GROUP BY i.id
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to recreate blocked_issues view: %w", err)
+	}
+
+	return nil
+}

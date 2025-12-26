@@ -925,12 +925,18 @@ var closeCmd = &cobra.Command{
 		force, _ := cmd.Flags().GetBool("force")
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
+		suggestNext, _ := cmd.Flags().GetBool("suggest-next")
 
 		ctx := rootCtx
 
 		// --continue only works with a single issue
 		if continueFlag && len(args) > 1 {
 			FatalErrorRespectJSON("--continue only works when closing a single issue")
+		}
+
+		// --suggest-next only works with a single issue
+		if suggestNext && len(args) > 1 {
+			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
 		// Resolve partial IDs first
@@ -974,8 +980,9 @@ var closeCmd = &cobra.Command{
 				}
 
 				closeArgs := &rpc.CloseArgs{
-					ID:     id,
-					Reason: reason,
+					ID:          id,
+					Reason:      reason,
+					SuggestNext: suggestNext,
 				}
 				resp, err := daemonClient.CloseIssue(closeArgs)
 				if err != nil {
@@ -983,18 +990,44 @@ var closeCmd = &cobra.Command{
 					continue
 				}
 
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err == nil {
-					// Run close hook (bd-kwro.8)
-					if hookRunner != nil {
-						hookRunner.Run(hooks.EventClose, &issue)
+				// Handle response based on whether SuggestNext was requested (GH#679)
+				if suggestNext {
+					var result rpc.CloseResult
+					if err := json.Unmarshal(resp.Data, &result); err == nil {
+						if result.Closed != nil {
+							// Run close hook (bd-kwro.8)
+							if hookRunner != nil {
+								hookRunner.Run(hooks.EventClose, result.Closed)
+							}
+							if jsonOutput {
+								closedIssues = append(closedIssues, result.Closed)
+							}
+						}
+						if !jsonOutput {
+							fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+							// Display newly unblocked issues (GH#679)
+							if len(result.Unblocked) > 0 {
+								fmt.Printf("\nNewly unblocked:\n")
+								for _, issue := range result.Unblocked {
+									fmt.Printf("  • %s %q (P%d)\n", issue.ID, issue.Title, issue.Priority)
+								}
+							}
+						}
 					}
-					if jsonOutput {
-						closedIssues = append(closedIssues, &issue)
+				} else {
+					var issue types.Issue
+					if err := json.Unmarshal(resp.Data, &issue); err == nil {
+						// Run close hook (bd-kwro.8)
+						if hookRunner != nil {
+							hookRunner.Run(hooks.EventClose, &issue)
+						}
+						if jsonOutput {
+							closedIssues = append(closedIssues, &issue)
+						}
 					}
-				}
-				if !jsonOutput {
-					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+					if !jsonOutput {
+						fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+					}
 				}
 			}
 
@@ -1042,6 +1075,24 @@ var closeCmd = &cobra.Command{
 				}
 			} else {
 				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+			}
+		}
+
+		// Handle --suggest-next flag in direct mode (GH#679)
+		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
+			unblocked, err := store.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
+			if err == nil && len(unblocked) > 0 {
+				if jsonOutput {
+					outputJSON(map[string]interface{}{
+						"closed":    closedIssues,
+						"unblocked": unblocked,
+					})
+					return
+				}
+				fmt.Printf("\nNewly unblocked:\n")
+				for _, issue := range unblocked {
+					fmt.Printf("  • %s %q (P%d)\n", issue.ID, issue.Title, issue.Priority)
+				}
 			}
 		}
 
@@ -1354,5 +1405,6 @@ func init() {
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
+	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing (GH#679)")
 	rootCmd.AddCommand(closeCmd)
 }

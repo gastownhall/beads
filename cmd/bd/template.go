@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -25,10 +26,11 @@ var variablePattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
 // TemplateSubgraph holds a template epic and all its descendants
 type TemplateSubgraph struct {
-	Root         *types.Issue            // The template epic
-	Issues       []*types.Issue          // All issues in the subgraph (including root)
-	Dependencies []*types.Dependency     // All dependencies within the subgraph
-	IssueMap     map[string]*types.Issue // ID -> Issue for quick lookup
+	Root         *types.Issue                // The template epic
+	Issues       []*types.Issue              // All issues in the subgraph (including root)
+	Dependencies []*types.Dependency         // All dependencies within the subgraph
+	IssueMap     map[string]*types.Issue     // ID -> Issue for quick lookup
+	VarDefs      map[string]formula.VarDef   // Variable definitions from formula (for defaults)
 }
 
 // InstantiateResult holds the result of template instantiation
@@ -785,6 +787,57 @@ func extractAllVariables(subgraph *TemplateSubgraph) []string {
 		allText += issue.Design + " " + issue.AcceptanceCriteria + " " + issue.Notes + " "
 	}
 	return extractVariables(allText)
+}
+
+// extractRequiredVariables returns only variables that don't have defaults.
+// If VarDefs is available (from a cooked formula), uses it to filter out defaulted vars.
+// Otherwise, falls back to returning all variables.
+func extractRequiredVariables(subgraph *TemplateSubgraph) []string {
+	allVars := extractAllVariables(subgraph)
+
+	// If no VarDefs, assume all variables are required
+	if subgraph.VarDefs == nil || len(subgraph.VarDefs) == 0 {
+		return allVars
+	}
+
+	// Filter to only required variables (no default and marked as required, or not defined in VarDefs)
+	var required []string
+	for _, v := range allVars {
+		def, exists := subgraph.VarDefs[v]
+		// A variable is required if:
+		// 1. It's not defined in VarDefs at all, OR
+		// 2. It's defined with Required=true and no Default, OR
+		// 3. It's defined with no Default (even if Required is false)
+		if !exists {
+			required = append(required, v)
+		} else if def.Default == "" {
+			required = append(required, v)
+		}
+		// If exists and has default, it's not required
+	}
+	return required
+}
+
+// applyVariableDefaults merges formula default values with provided variables.
+// Returns a new map with defaults applied for any missing variables.
+func applyVariableDefaults(vars map[string]string, subgraph *TemplateSubgraph) map[string]string {
+	if subgraph.VarDefs == nil {
+		return vars
+	}
+
+	result := make(map[string]string)
+	for k, v := range vars {
+		result[k] = v
+	}
+
+	// Apply defaults for missing variables
+	for name, def := range subgraph.VarDefs {
+		if _, exists := result[name]; !exists && def.Default != "" {
+			result[name] = def.Default
+		}
+	}
+
+	return result
 }
 
 // substituteVariables replaces {{variable}} with values

@@ -290,8 +290,15 @@ type VersionChange struct {
 var versionChanges = []VersionChange{
 	{
 		Version: "0.37.0",
-		Date:    "2025-12-25",
+		Date:    "2025-12-26",
 		Changes: []string{
+			"NEW: bd gate create/show/list/close/wait (bd-udsi) - Async coordination primitives for agent workflows",
+			"NEW: bd gate eval (gt-twjr5.2) - Evaluate timer gates and GitHub gates (gh:run, gh:pr, mail)",
+			"NEW: bd gate approve (gt-twjr5.4) - Human gate approval command",
+			"NEW: bd close --suggest-next (GH#679) - Show newly unblocked issues after close",
+			"NEW: bd ready/blocked --parent (GH#743) - Scope by epic or parent bead",
+			"NEW: TOML support for formulas (gt-xmyha) - .formula.toml files alongside JSON",
+			"NEW: Fork repo auto-detection (GH#742) - Offer to configure .git/info/exclude",
 			"NEW: Control flow operators (gt-8tmz.4) - loop and gate operators for formula composition",
 			"NEW: Aspect composition (gt-8tmz.5) - Cross-cutting concerns via aspects field in formulas",
 			"NEW: Runtime expansion (gt-8tmz.8) - on_complete and for-each dynamic step generation",
@@ -304,6 +311,9 @@ var versionChanges = []VersionChange{
 			"CHANGED: Formula format YAML→JSON - Formulas now use .formula.json extension",
 			"CHANGED: bd mol run removed - Orchestration moved to gt commands",
 			"CHANGED: Wisp architecture simplified (bd-bkul) - Single DB with Wisp=true flag",
+			"FIX: Gate await fields preserved during upsert (bd-gr4q) - Multirepo sync fix",
+			"FIX: Tombstones retain closed_at timestamp - Preserves close time in soft deletes",
+			"FIX: Git detection caching (bd-7di) - Eliminates worktree slowness",
 			"FIX: installed_plugins.json v2 format (GH#741) - bd doctor handles new Claude Code format",
 			"FIX: git.IsWorktree() hang on Windows (GH#727) - bd init no longer hangs outside git repos",
 			"FIX: Skill files deleted by bd sync (GH#738) - .claude/ files now preserved",
@@ -312,6 +322,8 @@ var versionChanges = []VersionChange{
 			"FIX: Aspect self-matching recursion (gt-8tmz.16) - Prevents infinite loops",
 			"FIX: Map expansion nested matching (gt-8tmz.33) - Correctly matches child steps",
 			"FIX: Content-level merge for divergence (bd-kpy) - Better conflict resolution",
+			"FIX: Windows MCP graceful fallback (GH#387) - Daemon mode on Windows",
+			"FIX: Windows npm postinstall file locking (GH#670) - Install reliability",
 		},
 	},
 	{
