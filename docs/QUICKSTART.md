@@ -25,7 +25,7 @@ bd init --contributor
 bd init --team
 
 # Protected main branch (GitHub/GitLab)
-bd init --branch beads-metadata
+bd init --branch beads-sync
 ```
 
 The wizard will:

@@ -36,7 +36,7 @@ bd runs a background daemon per workspace for auto-sync, RPC operations, and rea
 
 **Enable daemon in worktrees:** Configure sync-branch to safely use daemon across all worktrees:
 ```bash
-bd config set sync-branch beads-metadata
+bd config set sync-branch beads-sync
 ```
 
 With sync-branch configured, daemon commits to a dedicated branch using an internal worktree, so your current branch is never affected. See [WORKTREES.md](WORKTREES.md) for details.

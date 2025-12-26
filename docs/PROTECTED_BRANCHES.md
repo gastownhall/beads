@@ -17,7 +17,7 @@ This guide explains how to use beads with protected branches on platforms like G
 
 **Problem:** GitHub and other platforms let you protect branches (like `main`) to require pull requests for all changes. This prevents beads from auto-committing issue updates directly to `main`.
 
-**Solution:** Beads can commit to a separate branch (like `beads-metadata`) using git worktrees, while keeping your main working directory untouched. Periodically merge the metadata branch back to `main` via a pull request.
+**Solution:** Beads can commit to a separate branch (like `beads-sync`) using git worktrees, while keeping your main working directory untouched. Periodically merge the metadata branch back to `main` via a pull request.
 
 **Benefits:**
 - ✅ Works with any git platform's branch protection
@@ -33,10 +33,10 @@ This guide explains how to use beads with protected branches on platforms like G
 
 ```bash
 cd your-project
-bd init --branch beads-metadata
+bd init --branch beads-sync
 ```
 
-This creates a `.beads/` directory and configures beads to commit to `beads-metadata` instead of `main`.
+This creates a `.beads/` directory and configures beads to commit to `beads-sync` instead of `main`.
 
 **Important:** After initialization, you'll see some untracked files that should be committed to your protected branch:
 
@@ -61,7 +61,7 @@ Files that are automatically gitignored (do NOT commit):
 - `.beads/daemon.lock`, `daemon.log`, `daemon.pid` - Runtime files
 - `.beads/beads.left.jsonl`, `beads.right.jsonl` - Temporary merge artifacts
 
-The sync branch (beads-metadata) will contain:
+The sync branch (beads-sync) will contain:
 - `.beads/issues.jsonl` - Issue data in JSONL format (committed automatically by daemon)
 - `.beads/metadata.json` - Metadata about the beads installation
 - `.beads/config.yaml` - Configuration template (optional)
@@ -72,7 +72,7 @@ The sync branch (beads-metadata) will contain:
 bd daemon --start --auto-commit
 ```
 
-The daemon will automatically commit issue changes to the `beads-metadata` branch.
+The daemon will automatically commit issue changes to the `beads-sync` branch.
 
 **3. When ready, merge to main:**
 
@@ -98,7 +98,7 @@ Beads uses [git worktrees](https://git-scm.com/docs/git-worktree) to maintain a 
 your-project/
 ├── .git/                    # Main git directory
 │   └── beads-worktrees/
-│       └── beads-metadata/  # Worktree (only .beads/ checked out)
+│       └── beads-sync/  # Worktree (only .beads/ checked out)
 │           └── .beads/
 │               └── issues.jsonl
 ├── .beads/                  # Your main copy
@@ -115,7 +115,7 @@ Main branch (protected):
 - `.beads/.gitignore` - Tells git what to ignore
 - `.gitattributes` - Merge driver configuration
 
-Sync branch (beads-metadata):
+Sync branch (beads-sync):
 - `.beads/issues.jsonl` - Issue data (committed by daemon)
 - `.beads/metadata.json` - Repository metadata
 - `.beads/config.yaml` - Configuration template
@@ -137,8 +137,8 @@ When you update an issue:
 
 1. Issue is updated in `.beads/beads.db` (SQLite database)
 2. Daemon exports to `.beads/issues.jsonl` (JSONL file)
-3. JSONL is copied to worktree (`.git/beads-worktrees/beads-metadata/.beads/`)
-4. Daemon commits the change in the worktree to `beads-metadata` branch
+3. JSONL is copied to worktree (`.git/beads-worktrees/beads-sync/.beads/`)
+4. Daemon commits the change in the worktree to `beads-sync` branch
 5. Main branch stays untouched (no commits on `main`)
 
 ## Setup
@@ -147,12 +147,12 @@ When you update an issue:
 
 ```bash
 cd your-project
-bd init --branch beads-metadata
+bd init --branch beads-sync
 ```
 
 This will:
 - Create `.beads/` directory with database
-- Set `sync.branch` config to `beads-metadata`
+- Set `sync.branch` config to `beads-sync`
 - Import any existing issues from git (if present)
 - Prompt to install git hooks (recommended: say yes)
 
@@ -162,7 +162,7 @@ If you already have beads set up and want to switch to a separate branch:
 
 ```bash
 # Set the sync branch
-bd config set sync.branch beads-metadata
+bd config set sync.branch beads-sync
 
 # Start the daemon (it will create the worktree automatically)
 bd daemon --start --auto-commit
@@ -192,7 +192,7 @@ bd daemon --start --auto-commit --auto-push
 You can also configure the sync branch via environment variable:
 
 ```bash
-export BEADS_SYNC_BRANCH=beads-metadata
+export BEADS_SYNC_BRANCH=beads-sync
 bd daemon --start --auto-commit
 ```
 
@@ -215,7 +215,7 @@ bd update bd-a1b2 --status in_progress
 bd close bd-a1b2 "Completed authentication"
 ```
 
-All changes are automatically committed to the `beads-metadata` branch by the daemon. No changes are needed to agent workflows!
+All changes are automatically committed to the `beads-sync` branch by the daemon. No changes are needed to agent workflows!
 
 ### For Humans
 
@@ -226,7 +226,7 @@ All changes are automatically committed to the `beads-metadata` branch by the da
 bd sync --status
 ```
 
-This shows the diff between `beads-metadata` and `main` (or your current branch).
+This shows the diff between `beads-sync` and `main` (or your current branch).
 
 **Manual commit (if not using daemon):**
 
@@ -251,11 +251,11 @@ For protected branches with required reviews:
 
 ```bash
 # 1. Push your sync branch
-git push origin beads-metadata
+git push origin beads-sync
 
 # 2. Create PR on GitHub/GitLab/etc.
 #    - Base: main
-#    - Compare: beads-metadata
+#    - Compare: beads-sync
 
 # 3. After PR is merged, update your local main
 git checkout main
@@ -276,7 +276,7 @@ bd sync --merge
 
 # This will:
 # - Switch to main branch
-# - Merge beads-metadata with --no-ff (creates merge commit)
+# - Merge beads-sync with --no-ff (creates merge commit)
 # - Push to remote
 # - Import merged changes to database
 ```
@@ -320,7 +320,7 @@ Example conflict resolution:
 {"id":"bd-a1b2","title":"Feature A","status":"closed","updated_at":"2025-11-02T10:00:00Z"}
 =======
 {"id":"bd-a1b2","title":"Feature A","status":"in_progress","updated_at":"2025-11-02T09:00:00Z"}
->>>>>>> beads-metadata
+>>>>>>> beads-sync
 ```
 
 **Resolution:** Keep the line with the newer `updated_at`:
@@ -344,7 +344,7 @@ bd import  # Import to database (will use latest timestamp)
 This happens if you created the sync branch independently. Merge with `--allow-unrelated-histories`:
 
 ```bash
-git merge beads-metadata --allow-unrelated-histories --no-ff
+git merge beads-sync --allow-unrelated-histories --no-ff
 ```
 
 Or use `bd sync --merge` which handles this automatically.
@@ -355,7 +355,7 @@ If the worktree is corrupted or in a bad state:
 
 ```bash
 # Remove the worktree
-rm -rf .git/beads-worktrees/beads-metadata
+rm -rf .git/beads-worktrees/beads-sync
 
 # Prune stale worktree entries
 git worktree prune
@@ -364,12 +364,12 @@ git worktree prune
 bd daemon --stop && bd daemon --start
 ```
 
-### "branch 'beads-metadata' not found"
+### "branch 'beads-sync' not found"
 
 The sync branch doesn't exist yet. The daemon will create it on the first commit. If you want to create it manually:
 
 ```bash
-git checkout -b beads-metadata
+git checkout -b beads-sync
 git checkout main  # Switch back
 ```
 
@@ -409,7 +409,7 @@ Ensure all clones are configured the same way:
 
 ```bash
 # On each clone, verify:
-bd config get sync.branch  # Should be the same (e.g., beads-metadata)
+bd config get sync.branch  # Should be the same (e.g., beads-sync)
 
 # Pull latest changes
 bd sync --no-push
@@ -462,10 +462,10 @@ Yes! Each collaborator configures their own sync branch:
 
 ```bash
 # All collaborators use the same branch
-bd config set sync.branch beads-metadata
+bd config set sync.branch beads-sync
 ```
 
-Everyone's changes sync via the `beads-metadata` branch. Periodically merge to `main` via PR.
+Everyone's changes sync via the `beads-sync` branch. Periodically merge to `main` via PR.
 
 ### How often should I merge to main?
 
@@ -483,7 +483,7 @@ Yes! Use `bd sync --status` to see what's changed:
 
 ```bash
 bd sync --status
-# Shows diff between beads-metadata and main
+# Shows diff between beads-sync and main
 ```
 
 Or create a pull request and review on GitHub/GitLab.
@@ -504,7 +504,7 @@ Yes, but the daemon will recreate it. If you want to clean up permanently:
 bd daemon --stop
 
 # Remove worktree
-git worktree remove .git/beads-worktrees/beads-metadata
+git worktree remove .git/beads-worktrees/beads-sync
 
 # Unset sync branch
 bd config set sync.branch ""
@@ -566,7 +566,7 @@ jobs:
 
       - name: Pull changes
         run: |
-          git fetch origin beads-metadata
+          git fetch origin beads-sync
           bd sync --no-push
 
       - name: Merge to main (if changes)
@@ -591,8 +591,8 @@ Protected branch settings:
 
 Create sync branch PR:
 ```bash
-git push origin beads-metadata
-gh pr create --base main --head beads-metadata --title "Update beads metadata"
+git push origin beads-sync
+gh pr create --base main --head beads-sync --title "Update beads metadata"
 ```
 
 ### GitLab
@@ -605,8 +605,8 @@ Protected branch settings:
 
 Create sync branch MR:
 ```bash
-git push origin beads-metadata
-glab mr create --source-branch beads-metadata --target-branch main
+git push origin beads-sync
+glab mr create --source-branch beads-sync --target-branch main
 ```
 
 ### Bitbucket
@@ -618,7 +618,7 @@ Protected branch settings:
 
 Create sync branch PR:
 ```bash
-git push origin beads-metadata
+git push origin beads-sync
 # Create PR via Bitbucket web UI
 ```
 
@@ -649,9 +649,9 @@ git remote add upstream https://github.com/original/repo.git
 # Fetch upstream changes
 git fetch upstream
 
-# Merge upstream beads-metadata to yours
-git checkout beads-metadata
-git merge upstream/beads-metadata
+# Merge upstream beads-sync to yours
+git checkout beads-sync
+git merge upstream/beads-sync
 bd import  # Import merged changes
 ```
 
@@ -667,7 +667,7 @@ If you have an existing beads setup committing to `main`:
 
 1. **Set sync branch:**
    ```bash
-   bd config set sync.branch beads-metadata
+   bd config set sync.branch beads-sync
    ```
 
 2. **Restart daemon:**
@@ -677,10 +677,10 @@ If you have an existing beads setup committing to `main`:
 
 3. **Verify:**
    ```bash
-   bd config get sync.branch  # Should show: beads-metadata
+   bd config get sync.branch  # Should show: beads-sync
    ```
 
-Future commits will go to `beads-metadata`. Historical commits on `main` are preserved.
+Future commits will go to `beads-sync`. Historical commits on `main` are preserved.
 
 ### From Sync Branch to Direct Commits
 

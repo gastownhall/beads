@@ -365,7 +365,7 @@ Controls for the sync branch workflow (see docs/PROTECTED_BRANCHES.md):
 
 ```bash
 # Configure sync branch (required for protected branch workflow)
-bd config set sync.branch beads-metadata
+bd config set sync.branch beads-sync
 
 # Enable mass deletion protection (optional, default: false)
 # When enabled, if >50% of issues vanish during a merge AND more than 5

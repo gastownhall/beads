@@ -77,7 +77,7 @@ bd config set sync.branch ""
 
 # Stop and restart daemon
 bd daemon stop
-bd daemon start
+bd daemon --start
 
 # Clean up existing worktrees
 rm -rf .git/beads-worktrees
@@ -138,7 +138,7 @@ bd automatically detects when you're in a git worktree and handles daemon mode s
 
 **With sync-branch configured:**
 - Daemon is **enabled** in worktrees
-- Commits go to dedicated sync branch (e.g., `beads-metadata`)
+- Commits go to dedicated sync branch (e.g., `beads-sync`)
 - Full daemon functionality available across all worktrees
 
 ## Usage Patterns
@@ -147,13 +147,13 @@ bd automatically detects when you're in a git worktree and handles daemon mode s
 
 ```bash
 # Configure sync-branch once (in main repo or any worktree)
-bd config set sync-branch beads-metadata
+bd config set sync-branch beads-sync
 
 # Now daemon works safely in all worktrees
 cd feature-worktree
 bd create "Implement feature X" -t feature -p 1
 bd update bd-a1b2 --status in_progress
-bd ready  # Daemon auto-syncs to beads-metadata branch
+bd ready  # Daemon auto-syncs to beads-sync branch
 ```
 
 ### Alternative: Direct Mode (No Configuration Needed)
@@ -295,7 +295,7 @@ bd config set sync.branch ""
 **Solution (if still occurring):**
 ```bash
 # Option 1: Configure sync-branch (recommended)
-bd config set sync-branch beads-metadata
+bd config set sync-branch beads-sync
 
 # Option 2: Explicitly disable daemon
 export BEADS_NO_DAEMON=1
@@ -357,7 +357,7 @@ export BEADS_DB=/path/to/specific/.beads/beads.db
 
 ```bash
 # Configure sync behavior
-bd config set sync.branch beads-metadata  # Use separate sync branch
+bd config set sync.branch beads-sync  # Use separate sync branch
 bd config set sync.auto_commit true       # Auto-commit changes
 bd config set sync.auto_push true         # Auto-push changes
 ```

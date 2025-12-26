@@ -236,18 +236,18 @@ jj resolve --tool=beads-merge
 
 ```bash
 # Initialize with separate sync branch
-bd init --branch beads-metadata
+bd init --branch beads-sync
 
 # Or configure existing setup
-bd config set sync.branch beads-metadata
+bd config set sync.branch beads-sync
 ```
 
 ### How It Works
 
-- Beads commits issue updates to `beads-metadata` instead of `main`
+- Beads commits issue updates to `beads-sync` instead of `main`
 - Uses git worktrees (lightweight checkouts) in `.git/beads-worktrees/`
 - Your main working directory is never affected
-- Periodically merge `beads-metadata` back to `main` via pull request
+- Periodically merge `beads-sync` back to `main` via pull request
 
 ### Daily Workflow (Unchanged for Agents)
 
@@ -258,7 +258,7 @@ bd update bd-a1b2 --status in_progress
 bd close bd-a1b2 "Fixed"
 ```
 
-All changes automatically commit to `beads-metadata` branch (if daemon is running with `--auto-commit`).
+All changes automatically commit to `beads-sync` branch (if daemon is running with `--auto-commit`).
 
 ### Merging to Main (Humans)
 
@@ -267,7 +267,7 @@ All changes automatically commit to `beads-metadata` branch (if daemon is runnin
 bd sync --status
 
 # Option 1: Create pull request
-git push origin beads-metadata
+git push origin beads-sync
 # Then create PR on GitHub/GitLab
 
 # Option 2: Direct merge (if allowed)
@@ -449,7 +449,7 @@ See [MULTI_REPO_MIGRATION.md](MULTI_REPO_MIGRATION.md) for complete guide.
                     ▼
 ┌──────────────┐  ┌─────────────────┐
 │  Team Member │─▶│ Shared Repo     │
-│  (main)      │  │ (beads-metadata)│
+│  (main)      │  │ (beads-sync)│
 └──────────────┘  └─────────────────┘
 ```
 
