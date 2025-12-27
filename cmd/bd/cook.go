@@ -365,6 +365,8 @@ type cookFormulaResult struct {
 // cookFormulaToSubgraph creates an in-memory TemplateSubgraph from a resolved formula.
 // This is the ephemeral proto implementation - no database storage.
 // The returned subgraph can be passed directly to cloneSubgraph for instantiation.
+//
+//nolint:unparam // error return kept for API consistency with future error handling
 func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgraph, error) {
 	// Map step ID -> created issue
 	issueMap := make(map[string]*types.Issue)

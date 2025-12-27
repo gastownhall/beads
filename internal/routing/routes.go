@@ -26,7 +26,7 @@ type Route struct {
 // Returns an empty slice if the file doesn't exist.
 func LoadRoutes(beadsDir string) ([]Route, error) {
 	routesPath := filepath.Join(beadsDir, RoutesFileName)
-	file, err := os.Open(routesPath)
+	file, err := os.Open(routesPath) //nolint:gosec // routesPath is constructed from known beadsDir
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No routes file is not an error
@@ -116,7 +116,7 @@ func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (stri
 // and resolves the redirect path if present.
 func resolveRedirect(beadsDir string) string {
 	redirectFile := filepath.Join(beadsDir, "redirect")
-	data, err := os.ReadFile(redirectFile)
+	data, err := os.ReadFile(redirectFile) //nolint:gosec // redirectFile is constructed from known beadsDir
 	if err != nil {
 		if os.Getenv("BD_DEBUG_ROUTING") != "" {
 			fmt.Fprintf(os.Stderr, "[routing] No redirect file at %s: %v\n", redirectFile, err)

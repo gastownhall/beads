@@ -564,7 +564,7 @@ func runFormulaConvert(cmd *cobra.Command, args []string) {
 	tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
 
 	// Write the TOML file
-	if err := os.WriteFile(tomlPath, tomlData, 0644); err != nil {
+	if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", tomlPath, err)
 		os.Exit(1)
 	}
@@ -623,7 +623,7 @@ func convertAllFormulas() {
 				continue
 			}
 
-			if err := os.WriteFile(tomlPath, tomlData, 0644); err != nil {
+			if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
 				fmt.Fprintf(os.Stderr, "✗ Error writing %s: %v\n", tomlPath, err)
 				errors++
 				continue

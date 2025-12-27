@@ -870,7 +870,7 @@ func evalTimerGate(gate *types.Issue, now time.Time) (bool, string) {
 // ghRunStatus represents the JSON output of `gh run view --json`
 type ghRunStatus struct {
 	Status     string `json:"status"`     // queued, in_progress, completed
-	Conclusion string `json:"conclusion"` // success, failure, cancelled, skipped, etc.
+	Conclusion string `json:"conclusion"` // success, failure, canceled, skipped, etc.
 }
 
 // evalGHRunGate checks if a GitHub Actions run has completed.
@@ -882,7 +882,7 @@ func evalGHRunGate(gate *types.Issue) (bool, string) {
 	}
 
 	// Run gh CLI to get run status
-	cmd := exec.Command("gh", "run", "view", runID, "--json", "status,conclusion")
+	cmd := exec.Command("gh", "run", "view", runID, "--json", "status,conclusion") //nolint:gosec // runID is from trusted issue.AwaitID field
 	output, err := cmd.Output()
 	if err != nil {
 		// gh CLI failed - could be network issue, invalid run ID, or gh not installed
@@ -924,7 +924,7 @@ func evalGHPRGate(gate *types.Issue) (bool, string) {
 	}
 
 	// Run gh CLI to get PR status
-	cmd := exec.Command("gh", "pr", "view", prNumber, "--json", "state,mergedAt")
+	cmd := exec.Command("gh", "pr", "view", prNumber, "--json", "state,mergedAt") //nolint:gosec // prNumber is from trusted issue.AwaitID field
 	output, err := cmd.Output()
 	if err != nil {
 		// gh CLI failed - could be network issue, invalid PR, or gh not installed

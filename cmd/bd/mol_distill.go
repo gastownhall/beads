@@ -254,9 +254,9 @@ func findWritableFormulaDir(formulaName string) string {
 		if err := os.MkdirAll(dir, 0755); err == nil {
 			// Check if we can write to it
 			testPath := filepath.Join(dir, ".write-test")
-			if f, err := os.Create(testPath); err == nil {
-				f.Close()
-				os.Remove(testPath)
+			if f, err := os.Create(testPath); err == nil { //nolint:gosec // testPath is constructed from known search paths
+				_ = f.Close()
+				_ = os.Remove(testPath)
 				return filepath.Join(dir, formulaName+formula.FormulaExt)
 			}
 		}

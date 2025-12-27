@@ -99,7 +99,10 @@ The 30-second debounce provides a **transaction window** for batch operations - 
 **MANDATORY WORKFLOW - COMPLETE ALL STEPS:**
 
 1. **File beads issues for any remaining work** that needs follow-up
-2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
+2. **Ensure all quality gates pass** (only if code changes were made):
+   - Run `make lint` or `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
+   - Run `make test` or `go test ./...`
+   - File P0 issues if quality gates are broken
 3. **Update beads issues** - close finished work, update status
 4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
    ```bash
