@@ -1222,12 +1222,16 @@ func (s *Server) handleShow(req *Request) Response {
 		}
 	}
 
+	// Fetch comments
+	comments, _ := store.GetIssueComments(ctx, issue.ID)
+
 	// Create detailed response with related data
 	type IssueDetails struct {
 		*types.Issue
 		Labels       []string                              `json:"labels,omitempty"`
 		Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 		Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+		Comments     []*types.Comment                      `json:"comments,omitempty"`
 	}
 
 	details := &IssueDetails{
@@ -1235,6 +1239,7 @@ func (s *Server) handleShow(req *Request) Response {
 		Labels:       labels,
 		Dependencies: deps,
 		Dependents:   dependents,
+		Comments:     comments,
 	}
 
 	data, _ := json.Marshal(details)

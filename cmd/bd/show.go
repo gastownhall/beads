@@ -111,6 +111,7 @@ var showCmd = &cobra.Command{
 						Labels       []string                             `json:"labels,omitempty"`
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
 					}
 					details := &IssueDetails{Issue: issue}
 					details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
@@ -118,6 +119,7 @@ var showCmd = &cobra.Command{
 						details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
 						details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
 					}
+					details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
 					allDetails = append(allDetails, details)
 				} else {
 					if displayIdx > 0 {
@@ -151,6 +153,7 @@ var showCmd = &cobra.Command{
 						Labels       []string                             `json:"labels,omitempty"`
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
@@ -173,6 +176,7 @@ var showCmd = &cobra.Command{
 						Labels       []string                             `json:"labels,omitempty"`
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err != nil {
@@ -299,6 +303,17 @@ var showCmd = &cobra.Command{
 							fmt.Printf("\nDiscovered (%d):\n", len(discovered))
 							for _, dep := range discovered {
 								fmt.Printf("  ◊ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
+							}
+						}
+					}
+
+					if len(details.Comments) > 0 {
+						fmt.Printf("\nComments (%d):\n", len(details.Comments))
+						for _, comment := range details.Comments {
+							fmt.Printf("  [%s] %s\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"))
+							commentLines := strings.Split(comment.Text, "\n")
+							for _, line := range commentLines {
+								fmt.Printf("    %s\n", line)
 							}
 						}
 					}
