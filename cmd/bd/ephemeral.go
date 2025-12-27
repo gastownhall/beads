@@ -27,24 +27,34 @@ import (
 //   bd ephemeral gc      - Garbage collect orphaned ephemeral issues
 
 var ephemeralCmd = &cobra.Command{
-	Use:   "ephemeral",
-	Short: "Manage ephemeral molecules",
-	Long: `Manage ephemeral issues - ephemeral molecules for operational workflows.
+	Use:   "ephemeral [proto-id]",
+	Short: "Create or manage ephemeral molecules",
+	Long: `Create or manage ephemeral issues - ephemeral molecules for operational workflows.
 
-Ephemeral issues are issues with Wisp=true in the main database. They're stored
+When called with a proto-id argument, creates an ephemeral mol from that proto.
+When called with a subcommand (list, gc), manages existing ephemeral issues.
+
+Ephemeral issues are issues with Ephemeral=true in the main database. They're stored
 locally but NOT exported to JSONL (and thus not synced via git).
 They're used for patrol cycles, operational loops, and other workflows
 that shouldn't accumulate in the shared issue database.
 
-The wisp lifecycle:
-  1. Create: bd ephemeral create <proto> or bd create --ephemeral
+The ephemeral lifecycle:
+  1. Create: bd mol ephemeral <proto> or bd create --ephemeral
   2. Execute: Normal bd operations work on ephemeral issues
-  3. Squash: bd mol squash <id> (clears Wisp flag, promotes to persistent)
-  4. Or burn: bd mol burn <id> (deletes wisp without creating digest)
+  3. Squash: bd mol squash <id> (clears Ephemeral flag, promotes to persistent)
+  4. Or burn: bd mol burn <id> (deletes without creating digest)
 
-Commands:
+Examples:
+  bd mol ephemeral mol-patrol             # Create ephemeral from proto
+  bd mol ephemeral list                   # List all ephemeral issues
+  bd mol ephemeral gc                     # Garbage collect old ephemeral issues
+
+Subcommands:
   list  List all ephemeral issues in current context
   gc    Garbage collect orphaned ephemeral issues`,
+	Args: cobra.MaximumNArgs(1),
+	Run:  runEphemeral,
 }
 
 // EphemeralListItem represents a wisp in list output
@@ -68,7 +78,19 @@ type EphemeralListResult struct {
 // OldThreshold is how old a wisp must be to be flagged as old (time-based, for ephemeral cleanup)
 const OldThreshold = 24 * time.Hour
 
-// ephemeralCreateCmd instantiates a proto as an ephemeral wisp
+// runEphemeral handles the ephemeral command when called directly with a proto-id
+// It delegates to runEphemeralCreate for the actual work
+func runEphemeral(cmd *cobra.Command, args []string) {
+	if len(args) == 0 {
+		// No proto-id provided, show help
+		cmd.Help()
+		return
+	}
+	// Delegate to the create logic
+	runEphemeralCreate(cmd, args)
+}
+
+// ephemeralCreateCmd instantiates a proto as an ephemeral wisp (kept for backwards compat)
 var ephemeralCreateCmd = &cobra.Command{
 	Use:   "create <proto-id>",
 	Short: "Instantiate a proto as an ephemeral wisp (solid -> vapor)",
@@ -634,7 +656,11 @@ func runEphemeralGC(cmd *cobra.Command, args []string) {
 }
 
 func init() {
-	// Ephemeral create command flags
+	// Ephemeral command flags (for direct create: bd mol ephemeral <proto>)
+	ephemeralCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value)")
+	ephemeralCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+
+	// Ephemeral create command flags (kept for backwards compat: bd mol ephemeral create <proto>)
 	ephemeralCreateCmd.Flags().StringSlice("var", []string{}, "Variable substitution (key=value)")
 	ephemeralCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 
@@ -647,5 +673,5 @@ func init() {
 	ephemeralCmd.AddCommand(ephemeralCreateCmd)
 	ephemeralCmd.AddCommand(ephemeralListCmd)
 	ephemeralCmd.AddCommand(ephemeralGCCmd)
-	rootCmd.AddCommand(ephemeralCmd)
+	molCmd.AddCommand(ephemeralCmd)
 }

@@ -20,8 +20,8 @@ import (
 // Usage:
 //   bd mol catalog                        # List available protos
 //   bd mol show <id>                      # Show proto/molecule structure
-//   bd pour <id> --var key=value          # Instantiate proto → persistent mol
-//   bd ephemeral create <id> --var key=value   # Instantiate proto → ephemeral wisp
+//   bd mol pour <id> --var key=value      # Instantiate proto → persistent mol
+//   bd mol ephemeral <id> --var key=value # Instantiate proto → ephemeral mol
 
 // MoleculeLabel is the label used to identify molecules (templates)
 // Molecules use the same label as templates - they ARE templates with workflow semantics
@@ -48,14 +48,14 @@ The molecule metaphor:
   - Distilling extracts a proto from an ad-hoc epic
 
 Commands:
-  catalog  List available protos
-  show     Show proto/molecule structure and variables
-  bond     Polymorphic combine: proto+proto, proto+mol, mol+mol
-  distill  Extract proto from ad-hoc epic
-
-See also:
-  bd pour <proto>          # Instantiate as persistent mol (liquid phase)
-  bd ephemeral create <proto>   # Instantiate as ephemeral wisp (vapor phase)`,
+  catalog    List available protos
+  show       Show proto/molecule structure and variables
+  pour       Instantiate proto as persistent mol (liquid phase)
+  ephemeral  Instantiate proto as ephemeral mol (vapor phase)
+  bond       Polymorphic combine: proto+proto, proto+mol, mol+mol
+  squash     Condense molecule to digest
+  burn       Discard ephemeral mol
+  distill    Extract proto from ad-hoc epic`,
 }
 
 // =============================================================================
