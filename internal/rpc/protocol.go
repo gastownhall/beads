@@ -93,7 +93,8 @@ type CreateArgs struct {
 	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// ID generation (bd-hobo)
-	IDPrefix string `json:"id_prefix,omitempty"` // Override prefix for ID generation (mol, wisp, etc.)
+	IDPrefix  string `json:"id_prefix,omitempty"`  // Override prefix for ID generation (mol, wisp, etc.)
+	CreatedBy string `json:"created_by,omitempty"` // Who created the issue
 }
 
 // UpdateArgs represents arguments for the update operation

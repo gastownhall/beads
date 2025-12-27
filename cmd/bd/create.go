@@ -223,6 +223,7 @@ var createCmd = &cobra.Command{
 				WaitsFor:           waitsFor,
 				WaitsForGate:       waitsForGate,
 				Wisp:               wisp,
+				CreatedBy:          getActorWithGit(),
 			}
 
 			resp, err := daemonClient.Create(createArgs)

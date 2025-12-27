@@ -180,7 +180,8 @@ func (s *Server) handleCreate(req *Request) Response {
 		Wisp:   createArgs.Wisp,
 		// NOTE: RepliesTo now handled via replies-to dependency (Decision 004)
 		// ID generation (bd-hobo)
-		IDPrefix: createArgs.IDPrefix,
+		IDPrefix:  createArgs.IDPrefix,
+		CreatedBy: createArgs.CreatedBy,
 	}
 	
 	// Check if any dependencies are discovered-from type
