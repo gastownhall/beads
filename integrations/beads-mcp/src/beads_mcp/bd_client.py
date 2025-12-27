@@ -12,7 +12,6 @@ from .config import load_config
 from .models import (
     AddDependencyParams,
     BlockedIssue,
-    BlockedParams,
     CloseIssueParams,
     CreateIssueParams,
     InitParams,
@@ -127,7 +126,7 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def blocked(self, params: Optional[BlockedParams] = None) -> List[BlockedIssue]:
+    async def blocked(self) -> List[BlockedIssue]:
         """Get blocked issues."""
         pass
 
@@ -396,8 +395,6 @@ class BdCliClient(BdClientBase):
             args.append("--unassigned")
         if params.sort_policy:
             args.extend(["--sort", params.sort_policy])
-        if params.parent_id:
-            args.extend(["--parent", params.parent_id])
 
         data = await self._run_command(*args)
         if not isinstance(data, list):
@@ -667,21 +664,13 @@ class BdCliClient(BdClientBase):
 
         return Stats.model_validate(data)
 
-    async def blocked(self, params: BlockedParams | None = None) -> list[BlockedIssue]:
+    async def blocked(self) -> list[BlockedIssue]:
         """Get blocked issues.
-
-        Args:
-            params: Query parameters
 
         Returns:
             List of blocked issues with blocking information
         """
-        params = params or BlockedParams()
-        args = ["blocked"]
-        if params.parent_id:
-            args.extend(["--parent", params.parent_id])
-
-        data = await self._run_command(*args)
+        data = await self._run_command("blocked")
         if not isinstance(data, list):
             return []
 
@@ -842,6 +831,11 @@ def create_bd_client(
         If prefer_daemon is True and daemon is not running, falls back to CLI client.
         To check if daemon is running without falling back, use BdDaemonClient directly.
     """
+    # Windows doesn't support Unix domain sockets (GH#387)
+    # Skip daemon mode entirely on Windows
+    if prefer_daemon and sys.platform == 'win32':
+        prefer_daemon = False
+
     if prefer_daemon:
         try:
             from .bd_daemon_client import BdDaemonClient

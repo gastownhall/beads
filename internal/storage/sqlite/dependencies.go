@@ -247,7 +247,7 @@ func (s *SQLiteStorage) GetDependenciesWithMetadata(ctx context.Context, issueID
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.created_by, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
@@ -270,7 +270,7 @@ func (s *SQLiteStorage) GetDependentsWithMetadata(ctx context.Context, issueID s
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.created_by, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
@@ -484,7 +484,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				SELECT
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-				i.estimated_minutes, i.created_at, i.created_by, i.updated_at, i.closed_at,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
 				i.external_ref,
 				0 as depth,
 				i.id as path,
@@ -497,7 +497,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				SELECT
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-				i.estimated_minutes, i.created_at, i.created_by, i.updated_at, i.closed_at,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
 				i.external_ref,
 				t.depth + 1,
 				t.path || '→' || i.id,
@@ -525,7 +525,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				SELECT
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-				i.estimated_minutes, i.created_at, i.created_by, i.updated_at, i.closed_at,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
 				i.external_ref,
 				0 as depth,
 				i.id as path,
@@ -538,7 +538,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 				SELECT
 				i.id, i.title, i.status, i.priority, i.description, i.design,
 				i.acceptance_criteria, i.notes, i.issue_type, i.assignee,
-				i.estimated_minutes, i.created_at, i.created_by, i.updated_at, i.closed_at,
+				i.estimated_minutes, i.created_at, i.updated_at, i.closed_at,
 				i.external_ref,
 				t.depth + 1,
 				t.path || '→' || i.id,
@@ -839,7 +839,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.CreatedBy, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
@@ -885,7 +885,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
-			issue.Ephemeral = true
+			issue.Wisp = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {
@@ -962,7 +962,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.CreatedBy, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
+			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
@@ -1006,7 +1006,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
-			issue.Ephemeral = true
+			issue.Wisp = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {

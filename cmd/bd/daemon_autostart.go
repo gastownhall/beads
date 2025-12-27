@@ -31,19 +31,6 @@ var (
 	daemonStartFailures    int
 )
 
-var (
-	executableFn             = os.Executable
-	execCommandFn            = exec.Command
-	openFileFn               = os.OpenFile
-	findProcessFn            = os.FindProcess
-	removeFileFn             = os.Remove
-	configureDaemonProcessFn = configureDaemonProcess
-	waitForSocketReadinessFn = waitForSocketReadiness
-	startDaemonProcessFn     = startDaemonProcess
-	isDaemonRunningFn        = isDaemonRunning
-	sendStopSignalFn         = sendStopSignal
-)
-
 // shouldAutoStartDaemon checks if daemon auto-start is enabled
 func shouldAutoStartDaemon() bool {
 	// Check BEADS_NO_DAEMON first (escape hatch for single-user workflows)
@@ -66,6 +53,7 @@ func shouldAutoStartDaemon() bool {
 	return config.GetBool("auto-start-daemon") // Defaults to true
 }
 
+
 // restartDaemonForVersionMismatch stops the old daemon and starts a new one
 // Returns true if restart was successful
 func restartDaemonForVersionMismatch() bool {
@@ -79,17 +67,17 @@ func restartDaemonForVersionMismatch() bool {
 
 	// Check if daemon is running and stop it
 	forcedKill := false
-	if isRunning, pid := isDaemonRunningFn(pidFile); isRunning {
+	if isRunning, pid := isDaemonRunning(pidFile); isRunning {
 		debug.Logf("stopping old daemon (PID %d)", pid)
 
-		process, err := findProcessFn(pid)
+		process, err := os.FindProcess(pid)
 		if err != nil {
 			debug.Logf("failed to find process: %v", err)
 			return false
 		}
 
 		// Send stop signal
-		if err := sendStopSignalFn(process); err != nil {
+		if err := sendStopSignal(process); err != nil {
 			debug.Logf("failed to signal daemon: %v", err)
 			return false
 		}
@@ -97,14 +85,14 @@ func restartDaemonForVersionMismatch() bool {
 		// Wait for daemon to stop, then force kill
 		for i := 0; i < daemonShutdownAttempts; i++ {
 			time.Sleep(daemonShutdownPollInterval)
-			if isRunning, _ := isDaemonRunningFn(pidFile); !isRunning {
+			if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
 				debug.Logf("old daemon stopped successfully")
 				break
 			}
 		}
 
 		// Force kill if still running
-		if isRunning, _ := isDaemonRunningFn(pidFile); isRunning {
+		if isRunning, _ := isDaemonRunning(pidFile); isRunning {
 			debug.Logf("force killing old daemon")
 			_ = process.Kill()
 			forcedKill = true
@@ -113,19 +101,19 @@ func restartDaemonForVersionMismatch() bool {
 
 	// Clean up stale socket and PID file after force kill or if not running
 	if forcedKill || !isDaemonRunningQuiet(pidFile) {
-		_ = removeFileFn(socketPath)
-		_ = removeFileFn(pidFile)
+		_ = os.Remove(socketPath)
+		_ = os.Remove(pidFile)
 	}
 
 	// Start new daemon with current binary version
-	exe, err := executableFn()
+	exe, err := os.Executable()
 	if err != nil {
 		debug.Logf("failed to get executable path: %v", err)
 		return false
 	}
 
 	args := []string{"daemon", "--start"}
-	cmd := execCommandFn(exe, args...)
+	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
 
 	// Set working directory to database directory so daemon finds correct DB
@@ -133,9 +121,9 @@ func restartDaemonForVersionMismatch() bool {
 		cmd.Dir = filepath.Dir(dbPath)
 	}
 
-	configureDaemonProcessFn(cmd)
+	configureDaemonProcess(cmd)
 
-	devNull, err := openFileFn(os.DevNull, os.O_RDWR, 0)
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err == nil {
 		cmd.Stdin = devNull
 		cmd.Stdout = devNull
@@ -152,7 +140,7 @@ func restartDaemonForVersionMismatch() bool {
 	go func() { _ = cmd.Wait() }()
 
 	// Wait for daemon to be ready using shared helper
-	if waitForSocketReadinessFn(socketPath, 5*time.Second) {
+	if waitForSocketReadiness(socketPath, 5*time.Second) {
 		debug.Logf("new daemon started successfully")
 		return true
 	}
@@ -165,7 +153,7 @@ func restartDaemonForVersionMismatch() bool {
 
 // isDaemonRunningQuiet checks if daemon is running without output
 func isDaemonRunningQuiet(pidFile string) bool {
-	isRunning, _ := isDaemonRunningFn(pidFile)
+	isRunning, _ := isDaemonRunning(pidFile)
 	return isRunning
 }
 
@@ -197,7 +185,7 @@ func tryAutoStartDaemon(socketPath string) bool {
 	}
 
 	socketPath = determineSocketPath(socketPath)
-	return startDaemonProcessFn(socketPath)
+	return startDaemonProcess(socketPath)
 }
 
 func debugLog(msg string, args ...interface{}) {
@@ -281,21 +269,21 @@ func determineSocketPath(socketPath string) string {
 }
 
 func startDaemonProcess(socketPath string) bool {
-	binPath, err := executableFn()
+	binPath, err := os.Executable()
 	if err != nil {
 		binPath = os.Args[0]
 	}
 
 	args := []string{"daemon", "--start"}
 
-	cmd := execCommandFn(binPath, args...)
+	cmd := exec.Command(binPath, args...)
 	setupDaemonIO(cmd)
 
 	if dbPath != "" {
 		cmd.Dir = filepath.Dir(dbPath)
 	}
 
-	configureDaemonProcessFn(cmd)
+	configureDaemonProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		recordDaemonStartFailure()
 		debugLog("failed to start daemon: %v", err)
@@ -304,7 +292,7 @@ func startDaemonProcess(socketPath string) bool {
 
 	go func() { _ = cmd.Wait() }()
 
-	if waitForSocketReadinessFn(socketPath, 5*time.Second) {
+	if waitForSocketReadiness(socketPath, 5*time.Second) {
 		recordDaemonStartSuccess()
 		return true
 	}
@@ -318,7 +306,7 @@ func startDaemonProcess(socketPath string) bool {
 }
 
 func setupDaemonIO(cmd *exec.Cmd) {
-	devNull, err := openFileFn(os.DevNull, os.O_RDWR, 0)
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err == nil {
 		cmd.Stdout = devNull
 		cmd.Stderr = devNull

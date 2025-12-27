@@ -136,7 +136,7 @@ func findStaleMolecules(ctx context.Context, s storage.Storage, blockingOnly, un
 	}
 
 	// Get blocked issues to find what each stale molecule is blocking
-	blockedIssues, err := s.GetBlockedIssues(ctx, types.WorkFilter{})
+	blockedIssues, err := s.GetBlockedIssues(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("querying blocked issues: %w", err)
 	}

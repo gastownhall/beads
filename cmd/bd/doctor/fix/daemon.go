@@ -3,6 +3,7 @@ package fix
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -35,7 +36,7 @@ func Daemon(path string) error {
 	}
 
 	// Run bd daemons killall to clean up stale daemons
-	cmd := newBdCmd(bdBinary, "daemons", "killall")
+	cmd := exec.Command(bdBinary, "daemons", "killall") // #nosec G204 -- bdBinary from validated executable path
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

@@ -157,15 +157,6 @@ func runCook(cmd *cobra.Command, args []string) {
 		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
-	// Apply inline step expansions (gt-8tmz.35)
-	// This processes Step.Expand fields before compose.expand/map rules
-	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error applying inline expansions: %v\n", err)
-		os.Exit(1)
-	}
-	resolved.Steps = inlineExpandedSteps
-
 	// Apply expansion operators (gt-8tmz.3)
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
 		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
@@ -353,7 +344,7 @@ func runCook(cmd *cobra.Command, args []string) {
 	if len(bondPoints) > 0 {
 		fmt.Printf("  Bond points: %s\n", strings.Join(bondPoints, ", "))
 	}
-	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>\n", result.ProtoID)
+	fmt.Printf("\nTo use: bd pour %s --var <name>=<value>\n", result.ProtoID)
 }
 
 // cookFormulaResult holds the result of cooking
@@ -365,8 +356,6 @@ type cookFormulaResult struct {
 // cookFormulaToSubgraph creates an in-memory TemplateSubgraph from a resolved formula.
 // This is the ephemeral proto implementation - no database storage.
 // The returned subgraph can be passed directly to cloneSubgraph for instantiation.
-//
-//nolint:unparam // error return kept for API consistency with future error handling
 func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgraph, error) {
 	// Map step ID -> created issue
 	issueMap := make(map[string]*types.Issue)
@@ -596,13 +585,6 @@ func resolveAndCookFormula(formulaName string, searchPaths []string) (*TemplateS
 	if len(resolved.Advice) > 0 {
 		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
-
-	// Apply inline step expansions (gt-8tmz.35)
-	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
-	if err != nil {
-		return nil, fmt.Errorf("applying inline expansions to %q: %w", formulaName, err)
-	}
-	resolved.Steps = inlineExpandedSteps
 
 	// Apply expansion operators (gt-8tmz.3)
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {

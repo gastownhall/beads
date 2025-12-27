@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 // GetGitDir returns the actual .git directory path for the current repository.
@@ -53,52 +52,27 @@ func GetGitHeadPath() (string, error) {
 	return filepath.Join(gitDir, "HEAD"), nil
 }
 
-// isWorktreeOnce ensures we only check worktree status once per process.
-// This is safe because worktree status cannot change during a single command execution.
-var (
-	isWorktreeOnce   sync.Once
-	isWorktreeResult bool
-)
-
 // IsWorktree returns true if the current directory is in a Git worktree.
 // This is determined by comparing --git-dir and --git-common-dir.
-// The result is cached after the first call since worktree status doesn't
-// change during a single command execution.
 func IsWorktree() bool {
-	isWorktreeOnce.Do(func() {
-		isWorktreeResult = isWorktreeUncached()
-	})
-	return isWorktreeResult
-}
-
-// isWorktreeUncached performs the actual worktree check without caching.
-// Called once by IsWorktree and cached for subsequent calls.
-func isWorktreeUncached() bool {
 	gitDir := getGitDirNoError("--git-dir")
 	if gitDir == "" {
 		return false
 	}
-
+	
 	commonDir := getGitDirNoError("--git-common-dir")
 	if commonDir == "" {
 		return false
 	}
-
+	
 	absGit, err1 := filepath.Abs(gitDir)
 	absCommon, err2 := filepath.Abs(commonDir)
 	if err1 != nil || err2 != nil {
 		return false
 	}
-
+	
 	return absGit != absCommon
 }
-
-// mainRepoRootOnce ensures we only get main repo root once per process.
-var (
-	mainRepoRootOnce   sync.Once
-	mainRepoRootResult string
-	mainRepoRootErr    error
-)
 
 // GetMainRepoRoot returns the main repository root directory.
 // When in a worktree, this returns the main repository root.
@@ -108,16 +82,7 @@ var (
 // /project/.worktrees/feature/), this correctly returns the main repo
 // root (/project/) by using git rev-parse --git-common-dir which always
 // points to the main repo's .git directory. (GH#509)
-// The result is cached after the first call.
 func GetMainRepoRoot() (string, error) {
-	mainRepoRootOnce.Do(func() {
-		mainRepoRootResult, mainRepoRootErr = getMainRepoRootUncached()
-	})
-	return mainRepoRootResult, mainRepoRootErr
-}
-
-// getMainRepoRootUncached performs the actual main repo root lookup without caching.
-func getMainRepoRootUncached() (string, error) {
 	// Use --git-common-dir which always returns the main repo's .git directory,
 	// even when running from within a worktree or its subdirectories.
 	// This is the most reliable method for finding the main repo root.
@@ -138,28 +103,13 @@ func getMainRepoRootUncached() (string, error) {
 	return mainRepoRoot, nil
 }
 
-// repoRootOnce ensures we only get repo root once per process.
-var (
-	repoRootOnce   sync.Once
-	repoRootResult string
-)
-
 // GetRepoRoot returns the root directory of the current git repository.
 // Returns empty string if not in a git repository.
 //
 // This function is worktree-aware and handles Windows path normalization
 // (Git on Windows may return paths like /c/Users/... or C:/Users/...).
 // It also resolves symlinks to get the canonical path.
-// The result is cached after the first call.
 func GetRepoRoot() string {
-	repoRootOnce.Do(func() {
-		repoRootResult = getRepoRootUncached()
-	})
-	return repoRootResult
-}
-
-// getRepoRootUncached performs the actual repo root lookup without caching.
-func getRepoRootUncached() string {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
@@ -206,20 +156,4 @@ func getGitDirNoError(flag string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// ResetCaches resets all cached git information. This is intended for use
-// by tests that need to change directory between subtests.
-// In production, these caches are safe because the working directory
-// doesn't change during a single command execution.
-//
-// WARNING: Not thread-safe. Only call from single-threaded test contexts.
-func ResetCaches() {
-	isWorktreeOnce = sync.Once{}
-	isWorktreeResult = false
-	mainRepoRootOnce = sync.Once{}
-	mainRepoRootResult = ""
-	mainRepoRootErr = nil
-	repoRootOnce = sync.Once{}
-	repoRootResult = ""
 }

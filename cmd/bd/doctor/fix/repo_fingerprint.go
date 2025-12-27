@@ -3,6 +3,7 @@ package fix
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -30,9 +31,9 @@ func readLineUnbuffered() (string, error) {
 // RepoFingerprint fixes repo fingerprint mismatches by prompting the user
 // for which action to take. This is interactive because the consequences
 // differ significantly between options:
-//  1. Update repo ID (if URL changed or bd upgraded)
-//  2. Reinitialize database (if wrong database was copied)
-//  3. Skip (do nothing)
+//   1. Update repo ID (if URL changed or bd upgraded)
+//   2. Reinitialize database (if wrong database was copied)
+//   3. Skip (do nothing)
 func RepoFingerprint(path string) error {
 	// Validate workspace
 	if err := validateBeadsWorkspace(path); err != nil {
@@ -66,7 +67,7 @@ func RepoFingerprint(path string) error {
 	case "1":
 		// Run bd migrate --update-repo-id
 		fmt.Println("  → Running 'bd migrate --update-repo-id'...")
-		cmd := newBdCmd(bdBinary, "migrate", "--update-repo-id")
+		cmd := exec.Command(bdBinary, "migrate", "--update-repo-id") // #nosec G204 -- bdBinary from validated executable path
 		cmd.Dir = path
 		cmd.Stdin = os.Stdin // Allow user to respond to migrate's confirmation prompt
 		cmd.Stdout = os.Stdout
@@ -104,7 +105,7 @@ func RepoFingerprint(path string) error {
 		_ = os.Remove(dbPath + "-shm")
 
 		fmt.Println("  → Running 'bd init'...")
-		cmd := newBdCmd(bdBinary, "init", "--quiet")
+		cmd := exec.Command(bdBinary, "init", "--quiet") // #nosec G204 -- bdBinary from validated executable path
 		cmd.Dir = path
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

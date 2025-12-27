@@ -361,9 +361,6 @@ Use --merge to merge the sync branch back to main branch.`,
 				}
 			}
 
-			// Clear sync state on successful sync (daemon backoff/hints)
-			_ = ClearSyncState(beadsDir)
-
 			fmt.Println("\n✓ Sync complete")
 			return
 		}
@@ -712,11 +709,6 @@ Use --merge to merge the sync branch back to main branch.`,
 				// Skip final flush in PersistentPostRun - we've already exported to sync branch
 				// and restored the working directory to match the current branch
 				skipFinalFlush = true
-			}
-
-			// Clear sync state on successful sync (daemon backoff/hints)
-			if bd := beads.FindBeadsDir(); bd != "" {
-				_ = ClearSyncState(bd)
 			}
 
 			fmt.Println("\n✓ Sync complete")

@@ -5,8 +5,6 @@ import (
 	"os/exec"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/beads/internal/git"
 )
 
 // waitFor repeatedly evaluates pred until it returns true or timeout expires.
@@ -39,15 +37,11 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
-	git.ResetCaches()
-
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
+	// Initialize git repo
+	if err := exec.Command("git", "init").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
-	git.ResetCaches()
 
 	// Configure git
 	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
@@ -66,7 +60,6 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
-		git.ResetCaches()
 	}
 
 	return tmpDir, cleanup
@@ -87,15 +80,11 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
-	git.ResetCaches()
-
 	// Initialize git repo with specific branch
 	if err := exec.Command("git", "init", "-b", branch).Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
-	git.ResetCaches()
 
 	// Configure git
 	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
@@ -114,7 +103,6 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
-		git.ResetCaches()
 	}
 
 	return tmpDir, cleanup
@@ -135,11 +123,8 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
-	git.ResetCaches()
-
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
+	// Initialize git repo
+	if err := exec.Command("git", "init").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to init git repo: %v", err)
 	}
@@ -150,7 +135,6 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
-		git.ResetCaches()
 	}
 
 	return tmpDir, cleanup

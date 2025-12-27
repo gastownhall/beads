@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -312,9 +311,6 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Set up signal-aware context for graceful cancellation
 		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-
-		// Signal Gas Town daemon about bd activity (best-effort, for exponential backoff)
-		defer signalGasTownActivity()
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
@@ -627,13 +623,6 @@ var rootCmd = &cobra.Command{
 			FallbackReason:   FallbackNone,
 		}
 
-		// Doctor should always run in direct mode. It's specifically used to diagnose and
-		// repair daemon/DB issues, so attempting to connect to (or auto-start) a daemon
-		// can add noise and timeouts.
-		if cmd.Name() == "doctor" {
-			noDaemon = true
-		}
-
 		// Try to connect to daemon first (unless --no-daemon flag is set or worktree safety check fails)
 		if noDaemon {
 			daemonStatus.FallbackReason = FallbackFlagNoDaemon
@@ -875,9 +864,6 @@ var rootCmd = &cobra.Command{
 				debug.Logf("loaded %d molecules from %v", result.Loaded, result.Sources)
 			}
 		}
-
-		// Tips (including sync conflict proactive checks) are shown via maybeShowTip()
-		// after successful command execution, not in PreRun
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		// Handle --no-db mode: write memory storage back to JSONL
@@ -931,14 +917,8 @@ var rootCmd = &cobra.Command{
 		if store != nil {
 			_ = store.Close()
 		}
-		if profileFile != nil {
-			pprof.StopCPUProfile()
-			_ = profileFile.Close()
-		}
-		if traceFile != nil {
-			trace.Stop()
-			_ = traceFile.Close()
-		}
+		if profileFile != nil { pprof.StopCPUProfile(); _ = profileFile.Close() }
+		if traceFile != nil { trace.Stop(); _ = traceFile.Close() }
 
 		// Cancel the signal context to clean up resources
 		if rootCancel != nil {
@@ -950,80 +930,6 @@ var rootCmd = &cobra.Command{
 // getDebounceDuration returns the auto-flush debounce duration
 // Configurable via config file or BEADS_FLUSH_DEBOUNCE env var (e.g., "500ms", "10s")
 // Defaults to 5 seconds if not set or invalid
-
-// signalGasTownActivity writes an activity signal for Gas Town daemon.
-// This enables exponential backoff based on bd usage detection (gt-ws8ol).
-// Best-effort: silent on any failure, never affects bd operation.
-func signalGasTownActivity() {
-	// Determine town root
-	// Priority: GT_ROOT env > detect from cwd path > skip
-	townRoot := os.Getenv("GT_ROOT")
-	if townRoot == "" {
-		// Try to detect from cwd - if under ~/gt/, use that as town root
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		gtRoot := filepath.Join(home, "gt")
-		cwd, err := os.Getwd()
-		if err != nil {
-			return
-		}
-		if strings.HasPrefix(cwd, gtRoot+string(os.PathSeparator)) {
-			townRoot = gtRoot
-		}
-	}
-
-	if townRoot == "" {
-		return // Not in Gas Town, skip
-	}
-
-	// Ensure daemon directory exists
-	daemonDir := filepath.Join(townRoot, "daemon")
-	if err := os.MkdirAll(daemonDir, 0755); err != nil {
-		return
-	}
-
-	// Build command line from os.Args
-	cmdLine := strings.Join(os.Args, " ")
-
-	// Determine actor (use package-level var if set, else fall back to env)
-	actorName := actor
-	if actorName == "" {
-		if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
-			actorName = bdActor
-		} else if user := os.Getenv("USER"); user != "" {
-			actorName = user
-		} else {
-			actorName = "unknown"
-		}
-	}
-
-	// Build activity signal
-	activity := struct {
-		LastCommand string `json:"last_command"`
-		Actor       string `json:"actor"`
-		Timestamp   string `json:"timestamp"`
-	}{
-		LastCommand: cmdLine,
-		Actor:       actorName,
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-	}
-
-	data, err := json.Marshal(activity)
-	if err != nil {
-		return
-	}
-
-	// Write atomically (write to temp, rename)
-	activityPath := filepath.Join(daemonDir, "activity.json")
-	tmpPath := activityPath + ".tmp"
-	// nolint:gosec // G306: 0644 is appropriate for a status file
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return
-	}
-	_ = os.Rename(tmpPath, activityPath)
-}
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {

@@ -31,7 +31,7 @@ func TestCommitToSyncBranch(t *testing.T) {
 		writeFile(t, jsonlPath, `{"id":"test-1"}`)
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "initial sync branch commit")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Write new content to commit
 		writeFile(t, jsonlPath, `{"id":"test-1"}`+"\n"+`{"id":"test-2"}`)
@@ -64,7 +64,7 @@ func TestCommitToSyncBranch(t *testing.T) {
 		writeFile(t, jsonlPath, `{"id":"test-1"}`)
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "initial")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Write the same content that's in the sync branch
 		writeFile(t, jsonlPath, `{"id":"test-1"}`)
@@ -101,7 +101,7 @@ func TestPullFromSyncBranch(t *testing.T) {
 		writeFile(t, jsonlPath, `{"id":"test-1"}`)
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "local sync")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Pull should handle the case where remote doesn't have the branch
 		result, err := PullFromSyncBranch(ctx, repoDir, syncBranch, jsonlPath, false)
@@ -131,7 +131,7 @@ func TestPullFromSyncBranch(t *testing.T) {
 		runGit(t, repoDir, "commit", "-m", "sync commit")
 		// Set up a fake remote ref at the same commit
 		runGit(t, repoDir, "update-ref", "refs/remotes/origin/"+syncBranch, "HEAD")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Pull when already at remote HEAD
 		result, err := PullFromSyncBranch(ctx, repoDir, syncBranch, jsonlPath, false)
@@ -158,7 +158,7 @@ func TestPullFromSyncBranch(t *testing.T) {
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "sync commit")
 		runGit(t, repoDir, "update-ref", "refs/remotes/origin/"+syncBranch, "HEAD")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Remove local JSONL to verify it gets copied back
 		os.Remove(jsonlPath)
@@ -198,7 +198,7 @@ func TestPullFromSyncBranch(t *testing.T) {
 
 		// Reset back to base (so remote is ahead)
 		runGit(t, repoDir, "reset", "--hard", baseCommit)
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// Pull should fast-forward
 		result, err := PullFromSyncBranch(ctx, repoDir, syncBranch, jsonlPath, false)
@@ -233,7 +233,7 @@ func TestResetToRemote(t *testing.T) {
 		writeFile(t, jsonlPath, `{"id":"local-1"}`)
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "local commit")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// ResetToRemote should fail since remote branch doesn't exist
 		err := ResetToRemote(ctx, repoDir, syncBranch, jsonlPath)
@@ -264,7 +264,7 @@ func TestPushSyncBranch(t *testing.T) {
 		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
 		runGit(t, repoDir, "add", ".")
 		runGit(t, repoDir, "commit", "-m", "initial")
-		runGit(t, repoDir, "checkout", "main")
+		runGit(t, repoDir, "checkout", "master")
 
 		// PushSyncBranch should handle the worktree creation
 		err := PushSyncBranch(ctx, repoDir, syncBranch)
@@ -391,8 +391,8 @@ func setupTestRepoWithRemote(t *testing.T) string {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	runGit(t, tmpDir, "init", "--initial-branch=main")
+	// Initialize git repo
+	runGit(t, tmpDir, "init")
 	runGit(t, tmpDir, "config", "user.email", "test@test.com")
 	runGit(t, tmpDir, "config", "user.name", "Test User")
 
@@ -413,3 +413,4 @@ func setupTestRepoWithRemote(t *testing.T) string {
 
 	return tmpDir
 }
+

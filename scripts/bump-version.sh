@@ -12,13 +12,10 @@ set -e
 # QUICK START (for typical release):
 #
 #   # 1. Update CHANGELOG.md and cmd/bd/info.go with release notes (manual)
-#   # 2. Run version bump with chaos tests and all local installations:
-#   ./scripts/bump-version.sh X.Y.Z --run-chaos-tests --commit --tag --push --all
-#
-# Or step by step:
-#   ./scripts/bump-version.sh X.Y.Z --run-chaos-tests  # Run chaos tests first
-#   ./scripts/bump-version.sh X.Y.Z --commit --all     # Commit and install
-#   git push origin main && git push origin vX.Y.Z     # Push
+#   # 2. Run version bump with all local installations:
+#   ./scripts/bump-version.sh X.Y.Z --commit --all
+#   # 3. Test locally, then push:
+#   git push origin main && git push origin vX.Y.Z
 #
 # WHAT --all DOES:
 #   --install          - Build bd and install to ~/go/bin AND ~/.local/bin
@@ -50,7 +47,7 @@ NC='\033[0m' # No Color
 
 # Usage message
 usage() {
-    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install] [--upgrade-mcp] [--mcp-local] [--restart-daemons] [--run-chaos-tests] [--publish-npm] [--publish-pypi] [--publish-all] [--all]"
+    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install] [--upgrade-mcp] [--mcp-local] [--restart-daemons] [--publish-npm] [--publish-pypi] [--publish-all] [--all]"
     echo ""
     echo "Bump version across all beads components."
     echo ""
@@ -63,7 +60,6 @@ usage() {
     echo "  --upgrade-mcp    Upgrade local beads-mcp installation via pip after version bump"
     echo "  --mcp-local      Install beads-mcp from local source (for pre-PyPI testing)"
     echo "  --restart-daemons  Restart all bd daemons to pick up new version"
-    echo "  --run-chaos-tests  Run chaos/corruption recovery tests before tagging"
     echo "  --publish-npm    Publish npm package to registry (requires npm login)"
     echo "  --publish-pypi   Publish beads-mcp to PyPI (requires TWINE credentials)"
     echo "  --publish-all    Shorthand for --publish-npm --publish-pypi"
@@ -79,11 +75,7 @@ usage() {
     echo "  $0 0.9.3 --commit --tag --push      # Full release preparation"
     echo "  $0 0.9.3 --all                      # Install bd, local MCP, and restart daemons"
     echo "  $0 0.9.3 --commit --all             # Commit and install everything locally"
-    echo "  $0 0.9.3 --run-chaos-tests          # Run chaos tests before proceeding"
     echo "  $0 0.9.3 --publish-all              # Publish to npm and PyPI"
-    echo ""
-    echo "Recommended release command (includes chaos testing):"
-    echo "  $0 X.Y.Z --run-chaos-tests --commit --tag --push --all"
     exit 1
 }
 
@@ -161,7 +153,6 @@ main() {
     AUTO_RESTART_DAEMONS=false
     AUTO_PUBLISH_NPM=false
     AUTO_PUBLISH_PYPI=false
-    AUTO_RUN_CHAOS_TESTS=false
 
     # Parse flags
     shift  # Remove version argument
@@ -197,9 +188,6 @@ main() {
             --publish-all)
                 AUTO_PUBLISH_NPM=true
                 AUTO_PUBLISH_PYPI=true
-                ;;
-            --run-chaos-tests)
-                AUTO_RUN_CHAOS_TESTS=true
                 ;;
             --all)
                 AUTO_INSTALL=true
@@ -368,26 +356,13 @@ main() {
             exit 1
         fi
 
-        # Codesign the binary on macOS (required to avoid "Killed: 9")
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            xattr -cr /tmp/bd-new 2>/dev/null
-            codesign -f -s - /tmp/bd-new 2>/dev/null
-            echo -e "${GREEN}✓ bd codesigned for macOS${NC}"
-        fi
-
         # Install to GOPATH/bin (typically ~/go/bin)
         cp /tmp/bd-new "$GOPATH_BIN/bd"
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            codesign -f -s - "$GOPATH_BIN/bd" 2>/dev/null
-        fi
         echo -e "${GREEN}✓ bd installed to $GOPATH_BIN/bd${NC}"
 
         # Install to ~/.local/bin if it exists or we can create it
         if [ -d "$LOCAL_BIN" ] || mkdir -p "$LOCAL_BIN" 2>/dev/null; then
             cp /tmp/bd-new "$LOCAL_BIN/bd"
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                codesign -f -s - "$LOCAL_BIN/bd" 2>/dev/null
-            fi
             echo -e "${GREEN}✓ bd installed to $LOCAL_BIN/bd${NC}"
         else
             echo -e "${YELLOW}⚠ Could not install to $LOCAL_BIN (directory doesn't exist)${NC}"
@@ -625,34 +600,6 @@ main() {
 
         cd ../..
         echo ""
-    fi
-
-    # Run chaos tests if requested (before commit/tag to catch issues early)
-    if [ "$AUTO_RUN_CHAOS_TESTS" = true ]; then
-        echo "Running chaos/corruption recovery tests..."
-        echo "  (This tests database corruption recovery, may take a few minutes)"
-        echo ""
-
-        # Run chaos tests with the chaos build tag
-        if go test -tags=chaos -timeout=10m ./cmd/bd/...; then
-            echo -e "${GREEN}✓ Chaos tests passed${NC}"
-            echo ""
-        else
-            echo -e "${RED}✗ Chaos tests failed${NC}"
-            echo -e "${YELLOW}  Fix the failures before releasing.${NC}"
-            exit 1
-        fi
-
-        # Also run E2E tests if available
-        echo "Running E2E tests..."
-        if go test -tags=e2e -timeout=10m ./cmd/bd/...; then
-            echo -e "${GREEN}✓ E2E tests passed${NC}"
-            echo ""
-        else
-            echo -e "${RED}✗ E2E tests failed${NC}"
-            echo -e "${YELLOW}  Fix the failures before releasing.${NC}"
-            exit 1
-        fi
     fi
 
     # Check if cmd/bd/info.go has been updated with the new version

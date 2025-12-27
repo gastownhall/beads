@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -898,7 +897,11 @@ func setupDaemonTestEnvForDelete(t *testing.T) (context.Context, context.CancelF
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	log := daemonLogger{logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	log := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf("[daemon] "+format, args...)
+		},
+	}
 
 	server, _, err := startRPCServer(ctx, socketPath, testStore, tmpDir, testDBPath, log)
 	if err != nil {

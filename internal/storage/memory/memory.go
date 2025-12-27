@@ -1097,15 +1097,9 @@ func (m *MemoryStorage) getOpenBlockers(issueID string) []string {
 
 // GetBlockedIssues returns issues that are blocked by other issues
 // Note: Pinned issues are excluded from the output (beads-ei4)
-func (m *MemoryStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
+func (m *MemoryStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	// Build set of descendant IDs if parent filter is specified
-	var descendantIDs map[string]bool
-	if filter.ParentID != nil {
-		descendantIDs = m.getAllDescendants(*filter.ParentID)
-	}
 
 	var results []*types.BlockedIssue
 
@@ -1117,11 +1111,6 @@ func (m *MemoryStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 
 		// Exclude pinned issues (beads-ei4)
 		if issue.Pinned {
-			continue
-		}
-
-		// Parent filtering: only include descendants of specified parent
-		if descendantIDs != nil && !descendantIDs[issue.ID] {
 			continue
 		}
 
@@ -1160,27 +1149,6 @@ func (m *MemoryStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 	return results, nil
 }
 
-// getAllDescendants returns all descendant IDs of a parent issue recursively
-func (m *MemoryStorage) getAllDescendants(parentID string) map[string]bool {
-	descendants := make(map[string]bool)
-	m.collectDescendants(parentID, descendants)
-	return descendants
-}
-
-// collectDescendants recursively collects all descendants of a parent
-func (m *MemoryStorage) collectDescendants(parentID string, descendants map[string]bool) {
-	for issueID, deps := range m.dependencies {
-		for _, dep := range deps {
-			if dep.Type == types.DepParentChild && dep.DependsOnID == parentID {
-				if !descendants[issueID] {
-					descendants[issueID] = true
-					m.collectDescendants(issueID, descendants)
-				}
-			}
-		}
-	}
-}
-
 func (m *MemoryStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
 	return nil, nil
 }
@@ -1214,58 +1182,6 @@ func (m *MemoryStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 	}
 
 	return stale, nil
-}
-
-// GetNewlyUnblockedByClose returns issues that became unblocked when the given issue was closed.
-// This is used by the --suggest-next flag on bd close (GH#679).
-func (m *MemoryStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var unblocked []*types.Issue
-
-	// Find issues that depend on the closed issue
-	for issueID, deps := range m.dependencies {
-		issue, exists := m.issues[issueID]
-		if !exists {
-			continue
-		}
-
-		// Only consider open/in_progress, non-pinned issues
-		if issue.Status != types.StatusOpen && issue.Status != types.StatusInProgress {
-			continue
-		}
-		if issue.Pinned {
-			continue
-		}
-
-		// Check if this issue depended on the closed issue
-		dependedOnClosed := false
-		for _, dep := range deps {
-			if dep.DependsOnID == closedIssueID && dep.Type == types.DepBlocks {
-				dependedOnClosed = true
-				break
-			}
-		}
-
-		if !dependedOnClosed {
-			continue
-		}
-
-		// Check if now unblocked (no remaining open blockers)
-		blockers := m.getOpenBlockers(issueID)
-		if len(blockers) == 0 {
-			issueCopy := *issue
-			unblocked = append(unblocked, &issueCopy)
-		}
-	}
-
-	// Sort by priority ascending
-	sort.Slice(unblocked, func(i, j int) bool {
-		return unblocked[i].Priority < unblocked[j].Priority
-	})
-
-	return unblocked, nil
 }
 
 func (m *MemoryStorage) AddComment(ctx context.Context, issueID, actor, comment string) error {

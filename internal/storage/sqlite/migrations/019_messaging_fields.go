@@ -20,6 +20,10 @@ func MigrateMessagingFields(db *sql.DB) error {
 	}{
 		{"sender", "TEXT DEFAULT ''"},
 		{"ephemeral", "INTEGER DEFAULT 0"},
+		{"replies_to", "TEXT DEFAULT ''"},
+		{"relates_to", "TEXT DEFAULT ''"},
+		{"duplicate_of", "TEXT DEFAULT ''"},
+		{"superseded_by", "TEXT DEFAULT ''"},
 	}
 
 	for _, col := range columns {
@@ -53,6 +57,12 @@ func MigrateMessagingFields(db *sql.DB) error {
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_sender ON issues(sender) WHERE sender != ''`)
 	if err != nil {
 		return fmt.Errorf("failed to create sender index: %w", err)
+	}
+
+	// Add index for replies_to (for efficient thread queries)
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_replies_to ON issues(replies_to) WHERE replies_to != ''`)
+	if err != nil {
+		return fmt.Errorf("failed to create replies_to index: %w", err)
 	}
 
 	return nil

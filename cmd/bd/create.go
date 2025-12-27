@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
@@ -109,23 +107,7 @@ var createCmd = &cobra.Command{
 		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
-		rigOverride, _ := cmd.Flags().GetString("rig")
-		prefixOverride, _ := cmd.Flags().GetString("prefix")
-		wisp, _ := cmd.Flags().GetBool("ephemeral")
-
-		// Handle --rig or --prefix flag: create issue in a different rig
-		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
-		targetRig := rigOverride
-		if prefixOverride != "" {
-			if targetRig != "" {
-				FatalError("cannot specify both --rig and --prefix flags")
-			}
-			targetRig = prefixOverride
-		}
-		if targetRig != "" {
-			createInRig(cmd, targetRig, title, description, issueType, priority, design, acceptance, assignee, labels, externalRef, wisp)
-			return
-		}
+		wisp, _ := cmd.Flags().GetBool("wisp")
 
 		// Get estimate if provided
 		var estimatedMinutes *int
@@ -240,8 +222,7 @@ var createCmd = &cobra.Command{
 				Dependencies:       deps,
 				WaitsFor:           waitsFor,
 				WaitsForGate:       waitsForGate,
-				Ephemeral:          wisp,
-				CreatedBy:          getActorWithGit(),
+				Wisp:               wisp,
 			}
 
 			resp, err := daemonClient.Create(createArgs)
@@ -286,8 +267,7 @@ var createCmd = &cobra.Command{
 			Assignee:           assignee,
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
-			Ephemeral:          wisp,
-			CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
+			Wisp:               wisp,
 		}
 
 		ctx := rootCtx
@@ -465,111 +445,8 @@ func init() {
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
-	createCmd.Flags().String("rig", "", "Create issue in a different rig (e.g., --rig beads)")
-	createCmd.Flags().String("prefix", "", "Create issue in rig by prefix (e.g., --prefix bd- or --prefix bd or --prefix beads)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
-	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (ephemeral, not exported to JSONL)")
+	createCmd.Flags().Bool("wisp", false, "Create as wisp (ephemeral, not exported to JSONL)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
-}
-
-// createInRig creates an issue in a different rig using --rig flag.
-// This bypasses the normal daemon/direct flow and directly creates in the target rig.
-func createInRig(cmd *cobra.Command, rigName, title, description, issueType string, priority int, design, acceptance, assignee string, labels []string, externalRef string, wisp bool) {
-	ctx := rootCtx
-
-	// Find the town-level beads directory (where routes.jsonl lives)
-	townBeadsDir, err := findTownBeadsDir()
-	if err != nil {
-		FatalError("cannot use --rig: %v", err)
-	}
-
-	// Resolve the target rig's beads directory
-	targetBeadsDir, _, err := routing.ResolveBeadsDirForRig(rigName, townBeadsDir)
-	if err != nil {
-		FatalError("%v", err)
-	}
-
-	// Open storage for the target rig
-	targetDBPath := filepath.Join(targetBeadsDir, "beads.db")
-	targetStore, err := sqlite.New(ctx, targetDBPath)
-	if err != nil {
-		FatalError("failed to open rig %q database: %v", rigName, err)
-	}
-	defer targetStore.Close()
-
-	var externalRefPtr *string
-	if externalRef != "" {
-		externalRefPtr = &externalRef
-	}
-
-	// Create issue without ID - CreateIssue will generate one with the correct prefix
-	issue := &types.Issue{
-		Title:              title,
-		Description:        description,
-		Design:             design,
-		AcceptanceCriteria: acceptance,
-		Status:             types.StatusOpen,
-		Priority:           priority,
-		IssueType:          types.IssueType(issueType),
-		Assignee:           assignee,
-		ExternalRef:        externalRefPtr,
-		Ephemeral:          wisp,
-		CreatedBy:          getActorWithGit(),
-	}
-
-	if err := targetStore.CreateIssue(ctx, issue, actor); err != nil {
-		FatalError("failed to create issue in rig %q: %v", rigName, err)
-	}
-
-	// Add labels if specified
-	for _, label := range labels {
-		if err := targetStore.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			WarnError("failed to add label %s: %v", label, err)
-		}
-	}
-
-	// Get silent flag
-	silent, _ := cmd.Flags().GetBool("silent")
-
-	if jsonOutput {
-		outputJSON(issue)
-	} else if silent {
-		fmt.Println(issue.ID)
-	} else {
-		fmt.Printf("%s Created issue in rig %q: %s\n", ui.RenderPass("✓"), rigName, issue.ID)
-		fmt.Printf("  Title: %s\n", issue.Title)
-		fmt.Printf("  Priority: P%d\n", issue.Priority)
-		fmt.Printf("  Status: %s\n", issue.Status)
-	}
-}
-
-// findTownBeadsDir finds the town-level .beads directory (where routes.jsonl lives).
-// It walks up from the current directory looking for a .beads directory with routes.jsonl.
-func findTownBeadsDir() (string, error) {
-	// Start from current directory and walk up
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	for {
-		beadsDir := filepath.Join(dir, ".beads")
-		routesFile := filepath.Join(beadsDir, routing.RoutesFileName)
-
-		// Check if this .beads directory has routes.jsonl
-		if _, err := os.Stat(routesFile); err == nil {
-			return beadsDir, nil
-		}
-
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-		dir = parent
-	}
-
-	return "", fmt.Errorf("no routes.jsonl found in any parent .beads directory")
 }

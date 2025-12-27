@@ -180,14 +180,11 @@ func ChildParentDependencies(path string) error {
 	}
 	defer db.Close()
 
-	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
-	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
-	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	// Find child→parent dependencies where issue_id starts with depends_on_id + "."
 	query := `
-		SELECT d.issue_id, d.depends_on_id, d.type
+		SELECT d.issue_id, d.depends_on_id
 		FROM dependencies d
 		WHERE d.issue_id LIKE d.depends_on_id || '.%'
-		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -198,13 +195,12 @@ func ChildParentDependencies(path string) error {
 	type badDep struct {
 		issueID     string
 		dependsOnID string
-		depType     string
 	}
 	var badDeps []badDep
 
 	for rows.Next() {
 		var d badDep
-		if err := rows.Scan(&d.issueID, &d.dependsOnID, &d.depType); err == nil {
+		if err := rows.Scan(&d.issueID, &d.dependsOnID); err == nil {
 			badDeps = append(badDeps, d)
 		}
 	}
@@ -214,10 +210,10 @@ func ChildParentDependencies(path string) error {
 		return nil
 	}
 
-	// Delete child→parent blocking dependencies (preserving parent-child type)
+	// Delete child→parent dependencies
 	for _, d := range badDeps {
-		_, err := db.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ? AND type = ?",
-			d.issueID, d.dependsOnID, d.depType)
+		_, err := db.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
+			d.issueID, d.dependsOnID)
 		if err != nil {
 			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", d.issueID, d.dependsOnID, err)
 		} else {
@@ -233,5 +229,5 @@ func ChildParentDependencies(path string) error {
 
 // openDB opens a SQLite database for read-write access
 func openDB(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite3", sqliteConnString(dbPath, false))
+	return sql.Open("sqlite3", dbPath)
 }

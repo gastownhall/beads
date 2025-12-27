@@ -3,8 +3,6 @@ package rpc
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // Operation constants for all bd commands
@@ -20,7 +18,6 @@ const (
 	OpCount           = "count"
 	OpShow            = "show"
 	OpReady           = "ready"
-	OpBlocked         = "blocked"
 	OpStale           = "stale"
 	OpStats           = "stats"
 	OpDepAdd          = "dep_add"
@@ -89,12 +86,11 @@ type CreateArgs struct {
 	WaitsFor     string `json:"waits_for,omitempty"`      // Spawner issue ID to wait for
 	WaitsForGate string `json:"waits_for_gate,omitempty"` // Gate type: all-children or any-children
 	// Messaging fields (bd-kwro)
-	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
-	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
+	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
+	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// ID generation (bd-hobo)
-	IDPrefix  string `json:"id_prefix,omitempty"`  // Override prefix for ID generation (mol, eph, etc.)
-	CreatedBy string `json:"created_by,omitempty"` // Who created the issue
+	IDPrefix string `json:"id_prefix,omitempty"` // Override prefix for ID generation (mol, wisp, etc.)
 }
 
 // UpdateArgs represents arguments for the update operation
@@ -115,8 +111,8 @@ type UpdateArgs struct {
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`
 	// Messaging fields (bd-kwro)
-	Sender    *string `json:"sender,omitempty"`    // Who sent this (for messages)
-	Ephemeral *bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
+	Sender *string `json:"sender,omitempty"` // Who sent this (for messages)
+	Wisp   *bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo *string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// Graph link fields (bd-fu83)
 	RelatesTo    *string `json:"relates_to,omitempty"`    // JSON array of related issue IDs
@@ -128,16 +124,8 @@ type UpdateArgs struct {
 
 // CloseArgs represents arguments for the close operation
 type CloseArgs struct {
-	ID          string `json:"id"`
-	Reason      string `json:"reason,omitempty"`
-	SuggestNext bool   `json:"suggest_next,omitempty"` // Return newly unblocked issues (GH#679)
-}
-
-// CloseResult is returned when SuggestNext is true (GH#679)
-// When SuggestNext is false, just the closed issue is returned for backward compatibility
-type CloseResult struct {
-	Closed    *types.Issue   `json:"closed"`              // The issue that was closed
-	Unblocked []*types.Issue `json:"unblocked,omitempty"` // Issues newly unblocked by closing
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // DeleteArgs represents arguments for the delete operation
@@ -193,8 +181,8 @@ type ListArgs struct {
 	// Parent filtering (bd-yqhh)
 	ParentID string `json:"parent_id,omitempty"`
 
-	// Ephemeral filtering (bd-bkul)
-	Ephemeral *bool `json:"ephemeral,omitempty"`
+	// Wisp filtering (bd-bkul)
+	Wisp *bool `json:"wisp,omitempty"`
 }
 
 // CountArgs represents arguments for the count operation
@@ -255,12 +243,6 @@ type ReadyArgs struct {
 	SortPolicy string   `json:"sort_policy,omitempty"`
 	Labels     []string `json:"labels,omitempty"`
 	LabelsAny  []string `json:"labels_any,omitempty"`
-	ParentID   string   `json:"parent_id,omitempty"` // Filter to descendants of this bead/epic
-}
-
-// BlockedArgs represents arguments for the blocked operation
-type BlockedArgs struct {
-	ParentID string `json:"parent_id,omitempty"` // Filter to descendants of this bead/epic
 }
 
 // StaleArgs represents arguments for the stale command

@@ -292,14 +292,12 @@ func IsExpiredTombstone(issue Issue, ttl time.Duration) bool {
 }
 
 func merge3Way(base, left, right []Issue) ([]Issue, []string) {
-	return Merge3WayWithTTL(base, left, right, DefaultTombstoneTTL)
+	return merge3WayWithTTL(base, left, right, DefaultTombstoneTTL)
 }
 
-// Merge3WayWithTTL performs a 3-way merge with configurable tombstone TTL.
+// merge3WayWithTTL performs a 3-way merge with configurable tombstone TTL.
 // This is the core merge function that handles tombstone semantics.
-// Use this when you need to configure TTL for testing, debugging, or
-// per-repository configuration. For default TTL behavior, use merge3Way.
-func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []string) {
+func merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []string) {
 	// Build maps for quick lookup by IssueKey
 	baseMap := make(map[IssueKey]Issue)
 	for _, issue := range base {

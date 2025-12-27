@@ -864,7 +864,6 @@ func TestCountJSONLIssues(t *testing.T) {
 // TestGetMainRepoRoot tests the GetMainRepoRoot function for various scenarios
 func TestGetMainRepoRoot(t *testing.T) {
 	t.Run("returns correct root for regular repo", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -878,7 +877,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 		if err := os.Chdir(repoPath); err != nil {
 			t.Fatalf("Failed to chdir to repo: %v", err)
 		}
-		ResetCaches() // Reset after chdir
 
 		root, err := GetMainRepoRoot()
 		if err != nil {
@@ -895,7 +893,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 	})
 
 	t.Run("returns main repo root from worktree", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -916,7 +913,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 		if err := os.Chdir(worktreePath); err != nil {
 			t.Fatalf("Failed to chdir to worktree: %v", err)
 		}
-		ResetCaches() // Reset after chdir
 
 		root, err := GetMainRepoRoot()
 		if err != nil {
@@ -933,7 +929,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 	})
 
 	t.Run("returns main repo root from nested worktree (GH#509)", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -955,7 +950,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 		if err := os.Chdir(nestedWorktreePath); err != nil {
 			t.Fatalf("Failed to chdir to nested worktree: %v", err)
 		}
-		ResetCaches() // Reset after chdir
 
 		root, err := GetMainRepoRoot()
 		if err != nil {
@@ -972,7 +966,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 	})
 
 	t.Run("returns main repo root from subdirectory of nested worktree", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -1000,7 +993,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 		if err := os.Chdir(subDir); err != nil {
 			t.Fatalf("Failed to chdir to subdir: %v", err)
 		}
-		ResetCaches() // Reset after chdir
 
 		root, err := GetMainRepoRoot()
 		if err != nil {
@@ -1020,7 +1012,6 @@ func TestGetMainRepoRoot(t *testing.T) {
 // TestIsWorktree tests the IsWorktree function
 func TestIsWorktree(t *testing.T) {
 	t.Run("returns false for regular repo", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -1033,7 +1024,6 @@ func TestIsWorktree(t *testing.T) {
 		if err := os.Chdir(repoPath); err != nil {
 			t.Fatalf("Failed to chdir to repo: %v", err)
 		}
-		ResetCaches() // Reset after chdir
 
 		if IsWorktree() {
 			t.Error("IsWorktree() should return false for regular repo")
@@ -1041,7 +1031,6 @@ func TestIsWorktree(t *testing.T) {
 	})
 
 	t.Run("returns true for worktree", func(t *testing.T) {
-		ResetCaches() // Reset caches from previous subtests
 		repoPath, cleanup := setupTestRepo(t)
 		defer cleanup()
 
@@ -1062,7 +1051,6 @@ func TestIsWorktree(t *testing.T) {
 			t.Fatalf("Failed to chdir to worktree: %v", err)
 		}
 
-		ResetCaches() // Reset after chdir to worktree
 		if !IsWorktree() {
 			t.Error("IsWorktree() should return true for worktree")
 		}

@@ -349,15 +349,15 @@ Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md]
 
 | Phase | State | Storage | Command |
 |-------|-------|---------|---------|
-| Solid | Proto | `.beads/` | `bd formula list` |
-| Liquid | Mol | `.beads/` | `bd mol pour` |
-| Vapor | Wisp | `.beads/` (Ephemeral=true, not exported) | `bd mol wisp` |
+| Solid | Proto | `.beads/` | `bd mol catalog` |
+| Liquid | Mol | `.beads/` | `bd pour` |
+| Vapor | Wisp | `.beads/` (Wisp=true, not exported) | `bd wisp create` |
 
 ### Proto/Template Commands
 
 ```bash
-# List available formulas (templates)
-bd formula list --json
+# List available protos (templates)
+bd mol catalog --json
 
 # Show proto structure and variables
 bd mol show <proto-id> --json
@@ -370,32 +370,32 @@ bd mol distill <epic-id> --json
 
 ```bash
 # Instantiate proto as persistent mol (solid → liquid)
-bd mol pour <proto-id> --var key=value --json
+bd pour <proto-id> --var key=value --json
 
 # Preview what would be created
-bd mol pour <proto-id> --var key=value --dry-run
+bd pour <proto-id> --var key=value --dry-run
 
 # Assign root issue
-bd mol pour <proto-id> --var key=value --assignee alice --json
+bd pour <proto-id> --var key=value --assignee alice --json
 
 # Attach additional protos during pour
-bd mol pour <proto-id> --attach <other-proto> --json
+bd pour <proto-id> --attach <other-proto> --json
 ```
 
 ### Wisp Commands
 
 ```bash
 # Instantiate proto as ephemeral wisp (solid → vapor)
-bd mol wisp <proto-id> --var key=value --json
+bd wisp create <proto-id> --var key=value --json
 
 # List all wisps
-bd mol wisp list --json
-bd mol wisp list --all --json    # Include closed
+bd wisp list --json
+bd wisp list --all --json    # Include closed
 
 # Garbage collect orphaned wisps
-bd mol wisp gc --json
-bd mol wisp gc --age 24h --json  # Custom age threshold
-bd mol wisp gc --dry-run         # Preview what would be cleaned
+bd wisp gc --json
+bd wisp gc --age 24h --json  # Custom age threshold
+bd wisp gc --dry-run         # Preview what would be cleaned
 ```
 
 ### Bonding (Combining Work)
@@ -424,29 +424,29 @@ bd mol bond <A> <B> --dry-run
 
 ```bash
 # Compress wisp to permanent digest
-bd mol squash <ephemeral-id> --json
+bd mol squash <wisp-id> --json
 
 # With agent-provided summary
-bd mol squash <ephemeral-id> --summary "Work completed" --json
+bd mol squash <wisp-id> --summary "Work completed" --json
 
 # Preview
-bd mol squash <ephemeral-id> --dry-run
+bd mol squash <wisp-id> --dry-run
 
 # Keep wisp children after squash
-bd mol squash <ephemeral-id> --keep-children --json
+bd mol squash <wisp-id> --keep-children --json
 ```
 
 ### Burn (Discard Wisp)
 
 ```bash
 # Delete wisp without digest (destructive)
-bd mol burn <ephemeral-id> --json
+bd mol burn <wisp-id> --json
 
 # Preview
-bd mol burn <ephemeral-id> --dry-run
+bd mol burn <wisp-id> --dry-run
 
 # Skip confirmation
-bd mol burn <ephemeral-id> --force --json
+bd mol burn <wisp-id> --force --json
 ```
 
 **Note:** Most mol commands require `--no-daemon` flag when daemon is running.

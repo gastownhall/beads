@@ -28,7 +28,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 	}
 
 	wisp := 0
-	if issue.Ephemeral {
+	if issue.Wisp {
 		wisp = 1
 	}
 	pinned := 0
@@ -44,16 +44,16 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		INSERT OR IGNORE INTO issues (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, created_by, updated_at, closed_at, external_ref, source_repo, close_reason,
+			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, pinned, is_template,
 			await_type, await_id, timeout_ns, waiters
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
-		issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.UpdatedAt,
+		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 		issue.Sender, wisp, pinned, isTemplate,
@@ -76,11 +76,11 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 		INSERT OR IGNORE INTO issues (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, created_by, updated_at, closed_at, external_ref, source_repo, close_reason,
+			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, pinned, is_template,
 			await_type, await_id, timeout_ns, waiters
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -94,7 +94,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 		}
 
 		wisp := 0
-		if issue.Ephemeral {
+		if issue.Wisp {
 			wisp = 1
 		}
 		pinned := 0
@@ -110,7 +110,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 			issue.AcceptanceCriteria, issue.Notes, issue.Status,
 			issue.Priority, issue.IssueType, issue.Assignee,
-			issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.UpdatedAt,
+			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, wisp, pinned, isTemplate,

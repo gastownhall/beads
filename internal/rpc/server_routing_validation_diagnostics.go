@@ -188,8 +188,6 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleResolveID(req)
 	case OpReady:
 		resp = s.handleReady(req)
-	case OpBlocked:
-		resp = s.handleBlocked(req)
 	case OpStale:
 		resp = s.handleStale(req)
 	case OpStats:

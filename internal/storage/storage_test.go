@@ -89,16 +89,13 @@ func (m *mockStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*ty
 func (m *mockStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
-func (m *mockStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
+func (m *mockStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
 	return nil, nil
 }
 func (m *mockStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
 	return nil, nil
 }
 func (m *mockStorage) GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error) {
-	return nil, nil
-}
-func (m *mockStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
 	return nil, nil
 }
 func (m *mockStorage) AddComment(ctx context.Context, issueID, actor, comment string) error {

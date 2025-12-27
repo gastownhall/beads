@@ -81,8 +81,8 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Sender != nil {
 		u["sender"] = *a.Sender
 	}
-	if a.Ephemeral != nil {
-		u["ephemeral"] = *a.Ephemeral
+	if a.Wisp != nil {
+		u["wisp"] = *a.Wisp
 	}
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo
@@ -176,12 +176,11 @@ func (s *Server) handleCreate(req *Request) Response {
 		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
 		// Messaging fields (bd-kwro)
-		Sender:    createArgs.Sender,
-		Ephemeral: createArgs.Ephemeral,
+		Sender: createArgs.Sender,
+		Wisp:   createArgs.Wisp,
 		// NOTE: RepliesTo now handled via replies-to dependency (Decision 004)
 		// ID generation (bd-hobo)
-		IDPrefix:  createArgs.IDPrefix,
-		CreatedBy: createArgs.CreatedBy,
+		IDPrefix: createArgs.IDPrefix,
 	}
 	
 	// Check if any dependencies are discovered-from type
@@ -556,26 +555,6 @@ func (s *Server) handleClose(req *Request) Response {
 	})
 
 	closedIssue, _ := store.GetIssue(ctx, closeArgs.ID)
-
-	// If SuggestNext is requested, find newly unblocked issues (GH#679)
-	if closeArgs.SuggestNext {
-		unblocked, err := store.GetNewlyUnblockedByClose(ctx, closeArgs.ID)
-		if err != nil {
-			// Non-fatal: still return the closed issue
-			unblocked = nil
-		}
-		result := CloseResult{
-			Closed:    closedIssue,
-			Unblocked: unblocked,
-		}
-		data, _ := json.Marshal(result)
-		return Response{
-			Success: true,
-			Data:    data,
-		}
-	}
-
-	// Backward compatible: just return the closed issue
 	data, _ := json.Marshal(closedIssue)
 	return Response{
 		Success: true,
@@ -844,8 +823,8 @@ func (s *Server) handleList(req *Request) Response {
 		filter.ParentID = &listArgs.ParentID
 	}
 
-	// Ephemeral filtering (bd-bkul)
-	filter.Ephemeral = listArgs.Ephemeral
+	// Wisp filtering (bd-bkul)
+	filter.Wisp = listArgs.Wisp
 
 	// Guard against excessive ID lists to avoid SQLite parameter limits
 	const maxIDs = 1000
@@ -1222,16 +1201,12 @@ func (s *Server) handleShow(req *Request) Response {
 		}
 	}
 
-	// Fetch comments
-	comments, _ := store.GetIssueComments(ctx, issue.ID)
-
 	// Create detailed response with related data
 	type IssueDetails struct {
 		*types.Issue
 		Labels       []string                              `json:"labels,omitempty"`
 		Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 		Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-		Comments     []*types.Comment                      `json:"comments,omitempty"`
 	}
 
 	details := &IssueDetails{
@@ -1239,7 +1214,6 @@ func (s *Server) handleShow(req *Request) Response {
 		Labels:       labels,
 		Dependencies: deps,
 		Dependents:   dependents,
-		Comments:     comments,
 	}
 
 	data, _ := json.Marshal(details)
@@ -1268,7 +1242,6 @@ func (s *Server) handleReady(req *Request) Response {
 
 	wf := types.WorkFilter{
 		Status:     types.StatusOpen,
-		Type:       readyArgs.Type,
 		Priority:   readyArgs.Priority,
 		Unassigned: readyArgs.Unassigned,
 		Limit:      readyArgs.Limit,
@@ -1278,9 +1251,6 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 	if readyArgs.Assignee != "" && !readyArgs.Unassigned {
 		wf.Assignee = &readyArgs.Assignee
-	}
-	if readyArgs.ParentID != "" {
-		wf.ParentID = &readyArgs.ParentID
 	}
 
 	ctx := s.reqCtx(req)
@@ -1293,44 +1263,6 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 
 	data, _ := json.Marshal(issues)
-	return Response{
-		Success: true,
-		Data:    data,
-	}
-}
-
-func (s *Server) handleBlocked(req *Request) Response {
-	var blockedArgs BlockedArgs
-	if err := json.Unmarshal(req.Args, &blockedArgs); err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("invalid blocked args: %v", err),
-		}
-	}
-
-	store := s.storage
-	if store == nil {
-		return Response{
-			Success: false,
-			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
-		}
-	}
-
-	var wf types.WorkFilter
-	if blockedArgs.ParentID != "" {
-		wf.ParentID = &blockedArgs.ParentID
-	}
-
-	ctx := s.reqCtx(req)
-	blocked, err := store.GetBlockedIssues(ctx, wf)
-	if err != nil {
-		return Response{
-			Success: false,
-			Error:   fmt.Sprintf("failed to get blocked issues: %v", err),
-		}
-	}
-
-	data, _ := json.Marshal(blocked)
 	return Response{
 		Success: true,
 		Data:    data,
@@ -1480,7 +1412,7 @@ func (s *Server) handleGateCreate(req *Request) Response {
 		Status:    types.StatusOpen,
 		Priority:  1, // Gates are typically high priority
 		Assignee:  "deacon/",
-		Ephemeral:      true, // Gates are wisps (ephemeral)
+		Wisp:      true, // Gates are wisps (ephemeral)
 		AwaitType: args.AwaitType,
 		AwaitID:   args.AwaitID,
 		Timeout:   args.Timeout,

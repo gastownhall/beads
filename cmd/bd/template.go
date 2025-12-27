@@ -42,10 +42,10 @@ type InstantiateResult struct {
 
 // CloneOptions controls how the subgraph is cloned during spawn/bond
 type CloneOptions struct {
-	Vars      map[string]string // Variable substitutions for {{key}} placeholders
-	Assignee  string            // Assign the root epic to this agent/user
-	Actor     string            // Actor performing the operation
-	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
+	Vars     map[string]string // Variable substitutions for {{key}} placeholders
+	Assignee string            // Assign the root epic to this agent/user
+	Actor    string            // Actor performing the operation
+	Wisp     bool              // If true, spawned issues are marked for bulk deletion
 	Prefix   string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
 	// Dynamic bonding fields (for Christmas Ornament pattern)
@@ -60,7 +60,7 @@ var templateCmd = &cobra.Command{
 	Use:        "template",
 	GroupID:    "setup",
 	Short:      "Manage issue templates",
-	Deprecated: "use 'bd mol' instead (formula list, mol show, mol bond)",
+	Deprecated: "use 'bd mol' instead (mol catalog, mol show, mol bond)",
 	Long: `Manage Beads templates for creating issue hierarchies.
 
 Templates are epics with the "template" label. They can have child issues
@@ -78,7 +78,7 @@ To use a template:
 var templateListCmd = &cobra.Command{
 	Use:        "list",
 	Short:      "List available templates",
-	Deprecated: "use 'bd formula list' instead",
+	Deprecated: "use 'bd mol catalog' instead",
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := rootCtx
 		var beadsTemplates []*types.Issue
@@ -327,7 +327,7 @@ Example:
 			Vars:     vars,
 			Assignee: assignee,
 			Actor:    actor,
-			Ephemeral:     false,
+			Wisp:     false,
 		}
 		var result *InstantiateResult
 		if daemonClient != nil {
@@ -713,7 +713,7 @@ func cloneSubgraphViaDaemon(client *rpc.Client, subgraph *TemplateSubgraph, opts
 			AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
-			Ephemeral:               opts.Ephemeral,
+			Wisp:               opts.Wisp,
 			IDPrefix:           opts.Prefix, // bd-hobo: distinct prefixes for mols/wisps
 		}
 
@@ -960,7 +960,7 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				IssueType:          oldIssue.IssueType,
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Ephemeral:               opts.Ephemeral,   // bd-2vh3: mark for cleanup when closed
+				Wisp:               opts.Wisp,   // bd-2vh3: mark for cleanup when closed
 				IDPrefix:           opts.Prefix, // bd-hobo: distinct prefixes for mols/wisps
 				CreatedAt:          time.Now(),
 				UpdatedAt:          time.Now(),

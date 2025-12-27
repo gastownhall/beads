@@ -87,8 +87,8 @@ func runHook(cmd *cobra.Command, args []string) {
 
 	for _, issue := range issues {
 		phase := "mol"
-		if issue.Ephemeral {
-			phase = "ephemeral"
+		if issue.Wisp {
+			phase = "wisp"
 		}
 		fmt.Printf("  📌 %s (%s) - %s\n", issue.ID, phase, issue.Status)
 		fmt.Printf("     %s\n", issue.Title)

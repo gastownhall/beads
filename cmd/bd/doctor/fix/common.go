@@ -12,13 +12,6 @@ import (
 // This prevents fork bombs when tests call functions that execute bd subcommands.
 var ErrTestBinary = fmt.Errorf("running as test binary - cannot execute bd subcommands")
 
-func newBdCmd(bdBinary string, args ...string) *exec.Cmd {
-	fullArgs := append([]string{"--no-daemon"}, args...)
-	cmd := exec.Command(bdBinary, fullArgs...) // #nosec G204 -- bdBinary from validated executable path
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	return cmd
-}
-
 // getBdBinary returns the path to the bd binary to use for fix operations.
 // It prefers the current executable to avoid command injection attacks.
 // Returns ErrTestBinary if running as a test binary to prevent fork bombs.

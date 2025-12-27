@@ -39,7 +39,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		issueType, _ := cmd.Flags().GetString("type")
-		parentID, _ := cmd.Flags().GetString("parent")
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 
 		// Normalize labels: trim, dedupe, remove empty
@@ -70,9 +69,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if assignee != "" && !unassigned {
 			filter.Assignee = &assignee
 		}
-		if parentID != "" {
-			filter.ParentID = &parentID
-		}
 		// Validate sort policy
 		if !filter.SortPolicy.IsValid() {
 			fmt.Fprintf(os.Stderr, "Error: invalid sort policy '%s'. Valid values: hybrid, priority, oldest\n", sortPolicy)
@@ -88,7 +84,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				SortPolicy: sortPolicy,
 				Labels:     labels,
 				LabelsAny:  labelsAny,
-				ParentID:   parentID,
 			}
 			if cmd.Flags().Changed("priority") {
 				priority, _ := cmd.Flags().GetInt("priority")
@@ -234,17 +229,12 @@ var blockedCmd = &cobra.Command{
 			var err error
 			store, err = sqlite.New(ctx, dbPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
 			}
 			defer func() { _ = store.Close() }()
-		}
-		parentID, _ := cmd.Flags().GetString("parent")
-		var blockedFilter types.WorkFilter
-		if parentID != "" {
-			blockedFilter.ParentID = &parentID
-		}
-		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
+			}
+		blocked, err := store.GetBlockedIssues(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -420,8 +410,6 @@ func init() {
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, merge-request)")
 	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
-	readyCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(readyCmd)
-	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(blockedCmd)
 }

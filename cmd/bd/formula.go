@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/ui"
@@ -21,8 +18,8 @@ var formulaCmd = &cobra.Command{
 	Short: "Manage workflow formulas",
 	Long: `Manage workflow formulas - the source layer for molecule templates.
 
-Formulas are YAML/JSON files that define workflows with composition rules.
-They are "cooked" into proto beads which can then be poured or wisped.
+Formulas are JSON files (.formula.json) that define workflows with composition rules.
+They are "cooked" into ephemeral protos which can then be poured or wisped.
 
 The Rig → Cook → Run lifecycle:
   - Rig: Compose formulas (extends, compose)
@@ -366,7 +363,7 @@ func getFormulaSearchPaths() []string {
 	return paths
 }
 
-// scanFormulaDir scans a directory for formula files (both TOML and JSON).
+// scanFormulaDir scans a directory for formula files.
 func scanFormulaDir(dir string) ([]*formula.Formula, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -380,13 +377,11 @@ func scanFormulaDir(dir string) ([]*formula.Formula, error) {
 		if entry.IsDir() {
 			continue
 		}
-		// Support both .formula.toml and .formula.json
-		name := entry.Name()
-		if !strings.HasSuffix(name, formula.FormulaExtTOML) && !strings.HasSuffix(name, formula.FormulaExtJSON) {
+		if !strings.HasSuffix(entry.Name(), formula.FormulaExt) {
 			continue
 		}
 
-		path := filepath.Join(dir, name)
+		path := filepath.Join(dir, entry.Name())
 		f, err := parser.ParseFile(path)
 		if err != nil {
 			continue // Skip invalid formulas
@@ -476,297 +471,10 @@ func printFormulaStepsTree(steps []*formula.Step, indent string) {
 	}
 }
 
-// formulaConvertCmd converts JSON formulas to TOML.
-var formulaConvertCmd = &cobra.Command{
-	Use:   "convert <formula-name|path> [--all]",
-	Short: "Convert formula from JSON to TOML",
-	Long: `Convert formula files from JSON to TOML format.
-
-TOML format provides better ergonomics:
-  - Multi-line strings without \n escaping
-  - Human-readable diffs
-  - Comments allowed
-
-The convert command reads a .formula.json file and outputs .formula.toml.
-The original JSON file is preserved (use --delete to remove it).
-
-Examples:
-  bd formula convert shiny              # Convert shiny.formula.json to .toml
-  bd formula convert ./my.formula.json  # Convert specific file
-  bd formula convert --all              # Convert all JSON formulas
-  bd formula convert shiny --delete     # Convert and remove JSON file
-  bd formula convert shiny --stdout     # Print TOML to stdout`,
-	Run: runFormulaConvert,
-}
-
-var (
-	convertAll    bool
-	convertDelete bool
-	convertStdout bool
-)
-
-func runFormulaConvert(cmd *cobra.Command, args []string) {
-	if convertAll {
-		convertAllFormulas()
-		return
-	}
-
-	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: formula name or path required\n")
-		fmt.Fprintf(os.Stderr, "Usage: bd formula convert <name|path> [--all]\n")
-		os.Exit(1)
-	}
-
-	name := args[0]
-
-	// Determine the JSON file path
-	var jsonPath string
-	if strings.HasSuffix(name, formula.FormulaExtJSON) {
-		// Direct path provided
-		jsonPath = name
-	} else if strings.HasSuffix(name, formula.FormulaExtTOML) {
-		fmt.Fprintf(os.Stderr, "Error: %s is already a TOML file\n", name)
-		os.Exit(1)
-	} else {
-		// Search for the formula in search paths
-		jsonPath = findFormulaJSON(name)
-		if jsonPath == "" {
-			fmt.Fprintf(os.Stderr, "Error: JSON formula %q not found\n", name)
-			fmt.Fprintf(os.Stderr, "\nSearch paths:\n")
-			for _, p := range getFormulaSearchPaths() {
-				fmt.Fprintf(os.Stderr, "  %s\n", p)
-			}
-			os.Exit(1)
-		}
-	}
-
-	// Parse the JSON file
-	parser := formula.NewParser()
-	f, err := parser.ParseFile(jsonPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing %s: %v\n", jsonPath, err)
-		os.Exit(1)
-	}
-
-	// Convert to TOML
-	tomlData, err := formulaToTOML(f)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error converting to TOML: %v\n", err)
-		os.Exit(1)
-	}
-
-	if convertStdout {
-		fmt.Print(string(tomlData))
-		return
-	}
-
-	// Determine output path
-	tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
-
-	// Write the TOML file
-	if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", tomlPath, err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("✓ Converted: %s\n", tomlPath)
-
-	if convertDelete {
-		if err := os.Remove(jsonPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not delete %s: %v\n", jsonPath, err)
-		} else {
-			fmt.Printf("✓ Deleted: %s\n", jsonPath)
-		}
-	}
-}
-
-func convertAllFormulas() {
-	converted := 0
-	errors := 0
-
-	for _, dir := range getFormulaSearchPaths() {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-
-		parser := formula.NewParser(dir)
-
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			if !strings.HasSuffix(entry.Name(), formula.FormulaExtJSON) {
-				continue
-			}
-
-			jsonPath := filepath.Join(dir, entry.Name())
-			tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
-
-			// Skip if TOML already exists
-			if _, err := os.Stat(tomlPath); err == nil {
-				fmt.Printf("⏭ Skipped (TOML exists): %s\n", entry.Name())
-				continue
-			}
-
-			f, err := parser.ParseFile(jsonPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ Error parsing %s: %v\n", jsonPath, err)
-				errors++
-				continue
-			}
-
-			tomlData, err := formulaToTOML(f)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ Error converting %s: %v\n", jsonPath, err)
-				errors++
-				continue
-			}
-
-			if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "✗ Error writing %s: %v\n", tomlPath, err)
-				errors++
-				continue
-			}
-
-			fmt.Printf("✓ Converted: %s\n", tomlPath)
-			converted++
-
-			if convertDelete {
-				if err := os.Remove(jsonPath); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: could not delete %s: %v\n", jsonPath, err)
-				}
-			}
-		}
-	}
-
-	fmt.Printf("\nConverted %d formulas", converted)
-	if errors > 0 {
-		fmt.Printf(" (%d errors)", errors)
-	}
-	fmt.Println()
-}
-
-// findFormulaJSON searches for a JSON formula file by name.
-func findFormulaJSON(name string) string {
-	for _, dir := range getFormulaSearchPaths() {
-		path := filepath.Join(dir, name+formula.FormulaExtJSON)
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-	return ""
-}
-
-// formulaToTOML converts a Formula to TOML bytes.
-// Uses a custom structure optimized for TOML readability.
-func formulaToTOML(f *formula.Formula) ([]byte, error) {
-	// We need to re-read the original JSON to get the raw structure
-	// because the Formula struct loses some ordering/formatting
-	if f.Source == "" {
-		return nil, fmt.Errorf("formula has no source path")
-	}
-
-	// Read the original JSON
-	jsonData, err := os.ReadFile(f.Source)
-	if err != nil {
-		return nil, fmt.Errorf("reading source: %w", err)
-	}
-
-	// Parse into a map to preserve structure
-	var raw map[string]interface{}
-	if err := json.Unmarshal(jsonData, &raw); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
-	}
-
-	// Fix float64 to int for known integer fields
-	fixIntegerFields(raw)
-
-	// Encode to TOML
-	var buf bytes.Buffer
-	encoder := toml.NewEncoder(&buf)
-	encoder.Indent = ""
-	if err := encoder.Encode(raw); err != nil {
-		return nil, fmt.Errorf("encoding TOML: %w", err)
-	}
-
-	// Post-process to convert escaped \n in strings to multi-line strings
-	result := convertToMultiLineStrings(buf.String())
-
-	return []byte(result), nil
-}
-
-// convertToMultiLineStrings post-processes TOML to use multi-line strings
-// where strings contain newlines. This improves readability for descriptions.
-func convertToMultiLineStrings(input string) string {
-	// Regular expression to match key = "value with \n"
-	// We look for description fields specifically as those benefit most
-	lines := strings.Split(input, "\n")
-	var result []string
-
-	for _, line := range lines {
-		// Check if this line has a string with escaped newlines
-		if strings.Contains(line, "\\n") {
-			// Find the key = "..." pattern
-			eqIdx := strings.Index(line, " = \"")
-			if eqIdx > 0 && strings.HasSuffix(line, "\"") {
-				key := strings.TrimSpace(line[:eqIdx])
-				// Only convert description fields
-				if key == "description" {
-					// Extract the value (without quotes)
-					value := line[eqIdx+4 : len(line)-1]
-					// Unescape the newlines
-					value = strings.ReplaceAll(value, "\\n", "\n")
-					// Use multi-line string syntax
-					result = append(result, fmt.Sprintf("%s = \"\"\"\n%s\"\"\"", key, value))
-					continue
-				}
-			}
-		}
-		result = append(result, line)
-	}
-
-	return strings.Join(result, "\n")
-}
-
-// fixIntegerFields recursively fixes float64 values that should be integers.
-// JSON unmarshals all numbers as float64, but TOML needs proper int types.
-func fixIntegerFields(m map[string]interface{}) {
-	// Known integer fields
-	intFields := map[string]bool{
-		"version":  true,
-		"priority": true,
-		"count":    true,
-		"max":      true,
-	}
-
-	for k, v := range m {
-		switch val := v.(type) {
-		case float64:
-			// Convert whole numbers to int64 if they're known int fields
-			if intFields[k] && val == float64(int64(val)) {
-				m[k] = int64(val)
-			}
-		case map[string]interface{}:
-			fixIntegerFields(val)
-		case []interface{}:
-			for _, item := range val {
-				if subMap, ok := item.(map[string]interface{}); ok {
-					fixIntegerFields(subMap)
-				}
-			}
-		}
-	}
-}
-
 func init() {
 	formulaListCmd.Flags().String("type", "", "Filter by type (workflow, expansion, aspect)")
-	formulaConvertCmd.Flags().BoolVar(&convertAll, "all", false, "Convert all JSON formulas")
-	formulaConvertCmd.Flags().BoolVar(&convertDelete, "delete", false, "Delete JSON file after conversion")
-	formulaConvertCmd.Flags().BoolVar(&convertStdout, "stdout", false, "Print TOML to stdout instead of file")
 
 	formulaCmd.AddCommand(formulaListCmd)
 	formulaCmd.AddCommand(formulaShowCmd)
-	formulaCmd.AddCommand(formulaConvertCmd)
 	rootCmd.AddCommand(formulaCmd)
 }

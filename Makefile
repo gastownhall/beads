@@ -13,7 +13,7 @@ build:
 # Run all tests (skips known broken tests listed in .test-skip)
 test:
 	@echo "Running tests..."
-	@TEST_COVER=1 ./scripts/test.sh
+	@./scripts/test.sh
 
 # Run performance benchmarks (10K and 20K issue databases with automatic CPU profiling)
 # Generates CPU profile: internal/storage/sqlite/bench-cpu-<timestamp>.prof

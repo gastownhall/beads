@@ -312,7 +312,7 @@ func CheckCompactionCandidates(path string) DoctorCheck {
 // the actual beads directory location.
 func resolveBeadsDir(beadsDir string) string {
 	redirectFile := filepath.Join(beadsDir, "redirect")
-	data, err := os.ReadFile(redirectFile) //nolint:gosec // redirect file path is constructed from known beadsDir
+	data, err := os.ReadFile(redirectFile)
 	if err != nil {
 		// No redirect file - use original path
 		return beadsDir

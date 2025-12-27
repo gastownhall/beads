@@ -32,9 +32,9 @@ Use pour for:
   - Anything you might need to reference later
 
 Examples:
-  bd mol pour mol-feature --var name=auth    # Create persistent mol from proto
-  bd mol pour mol-release --var version=1.0  # Release workflow
-  bd mol pour mol-review --var pr=123        # Code review workflow`,
+  bd pour mol-feature --var name=auth    # Create persistent mol from proto
+  bd pour mol-release --var version=1.0  # Release workflow
+  bd pour mol-review --var pr=123        # Code review workflow`,
 	Args: cobra.ExactArgs(1),
 	Run:  runPour,
 }
@@ -260,5 +260,5 @@ func init() {
 	pourCmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
 	pourCmd.Flags().String("attach-type", types.BondTypeSequential, "Bond type for attachments: sequential, parallel, or conditional")
 
-	molCmd.AddCommand(pourCmd)
+	rootCmd.AddCommand(pourCmd)
 }

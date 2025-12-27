@@ -204,7 +204,7 @@ func TestRelateCommand(t *testing.T) {
 		}
 
 		// Issue1 should NOT be blocked (relates-to doesn't block)
-		blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{})
+		blocked, err := s.GetBlockedIssues(ctx)
 		if err != nil {
 			t.Fatalf("GetBlockedIssues failed: %v", err)
 		}

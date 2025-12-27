@@ -3,10 +3,8 @@ package fix
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // DatabaseVersion fixes database version mismatches by running bd migrate,
@@ -25,15 +23,12 @@ func DatabaseVersion(path string) error {
 
 	// Check if database exists - if not, run init instead of migrate (bd-4h9)
 	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	}
+	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// No database - this is a fresh clone, run bd init
 		fmt.Println("→ No database found, running 'bd init' to hydrate from JSONL...")
-		cmd := newBdCmd(bdBinary, "--db", dbPath, "init")
+		cmd := exec.Command(bdBinary, "init") // #nosec G204 -- bdBinary from validated executable path
 		cmd.Dir = path
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -46,8 +41,8 @@ func DatabaseVersion(path string) error {
 	}
 
 	// Database exists - run bd migrate
-	cmd := newBdCmd(bdBinary, "--db", dbPath, "migrate")
-	cmd.Dir = path // Set working directory without changing process dir
+	cmd := exec.Command(bdBinary, "migrate") // #nosec G204 -- bdBinary from validated executable path
+	cmd.Dir = path                           // Set working directory without changing process dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

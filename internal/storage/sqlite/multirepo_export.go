@@ -54,7 +54,7 @@ func (s *SQLiteStorage) ExportToMultiRepo(ctx context.Context) (map[string]int, 
 	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 	filtered := make([]*types.Issue, 0, len(allIssues))
 	for _, issue := range allIssues {
-		if !issue.Ephemeral {
+		if !issue.Wisp {
 			filtered = append(filtered, issue)
 		}
 	}

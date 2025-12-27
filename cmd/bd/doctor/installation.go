@@ -106,7 +106,7 @@ func CheckPermissions(path string) DoctorCheck {
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
 		// Try to open database
-		db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+		db, err := sql.Open("sqlite3", dbPath)
 		if err != nil {
 			return DoctorCheck{
 				Name:    "Permissions",
@@ -118,7 +118,7 @@ func CheckPermissions(path string) DoctorCheck {
 		_ = db.Close() // Intentionally ignore close error
 
 		// Try a write test
-		db, err = sql.Open("sqlite", sqliteConnString(dbPath, true))
+		db, err = sql.Open("sqlite", dbPath)
 		if err == nil {
 			_, err = db.Exec("SELECT 1")
 			_ = db.Close() // Intentionally ignore close error

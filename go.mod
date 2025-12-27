@@ -5,7 +5,6 @@ go 1.24.0
 toolchain go1.24.11
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.19.0
 	github.com/charmbracelet/huh v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.0

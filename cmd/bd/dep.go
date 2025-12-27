@@ -5,25 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
-
-// getBeadsDir returns the .beads directory path, derived from the global dbPath.
-func getBeadsDir() string {
-	if dbPath != "" {
-		return filepath.Dir(dbPath)
-	}
-	return ""
-}
 
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
@@ -98,15 +88,9 @@ Examples:
 				resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
 				resp, err = daemonClient.ResolveID(resolveArgs)
 				if err != nil {
-					// Resolution failed - try auto-converting to external ref (bd-lfiu)
-					beadsDir := getBeadsDir()
-					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
-						toID = extRef
-						isExternalRef = true
-					} else {
-						FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
-					}
-				} else if err := json.Unmarshal(resp.Data, &toID); err != nil {
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+				}
+				if err := json.Unmarshal(resp.Data, &toID); err != nil {
 					FatalErrorRespectJSON("unmarshaling resolved ID: %v", err)
 				}
 			}
@@ -127,14 +111,7 @@ Examples:
 			} else {
 				toID, err = utils.ResolvePartialID(ctx, store, args[1])
 				if err != nil {
-					// Resolution failed - try auto-converting to external ref (bd-lfiu)
-					beadsDir := getBeadsDir()
-					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
-						toID = extRef
-						isExternalRef = true
-					} else {
-						FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
-					}
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
 				}
 			}
 		}

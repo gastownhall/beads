@@ -23,8 +23,8 @@ func setupGitRepo(t *testing.T) string {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	cmd := exec.Command("git", "init", "--initial-branch=main")
+	// Initialize git repo
+	cmd := exec.Command("git", "init")
 	cmd.Dir = dir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
@@ -278,8 +278,8 @@ func setupGitRepoInDir(t *testing.T, dir string) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	cmd := exec.Command("git", "init", "--initial-branch=main")
+	// Initialize git repo
+	cmd := exec.Command("git", "init")
 	cmd.Dir = dir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
