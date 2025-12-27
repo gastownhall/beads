@@ -23,7 +23,7 @@ var molCatalogCmd = &cobra.Command{
 	Use:     "catalog",
 	Aliases: []string{"list", "ls"},
 	Short:   "List available molecule formulas",
-	Long: `List formulas available for bd pour / bd wisp create.
+	Long: `List formulas available for bd mol pour / bd mol wisp.
 
 Formulas are ephemeral proto definitions stored as .formula.json files.
 They are cooked inline when pouring, never stored as database beads.
@@ -92,12 +92,12 @@ Search paths (in priority order):
 			fmt.Println("\nOr distill from existing work:")
 			fmt.Println("  bd mol distill <epic-id> my-workflow")
 			fmt.Println("\nTo instantiate from formula:")
-			fmt.Println("  bd pour <formula-name> --var key=value          # persistent mol")
-			fmt.Println("  bd wisp create <formula-name> --var key=value   # ephemeral wisp")
+			fmt.Println("  bd mol pour <formula-name> --var key=value      # persistent mol")
+			fmt.Println("  bd mol wisp <formula-name> --var key=value      # ephemeral wisp")
 			return
 		}
 
-		fmt.Printf("%s\n\n", ui.RenderPass("Formulas (for bd pour / bd wisp create):"))
+		fmt.Printf("%s\n\n", ui.RenderPass("Formulas (for bd mol pour / bd mol wisp):"))
 
 		// Group by type for display
 		byType := make(map[string][]CatalogEntry)

@@ -67,6 +67,49 @@ func ExtractPrefix(id string) string {
 	return id[:idx+1] // Include the hyphen
 }
 
+// ExtractProjectFromPath extracts the project name from a route path.
+// For "beads/mayor/rig", returns "beads".
+// For "gastown/crew/max", returns "gastown".
+func ExtractProjectFromPath(path string) string {
+	// Get the first component of the path
+	parts := strings.Split(path, "/")
+	if len(parts) > 0 && parts[0] != "" {
+		return parts[0]
+	}
+	return ""
+}
+
+// ResolveToExternalRef attempts to convert a foreign issue ID to an external reference
+// using routes.jsonl for prefix-based routing.
+//
+// If the ID's prefix matches a route, returns "external:<project>:<id>".
+// Otherwise, returns empty string (no route found).
+//
+// Example: If routes.jsonl has {"prefix": "bd-", "path": "beads/mayor/rig"}
+// then ResolveToExternalRef("bd-abc", beadsDir) returns "external:beads:bd-abc"
+func ResolveToExternalRef(id, beadsDir string) string {
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil || len(routes) == 0 {
+		return ""
+	}
+
+	prefix := ExtractPrefix(id)
+	if prefix == "" {
+		return ""
+	}
+
+	for _, route := range routes {
+		if route.Prefix == prefix {
+			project := ExtractProjectFromPath(route.Path)
+			if project != "" {
+				return fmt.Sprintf("external:%s:%s", project, id)
+			}
+		}
+	}
+
+	return ""
+}
+
 // ResolveBeadsDirForID determines which beads directory contains the given issue ID.
 // It first checks the local beads directory, then consults routes.jsonl for prefix-based routing.
 //

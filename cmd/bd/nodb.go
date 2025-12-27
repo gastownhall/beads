@@ -72,8 +72,11 @@ func initializeNoDbMode() error {
 
 	debug.Logf("using prefix '%s'", prefix)
 
-	// Set global store
+	// Set global store and mark as active (fixes bd comment --no-db)
+	storeMutex.Lock()
 	store = memStore
+	storeActive = true
+	storeMutex.Unlock()
 	return nil
 }
 
@@ -218,7 +221,7 @@ func writeIssuesToJSONL(memStore *memory.MemoryStorage, beadsDir string) error {
 	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 	filtered := make([]*types.Issue, 0, len(issues))
 	for _, issue := range issues {
-		if !issue.Wisp {
+		if !issue.Ephemeral {
 			filtered = append(filtered, issue)
 		}
 	}

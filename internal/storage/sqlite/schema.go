@@ -230,6 +230,7 @@ WITH RECURSIVE
 SELECT i.*
 FROM issues i
 WHERE i.status = 'open'
+  AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND NOT EXISTS (
     SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
   );

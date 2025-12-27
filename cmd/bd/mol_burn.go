@@ -23,8 +23,8 @@ completely removes the wisp with no trace. Use this for:
   - Test/debug wisps you don't want to preserve
 
 The burn operation:
-  1. Verifies the molecule has Wisp=true (is ephemeral)
-  2. Deletes the molecule and all its wisp children
+  1. Verifies the molecule has Ephemeral=true (is ephemeral)
+  2. Deletes the molecule and all its ephemeral children
   3. No digest is created (use 'bd mol squash' if you want a digest)
 
 CAUTION: This is a destructive operation. The wisp's data will be
@@ -81,8 +81,8 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	}
 
 	// Verify it's a wisp
-	if !rootIssue.Wisp {
-		fmt.Fprintf(os.Stderr, "Error: molecule %s is not a wisp (Wisp=false)\n", resolvedID)
+	if !rootIssue.Ephemeral {
+		fmt.Fprintf(os.Stderr, "Error: molecule %s is not a wisp (Ephemeral=false)\n", resolvedID)
 		fmt.Fprintf(os.Stderr, "Hint: mol burn only works with wisp molecules\n")
 		fmt.Fprintf(os.Stderr, "      Use 'bd delete' to remove non-wisp issues\n")
 		os.Exit(1)
@@ -98,7 +98,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	// Collect wisp issue IDs to delete (only delete wisps, not regular children)
 	var wispIDs []string
 	for _, issue := range subgraph.Issues {
-		if issue.Wisp {
+		if issue.Ephemeral {
 			wispIDs = append(wispIDs, issue.ID)
 		}
 	}
@@ -120,7 +120,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 		fmt.Printf("Root: %s\n", subgraph.Root.Title)
 		fmt.Printf("\nWisp issues to delete (%d total):\n", len(wispIDs))
 		for _, issue := range subgraph.Issues {
-			if !issue.Wisp {
+			if !issue.Ephemeral {
 				continue
 			}
 			status := string(issue.Status)
@@ -166,7 +166,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Printf("%s Burned wisp: %d issues deleted\n", ui.RenderPass("✓"), result.DeletedCount)
-	fmt.Printf("  Wisp: %s\n", resolvedID)
+	fmt.Printf("  Ephemeral: %s\n", resolvedID)
 	fmt.Printf("  No digest created.\n")
 }
 

@@ -353,7 +353,7 @@ func runCook(cmd *cobra.Command, args []string) {
 	if len(bondPoints) > 0 {
 		fmt.Printf("  Bond points: %s\n", strings.Join(bondPoints, ", "))
 	}
-	fmt.Printf("\nTo use: bd pour %s --var <name>=<value>\n", result.ProtoID)
+	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>\n", result.ProtoID)
 }
 
 // cookFormulaResult holds the result of cooking

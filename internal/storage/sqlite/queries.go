@@ -349,7 +349,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		issue.Sender = sender.String
 	}
 	if wisp.Valid && wisp.Int64 != 0 {
-		issue.Wisp = true
+		issue.Ephemeral = true
 	}
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
@@ -562,7 +562,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		issue.Sender = sender.String
 	}
 	if wisp.Valid && wisp.Int64 != 0 {
-		issue.Wisp = true
+		issue.Ephemeral = true
 	}
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
@@ -1652,8 +1652,8 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	}
 
 	// Wisp filtering (bd-kwro.9)
-	if filter.Wisp != nil {
-		if *filter.Wisp {
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
 			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
 		} else {
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")

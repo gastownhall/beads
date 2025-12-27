@@ -305,20 +305,20 @@ var showCmd = &cobra.Command{
 								fmt.Printf("  ◊ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
 							}
 						}
+					}
 
-						if len(details.Comments) > 0 {
-							fmt.Printf("\nComments (%d):\n", len(details.Comments))
-							for _, comment := range details.Comments {
-								fmt.Printf("  [%s] %s\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"))
-								commentLines := strings.Split(comment.Text, "\n")
-								for _, line := range commentLines {
-									fmt.Printf("    %s\n", line)
-								}
+					if len(details.Comments) > 0 {
+						fmt.Printf("\nComments (%d):\n", len(details.Comments))
+						for _, comment := range details.Comments {
+							fmt.Printf("  [%s] %s\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"))
+							commentLines := strings.Split(comment.Text, "\n")
+							for _, line := range commentLines {
+								fmt.Printf("    %s\n", line)
 							}
 						}
-						}
+					}
 
-						fmt.Println()
+					fmt.Println()
 				}
 			}
 

@@ -44,8 +44,8 @@ type Issue struct {
 	OriginalType string     `json:"original_type,omitempty"` // Issue type before deletion (for tombstones)
 
 	// Messaging fields (bd-kwro): inter-agent communication support
-	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
-	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
+	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -598,8 +598,8 @@ type IssueFilter struct {
 	// Tombstone filtering (bd-1bu)
 	IncludeTombstones bool // If false (default), exclude tombstones from results
 
-	// Wisp filtering (bd-kwro.9)
-	Wisp *bool // Filter by wisp flag (nil = any, true = only wisps, false = only non-wisps)
+	// Ephemeral filtering (bd-kwro.9)
+	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
 	// Pinned filtering (bd-7h5)
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)

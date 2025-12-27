@@ -909,7 +909,7 @@ func TestUpsertPreservesGateFields(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  1,
 		IssueType: types.TypeGate,
-		Wisp:      true,
+		Ephemeral: true,
 		AwaitType: "gh:run",
 		AwaitID:   "123456789",
 		Timeout:   30 * 60 * 1000000000, // 30 minutes in nanoseconds

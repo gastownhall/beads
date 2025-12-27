@@ -157,7 +157,7 @@ Examples:
 				Status:    types.StatusOpen,
 				Priority:  1, // Gates are typically high priority
 				// Assignee left empty - orchestrator decides who processes gates
-				Wisp:      true, // Gates are wisps (ephemeral)
+				Ephemeral:      true, // Gates are wisps (ephemeral)
 				AwaitType: awaitType,
 				AwaitID:   awaitID,
 				Timeout:   timeout,

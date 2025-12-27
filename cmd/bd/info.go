@@ -292,6 +292,7 @@ var versionChanges = []VersionChange{
 		Version: "0.37.0",
 		Date:    "2025-12-26",
 		Changes: []string{
+			"BREAKING: Ephemeral API rename (bd-o18s) - Wisp→Ephemeral: JSON 'wisp'→'ephemeral', bd wisp→bd ephemeral",
 			"NEW: bd gate create/show/list/close/wait (bd-udsi) - Async coordination primitives for agent workflows",
 			"NEW: bd gate eval (gt-twjr5.2) - Evaluate timer gates and GitHub gates (gh:run, gh:pr, mail)",
 			"NEW: bd gate approve (gt-twjr5.4) - Human gate approval command",

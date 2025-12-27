@@ -295,7 +295,7 @@ func TestRepliesTo(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Sender:      "alice",
 		Assignee:    "bob",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -307,7 +307,7 @@ func TestRepliesTo(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Sender:      "bob",
 		Assignee:    "alice",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -363,7 +363,7 @@ func TestRepliesTo_Chain(t *testing.T) {
 			IssueType: types.TypeMessage,
 			Sender:    "user",
 			Assignee:  "inbox",
-			Wisp: true,
+			Ephemeral: true,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -415,7 +415,7 @@ func TestWispField(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeMessage,
-		Wisp:      true,
+		Ephemeral:      true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -426,7 +426,7 @@ func TestWispField(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      false,
+		Ephemeral:      false,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -443,7 +443,7 @@ func TestWispField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetIssue failed: %v", err)
 	}
-	if !savedWisp.Wisp {
+	if !savedWisp.Ephemeral {
 		t.Error("Wisp issue should have Wisp=true")
 	}
 
@@ -451,7 +451,7 @@ func TestWispField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetIssue failed: %v", err)
 	}
-	if savedPermanent.Wisp {
+	if savedPermanent.Ephemeral {
 		t.Error("Permanent issue should have Wisp=false")
 	}
 }
@@ -468,7 +468,7 @@ func TestWispFilter(t *testing.T) {
 			Status:    types.StatusClosed, // Closed for cleanup test
 			Priority:  2,
 			IssueType: types.TypeMessage,
-			Wisp:      true,
+			Ephemeral:      true,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -483,7 +483,7 @@ func TestWispFilter(t *testing.T) {
 			Status:    types.StatusClosed,
 			Priority:  2,
 			IssueType: types.TypeTask,
-			Wisp:      false,
+			Ephemeral:      false,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -497,7 +497,7 @@ func TestWispFilter(t *testing.T) {
 	closedStatus := types.StatusClosed
 	wispFilter := types.IssueFilter{
 		Status: &closedStatus,
-		Wisp:   &wispTrue,
+		Ephemeral:   &wispTrue,
 	}
 
 	wispIssues, err := store.SearchIssues(ctx, "", wispFilter)
@@ -512,7 +512,7 @@ func TestWispFilter(t *testing.T) {
 	wispFalse := false
 	nonWispFilter := types.IssueFilter{
 		Status: &closedStatus,
-		Wisp:   &wispFalse,
+		Ephemeral:   &wispFalse,
 	}
 
 	permanentIssues, err := store.SearchIssues(ctx, "", nonWispFilter)

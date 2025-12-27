@@ -489,7 +489,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Completed design",
 	}
 	child2 := &types.Issue{
@@ -498,7 +498,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Code merged",
 	}
 
@@ -547,7 +547,7 @@ func TestSquashMolecule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get digest: %v", err)
 	}
-	if digest.Wisp {
+	if digest.Ephemeral {
 		t.Error("Digest should NOT be ephemeral")
 	}
 	if digest.Status != types.StatusClosed {
@@ -595,7 +595,7 @@ func TestSquashMoleculeWithDelete(t *testing.T) {
 		Status:    types.StatusClosed,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral:      true,
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
 		t.Fatalf("Failed to create child: %v", err)
@@ -705,7 +705,7 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Done",
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
@@ -1304,14 +1304,14 @@ func TestWispFilteringFromExport(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  1,
 		IssueType: types.TypeTask,
-		Wisp:      false,
+		Ephemeral:      false,
 	}
 	wispIssue := &types.Issue{
 		Title:     "Wisp Issue",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral:      true,
 	}
 
 	if err := s.CreateIssue(ctx, normalIssue, "test"); err != nil {
@@ -1333,7 +1333,7 @@ func TestWispFilteringFromExport(t *testing.T) {
 	// Filter wisp issues (simulating export behavior)
 	exportableIssues := make([]*types.Issue, 0)
 	for _, issue := range allIssues {
-		if !issue.Wisp {
+		if !issue.Ephemeral {
 			exportableIssues = append(exportableIssues, issue)
 		}
 	}
