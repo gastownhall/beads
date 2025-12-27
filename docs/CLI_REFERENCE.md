@@ -349,15 +349,15 @@ Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md]
 
 | Phase | State | Storage | Command |
 |-------|-------|---------|---------|
-| Solid | Proto | `.beads/` | `bd mol catalog` |
+| Solid | Proto | `.beads/` | `bd formula list` |
 | Liquid | Mol | `.beads/` | `bd mol pour` |
 | Vapor | Wisp | `.beads/` (Ephemeral=true, not exported) | `bd mol wisp` |
 
 ### Proto/Template Commands
 
 ```bash
-# List available protos (templates)
-bd mol catalog --json
+# List available formulas (templates)
+bd formula list --json
 
 # Show proto structure and variables
 bd mol show <proto-id> --json

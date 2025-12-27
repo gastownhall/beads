@@ -55,11 +55,11 @@ bd mol distill bd-abc123 --as "Release Workflow" --var version=1.0.0
 
 **Proto naming convention:** Use `mol-` prefix for clarity (e.g., `mol-release`, `mol-patrol`).
 
-### Listing Protos
+### Listing Formulas
 
 ```bash
-bd mol catalog                  # List all protos
-bd mol catalog --json           # Machine-readable
+bd formula list                 # List all formulas (protos)
+bd formula list --json          # Machine-readable
 ```
 
 ### Viewing Proto Structure
@@ -318,7 +318,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 
 | Command | Purpose |
 |---------|---------|
-| `bd mol catalog` | List available protos |
+| `bd formula list` | List available formulas/protos |
 | `bd mol show <id>` | Show proto/mol structure |
 | `bd mol spawn <proto>` | Create wisp from proto (default) |
 | `bd mol spawn <proto> --pour` | Create persistent mol from proto |
@@ -338,7 +338,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 ## Troubleshooting
 
 **"Proto not found"**
-- Check `bd mol catalog` for available protos
+- Check `bd formula list` for available formulas/protos
 - Protos need `template` label on the epic
 
 **"Variable not substituted"**
