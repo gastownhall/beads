@@ -885,7 +885,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
-			issue.Wisp = true
+			issue.Ephemeral = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {
@@ -1006,7 +1006,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
-			issue.Wisp = true
+			issue.Ephemeral = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {

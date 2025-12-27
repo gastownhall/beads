@@ -362,7 +362,7 @@ Examples:
 		// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 		filtered := make([]*types.Issue, 0, len(issues))
 		for _, issue := range issues {
-			if !issue.Wisp {
+			if !issue.Ephemeral {
 				filtered = append(filtered, issue)
 			}
 		}

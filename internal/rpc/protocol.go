@@ -89,11 +89,11 @@ type CreateArgs struct {
 	WaitsFor     string `json:"waits_for,omitempty"`      // Spawner issue ID to wait for
 	WaitsForGate string `json:"waits_for_gate,omitempty"` // Gate type: all-children or any-children
 	// Messaging fields (bd-kwro)
-	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
-	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
+	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
 	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// ID generation (bd-hobo)
-	IDPrefix  string `json:"id_prefix,omitempty"`  // Override prefix for ID generation (mol, wisp, etc.)
+	IDPrefix  string `json:"id_prefix,omitempty"`  // Override prefix for ID generation (mol, eph, etc.)
 	CreatedBy string `json:"created_by,omitempty"` // Who created the issue
 }
 
@@ -115,8 +115,8 @@ type UpdateArgs struct {
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`
 	// Messaging fields (bd-kwro)
-	Sender *string `json:"sender,omitempty"` // Who sent this (for messages)
-	Wisp   *bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
+	Sender    *string `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral *bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
 	RepliesTo *string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// Graph link fields (bd-fu83)
 	RelatesTo    *string `json:"relates_to,omitempty"`    // JSON array of related issue IDs
@@ -193,8 +193,8 @@ type ListArgs struct {
 	// Parent filtering (bd-yqhh)
 	ParentID string `json:"parent_id,omitempty"`
 
-	// Wisp filtering (bd-bkul)
-	Wisp *bool `json:"wisp,omitempty"`
+	// Ephemeral filtering (bd-bkul)
+	Ephemeral *bool `json:"ephemeral,omitempty"`
 }
 
 // CountArgs represents arguments for the count operation

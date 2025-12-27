@@ -21,7 +21,7 @@ import (
 //   bd mol catalog                        # List available protos
 //   bd mol show <id>                      # Show proto/molecule structure
 //   bd pour <id> --var key=value          # Instantiate proto → persistent mol
-//   bd wisp create <id> --var key=value   # Instantiate proto → ephemeral wisp
+//   bd ephemeral create <id> --var key=value   # Instantiate proto → ephemeral wisp
 
 // MoleculeLabel is the label used to identify molecules (templates)
 // Molecules use the same label as templates - they ARE templates with workflow semantics
@@ -55,7 +55,7 @@ Commands:
 
 See also:
   bd pour <proto>          # Instantiate as persistent mol (liquid phase)
-  bd wisp create <proto>   # Instantiate as ephemeral wisp (vapor phase)`,
+  bd ephemeral create <proto>   # Instantiate as ephemeral wisp (vapor phase)`,
 }
 
 // =============================================================================
@@ -72,7 +72,7 @@ func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSub
 		Vars:     vars,
 		Assignee: assignee,
 		Actor:    actorName,
-		Wisp:     ephemeral,
+		Ephemeral:     ephemeral,
 		Prefix:   prefix,
 	}
 	return cloneSubgraph(ctx, s, subgraph, opts)

@@ -1089,8 +1089,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	// Wisp filtering (bd-kwro.9)
-	if filter.Wisp != nil {
-		if *filter.Wisp {
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
 			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
 		} else {
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
@@ -1244,7 +1244,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		issue.Sender = sender.String
 	}
 	if wisp.Valid && wisp.Int64 != 0 {
-		issue.Wisp = true
+		issue.Ephemeral = true
 	}
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {

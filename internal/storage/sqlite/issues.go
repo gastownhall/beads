@@ -28,7 +28,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 	}
 
 	wisp := 0
-	if issue.Wisp {
+	if issue.Ephemeral {
 		wisp = 1
 	}
 	pinned := 0
@@ -94,7 +94,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 		}
 
 		wisp := 0
-		if issue.Wisp {
+		if issue.Ephemeral {
 			wisp = 1
 		}
 		pinned := 0

@@ -107,7 +107,7 @@ var createCmd = &cobra.Command{
 		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
-		wisp, _ := cmd.Flags().GetBool("wisp")
+		wisp, _ := cmd.Flags().GetBool("ephemeral")
 
 		// Get estimate if provided
 		var estimatedMinutes *int
@@ -222,7 +222,7 @@ var createCmd = &cobra.Command{
 				Dependencies:       deps,
 				WaitsFor:           waitsFor,
 				WaitsForGate:       waitsForGate,
-				Wisp:               wisp,
+				Ephemeral:          wisp,
 				CreatedBy:          getActorWithGit(),
 			}
 
@@ -268,7 +268,7 @@ var createCmd = &cobra.Command{
 			Assignee:           assignee,
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
-			Wisp:               wisp,
+			Ephemeral:          wisp,
 			CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
 		}
 
@@ -448,7 +448,7 @@ func init() {
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
-	createCmd.Flags().Bool("wisp", false, "Create as wisp (ephemeral, not exported to JSONL)")
+	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (ephemeral, not exported to JSONL)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }

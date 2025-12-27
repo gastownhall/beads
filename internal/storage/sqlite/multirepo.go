@@ -282,7 +282,7 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 	err := tx.QueryRowContext(ctx, `SELECT id FROM issues WHERE id = ?`, issue.ID).Scan(&existingID)
 
 	wisp := 0
-	if issue.Wisp {
+	if issue.Ephemeral {
 		wisp = 1
 	}
 	pinned := 0

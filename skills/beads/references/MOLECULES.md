@@ -84,7 +84,7 @@ bd mol spawn mol-release --var version=2.0 # With variable substitution
 **Chemistry shortcuts:**
 ```bash
 bd pour mol-feature                        # Shortcut for spawn --pour
-bd wisp create mol-patrol                  # Explicit wisp creation
+bd ephemeral create mol-patrol                  # Explicit wisp creation
 ```
 
 ### Spawn with Immediate Execution
@@ -164,7 +164,7 @@ bd mol bond mol-feature mol-deploy --as "Feature with Deploy"
 ### Creating Wisps
 
 ```bash
-bd wisp create mol-patrol                    # From proto
+bd ephemeral create mol-patrol                    # From proto
 bd mol spawn mol-patrol                      # Same (spawn defaults to wisp)
 bd mol spawn mol-check --var target=db       # With variables
 ```
@@ -172,8 +172,8 @@ bd mol spawn mol-check --var target=db       # With variables
 ### Listing Wisps
 
 ```bash
-bd wisp list                    # List all wisps
-bd wisp list --json             # Machine-readable
+bd ephemeral list                    # List all wisps
+bd ephemeral list --json             # Machine-readable
 ```
 
 ### Ending Wisps
@@ -198,7 +198,7 @@ Use burn for routine work with no archival value.
 ### Garbage Collection
 
 ```bash
-bd wisp gc                      # Clean up orphaned wisps
+bd ephemeral gc                      # Clean up orphaned wisps
 ```
 
 ---
@@ -289,7 +289,7 @@ bd mol spawn mol-weekly-review --pour
 
 ```bash
 # Patrol proto exists
-bd wisp create mol-patrol
+bd ephemeral create mol-patrol
 
 # Execute patrol work...
 
@@ -328,9 +328,9 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 | `bd mol squash <mol>` | Compress wisp children to digest |
 | `bd mol burn <wisp>` | Delete wisp without trace |
 | `bd pour <proto>` | Shortcut for `spawn --pour` |
-| `bd wisp create <proto>` | Create ephemeral wisp |
-| `bd wisp list` | List all wisps |
-| `bd wisp gc` | Garbage collect orphaned wisps |
+| `bd ephemeral create <proto>` | Create ephemeral wisp |
+| `bd ephemeral list` | List all wisps |
+| `bd ephemeral gc` | Garbage collect orphaned wisps |
 | `bd ship <capability>` | Publish capability for cross-project deps |
 
 ---
@@ -347,7 +347,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 
 **"Wisp commands fail"**
 - Wisps stored in `.beads-wisp/` (separate from `.beads/`)
-- Check `bd wisp list` for active wisps
+- Check `bd ephemeral list` for active wisps
 
 **"External dependency not satisfied"**
 - Target project must have closed issue with `provides:<capability>` label

@@ -400,7 +400,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			issue.Sender = sender.String
 		}
 		if ephemeral.Valid && ephemeral.Int64 != 0 {
-			issue.Wisp = true
+			issue.Ephemeral = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {

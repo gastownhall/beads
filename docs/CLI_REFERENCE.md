@@ -351,7 +351,7 @@ Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md]
 |-------|-------|---------|---------|
 | Solid | Proto | `.beads/` | `bd mol catalog` |
 | Liquid | Mol | `.beads/` | `bd pour` |
-| Vapor | Wisp | `.beads/` (Wisp=true, not exported) | `bd wisp create` |
+| Vapor | Wisp | `.beads/` (Wisp=true, not exported) | `bd ephemeral create` |
 
 ### Proto/Template Commands
 
@@ -385,17 +385,17 @@ bd pour <proto-id> --attach <other-proto> --json
 ### Wisp Commands
 
 ```bash
-# Instantiate proto as ephemeral wisp (solid → vapor)
-bd wisp create <proto-id> --var key=value --json
+# Instantiate proto as ephemeral issue (solid → vapor)
+bd ephemeral create <proto-id> --var key=value --json
 
 # List all wisps
-bd wisp list --json
-bd wisp list --all --json    # Include closed
+bd ephemeral list --json
+bd ephemeral list --all --json    # Include closed
 
 # Garbage collect orphaned wisps
-bd wisp gc --json
-bd wisp gc --age 24h --json  # Custom age threshold
-bd wisp gc --dry-run         # Preview what would be cleaned
+bd ephemeral gc --json
+bd ephemeral gc --age 24h --json  # Custom age threshold
+bd ephemeral gc --dry-run         # Preview what would be cleaned
 ```
 
 ### Bonding (Combining Work)
@@ -424,29 +424,29 @@ bd mol bond <A> <B> --dry-run
 
 ```bash
 # Compress wisp to permanent digest
-bd mol squash <wisp-id> --json
+bd mol squash <ephemeral-id> --json
 
 # With agent-provided summary
-bd mol squash <wisp-id> --summary "Work completed" --json
+bd mol squash <ephemeral-id> --summary "Work completed" --json
 
 # Preview
-bd mol squash <wisp-id> --dry-run
+bd mol squash <ephemeral-id> --dry-run
 
 # Keep wisp children after squash
-bd mol squash <wisp-id> --keep-children --json
+bd mol squash <ephemeral-id> --keep-children --json
 ```
 
 ### Burn (Discard Wisp)
 
 ```bash
 # Delete wisp without digest (destructive)
-bd mol burn <wisp-id> --json
+bd mol burn <ephemeral-id> --json
 
 # Preview
-bd mol burn <wisp-id> --dry-run
+bd mol burn <ephemeral-id> --dry-run
 
 # Skip confirmation
-bd mol burn <wisp-id> --force --json
+bd mol burn <ephemeral-id> --force --json
 ```
 
 **Note:** Most mol commands require `--no-daemon` flag when daemon is running.

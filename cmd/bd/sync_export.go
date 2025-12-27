@@ -65,7 +65,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	// This prevents "zombie" issues that resurrect after mol squash deletes them.
 	filteredIssues := make([]*types.Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Wisp {
+		if issue.Ephemeral {
 			continue
 		}
 		filteredIssues = append(filteredIssues, issue)

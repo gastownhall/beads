@@ -81,8 +81,8 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Sender != nil {
 		u["sender"] = *a.Sender
 	}
-	if a.Wisp != nil {
-		u["wisp"] = *a.Wisp
+	if a.Ephemeral != nil {
+		u["ephemeral"] = *a.Ephemeral
 	}
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo
@@ -176,8 +176,8 @@ func (s *Server) handleCreate(req *Request) Response {
 		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
 		// Messaging fields (bd-kwro)
-		Sender: createArgs.Sender,
-		Wisp:   createArgs.Wisp,
+		Sender:    createArgs.Sender,
+		Ephemeral: createArgs.Ephemeral,
 		// NOTE: RepliesTo now handled via replies-to dependency (Decision 004)
 		// ID generation (bd-hobo)
 		IDPrefix:  createArgs.IDPrefix,
@@ -844,8 +844,8 @@ func (s *Server) handleList(req *Request) Response {
 		filter.ParentID = &listArgs.ParentID
 	}
 
-	// Wisp filtering (bd-bkul)
-	filter.Wisp = listArgs.Wisp
+	// Ephemeral filtering (bd-bkul)
+	filter.Ephemeral = listArgs.Ephemeral
 
 	// Guard against excessive ID lists to avoid SQLite parameter limits
 	const maxIDs = 1000
@@ -1475,7 +1475,7 @@ func (s *Server) handleGateCreate(req *Request) Response {
 		Status:    types.StatusOpen,
 		Priority:  1, // Gates are typically high priority
 		Assignee:  "deacon/",
-		Wisp:      true, // Gates are wisps (ephemeral)
+		Ephemeral:      true, // Gates are wisps (ephemeral)
 		AwaitType: args.AwaitType,
 		AwaitID:   args.AwaitID,
 		Timeout:   args.Timeout,
