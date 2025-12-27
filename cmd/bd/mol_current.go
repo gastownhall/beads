@@ -100,7 +100,7 @@ The output shows all steps with status indicators:
 				}
 				fmt.Println(".")
 				fmt.Println("\nTo start work on a molecule:")
-				fmt.Println("  bd pour <proto-id>          # Instantiate a molecule from template")
+				fmt.Println("  bd mol pour <proto-id>      # Instantiate a molecule from template")
 				fmt.Println("  bd update <step-id> --status in_progress  # Claim a step")
 				return
 			}

@@ -225,7 +225,7 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Variables: %s\n", strings.Join(result.Variables, ", "))
 	}
 	fmt.Printf("\nTo instantiate:\n")
-	fmt.Printf("  bd pour %s", result.FormulaName)
+	fmt.Printf("  bd mol pour %s", result.FormulaName)
 	for _, v := range result.Variables {
 		fmt.Printf(" --var %s=<value>", v)
 	}

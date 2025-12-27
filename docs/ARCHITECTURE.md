@@ -275,7 +275,7 @@ open ──▶ in_progress ──▶ closed
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│ bd ephemeral create  │───▶│  Wisp Issues    │───▶│  bd mol squash  │
+│   bd mol wisp       │───▶│  Wisp Issues    │───▶│  bd mol squash  │
 │ (from template) │    │  (local-only)   │    │  (→ digest)     │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```

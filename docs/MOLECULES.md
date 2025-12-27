@@ -128,8 +128,8 @@ For reusable workflows, beads uses a chemistry metaphor:
 ### Phase Commands
 
 ```bash
-bd pour <proto>                  # Proto → Mol (persistent instance)
-bd ephemeral create <proto>           # Proto → Wisp (ephemeral instance)
+bd mol pour <proto>              # Proto → Mol (persistent instance)
+bd mol wisp <proto>              # Proto → Wisp (ephemeral instance)
 bd mol squash <id>               # Mol/Wisp → Digest (permanent record)
 bd mol burn <id>                 # Wisp → nothing (discard)
 ```
@@ -227,10 +227,10 @@ bd close <id> --reason "Done"
 Wisps accumulate if not squashed/burned:
 
 ```bash
-bd ephemeral list           # Check for orphans
-bd mol squash <id>     # Create digest
-bd mol burn <id>       # Or discard
-bd ephemeral gc             # Garbage collect old wisps
+bd mol wisp list        # Check for orphans
+bd mol squash <id>      # Create digest
+bd mol burn <id>        # Or discard
+bd mol wisp gc          # Garbage collect old wisps
 ```
 
 ## Layer Cake Architecture
@@ -272,8 +272,8 @@ bd dep tree <id>                 # Show dependency tree
 ### Molecules
 
 ```bash
-bd pour <proto> --var k=v        # Template → persistent mol
-bd ephemeral create <proto>           # Template → ephemeral wisp
+bd mol pour <proto> --var k=v    # Template → persistent mol
+bd mol wisp <proto>              # Template → ephemeral wisp
 bd mol bond A B                  # Connect work graphs
 bd mol squash <id>               # Compress to digest
 bd mol burn <id>                 # Discard without record
