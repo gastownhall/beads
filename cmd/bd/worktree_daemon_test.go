@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 
 	// Import SQLite driver for test database creation
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -70,14 +71,19 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			// Reset git caches after changing directory
+			git.ResetCaches()
 			// Reinitialize config to restore original state
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory (required for IsWorktree to re-detect)
+		git.ResetCaches()
 
 		// No sync-branch configured
 		os.Unsetenv("BEADS_SYNC_BRANCH")
@@ -106,13 +112,17 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			git.ResetCaches()
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -137,13 +147,17 @@ func TestShouldDisableDaemonForWorktree(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			git.ResetCaches()
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -187,13 +201,17 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			git.ResetCaches()
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory
+		git.ResetCaches()
 
 		// Clear all daemon-related env vars
 		os.Unsetenv("BEADS_NO_DAEMON")
@@ -220,13 +238,17 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			git.ResetCaches()
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -253,13 +275,17 @@ func TestShouldAutoStartDaemonWorktreeIntegration(t *testing.T) {
 
 		// Change to the worktree directory
 		origDir, _ := os.Getwd()
-		defer func() { 
+		defer func() {
 			_ = os.Chdir(origDir)
+			git.ResetCaches()
 			_ = config.Initialize()
 		}()
 		if err := os.Chdir(worktreeDir); err != nil {
 			t.Fatalf("Failed to change to worktree dir: %v", err)
 		}
+
+		// Reset git caches after changing directory
+		git.ResetCaches()
 
 		// Reinitialize config to pick up the new directory's config.yaml
 		if err := config.Initialize(); err != nil {
@@ -302,8 +328,8 @@ func setupWorktreeTestRepo(t *testing.T) (mainDir, worktreeDir string) {
 	// Create main repo directory
 	mainDir = t.TempDir()
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
+	// Initialize git repo with 'main' as default branch (modern git convention)
+	cmd := exec.Command("git", "init", "--initial-branch=main")
 	cmd.Dir = mainDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to init git repo: %v\n%s", err, output)
