@@ -79,6 +79,63 @@ func ExtractProjectFromPath(path string) string {
 	return ""
 }
 
+// LookupRigByName finds a route by rig name (first path component).
+// For example, LookupRigByName("beads", beadsDir) would find the route
+// with path "beads/mayor/rig" and return it.
+//
+// Returns the matching route and true if found, or zero Route and false if not.
+func LookupRigByName(rigName, beadsDir string) (Route, bool) {
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil || len(routes) == 0 {
+		return Route{}, false
+	}
+
+	for _, route := range routes {
+		project := ExtractProjectFromPath(route.Path)
+		if project == rigName {
+			return route, true
+		}
+	}
+
+	return Route{}, false
+}
+
+// ResolveBeadsDirForRig returns the beads directory for a given rig name.
+// This is used by --rig flag to create issues in a different rig.
+//
+// Parameters:
+//   - rigName: the rig name (e.g., "beads", "gastown")
+//   - currentBeadsDir: the current .beads directory (used to find routes.jsonl)
+//
+// Returns:
+//   - beadsDir: the target .beads directory path
+//   - prefix: the issue prefix for that rig (e.g., "bd-")
+//   - err: error if rig not found or path doesn't exist
+func ResolveBeadsDirForRig(rigName, currentBeadsDir string) (beadsDir string, prefix string, err error) {
+	route, found := LookupRigByName(rigName, currentBeadsDir)
+	if !found {
+		return "", "", fmt.Errorf("rig %q not found in routes.jsonl", rigName)
+	}
+
+	// Resolve the target beads directory
+	projectRoot := filepath.Dir(currentBeadsDir)
+	targetPath := filepath.Join(projectRoot, route.Path, ".beads")
+
+	// Follow redirect if present
+	targetPath = resolveRedirect(targetPath)
+
+	// Verify the target exists
+	if info, statErr := os.Stat(targetPath); statErr != nil || !info.IsDir() {
+		return "", "", fmt.Errorf("rig %q beads directory not found: %s", rigName, targetPath)
+	}
+
+	if os.Getenv("BD_DEBUG_ROUTING") != "" {
+		fmt.Fprintf(os.Stderr, "[routing] Rig %q -> prefix %s, path %s\n", rigName, route.Prefix, targetPath)
+	}
+
+	return targetPath, route.Prefix, nil
+}
+
 // ResolveToExternalRef attempts to convert a foreign issue ID to an external reference
 // using routes.jsonl for prefix-based routing.
 //
