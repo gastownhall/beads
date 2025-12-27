@@ -5,6 +5,94 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.0] - 2025-12-27
+
+### Added
+
+- **Prefix-based routing** (bd-9gvf) - Cross-rig command routing
+  - `bd` commands auto-route to correct rig based on issue ID prefix
+  - Routes stored in `~/gt/.beads/routes.jsonl`
+  - Enables seamless multi-rig workflows from any directory
+
+- **Cross-rig ID auto-resolve** (bd-lfiu) - Smarter dependency handling
+  - `bd dep add` auto-resolves issue IDs across different rigs
+  - No need to specify full paths for cross-rig dependencies
+
+- **`bd mol pour/wisp` subcommands** (bd-2fs7) - Reorganized command hierarchy
+  - `bd mol pour` for persistent molecules
+  - `bd mol wisp` for ephemeral workflows
+  - Cleaner organization under `bd mol` namespace
+
+- **Comments display in `bd show`** (GH#177) - Enhanced issue details
+  - Comments now visible in issue output
+  - Shows full discussion thread for issues
+
+- **`created_by` field on issues** (GH#748) - Creator tracking
+  - Track who created each issue for audit trail
+  - Useful for multi-agent workflows
+
+- **Database corruption recovery** (GH#753) - Robust doctor repairs
+  - `bd doctor --fix` can now auto-repair corrupted SQLite databases
+  - JSONL integrity checks detect and fix malformed entries
+  - Git hygiene checks for stale branches
+
+- **Chaos testing for releases** (bd-kx1j) - Thorough validation
+  - `--run-chaos-tests` flag in release script
+  - Exercises edge cases and failure modes
+
+- **Pre-commit config** - Local lint enforcement
+  - Consistent code quality before commits
+
+### Changed
+
+- **Sync backoff and tips consolidation** (GH#753) - Smarter daemon
+  - Daemon uses exponential backoff for sync retries
+  - Tips consolidated from multiple sources
+
+- **Wisp/Ephemeral naming finalized** - `wisp` is canonical
+  - `bd mol wisp` is the correct command
+  - Internal API uses "ephemeral" but CLI uses "wisp"
+
+### Fixed
+
+- **Comments display position** (GH#756) - Formatting fix
+  - Comments now display outside dependents block
+  - Proper visual hierarchy in `bd show` output
+
+- **no-db mode storeActive** (GH#761) - JSONL-only fix
+  - `storeActive` correctly set in no-database mode
+  - Fixes issues with JSONL-only installations
+
+- **`--resolution` alias** (GH#746) - Backwards compatibility
+  - Restored `--resolution` as alias for `--reason` on `bd close`
+
+- **`bd graph` with daemon** (GH#751) - Daemon compatibility
+  - Graph generation works when daemon is running
+  - No more conflicts between graph and daemon operations
+
+- **`created_by` in RPC path** (GH#754) - Daemon propagation
+  - Creator field correctly passed through daemon RPC
+
+- **Migration 028 idempotency** (GH#757) - Safe re-runs
+  - Migration handles partial or repeated runs gracefully
+  - Checks for existing columns before adding
+
+- **Routed ID daemon bypass** (bd-uu8p) - Cross-rig show
+  - `bd show` with routed IDs bypasses daemon correctly
+  - Storage connections closed per iteration to prevent leaks
+
+- **Modern git init** (GH#753) - Test compatibility
+  - Tests use `--initial-branch=main` for modern git versions
+
+- **golangci-lint clean** (GH#753) - All platforms
+  - Resolved all lint errors across platforms
+
+### Improved
+
+- **Test coverage** - Comprehensive testing
+  - Doctor, daemon, storage, and RPC client paths covered
+  - Chaos testing integration for edge cases
+
 ## [0.37.0] - 2025-12-26
 
 ### Added

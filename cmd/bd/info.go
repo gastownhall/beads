@@ -289,6 +289,35 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.38.0",
+		Date:    "2025-12-27",
+		Changes: []string{
+			"NEW: Prefix-based routing (bd-9gvf) - bd commands auto-route to correct rig via routes.jsonl",
+			"NEW: Cross-rig ID auto-resolve (bd-lfiu) - bd dep add auto-resolves IDs across rigs",
+			"NEW: bd mol pour/wisp moved under bd mol subcommand (bd-2fs7) - cleaner command hierarchy",
+			"NEW: bd show displays comments (GH#177) - Comments now visible in issue details",
+			"NEW: created_by field on issues (GH#748) - Track issue creator for audit trail",
+			"NEW: Database corruption recovery in bd doctor --fix (GH#753) - Auto-repair corrupted databases",
+			"NEW: JSONL integrity check in bd doctor (GH#753) - Detect and fix malformed JSONL",
+			"NEW: Git hygiene checks in bd doctor - Detect stale branches and sync issues",
+			"NEW: pre-commit config for local lint enforcement - Consistent code quality",
+			"NEW: Chaos testing flag for release script (bd-kx1j) - --run-chaos-tests for thorough validation",
+			"CHANGED: Sync backoff and tips consolidation (GH#753) - Smarter daemon sync timing",
+			"CHANGED: Wisp/Ephemeral name finalized as 'wisp' - bd mol wisp is the canonical command",
+			"FIX: Comments display outside dependents block (GH#756) - Proper formatting",
+			"FIX: no-db mode storeActive initialization (GH#761) - JSONL-only mode works correctly",
+			"FIX: --resolution alias restored for bd close (GH#746) - Backwards compatibility",
+			"FIX: bd graph works with daemon running (GH#751) - Graph generation no longer conflicts",
+			"FIX: created_by field in RPC path (GH#754) - Daemon correctly propagates creator",
+			"FIX: Migration 028 idempotency (GH#757) - Migration handles partial/re-runs",
+			"FIX: Routed IDs bypass daemon in show command (bd-uu8p) - Cross-rig show works correctly",
+			"FIX: Storage connections closed per iteration (bd-uu8p) - Prevents resource leaks",
+			"FIX: Modern git init compatibility (GH#753) - Tests use --initial-branch=main",
+			"FIX: golangci-lint errors resolved (GH#753) - Clean lint on all platforms",
+			"IMPROVED: Test coverage - doctor, daemon, storage, RPC client paths covered",
+		},
+	},
+	{
 		Version: "0.37.0",
 		Date:    "2025-12-26",
 		Changes: []string{
