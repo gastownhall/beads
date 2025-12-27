@@ -72,8 +72,11 @@ func initializeNoDbMode() error {
 
 	debug.Logf("using prefix '%s'", prefix)
 
-	// Set global store
+	// Set global store and mark as active (fixes bd comment --no-db)
+	storeMutex.Lock()
 	store = memStore
+	storeActive = true
+	storeMutex.Unlock()
 	return nil
 }
 
