@@ -718,74 +718,101 @@ func parseExternalRefParts(ref string) (project, capability string) {
 	return parts[1], parts[2]
 }
 
-// DetectCycles finds circular dependencies and returns the actual cycle paths
-// Note: relates-to dependencies are excluded because they are intentionally bidirectional
-// ("see also" relationships) and do not represent problematic cycles.
-func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
-	// Use recursive CTE to find cycles with full paths
-	// We track the path as a string to work around SQLite's lack of arrays
-	// Exclude relates-to dependencies since they are inherently bidirectional
+// loadDependencyGraph loads all non-relates-to dependencies as an adjacency list.
+// This is used by DetectCycles for O(V+E) cycle detection instead of the O(2^n) SQL CTE.
+func (s *SQLiteStorage) loadDependencyGraph(ctx context.Context) (map[string][]string, error) {
+	deps := make(map[string][]string)
 	rows, err := s.db.QueryContext(ctx, `
-		WITH RECURSIVE paths AS (
-			SELECT
-				issue_id,
-				depends_on_id,
-				issue_id as start_id,
-				issue_id || '→' || depends_on_id as path,
-				0 as depth
-			FROM dependencies
-			WHERE type != 'relates-to'
-
-			UNION ALL
-
-			SELECT
-			d.issue_id,
-			d.depends_on_id,
-			p.start_id,
-			p.path || '→' || d.depends_on_id,
-			p.depth + 1
-			FROM dependencies d
-			JOIN paths p ON d.issue_id = p.depends_on_id
-			WHERE d.type != 'relates-to'
-			AND p.depth < ?
-			AND (d.depends_on_id = p.start_id OR p.path NOT LIKE '%' || d.depends_on_id || '→%')
-		)
-		SELECT DISTINCT path as cycle_path
-		FROM paths
-		WHERE depends_on_id = start_id
-		ORDER BY cycle_path
-	`, maxDependencyDepth)
+		SELECT issue_id, depends_on_id
+		FROM dependencies
+		WHERE type != 'relates-to'
+	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to detect cycles: %w", err)
+		return nil, fmt.Errorf("failed to load dependency graph: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var cycles [][]*types.Issue
-	seen := make(map[string]bool)
-
 	for rows.Next() {
-		var pathStr string
-		if err := rows.Scan(&pathStr); err != nil {
+		var from, to string
+		if err := rows.Scan(&from, &to); err != nil {
 			return nil, err
 		}
+		deps[from] = append(deps[from], to)
+	}
+	return deps, rows.Err()
+}
 
-		// Skip if we've already seen this cycle (can happen with different entry points)
-		if seen[pathStr] {
-			continue
+// DetectCycles finds circular dependencies and returns the actual cycle paths.
+// Uses O(V+E) DFS with shared visited set instead of O(2^n) SQL path enumeration.
+// Note: relates-to dependencies are excluded because they are intentionally bidirectional
+// ("see also" relationships) and do not represent problematic cycles.
+func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
+	// Load all dependencies as adjacency list (one query)
+	deps, err := s.loadDependencyGraph(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// DFS with shared visited set - O(V+E)
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+	var allCycles [][]string
+
+	// Recursive DFS function
+	var dfs func(node string, path []string)
+	dfs = func(node string, path []string) {
+		visited[node] = true
+		recStack[node] = true
+		path = append(path, node)
+
+		for _, neighbor := range deps[node] {
+			if !visited[neighbor] {
+				dfs(neighbor, path)
+			} else if recStack[neighbor] {
+				// Found cycle - extract the cycle portion
+				cycleStart := -1
+				for i, n := range path {
+					if n == neighbor {
+						cycleStart = i
+						break
+					}
+				}
+				if cycleStart >= 0 {
+					cycle := make([]string, len(path)-cycleStart)
+					copy(cycle, path[cycleStart:])
+					allCycles = append(allCycles, cycle)
+				}
+			}
 		}
-		seen[pathStr] = true
 
-		// Parse the path string: "bd-1→bd-2→bd-3→bd-1"
-		issueIDs := strings.Split(pathStr, "→")
+		recStack[node] = false
+	}
 
-		// Remove the duplicate last element (cycle closes back to start)
-		if len(issueIDs) > 1 && issueIDs[0] == issueIDs[len(issueIDs)-1] {
-			issueIDs = issueIDs[:len(issueIDs)-1]
+	// Check from each unvisited node
+	for node := range deps {
+		if !visited[node] {
+			dfs(node, nil)
 		}
+	}
 
-		// Fetch full issue details for each ID in the cycle
+	// Deduplicate cycles (same cycle can be found from different entry points)
+	seen := make(map[string]bool)
+	var uniqueCycles [][]string
+	for _, cycle := range allCycles {
+		// Normalize cycle: rotate to start with smallest ID
+		normalized := normalizeCycle(cycle)
+		key := strings.Join(normalized, "→")
+		if !seen[key] {
+			seen[key] = true
+			uniqueCycles = append(uniqueCycles, normalized)
+		}
+	}
+
+	// Convert cycle paths to Issue objects
+	var cycles [][]*types.Issue
+	for _, cyclePath := range uniqueCycles {
 		var cycleIssues []*types.Issue
-		for _, issueID := range issueIDs {
+		for _, issueID := range cyclePath {
 			issue, err := s.GetIssue(ctx, issueID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get issue %s: %w", issueID, err)
@@ -794,13 +821,35 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 				cycleIssues = append(cycleIssues, issue)
 			}
 		}
-
 		if len(cycleIssues) > 0 {
 			cycles = append(cycles, cycleIssues)
 		}
 	}
 
 	return cycles, nil
+}
+
+// normalizeCycle rotates a cycle to start with the lexicographically smallest ID.
+// This ensures the same cycle found from different entry points is deduplicated.
+func normalizeCycle(cycle []string) []string {
+	if len(cycle) == 0 {
+		return cycle
+	}
+
+	// Find index of smallest element
+	minIdx := 0
+	for i, id := range cycle {
+		if id < cycle[minIdx] {
+			minIdx = i
+		}
+	}
+
+	// Rotate to start with smallest
+	result := make([]string, len(cycle))
+	for i := 0; i < len(cycle); i++ {
+		result[i] = cycle[(minIdx+i)%len(cycle)]
+	}
+	return result
 }
 
 // Helper function to scan issues from rows

@@ -50,13 +50,13 @@ func BenchmarkCycleDetection_Linear_5000(b *testing.B) {
 
 // BenchmarkCycleDetection_Dense_100 tests dense graph: each issue depends on 3-5 previous issues
 func BenchmarkCycleDetection_Dense_100(b *testing.B) {
-	b.Skip("Dense graph benchmarks timeout (>120s). Known issue, no optimization needed for rare use case.")
+	b.Skip("Dense graph setup slow (creates 5*n deps). AddDependency CTE is O(n), not affected by DetectCycles fix.")
 	benchmarkCycleDetectionDense(b, 100)
 }
 
 // BenchmarkCycleDetection_Dense_1000 tests dense graph with 1000 issues
 func BenchmarkCycleDetection_Dense_1000(b *testing.B) {
-	b.Skip("Dense graph benchmarks timeout (>120s). Known issue, no optimization needed for rare use case.")
+	b.Skip("Dense graph setup slow (creates 5*n deps). AddDependency CTE is O(n), not affected by DetectCycles fix.")
 	benchmarkCycleDetectionDense(b, 1000)
 }
 
@@ -243,4 +243,148 @@ func benchmarkCycleDetectionTree(b *testing.B, n int) {
 		_ = store.AddDependency(ctx, dep, "benchmark")
 		_ = store.RemoveDependency(ctx, issues[n-1].ID, newIssue.ID, "benchmark")
 	}
+}
+
+// ============================================================================
+// DetectCycles Benchmarks
+// These benchmark the DetectCycles function directly (not AddDependency).
+// The Go DFS fix changed DetectCycles from O(2^n) to O(V+E).
+// ============================================================================
+
+// BenchmarkDetectCycles_Linear_1000 benchmarks DetectCycles on a linear chain
+func BenchmarkDetectCycles_Linear_1000(b *testing.B) {
+	store, cleanup := setupBenchDB(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	createLinearGraph(b, store, ctx, 1000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = store.DetectCycles(ctx)
+	}
+}
+
+// BenchmarkDetectCycles_Dense_500 benchmarks DetectCycles on dense graph
+// This was O(2^n) before the fix, now O(V+E)
+func BenchmarkDetectCycles_Dense_500(b *testing.B) {
+	store, cleanup := setupBenchDB(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	createDenseGraphDirect(b, store, ctx, 500)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = store.DetectCycles(ctx)
+	}
+}
+
+// BenchmarkDetectCycles_Tree_1000 benchmarks DetectCycles on tree structure
+func BenchmarkDetectCycles_Tree_1000(b *testing.B) {
+	store, cleanup := setupBenchDB(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	createTreeGraph(b, store, ctx, 1000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = store.DetectCycles(ctx)
+	}
+}
+
+// createLinearGraph creates n issues with linear chain dependencies
+func createLinearGraph(b *testing.B, store *SQLiteStorage, ctx context.Context, n int) []*types.Issue {
+	issues := make([]*types.Issue, n)
+	for i := 0; i < n; i++ {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Issue %d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "benchmark"); err != nil {
+			b.Fatalf("Failed to create issue: %v", err)
+		}
+		issues[i] = issue
+	}
+
+	// Create linear chain using direct SQL (faster than AddDependency)
+	for i := 1; i < n; i++ {
+		_, err := store.db.ExecContext(ctx, `
+			INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
+			VALUES (?, ?, 'blocks', datetime('now'), 'bench')
+		`, issues[i].ID, issues[i-1].ID)
+		if err != nil {
+			b.Fatalf("Failed to add dependency: %v", err)
+		}
+	}
+
+	return issues
+}
+
+// createDenseGraphDirect creates n issues with dense deps using direct SQL
+// Each issue (after 5) depends on the 5 previous issues
+// Uses direct SQL to bypass AddDependency's cycle check (O(n) vs O(n²) setup)
+func createDenseGraphDirect(b *testing.B, store *SQLiteStorage, ctx context.Context, n int) []*types.Issue {
+	issues := make([]*types.Issue, n)
+	for i := 0; i < n; i++ {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Issue %d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "benchmark"); err != nil {
+			b.Fatalf("Failed to create issue: %v", err)
+		}
+		issues[i] = issue
+	}
+
+	// Create dense graph using direct SQL (bypasses cycle check during setup)
+	for i := 5; i < n; i++ {
+		for j := 1; j <= 5 && i-j >= 0; j++ {
+			_, err := store.db.ExecContext(ctx, `
+				INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
+				VALUES (?, ?, 'blocks', datetime('now'), 'bench')
+			`, issues[i].ID, issues[i-j].ID)
+			if err != nil {
+				b.Fatalf("Failed to add dependency: %v", err)
+			}
+		}
+	}
+
+	return issues
+}
+
+// createTreeGraph creates n issues in tree structure (branching factor 3)
+func createTreeGraph(b *testing.B, store *SQLiteStorage, ctx context.Context, n int) []*types.Issue {
+	issues := make([]*types.Issue, n)
+	for i := 0; i < n; i++ {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Issue %d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "benchmark"); err != nil {
+			b.Fatalf("Failed to create issue: %v", err)
+		}
+		issues[i] = issue
+	}
+
+	// Create tree using direct SQL
+	for i := 1; i < n; i++ {
+		parent := (i - 1) / 3
+		_, err := store.db.ExecContext(ctx, `
+			INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
+			VALUES (?, ?, 'blocks', datetime('now'), 'bench')
+		`, issues[i].ID, issues[parent].ID)
+		if err != nil {
+			b.Fatalf("Failed to add dependency: %v", err)
+		}
+	}
+
+	return issues
 }
