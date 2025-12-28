@@ -1,7 +1,7 @@
 {
-  "last_failure": "2025-12-27T19:14:20.390485-08:00",
-  "failure_count": 1,
-  "backoff_until": "2025-12-27T19:14:50.390485-08:00",
-  "needs_manual_sync": false,
-  "failure_reason": "git pull failed in worktree: exit status 128\nFrom github.com:steveyegge/beads\n * branch              beads-sync -\u003e FETCH_HEAD\nfatal: Cannot rebase onto multiple branches.\n"
+  "last_failure": "0001-01-01T00:00:00Z",
+  "failure_count": 0,
+  "backoff_until": "0001-01-01T00:00:00Z",
+  "needs_manual_sync": true,
+  "failure_reason": "git pull failed in worktree: exit status 1\nFrom github.com:steveyegge/beads\n * branch              beads-sync -\u003e FETCH_HEAD\nThere is no candidate for rebasing against among the refs that you just fetched.\nGenerally this means that you provided a wildcard refspec which had no\nmatches on the remote end.\n"
 }
