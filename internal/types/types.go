@@ -340,12 +340,14 @@ const (
 	TypeMergeRequest IssueType = "merge-request" // Merge queue entry for refinery processing
 	TypeMolecule     IssueType = "molecule"      // Template molecule for issue hierarchies (beads-1ra)
 	TypeGate         IssueType = "gate"          // Async coordination gate (bd-udsi)
+	TypeAgent        IssueType = "agent"         // Agent identity bead (gt-ikyo1)
+	TypeRole         IssueType = "role"          // Agent role definition (gt-gzp2y)
 )
 
 // IsValid checks if the issue type value is valid
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule, TypeGate:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule, TypeGate, TypeAgent, TypeRole:
 		return true
 	}
 	return false

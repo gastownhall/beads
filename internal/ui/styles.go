@@ -105,6 +105,14 @@ var (
 		Light: "", // standard text color
 		Dark:  "",
 	}
+	ColorTypeAgent = lipgloss.AdaptiveColor{
+		Light: "#59c2ff", // cyan - agent identity
+		Dark:  "#59c2ff",
+	}
+	ColorTypeRole = lipgloss.AdaptiveColor{
+		Light: "#7fd962", // green - role definition
+		Dark:  "#7fd962",
+	}
 
 	// === Issue ID Color ===
 	// IDs use standard text color - subtle, not attention-grabbing
@@ -151,6 +159,8 @@ var (
 	TypeTaskStyle    = lipgloss.NewStyle().Foreground(ColorTypeTask)
 	TypeEpicStyle    = lipgloss.NewStyle().Foreground(ColorTypeEpic)
 	TypeChoreStyle   = lipgloss.NewStyle().Foreground(ColorTypeChore)
+	TypeAgentStyle   = lipgloss.NewStyle().Foreground(ColorTypeAgent)
+	TypeRoleStyle    = lipgloss.NewStyle().Foreground(ColorTypeRole)
 )
 
 // CategoryStyle for section headers - bold with accent color
@@ -296,6 +306,10 @@ func RenderType(issueType string) string {
 		return TypeEpicStyle.Render(issueType)
 	case "chore":
 		return TypeChoreStyle.Render(issueType)
+	case "agent":
+		return TypeAgentStyle.Render(issueType)
+	case "role":
+		return TypeRoleStyle.Render(issueType)
 	default:
 		return issueType
 	}
