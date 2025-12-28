@@ -101,6 +101,13 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Pinned != nil {
 		u["pinned"] = *a.Pinned
 	}
+	// Agent slot fields (gt-h5sza)
+	if a.HookBead != nil {
+		u["hook_bead"] = *a.HookBead
+	}
+	if a.RoleBead != nil {
+		u["role_bead"] = *a.RoleBead
+	}
 	return u
 }
 

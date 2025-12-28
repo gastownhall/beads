@@ -126,6 +126,9 @@ type UpdateArgs struct {
 	Pinned *bool `json:"pinned,omitempty"` // If true, issue is a persistent context marker
 	// Reparenting field (bd-cj2e)
 	Parent *string `json:"parent,omitempty"` // New parent issue ID (reparents the issue)
+	// Agent slot fields (gt-h5sza)
+	HookBead *string `json:"hook_bead,omitempty"` // Current work on agent's hook (0..1)
+	RoleBead *string `json:"role_bead,omitempty"` // Role definition bead for agent
 }
 
 // CloseArgs represents arguments for the close operation

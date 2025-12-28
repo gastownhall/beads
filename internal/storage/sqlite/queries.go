@@ -272,6 +272,13 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var awaitID sql.NullString
 	var timeoutNs sql.NullInt64
 	var waiters sql.NullString
+	// Agent fields (gt-h5sza)
+	var hookBead sql.NullString
+	var roleBead sql.NullString
+	var agentState sql.NullString
+	var lastActivity sql.NullTime
+	var roleType sql.NullString
+	var rig sql.NullString
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -282,7 +289,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template,
-		       await_type, await_id, timeout_ns, waiters
+		       await_type, await_id, timeout_ns, waiters,
+		       hook_bead, role_bead, agent_state, last_activity, role_type, rig
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -294,6 +302,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
+		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig,
 	)
 
 	if err == sql.ErrNoRows {
@@ -371,6 +380,25 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if waiters.Valid && waiters.String != "" {
 		issue.Waiters = parseJSONStringArray(waiters.String)
+	}
+	// Agent fields (gt-h5sza)
+	if hookBead.Valid {
+		issue.HookBead = hookBead.String
+	}
+	if roleBead.Valid {
+		issue.RoleBead = roleBead.String
+	}
+	if agentState.Valid {
+		issue.AgentState = types.AgentState(agentState.String)
+	}
+	if lastActivity.Valid {
+		issue.LastActivity = &lastActivity.Time
+	}
+	if roleType.Valid {
+		issue.RoleType = roleType.String
+	}
+	if rig.Valid {
+		issue.Rig = rig.String
 	}
 
 	// Fetch labels for this issue
@@ -617,6 +645,13 @@ var allowedUpdateFields = map[string]bool{
 	"pinned": true,
 	// NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
 	// Use AddDependency() to create graph edges instead
+	// Agent slot fields (gt-h5sza)
+	"hook_bead":     true,
+	"role_bead":     true,
+	"agent_state":   true,
+	"last_activity": true,
+	"role_type":     true,
+	"rig":           true,
 }
 
 // validatePriority validates a priority value
