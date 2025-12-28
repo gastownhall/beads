@@ -203,21 +203,15 @@ Examples:
 	},
 }
 
-// commentCmd is a top-level alias for commentsAddCmd
+// commentCmd is a hidden top-level alias for commentsAddCmd (backwards compat)
 var commentCmd = &cobra.Command{
-	Use:     "comment [issue-id] [text]",
-	GroupID: "issues",
-	Short:   "Add a comment to an issue (alias for 'comments add')",
-	Long: `Add a comment to an issue. This is a convenient alias for 'bd comments add'.
-
-Examples:
-  # Add a comment
-  bd comment bd-123 "Working on this now"
-
-  # Add a comment from a file
-  bd comment bd-123 -f notes.txt`,
-	Args: cobra.MinimumNArgs(1),
-	Run: commentsAddCmd.Run,
+	Use:        "comment [issue-id] [text]",
+	Short:      "Add a comment to an issue (alias for 'comments add')",
+	Long:       `Add a comment to an issue. This is an alias for 'bd comments add'.`,
+	Args:       cobra.MinimumNArgs(1),
+	Run:        commentsAddCmd.Run,
+	Hidden:     true,
+	Deprecated: "use 'bd comments add' instead",
 }
 
 func init() {

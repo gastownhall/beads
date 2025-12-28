@@ -604,14 +604,26 @@ stale sockets, version mismatches, and unresponsive daemons.`,
 	},
 }
 func init() {
-	rootCmd.AddCommand(daemonsCmd)
-	// Add subcommands
+	// Add multi-daemon subcommands to daemonCmd (primary location)
+	daemonCmd.AddCommand(daemonsListCmd)
+	daemonCmd.AddCommand(daemonsHealthCmd)
+	daemonCmd.AddCommand(daemonsStopCmd)
+	daemonCmd.AddCommand(daemonsLogsCmd)
+	daemonCmd.AddCommand(daemonsKillallCmd)
+	daemonCmd.AddCommand(daemonsRestartCmd)
+
+	// Also add to daemonsCmd for backwards compatibility
+	// Make daemonsCmd a hidden alias that shows deprecation
+	daemonsCmd.Hidden = true
+	daemonsCmd.Deprecated = "use 'bd daemon <subcommand>' instead (e.g., 'bd daemon list')"
 	daemonsCmd.AddCommand(daemonsListCmd)
 	daemonsCmd.AddCommand(daemonsHealthCmd)
 	daemonsCmd.AddCommand(daemonsStopCmd)
 	daemonsCmd.AddCommand(daemonsLogsCmd)
 	daemonsCmd.AddCommand(daemonsKillallCmd)
 	daemonsCmd.AddCommand(daemonsRestartCmd)
+	rootCmd.AddCommand(daemonsCmd)
+
 	// Flags for list command
 	daemonsListCmd.Flags().StringSlice("search", nil, "Directories to search for daemons (default: home, /tmp, cwd)")
 	daemonsListCmd.Flags().Bool("no-cleanup", false, "Skip auto-cleanup of stale sockets")

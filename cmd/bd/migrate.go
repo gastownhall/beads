@@ -23,25 +23,27 @@ import (
 var migrateCmd = &cobra.Command{
 	Use:     "migrate",
 	GroupID: "maint",
-	Short:   "Migrate database to current version",
-	Long: `Detect and migrate database files to the current version.
+	Short:   "Database migration commands",
+	Long: `Database migration and data transformation commands.
 
-This command:
+Without subcommand, detects and migrates database schema to current version:
 - Finds all .db files in .beads/
 - Checks schema versions
 - Migrates old databases to beads.db
 - Updates schema version metadata
-- Migrates sequential IDs to hash-based IDs (with --to-hash-ids)
-- Enables separate branch workflow (with --to-separate-branch)
-- Removes stale databases (with confirmation)`,
+- Removes stale databases (with confirmation)
+
+Subcommands:
+  hash-ids    Migrate sequential IDs to hash-based IDs (legacy)
+  issues      Move issues between repositories
+  sync        Set up sync.branch workflow for multi-clone setups
+  tombstones  Convert deletions.jsonl to inline tombstones`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		cleanup, _ := cmd.Flags().GetBool("cleanup")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
-		toHashIDs, _ := cmd.Flags().GetBool("to-hash-ids")
 		inspect, _ := cmd.Flags().GetBool("inspect")
-		toSeparateBranch, _ := cmd.Flags().GetString("to-separate-branch")
 
 		// Block writes in readonly mode (migration modifies data, --inspect is read-only)
 		if !dryRun && !inspect {
@@ -57,12 +59,6 @@ This command:
 		// Handle --inspect flag (show migration plan for AI agents)
 		if inspect {
 			handleInspect()
-			return
-		}
-
-		// Handle --to-separate-branch
-		if toSeparateBranch != "" {
-			handleToSeparateBranch(toSeparateBranch, dryRun)
 			return
 		}
 
@@ -376,92 +372,6 @@ This command:
 			}
 		}
 
-
-		// Migrate to hash IDs if requested
-		if toHashIDs {
-			if !jsonOutput {
-				fmt.Println("\n→ Migrating to hash-based IDs...")
-			}
-			
-			store, err := sqlite.New(rootCtx, targetPath)
-			if err != nil {
-				if jsonOutput {
-					outputJSON(map[string]interface{}{
-						"error":   "hash_migration_failed",
-						"message": err.Error(),
-					})
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				}
-				os.Exit(1)
-			}
-			
-			ctx := rootCtx
-			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-			if err != nil {
-			_ = store.Close()
-			if jsonOutput {
-					outputJSON(map[string]interface{}{
-						"error":   "hash_migration_failed",
-						"message": err.Error(),
-					})
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: failed to list issues: %v\n", err)
-				}
-				os.Exit(1)
-			}
-			
-			if len(issues) > 0 && !isHashID(issues[0].ID) {
-				// Create backup
-				if !dryRun {
-					backupPath := strings.TrimSuffix(targetPath, ".db") + ".backup-pre-hash-" + time.Now().Format("20060102-150405") + ".db"
-					if err := copyFile(targetPath, backupPath); err != nil {
-						_ = store.Close()
-						if jsonOutput {
-							outputJSON(map[string]interface{}{
-								"error":   "backup_failed",
-								"message": err.Error(),
-							})
-						} else {
-							fmt.Fprintf(os.Stderr, "Error: failed to create backup: %v\n", err)
-						}
-						os.Exit(1)
-					}
-					if !jsonOutput {
-						fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Created backup: %s", filepath.Base(backupPath))))
-					}
-					}
-					
-					mapping, err := migrateToHashIDs(ctx, store, issues, dryRun)
-					_ = store.Close()
-				
-				if err != nil {
-					if jsonOutput {
-						outputJSON(map[string]interface{}{
-							"error":   "hash_migration_failed",
-							"message": err.Error(),
-						})
-					} else {
-						fmt.Fprintf(os.Stderr, "Error: hash ID migration failed: %v\n", err)
-					}
-					os.Exit(1)
-				}
-				
-				if !jsonOutput {
-					if dryRun {
-						fmt.Printf("\nWould migrate %d issues to hash-based IDs\n", len(mapping))
-					} else {
-						fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Migrated %d issues to hash-based IDs", len(mapping))))
-						}
-						}
-						} else {
-						_ = store.Close()
-				if !jsonOutput {
-					fmt.Println("Database already uses hash-based IDs")
-				}
-			}
-		}
-		
 		// Save updated config
 		if !dryRun {
 			if err := cfg.Save(beadsDir); err != nil {
@@ -1063,9 +973,7 @@ func init() {
 	migrateCmd.Flags().Bool("cleanup", false, "Remove old database files after migration")
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
-	migrateCmd.Flags().Bool("to-hash-ids", false, "Migrate sequential IDs to hash-based IDs")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
-	migrateCmd.Flags().String("to-separate-branch", "", "Enable separate branch workflow (e.g., 'beads-metadata')")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	rootCmd.AddCommand(migrateCmd)
 }

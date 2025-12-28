@@ -15,8 +15,7 @@ import (
 
 // TODO: Consider integrating into 'bd doctor' migration detection
 var migrateSyncCmd = &cobra.Command{
-	Use:     "migrate-sync <branch-name>",
-	GroupID: "maint",
+	Use:     "sync <branch-name>",
 	Short:   "Migrate to sync.branch workflow for multi-clone setups",
 	Long: `Migrate to using a dedicated sync branch for beads data.
 
@@ -60,7 +59,14 @@ Examples:
 func init() {
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Preview migration without making changes")
 	migrateSyncCmd.Flags().Bool("force", false, "Force migration even if already configured")
-	rootCmd.AddCommand(migrateSyncCmd)
+	migrateCmd.AddCommand(migrateSyncCmd)
+
+	// Backwards compatibility alias at root level (hidden)
+	migrateSyncAliasCmd := *migrateSyncCmd
+	migrateSyncAliasCmd.Use = "migrate-sync"
+	migrateSyncAliasCmd.Hidden = true
+	migrateSyncAliasCmd.Deprecated = "use 'bd migrate sync' instead"
+	rootCmd.AddCommand(&migrateSyncAliasCmd)
 }
 
 func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) error {

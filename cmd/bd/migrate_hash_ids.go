@@ -23,8 +23,7 @@ import (
 
 // TODO: Consider integrating into 'bd doctor' migration detection
 var migrateHashIDsCmd = &cobra.Command{
-	Use:     "migrate-hash-ids",
-	GroupID: "maint",
+	Use:     "hash-ids",
 	Short:   "Migrate sequential IDs to hash-based IDs (legacy)",
 	Long: `Migrate database from sequential IDs (bd-1, bd-2) to hash-based IDs (bd-a3f8e9a2).
 
@@ -425,5 +424,12 @@ func copyFile(src, dst string) error {
 
 func init() {
 	migrateHashIDsCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
-	rootCmd.AddCommand(migrateHashIDsCmd)
+	migrateCmd.AddCommand(migrateHashIDsCmd)
+
+	// Backwards compatibility alias at root level (hidden)
+	migrateHashIDsAliasCmd := *migrateHashIDsCmd
+	migrateHashIDsAliasCmd.Use = "migrate-hash-ids"
+	migrateHashIDsAliasCmd.Hidden = true
+	migrateHashIDsAliasCmd.Deprecated = "use 'bd migrate hash-ids' instead"
+	rootCmd.AddCommand(&migrateHashIDsAliasCmd)
 }

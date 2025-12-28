@@ -71,8 +71,7 @@ func loadLegacyDeletionsCmd(path string) (map[string]legacyDeletionRecordCmd, []
 
 // TODO: Consider integrating into 'bd doctor' migration detection
 var migrateTombstonesCmd = &cobra.Command{
-	Use:     "migrate-tombstones",
-	GroupID: "maint",
+	Use:     "tombstones",
 	Short:   "Convert deletions.jsonl entries to inline tombstones",
 	Long: `Migrate legacy deletions.jsonl entries to inline tombstones in issues.jsonl.
 
@@ -344,5 +343,12 @@ func init() {
 	migrateTombstonesCmd.Flags().Bool("dry-run", false, "Preview changes without modifying files")
 	migrateTombstonesCmd.Flags().Bool("verbose", false, "Show detailed progress")
 	migrateTombstonesCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
-	rootCmd.AddCommand(migrateTombstonesCmd)
+	migrateCmd.AddCommand(migrateTombstonesCmd)
+
+	// Backwards compatibility alias at root level (hidden)
+	migrateTombstonesAliasCmd := *migrateTombstonesCmd
+	migrateTombstonesAliasCmd.Use = "migrate-tombstones"
+	migrateTombstonesAliasCmd.Hidden = true
+	migrateTombstonesAliasCmd.Deprecated = "use 'bd migrate tombstones' instead"
+	rootCmd.AddCommand(&migrateTombstonesAliasCmd)
 }

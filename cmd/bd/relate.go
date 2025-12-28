@@ -13,9 +13,8 @@ import (
 )
 
 var relateCmd = &cobra.Command{
-	Use:     "relate <id1> <id2>",
-	GroupID: "deps",
-	Short:   "Create a bidirectional relates_to link between issues",
+	Use:   "relate <id1> <id2>",
+	Short: "Create a bidirectional relates_to link between issues",
 	Long: `Create a loose 'see also' relationship between two issues.
 
 The relates_to link is bidirectional - both issues will reference each other.
@@ -29,9 +28,8 @@ Examples:
 }
 
 var unrelateCmd = &cobra.Command{
-	Use:     "unrelate <id1> <id2>",
-	GroupID: "deps",
-	Short:   "Remove a relates_to link between issues",
+	Use:   "unrelate <id1> <id2>",
+	Short: "Remove a relates_to link between issues",
 	Long: `Remove a relates_to relationship between two issues.
 
 Removes the link in both directions.
@@ -43,8 +41,20 @@ Example:
 }
 
 func init() {
-	rootCmd.AddCommand(relateCmd)
-	rootCmd.AddCommand(unrelateCmd)
+	// Add as subcommands of dep
+	depCmd.AddCommand(relateCmd)
+	depCmd.AddCommand(unrelateCmd)
+
+	// Backwards compatibility aliases at root level (hidden)
+	relateAliasCmd := *relateCmd
+	relateAliasCmd.Hidden = true
+	relateAliasCmd.Deprecated = "use 'bd dep relate' instead"
+	rootCmd.AddCommand(&relateAliasCmd)
+
+	unrelateAliasCmd := *unrelateCmd
+	unrelateAliasCmd.Hidden = true
+	unrelateAliasCmd.Deprecated = "use 'bd dep unrelate' instead"
+	rootCmd.AddCommand(&unrelateAliasCmd)
 }
 
 func runRelate(cmd *cobra.Command, args []string) error {
