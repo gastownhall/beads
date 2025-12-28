@@ -188,10 +188,6 @@ func validatePrefix(prefix string) error {
 		return fmt.Errorf("prefix cannot be empty")
 	}
 
-	if len(prefix) > 8 {
-		return fmt.Errorf("prefix too long (max 8 characters): %s", prefix)
-	}
-
 	matched, _ := regexp.MatchString(`^[a-z][a-z0-9-]*$`, prefix)
 	if !matched {
 		return fmt.Errorf("prefix must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens: %s", prefix)

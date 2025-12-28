@@ -20,7 +20,7 @@ func TestValidatePrefix(t *testing.T) {
 		{"valid with numbers", "work1-", false},
 		{"valid with hyphen", "my-work-", false},
 		{"empty", "", true},
-		{"too long", "verylongprefix-", true},
+		{"long prefix ok", "verylongprefix-", false}, // No length limit (GH#770)
 		{"starts with number", "1work-", true},
 		{"uppercase", "KW-", true},
 		{"no hyphen", "kw", false},
