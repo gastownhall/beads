@@ -8,6 +8,77 @@ import (
 	"sync"
 )
 
+// gitContext holds cached git repository information.
+// All fields are populated with a single git call for efficiency.
+type gitContext struct {
+	gitDir     string // Result of --git-dir
+	commonDir  string // Result of --git-common-dir (absolute)
+	repoRoot   string // Result of --show-toplevel (normalized, symlinks resolved)
+	isWorktree bool   // Derived: gitDir != commonDir
+	err        error  // Any error during initialization
+}
+
+var (
+	gitCtxOnce sync.Once
+	gitCtx     gitContext
+)
+
+// initGitContext populates the gitContext with a single git call.
+// This is called once per process via sync.Once.
+func initGitContext() {
+	// Get all three values with a single git call
+	cmd := exec.Command("git", "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		gitCtx.err = fmt.Errorf("not a git repository: %w", err)
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 3 {
+		gitCtx.err = fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 3", len(lines))
+		return
+	}
+
+	gitCtx.gitDir = strings.TrimSpace(lines[0])
+	commonDirRaw := strings.TrimSpace(lines[1])
+	repoRootRaw := strings.TrimSpace(lines[2])
+
+	// Convert commonDir to absolute for reliable comparison
+	absCommon, err := filepath.Abs(commonDirRaw)
+	if err != nil {
+		gitCtx.err = fmt.Errorf("failed to resolve common dir path: %w", err)
+		return
+	}
+	gitCtx.commonDir = absCommon
+
+	// Convert gitDir to absolute for worktree comparison
+	absGitDir, err := filepath.Abs(gitCtx.gitDir)
+	if err != nil {
+		gitCtx.err = fmt.Errorf("failed to resolve git dir path: %w", err)
+		return
+	}
+
+	// Derive isWorktree from comparing absolute paths
+	gitCtx.isWorktree = absGitDir != absCommon
+
+	// Process repoRoot: normalize Windows paths and resolve symlinks
+	repoRoot := NormalizePath(repoRootRaw)
+	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		repoRoot = resolved
+	}
+	gitCtx.repoRoot = repoRoot
+}
+
+// getGitContext returns the cached git context, initializing it if needed.
+func getGitContext() (*gitContext, error) {
+	gitCtxOnce.Do(initGitContext)
+	if gitCtx.err != nil {
+		return nil, gitCtx.err
+	}
+	return &gitCtx, nil
+}
+
 // GetGitDir returns the actual .git directory path for the current repository.
 // In a normal repo, this is ".git". In a worktree, .git is a file
 // containing "gitdir: /path/to/actual/git/dir", so we use git rev-parse.
@@ -15,12 +86,11 @@ import (
 // This function uses Git's native worktree-aware APIs and should be used
 // instead of direct filepath.Join(path, ".git") throughout the codebase.
 func GetGitDir() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	output, err := cmd.Output()
+	ctx, err := getGitContext()
 	if err != nil {
-		return "", fmt.Errorf("not a git repository: %w", err)
+		return "", err
 	}
-	return strings.TrimSpace(string(output)), nil
+	return ctx.gitDir, nil
 }
 
 // GetGitHooksDir returns the path to the Git hooks directory.
@@ -53,52 +123,17 @@ func GetGitHeadPath() (string, error) {
 	return filepath.Join(gitDir, "HEAD"), nil
 }
 
-// isWorktreeOnce ensures we only check worktree status once per process.
-// This is safe because worktree status cannot change during a single command execution.
-var (
-	isWorktreeOnce   sync.Once
-	isWorktreeResult bool
-)
-
 // IsWorktree returns true if the current directory is in a Git worktree.
 // This is determined by comparing --git-dir and --git-common-dir.
 // The result is cached after the first call since worktree status doesn't
 // change during a single command execution.
 func IsWorktree() bool {
-	isWorktreeOnce.Do(func() {
-		isWorktreeResult = isWorktreeUncached()
-	})
-	return isWorktreeResult
+	ctx, err := getGitContext()
+	if err != nil {
+		return false
+	}
+	return ctx.isWorktree
 }
-
-// isWorktreeUncached performs the actual worktree check without caching.
-// Called once by IsWorktree and cached for subsequent calls.
-func isWorktreeUncached() bool {
-	gitDir := getGitDirNoError("--git-dir")
-	if gitDir == "" {
-		return false
-	}
-
-	commonDir := getGitDirNoError("--git-common-dir")
-	if commonDir == "" {
-		return false
-	}
-
-	absGit, err1 := filepath.Abs(gitDir)
-	absCommon, err2 := filepath.Abs(commonDir)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-
-	return absGit != absCommon
-}
-
-// mainRepoRootOnce ensures we only get main repo root once per process.
-var (
-	mainRepoRootOnce   sync.Once
-	mainRepoRootResult string
-	mainRepoRootErr    error
-)
 
 // GetMainRepoRoot returns the main repository root directory.
 // When in a worktree, this returns the main repository root.
@@ -110,39 +145,13 @@ var (
 // points to the main repo's .git directory. (GH#509)
 // The result is cached after the first call.
 func GetMainRepoRoot() (string, error) {
-	mainRepoRootOnce.Do(func() {
-		mainRepoRootResult, mainRepoRootErr = getMainRepoRootUncached()
-	})
-	return mainRepoRootResult, mainRepoRootErr
-}
-
-// getMainRepoRootUncached performs the actual main repo root lookup without caching.
-func getMainRepoRootUncached() (string, error) {
-	// Use --git-common-dir which always returns the main repo's .git directory,
-	// even when running from within a worktree or its subdirectories.
-	// This is the most reliable method for finding the main repo root.
-	commonDir := getGitDirNoError("--git-common-dir")
-	if commonDir == "" {
-		return "", fmt.Errorf("not a git repository")
-	}
-
-	// Convert to absolute path to handle relative paths correctly
-	absCommonDir, err := filepath.Abs(commonDir)
+	ctx, err := getGitContext()
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve common dir path: %w", err)
+		return "", err
 	}
-
-	// The main repo root is the parent of the .git directory
-	mainRepoRoot := filepath.Dir(absCommonDir)
-
-	return mainRepoRoot, nil
+	// The main repo root is the parent of the .git directory (commonDir)
+	return filepath.Dir(ctx.commonDir), nil
 }
-
-// repoRootOnce ensures we only get repo root once per process.
-var (
-	repoRootOnce   sync.Once
-	repoRootResult string
-)
 
 // GetRepoRoot returns the root directory of the current git repository.
 // Returns empty string if not in a git repository.
@@ -152,30 +161,11 @@ var (
 // It also resolves symlinks to get the canonical path.
 // The result is cached after the first call.
 func GetRepoRoot() string {
-	repoRootOnce.Do(func() {
-		repoRootResult = getRepoRootUncached()
-	})
-	return repoRootResult
-}
-
-// getRepoRootUncached performs the actual repo root lookup without caching.
-func getRepoRootUncached() string {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
+	ctx, err := getGitContext()
 	if err != nil {
 		return ""
 	}
-	root := strings.TrimSpace(string(output))
-
-	// Normalize Windows paths from Git
-	// Git on Windows may return /c/Users/... or C:/Users/...
-	root = NormalizePath(root)
-
-	// Resolve symlinks to get canonical path (fixes macOS /var -> /private/var)
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		return resolved
-	}
-	return root
+	return ctx.repoRoot
 }
 
 // NormalizePath converts Git's Windows path formats to native format.
@@ -197,17 +187,6 @@ func NormalizePath(path string) string {
 	return filepath.FromSlash(path)
 }
 
-// getGitDirNoError is a helper that returns empty string on error
-// to avoid cluttering code with error handling for simple checks.
-func getGitDirNoError(flag string) string {
-	cmd := exec.Command("git", "rev-parse", flag)
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
 // ResetCaches resets all cached git information. This is intended for use
 // by tests that need to change directory between subtests.
 // In production, these caches are safe because the working directory
@@ -215,11 +194,6 @@ func getGitDirNoError(flag string) string {
 //
 // WARNING: Not thread-safe. Only call from single-threaded test contexts.
 func ResetCaches() {
-	isWorktreeOnce = sync.Once{}
-	isWorktreeResult = false
-	mainRepoRootOnce = sync.Once{}
-	mainRepoRootResult = ""
-	mainRepoRootErr = nil
-	repoRootOnce = sync.Once{}
-	repoRootResult = ""
+	gitCtxOnce = sync.Once{}
+	gitCtx = gitContext{}
 }
