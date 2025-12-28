@@ -564,6 +564,18 @@ bd sync
 
 **Hierarchical children:** Epics can have child issues with dotted IDs (e.g., `bd-a3f8e9.1`, `bd-a3f8e9.2`). Children are auto-numbered sequentially. Up to 3 levels of nesting supported.
 
+## Issue Statuses
+
+- `open` - Ready to be worked on
+- `in_progress` - Currently being worked on
+- `blocked` - Cannot proceed (waiting on dependencies)
+- `deferred` - Deliberately put on ice for later
+- `closed` - Work completed
+- `tombstone` - Soft-deleted issue (preserved for reference)
+- `pinned` - Persistent bead that stays open indefinitely (used for hooks, anchors)
+
+**Note:** The `pinned` status is used by Gas Town for hook management and persistent work items that should never be auto-closed or cleaned up.
+
 ## Priorities
 
 - `0` - Critical (security, data loss, broken builds)
