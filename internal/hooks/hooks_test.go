@@ -336,8 +336,8 @@ func TestRun_Async(t *testing.T) {
 	outputFile := filepath.Join(tmpDir, "async_output.txt")
 
 	// Create a hook that writes to a file
-	hookScript := `#!/bin/sh
-echo "async" > ` + outputFile
+	hookScript := "#!/bin/sh\n" +
+		"echo \"async\" > \"" + outputFile + "\"\n"
 	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
 		t.Fatalf("Failed to create hook file: %v", err)
 	}
@@ -348,15 +348,17 @@ echo "async" > ` + outputFile
 	// Run should return immediately
 	runner.Run(EventClose, issue)
 
-	// Wait for the async hook to complete with retries
+	// Wait for the async hook to complete with retries.
+	// Under high test load the goroutine scheduling + exec can be delayed.
 	var output []byte
 	var err error
-	for i := 0; i < 10; i++ {
-		time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
 		output, err = os.ReadFile(outputFile)
 		if err == nil {
 			break
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	if err != nil {

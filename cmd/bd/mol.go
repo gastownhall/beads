@@ -18,10 +18,9 @@ import (
 //   - Compound: Result of bonding
 //
 // Usage:
-//   bd mol catalog                        # List available protos
 //   bd mol show <id>                      # Show proto/molecule structure
-//   bd pour <id> --var key=value          # Instantiate proto → persistent mol
-//   bd wisp create <id> --var key=value   # Instantiate proto → ephemeral wisp
+//   bd mol pour <id> --var key=value      # Instantiate proto → persistent mol
+//   bd mol wisp <id> --var key=value      # Instantiate proto → ephemeral wisp
 
 // MoleculeLabel is the label used to identify molecules (templates)
 // Molecules use the same label as templates - they ARE templates with workflow semantics
@@ -48,14 +47,15 @@ The molecule metaphor:
   - Distilling extracts a proto from an ad-hoc epic
 
 Commands:
-  catalog  List available protos
-  show     Show proto/molecule structure and variables
-  bond     Polymorphic combine: proto+proto, proto+mol, mol+mol
-  distill  Extract proto from ad-hoc epic
+  show       Show proto/molecule structure and variables
+  pour       Instantiate proto as persistent mol (liquid phase)
+  wisp       Instantiate proto as ephemeral wisp (vapor phase)
+  bond       Polymorphic combine: proto+proto, proto+mol, mol+mol
+  squash     Condense molecule to digest
+  burn       Discard wisp
+  distill    Extract proto from ad-hoc epic
 
-See also:
-  bd pour <proto>          # Instantiate as persistent mol (liquid phase)
-  bd wisp create <proto>   # Instantiate as ephemeral wisp (vapor phase)`,
+Use "bd formula list" to list available formulas.`,
 }
 
 // =============================================================================
@@ -72,7 +72,7 @@ func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSub
 		Vars:     vars,
 		Assignee: assignee,
 		Actor:    actorName,
-		Wisp:     ephemeral,
+		Ephemeral:     ephemeral,
 		Prefix:   prefix,
 	}
 	return cloneSubgraph(ctx, s, subgraph, opts)

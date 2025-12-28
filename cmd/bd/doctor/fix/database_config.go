@@ -32,6 +32,13 @@ func DatabaseConfig(path string) error {
 
 	fixed := false
 
+	// Never treat system JSONL files as a JSONL export configuration.
+	if isSystemJSONLFilename(cfg.JSONLExport) {
+		fmt.Printf("  Updating jsonl_export: %s → issues.jsonl\n", cfg.JSONLExport)
+		cfg.JSONLExport = "issues.jsonl"
+		fixed = true
+	}
+
 	// Check if configured JSONL exists
 	if cfg.JSONLExport != "" {
 		jsonlPath := cfg.JSONLPath(beadsDir)
@@ -99,7 +106,15 @@ func findActualJSONLFile(beadsDir string) string {
 			strings.Contains(lowerName, ".orig") ||
 			strings.Contains(lowerName, ".bak") ||
 			strings.Contains(lowerName, "~") ||
-			strings.HasPrefix(lowerName, "backup_") {
+			strings.HasPrefix(lowerName, "backup_") ||
+			// System files are not JSONL exports.
+			name == "deletions.jsonl" ||
+			name == "interactions.jsonl" ||
+			name == "molecules.jsonl" ||
+			// Git merge conflict artifacts (e.g., issues.base.jsonl, issues.left.jsonl)
+			strings.Contains(lowerName, ".base.jsonl") ||
+			strings.Contains(lowerName, ".left.jsonl") ||
+			strings.Contains(lowerName, ".right.jsonl") {
 			continue
 		}
 
@@ -119,6 +134,15 @@ func findActualJSONLFile(beadsDir string) string {
 
 	// Fall back to first candidate (including beads.jsonl as legacy)
 	return candidates[0]
+}
+
+func isSystemJSONLFilename(name string) bool {
+	switch name {
+	case "deletions.jsonl", "interactions.jsonl", "molecules.jsonl":
+		return true
+	default:
+		return false
+	}
 }
 
 // LegacyJSONLConfig migrates from legacy beads.jsonl to canonical issues.jsonl.

@@ -212,6 +212,8 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 // expandLoopIteration expands a single iteration of a loop.
 // The iteration index is used to generate unique step IDs.
 // The iterVars map contains loop variable bindings for this iteration (gt-8tmz.27).
+//
+//nolint:unparam // error return kept for API consistency with future error handling
 func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) ([]*Step, error) {
 	result := make([]*Step, 0, len(step.Loop.Body))
 

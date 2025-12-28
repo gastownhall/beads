@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -8,6 +9,49 @@ import (
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestHandleCreate_SetsCreatedBy verifies that CreatedBy is passed through RPC and stored (GH#748)
+func TestHandleCreate_SetsCreatedBy(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	createArgs := CreateArgs{
+		Title:     "Test CreatedBy Field",
+		IssueType: "task",
+		Priority:  2,
+		CreatedBy: "test-actor",
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-actor",
+	}
+
+	resp := server.handleCreate(createReq)
+	if !resp.Success {
+		t.Fatalf("create failed: %s", resp.Error)
+	}
+
+	var createdIssue types.Issue
+	if err := json.Unmarshal(resp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	// Verify CreatedBy was set in the response
+	if createdIssue.CreatedBy != "test-actor" {
+		t.Errorf("expected CreatedBy 'test-actor' in response, got %q", createdIssue.CreatedBy)
+	}
+
+	// Verify CreatedBy was persisted to storage
+	storedIssue, err := store.GetIssue(context.Background(), createdIssue.ID)
+	if err != nil {
+		t.Fatalf("failed to get issue from storage: %v", err)
+	}
+	if storedIssue.CreatedBy != "test-actor" {
+		t.Errorf("expected CreatedBy 'test-actor' in storage, got %q", storedIssue.CreatedBy)
+	}
+}
 
 func TestEmitMutation(t *testing.T) {
 	store := memory.New("/tmp/test.jsonl")

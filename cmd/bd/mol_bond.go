@@ -40,12 +40,12 @@ Bond types:
 
 Phase control:
   By default, spawned protos follow the target's phase:
-  - Attaching to mol (Wisp=false) → spawns as persistent (Wisp=false)
-  - Attaching to wisp (Wisp=true) → spawns as ephemeral (Wisp=true)
+  - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
+  - Attaching to ephemeral issue (Ephemeral=true) → spawns as ephemeral (Ephemeral=true)
 
   Override with:
-  --pour  Force spawn as liquid (persistent, Wisp=false)
-  --wisp  Force spawn as vapor (ephemeral, Wisp=true, excluded from JSONL export)
+  --pour  Force spawn as liquid (persistent, Ephemeral=false)
+  --ephemeral  Force spawn as vapor (ephemeral, Ephemeral=true, excluded from JSONL export)
 
 Dynamic bonding (Christmas Ornament pattern):
   Use --ref to specify a custom child reference with variable substitution.
@@ -57,7 +57,7 @@ Dynamic bonding (Christmas Ornament pattern):
 
 Use cases:
   - Found important bug during patrol? Use --pour to persist it
-  - Need ephemeral diagnostic on persistent feature? Use --wisp
+  - Need ephemeral diagnostic on persistent feature? Use --ephemeral
   - Spawning per-worker arms on a patrol? Use --ref for readable IDs
 
 Examples:
@@ -66,7 +66,7 @@ Examples:
   bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
   bd mol bond bd-abc123 bd-def456                       # Join two molecules
   bd mol bond mol-critical-bug wisp-patrol --pour       # Persist found bug
-  bd mol bond mol-temp-check bd-feature --wisp          # Ephemeral diagnostic
+  bd mol bond mol-temp-check bd-feature --ephemeral          # Ephemeral diagnostic
   bd mol bond mol-arm bd-patrol --ref arm-{{name}} --var name=ace  # Dynamic child ID`,
 	Args: cobra.ExactArgs(2),
 	Run:  runMolBond,
@@ -102,20 +102,20 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	customTitle, _ := cmd.Flags().GetString("as")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
-	wisp, _ := cmd.Flags().GetBool("wisp")
+	ephemeral, _ := cmd.Flags().GetBool("ephemeral")
 	pour, _ := cmd.Flags().GetBool("pour")
 	childRef, _ := cmd.Flags().GetString("ref")
 
 	// Validate phase flags are not both set
-	if wisp && pour {
-		fmt.Fprintf(os.Stderr, "Error: cannot use both --wisp and --pour\n")
+	if ephemeral && pour {
+		fmt.Fprintf(os.Stderr, "Error: cannot use both --ephemeral and --pour\n")
 		os.Exit(1)
 	}
 
-	// All issues go in the main store; wisp vs pour determines the Wisp flag
-	// --wisp: create with Wisp=true (ephemeral, excluded from JSONL export)
-	// --pour: create with Wisp=false (persistent, exported to JSONL)
-	// Default: follow target's phase (wisp if target is wisp, otherwise persistent)
+	// All issues go in the main store; ephemeral vs pour determines the Wisp flag
+	// --ephemeral: create with Ephemeral=true (ephemeral, excluded from JSONL export)
+	// --pour: create with Ephemeral=false (persistent, exported to JSONL)
+	// Default: follow target's phase (ephemeral if target is ephemeral, otherwise persistent)
 
 	// Validate bond type
 	if bondType != types.BondTypeSequential && bondType != types.BondTypeParallel && bondType != types.BondTypeConditional {
@@ -181,8 +181,8 @@ func runMolBond(cmd *cobra.Command, args []string) {
 			fmt.Printf("  B: %s (%s)\n", issueB.Title, operandType(bIsProto))
 		}
 		fmt.Printf("  Bond type: %s\n", bondType)
-		if wisp {
-			fmt.Printf("  Phase override: vapor (--wisp)\n")
+		if ephemeral {
+			fmt.Printf("  Phase override: vapor (--ephemeral)\n")
 		} else if pour {
 			fmt.Printf("  Phase override: liquid (--pour)\n")
 		}
@@ -240,16 +240,16 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	case aIsProto && !bIsProto:
 		// Pass subgraph directly if cooked from formula
 		if cookedA {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		} else {
-			result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+			result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		}
 	case !aIsProto && bIsProto:
 		// Pass subgraph directly if cooked from formula
 		if cookedB {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, bondType, vars, childRef, actor, wisp, pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, bondType, vars, childRef, actor, ephemeral, pour)
 		} else {
-			result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, childRef, actor, wisp, pour)
+			result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		}
 	default:
 		result, err = bondMolMol(ctx, store, issueA, issueB, bondType, actor)
@@ -273,10 +273,10 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	if result.Spawned > 0 {
 		fmt.Printf("  Spawned: %d issues\n", result.Spawned)
 	}
-	if wisp {
-		fmt.Printf("  Phase: vapor (ephemeral, Wisp=true)\n")
+	if ephemeral {
+		fmt.Printf("  Phase: vapor (ephemeral, Ephemeral=true)\n")
 	} else if pour {
-		fmt.Printf("  Phase: liquid (persistent, Wisp=false)\n")
+		fmt.Printf("  Phase: liquid (persistent, Ephemeral=false)\n")
 	}
 }
 
@@ -386,12 +386,12 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 // bondProtoMol bonds a proto to an existing molecule by spawning the proto.
 // If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
 // protoSubgraph can be nil if proto is from DB (will be loaded), or pre-loaded for formulas.
-func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, wispFlag, pourFlag bool) (*BondResult, error) {
-	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, wispFlag, pourFlag)
+func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
 // bondProtoMolWithSubgraph is the internal implementation that accepts a pre-loaded subgraph.
-func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, wispFlag, pourFlag bool) (*BondResult, error) {
+func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	// Use provided subgraph or load from DB
 	subgraph := protoSubgraph
 	if subgraph == nil {
@@ -414,20 +414,20 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgr
 		return nil, fmt.Errorf("missing required variables: %s (use --var)", strings.Join(missingVars, ", "))
 	}
 
-	// Determine wisp flag based on explicit flags or target's phase
-	// --wisp: force wisp=true, --pour: force wisp=false, neither: follow target
-	makeWisp := mol.Wisp // Default: follow target's phase
-	if wispFlag {
-		makeWisp = true
+	// Determine ephemeral flag based on explicit flags or target's phase
+	// --ephemeral: force ephemeral=true, --pour: force ephemeral=false, neither: follow target
+	makeEphemeral := mol.Ephemeral // Default: follow target's phase
+	if ephemeralFlag {
+		makeEphemeral = true
 	} else if pourFlag {
-		makeWisp = false
+		makeEphemeral = false
 	}
 
 	// Build CloneOptions for spawning
 	opts := CloneOptions{
 		Vars:  vars,
 		Actor: actorName,
-		Wisp:  makeWisp,
+		Ephemeral:  makeEphemeral,
 	}
 
 	// Dynamic bonding: use custom IDs if childRef is provided
@@ -482,9 +482,9 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgr
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)
-func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, wispFlag, pourFlag bool) (*BondResult, error) {
+func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	// Same as bondProtoMol but with arguments swapped
-	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, wispFlag, pourFlag)
+	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
 // bondMolMol bonds two molecules together
@@ -630,8 +630,8 @@ func init() {
 	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
 	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	molBondCmd.Flags().StringSlice("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("wisp", false, "Force spawn as vapor (ephemeral, Wisp=true)")
-	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Wisp=false)")
+	molBondCmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
+	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
 	molBondCmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
 
 	molCmd.AddCommand(molBondCmd)

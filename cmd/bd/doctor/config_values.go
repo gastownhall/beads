@@ -316,6 +316,10 @@ func checkMetadataConfigValues(repoPath string) []string {
 
 	// Validate jsonl_export filename
 	if cfg.JSONLExport != "" {
+		switch cfg.JSONLExport {
+		case "deletions.jsonl", "interactions.jsonl", "molecules.jsonl":
+			issues = append(issues, fmt.Sprintf("metadata.json jsonl_export: %q is a system file and should not be configured as a JSONL export (expected issues.jsonl)", cfg.JSONLExport))
+		}
 		if strings.Contains(cfg.JSONLExport, string(os.PathSeparator)) || strings.Contains(cfg.JSONLExport, "/") {
 			issues = append(issues, fmt.Sprintf("metadata.json jsonl_export: %q should be a filename, not a path", cfg.JSONLExport))
 		}
@@ -353,7 +357,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	}
 
 	// Open database in read-only mode
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return issues // Can't open database, skip
 	}

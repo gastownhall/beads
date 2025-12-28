@@ -43,8 +43,8 @@ type doctorResult struct {
 	Checks     []doctorCheck     `json:"checks"`
 	OverallOK  bool              `json:"overall_ok"`
 	CLIVersion string            `json:"cli_version"`
-	Timestamp  string            `json:"timestamp,omitempty"`  // bd-9cc: ISO8601 timestamp for historical tracking
-	Platform   map[string]string `json:"platform,omitempty"`   // bd-9cc: platform info for debugging
+	Timestamp  string            `json:"timestamp,omitempty"` // bd-9cc: ISO8601 timestamp for historical tracking
+	Platform   map[string]string `json:"platform,omitempty"`  // bd-9cc: platform info for debugging
 }
 
 var (
@@ -353,6 +353,42 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 
 // applyFixList applies a list of fixes and reports results
 func applyFixList(path string, fixes []doctorCheck) {
+	// Apply fixes in a dependency-aware order.
+	// Rough dependency chain:
+	// permissions/daemon cleanup → config sanity → DB integrity/migrations → DB↔JSONL sync.
+	order := []string{
+		"Permissions",
+		"Daemon Health",
+		"Database Config",
+		"JSONL Config",
+		"Database Integrity",
+		"Database",
+		"Schema Compatibility",
+		"JSONL Integrity",
+		"DB-JSONL Sync",
+	}
+	priority := make(map[string]int, len(order))
+	for i, name := range order {
+		priority[name] = i
+	}
+	slices.SortStableFunc(fixes, func(a, b doctorCheck) int {
+		pa, oka := priority[a.Name]
+		if !oka {
+			pa = 1000
+		}
+		pb, okb := priority[b.Name]
+		if !okb {
+			pb = 1000
+		}
+		if pa < pb {
+			return -1
+		}
+		if pa > pb {
+			return 1
+		}
+		return 0
+	})
+
 	fixedCount := 0
 	errorCount := 0
 
@@ -373,6 +409,9 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.Permissions(path)
 		case "Database":
 			err = fix.DatabaseVersion(path)
+		case "Database Integrity":
+			// Corruption detected - try recovery from JSONL
+			err = fix.DatabaseCorruptionRecovery(path)
 		case "Schema Compatibility":
 			err = fix.SchemaCompatibility(path)
 		case "Repo Fingerprint":
@@ -387,6 +426,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.DatabaseConfig(path)
 		case "JSONL Config":
 			err = fix.LegacyJSONLConfig(path)
+		case "JSONL Integrity":
+			err = fix.JSONLIntegrity(path)
 		case "Deletions Manifest":
 			err = fix.MigrateTombstones(path)
 		case "Untracked Files":
@@ -431,6 +472,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Compaction Candidates":
 			// No auto-fix: compaction requires agent review
 			fmt.Printf("  ⚠ Run 'bd compact --analyze' to review candidates\n")
+			continue
+		case "Large Database":
+			// No auto-fix: pruning deletes data, must be user-controlled
+			fmt.Printf("  ⚠ Run 'bd cleanup --older-than 90' to prune old closed issues\n")
 			continue
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
@@ -687,6 +732,13 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
+	// Check 7b: JSONL integrity (malformed lines, missing IDs)
+	jsonlIntegrityCheck := convertWithCategory(doctor.CheckJSONLIntegrity(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, jsonlIntegrityCheck)
+	if jsonlIntegrityCheck.Status == statusWarning || jsonlIntegrityCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 8: Daemon health
 	daemonCheck := convertWithCategory(doctor.CheckDaemonStatus(path, Version), doctor.CategoryRuntime)
 	result.Checks = append(result.Checks, daemonCheck)
@@ -749,6 +801,16 @@ func runDiagnostics(path string) doctorResult {
 	mergeDriverCheck := convertWithCategory(doctor.CheckMergeDriver(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, mergeDriverCheck)
 	// Don't fail overall check for merge driver, just warn
+
+	// Check 15a: Git working tree cleanliness (AGENTS.md hygiene)
+	gitWorkingTreeCheck := convertWithCategory(doctor.CheckGitWorkingTree(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, gitWorkingTreeCheck)
+	// Don't fail overall check for dirty working tree, just warn
+
+	// Check 15b: Git upstream sync (ahead/behind/diverged)
+	gitUpstreamCheck := convertWithCategory(doctor.CheckGitUpstream(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, gitUpstreamCheck)
+	// Don't fail overall check for upstream drift, just warn
 
 	// Check 16: Metadata.json version tracking (bd-u4sb)
 	metadataCheck := convertWithCategory(doctor.CheckMetadataVersionTracking(path, Version), doctor.CategoryMetadata)
@@ -836,6 +898,12 @@ func runDiagnostics(path string) doctorResult {
 	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))
 	result.Checks = append(result.Checks, compactionCheck)
 	// Info only, not a warning - compaction requires human review
+
+	// Check 29: Database size (pruning suggestion)
+	// Note: This check has no auto-fix - pruning is destructive and user-controlled
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))
+	result.Checks = append(result.Checks, sizeCheck)
+	// Don't fail overall check for size warning, just inform
 
 	return result
 }

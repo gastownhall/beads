@@ -355,6 +355,11 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 
 	// Check for multiple .db files (ambiguity error)
 	beadsDir := filepath.Dir(daemonDBPath)
+
+	// Reset backoff on daemon start (fresh start, but preserve NeedsManualSync hint)
+	if !localMode {
+		ResetBackoffOnDaemonStart(beadsDir)
+	}
 	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
 	if err == nil && len(matches) > 1 {
 		// Filter out backup files (*.backup-*.db, *.backup.db)

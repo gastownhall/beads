@@ -489,7 +489,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Completed design",
 	}
 	child2 := &types.Issue{
@@ -498,7 +498,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Code merged",
 	}
 
@@ -547,7 +547,7 @@ func TestSquashMolecule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get digest: %v", err)
 	}
-	if digest.Wisp {
+	if digest.Ephemeral {
 		t.Error("Digest should NOT be ephemeral")
 	}
 	if digest.Status != types.StatusClosed {
@@ -595,7 +595,7 @@ func TestSquashMoleculeWithDelete(t *testing.T) {
 		Status:    types.StatusClosed,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral:      true,
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
 		t.Fatalf("Failed to create child: %v", err)
@@ -705,7 +705,7 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:        true,
 		CloseReason: "Done",
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
@@ -1304,14 +1304,14 @@ func TestWispFilteringFromExport(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  1,
 		IssueType: types.TypeTask,
-		Wisp:      false,
+		Ephemeral:      false,
 	}
 	wispIssue := &types.Issue{
 		Title:     "Wisp Issue",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral:      true,
 	}
 
 	if err := s.CreateIssue(ctx, normalIssue, "test"); err != nil {
@@ -1333,7 +1333,7 @@ func TestWispFilteringFromExport(t *testing.T) {
 	// Filter wisp issues (simulating export behavior)
 	exportableIssues := make([]*types.Issue, 0)
 	for _, issue := range allIssues {
-		if !issue.Wisp {
+		if !issue.Ephemeral {
 			exportableIssues = append(exportableIssues, issue)
 		}
 	}
@@ -2362,5 +2362,168 @@ func TestCalculateBlockingDepths(t *testing.T) {
 	}
 	if depths["step3"] != 3 {
 		t.Errorf("step3 depth = %d, want 3", depths["step3"])
+	}
+}
+
+// TestSpawnMoleculeEphemeralFlag verifies that spawnMolecule with ephemeral=true
+// creates issues with the Ephemeral flag set (bd-phin)
+func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a template with a child (IDs will be auto-generated)
+	root := &types.Issue{
+		Title:      "Template Epic",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeEpic,
+		Labels:     []string{MoleculeLabel}, // Required for loadTemplateSubgraph
+	}
+	child := &types.Issue{
+		Title:      "Template Task",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeTask,
+	}
+
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create template root: %v", err)
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create template child: %v", err)
+	}
+
+	// Add parent-child dependency
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child dependency: %v", err)
+	}
+
+	// Load subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, s, root.ID)
+	if err != nil {
+		t.Fatalf("Failed to load subgraph: %v", err)
+	}
+
+	// Spawn with ephemeral=true
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", true, "eph")
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	// Verify all spawned issues have Ephemeral=true
+	for oldID, newID := range result.IDMapping {
+		spawned, err := s.GetIssue(ctx, newID)
+		if err != nil {
+			t.Fatalf("Failed to get spawned issue %s: %v", newID, err)
+		}
+		if !spawned.Ephemeral {
+			t.Errorf("Spawned issue %s (from %s) should have Ephemeral=true, got false", newID, oldID)
+		}
+	}
+
+	// Verify spawned issues have the correct prefix
+	for _, newID := range result.IDMapping {
+		if !strings.HasPrefix(newID, "test-eph-") {
+			t.Errorf("Spawned issue ID %s should have prefix 'test-eph-'", newID)
+		}
+	}
+}
+
+// TestSpawnMoleculeFromFormulaEphemeral verifies that spawning from a cooked formula
+// with ephemeral=true creates issues with the Ephemeral flag set (bd-phin)
+func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a minimal in-memory subgraph (simulating cookFormulaToSubgraph output)
+	root := &types.Issue{
+		ID:          "test-formula",
+		Title:       "Test Formula",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeEpic,
+		IsTemplate:  true,
+	}
+	step := &types.Issue{
+		ID:          "test-formula.step1",
+		Title:       "Step 1",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		IsTemplate:  true,
+	}
+	
+	subgraph := &TemplateSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, step},
+		Dependencies: []*types.Dependency{
+			{
+				IssueID:     step.ID,
+				DependsOnID: root.ID,
+				Type:        types.DepParentChild,
+			},
+		},
+		IssueMap: map[string]*types.Issue{
+			root.ID: root,
+			step.ID: step,
+		},
+	}
+
+	// Spawn with ephemeral=true (simulating bd mol wisp <formula>)
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", true, "eph")
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	// Verify all spawned issues have Ephemeral=true
+	for oldID, newID := range result.IDMapping {
+		spawned, err := s.GetIssue(ctx, newID)
+		if err != nil {
+			t.Fatalf("Failed to get spawned issue %s: %v", newID, err)
+		}
+		if !spawned.Ephemeral {
+			t.Errorf("Spawned issue %s (from %s) should have Ephemeral=true, got false", newID, oldID)
+		}
+		t.Logf("Issue %s: Ephemeral=%v", newID, spawned.Ephemeral)
+	}
+
+	// Verify they have the correct prefix
+	for _, newID := range result.IDMapping {
+		if !strings.HasPrefix(newID, "test-eph-") {
+			t.Errorf("Spawned issue ID %s should have prefix 'test-eph-'", newID)
+		}
+	}
+
+	// Verify ephemeral issues are excluded from ready work
+	readyWork, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+	for _, issue := range readyWork {
+		for _, spawnedID := range result.IDMapping {
+			if issue.ID == spawnedID {
+				t.Errorf("Ephemeral issue %s should not appear in ready work", spawnedID)
+			}
+		}
 	}
 }

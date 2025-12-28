@@ -310,7 +310,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 	row := t.conn.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at, external_ref,
+		       created_at, created_by, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template,
@@ -1089,8 +1089,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	// Wisp filtering (bd-kwro.9)
-	if filter.Wisp != nil {
-		if *filter.Wisp {
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
 			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
 		} else {
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
@@ -1127,7 +1127,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	querySQL := fmt.Sprintf(`
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, updated_at, closed_at, external_ref,
+		       created_at, created_by, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template,
@@ -1188,7 +1188,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
+		&issue.CreatedAt, &issue.CreatedBy, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate,
@@ -1244,7 +1244,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		issue.Sender = sender.String
 	}
 	if wisp.Valid && wisp.Int64 != 0 {
-		issue.Wisp = true
+		issue.Ephemeral = true
 	}
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {

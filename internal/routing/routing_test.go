@@ -88,3 +88,57 @@ func TestDetectUserRole_Fallback(t *testing.T) {
 		t.Errorf("DetectUserRole() = %v, want %v (fallback)", role, Contributor)
 	}
 }
+
+func TestExtractPrefix(t *testing.T) {
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"gt-abc123", "gt-"},
+		{"bd-xyz", "bd-"},
+		{"hq-1234", "hq-"},
+		{"abc123", ""},     // No hyphen
+		{"", ""},           // Empty string
+		{"-abc", "-"},      // Starts with hyphen
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			got := ExtractPrefix(tt.id)
+			if got != tt.want {
+				t.Errorf("ExtractPrefix(%q) = %q, want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractProjectFromPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"beads/mayor/rig", "beads"},
+		{"gastown/crew/max", "gastown"},
+		{"simple", "simple"},
+		{"", ""},
+		{"/absolute/path", ""}, // Starts with /, first component is empty
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := ExtractProjectFromPath(tt.path)
+			if got != tt.want {
+				t.Errorf("ExtractProjectFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveToExternalRef(t *testing.T) {
+	// This test is limited since it requires a routes.jsonl file
+	// Just test that it returns empty string for nonexistent directory
+	got := ResolveToExternalRef("bd-abc", "/nonexistent/path")
+	if got != "" {
+		t.Errorf("ResolveToExternalRef() = %q, want empty string for nonexistent path", got)
+	}
+}

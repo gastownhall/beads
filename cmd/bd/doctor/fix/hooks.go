@@ -28,7 +28,7 @@ func GitHooks(path string) error {
 	}
 
 	// Run bd hooks install
-	cmd := exec.Command(bdBinary, "hooks", "install") // #nosec G204 -- bdBinary from validated executable path
+	cmd := newBdCmd(bdBinary, "hooks", "install")
 	cmd.Dir = path                                     // Set working directory without changing process dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

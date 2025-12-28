@@ -209,6 +209,13 @@ class ReadyWorkParams(BaseModel):
     labels_any: list[str] | None = None  # OR: must have at least one
     unassigned: bool = False  # Filter to only unassigned issues
     sort_policy: str | None = None  # hybrid, priority, oldest
+    parent_id: str | None = None  # Filter to descendants of this bead/epic
+
+
+class BlockedParams(BaseModel):
+    """Parameters for querying blocked issues."""
+
+    parent_id: str | None = None  # Filter to descendants of this bead/epic
 
 
 class ListIssuesParams(BaseModel):

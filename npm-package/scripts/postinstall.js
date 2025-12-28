@@ -50,18 +50,14 @@ function getPlatformInfo() {
   return { platformName, archName, binaryName };
 }
 
-// Small delay helper for Windows file handle release
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // Download file from URL
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     console.log(`Downloading from: ${url}`);
+    const file = fs.createWriteStream(dest);
 
     const request = https.get(url, (response) => {
-      // Handle redirects - must happen BEFORE creating write stream
+      // Handle redirects
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         console.log(`Following redirect to: ${redirectUrl}`);
@@ -74,34 +70,24 @@ function downloadFile(url, dest) {
         return;
       }
 
-      // Only create write stream after we know we have the final URL
-      const file = fs.createWriteStream(dest);
-
       response.pipe(file);
 
       file.on('finish', () => {
         // Wait for file.close() to complete before resolving
         // This is critical on Windows where the file may still be locked
-        file.close(async (err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          // On Windows, add a small delay to ensure file handle is fully released
-          if (os.platform() === 'win32') {
-            await delay(100);
-          }
-          resolve();
+        file.close((err) => {
+          if (err) reject(err);
+          else resolve();
         });
-      });
-
-      file.on('error', (err) => {
-        fs.unlink(dest, () => {});
-        reject(err);
       });
     });
 
     request.on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+
+    file.on('error', (err) => {
       fs.unlink(dest, () => {});
       reject(err);
     });

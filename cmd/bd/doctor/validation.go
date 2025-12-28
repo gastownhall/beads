@@ -333,12 +333,14 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	}
 	defer db.Close()
 
-	// Query for child→parent dependencies where issue_id starts with depends_on_id + "."
-	// This uses SQLite's LIKE pattern matching
+	// Query for child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
+	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
+	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
 	query := `
 		SELECT d.issue_id, d.depends_on_id
 		FROM dependencies d
 		WHERE d.issue_id LIKE d.depends_on_id || '.%'
+		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`
 	rows, err := db.Query(query)
 	if err != nil {

@@ -124,7 +124,7 @@ func TestGetBlockedIssues_IncludesExplicitlyBlockedStatus(t *testing.T) {
 		t.Fatalf("AddDependency failed: %v", err)
 	}
 
-	blocked, err := store.GetBlockedIssues(ctx)
+	blocked, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
 		t.Fatalf("GetBlockedIssues failed: %v", err)
 	}

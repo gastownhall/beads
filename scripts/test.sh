@@ -24,6 +24,9 @@ TIMEOUT="${TEST_TIMEOUT:-3m}"
 SKIP_PATTERN=$(build_skip_pattern)
 VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
+COVERAGE="${TEST_COVER:-}"
+COVERPROFILE="${TEST_COVERPROFILE:-/tmp/beads.coverage.out}"
+COVERPKG="${TEST_COVERPKG:-}"
 
 # Parse arguments
 PACKAGES=()
@@ -77,10 +80,25 @@ if [[ -n "$RUN_PATTERN" ]]; then
     CMD+=(-run "$RUN_PATTERN")
 fi
 
+if [[ -n "$COVERAGE" ]]; then
+    CMD+=(-covermode=atomic -coverprofile "$COVERPROFILE")
+    if [[ -n "$COVERPKG" ]]; then
+        CMD+=(-coverpkg "$COVERPKG")
+    fi
+fi
+
 CMD+=("${PACKAGES[@]}")
 
 echo "Running: ${CMD[*]}" >&2
 echo "Skipping: $SKIP_PATTERN" >&2
 echo "" >&2
 
-exec "${CMD[@]}"
+"${CMD[@]}"
+status=$?
+
+if [[ -n "$COVERAGE" ]]; then
+    total=$(go tool cover -func="$COVERPROFILE" | awk '/^total:/ {print $NF}')
+    echo "Total coverage: ${total} (profile: ${COVERPROFILE})" >&2
+fi
+
+exit $status

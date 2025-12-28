@@ -78,6 +78,173 @@ func CheckGitHooks() DoctorCheck {
 	}
 }
 
+// CheckGitWorkingTree checks if the git working tree is clean.
+// This helps prevent leaving work stranded (AGENTS.md: keep git state clean).
+func CheckGitWorkingTree(path string) DoctorCheck {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = path
+	if err := cmd.Run(); err != nil {
+		return DoctorCheck{
+			Name:    "Git Working Tree",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	cmd = exec.Command("git", "status", "--porcelain")
+	cmd.Dir = path
+	out, err := cmd.Output()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Git Working Tree",
+			Status:  StatusWarning,
+			Message: "Unable to check git status",
+			Detail:  err.Error(),
+			Fix:     "Run 'git status' and commit/stash changes before syncing",
+		}
+	}
+
+	status := strings.TrimSpace(string(out))
+	if status == "" {
+		return DoctorCheck{
+			Name:    "Git Working Tree",
+			Status:  StatusOK,
+			Message: "Clean",
+		}
+	}
+
+	// Show a small sample of paths for quick debugging.
+	lines := strings.Split(status, "\n")
+	maxLines := 8
+	if len(lines) > maxLines {
+		lines = append(lines[:maxLines], "…")
+	}
+
+	return DoctorCheck{
+		Name:    "Git Working Tree",
+		Status:  StatusWarning,
+		Message: "Uncommitted changes present",
+		Detail:  strings.Join(lines, "\n"),
+		Fix:     "Commit or stash changes, then follow AGENTS.md: git pull --rebase && git push",
+	}
+}
+
+// CheckGitUpstream checks whether the current branch is up to date with its upstream.
+// This catches common "forgot to pull/push" failure modes (AGENTS.md: pull --rebase, push).
+func CheckGitUpstream(path string) DoctorCheck {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = path
+	if err := cmd.Run(); err != nil {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	// Detect detached HEAD.
+	cmd = exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = path
+	branchOut, err := cmd.Output()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusWarning,
+			Message: "Detached HEAD (no branch)",
+			Fix:     "Check out a branch before syncing",
+		}
+	}
+	branch := strings.TrimSpace(string(branchOut))
+
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	cmd.Dir = path
+	upOut, err := cmd.Output()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("No upstream configured for %s", branch),
+			Fix:     fmt.Sprintf("Set upstream then push: git push -u origin %s", branch),
+		}
+	}
+	upstream := strings.TrimSpace(string(upOut))
+
+	ahead, aheadErr := gitRevListCount(path, "@{u}..HEAD")
+	behind, behindErr := gitRevListCount(path, "HEAD..@{u}")
+	if aheadErr != nil || behindErr != nil {
+		detailParts := []string{}
+		if aheadErr != nil {
+			detailParts = append(detailParts, "ahead: "+aheadErr.Error())
+		}
+		if behindErr != nil {
+			detailParts = append(detailParts, "behind: "+behindErr.Error())
+		}
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("Unable to compare with upstream (%s)", upstream),
+			Detail:  strings.Join(detailParts, "; "),
+			Fix:     "Run 'git fetch' then check: git status -sb",
+		}
+	}
+
+	if ahead == 0 && behind == 0 {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Up to date (%s)", upstream),
+			Detail:  fmt.Sprintf("Branch: %s", branch),
+		}
+	}
+
+	if ahead > 0 && behind == 0 {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("Ahead of upstream by %d commit(s)", ahead),
+			Detail:  fmt.Sprintf("Branch: %s, upstream: %s", branch, upstream),
+			Fix:     "Run 'git push' (AGENTS.md: git pull --rebase && git push)",
+		}
+	}
+
+	if behind > 0 && ahead == 0 {
+		return DoctorCheck{
+			Name:    "Git Upstream",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("Behind upstream by %d commit(s)", behind),
+			Detail:  fmt.Sprintf("Branch: %s, upstream: %s", branch, upstream),
+			Fix:     "Run 'git pull --rebase' (then re-run bd sync / bd doctor)",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Git Upstream",
+		Status:  StatusWarning,
+		Message: fmt.Sprintf("Diverged from upstream (ahead %d, behind %d)", ahead, behind),
+		Detail:  fmt.Sprintf("Branch: %s, upstream: %s", branch, upstream),
+		Fix:     "Run 'git pull --rebase' then 'git push'",
+	}
+}
+
+func gitRevListCount(path string, rangeExpr string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", rangeExpr) // #nosec G204 -- fixed args
+	cmd.Dir = path
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	countStr := strings.TrimSpace(string(out))
+	if countStr == "" {
+		return 0, nil
+	}
+
+	var n int
+	if _, err := fmt.Sscanf(countStr, "%d", &n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // CheckSyncBranchHookCompatibility checks if pre-push hook is compatible with sync-branch mode.
 // When sync-branch is configured, the pre-push hook must have the sync-branch bypass logic
 // (added in version 0.29.0). Without it, users experience circular "bd sync" failures (issue #532).
@@ -145,6 +312,8 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: "Pre-push hook is not a bd hook",
 			Detail:  "Cannot verify sync-branch compatibility with custom hooks",
+			Fix: "Either run 'bd hooks install --force' to use bd hooks,\n" +
+				"  or ensure your custom hook skips validation when pushing to sync-branch",
 		}
 	}
 
@@ -662,5 +831,5 @@ func CheckOrphanedIssues(path string) DoctorCheck {
 
 // openDBReadOnly opens a SQLite database in read-only mode
 func openDBReadOnly(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	return sql.Open("sqlite3", sqliteConnString(dbPath, true))
 }

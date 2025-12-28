@@ -57,6 +57,57 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 		return nil
 	}
 
+	// Preserve newer columns if they already exist (migration may run on partially-migrated DBs).
+	hasPinned, err := checkCol("pinned")
+	if err != nil {
+		return fmt.Errorf("failed to check pinned column: %w", err)
+	}
+	hasIsTemplate, err := checkCol("is_template")
+	if err != nil {
+		return fmt.Errorf("failed to check is_template column: %w", err)
+	}
+	hasAwaitType, err := checkCol("await_type")
+	if err != nil {
+		return fmt.Errorf("failed to check await_type column: %w", err)
+	}
+	hasAwaitID, err := checkCol("await_id")
+	if err != nil {
+		return fmt.Errorf("failed to check await_id column: %w", err)
+	}
+	hasTimeoutNs, err := checkCol("timeout_ns")
+	if err != nil {
+		return fmt.Errorf("failed to check timeout_ns column: %w", err)
+	}
+	hasWaiters, err := checkCol("waiters")
+	if err != nil {
+		return fmt.Errorf("failed to check waiters column: %w", err)
+	}
+
+	pinnedExpr := "0"
+	if hasPinned {
+		pinnedExpr = "pinned"
+	}
+	isTemplateExpr := "0"
+	if hasIsTemplate {
+		isTemplateExpr = "is_template"
+	}
+	awaitTypeExpr := "''"
+	if hasAwaitType {
+		awaitTypeExpr = "await_type"
+	}
+	awaitIDExpr := "''"
+	if hasAwaitID {
+		awaitIDExpr = "await_id"
+	}
+	timeoutNsExpr := "0"
+	if hasTimeoutNs {
+		timeoutNsExpr = "timeout_ns"
+	}
+	waitersExpr := "''"
+	if hasWaiters {
+		waitersExpr = "waiters"
+	}
+
 	// SQLite 3.35.0+ supports DROP COLUMN, but we use table recreation for compatibility
 	// This is idempotent - we recreate the table without the deprecated columns
 
@@ -117,6 +168,12 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 			original_type TEXT DEFAULT '',
 			sender TEXT DEFAULT '',
 			ephemeral INTEGER DEFAULT 0,
+			pinned INTEGER DEFAULT 0,
+			is_template INTEGER DEFAULT 0,
+			await_type TEXT,
+			await_id TEXT,
+			timeout_ns INTEGER,
+			waiters TEXT,
 			close_reason TEXT DEFAULT '',
 			CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 		)
@@ -132,7 +189,8 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 			notes, status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo, compaction_level,
 			compacted_at, compacted_at_commit, original_size, deleted_at,
-			deleted_by, delete_reason, original_type, sender, ephemeral, close_reason
+			deleted_by, delete_reason, original_type, sender, ephemeral, pinned, is_template,
+			await_type, await_id, timeout_ns, waiters, close_reason
 		)
 		SELECT
 			id, content_hash, title, description, design, acceptance_criteria,
@@ -140,9 +198,11 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 			created_at, updated_at, closed_at, external_ref, COALESCE(source_repo, ''), compaction_level,
 			compacted_at, compacted_at_commit, original_size, deleted_at,
 			deleted_by, delete_reason, original_type, sender, ephemeral,
+			%s, %s,
+			%s, %s, %s, %s,
 			COALESCE(close_reason, '')
 		FROM issues
-	`)
+	`, pinnedExpr, isTemplateExpr, awaitTypeExpr, awaitIDExpr, timeoutNsExpr, waitersExpr)
 	if err != nil {
 		return fmt.Errorf("failed to copy issues data: %w", err)
 	}

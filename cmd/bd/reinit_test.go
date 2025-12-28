@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -91,6 +92,11 @@ func testFreshCloneAutoImport(t *testing.T) {
 	// Test checkGitForIssues detects issues.jsonl
 	t.Chdir(dir)
 
+	git.ResetCaches() // Reset git caches after changing directory
+
+	git.ResetCaches()
+
+
 	count, path, gitRef := checkGitForIssues()
 	if count != 1 {
 		t.Errorf("Expected 1 issue in git, got %d", count)
@@ -170,6 +176,11 @@ func testDatabaseRemovalScenario(t *testing.T) {
 	// Change to test directory
 	t.Chdir(dir)
 
+	git.ResetCaches() // Reset git caches after changing directory
+
+	git.ResetCaches()
+
+
 	// Test checkGitForIssues finds issues.jsonl (canonical name)
 	count, path, gitRef := checkGitForIssues()
 	if count != 2 {
@@ -248,6 +259,11 @@ func testLegacyFilenameSupport(t *testing.T) {
 	// Change to test directory
 	t.Chdir(dir)
 
+	git.ResetCaches() // Reset git caches after changing directory
+
+	git.ResetCaches()
+
+
 	// Test checkGitForIssues finds issues.jsonl
 	count, path, gitRef := checkGitForIssues()
 	if count != 1 {
@@ -324,6 +340,11 @@ func testPrecedenceTest(t *testing.T) {
 	// Change to test directory
 	t.Chdir(dir)
 
+	git.ResetCaches() // Reset git caches after changing directory
+
+	git.ResetCaches()
+
+
 	// Test checkGitForIssues prefers issues.jsonl
 	count, path, _ := checkGitForIssues()
 	if count != 2 {
@@ -370,6 +391,11 @@ func testInitSafetyCheck(t *testing.T) {
 	// Change to test directory
 	t.Chdir(dir)
 
+	git.ResetCaches() // Reset git caches after changing directory
+
+	git.ResetCaches()
+
+
 	// Create empty database (simulating failed import)
 	dbPath := filepath.Join(beadsDir, "test.db")
 	store, err := sqlite.New(context.Background(), dbPath)
@@ -409,8 +435,14 @@ func testInitSafetyCheck(t *testing.T) {
 // Helper functions
 
 // runCmd runs a command and fails the test if it returns an error
+// If the command is "git init", it automatically adds --initial-branch=main
+// for modern git compatibility.
 func runCmd(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
+	// Add --initial-branch=main to git init for modern git compatibility
+	if name == "git" && len(args) > 0 && args[0] == "init" {
+		args = append(args, "--initial-branch=main")
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {

@@ -213,6 +213,21 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 			t.Error("expected issues for wrong jsonl extension")
 		}
 	})
+
+	t.Run("jsonl_export cannot be system file", func(t *testing.T) {
+		metadataContent := `{
+  "database": "beads.db",
+  "jsonl_export": "interactions.jsonl"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		if len(issues) == 0 {
+			t.Error("expected issues for system jsonl_export")
+		}
+	})
 }
 
 func contains(s, substr string) bool {

@@ -23,6 +23,7 @@ type Issue struct {
 	Assignee           string         `json:"assignee,omitempty"`
 	EstimatedMinutes   *int           `json:"estimated_minutes,omitempty"`
 	CreatedAt          time.Time      `json:"created_at"`
+	CreatedBy          string         `json:"created_by,omitempty"` // Who created this issue (GH#748)
 	UpdatedAt          time.Time      `json:"updated_at"`
 	ClosedAt           *time.Time     `json:"closed_at,omitempty"`
 	CloseReason        string         `json:"close_reason,omitempty"` // Reason provided when closing the issue
@@ -43,8 +44,8 @@ type Issue struct {
 	OriginalType string     `json:"original_type,omitempty"` // Issue type before deletion (for tombstones)
 
 	// Messaging fields (bd-kwro): inter-agent communication support
-	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
-	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
+	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -97,7 +98,9 @@ func (i *Issue) ComputeContentHash() string {
 	h.Write([]byte{0})
 	h.Write([]byte(i.Assignee))
 	h.Write([]byte{0})
-	
+	h.Write([]byte(i.CreatedBy))
+	h.Write([]byte{0})
+
 	if i.ExternalRef != nil {
 		h.Write([]byte(*i.ExternalRef))
 	}
@@ -246,10 +249,11 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
 	// Enforce closed_at invariant: closed_at should be set if and only if status is closed
+	// Exception: tombstones may retain closed_at from before deletion
 	if i.Status == StatusClosed && i.ClosedAt == nil {
 		return fmt.Errorf("closed issues must have closed_at timestamp")
 	}
-	if i.Status != StatusClosed && i.ClosedAt != nil {
+	if i.Status != StatusClosed && i.Status != StatusTombstone && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
 	// Enforce tombstone invariants (bd-md2): deleted_at must be set for tombstones, and only for tombstones
@@ -594,8 +598,8 @@ type IssueFilter struct {
 	// Tombstone filtering (bd-1bu)
 	IncludeTombstones bool // If false (default), exclude tombstones from results
 
-	// Wisp filtering (bd-kwro.9)
-	Wisp *bool // Filter by wisp flag (nil = any, true = only wisps, false = only non-wisps)
+	// Ephemeral filtering (bd-kwro.9)
+	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
 	// Pinned filtering (bd-7h5)
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
@@ -646,6 +650,9 @@ type WorkFilter struct {
 	LabelsAny  []string   // OR semantics: issue must have AT LEAST ONE of these labels
 	Limit      int
 	SortPolicy SortPolicy
+
+	// Parent filtering: filter to descendants of a bead/epic (recursive)
+	ParentID *string // Show all descendants of this issue
 }
 
 // StaleFilter is used to filter stale issue queries

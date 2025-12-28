@@ -20,6 +20,11 @@ func MigratePinnedColumn(db *sql.DB) error {
 	}
 
 	if columnExists {
+		// Column exists (e.g. created by new schema); ensure index exists.
+		_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_pinned ON issues(pinned) WHERE pinned = 1`)
+		if err != nil {
+			return fmt.Errorf("failed to create pinned index: %w", err)
+		}
 		return nil
 	}
 

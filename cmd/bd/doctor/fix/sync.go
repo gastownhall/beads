@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -38,13 +37,23 @@ func DBJSONLSync(path string) error {
 
 	// Find JSONL file
 	var jsonlPath string
-	issuesJSONL := filepath.Join(beadsDir, "issues.jsonl")
-	beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		if cfg.JSONLExport != "" && !isSystemJSONLFilename(cfg.JSONLExport) {
+			p := cfg.JSONLPath(beadsDir)
+			if _, err := os.Stat(p); err == nil {
+				jsonlPath = p
+			}
+		}
+	}
+	if jsonlPath == "" {
+		issuesJSONL := filepath.Join(beadsDir, "issues.jsonl")
+		beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
 
-	if _, err := os.Stat(issuesJSONL); err == nil {
-		jsonlPath = issuesJSONL
-	} else if _, err := os.Stat(beadsJSONL); err == nil {
-		jsonlPath = beadsJSONL
+		if _, err := os.Stat(issuesJSONL); err == nil {
+			jsonlPath = issuesJSONL
+		} else if _, err := os.Stat(beadsJSONL); err == nil {
+			jsonlPath = beadsJSONL
+		}
 	}
 
 	// Check if both database and JSONL exist
@@ -102,21 +111,36 @@ func DBJSONLSync(path string) error {
 		return err
 	}
 
-	// Run the appropriate sync command
-	var cmd *exec.Cmd
 	if syncDirection == "export" {
 		// Export DB to JSONL file (must specify -o to write to file, not stdout)
-		jsonlOutputPath := filepath.Join(beadsDir, "issues.jsonl")
-		cmd = exec.Command(bdBinary, "export", "-o", jsonlOutputPath, "--force") // #nosec G204 -- bdBinary from validated executable path
-	} else {
-		cmd = exec.Command(bdBinary, "sync", "--import-only") // #nosec G204 -- bdBinary from validated executable path
+		jsonlOutputPath := jsonlPath
+		exportCmd := newBdCmd(bdBinary, "--db", dbPath, "export", "-o", jsonlOutputPath, "--force")
+		exportCmd.Dir = path // Set working directory without changing process dir
+		exportCmd.Stdout = os.Stdout
+		exportCmd.Stderr = os.Stderr
+		if err := exportCmd.Run(); err != nil {
+			return fmt.Errorf("failed to export database to JSONL: %w", err)
+		}
+
+		// Staleness check uses last_import_time. After exporting, JSONL mtime is newer,
+		// so mark the DB as fresh by running a no-op import (skip existing issues).
+		markFreshCmd := newBdCmd(bdBinary, "--db", dbPath, "import", "-i", jsonlOutputPath, "--force", "--skip-existing", "--no-git-history")
+		markFreshCmd.Dir = path
+		markFreshCmd.Stdout = os.Stdout
+		markFreshCmd.Stderr = os.Stderr
+		if err := markFreshCmd.Run(); err != nil {
+			return fmt.Errorf("failed to mark database as fresh after export: %w", err)
+		}
+
+		return nil
 	}
 
-	cmd.Dir = path // Set working directory without changing process dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	importCmd := newBdCmd(bdBinary, "--db", dbPath, "sync", "--import-only")
+	importCmd.Dir = path // Set working directory without changing process dir
+	importCmd.Stdout = os.Stdout
+	importCmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := importCmd.Run(); err != nil {
 		return fmt.Errorf("failed to sync database with JSONL: %w", err)
 	}
 
@@ -125,7 +149,7 @@ func DBJSONLSync(path string) error {
 
 // countDatabaseIssues counts the number of issues in the database.
 func countDatabaseIssues(dbPath string) (int, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return 0, fmt.Errorf("failed to open database: %w", err)
 	}

@@ -51,7 +51,7 @@ func CheckIDFormat(path string) DoctorCheck {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
@@ -121,7 +121,7 @@ func CheckDependencyCycles(path string) DoctorCheck {
 	}
 
 	// Open database to check for cycles
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -216,7 +216,7 @@ func CheckTombstones(path string) DoctorCheck {
 		}
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Tombstones",
@@ -420,7 +420,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",

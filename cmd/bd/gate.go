@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -101,6 +104,16 @@ Examples:
 			}
 		}
 
+		// For timer gates, the await_id IS the duration - use it as timeout if not explicitly set
+		if awaitType == "timer" && timeout == 0 {
+			var err error
+			timeout, err = time.ParseDuration(awaitID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid timer duration %q: %v\n", awaitID, err)
+				os.Exit(1)
+			}
+		}
+
 		// Generate title if not provided
 		if title == "" {
 			title = fmt.Sprintf("Gate: %s:%s", awaitType, awaitID)
@@ -144,7 +157,7 @@ Examples:
 				Status:    types.StatusOpen,
 				Priority:  1, // Gates are typically high priority
 				// Assignee left empty - orchestrator decides who processes gates
-				Wisp:      true, // Gates are wisps (ephemeral)
+				Ephemeral:      true, // Gates are wisps (ephemeral)
 				AwaitType: awaitType,
 				AwaitID:   awaitID,
 				Timeout:   timeout,
@@ -434,6 +447,129 @@ var gateCloseCmd = &cobra.Command{
 	},
 }
 
+var gateApproveCmd = &cobra.Command{
+	Use:   "approve <gate-id>",
+	Short: "Approve a human gate",
+	Long: `Approve a human gate, closing it and notifying waiters.
+
+Human gates (created with --await human:<prompt>) require explicit approval
+to close. This is the command that provides that approval.
+
+Example:
+  bd gate create --await human:approve-deploy --notify gastown/witness
+  # ... later, when ready to approve ...
+  bd gate approve <gate-id>
+  bd gate approve <gate-id> --comment "Reviewed and approved by Steve"`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		CheckReadonly("gate approve")
+		ctx := rootCtx
+		comment, _ := cmd.Flags().GetString("comment")
+
+		var closedGate *types.Issue
+		var gateID string
+
+		// Try daemon first, fall back to direct store access
+		if daemonClient != nil {
+			// First get the gate to verify it's a human gate
+			showResp, err := daemonClient.GateShow(&rpc.GateShowArgs{ID: args[0]})
+			if err != nil {
+				FatalError("gate approve: %v", err)
+			}
+			var gate types.Issue
+			if err := json.Unmarshal(showResp.Data, &gate); err != nil {
+				FatalError("failed to parse gate: %v", err)
+			}
+			if gate.AwaitType != "human" {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a human gate (type: %s:%s)\n", args[0], gate.AwaitType, gate.AwaitID)
+				os.Exit(1)
+			}
+			if gate.Status == types.StatusClosed {
+				fmt.Fprintf(os.Stderr, "Error: gate %s is already closed\n", args[0])
+				os.Exit(1)
+			}
+
+			// Close with approval reason
+			reason := fmt.Sprintf("Human approval granted: %s", gate.AwaitID)
+			if comment != "" {
+				reason = fmt.Sprintf("Human approval granted: %s (%s)", gate.AwaitID, comment)
+			}
+
+			resp, err := daemonClient.GateClose(&rpc.GateCloseArgs{
+				ID:     args[0],
+				Reason: reason,
+			})
+			if err != nil {
+				FatalError("gate approve: %v", err)
+			}
+			if err := json.Unmarshal(resp.Data, &closedGate); err != nil {
+				FatalError("failed to parse gate: %v", err)
+			}
+			gateID = closedGate.ID
+		} else if store != nil {
+			var err error
+			gateID, err = utils.ResolvePartialID(ctx, store, args[0])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Get gate and verify it's a human gate
+			gate, err := store.GetIssue(ctx, gateID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if gate == nil {
+				fmt.Fprintf(os.Stderr, "Error: gate %s not found\n", gateID)
+				os.Exit(1)
+			}
+			if gate.IssueType != types.TypeGate {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a gate (type: %s)\n", gateID, gate.IssueType)
+				os.Exit(1)
+			}
+			if gate.AwaitType != "human" {
+				fmt.Fprintf(os.Stderr, "Error: %s is not a human gate (type: %s:%s)\n", gateID, gate.AwaitType, gate.AwaitID)
+				os.Exit(1)
+			}
+			if gate.Status == types.StatusClosed {
+				fmt.Fprintf(os.Stderr, "Error: gate %s is already closed\n", gateID)
+				os.Exit(1)
+			}
+
+			// Close with approval reason
+			reason := fmt.Sprintf("Human approval granted: %s", gate.AwaitID)
+			if comment != "" {
+				reason = fmt.Sprintf("Human approval granted: %s (%s)", gate.AwaitID, comment)
+			}
+
+			if err := store.CloseIssue(ctx, gateID, reason, actor); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing gate: %v\n", err)
+				os.Exit(1)
+			}
+
+			markDirtyAndScheduleFlush()
+			closedGate, _ = store.GetIssue(ctx, gateID)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+			os.Exit(1)
+		}
+
+		if jsonOutput {
+			outputJSON(closedGate)
+			return
+		}
+
+		fmt.Printf("%s Approved gate: %s\n", ui.RenderPass("✓"), gateID)
+		if closedGate != nil && closedGate.CloseReason != "" {
+			fmt.Printf("   %s\n", closedGate.CloseReason)
+		}
+		if closedGate != nil && len(closedGate.Waiters) > 0 {
+			fmt.Printf("   Waiters notified: %s\n", strings.Join(closedGate.Waiters, ", "))
+		}
+	},
+}
+
 var gateWaitCmd = &cobra.Command{
 	Use:   "wait <gate-id>",
 	Short: "Add a waiter to an existing gate",
@@ -564,7 +700,314 @@ var gateWaitCmd = &cobra.Command{
 	},
 }
 
+var gateEvalCmd = &cobra.Command{
+	Use:   "eval",
+	Short: "Evaluate pending gates and close elapsed ones",
+	Long: `Evaluate all open gates and close those whose conditions are met.
+
+Supported gate types:
+  - timer gates: closed when elapsed time exceeds timeout
+  - gh:run gates: closed when GitHub Actions run completes (requires gh CLI)
+  - gh:pr gates: closed when PR is merged/closed (requires gh CLI)
+
+This command is idempotent and safe to run repeatedly.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		CheckReadonly("gate eval")
+		ctx := rootCtx
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		var gates []*types.Issue
+
+		// Get all open gates
+		if daemonClient != nil {
+			resp, err := daemonClient.GateList(&rpc.GateListArgs{All: false})
+			if err != nil {
+				FatalError("gate eval: %v", err)
+			}
+			if err := json.Unmarshal(resp.Data, &gates); err != nil {
+				FatalError("failed to parse gates: %v", err)
+			}
+		} else if store != nil {
+			gateType := types.TypeGate
+			openStatus := types.StatusOpen
+			filter := types.IssueFilter{
+				IssueType: &gateType,
+				Status:    &openStatus,
+			}
+			var err error
+			gates, err = store.SearchIssues(ctx, "", filter)
+			if err != nil {
+				FatalError("listing gates: %v", err)
+			}
+		} else {
+			FatalError("no database connection")
+		}
+
+		if len(gates) == 0 {
+			if !jsonOutput {
+				fmt.Println("No open gates to evaluate")
+			}
+			return
+		}
+
+		var closed []string
+		var skipped []string
+		var awaitingHuman []string
+		var awaitingMail []string
+		now := time.Now()
+
+		for _, gate := range gates {
+			var shouldClose bool
+			var reason string
+
+			switch gate.AwaitType {
+			case "timer":
+				shouldClose, reason = evalTimerGate(gate, now)
+			case "gh:run":
+				shouldClose, reason = evalGHRunGate(gate)
+			case "gh:pr":
+				shouldClose, reason = evalGHPRGate(gate)
+			case "human":
+				// Human gates require explicit approval via 'bd gate approve'
+				awaitingHuman = append(awaitingHuman, gate.ID)
+				continue
+			case "mail":
+				// Mail gates check for messages matching the pattern
+				if store != nil {
+					shouldClose, reason = evalMailGate(ctx, store, gate)
+				} else {
+					// Daemon mode - can't evaluate mail gates without store access
+					awaitingMail = append(awaitingMail, gate.ID)
+					continue
+				}
+			default:
+				// Unsupported gate type - skip
+				skipped = append(skipped, gate.ID)
+				continue
+			}
+
+			if !shouldClose {
+				continue
+			}
+
+			// Gate condition met - close it
+			if dryRun {
+				fmt.Printf("Would close gate %s (%s)\n", gate.ID, reason)
+				closed = append(closed, gate.ID)
+				continue
+			}
+
+			if daemonClient != nil {
+				_, err := daemonClient.GateClose(&rpc.GateCloseArgs{
+					ID:     gate.ID,
+					Reason: reason,
+				})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to close gate %s: %v\n", gate.ID, err)
+					continue
+				}
+			} else if store != nil {
+				if err := store.CloseIssue(ctx, gate.ID, reason, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to close gate %s: %v\n", gate.ID, err)
+					continue
+				}
+				markDirtyAndScheduleFlush()
+			}
+
+			closed = append(closed, gate.ID)
+		}
+
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"evaluated":      len(gates),
+				"closed":         closed,
+				"awaiting_human": awaitingHuman,
+				"awaiting_mail":  awaitingMail,
+				"skipped":        skipped,
+			})
+			return
+		}
+
+		if len(closed) == 0 {
+			fmt.Printf("Evaluated %d gates, none ready to close\n", len(gates))
+		} else {
+			action := "Closed"
+			if dryRun {
+				action = "Would close"
+			}
+			fmt.Printf("%s %s %d gate(s)\n", ui.RenderPass("✓"), action, len(closed))
+			for _, id := range closed {
+				fmt.Printf("   %s\n", id)
+			}
+		}
+		if len(awaitingHuman) > 0 {
+			fmt.Printf("Awaiting human approval: %s\n", strings.Join(awaitingHuman, ", "))
+			fmt.Printf("   Use 'bd gate approve <id>' to approve\n")
+		}
+		if len(awaitingMail) > 0 {
+			fmt.Printf("Awaiting mail: %s\n", strings.Join(awaitingMail, ", "))
+		}
+		if len(skipped) > 0 {
+			fmt.Printf("Skipped %d unsupported gate(s): %s\n", len(skipped), strings.Join(skipped, ", "))
+		}
+	},
+}
+
+// evalTimerGate checks if a timer gate's duration has elapsed.
+func evalTimerGate(gate *types.Issue, now time.Time) (bool, string) {
+	if gate.Timeout <= 0 {
+		return false, "" // No timeout set
+	}
+
+	elapsed := now.Sub(gate.CreatedAt)
+	if elapsed < gate.Timeout {
+		return false, "" // Not yet elapsed
+	}
+
+	return true, fmt.Sprintf("Timer elapsed (%v)", gate.Timeout)
+}
+
+// ghRunStatus represents the JSON output of `gh run view --json`
+type ghRunStatus struct {
+	Status     string `json:"status"`     // queued, in_progress, completed
+	Conclusion string `json:"conclusion"` // success, failure, canceled, skipped, etc.
+}
+
+// evalGHRunGate checks if a GitHub Actions run has completed.
+// Uses `gh run view <run_id> --json status,conclusion` to check status.
+func evalGHRunGate(gate *types.Issue) (bool, string) {
+	runID := gate.AwaitID
+	if runID == "" {
+		return false, ""
+	}
+
+	// Run gh CLI to get run status
+	cmd := exec.Command("gh", "run", "view", runID, "--json", "status,conclusion") //nolint:gosec // runID is from trusted issue.AwaitID field
+	output, err := cmd.Output()
+	if err != nil {
+		// gh CLI failed - could be network issue, invalid run ID, or gh not installed
+		// Don't close the gate, just skip it
+		return false, ""
+	}
+
+	var status ghRunStatus
+	if err := json.Unmarshal(output, &status); err != nil {
+		return false, ""
+	}
+
+	// Only close if status is "completed"
+	if status.Status != "completed" {
+		return false, ""
+	}
+
+	// Run completed - include conclusion in reason
+	reason := fmt.Sprintf("GitHub Actions run %s completed", runID)
+	if status.Conclusion != "" {
+		reason = fmt.Sprintf("GitHub Actions run %s: %s", runID, status.Conclusion)
+	}
+
+	return true, reason
+}
+
+// ghPRStatus represents the JSON output of `gh pr view --json`
+type ghPRStatus struct {
+	State    string `json:"state"`    // OPEN, CLOSED, MERGED
+	MergedAt string `json:"mergedAt"` // non-empty if merged
+}
+
+// evalGHPRGate checks if a GitHub PR has been merged or closed.
+// Uses `gh pr view <pr_number> --json state,mergedAt` to check status.
+func evalGHPRGate(gate *types.Issue) (bool, string) {
+	prNumber := gate.AwaitID
+	if prNumber == "" {
+		return false, ""
+	}
+
+	// Run gh CLI to get PR status
+	cmd := exec.Command("gh", "pr", "view", prNumber, "--json", "state,mergedAt") //nolint:gosec // prNumber is from trusted issue.AwaitID field
+	output, err := cmd.Output()
+	if err != nil {
+		// gh CLI failed - could be network issue, invalid PR, or gh not installed
+		// Don't close the gate, just skip it
+		return false, ""
+	}
+
+	var status ghPRStatus
+	if err := json.Unmarshal(output, &status); err != nil {
+		return false, ""
+	}
+
+	// Close gate if PR is no longer OPEN
+	// State is "MERGED" for merged PRs, "CLOSED" for closed-without-merge
+	switch status.State {
+	case "MERGED":
+		return true, fmt.Sprintf("PR #%s merged", prNumber)
+	case "CLOSED":
+		return true, fmt.Sprintf("PR #%s closed without merge", prNumber)
+	default:
+		// Still OPEN
+		return false, ""
+	}
+}
+
+// evalMailGate checks if any message matching the pattern exists.
+// The pattern (await_id) is matched as a case-insensitive substring of message subjects.
+// If waiters are specified, only messages addressed to those waiters are considered.
+func evalMailGate(ctx context.Context, store storage.Storage, gate *types.Issue) (bool, string) {
+	pattern := gate.AwaitID
+	if pattern == "" {
+		return false, ""
+	}
+
+	// Search for messages
+	msgType := types.TypeMessage
+	openStatus := types.StatusOpen
+	filter := types.IssueFilter{
+		IssueType: &msgType,
+		Status:    &openStatus,
+	}
+
+	messages, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return false, ""
+	}
+
+	// Convert pattern to lowercase for case-insensitive matching
+	patternLower := strings.ToLower(pattern)
+
+	// Build waiter set for efficient lookup (if waiters specified)
+	waiterSet := make(map[string]bool)
+	for _, w := range gate.Waiters {
+		waiterSet[w] = true
+	}
+
+	// Check each message
+	for _, msg := range messages {
+		// Check subject contains pattern (case-insensitive)
+		if !strings.Contains(strings.ToLower(msg.Title), patternLower) {
+			continue
+		}
+
+		// If waiters specified, check if message is addressed to a waiter
+		// Messages use Assignee field for recipient
+		if len(waiterSet) > 0 {
+			if !waiterSet[msg.Assignee] {
+				continue
+			}
+		}
+
+		// Found a matching message
+		return true, fmt.Sprintf("Mail received: %s", msg.Title)
+	}
+
+	return false, ""
+}
+
 func init() {
+	// Gate eval flags
+	gateEvalCmd.Flags().Bool("dry-run", false, "Show what would be closed without actually closing")
+	gateEvalCmd.Flags().Bool("json", false, "Output JSON format")
+
 	// Gate create flags
 	gateCreateCmd.Flags().String("await", "", "Await spec: gh:run:<id>, gh:pr:<id>, timer:<duration>, human:<prompt>, mail:<pattern> (required)")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 30m, 1h)")
@@ -583,6 +1026,10 @@ func init() {
 	gateCloseCmd.Flags().StringP("reason", "r", "", "Reason for closing")
 	gateCloseCmd.Flags().Bool("json", false, "Output JSON format")
 
+	// Gate approve flags
+	gateApproveCmd.Flags().String("comment", "", "Optional approval comment")
+	gateApproveCmd.Flags().Bool("json", false, "Output JSON format")
+
 	// Gate wait flags
 	gateWaitCmd.Flags().StringSlice("notify", nil, "Mail addresses to add as waiters (repeatable, required)")
 	gateWaitCmd.Flags().Bool("json", false, "Output JSON format")
@@ -592,7 +1039,9 @@ func init() {
 	gateCmd.AddCommand(gateShowCmd)
 	gateCmd.AddCommand(gateListCmd)
 	gateCmd.AddCommand(gateCloseCmd)
+	gateCmd.AddCommand(gateApproveCmd)
 	gateCmd.AddCommand(gateWaitCmd)
+	gateCmd.AddCommand(gateEvalCmd)
 
 	// Add gate command to root
 	rootCmd.AddCommand(gateCmd)

@@ -671,7 +671,7 @@ func flushToJSONLWithState(state flushState) {
 	issues := make([]*types.Issue, 0, len(issueMap))
 	wispsSkipped := 0
 	for _, issue := range issueMap {
-		if issue.Wisp {
+		if issue.Ephemeral {
 			wispsSkipped++
 			continue
 		}

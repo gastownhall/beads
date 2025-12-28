@@ -21,6 +21,11 @@ func MigrateIsTemplateColumn(db *sql.DB) error {
 	}
 
 	if columnExists {
+		// Column exists (e.g. created by new schema); ensure index exists.
+		_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_is_template ON issues(is_template) WHERE is_template = 1`)
+		if err != nil {
+			return fmt.Errorf("failed to create is_template index: %w", err)
+		}
 		return nil
 	}
 

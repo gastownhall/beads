@@ -5,9 +5,119 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.38.0] - 2025-12-27
 
 ### Added
+
+- **Prefix-based routing** (bd-9gvf) - Cross-rig command routing
+  - `bd` commands auto-route to correct rig based on issue ID prefix
+  - Routes stored in `~/gt/.beads/routes.jsonl`
+  - Enables seamless multi-rig workflows from any directory
+
+- **Cross-rig ID auto-resolve** (bd-lfiu) - Smarter dependency handling
+  - `bd dep add` auto-resolves issue IDs across different rigs
+  - No need to specify full paths for cross-rig dependencies
+
+- **`bd mol pour/wisp` subcommands** (bd-2fs7) - Reorganized command hierarchy
+  - `bd mol pour` for persistent molecules
+  - `bd mol wisp` for ephemeral workflows
+  - Cleaner organization under `bd mol` namespace
+
+- **Comments display in `bd show`** (GH#177) - Enhanced issue details
+  - Comments now visible in issue output
+  - Shows full discussion thread for issues
+
+- **`created_by` field on issues** (GH#748) - Creator tracking
+  - Track who created each issue for audit trail
+  - Useful for multi-agent workflows
+
+- **Database corruption recovery** (GH#753) - Robust doctor repairs
+  - `bd doctor --fix` can now auto-repair corrupted SQLite databases
+  - JSONL integrity checks detect and fix malformed entries
+  - Git hygiene checks for stale branches
+
+- **Chaos testing for releases** (bd-kx1j) - Thorough validation
+  - `--run-chaos-tests` flag in release script
+  - Exercises edge cases and failure modes
+
+- **Pre-commit config** - Local lint enforcement
+  - Consistent code quality before commits
+
+### Changed
+
+- **Sync backoff and tips consolidation** (GH#753) - Smarter daemon
+  - Daemon uses exponential backoff for sync retries
+  - Tips consolidated from multiple sources
+
+- **Wisp/Ephemeral naming finalized** - `wisp` is canonical
+  - `bd mol wisp` is the correct command
+  - Internal API uses "ephemeral" but CLI uses "wisp"
+
+### Fixed
+
+- **Comments display position** (GH#756) - Formatting fix
+  - Comments now display outside dependents block
+  - Proper visual hierarchy in `bd show` output
+
+- **no-db mode storeActive** (GH#761) - JSONL-only fix
+  - `storeActive` correctly set in no-database mode
+  - Fixes issues with JSONL-only installations
+
+- **`--resolution` alias** (GH#746) - Backwards compatibility
+  - Restored `--resolution` as alias for `--reason` on `bd close`
+
+- **`bd graph` with daemon** (GH#751) - Daemon compatibility
+  - Graph generation works when daemon is running
+  - No more conflicts between graph and daemon operations
+
+- **`created_by` in RPC path** (GH#754) - Daemon propagation
+  - Creator field correctly passed through daemon RPC
+
+- **Migration 028 idempotency** (GH#757) - Safe re-runs
+  - Migration handles partial or repeated runs gracefully
+  - Checks for existing columns before adding
+
+- **Routed ID daemon bypass** (bd-uu8p) - Cross-rig show
+  - `bd show` with routed IDs bypasses daemon correctly
+  - Storage connections closed per iteration to prevent leaks
+
+- **Modern git init** (GH#753) - Test compatibility
+  - Tests use `--initial-branch=main` for modern git versions
+
+- **golangci-lint clean** (GH#753) - All platforms
+  - Resolved all lint errors across platforms
+
+### Improved
+
+- **Test coverage** - Comprehensive testing
+  - Doctor, daemon, storage, and RPC client paths covered
+  - Chaos testing integration for edge cases
+
+## [0.37.0] - 2025-12-26
+
+### Added
+
+- **Gate commands** (bd-udsi, gt-twjr5) - Async coordination for agent workflows
+  - `bd gate create` - Create gates with await conditions (gh:run, gh:pr, timer, human, mail)
+  - `bd gate eval` - Evaluate timer and GitHub gates (checks run completion, PR merge)
+  - `bd gate approve` - Approve human gates
+  - `bd gate show/list/close/wait` - Full gate lifecycle management
+
+- **`bd close --suggest-next`** (GH#679) - Smart workflow continuation
+  - Shows newly unblocked issues after closing
+  - Helps agents find next actionable work
+
+- **`bd ready/blocked --parent`** (GH#743) - Epic-scoped filtering
+  - Filter issues by parent bead or epic
+  - Enables focused work within a subtree
+
+- **TOML support for formulas** (gt-xmyha) - Alternative format
+  - `.formula.toml` files alongside JSON support
+  - Human-friendly authoring option
+
+- **Fork repo auto-detection** (GH#742) - Contributor workflow
+  - Detects fork repositories during init
+  - Offers to configure .git/info/exclude for stealth mode
 
 - **Control flow operators** (gt-8tmz.4) - Advanced formula composition
   - `loop` operator for iterating over collections
@@ -67,6 +177,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Gate await fields preserved during upsert** (bd-gr4q) - Multirepo sync
+  - Gate fields no longer cleared during multi-repo sync operations
+  - Enables reliable gate coordination across clones
+
+- **Tombstones retain closed_at timestamp** - Soft delete metadata
+  - Tombstones preserve the original close time
+  - Maintains accurate timeline for deleted issues
+
+- **Git detection caching** (bd-7di) - Performance improvement
+  - Cache git worktree/repo detection results
+  - Eliminates repeated slowness on worktree checks
+
+- **Windows MCP graceful fallback** (GH#387) - Platform compatibility
+  - Daemon mode falls back gracefully on Windows
+  - Prevents crashes when daemon unavailable
+
+- **Windows npm postinstall file locking** (GH#670) - Install reliability
+  - Handles file lock errors during npm install
+  - Improves installation success on Windows
+
 - **installed_plugins.json v2 format** (GH#741) - Claude Code compatibility
   - `bd doctor` now handles both v1 and v2 plugin file formats
   - Fixes "cannot unmarshal array" error on newer Claude Code versions
@@ -82,16 +212,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **doctor check false positives** (GH#709) - Cleaner diagnostics
   - Skips interactions.jsonl and molecules.jsonl in sync checks
   - These files are runtime state, not sync targets
-
-- **Windows npm postinstall file locking** (GH#670) - Windows install fix
-  - Fixed file handle not being released before extraction on Windows
-  - Moved write stream creation after redirect handling to avoid orphan streams
-  - Added delay after file close to ensure Windows releases file handle
-
-- **Windows MCP daemon mode crash** (GH#387) - Windows compatibility
-  - beads-mcp now gracefully falls back to CLI mode on Windows
-  - Avoids `asyncio.open_unix_connection` which doesn't exist on Windows
-  - Daemon mode still works on Unix/macOS
 
 - **FatalErrorRespectJSON** (bd-28sq) - Consistent error output
   - All commands respect `--json` flag for error output

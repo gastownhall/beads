@@ -220,3 +220,53 @@ func TestLegacyJSONLConfig_UpdatesGitattributes(t *testing.T) {
 		t.Errorf("Expected .gitattributes to reference issues.jsonl, got: %q", string(content))
 	}
 }
+
+// TestFindActualJSONLFile_SkipsSystemFiles ensures system JSONL files are never treated as JSONL exports.
+func TestFindActualJSONLFile_SkipsSystemFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Only system files → no candidates.
+	if err := os.WriteFile(filepath.Join(tmpDir, "interactions.jsonl"), []byte(`{"id":"x"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findActualJSONLFile(tmpDir); got != "" {
+		t.Fatalf("expected empty result, got %q", got)
+	}
+
+	// System + legacy export → legacy wins.
+	if err := os.WriteFile(filepath.Join(tmpDir, "beads.jsonl"), []byte(`{"id":"x"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findActualJSONLFile(tmpDir); got != "beads.jsonl" {
+		t.Fatalf("expected beads.jsonl, got %q", got)
+	}
+}
+
+func TestDatabaseConfigFix_RejectsSystemJSONLExport(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(beadsDir, "interactions.jsonl"), []byte(`{"id":"x"}`), 0644); err != nil {
+		t.Fatalf("Failed to create interactions.jsonl: %v", err)
+	}
+
+	cfg := &configfile.Config{Database: "beads.db", JSONLExport: "interactions.jsonl"}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	if err := DatabaseConfig(tmpDir); err != nil {
+		t.Fatalf("DatabaseConfig failed: %v", err)
+	}
+
+	updated, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("Failed to load updated config: %v", err)
+	}
+	if updated.JSONLExport != "issues.jsonl" {
+		t.Fatalf("expected issues.jsonl, got %q", updated.JSONLExport)
+	}
+}

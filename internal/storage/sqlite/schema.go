@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS issues (
     assignee TEXT,
     estimated_minutes INTEGER,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT DEFAULT '',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     closed_at DATETIME,
     external_ref TEXT,
@@ -36,7 +37,12 @@ CREATE TABLE IF NOT EXISTS issues (
     is_template INTEGER DEFAULT 0,
     -- NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
     -- These relationships are now stored in the dependencies table
-    CHECK ((status = 'closed') = (closed_at IS NOT NULL))
+    -- closed_at constraint: closed issues must have it, tombstones may retain it from before deletion
+    CHECK (
+        (status = 'closed' AND closed_at IS NOT NULL) OR
+        (status = 'tombstone') OR
+        (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
@@ -224,6 +230,7 @@ WITH RECURSIVE
 SELECT i.*
 FROM issues i
 WHERE i.status = 'open'
+  AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND NOT EXISTS (
     SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
   );

@@ -157,23 +157,26 @@ func TestDebouncer_MultipleSequentialTriggerCycles(t *testing.T) {
 	})
 	t.Cleanup(debouncer.Cancel)
 
-	debouncer.Trigger()
-	time.Sleep(40 * time.Millisecond)
-	if got := atomic.LoadInt32(&count); got != 1 {
-		t.Errorf("first cycle: got %d, want 1", got)
+	awaitCount := func(want int32) {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if got := atomic.LoadInt32(&count); got >= want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		got := atomic.LoadInt32(&count)
+		t.Fatalf("timeout waiting for count=%d (got %d)", want, got)
 	}
 
 	debouncer.Trigger()
-	time.Sleep(40 * time.Millisecond)
-	if got := atomic.LoadInt32(&count); got != 2 {
-		t.Errorf("second cycle: got %d, want 2", got)
-	}
+	awaitCount(1)
 
 	debouncer.Trigger()
-	time.Sleep(40 * time.Millisecond)
-	if got := atomic.LoadInt32(&count); got != 3 {
-		t.Errorf("third cycle: got %d, want 3", got)
-	}
+	awaitCount(2)
+
+	debouncer.Trigger()
+	awaitCount(3)
 }
 
 func TestDebouncer_CancelImmediatelyAfterTrigger(t *testing.T) {

@@ -892,3 +892,108 @@ func TestExportToMultiRepo(t *testing.T) {
 		}
 	})
 }
+
+// TestUpsertPreservesGateFields tests that gate await fields are preserved during upsert (bd-gr4q).
+// Gates are wisps and aren't exported to JSONL. When an issue with the same ID is imported,
+// the await fields should NOT be cleared.
+func TestUpsertPreservesGateFields(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a gate with await fields directly in the database
+	gate := &types.Issue{
+		ID:        "bd-gate1",
+		Title:     "Test Gate",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeGate,
+		Ephemeral: true,
+		AwaitType: "gh:run",
+		AwaitID:   "123456789",
+		Timeout:   30 * 60 * 1000000000, // 30 minutes in nanoseconds
+		Waiters:   []string{"beads/dave"},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	gate.ContentHash = gate.ComputeContentHash()
+
+	if err := store.CreateIssue(ctx, gate, "test"); err != nil {
+		t.Fatalf("failed to create gate: %v", err)
+	}
+
+	// Verify gate was created with await fields
+	retrieved, err := store.GetIssue(ctx, gate.ID)
+	if err != nil || retrieved == nil {
+		t.Fatalf("failed to get gate: %v", err)
+	}
+	if retrieved.AwaitType != "gh:run" {
+		t.Errorf("expected AwaitType=gh:run, got %q", retrieved.AwaitType)
+	}
+	if retrieved.AwaitID != "123456789" {
+		t.Errorf("expected AwaitID=123456789, got %q", retrieved.AwaitID)
+	}
+
+	// Create a JSONL file with an issue that has the same ID but no await fields
+	// (simulating what happens when a non-gate issue is imported)
+	tmpDir := t.TempDir()
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		t.Fatalf("failed to create JSONL file: %v", err)
+	}
+
+	// Same ID, different content (to trigger update), no await fields
+	incomingIssue := types.Issue{
+		ID:          "bd-gate1",
+		Title:       "Test Gate Updated", // Different title to trigger update
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeGate,
+		AwaitType:   "", // Empty - simulating JSONL without await fields
+		AwaitID:     "", // Empty
+		Timeout:     0,
+		Waiters:     nil,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now().Add(time.Second), // Newer timestamp
+	}
+	incomingIssue.ContentHash = incomingIssue.ComputeContentHash()
+
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(incomingIssue); err != nil {
+		t.Fatalf("failed to encode issue: %v", err)
+	}
+	f.Close()
+
+	// Import the JSONL file (this should NOT clear the await fields)
+	_, err = store.importJSONLFile(ctx, jsonlPath, "test")
+	if err != nil {
+		t.Fatalf("importJSONLFile failed: %v", err)
+	}
+
+	// Verify await fields are preserved
+	updated, err := store.GetIssue(ctx, gate.ID)
+	if err != nil || updated == nil {
+		t.Fatalf("failed to get updated gate: %v", err)
+	}
+
+	// Title should be updated
+	if updated.Title != "Test Gate Updated" {
+		t.Errorf("expected title to be updated, got %q", updated.Title)
+	}
+
+	// Await fields should be PRESERVED (not cleared)
+	if updated.AwaitType != "gh:run" {
+		t.Errorf("AwaitType was cleared! expected 'gh:run', got %q", updated.AwaitType)
+	}
+	if updated.AwaitID != "123456789" {
+		t.Errorf("AwaitID was cleared! expected '123456789', got %q", updated.AwaitID)
+	}
+	if updated.Timeout != 30*60*1000000000 {
+		t.Errorf("Timeout was cleared! expected %d, got %d", 30*60*1000000000, updated.Timeout)
+	}
+	if len(updated.Waiters) != 1 || updated.Waiters[0] != "beads/dave" {
+		t.Errorf("Waiters was cleared! expected [beads/dave], got %v", updated.Waiters)
+	}
+}

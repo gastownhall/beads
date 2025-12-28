@@ -37,11 +37,17 @@ var showCmd = &cobra.Command{
 			}
 		}
 
-		// Resolve partial IDs first
+		// Resolve partial IDs first (daemon mode only - direct mode uses routed resolution)
 		var resolvedIDs []string
+		var routedArgs []string // IDs that need cross-repo routing (bypass daemon)
 		if daemonClient != nil {
-			// In daemon mode, resolve via RPC
+			// In daemon mode, resolve via RPC - but check routing first
 			for _, id := range args {
+				// Check if this ID needs routing to a different beads directory
+				if needsRouting(id) {
+					routedArgs = append(routedArgs, id)
+					continue
+				}
 				resolveArgs := &rpc.ResolveIDArgs{ID: id}
 				resp, err := daemonClient.ResolveID(resolveArgs)
 				if err != nil {
@@ -53,25 +59,87 @@ var showCmd = &cobra.Command{
 				}
 				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
-		} else {
-			// In direct mode, resolve via storage
-			var err error
-			resolvedIDs, err = utils.ResolvePartialIDs(ctx, store, args)
-			if err != nil {
-				FatalErrorRespectJSON("%v", err)
+		}
+		// Note: Direct mode uses resolveAndGetIssueWithRouting for prefix-based routing
+
+		// Handle --thread flag: show full conversation thread
+		if showThread {
+			if daemonClient != nil && len(resolvedIDs) > 0 {
+				showMessageThread(ctx, resolvedIDs[0], jsonOutput)
+				return
+			} else if len(args) > 0 {
+				// Direct mode - resolve first arg with routing
+				result, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+				if result != nil {
+					defer result.Close()
+				}
+				if err == nil && result != nil && result.ResolvedID != "" {
+					showMessageThread(ctx, result.ResolvedID, jsonOutput)
+					return
+				}
 			}
 		}
 
-		// Handle --thread flag: show full conversation thread
-		if showThread && len(resolvedIDs) > 0 {
-			showMessageThread(ctx, resolvedIDs[0], jsonOutput)
-			return
-		}
-
-		// If daemon is running, use RPC
+		// If daemon is running, use RPC (but fall back to direct mode for routed IDs)
 		if daemonClient != nil {
 			allDetails := []interface{}{}
-			for idx, id := range resolvedIDs {
+			displayIdx := 0
+
+			// First, handle routed IDs via direct mode
+			for _, id := range routedArgs {
+				result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+				if err != nil {
+					if result != nil {
+						result.Close()
+					}
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+					continue
+				}
+				if result == nil || result.Issue == nil {
+					if result != nil {
+						result.Close()
+					}
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					continue
+				}
+				issue := result.Issue
+				issueStore := result.Store
+				if jsonOutput {
+					// Get labels and deps for JSON output
+					type IssueDetails struct {
+						*types.Issue
+						Labels       []string                             `json:"labels,omitempty"`
+						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
+						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
+					}
+					details := &IssueDetails{Issue: issue}
+					details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
+					if sqliteStore, ok := issueStore.(*sqlite.SQLiteStorage); ok {
+						details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
+						details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
+					}
+					details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
+					allDetails = append(allDetails, details)
+				} else {
+					if displayIdx > 0 {
+						fmt.Println("\n" + strings.Repeat("─", 60))
+					}
+					fmt.Printf("\n%s: %s\n", ui.RenderAccent(issue.ID), issue.Title)
+					fmt.Printf("Status: %s\n", issue.Status)
+					fmt.Printf("Priority: P%d\n", issue.Priority)
+					fmt.Printf("Type: %s\n", issue.IssueType)
+					if issue.Description != "" {
+						fmt.Printf("\nDescription:\n%s\n", issue.Description)
+					}
+					fmt.Println()
+					displayIdx++
+				}
+				result.Close() // Close immediately after processing each routed ID
+			}
+
+			// Then, handle local IDs via daemon
+			for _, id := range resolvedIDs {
 				showArgs := &rpc.ShowArgs{ID: id}
 				resp, err := daemonClient.Show(showArgs)
 				if err != nil {
@@ -85,6 +153,7 @@ var showCmd = &cobra.Command{
 						Labels       []string                             `json:"labels,omitempty"`
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
@@ -96,9 +165,10 @@ var showCmd = &cobra.Command{
 						fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 						continue
 					}
-					if idx > 0 {
+					if displayIdx > 0 {
 						fmt.Println("\n" + strings.Repeat("─", 60))
 					}
+					displayIdx++
 
 					// Parse response and use existing formatting code
 					type IssueDetails struct {
@@ -106,6 +176,7 @@ var showCmd = &cobra.Command{
 						Labels       []string                             `json:"labels,omitempty"`
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
+						Comments     []*types.Comment                     `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err != nil {
@@ -140,6 +211,9 @@ var showCmd = &cobra.Command{
 						fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
 					}
 					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+					if issue.CreatedBy != "" {
+						fmt.Printf("Created by: %s\n", issue.CreatedBy)
+					}
 					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
 					// Show compaction status
@@ -233,6 +307,17 @@ var showCmd = &cobra.Command{
 						}
 					}
 
+					if len(details.Comments) > 0 {
+						fmt.Printf("\nComments (%d):\n", len(details.Comments))
+						for _, comment := range details.Comments {
+							fmt.Printf("  [%s] %s\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"))
+							commentLines := strings.Split(comment.Text, "\n")
+							for _, line := range commentLines {
+								fmt.Printf("    %s\n", line)
+							}
+						}
+					}
+
 					fmt.Println()
 				}
 			}
@@ -243,18 +328,28 @@ var showCmd = &cobra.Command{
 			return
 		}
 
-		// Direct mode
+		// Direct mode - use routed resolution for cross-repo lookups
 		allDetails := []interface{}{}
-		for idx, id := range resolvedIDs {
-			issue, err := store.GetIssue(ctx, id)
+		for idx, id := range args {
+			// Resolve and get issue with routing (e.g., gt-xyz routes to gastown)
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 				continue
 			}
-			if issue == nil {
+			if result == nil || result.Issue == nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 				continue
 			}
+			issue := result.Issue
+			issueStore := result.Store // Use the store that contains this issue
+			// Note: result.Close() called at end of loop iteration
 
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
@@ -266,26 +361,27 @@ var showCmd = &cobra.Command{
 					Comments     []*types.Comment                     `json:"comments,omitempty"`
 				}
 				details := &IssueDetails{Issue: issue}
-				details.Labels, _ = store.GetLabels(ctx, issue.ID)
+				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
 
 				// Get dependencies with metadata (dependency_type field)
-				if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+				if sqliteStore, ok := issueStore.(*sqlite.SQLiteStorage); ok {
 					details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
 					details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
 				} else {
 					// Fallback to regular methods without metadata for other storage backends
-					deps, _ := store.GetDependencies(ctx, issue.ID)
+					deps, _ := issueStore.GetDependencies(ctx, issue.ID)
 					for _, dep := range deps {
 						details.Dependencies = append(details.Dependencies, &types.IssueWithDependencyMetadata{Issue: *dep})
 					}
-					dependents, _ := store.GetDependents(ctx, issue.ID)
+					dependents, _ := issueStore.GetDependents(ctx, issue.ID)
 					for _, dependent := range dependents {
 						details.Dependents = append(details.Dependents, &types.IssueWithDependencyMetadata{Issue: *dependent})
 					}
 				}
 
-				details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
+				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
 				allDetails = append(allDetails, details)
+				result.Close() // Close before continuing to next iteration
 				continue
 			}
 
@@ -319,6 +415,9 @@ var showCmd = &cobra.Command{
 				fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
 			}
 			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
+			if issue.CreatedBy != "" {
+				fmt.Printf("Created by: %s\n", issue.CreatedBy)
+			}
 			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
 			// Show compaction status footer
@@ -360,13 +459,13 @@ var showCmd = &cobra.Command{
 			}
 
 			// Show labels
-			labels, _ := store.GetLabels(ctx, issue.ID)
+			labels, _ := issueStore.GetLabels(ctx, issue.ID)
 			if len(labels) > 0 {
 				fmt.Printf("\nLabels: %v\n", labels)
 			}
 
 			// Show dependencies
-			deps, _ := store.GetDependencies(ctx, issue.ID)
+			deps, _ := issueStore.GetDependencies(ctx, issue.ID)
 			if len(deps) > 0 {
 				fmt.Printf("\nDepends on (%d):\n", len(deps))
 				for _, dep := range deps {
@@ -376,7 +475,7 @@ var showCmd = &cobra.Command{
 
 			// Show dependents - grouped by dependency type for clarity
 			// Use GetDependentsWithMetadata to get the dependency type
-			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+			sqliteStore, ok := issueStore.(*sqlite.SQLiteStorage)
 			if ok {
 				dependentsWithMeta, _ := sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
 				if len(dependentsWithMeta) > 0 {
@@ -424,7 +523,7 @@ var showCmd = &cobra.Command{
 				}
 			} else {
 				// Fallback for non-SQLite storage
-				dependents, _ := store.GetDependents(ctx, issue.ID)
+				dependents, _ := issueStore.GetDependents(ctx, issue.ID)
 				if len(dependents) > 0 {
 					fmt.Printf("\nBlocks (%d):\n", len(dependents))
 					for _, dep := range dependents {
@@ -434,7 +533,7 @@ var showCmd = &cobra.Command{
 			}
 
 			// Show comments
-			comments, _ := store.GetIssueComments(ctx, issue.ID)
+			comments, _ := issueStore.GetIssueComments(ctx, issue.ID)
 			if len(comments) > 0 {
 				fmt.Printf("\nComments (%d):\n", len(comments))
 				for _, comment := range comments {
@@ -443,6 +542,7 @@ var showCmd = &cobra.Command{
 			}
 
 			fmt.Println()
+			result.Close() // Close routed storage after each iteration
 		}
 
 		if jsonOutput && len(allDetails) > 0 {
@@ -663,8 +763,8 @@ var updateCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", id, err)
 				continue
 			}
-			if issue != nil && issue.IsTemplate {
-				fmt.Fprintf(os.Stderr, "Error: cannot update template %s: templates are read-only; use 'bd molecule instantiate' to create a work item\n", id)
+			if err := validateIssueUpdatable(id, issue); err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
 				continue
 			}
 
@@ -683,47 +783,20 @@ var updateCmd = &cobra.Command{
 			}
 
 			// Handle label operations
-			// Set labels (replaces all existing labels)
-			if setLabels, ok := updates["set_labels"].([]string); ok && len(setLabels) > 0 {
-				// Get current labels
-				currentLabels, err := store.GetLabels(ctx, id)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", id, err)
+			var setLabels, addLabels, removeLabels []string
+			if v, ok := updates["set_labels"].([]string); ok {
+				setLabels = v
+			}
+			if v, ok := updates["add_labels"].([]string); ok {
+				addLabels = v
+			}
+			if v, ok := updates["remove_labels"].([]string); ok {
+				removeLabels = v
+			}
+			if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
+				if err := applyLabelUpdates(ctx, store, id, actor, setLabels, addLabels, removeLabels); err != nil {
+					fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
 					continue
-				}
-				// Remove all current labels
-				for _, label := range currentLabels {
-					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
-						continue
-					}
-				}
-				// Add new labels
-				for _, label := range setLabels {
-					if err := store.AddLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error setting label %s on %s: %v\n", label, id, err)
-						continue
-					}
-				}
-			}
-
-			// Add labels
-			if addLabels, ok := updates["add_labels"].([]string); ok {
-				for _, label := range addLabels {
-					if err := store.AddLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error adding label %s to %s: %v\n", label, id, err)
-						continue
-					}
-				}
-			}
-
-			// Remove labels
-			if removeLabels, ok := updates["remove_labels"].([]string); ok {
-				for _, label := range removeLabels {
-					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
-						continue
-					}
 				}
 			}
 
@@ -947,17 +1020,27 @@ var closeCmd = &cobra.Command{
 		CheckReadonly("close")
 		reason, _ := cmd.Flags().GetString("reason")
 		if reason == "" {
+			// Check --resolution alias (Jira CLI convention)
+			reason, _ = cmd.Flags().GetString("resolution")
+		}
+		if reason == "" {
 			reason = "Closed"
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
+		suggestNext, _ := cmd.Flags().GetBool("suggest-next")
 
 		ctx := rootCtx
 
 		// --continue only works with a single issue
 		if continueFlag && len(args) > 1 {
 			FatalErrorRespectJSON("--continue only works when closing a single issue")
+		}
+
+		// --suggest-next only works with a single issue
+		if suggestNext && len(args) > 1 {
+			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
 		// Resolve partial IDs first
@@ -993,22 +1076,17 @@ var closeCmd = &cobra.Command{
 				if showErr == nil {
 					var issue types.Issue
 					if json.Unmarshal(showResp.Data, &issue) == nil {
-						// Check if issue is a template (beads-1ra): templates are read-only
-						if issue.IsTemplate {
-							fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
-							continue
-						}
-						// Check if issue is pinned (bd-6v2)
-						if !force && issue.Status == types.StatusPinned {
-							fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
+						if err := validateIssueClosable(id, &issue, force); err != nil {
+							fmt.Fprintf(os.Stderr, "%s\n", err)
 							continue
 						}
 					}
 				}
 
 				closeArgs := &rpc.CloseArgs{
-					ID:     id,
-					Reason: reason,
+					ID:          id,
+					Reason:      reason,
+					SuggestNext: suggestNext,
 				}
 				resp, err := daemonClient.CloseIssue(closeArgs)
 				if err != nil {
@@ -1016,18 +1094,44 @@ var closeCmd = &cobra.Command{
 					continue
 				}
 
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err == nil {
-					// Run close hook (bd-kwro.8)
-					if hookRunner != nil {
-						hookRunner.Run(hooks.EventClose, &issue)
+				// Handle response based on whether SuggestNext was requested (GH#679)
+				if suggestNext {
+					var result rpc.CloseResult
+					if err := json.Unmarshal(resp.Data, &result); err == nil {
+						if result.Closed != nil {
+							// Run close hook (bd-kwro.8)
+							if hookRunner != nil {
+								hookRunner.Run(hooks.EventClose, result.Closed)
+							}
+							if jsonOutput {
+								closedIssues = append(closedIssues, result.Closed)
+							}
+						}
+						if !jsonOutput {
+							fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+							// Display newly unblocked issues (GH#679)
+							if len(result.Unblocked) > 0 {
+								fmt.Printf("\nNewly unblocked:\n")
+								for _, issue := range result.Unblocked {
+									fmt.Printf("  • %s %q (P%d)\n", issue.ID, issue.Title, issue.Priority)
+								}
+							}
+						}
 					}
-					if jsonOutput {
-						closedIssues = append(closedIssues, &issue)
+				} else {
+					var issue types.Issue
+					if err := json.Unmarshal(resp.Data, &issue); err == nil {
+						// Run close hook (bd-kwro.8)
+						if hookRunner != nil {
+							hookRunner.Run(hooks.EventClose, &issue)
+						}
+						if jsonOutput {
+							closedIssues = append(closedIssues, &issue)
+						}
 					}
-				}
-				if !jsonOutput {
-					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+					if !jsonOutput {
+						fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+					}
 				}
 			}
 
@@ -1051,18 +1155,9 @@ var closeCmd = &cobra.Command{
 			// Get issue for checks
 			issue, _ := store.GetIssue(ctx, id)
 
-			// Check if issue is a template (beads-1ra): templates are read-only
-			if issue != nil && issue.IsTemplate {
-				fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
+			if err := validateIssueClosable(id, issue, force); err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
 				continue
-			}
-
-			// Check if issue is pinned (bd-6v2)
-			if !force {
-				if issue != nil && issue.Status == types.StatusPinned {
-					fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
-					continue
-				}
 			}
 
 			if err := store.CloseIssue(ctx, id, reason, actor); err != nil {
@@ -1084,6 +1179,24 @@ var closeCmd = &cobra.Command{
 				}
 			} else {
 				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+			}
+		}
+
+		// Handle --suggest-next flag in direct mode (GH#679)
+		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
+			unblocked, err := store.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
+			if err == nil && len(unblocked) > 0 {
+				if jsonOutput {
+					outputJSON(map[string]interface{}{
+						"closed":    closedIssues,
+						"unblocked": unblocked,
+					})
+					return
+				}
+				fmt.Printf("\nNewly unblocked:\n")
+				for _, issue := range unblocked {
+					fmt.Printf("  • %s %q (P%d)\n", issue.ID, issue.Title, issue.Priority)
+				}
 			}
 		}
 
@@ -1291,15 +1404,13 @@ func findRepliesTo(ctx context.Context, issueID string, daemonClient *rpc.Client
 		return ""
 	}
 	// Direct mode - query storage
-	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
-		deps, err := sqliteStore.GetDependenciesWithMetadata(ctx, issueID)
-		if err != nil {
-			return ""
-		}
-		for _, dep := range deps {
-			if dep.DependencyType == types.DepRepliesTo {
-				return dep.ID
-			}
+	deps, err := store.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		return ""
+	}
+	for _, dep := range deps {
+		if dep.Type == types.DepRepliesTo {
+			return dep.DependsOnID
 		}
 	}
 	return ""
@@ -1348,7 +1459,25 @@ func findReplies(ctx context.Context, issueID string, daemonClient *rpc.Client, 
 		}
 		return replies
 	}
-	return nil
+
+	allDeps, err := store.GetAllDependencyRecords(ctx)
+	if err != nil {
+		return nil
+	}
+
+	var replies []*types.Issue
+	for childID, deps := range allDeps {
+		for _, dep := range deps {
+			if dep.Type == types.DepRepliesTo && dep.DependsOnID == issueID {
+				issue, _ := store.GetIssue(ctx, childID)
+				if issue != nil {
+					replies = append(replies, issue)
+				}
+			}
+		}
+	}
+
+	return replies
 }
 
 func init() {
@@ -1377,8 +1506,11 @@ func init() {
 	rootCmd.AddCommand(editCmd)
 
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
+	closeCmd.Flags().String("resolution", "", "Alias for --reason (Jira CLI convention)")
+	_ = closeCmd.Flags().MarkHidden("resolution") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
+	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing (GH#679)")
 	rootCmd.AddCommand(closeCmd)
 }

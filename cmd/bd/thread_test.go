@@ -27,7 +27,7 @@ func TestThreadTraversal(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "worker",
 		Sender:      "manager",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -43,7 +43,7 @@ func TestThreadTraversal(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "manager",
 		Sender:      "worker",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now.Add(time.Minute),
 		UpdatedAt:   now.Add(time.Minute),
 	}
@@ -59,7 +59,7 @@ func TestThreadTraversal(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "worker",
 		Sender:      "manager",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now.Add(2 * time.Minute),
 		UpdatedAt:   now.Add(2 * time.Minute),
 	}
@@ -190,7 +190,7 @@ func TestThreadTraversalEmptyThread(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "user",
 		Sender:      "sender",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -228,7 +228,7 @@ func TestThreadTraversalBranching(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "user",
 		Sender:      "sender",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -245,7 +245,7 @@ func TestThreadTraversalBranching(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "sender",
 		Sender:      "user",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now.Add(time.Minute),
 		UpdatedAt:   now.Add(time.Minute),
 	}
@@ -261,7 +261,7 @@ func TestThreadTraversalBranching(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "sender",
 		Sender:      "another-user",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now.Add(2 * time.Minute),
 		UpdatedAt:   now.Add(2 * time.Minute),
 	}
@@ -364,7 +364,7 @@ func TestThreadTraversalOnlyRepliesTo(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "user",
 		Sender:      "sender",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -380,7 +380,7 @@ func TestThreadTraversalOnlyRepliesTo(t *testing.T) {
 		IssueType:   types.TypeMessage,
 		Assignee:    "user",
 		Sender:      "sender",
-		Wisp:        true,
+		Ephemeral:        true,
 		CreatedAt:   now.Add(time.Minute),
 		UpdatedAt:   now.Add(time.Minute),
 	}

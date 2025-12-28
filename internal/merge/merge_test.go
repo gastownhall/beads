@@ -1648,7 +1648,7 @@ func TestMerge3WayWithTTL(t *testing.T) {
 		left := []Issue{tombstone}
 		right := []Issue{liveIssue}
 
-		result, _ := merge3WayWithTTL(base, left, right, shortTTL)
+		result, _ := Merge3WayWithTTL(base, left, right, shortTTL)
 		if len(result) != 1 {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
@@ -1665,7 +1665,7 @@ func TestMerge3WayWithTTL(t *testing.T) {
 		left := []Issue{tombstone}
 		right := []Issue{liveIssue}
 
-		result, _ := merge3WayWithTTL(base, left, right, longTTL)
+		result, _ := Merge3WayWithTTL(base, left, right, longTTL)
 		if len(result) != 1 {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}

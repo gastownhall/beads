@@ -529,6 +529,19 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 		if skipGit {
 			mode = "local auto-import"
 		}
+
+		// Check backoff before attempting sync (skip for local mode)
+		if !skipGit {
+			jsonlPath := findJSONLPath()
+			if jsonlPath != "" {
+				beadsDir := filepath.Dir(jsonlPath)
+				if ShouldSkipSync(beadsDir) {
+					log.log("Skipping %s: in backoff period", mode)
+					return
+				}
+			}
+		}
+
 		log.log("Starting %s...", mode)
 
 		jsonlPath := findJSONLPath()
@@ -579,14 +592,16 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 			// Try sync branch first
 			pulled, err := syncBranchPull(importCtx, store, log)
 			if err != nil {
-				log.log("Sync branch pull failed: %v", err)
+				backoff := RecordSyncFailure(beadsDir, err.Error())
+				log.log("Sync branch pull failed: %v (backoff: %v)", err, backoff)
 				return
 			}
 
 			// If sync branch not configured, use regular pull
 			if !pulled {
 				if err := gitPull(importCtx); err != nil {
-					log.log("Pull failed: %v", err)
+					backoff := RecordSyncFailure(beadsDir, err.Error())
+					log.log("Pull failed: %v (backoff: %v)", err, backoff)
 					return
 				}
 				log.log("Pulled from remote")
@@ -622,6 +637,8 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 		if skipGit {
 			log.log("Local auto-import complete")
 		} else {
+			// Record success to clear backoff state
+			RecordSyncSuccess(beadsDir)
 			log.log("Auto-import complete")
 		}
 	}

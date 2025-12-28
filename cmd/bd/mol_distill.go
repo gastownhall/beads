@@ -15,22 +15,21 @@ import (
 )
 
 var molDistillCmd = &cobra.Command{
-	Use:   "distill <id> [formula-name]",
-	Short: "Extract a formula from a mol, wisp, or epic",
-	Long: `Extract a reusable formula from completed work.
+	Use:   "distill <epic-id> [formula-name]",
+	Short: "Extract a formula from an existing epic",
+	Long: `Distill a molecule by extracting a reusable formula from an existing epic.
 
-This is the reverse of pour: instead of formula → mol, it's mol → formula.
-Works with any hierarchical work: mols, wisps, or plain epics.
+This is the reverse of pour: instead of formula → molecule, it's molecule → formula.
 
 The distill command:
-  1. Loads the work item and all its children
+  1. Loads the existing epic and all its children
   2. Converts the structure to a .formula.json file
   3. Replaces concrete values with {{variable}} placeholders (via --var flags)
 
 Use cases:
-  - Emergent patterns: structured work manually, want to templatize
-  - Modified execution: poured formula, added steps, want to capture
-  - Learning from success: extract what made a workflow succeed
+  - Team develops good workflow organically, wants to reuse it
+  - Capture tribal knowledge as executable templates
+  - Create starting point for similar future work
 
 Variable syntax (both work - we detect which side is the concrete value):
   --var branch=feature-auth    Spawn-style: variable=value (recommended)
@@ -41,10 +40,8 @@ Output locations (first writable wins):
   2. ~/.beads/formulas/     (user-level, if project not writable)
 
 Examples:
-  bd mol distill bd-mol-xyz my-workflow
-  bd mol distill bd-wisp-abc patrol-template
-  bd mol distill bd-epic-123 release-workflow --var version=1.2.3
-  bd mol distill bd-xyz workflow -o ./formulas/`,
+  bd mol distill bd-o5xe my-workflow
+  bd mol distill bd-abc release-workflow --var feature_name=auth-refactor`,
 	Args: cobra.RangeArgs(1, 2),
 	Run:  runMolDistill,
 }
@@ -105,9 +102,14 @@ func parseDistillVar(varFlag, searchableText string) (string, string, error) {
 func runMolDistill(cmd *cobra.Command, args []string) {
 	ctx := rootCtx
 
-	// Check we have some database access
-	if store == nil && daemonClient == nil {
-		fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+	// mol distill requires direct store access for reading the epic
+	if store == nil {
+		if daemonClient != nil {
+			fmt.Fprintf(os.Stderr, "Error: mol distill requires direct database access\n")
+			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon mol distill %s ...\n", args[0])
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
+		}
 		os.Exit(1)
 	}
 
@@ -115,23 +117,17 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	outputDir, _ := cmd.Flags().GetString("output")
 
-	// Load the subgraph (works with daemon or direct)
-	// Show/GetIssue handle partial ID resolution
-	var subgraph *TemplateSubgraph
-	var err error
-	if daemonClient != nil {
-		subgraph, err = loadTemplateSubgraphViaDaemon(daemonClient, args[0])
-	} else {
-		// Resolve ID for direct access
-		issueID, resolveErr := utils.ResolvePartialID(ctx, store, args[0])
-		if resolveErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: '%s' not found\n", args[0])
-			os.Exit(1)
-		}
-		subgraph, err = loadTemplateSubgraph(ctx, store, issueID)
-	}
+	// Resolve epic ID
+	epicID, err := utils.ResolvePartialID(ctx, store, args[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: '%s' not found\n", args[0])
+		os.Exit(1)
+	}
+
+	// Load the epic subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, store, epicID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading epic: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -176,7 +172,7 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 	}
 
 	if dryRun {
-		fmt.Printf("\nDry run: would distill %d steps from %s into formula\n\n", countSteps(f.Steps), subgraph.Root.ID)
+		fmt.Printf("\nDry run: would distill %d steps from %s into formula\n\n", countSteps(f.Steps), epicID)
 		fmt.Printf("Formula: %s\n", formulaName)
 		fmt.Printf("Output: %s\n", outputPath)
 		if len(replacements) > 0 {
@@ -229,7 +225,7 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		fmt.Printf("  Variables: %s\n", strings.Join(result.Variables, ", "))
 	}
 	fmt.Printf("\nTo instantiate:\n")
-	fmt.Printf("  bd pour %s", result.FormulaName)
+	fmt.Printf("  bd mol pour %s", result.FormulaName)
 	for _, v := range result.Variables {
 		fmt.Printf(" --var %s=<value>", v)
 	}
@@ -258,9 +254,9 @@ func findWritableFormulaDir(formulaName string) string {
 		if err := os.MkdirAll(dir, 0755); err == nil {
 			// Check if we can write to it
 			testPath := filepath.Join(dir, ".write-test")
-			if f, err := os.Create(testPath); err == nil {
-				f.Close()
-				os.Remove(testPath)
+			if f, err := os.Create(testPath); err == nil { //nolint:gosec // testPath is constructed from known search paths
+				_ = f.Close()
+				_ = os.Remove(testPath)
 				return filepath.Join(dir, formulaName+formula.FormulaExt)
 			}
 		}
@@ -369,7 +365,7 @@ func subgraphToFormula(subgraph *TemplateSubgraph, name string, replacements map
 func init() {
 	molDistillCmd.Flags().StringSlice("var", []string{}, "Replace value with {{variable}} placeholder (variable=value)")
 	molDistillCmd.Flags().Bool("dry-run", false, "Preview what would be created")
-	molDistillCmd.Flags().StringP("output", "o", "", "Output directory for formula file")
+	molDistillCmd.Flags().String("output", "", "Output directory for formula file")
 
 	molCmd.AddCommand(molDistillCmd)
 }

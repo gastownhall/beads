@@ -15,7 +15,7 @@ type CleanupEmptyResponse struct {
 	DeletedCount int    `json:"deleted_count"`
 	Message      string `json:"message"`
 	Filter       string `json:"filter,omitempty"`
-	Wisp         bool   `json:"wisp,omitempty"`
+	Ephemeral    bool   `json:"ephemeral,omitempty"`
 }
 
 // Hard delete mode: bypass tombstone TTL safety, use --older-than days directly
@@ -56,7 +56,7 @@ Delete issues closed more than 30 days ago:
   bd cleanup --older-than 30 --force
 
 Delete only closed wisps (transient molecules):
-  bd cleanup --wisp --force
+  bd cleanup --ephemeral --force
 
 Preview what would be deleted/pruned:
   bd cleanup --dry-run
@@ -80,7 +80,7 @@ SEE ALSO:
 		cascade, _ := cmd.Flags().GetBool("cascade")
 		olderThanDays, _ := cmd.Flags().GetInt("older-than")
 		hardDelete, _ := cmd.Flags().GetBool("hard")
-		wispOnly, _ := cmd.Flags().GetBool("wisp")
+		wispOnly, _ := cmd.Flags().GetBool("ephemeral")
 
 		// Calculate custom TTL for --hard mode
 		// When --hard is set, use --older-than days as the tombstone TTL cutoff
@@ -129,7 +129,7 @@ SEE ALSO:
 		// Add wisp filter if specified (bd-kwro.9)
 		if wispOnly {
 			wispTrue := true
-			filter.Wisp = &wispTrue
+			filter.Ephemeral = &wispTrue
 		}
 
 		// Get all closed issues matching filter
@@ -165,7 +165,7 @@ SEE ALSO:
 					result.Filter = fmt.Sprintf("older than %d days", olderThanDays)
 				}
 				if wispOnly {
-					result.Wisp = true
+					result.Ephemeral = true
 				}
 				outputJSON(result)
 			} else {
@@ -270,6 +270,6 @@ func init() {
 	cleanupCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
 	cleanupCmd.Flags().Int("older-than", 0, "Only delete issues closed more than N days ago (0 = all closed issues)")
 	cleanupCmd.Flags().Bool("hard", false, "Bypass tombstone TTL safety; use --older-than days as cutoff")
-	cleanupCmd.Flags().Bool("wisp", false, "Only delete closed wisps (transient molecules)")
+	cleanupCmd.Flags().Bool("ephemeral", false, "Only delete closed wisps (transient molecules)")
 	rootCmd.AddCommand(cleanupCmd)
 }

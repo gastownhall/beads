@@ -249,20 +249,16 @@ type LoopSpec struct {
 // OnCompleteSpec defines actions triggered when a step completes (gt-8tmz.8).
 // Used for runtime expansion over step output (the for-each construct).
 //
-// Example JSON:
+// Example YAML:
 //
-//	{
-//	  "id": "survey-workers",
-//	  "on_complete": {
-//	    "for_each": "output.polecats",
-//	    "bond": "mol-polecat-arm",
-//	    "vars": {
-//	      "polecat_name": "{item.name}",
-//	      "rig": "{item.rig}"
-//	    },
-//	    "parallel": true
-//	  }
-//	}
+//	step: survey-workers
+//	on_complete:
+//	  for_each: output.polecats
+//	  bond: mol-polecat-arm
+//	  vars:
+//	    polecat_name: "{item.name}"
+//	    rig: "{item.rig}"
+//	  parallel: true
 type OnCompleteSpec struct {
 	// ForEach is the path to the iterable collection in step output.
 	// Format: "output.<field>" or "output.<field>.<nested>"
