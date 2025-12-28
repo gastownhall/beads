@@ -5,6 +5,63 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0] - 2025-12-28
+
+### Added
+
+- **`bd worktree` command** - Parallel development support
+  - Manage git worktrees with beads integration
+  - Enables working on multiple issues simultaneously
+
+- **`bd slot` commands** - Agent bead slot management
+  - Track agent assignments with dedicated slot operations
+  - Supports Gas Town multi-agent workflows
+
+- **`bd agent state` command** - ZFC-compliant state reporting
+  - Report agent state in standardized format
+  - Enables machine-readable status checks
+
+- **`bd doctor --deep`** - Full graph integrity validation
+  - Deep validation of bead dependency graphs
+  - Includes agent bead integrity checks
+
+- **Agent bead support** - New bead types
+  - `type=agent` and `type=role` for agent tracking
+  - Agent-specific fields in schema (migration 030)
+  - Agent ID pattern validation on create
+
+- **Computed `.parent` field** - JSON output enhancement
+  - Parent field included in JSON for convenience
+  - Simplifies integration with external tools
+
+- **Auto-bypass daemon for wisp operations** - Performance
+  - Ephemeral wisp operations skip daemon overhead
+  - Faster patrol cycle processing
+
+- **Pour warning for vapor-phase formulas** - Safety
+  - Warning when pouring formulas designed for wisps
+  - Prevents accidental persistent molecule creation
+
+### Fixed
+
+- **O(2^n) → O(V+E) cycle detection** (GH#775) - Performance
+  - Replaced exponential algorithm with linear DFS
+  - Dramatic speedup for large dependency graphs
+
+- **Import hash mismatch warnings** - Data integrity
+  - Update jsonl_file_hash on import operations
+  - Prevents spurious hash mismatch warnings
+
+### Changed
+
+- **Community tools documentation** (GH#772, GH#776)
+  - Consolidated into dedicated docs page
+  - Added opencode-beads to community tools list
+
+- **Activity feed improvements** - Better context
+  - Shows title and assignee in activity entries
+  - More informative `bd activity` output
+
 ## [0.39.1] - 2025-12-27
 
 ### Added
