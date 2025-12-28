@@ -8,7 +8,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha). (Node.js)
 
-- **[perles](https://github.com/zjrosen/perles)** - Terminal UI with BQL (Beads Query Language) and multi-view kanban. Built by [@zjrosen](https://github.com/zjrosen). (Node.js)
+- **[perles](https://github.com/zjrosen/perles)** - Terminal UI search, dependency and kanban viewer powered by a custom BQL (Beads Query Language). Built by [@zjrosen](https://github.com/zjrosen). (Go)
 
 - **[beads.el](https://codeberg.org/ctietze/beads.el)** - Emacs UI to browse, edit, and manage beads. Built by [@ctietze](https://codeberg.org/ctietze). (Elisp)
 
