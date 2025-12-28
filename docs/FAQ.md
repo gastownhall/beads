@@ -199,7 +199,7 @@ bd automatically:
 
 **Optional**: For immediate export (no 5-second wait) and guaranteed import after git operations, install the git hooks:
 ```bash
-cd examples/git-hooks && ./install.sh
+bd hooks install
 ```
 
 **Disable auto-sync** if needed:

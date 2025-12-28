@@ -402,7 +402,7 @@ bd export -o .beads/issues.jsonl
 bd import -i .beads/issues.jsonl
 
 # Install git hooks for guaranteed sync
-cd examples/git-hooks && ./install.sh
+bd hooks install
 ```
 
 If you disabled auto-sync with `--no-auto-flush` or `--no-auto-import`, remove those flags or use `bd sync` manually.

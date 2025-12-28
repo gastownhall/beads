@@ -40,16 +40,22 @@ There are two ways to install the beads plugin:
 #### Option 2: Local Development
 
 ```bash
-# Clone the repository
+# Clone the repository (shell command)
 git clone https://github.com/steveyegge/beads
 cd beads
+```
 
-# Add local marketplace
-/plugin marketplace add .
+Then in Claude Code:
+
+```
+# Add local marketplace (Claude Code command)
+/plugin marketplace add ./beads
 
 # Install plugin
 /plugin install beads
 ```
+
+**Note:** If you want to install the plugin from a different repo, first `cd` to that repo's directory in your terminal, then use `./beads` (or the relative path to the beads directory) in Claude Code.
 
 ### Restart Claude Code
 
@@ -282,7 +288,7 @@ git commit -m "Add feature tracking"
 
 # After pull, JSONL auto-imports
 git pull
-bd ready  # Fresh data from git!
+bd ready  # Shows issues ready to work on (with fresh data from git)
 ```
 
 ## Updating
