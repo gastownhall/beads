@@ -138,6 +138,8 @@ func init() {
 }
 
 func runWorktreeCreate(cmd *cobra.Command, args []string) error {
+	CheckReadonly("worktree create")
+
 	name := args[0]
 
 	// Determine worktree path
@@ -170,11 +172,13 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the worktree
+	// #nosec G204 - branch and worktreePath are user input but git validates them
 	gitCmd := exec.Command("git", "worktree", "add", "-b", branch, worktreePath)
 	gitCmd.Dir = repoRoot
 	output, err := gitCmd.CombinedOutput()
 	if err != nil {
 		// Try without -b if branch already exists
+		// #nosec G204 - branch and worktreePath are user input but git validates them
 		gitCmd = exec.Command("git", "worktree", "add", worktreePath, branch)
 		gitCmd.Dir = repoRoot
 		output, err = gitCmd.CombinedOutput()
@@ -183,9 +187,16 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Helper to clean up worktree on failure
+	cleanupWorktree := func() {
+		// #nosec G204 - worktreePath was created by us above
+		_ = exec.Command("git", "worktree", "remove", "--force", worktreePath).Run()
+	}
+
 	// Create .beads directory in worktree
 	worktreeBeadsDir := filepath.Join(worktreePath, ".beads")
 	if err := os.MkdirAll(worktreeBeadsDir, 0755); err != nil {
+		cleanupWorktree()
 		return fmt.Errorf("failed to create .beads directory: %w", err)
 	}
 
@@ -196,13 +207,20 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		// Fall back to absolute path
 		relPath = mainBeadsDir
 	}
+	// #nosec G306 - redirect file needs to be readable
 	if err := os.WriteFile(redirectPath, []byte(relPath+"\n"), 0644); err != nil {
+		cleanupWorktree()
 		return fmt.Errorf("failed to create redirect file: %w", err)
 	}
 
 	// Add to .gitignore if worktree is inside repo root
 	if strings.HasPrefix(worktreePath, repoRoot+string(os.PathSeparator)) {
-		if err := addToGitignore(repoRoot, name); err != nil {
+		// Use relative path from repo root for gitignore entry
+		relWorktreePath, err := filepath.Rel(repoRoot, worktreePath)
+		if err != nil {
+			relWorktreePath = filepath.Base(worktreePath)
+		}
+		if err := addToGitignore(repoRoot, relWorktreePath); err != nil {
 			// Non-fatal, just warn
 			fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
 		}
@@ -285,6 +303,8 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 }
 
 func runWorktreeRemove(cmd *cobra.Command, args []string) error {
+	CheckReadonly("worktree remove")
+
 	name := args[0]
 
 	// Find the worktree
@@ -299,6 +319,13 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Don't allow removing the main repository
+	absWorktree, _ := filepath.Abs(worktreePath)
+	absMain, _ := filepath.Abs(repoRoot)
+	if absWorktree == absMain {
+		return fmt.Errorf("cannot remove main repository as worktree")
+	}
+
 	// Safety checks unless --force
 	if !worktreeForce {
 		if err := checkWorktreeSafety(worktreePath); err != nil {
@@ -307,8 +334,10 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Remove worktree
+	// #nosec G204 - worktreePath is validated above
 	gitCmd := exec.Command("git", "worktree", "remove", worktreePath)
 	if worktreeForce {
+		// #nosec G204 - worktreePath is validated above
 		gitCmd = exec.Command("git", "worktree", "remove", "--force", worktreePath)
 	}
 	gitCmd.Dir = repoRoot
@@ -317,8 +346,12 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove worktree: %w\n%s", err, string(output))
 	}
 
-	// Remove from .gitignore
-	if err := removeFromGitignore(repoRoot, filepath.Base(worktreePath)); err != nil {
+	// Remove from .gitignore - use relative path from repo root
+	relWorktreePath, err := filepath.Rel(repoRoot, worktreePath)
+	if err != nil {
+		relWorktreePath = filepath.Base(worktreePath)
+	}
+	if err := removeFromGitignore(repoRoot, relWorktreePath); err != nil {
 		// Non-fatal, just warn
 		fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
 	}
@@ -408,8 +441,10 @@ func parseWorktreeList(output string) []WorktreeInfo {
 			if current.Path != "" {
 				worktrees = append(worktrees, current)
 			}
+			path := strings.TrimPrefix(line, "worktree ")
 			current = WorktreeInfo{
-				Path: strings.TrimPrefix(line, "worktree "),
+				Path: path,
+				Name: filepath.Base(path),
 			}
 		} else if strings.HasPrefix(line, "HEAD ") {
 			// Skip HEAD hash
@@ -453,6 +488,7 @@ func getBeadsState(worktreePath, mainBeadsDir string) string {
 
 func getRedirectTarget(worktreePath string) string {
 	redirectFile := filepath.Join(worktreePath, ".beads", beads.RedirectFileName)
+	// #nosec G304 - path is constructed from worktreePath which comes from git worktree list
 	data, err := os.ReadFile(redirectFile)
 	if err != nil {
 		return ""
@@ -510,13 +546,9 @@ func checkWorktreeSafety(worktreePath string) error {
 		return fmt.Errorf("worktree has unpushed commits")
 	}
 
-	// Check for stashes
-	gitCmd = exec.Command("git", "stash", "list")
-	gitCmd.Dir = worktreePath
-	output, _ = gitCmd.CombinedOutput()
-	if len(strings.TrimSpace(string(output))) > 0 {
-		return fmt.Errorf("worktree has stashed changes")
-	}
+	// Note: We intentionally don't check stashes here because git stashes
+	// are stored globally in the main repo, not per-worktree. Checking
+	// stashes would give misleading results.
 
 	return nil
 }
