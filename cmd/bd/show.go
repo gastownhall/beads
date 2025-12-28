@@ -112,6 +112,7 @@ var showCmd = &cobra.Command{
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
 						Comments     []*types.Comment                     `json:"comments,omitempty"`
+						Parent       *string                              `json:"parent,omitempty"`
 					}
 					details := &IssueDetails{Issue: issue}
 					details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
@@ -120,6 +121,13 @@ var showCmd = &cobra.Command{
 						details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
 					}
 					details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
+					// Compute parent from dependencies (bd-qket)
+					for _, dep := range details.Dependencies {
+						if dep.DependencyType == types.DepParentChild {
+							details.Parent = &dep.ID
+							break
+						}
+					}
 					allDetails = append(allDetails, details)
 				} else {
 					if displayIdx > 0 {
@@ -154,9 +162,17 @@ var showCmd = &cobra.Command{
 						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
 						Comments     []*types.Comment                     `json:"comments,omitempty"`
+						Parent       *string                              `json:"parent,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
+						// Compute parent from dependencies (bd-qket)
+						for _, dep := range details.Dependencies {
+							if dep.DependencyType == types.DepParentChild {
+								details.Parent = &dep.ID
+								break
+							}
+						}
 						allDetails = append(allDetails, details)
 					}
 				} else {
@@ -359,6 +375,7 @@ var showCmd = &cobra.Command{
 					Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 					Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
 					Comments     []*types.Comment                     `json:"comments,omitempty"`
+					Parent       *string                              `json:"parent,omitempty"`
 				}
 				details := &IssueDetails{Issue: issue}
 				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
@@ -380,6 +397,13 @@ var showCmd = &cobra.Command{
 				}
 
 				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
+				// Compute parent from dependencies (bd-qket)
+				for _, dep := range details.Dependencies {
+					if dep.DependencyType == types.DepParentChild {
+						details.Parent = &dep.ID
+						break
+					}
+				}
 				allDetails = append(allDetails, details)
 				result.Close() // Close before continuing to next iteration
 				continue
