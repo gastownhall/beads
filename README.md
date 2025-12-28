@@ -40,7 +40,6 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 | `bd create "Title" -p 0` | Create a P0 task. |
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
-| `bd quickstart` | Interactive guide for AI agents. |
 
 ## 🔗 Hierarchy & Workflow
 

@@ -1,17 +1,13 @@
 ---
-description: Quick start guide for bd workflows
+description: Quick start guide for bd workflows (deprecated)
 argument-hint: []
 ---
 
-Display a quick start guide showing common bd workflows and patterns.
+**Note:** The `bd quickstart` command is deprecated. See [docs/QUICKSTART.md](../docs/QUICKSTART.md) instead.
 
-Use `bd quickstart` to see:
+The quickstart documentation covers:
 - Getting started with bd
 - Common workflow patterns
 - Basic commands
 - Dependency management
 - Git integration
-
-This is an interactive tutorial that walks through the essential bd commands and concepts for new users.
-
-No arguments needed - just run `bd quickstart` to see the full guide.

@@ -296,7 +296,7 @@ After installation:
 
 1. **Initialize a project**: `cd your-project && bd init`
 2. **Configure your agent**: Add bd instructions to `AGENTS.md` (see [README.md](../README.md#quick-start))
-3. **Learn the basics**: Run `bd quickstart` for an interactive tutorial
+3. **Learn the basics**: See [QUICKSTART.md](QUICKSTART.md) for a tutorial
 4. **Explore examples**: Check out the [examples/](../examples/) directory
 
 ## Updating bd

@@ -106,8 +106,8 @@ This ensures deletions propagate reliably while handling clock skew and delayed 
 Prior to v0.30, beads used a separate `deletions.jsonl` manifest. To migrate:
 
 ```bash
-bd migrate-tombstones              # Convert deletions.jsonl to inline tombstones
-bd migrate-tombstones --dry-run    # Preview changes first
+bd migrate tombstones              # Convert deletions.jsonl to inline tombstones
+bd migrate tombstones --dry-run    # Preview changes first
 ```
 
 The migration:

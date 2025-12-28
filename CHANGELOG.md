@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CLI consolidation** (bd-9115) - Reduced top-level command clutter
+  - `bd cleanup`, `bd compact`, `bd reset` → `bd admin cleanup|compact|reset`
+  - `bd migrate-*` → `bd migrate hash-ids|issues|sync|tombstones`
+  - `bd cook` → `bd formula cook`
+  - `bd detect-pollution` → `bd doctor --check=pollution`
+  - `bd quickstart` hidden, use docs/QUICKSTART.md instead
+  - Hidden aliases maintain backwards compatibility with deprecation notices
+
 - **Sync backoff and tips consolidation** (GH#753) - Smarter daemon
   - Daemon uses exponential backoff for sync retries
   - Tips consolidated from multiple sources
