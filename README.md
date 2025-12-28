@@ -61,13 +61,7 @@ Beads supports hierarchical IDs for epics:
 
 ## 🌐 Community Tools
 
-- **[beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)** - Keyboard-driven terminal UI with kanban board, insights panel, and graph view. Built by [@Dicklesworthstone](https://github.com/Dicklesworthstone).
-- **[beads.el](https://codeberg.org/ctietze/beads.el)** - Emacs UI to browse, edit, and manage beads. Built by [@ctietze](https://codeberg.org/ctietze).
-- **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates and kanban board. `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni).
-- **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha).
-- **[perles](https://github.com/zjrosen/perles)** - Terminal UI with BQL (Beads Query Language) and multi-view kanban. Built by [@zjrosen](https://github.com/zjrosen).
-- **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and daemon management. Built by [@jdillon](https://github.com/jdillon).
-- **[opencode-beads](https://github.com/joshuadavidthomas/opencode-beads)** - OpenCode plugin with automatic context injection, `/bd-*` slash commands, and autonomous task agent. Built by [@joshuadavidthomas](https://github.com/joshuadavidthomas).
+See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
 
 ## 📝 Documentation
 
