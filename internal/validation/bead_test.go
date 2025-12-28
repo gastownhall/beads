@@ -125,15 +125,19 @@ func TestParseIssueType(t *testing.T) {
 		{"chore type", "chore", types.TypeChore, false, ""},
 		{"merge-request type", "merge-request", types.TypeMergeRequest, false, ""},
 		{"molecule type", "molecule", types.TypeMolecule, false, ""},
-		
+		{"gate type", "gate", types.TypeGate, false, ""},
+		{"agent type", "agent", types.TypeAgent, false, ""},
+		{"role type", "role", types.TypeRole, false, ""},
+		{"message type", "message", types.TypeMessage, false, ""},
+
 		// Case sensitivity (function is case-sensitive)
 		{"uppercase bug", "BUG", types.TypeTask, true, "invalid issue type"},
 		{"mixed case feature", "FeAtUrE", types.TypeTask, true, "invalid issue type"},
-		
+
 		// With whitespace
 		{"bug with spaces", "  bug  ", types.TypeBug, false, ""},
 		{"feature with tabs", "\tfeature\t", types.TypeFeature, false, ""},
-		
+
 		// Invalid issue types
 		{"invalid type", "invalid", types.TypeTask, true, "invalid issue type"},
 		{"empty string", "", types.TypeTask, true, "invalid issue type"},
@@ -186,6 +190,76 @@ func TestValidatePrefix(t *testing.T) {
 			err := ValidatePrefix(tt.requestedPrefix, tt.dbPrefix, tt.force)
 			if (err != nil) != tt.wantError {
 				t.Errorf("ValidatePrefix() error = %v, wantError %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateAgentID(t *testing.T) {
+	tests := []struct {
+		name          string
+		id            string
+		wantError     bool
+		errorContains string
+	}{
+		// Town-level agents (no rig)
+		{"valid mayor", "gt-mayor", false, ""},
+		{"valid deacon", "gt-deacon", false, ""},
+
+		// Per-rig agents (witness, refinery)
+		{"valid witness gastown", "gt-witness-gastown", false, ""},
+		{"valid refinery beads", "gt-refinery-beads", false, ""},
+		// Note: hyphenated rig names like "my-rig" are ambiguous and not supported
+		// for witness/refinery. Use simple rig names.
+
+		// Named agents (crew, polecat)
+		{"valid polecat", "gt-polecat-gastown-nux", false, ""},
+		{"valid crew", "gt-crew-beads-dave", false, ""},
+		{"valid polecat with complex name", "gt-polecat-gastown-war-boy-1", false, ""},
+
+		// Invalid: wrong prefix
+		{"wrong prefix bd", "bd-mayor", true, "must start with 'gt-'"},
+		{"wrong prefix empty", "mayor", true, "must start with 'gt-'"},
+
+		// Invalid: empty
+		{"empty id", "", true, "agent ID is required"},
+
+		// Invalid: unknown role
+		{"unknown role", "gt-admin-gastown", true, "invalid agent role"},
+		{"unknown role foo", "gt-foo", true, "invalid agent role"},
+
+		// Invalid: town-level with rig
+		{"mayor with rig", "gt-mayor-gastown", true, "cannot have rig suffix"},
+		{"deacon with rig", "gt-deacon-beads", true, "cannot have rig suffix"},
+
+		// Invalid: per-rig without rig
+		{"witness no rig", "gt-witness", true, "requires rig"},
+		{"refinery no rig", "gt-refinery", true, "requires rig"},
+
+		// Invalid: named agent without name
+		{"polecat no name", "gt-polecat-gastown", true, "requires name"},
+		{"crew no name", "gt-crew-beads", true, "requires name"},
+
+		// Invalid: witness/refinery with extra parts
+		{"witness with name", "gt-witness-gastown-extra", true, "takes only rig"},
+		{"refinery with name", "gt-refinery-beads-extra", true, "takes only rig"},
+
+		// Invalid: empty components
+		{"empty rig", "gt-witness-", true, "rig name cannot be empty"},
+		{"just gt", "gt-", true, "must include role type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateAgentID(tt.id)
+			if (err != nil) != tt.wantError {
+				t.Errorf("ValidateAgentID(%q) error = %v, wantError %v", tt.id, err, tt.wantError)
+				return
+			}
+			if err != nil && tt.errorContains != "" {
+				if !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("ValidateAgentID(%q) error = %q, should contain %q", tt.id, err.Error(), tt.errorContains)
+				}
 			}
 		})
 	}

@@ -215,6 +215,13 @@ var createCmd = &cobra.Command{
 			if err := validation.ValidatePrefix(requestedPrefix, dbPrefix, forceCreate); err != nil {
 				FatalError("%v", err)
 			}
+
+			// Validate agent ID pattern if type is agent (gt-hlaaf)
+			if issueType == "agent" {
+				if err := validation.ValidateAgentID(explicitID); err != nil {
+					FatalError("invalid agent ID: %v", err)
+				}
+			}
 		}
 
 		var externalRefPtr *string
@@ -453,7 +460,7 @@ func init() {
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate)")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role)")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
