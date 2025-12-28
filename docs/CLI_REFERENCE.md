@@ -571,7 +571,7 @@ bd sync
 - `blocked` - Cannot proceed (waiting on dependencies)
 - `deferred` - Deliberately put on ice for later
 - `closed` - Work completed
-- `tombstone` - Soft-deleted issue (preserved for reference)
+- `tombstone` - Deleted issue (suppresses resurrections)
 - `pinned` - Persistent bead that stays open indefinitely (used for hooks, anchors)
 
 **Note:** The `pinned` status is used by Gas Town for hook management and persistent work items that should never be auto-closed or cleaned up.
