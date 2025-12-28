@@ -7,6 +7,7 @@ This guide covers advanced features for power users and specific use cases.
 - [Renaming Prefix](#renaming-prefix)
 - [Merging Duplicate Issues](#merging-duplicate-issues)
 - [Git Worktrees](#git-worktrees)
+- [Database Redirects](#database-redirects)
 - [Handling Import Collisions](#handling-import-collisions)
 - [Custom Git Hooks](#custom-git-hooks)
 - [Extensible Database](#extensible-database)
@@ -196,6 +197,75 @@ bd automatically detects when you're in a worktree and shows a prominent warning
 
 **Why It Matters:**
 The daemon maintains its own view of the current working directory and git state. When multiple worktrees share the same `.beads` database, the daemon may commit changes intended for one branch to a different branch, leading to confusion and incorrect git history.
+
+## Database Redirects
+
+Multiple git clones can share a single beads database using redirect files. This is useful for:
+- Multi-agent setups where several clones work on the same issues
+- Development environments with multiple checkout directories
+- Avoiding duplicate databases across clones
+
+### Setting Up a Redirect
+
+Create a `.beads/redirect` file pointing to the shared database location:
+
+```bash
+# In your secondary clone
+mkdir -p .beads
+echo "../main-clone/.beads" > .beads/redirect
+
+# Or use an absolute path
+echo "/path/to/shared/.beads" > .beads/redirect
+```
+
+The redirect file should contain a single path (relative or absolute) to the target `.beads` directory.
+
+**Example setup:**
+```
+repo/
+├── main-clone/
+│   └── .beads/
+│       └── beads.db      ← Actual database
+├── agent-1/
+│   └── .beads/
+│       └── redirect      ← Points to ../main-clone/.beads
+└── agent-2/
+    └── .beads/
+        └── redirect      ← Points to ../main-clone/.beads
+```
+
+### Checking Active Location
+
+Use `bd where` to see which database is actually being used:
+
+```bash
+bd where
+# /path/to/main-clone/.beads
+#   (via redirect from /path/to/agent-1/.beads)
+#   prefix: bd
+#   database: /path/to/main-clone/.beads/beads.db
+
+bd where --json
+# {"path": "...", "redirected_from": "...", "prefix": "bd", "database_path": "..."}
+```
+
+### Limitations
+
+- **Single-level redirects only**: Redirect chains are not followed (A → B → C won't work)
+- **Target must exist**: The redirect target directory must exist and contain a valid database
+- **Daemon coordination**: All clones share the same daemon when using redirects
+
+### When to Use Redirects
+
+**Good use cases:**
+- Multiple AI agents working on the same project
+- Parallel development clones (feature work, bug fixes)
+- Testing clones that should see production issues
+
+**Not recommended for:**
+- Separate projects (use separate databases)
+- Long-lived forks (they should have their own issues)
+- Git worktrees (use `--no-daemon` instead, see above)
 
 ## Handling Git Merge Conflicts
 
