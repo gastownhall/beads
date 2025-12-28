@@ -54,7 +54,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		filter := types.WorkFilter{
-			// Leave Status empty to get both 'open' and 'in_progress' (bd-165)
+			// Leave Status empty to get both 'open' and 'in_progress'
 			Type:       issueType,
 			Limit:      limit,
 			Unassigned: unassigned,
@@ -112,11 +112,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				return
 			}
 
-			// Show upgrade notification if needed (bd-loka)
+			// Show upgrade notification if needed
 			maybeShowUpgradeNotification()
 
 			if len(issues) == 0 {
-				// Check if there are any open issues at all (bd-r4n)
+				// Check if there are any open issues at all
 				statsResp, statsErr := daemonClient.Stats()
 				hasOpenIssues := false
 				if statsErr == nil {
@@ -152,7 +152,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		// Direct mode
 		ctx := rootCtx
 
-		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Check database freshness before reading
 		// Skip check when using daemon (daemon auto-imports on staleness)
 		if daemonClient == nil {
 			if err := ensureDatabaseFresh(ctx); err != nil {
@@ -185,11 +185,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			outputJSON(issues)
 			return
 		}
-		// Show upgrade notification if needed (bd-loka)
+		// Show upgrade notification if needed
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			// Check if there are any open issues at all (bd-r4n)
+			// Check if there are any open issues at all
 			hasOpenIssues := false
 			if stats, statsErr := store.GetStatistics(ctx); statsErr == nil {
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0

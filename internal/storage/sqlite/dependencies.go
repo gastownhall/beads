@@ -33,7 +33,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// External refs (external:<project>:<capability>) don't need target validation
 	// They are resolved lazily at query time by CheckExternalDep
 	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
@@ -169,7 +169,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 			return wrapDBError("mark issues dirty after adding dependency", err)
 		}
 
-		// Invalidate blocked issues cache since dependencies changed (bd-5qim)
+		// Invalidate blocked issues cache since dependencies changed
 		// Only invalidate for types that affect ready work calculation
 		if dep.Type.AffectsReadyWork() {
 			if err := s.invalidateBlockedCache(ctx, tx); err != nil {
@@ -231,7 +231,7 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 			return wrapDBError("mark issues dirty after removing dependency", err)
 		}
 
-		// Invalidate blocked issues cache if this was a blocking dependency (bd-5qim)
+		// Invalidate blocked issues cache if this was a blocking dependency
 		if needsCacheInvalidation {
 			if err := s.invalidateBlockedCache(ctx, tx); err != nil {
 				return fmt.Errorf("failed to invalidate blocked cache: %w", err)
@@ -627,7 +627,7 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 		nodes = append(nodes, &node)
 	}
 
-	// Fetch external dependencies for all issues in the tree (bd-vks2)
+	// Fetch external dependencies for all issues in the tree
 	// External deps like "external:project:capability" don't exist in the issues
 	// table, so the recursive CTE above doesn't find them. We add them as
 	// synthetic leaf nodes here.
@@ -871,14 +871,14 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		var sender sql.NullString
 		var wisp sql.NullInt64
-		// Pinned field (bd-7h5)
+		// Pinned field
 		var pinned sql.NullInt64
-		// Template field (beads-1ra)
+		// Template field
 		var isTemplate sql.NullInt64
-		// Gate fields (bd-udsi)
+		// Gate fields
 		var awaitType sql.NullString
 		var awaitID sql.NullString
 		var timeoutNs sql.NullInt64
@@ -929,22 +929,22 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
 		}
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		if sender.Valid {
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
 			issue.Ephemeral = true
 		}
-		// Pinned field (bd-7h5)
+		// Pinned field
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
 		}
-		// Template field (beads-1ra)
+		// Template field
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
 		}
-		// Gate fields (bd-udsi)
+		// Gate fields
 		if awaitType.Valid {
 			issue.AwaitType = awaitType.String
 		}
@@ -993,14 +993,14 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		var sender sql.NullString
 		var wisp sql.NullInt64
-		// Pinned field (bd-7h5)
+		// Pinned field
 		var pinned sql.NullInt64
-		// Template field (beads-1ra)
+		// Template field
 		var isTemplate sql.NullInt64
-		// Gate fields (bd-udsi)
+		// Gate fields
 		var awaitType sql.NullString
 		var awaitID sql.NullString
 		var timeoutNs sql.NullInt64
@@ -1050,22 +1050,22 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
 		}
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		if sender.Valid {
 			issue.Sender = sender.String
 		}
 		if wisp.Valid && wisp.Int64 != 0 {
 			issue.Ephemeral = true
 		}
-		// Pinned field (bd-7h5)
+		// Pinned field
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
 		}
-		// Template field (beads-1ra)
+		// Template field
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
 		}
-		// Gate fields (bd-udsi)
+		// Gate fields
 		if awaitType.Valid {
 			issue.AwaitType = awaitType.String
 		}

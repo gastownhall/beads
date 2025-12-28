@@ -210,14 +210,11 @@ func runEventDrivenLoop(
 
 // checkDaemonHealth performs periodic health validation.
 // Separate from sync operations - just validates state.
-//
-// Implements bd-e0o: Phase 3 daemon robustness for GH #353
-// Implements bd-gqo: Additional health checks
 func checkDaemonHealth(ctx context.Context, store storage.Storage, log daemonLogger) {
 	// Health check 1: Verify metadata is accessible
 	// This helps detect if external operations (like bd import --force) have modified metadata
 	// Without this, daemon may continue operating with stale metadata cache
-	// Try new key first, fall back to old for migration (bd-39o)
+	// Try new key first, fall back to old for migration
 	if _, err := store.GetMetadata(ctx, "jsonl_content_hash"); err != nil {
 		if _, err := store.GetMetadata(ctx, "last_import_hash"); err != nil {
 			log.log("Health check: metadata read failed: %v", err)

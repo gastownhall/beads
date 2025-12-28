@@ -56,7 +56,7 @@ func (s *Server) checkVersionCompatibility(clientVersion string) error {
 			clientVersion, ServerVersion)
 	}
 
-	// Compare full versions - daemon must be >= client (bd-ckvw: strict minor version gating)
+	// Compare full versions - daemon must be >= client (strict minor version gating)
 	// This prevents stale daemons from serving requests with old schema assumptions
 	cmp := semver.Compare(serverVer, clientVer)
 	if cmp < 0 {
@@ -146,7 +146,7 @@ func (s *Server) handleRequest(req *Request) Response {
 		}
 	}
 
-	// Check for stale JSONL and auto-import if needed (bd-160)
+	// Check for stale JSONL and auto-import if needed
 	// Skip for write operations that will trigger export anyway
 	// Skip for import operation itself to avoid recursion
 	if req.Operation != OpPing && req.Operation != OpHealth && req.Operation != OpMetrics && 
@@ -227,7 +227,7 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleGetWorkerStatus(req)
 	case OpShutdown:
 		resp = s.handleShutdown(req)
-	// Gate operations (bd-likt)
+	// Gate operations
 	case OpGateCreate:
 		resp = s.handleGateCreate(req)
 	case OpGateList:

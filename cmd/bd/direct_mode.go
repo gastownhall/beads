@@ -63,7 +63,7 @@ func ensureStoreActive() error {
 		if found := beads.FindDatabasePath(); found != "" {
 			dbPath = found
 		} else {
-			// Check if this is a JSONL-only project (bd-534)
+			// Check if this is a JSONL-only project
 			beadsDir := beads.FindBeadsDir()
 			if beadsDir != "" {
 				jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
@@ -87,7 +87,7 @@ func ensureStoreActive() error {
 
 	sqlStore, err := sqlite.New(rootCtx, dbPath)
 	if err != nil {
-		// Check for fresh clone scenario (bd-dmb)
+		// Check for fresh clone scenario
 		if isFreshCloneError(err) {
 			beadsDir := filepath.Dir(dbPath)
 			handleFreshCloneError(err, beadsDir)

@@ -72,7 +72,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("expand: %q has no template steps", rule.With)
 		}
 
-		// Merge formula default vars with rule overrides (gt-8tmz.34)
+		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
 
 		// Expand the target step (start at depth 0)
@@ -115,10 +115,10 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 			return nil, fmt.Errorf("map: %q has no template steps", rule.With)
 		}
 
-		// Merge formula default vars with rule overrides (gt-8tmz.34)
+		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
 
-		// Find all matching steps (including nested children - gt-8tmz.33)
+		// Find all matching steps (including nested children)
 		// Rebuild stepMap to capture any changes from previous expansions
 		stepMap = buildStepMap(result)
 		var toExpand []*Step
@@ -152,7 +152,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		}
 	}
 
-	// Validate no duplicate step IDs after expansion (gt-8tmz.36)
+	// Validate no duplicate step IDs after expansion
 	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
 		return nil, fmt.Errorf("duplicate step IDs after expansion: %v", dups)
 	}
@@ -206,8 +206,8 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 			Type:           tmpl.Type,
 			Priority:       tmpl.Priority,
 			Assignee:       substituteVars(tmpl.Assignee, vars),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template (gt-8tmz.18)
-			SourceLocation: tmpl.SourceLocation, // Preserve source location (gt-8tmz.18)
+			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
+			SourceLocation: tmpl.SourceLocation, // Preserve source location
 		}
 
 		// Substitute placeholders in labels
@@ -361,7 +361,7 @@ func UpdateDependenciesForExpansion(steps []*Step, expandedID string, lastExpand
 	return result
 }
 
-// ApplyInlineExpansions applies Step.Expand fields to inline expansions (gt-8tmz.35).
+// ApplyInlineExpansions applies Step.Expand fields to inline expansions.
 // Steps with the Expand field set are replaced by the referenced expansion template.
 // The step's ExpandVars are passed as variable overrides to the expansion.
 //

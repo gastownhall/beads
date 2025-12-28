@@ -67,10 +67,10 @@ func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
 }
 
 // doSyncFromMain performs a one-way sync from the default branch (main/master)
-// Used for ephemeral branches without upstream tracking (gt-ick9)
+// Used for ephemeral branches without upstream tracking.
 // This fetches beads from main and imports them, discarding local beads changes.
 // If sync.remote is configured (e.g., "upstream" for fork workflows), uses that remote
-// instead of "origin" (bd-bx9).
+// instead of "origin".
 func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool, noGitHistory bool) error {
 	// Determine which remote to use (default: origin, but can be configured via sync.remote)
 	remote := "origin"

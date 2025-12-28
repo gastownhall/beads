@@ -33,46 +33,46 @@ type Issue struct {
 	CompactedAtCommit  *string        `json:"compacted_at_commit,omitempty"` // Git commit hash when compacted
 	OriginalSize       int            `json:"original_size,omitempty"`
 	SourceRepo         string         `json:"-"` // Internal: Which repo owns this issue (multi-repo support) - NOT exported to JSONL
-	IDPrefix           string         `json:"-"` // Internal: Override prefix for ID generation (bd-hobo) - NOT exported to JSONL
+	IDPrefix           string         `json:"-"` // Internal: Override prefix for ID generation - NOT exported to JSONL
 	Labels             []string       `json:"labels,omitempty"` // Populated only for export/import
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import
-	// Tombstone fields (bd-vw8): inline soft-delete support
+	// Tombstone fields: inline soft-delete support
 	DeletedAt    *time.Time `json:"deleted_at,omitempty"`    // When the issue was deleted
 	DeletedBy    string     `json:"deleted_by,omitempty"`    // Who deleted the issue
 	DeleteReason string     `json:"delete_reason,omitempty"` // Why the issue was deleted
 	OriginalType string     `json:"original_type,omitempty"` // Issue type before deletion (for tombstones)
 
-	// Messaging fields (bd-kwro): inter-agent communication support
+	// Messaging fields: inter-agent communication support
 	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
 	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL; bulk-deleted when closed
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
-	// Pinned field (bd-7h5): persistent context markers
+	// Pinned field: persistent context markers
 	Pinned bool `json:"pinned,omitempty"` // If true, issue is a persistent context marker, not a work item
 
-	// Template field (beads-1ra): template molecule support
+	// Template field: template molecule support
 	IsTemplate bool `json:"is_template,omitempty"` // If true, issue is a read-only template molecule
 
-	// Bonding fields (bd-rnnr): compound molecule lineage
+	// Bonding fields: compound molecule lineage
 	BondedFrom []BondRef `json:"bonded_from,omitempty"` // For compounds: constituent protos
 
-	// HOP fields (bd-7pwh): entity tracking for CV chains
+	// HOP fields: entity tracking for CV chains
 	Creator     *EntityRef   `json:"creator,omitempty"`     // Who created this issue (human, agent, or org)
 	Validations []Validation `json:"validations,omitempty"` // Who validated/approved this work
 
-	// Gate fields (bd-udsi): async coordination primitives
+	// Gate fields: async coordination primitives
 	AwaitType string        `json:"await_type,omitempty"` // Condition type: gh:run, gh:pr, timer, human, mail
 	AwaitID   string        `json:"await_id,omitempty"`   // Condition identifier (e.g., run ID, PR number)
 	Timeout   time.Duration `json:"timeout,omitempty"`    // Max wait time before escalation
 	Waiters   []string      `json:"waiters,omitempty"`    // Mail addresses to notify when gate clears
 
-	// Source tracing fields (gt-8tmz.18): track where this issue came from during cooking
+	// Source tracing fields: track where this issue came from during cooking
 	SourceFormula  string `json:"source_formula,omitempty"`  // Formula name where this step was defined
 	SourceLocation string `json:"source_location,omitempty"` // Path within source: "steps[0]", "advice[0].after"
 
-	// Agent identity fields (gt-v2gkv): agent-as-bead support
+	// Agent identity fields: agent-as-bead support
 	HookBead     string     `json:"hook_bead,omitempty"`     // Current work attached to agent's hook (0..1)
 	RoleBead     string     `json:"role_bead,omitempty"`     // Role definition bead (required for agents)
 	AgentState   AgentState `json:"agent_state,omitempty"`   // Agent-reported state (idle|running|stuck|stopped)
@@ -121,7 +121,7 @@ func (i *Issue) ComputeContentHash() string {
 		h.Write([]byte("template"))
 	}
 	h.Write([]byte{0})
-	// Hash bonded_from for compound molecules (bd-rnnr)
+	// Hash bonded_from for compound molecules
 	for _, br := range i.BondedFrom {
 		h.Write([]byte(br.ProtoID))
 		h.Write([]byte{0})
@@ -130,7 +130,7 @@ func (i *Issue) ComputeContentHash() string {
 		h.Write([]byte(br.BondPoint))
 		h.Write([]byte{0})
 	}
-	// Hash creator for HOP entity tracking (bd-m7ib)
+	// Hash creator for HOP entity tracking
 	if i.Creator != nil {
 		h.Write([]byte(i.Creator.Name))
 		h.Write([]byte{0})
@@ -141,7 +141,7 @@ func (i *Issue) ComputeContentHash() string {
 		h.Write([]byte(i.Creator.ID))
 		h.Write([]byte{0})
 	}
-	// Hash validations for HOP proof-of-stake (bd-du9h)
+	// Hash validations for HOP proof-of-stake
 	for _, v := range i.Validations {
 		if v.Validator != nil {
 			h.Write([]byte(v.Validator.Name))
@@ -162,7 +162,7 @@ func (i *Issue) ComputeContentHash() string {
 		}
 		h.Write([]byte{0})
 	}
-	// Hash gate fields for async coordination (bd-udsi)
+	// Hash gate fields for async coordination
 	h.Write([]byte(i.AwaitType))
 	h.Write([]byte{0})
 	h.Write([]byte(i.AwaitID))
@@ -173,7 +173,7 @@ func (i *Issue) ComputeContentHash() string {
 		h.Write([]byte(waiter))
 		h.Write([]byte{0})
 	}
-	// Hash agent identity fields (gt-v2gkv)
+	// Hash agent identity fields
 	h.Write([]byte(i.HookBead))
 	h.Write([]byte{0})
 	h.Write([]byte(i.RoleBead))
@@ -198,7 +198,7 @@ const MinTombstoneTTL = 7 * 24 * time.Hour
 // ClockSkewGrace is added to TTL to handle clock drift between machines
 const ClockSkewGrace = 1 * time.Hour
 
-// IsTombstone returns true if the issue has been soft-deleted (bd-vw8)
+// IsTombstone returns true if the issue has been soft-deleted
 func (i *Issue) IsTombstone() bool {
 	return i.Status == StatusTombstone
 }
@@ -220,7 +220,7 @@ func (i *Issue) IsExpired(ttl time.Duration) bool {
 		return false
 	}
 
-	// Negative TTL means "immediately expired" - for --hard mode (bd-4q8 fix)
+	// Negative TTL means "immediately expired" - for --hard mode
 	if ttl < 0 {
 		return true
 	}
@@ -276,14 +276,14 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 	if i.Status != StatusClosed && i.Status != StatusTombstone && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
-	// Enforce tombstone invariants (bd-md2): deleted_at must be set for tombstones, and only for tombstones
+	// Enforce tombstone invariants: deleted_at must be set for tombstones, and only for tombstones
 	if i.Status == StatusTombstone && i.DeletedAt == nil {
 		return fmt.Errorf("tombstone issues must have deleted_at timestamp")
 	}
 	if i.Status != StatusTombstone && i.DeletedAt != nil {
 		return fmt.Errorf("non-tombstone issues cannot have deleted_at timestamp")
 	}
-	// Validate agent state if set (gt-v2gkv)
+	// Validate agent state if set
 	if !i.AgentState.IsValid() {
 		return fmt.Errorf("invalid agent state: %s", i.AgentState)
 	}
@@ -319,10 +319,10 @@ const (
 	StatusOpen       Status = "open"
 	StatusInProgress Status = "in_progress"
 	StatusBlocked    Status = "blocked"
-	StatusDeferred   Status = "deferred" // Deliberately put on ice for later (bd-4jr)
+	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
 	StatusClosed     Status = "closed"
-	StatusTombstone  Status = "tombstone" // Soft-deleted issue (bd-vw8)
-	StatusPinned     Status = "pinned"    // Persistent bead that stays open indefinitely (bd-6v2)
+	StatusTombstone  Status = "tombstone" // Soft-deleted issue
+	StatusPinned     Status = "pinned"    // Persistent bead that stays open indefinitely
 )
 
 // IsValid checks if the status value is valid (built-in statuses only)
@@ -362,10 +362,10 @@ const (
 	TypeChore        IssueType = "chore"
 	TypeMessage      IssueType = "message"       // Ephemeral communication between workers
 	TypeMergeRequest IssueType = "merge-request" // Merge queue entry for refinery processing
-	TypeMolecule     IssueType = "molecule"      // Template molecule for issue hierarchies (beads-1ra)
-	TypeGate         IssueType = "gate"          // Async coordination gate (bd-udsi)
-	TypeAgent        IssueType = "agent"         // Agent identity bead (gt-ikyo1)
-	TypeRole         IssueType = "role"          // Agent role definition (gt-gzp2y)
+	TypeMolecule     IssueType = "molecule"      // Template molecule for issue hierarchies
+	TypeGate         IssueType = "gate"          // Async coordination gate
+	TypeAgent        IssueType = "agent"         // Agent identity bead
+	TypeRole         IssueType = "role"          // Agent role definition
 )
 
 // IsValid checks if the issue type value is valid
@@ -377,7 +377,7 @@ func (t IssueType) IsValid() bool {
 	return false
 }
 
-// AgentState represents the self-reported state of an agent (gt-v2gkv)
+// AgentState represents the self-reported state of an agent
 type AgentState string
 
 // Agent state constants
@@ -444,14 +444,14 @@ const (
 	// Workflow types (affect ready work calculation)
 	DepBlocks            DependencyType = "blocks"
 	DepParentChild       DependencyType = "parent-child"
-	DepConditionalBlocks DependencyType = "conditional-blocks" // B runs only if A fails (bd-kzda)
-	DepWaitsFor          DependencyType = "waits-for"          // Fanout gate: wait for dynamic children (bd-xo1o.2)
+	DepConditionalBlocks DependencyType = "conditional-blocks" // B runs only if A fails
+	DepWaitsFor          DependencyType = "waits-for"          // Fanout gate: wait for dynamic children
 
 	// Association types
 	DepRelated        DependencyType = "related"
 	DepDiscoveredFrom DependencyType = "discovered-from"
 
-	// Graph link types (bd-kwro)
+	// Graph link types
 	DepRepliesTo  DependencyType = "replies-to"  // Conversation threading
 	DepRelatesTo  DependencyType = "relates-to"  // Loose knowledge graph edges
 	DepDuplicates DependencyType = "duplicates"  // Deduplication link
@@ -603,10 +603,10 @@ type Statistics struct {
 	InProgressIssues         int     `json:"in_progress_issues"`
 	ClosedIssues             int     `json:"closed_issues"`
 	BlockedIssues            int     `json:"blocked_issues"`
-	DeferredIssues           int     `json:"deferred_issues"`  // Issues on ice (bd-4jr)
+	DeferredIssues           int     `json:"deferred_issues"`  // Issues on ice
 	ReadyIssues              int     `json:"ready_issues"`
-	TombstoneIssues          int     `json:"tombstone_issues"` // Soft-deleted issues (bd-nyt)
-	PinnedIssues             int     `json:"pinned_issues"`    // Persistent issues (bd-6v2)
+	TombstoneIssues          int     `json:"tombstone_issues"` // Soft-deleted issues
+	PinnedIssues             int     `json:"pinned_issues"`    // Persistent issues
 	EpicsEligibleForClosure  int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime          float64 `json:"average_lead_time_hours"`
 }
@@ -645,19 +645,19 @@ type IssueFilter struct {
 	PriorityMin *int
 	PriorityMax *int
 
-	// Tombstone filtering (bd-1bu)
+	// Tombstone filtering
 	IncludeTombstones bool // If false (default), exclude tombstones from results
 
-	// Ephemeral filtering (bd-kwro.9)
+	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
-	// Pinned filtering (bd-7h5)
+	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
 
-	// Template filtering (beads-1ra)
+	// Template filtering
 	IsTemplate *bool // Filter by template flag (nil = any, true = only templates, false = exclude templates)
 
-	// Parent filtering (bd-yqhh): filter children by parent issue ID
+	// Parent filtering: filter children by parent issue ID
 	ParentID *string // Filter by parent issue (via parent-child dependency)
 }
 
@@ -720,7 +720,7 @@ type EpicStatus struct {
 	EligibleForClose bool   `json:"eligible_for_close"`
 }
 
-// BondRef tracks compound molecule lineage (bd-rnnr).
+// BondRef tracks compound molecule lineage.
 // When protos or molecules are bonded together, BondRefs record
 // which sources were combined and how they were attached.
 type BondRef struct {

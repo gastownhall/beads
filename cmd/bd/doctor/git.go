@@ -504,7 +504,6 @@ func CheckSyncBranchConfig(path string) DoctorCheck {
 
 // CheckSyncBranchHealth detects when the sync branch has diverged from main
 // or from the remote sync branch (after a force-push reset).
-// bd-6rf: Detect and fix stale beads-sync branch
 func CheckSyncBranchHealth(path string) DoctorCheck {
 	// Skip if not in a git repo using worktree-aware detection
 	_, err := git.GetGitDir()

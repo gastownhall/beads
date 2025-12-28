@@ -54,7 +54,7 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			// Non-fatal - continue with defaults
 		}
 
-		// Safety guard: check for existing JSONL with issues (bd-emg)
+		// Safety guard: check for existing JSONL with issues
 		// This prevents accidental re-initialization in fresh clones
 		if !force {
 			if err := checkExistingBeadsData(prefix); err != nil {
@@ -285,7 +285,7 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		}
 
 		// Set sync.branch: use explicit --branch flag, or auto-detect current branch
-		// This ensures bd sync --status works after bd init (bd-flil)
+		// This ensures bd sync --status works after bd init
 		if branch == "" && isGitRepo() {
 			// Auto-detect current branch if not specified
 			currentBranch, err := getGitBranch()
@@ -479,7 +479,7 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
 		fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
 
-		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)
+		// Run bd doctor diagnostics to catch setup issues early
 		doctorResult := runDiagnostics(cwd)
 		// Check if there are any warnings or errors (not just critical failures)
 		hasIssues := false

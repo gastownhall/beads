@@ -16,7 +16,6 @@ import (
 )
 
 // SyncIntegrityResult contains the results of a pre-sync integrity check.
-// bd-hlsw.1: Pre-sync integrity check
 type SyncIntegrityResult struct {
 	ForcedPush       *ForcedPushCheck  `json:"forced_push,omitempty"`
 	PrefixMismatch   *PrefixMismatch   `json:"prefix_mismatch,omitempty"`
@@ -46,7 +45,7 @@ type OrphanedChildren struct {
 }
 
 // showSyncIntegrityCheck performs pre-sync integrity checks without modifying state.
-// bd-hlsw.1: Detects forced pushes, prefix mismatches, and orphaned children.
+// Detects forced pushes, prefix mismatches, and orphaned children.
 // Exits with code 1 if problems are detected.
 func showSyncIntegrityCheck(ctx context.Context, jsonlPath string) {
 	fmt.Println("Sync Integrity Check")

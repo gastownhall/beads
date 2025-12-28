@@ -99,7 +99,7 @@ var labelAddCmd = &cobra.Command{
 		}
 		issueIDs = resolvedIDs
 
-		// Protect reserved label namespaces (bd-eijl)
+		// Protect reserved label namespaces
 		// provides:* labels can only be added via 'bd ship' command
 		if strings.HasPrefix(label, "provides:") {
 			FatalErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))

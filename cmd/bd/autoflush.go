@@ -92,9 +92,9 @@ func findJSONLPath() string {
 }
 
 // autoImportIfNewer checks if JSONL content changed (via hash) and imports if so
-// Fixes bd-84: Hash-based comparison is git-proof (mtime comparison fails after git pull)
-// Fixes bd-228: Now uses collision detection to prevent silently overwriting local changes
-// Fixes bd-4t7: Defense-in-depth check to respect --no-auto-import flag
+// Hash-based comparison is git-proof (mtime comparison fails after git pull).
+// Uses collision detection to prevent silently overwriting local changes.
+// Defense-in-depth check to respect --no-auto-import flag.
 func autoImportIfNewer() {
 	// Defense-in-depth: always check noAutoImport flag directly
 	// This ensures auto-import is disabled even if caller forgot to check autoImportEnabled
@@ -119,13 +119,13 @@ func autoImportIfNewer() {
 	hasher.Write(jsonlData)
 	currentHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Get content hash from DB metadata (try new key first, fall back to old for migration - bd-39o)
+	// Get content hash from DB metadata (try new key first, fall back to old for migration)
 	ctx := rootCtx
 	lastHash, err := store.GetMetadata(ctx, "jsonl_content_hash")
 	if err != nil || lastHash == "" {
 		lastHash, err = store.GetMetadata(ctx, "last_import_hash")
 		if err != nil {
-			// Metadata error - treat as first import rather than skipping (bd-663)
+			// Metadata error - treat as first import rather than skipping
 			// This allows auto-import to recover from corrupt/missing metadata
 			debug.Logf("metadata read failed (%v), treating as first import", err)
 			lastHash = ""
@@ -141,7 +141,7 @@ func autoImportIfNewer() {
 
 	debug.Logf("auto-import triggered (hash changed)")
 
-	// Check for Git merge conflict markers (bd-270)
+	// Check for Git merge conflict markers
 	// Only match if they appear as standalone lines (not embedded in JSON strings)
 	lines := bytes.Split(jsonlData, []byte("\n"))
 	for _, line := range lines {
@@ -200,13 +200,13 @@ func autoImportIfNewer() {
 		return
 	}
 
-	// Clear export_hashes before import to prevent staleness (bd-160)
+	// Clear export_hashes before import to prevent staleness
 	// Import operations may add/update issues, so export_hashes entries become invalid
 	if err := store.ClearAllExportHashes(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
 	}
 	
-	// Use shared import logic (bd-157)
+	// Use shared import logic
 	opts := ImportOptions{
 		DryRun:               false,
 		SkipUpdate:           false,
@@ -271,14 +271,14 @@ func autoImportIfNewer() {
 		}
 	}
 
-	// Store new hash after successful import (renamed from last_import_hash - bd-39o)
+	// Store new hash after successful import (renamed from last_import_hash)
 	if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_content_hash after import: %v\n", err)
 		fmt.Fprintf(os.Stderr, "This may cause auto-import to retry the same import on next operation.\n")
 	}
 
-	// Store import timestamp (bd-159: for staleness detection)
-	// Use RFC3339Nano for nanosecond precision to avoid race with file mtime (fixes #399)
+	// Store import timestamp for staleness detection
+	// Use RFC3339Nano for nanosecond precision to avoid race with file mtime
 	importTime := time.Now().Format(time.RFC3339Nano)
 	if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time after import: %v\n", err)
@@ -289,7 +289,7 @@ func autoImportIfNewer() {
 
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a flush
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a debounced
-// export to JSONL. Uses FlushManager's event-driven architecture (fixes bd-52).
+// export to JSONL. Uses FlushManager's event-driven architecture.
 //
 // Debouncing behavior: If multiple operations happen within the debounce window, only
 // one flush occurs after the burst of activity completes. This prevents excessive
@@ -344,7 +344,7 @@ func clearAutoFlushState() {
 // Error handling: Returns error on any failure. Cleanup is guaranteed via defer.
 // Thread-safe: No shared state access. Safe to call from multiple goroutines.
 // validateJSONLIntegrity checks if JSONL file hash matches stored hash.
-// If mismatch detected, clears export_hashes and logs warning (bd-160).
+// If mismatch detected, clears export_hashes and logs warning.
 // Returns (needsFullExport, error) where needsFullExport=true if export_hashes was cleared.
 func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error) {
 	// Get stored JSONL file hash
@@ -367,7 +367,7 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 			if err := store.ClearAllExportHashes(ctx); err != nil {
 				return false, fmt.Errorf("failed to clear export_hashes: %w", err)
 			}
-			// Also clear jsonl_file_hash to prevent perpetual mismatch warnings (bd-admx)
+			// Also clear jsonl_file_hash to prevent perpetual mismatch warnings
 			if err := store.SetJSONLFileHash(ctx, ""); err != nil {
 				return false, fmt.Errorf("failed to clear jsonl_file_hash: %w", err)
 			}
@@ -383,7 +383,7 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 	
 	// Compare hashes
 	if currentHash != storedHash {
-		fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file hash mismatch detected (bd-160)\n")
+		fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file hash mismatch detected\n")
 		fmt.Fprintf(os.Stderr, "  This indicates JSONL and export_hashes are out of sync.\n")
 		fmt.Fprintf(os.Stderr, "  Clearing export_hashes to force full re-export.\n")
 
@@ -391,7 +391,7 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 		if err := store.ClearAllExportHashes(ctx); err != nil {
 			return false, fmt.Errorf("failed to clear export_hashes: %w", err)
 		}
-		// Also clear jsonl_file_hash to prevent perpetual mismatch warnings (bd-admx)
+		// Also clear jsonl_file_hash to prevent perpetual mismatch warnings
 		if err := store.SetJSONLFileHash(ctx, ""); err != nil {
 			return false, fmt.Errorf("failed to clear jsonl_file_hash: %w", err)
 		}
@@ -407,7 +407,7 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 		return cmp.Compare(a.ID, b.ID)
 	})
 
-	// Create temp file with PID suffix to avoid collisions (bd-306)
+	// Create temp file with PID suffix to avoid collisions
 	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
 	f, err := os.Create(tempPath)
 	if err != nil {
@@ -422,7 +422,7 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 		}
 	}()
 
-	// Write all issues as JSONL (timestamp-only deduplication DISABLED - bd-160)
+	// Write all issues as JSONL (timestamp-only deduplication DISABLED)
 	encoder := json.NewEncoder(f)
 	skippedCount := 0
 	exportedIDs := make([]string, 0, len(issues))
@@ -435,7 +435,7 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 		exportedIDs = append(exportedIDs, issue.ID)
 	}
 	
-	// Report skipped issues if any (helps debugging bd-159)
+	// Report skipped issues if any (helps debugging)
 	if skippedCount > 0 {
 		debug.Logf("auto-flush skipped %d issue(s) with timestamp-only changes", skippedCount)
 	}
@@ -508,12 +508,12 @@ func flushToJSONLWithState(state flushState) {
 
 	ctx := rootCtx
 	
-	// Validate JSONL integrity BEFORE checking isDirty (bd-c6cf)
+	// Validate JSONL integrity BEFORE checking isDirty
 	// This detects if JSONL and export_hashes are out of sync (e.g., after git operations)
 	// If export_hashes was cleared, we need to do a full export even if nothing is dirty
 	integrityNeedsFullExport, err := validateJSONLIntegrity(ctx, jsonlPath)
 	if err != nil {
-		// Special case: missing JSONL is not fatal, just forces full export (bd-c6cf)
+		// Special case: missing JSONL is not fatal, just forces full export
 		if !os.IsNotExist(err) {
 			// Record failure without clearing isDirty (we didn't do any work yet)
 			flushMutex.Lock()
@@ -538,7 +538,7 @@ func flushToJSONLWithState(state flushState) {
 	}
 
 	// Check if we should proceed with export
-	// Use only the state parameter - don't read global flags (fixes bd-52)
+	// Use only the state parameter - don't read global flags
 	// Caller is responsible for passing correct forceDirty/forceFullExport values
 	if !state.forceDirty && !integrityNeedsFullExport {
 		// Nothing to do: not forced and no integrity issue
@@ -590,7 +590,7 @@ func flushToJSONLWithState(state flushState) {
 			dirtyIDs[i] = issue.ID
 		}
 	} else {
-		// Incremental export: get only dirty issue IDs (bd-39 optimization)
+		// Incremental export: get only dirty issue IDs
 		var err2 error
 		dirtyIDs, err2 = store.GetDirtyIssues(ctx)
 		if err2 != nil {
@@ -610,7 +610,7 @@ func flushToJSONLWithState(state flushState) {
 	if !fullExport {
 		if existingFile, err := os.Open(jsonlPath); err == nil {
 			scanner := bufio.NewScanner(existingFile)
-			// Increase buffer to handle large JSON lines (bd-c6cf)
+			// Increase buffer to handle large JSON lines
 			// Default scanner limit is 64KB which can cause silent truncation
 			scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024) // 2MB max line size
 			lineNum := 0
@@ -629,7 +629,7 @@ func flushToJSONLWithState(state flushState) {
 					fmt.Fprintf(os.Stderr, "Warning: skipping malformed JSONL line %d: %v\n", lineNum, err)
 				}
 			}
-			// Check for scanner errors (bd-c6cf)
+			// Check for scanner errors
 			if err := scanner.Err(); err != nil {
 				_ = existingFile.Close()
 				recordFailure(fmt.Errorf("failed to read existing JSONL: %w", err))
@@ -665,7 +665,7 @@ func flushToJSONLWithState(state flushState) {
 	}
 
 	// Convert map to slice (will be sorted by writeJSONLAtomic)
-	// Filter out wisps - they should never be exported to JSONL (bd-687g)
+	// Filter out wisps - they should never be exported to JSONL
 	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 	// This prevents "zombie" issues that resurrect after mol squash deletes them.
 	issues := make([]*types.Issue, 0, len(issueMap))
@@ -728,7 +728,7 @@ func flushToJSONLWithState(state flushState) {
 		return
 	}
 
-	// Clear only the dirty issues that were actually exported (fixes bd-52 race condition, bd-159)
+	// Clear only the dirty issues that were actually exported (fixes race condition)
 	// Don't clear issues that were skipped due to timestamp-only changes
 	if len(exportedIDs) > 0 {
 		if err := store.ClearDirtyIssuesByID(ctx, exportedIDs); err != nil {
@@ -737,8 +737,8 @@ func flushToJSONLWithState(state flushState) {
 		}
 	}
 
-	// Store hash of exported JSONL (fixes bd-84: enables hash-based auto-import)
-	// Renamed from last_import_hash to jsonl_content_hash (bd-39o)
+	// Store hash of exported JSONL (enables hash-based auto-import)
+	// Renamed from last_import_hash to jsonl_content_hash
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err == nil {
 		hasher := sha256.New()
@@ -748,7 +748,7 @@ func flushToJSONLWithState(state flushState) {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_content_hash after export: %v\n", err)
 		}
 
-		// Store JSONL file hash for integrity validation (bd-160)
+		// Store JSONL file hash for integrity validation
 		if err := store.SetJSONLFileHash(ctx, exportedHash); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_file_hash after export: %v\n", err)
 		}

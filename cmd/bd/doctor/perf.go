@@ -97,7 +97,6 @@ func RunPerformanceDiagnostics(path string) {
 }
 
 // CollectPlatformInfo gathers platform information for diagnostics.
-// bd-9cc: Exported for use by --output flag.
 func CollectPlatformInfo(path string) map[string]string {
 	info := make(map[string]string)
 
@@ -108,7 +107,7 @@ func CollectPlatformInfo(path string) map[string]string {
 	info["go_version"] = runtime.Version()
 
 	// SQLite version - try to find database
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")

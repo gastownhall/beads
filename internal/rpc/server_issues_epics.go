@@ -77,7 +77,7 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.IssueType != nil {
 		u["issue_type"] = *a.IssueType
 	}
-	// Messaging fields (bd-kwro)
+	// Messaging fields
 	if a.Sender != nil {
 		u["sender"] = *a.Sender
 	}
@@ -87,7 +87,7 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo
 	}
-	// Graph link fields (bd-fu83)
+	// Graph link fields
 	if a.RelatesTo != nil {
 		u["relates_to"] = *a.RelatesTo
 	}
@@ -97,18 +97,18 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.SupersededBy != nil {
 		u["superseded_by"] = *a.SupersededBy
 	}
-	// Pinned field (bd-iea)
+	// Pinned field
 	if a.Pinned != nil {
 		u["pinned"] = *a.Pinned
 	}
-	// Agent slot fields (gt-h5sza)
+	// Agent slot fields
 	if a.HookBead != nil {
 		u["hook_bead"] = *a.HookBead
 	}
 	if a.RoleBead != nil {
 		u["role_bead"] = *a.RoleBead
 	}
-	// Agent state fields (bd-uxlb)
+	// Agent state fields
 	if a.AgentState != nil {
 		u["agent_state"] = *a.AgentState
 	}
@@ -189,11 +189,11 @@ func (s *Server) handleCreate(req *Request) Response {
 		ExternalRef:        externalRef,
 		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		Sender:    createArgs.Sender,
 		Ephemeral: createArgs.Ephemeral,
 		// NOTE: RepliesTo now handled via replies-to dependency (Decision 004)
-		// ID generation (bd-hobo)
+		// ID generation
 		IDPrefix:  createArgs.IDPrefix,
 		CreatedBy: createArgs.CreatedBy,
 	}
@@ -326,7 +326,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
-	// Add waits-for dependency if specified (bd-xo1o.2)
+	// Add waits-for dependency if specified
 	if createArgs.WaitsFor != "" {
 		// Validate gate type
 		gate := createArgs.WaitsForGate
@@ -480,7 +480,7 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
-	// Handle reparenting (bd-cj2e)
+	// Handle reparenting
 	if updateArgs.Parent != nil {
 		newParentID := *updateArgs.Parent
 
@@ -715,7 +715,7 @@ func (s *Server) handleDelete(req *Request) Response {
 			continue
 		}
 
-		// Create tombstone instead of hard delete (bd-rp4o fix)
+		// Create tombstone instead of hard delete
 		// This preserves deletion history and prevents resurrection during sync
 		type tombstoner interface {
 			CreateTombstone(ctx context.Context, id string, actor string, reason string) error
@@ -901,21 +901,21 @@ func (s *Server) handleList(req *Request) Response {
 	filter.PriorityMin = listArgs.PriorityMin
 	filter.PriorityMax = listArgs.PriorityMax
 
-	// Pinned filtering (bd-p8e)
+	// Pinned filtering
 	filter.Pinned = listArgs.Pinned
 
-	// Template filtering (beads-1ra): exclude templates by default
+	// Template filtering: exclude templates by default
 	if !listArgs.IncludeTemplates {
 		isTemplate := false
 		filter.IsTemplate = &isTemplate
 	}
 
-	// Parent filtering (bd-yqhh)
+	// Parent filtering
 	if listArgs.ParentID != "" {
 		filter.ParentID = &listArgs.ParentID
 	}
 
-	// Ephemeral filtering (bd-bkul)
+	// Ephemeral filtering
 	filter.Ephemeral = listArgs.Ephemeral
 
 	// Guard against excessive ID lists to avoid SQLite parameter limits
@@ -1522,7 +1522,7 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 	}
 }
 
-// Gate handlers (bd-likt)
+// Gate handlers
 
 func (s *Server) handleGateCreate(req *Request) Response {
 	var args GateCreateArgs

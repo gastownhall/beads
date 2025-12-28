@@ -516,7 +516,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		os.Exit(1)
 	}
 
-	// Hard delete: immediately prune tombstones from JSONL (bd-4q8)
+	// Hard delete: immediately prune tombstones from JSONL
 	// Note: We keep tombstones in DB to prevent resurrection during sync.
 	// The tombstones will be exported and synced to remote, blocking resurrection.
 	// Use 'bd cleanup --hard' after syncing to fully purge old tombstones.
@@ -535,7 +535,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 
 	// Update text references in connected issues (using pre-collected issues)
 	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
-	// Note: No longer remove from JSONL - tombstones will be exported to JSONL (bd-3b4)
+	// Note: No longer remove from JSONL - tombstones will be exported to JSONL
 	// Schedule auto-flush
 	markDirtyAndScheduleFlush()
 	// Output results

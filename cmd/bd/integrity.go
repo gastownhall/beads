@@ -20,11 +20,11 @@ import (
 
 // isJSONLNewer checks if JSONL file is newer than database file.
 // Returns true if JSONL is newer AND has different content, false otherwise.
-// This prevents false positives from daemon auto-export timestamp skew (bd-lm2q).
+// This prevents false positives from daemon auto-export timestamp skew.
 //
 // NOTE: This uses computeDBHash which is more expensive than hasJSONLChanged.
 // For daemon auto-import, prefer hasJSONLChanged() which uses metadata-based
-// content tracking and is safe against git operations (bd-khnb).
+// content tracking and is safe against git operations.
 func isJSONLNewer(jsonlPath string) bool {
 	return isJSONLNewerWithStore(jsonlPath, nil)
 }
@@ -97,16 +97,16 @@ func computeJSONLHash(jsonlPath string) (string, error) {
 // unchanged) while still catching git operations that restore old content with new mtimes.
 //
 // In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
-// The keySuffix must not contain the ':' separator character (bd-ar2.12).
+// The keySuffix must not contain the ':' separator character.
 func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath string, keySuffix string) bool {
-	// Validate keySuffix doesn't contain the separator character (bd-ar2.12)
+	// Validate keySuffix doesn't contain the separator character
 	if keySuffix != "" && strings.Contains(keySuffix, ":") {
 		// Invalid keySuffix - treat as changed to trigger proper error handling
 		return true
 	}
 
-	// Build metadata keys with optional suffix for per-repo tracking (bd-ar2.10, bd-ar2.11)
-	// Renamed from last_import_hash to jsonl_content_hash (bd-39o) - more accurate name
+	// Build metadata keys with optional suffix for per-repo tracking
+	// Renamed from last_import_hash to jsonl_content_hash - more accurate name
 	// since this hash is updated on both import AND export
 	hashKey := "jsonl_content_hash"
 	oldHashKey := "last_import_hash" // Migration: check old key if new key missing
@@ -115,7 +115,7 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 		oldHashKey += ":" + keySuffix
 	}
 
-	// Always compute content hash (bd-v0y fix)
+	// Always compute content hash
 	// Previous mtime-based fast-path was unsafe: git operations (pull, checkout, rebase)
 	// can change file content without updating mtime, causing false negatives.
 	// Hash computation is fast enough for sync operations (~10-50ms even for large DBs).
@@ -128,7 +128,7 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 	// Get content hash from metadata (try new key first, fall back to old for migration)
 	lastHash, err := store.GetMetadata(ctx, hashKey)
 	if err != nil || lastHash == "" {
-		// Try old key for migration (bd-39o)
+		// Try old key for migration
 		lastHash, err = store.GetMetadata(ctx, oldHashKey)
 		if err != nil || lastHash == "" {
 			// No previous hash - this is the first run or metadata is missing
@@ -145,8 +145,8 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 // Returns error if critical issues found that would cause data loss.
 func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath string) error {
 	// Check if JSONL content has changed since last import - if so, must import first
-	// Uses content-based detection (bd-xwo fix) instead of mtime-based to avoid false positives from git operations
-	// Use getRepoKeyForPath to get stable repo identifier for multi-repo support (bd-ar2.10, bd-ar2.11)
+	// Uses content-based detection instead of mtime-based to avoid false positives from git operations
+	// Use getRepoKeyForPath to get stable repo identifier for multi-repo support
 	repoKey := getRepoKeyForPath(jsonlPath)
 	if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
 		return fmt.Errorf("refusing to export: JSONL content has changed since last import (import first to avoid data loss)")
@@ -180,7 +180,7 @@ func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath str
 		return fmt.Errorf("refusing to export empty DB over %d issues in JSONL (would cause data loss)", jsonlCount)
 	}
 
-	// Note: The main bd-53c protection is the reverse ZFC check in sync.go
+	// Note: The main protection is the reverse ZFC check in sync.go
 	// which runs BEFORE this validation. Here we only block empty DB.
 	// This allows legitimate deletions while sync.go catches stale DBs.
 

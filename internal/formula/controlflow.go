@@ -1,6 +1,6 @@
 // Package formula provides control flow operators for step transformation.
 //
-// Control flow operators (gt-8tmz.4) enable:
+// Control flow operators enable:
 //   - loop: Repeat a body of steps (fixed count or conditional)
 //   - branch: Fork-join parallel execution patterns
 //   - gate: Conditional waits before steps proceed
@@ -97,7 +97,7 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 		}
 	}
 
-	// Validate range syntax if present (gt-8tmz.27)
+	// Validate range syntax if present
 	if loop.Range != "" {
 		if err := ValidateRange(loop.Range); err != nil {
 			return fmt.Errorf("loop %q: invalid range %q: %w", stepID, loop.Range, err)
@@ -127,7 +127,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 			result = append(result, iterSteps...)
 		}
 
-		// Recursively expand any nested loops FIRST (gt-zn35j)
+		// Recursively expand any nested loops FIRST
 		var err error
 		result, err = ApplyLoops(result)
 		if err != nil {
@@ -140,7 +140,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 			result = chainExpandedIterations(result, step.ID, step.Loop.Count)
 		}
 	} else if step.Loop.Range != "" {
-		// Range loop (gt-8tmz.27): expand body for each value in the computed range
+		// Range loop: expand body for each value in the computed range
 		rangeSpec, err := ParseRange(step.Loop.Range, vars)
 		if err != nil {
 			return nil, fmt.Errorf("loop %q: %w", step.ID, err)
@@ -169,7 +169,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 			result = append(result, iterSteps...)
 		}
 
-		// Recursively expand any nested loops FIRST (gt-zn35j)
+		// Recursively expand any nested loops FIRST
 		result, err = ApplyLoops(result)
 		if err != nil {
 			return nil, err
@@ -199,7 +199,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 			firstStep.Labels = append(firstStep.Labels, fmt.Sprintf("loop:%s", string(loopJSON)))
 		}
 
-		// Recursively expand any nested loops (gt-zn35j)
+		// Recursively expand any nested loops
 		result, err = ApplyLoops(iterSteps)
 		if err != nil {
 			return nil, err
@@ -211,7 +211,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 
 // expandLoopIteration expands a single iteration of a loop.
 // The iteration index is used to generate unique step IDs.
-// The iterVars map contains loop variable bindings for this iteration (gt-8tmz.27).
+// The iterVars map contains loop variable bindings for this iteration.
 //
 //nolint:unparam // error return kept for API consistency with future error handling
 func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) ([]*Step, error) {
@@ -224,7 +224,7 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 		// Create unique ID for this iteration
 		iterID := fmt.Sprintf("%s.iter%d.%s", step.ID, iteration, bodyStep.ID)
 
-		// Substitute loop variables in title and description (gt-8tmz.27)
+		// Substitute loop variables in title and description
 		title := substituteLoopVars(bodyStep.Title, iterVars)
 		description := substituteLoopVars(bodyStep.Description, iterVars)
 
@@ -239,13 +239,13 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 			WaitsFor:       bodyStep.WaitsFor,
 			Expand:         bodyStep.Expand,
 			Gate:           bodyStep.Gate,
-			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops (gt-zn35j)
+			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops
 			OnComplete:     cloneOnComplete(bodyStep.OnComplete),
-			SourceFormula:  bodyStep.SourceFormula,                                       // Preserve source (gt-8tmz.18)
+			SourceFormula:  bodyStep.SourceFormula,                                       // Preserve source
 			SourceLocation: fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration), // Track iteration
 		}
 
-		// Clone ExpandVars if present, adding loop vars (gt-8tmz.27)
+		// Clone ExpandVars if present, adding loop vars
 		if len(bodyStep.ExpandVars) > 0 || len(iterVars) > 0 {
 			clone.ExpandVars = make(map[string]string)
 			for k, v := range bodyStep.ExpandVars {
@@ -369,7 +369,7 @@ func chainLoopIterations(steps []*Step, body []*Step, count int) []*Step {
 	return steps
 }
 
-// chainExpandedIterations chains iterations AFTER nested loop expansion (gt-zn35j).
+// chainExpandedIterations chains iterations AFTER nested loop expansion.
 // Unlike chainLoopIterations, this handles variable step counts per iteration
 // by finding iteration boundaries via ID prefix matching.
 func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
@@ -421,7 +421,7 @@ func ApplyBranches(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 		return steps, nil
 	}
 
-	// Clone steps to avoid mutating input (gt-v1pcg)
+	// Clone steps to avoid mutating input
 	cloned := cloneStepsRecursive(steps)
 	stepMap := buildStepMap(cloned)
 
@@ -493,7 +493,7 @@ func ApplyGates(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 		return steps, nil
 	}
 
-	// Clone steps to avoid mutating input (gt-v1pcg)
+	// Clone steps to avoid mutating input
 	cloned := cloneStepsRecursive(steps)
 	stepMap := buildStepMap(cloned)
 
@@ -558,7 +558,7 @@ func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}
 
-	// Build stepMap once for branches and gates (gt-gpgdv optimization)
+	// Build stepMap once for branches and gates
 	// No need to clone here since ApplyLoops already returned a new slice
 	stepMap := buildStepMap(steps)
 
@@ -589,7 +589,7 @@ func cloneStepDeep(s *Step) *Step {
 	return clone
 }
 
-// cloneStepsRecursive creates a deep copy of a slice of steps (gt-v1pcg).
+// cloneStepsRecursive creates a deep copy of a slice of steps.
 func cloneStepsRecursive(steps []*Step) []*Step {
 	result := make([]*Step, len(steps))
 	for i, step := range steps {
@@ -598,7 +598,7 @@ func cloneStepsRecursive(steps []*Step) []*Step {
 	return result
 }
 
-// cloneLoopSpec creates a deep copy of a LoopSpec (gt-zn35j).
+// cloneLoopSpec creates a deep copy of a LoopSpec.
 func cloneLoopSpec(loop *LoopSpec) *LoopSpec {
 	if loop == nil {
 		return nil
@@ -607,8 +607,8 @@ func cloneLoopSpec(loop *LoopSpec) *LoopSpec {
 		Count: loop.Count,
 		Until: loop.Until,
 		Max:   loop.Max,
-		Range: loop.Range, // gt-8tmz.27
-		Var:   loop.Var,   // gt-8tmz.27
+		Range: loop.Range,
+		Var:   loop.Var,
 	}
 	if len(loop.Body) > 0 {
 		clone.Body = make([]*Step, len(loop.Body))

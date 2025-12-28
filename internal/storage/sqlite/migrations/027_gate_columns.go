@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// MigrateGateColumns adds gate-related columns to the issues table for async coordination (bd-udsi).
+// MigrateGateColumns adds gate-related columns to the issues table for async coordination.
 // Gate fields enable agents to wait on external conditions (CI completion, human approval, etc.)
 func MigrateGateColumns(db *sql.DB) error {
 	columns := []struct {

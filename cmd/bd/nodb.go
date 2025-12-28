@@ -217,7 +217,7 @@ func writeIssuesToJSONL(memStore *memory.MemoryStorage, beadsDir string) error {
 	// Get all issues from memory storage
 	issues := memStore.GetAllIssues()
 
-	// Filter out wisps - they should never be exported to JSONL (bd-9avq)
+	// Filter out wisps - they should never be exported to JSONL
 	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 	filtered := make([]*types.Issue, 0, len(issues))
 	for _, issue := range issues {

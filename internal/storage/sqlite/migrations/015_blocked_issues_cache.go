@@ -7,7 +7,7 @@ import (
 
 // MigrateBlockedIssuesCache creates the blocked_issues_cache table for performance optimization
 // This cache materializes the recursive CTE computation from GetReadyWork to avoid
-// expensive recursive queries on every call (bd-5qim)
+// expensive recursive queries on every call
 func MigrateBlockedIssuesCache(db *sql.DB) error {
 	// Check if table already exists
 	var tableName string

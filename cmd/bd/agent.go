@@ -14,7 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// Valid agent states for state command (bd-uxlb)
+// Valid agent states for state command
 var validAgentStates = map[string]bool{
 	"idle":     true, // Agent is waiting for work
 	"spawning": true, // Agent is starting up

@@ -21,7 +21,7 @@ const DefaultCleanupAgeDays = 30
 // CheckStaleClosedIssues detects closed issues that could be cleaned up.
 // This consolidates the cleanup command into doctor checks.
 func CheckStaleClosedIssues(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check metadata.json first for custom database name
@@ -100,7 +100,7 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 
 // CheckExpiredTombstones detects tombstones that have exceeded their TTL.
 func CheckExpiredTombstones(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
@@ -160,7 +160,7 @@ func CheckExpiredTombstones(path string) DoctorCheck {
 	}
 }
 
-// CheckStaleMolecules detects complete-but-unclosed molecules (bd-6a5z).
+// CheckStaleMolecules detects complete-but-unclosed molecules.
 // A molecule is stale if all children are closed but the root is still open.
 func CheckStaleMolecules(path string) DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
@@ -243,7 +243,7 @@ func CheckStaleMolecules(path string) DoctorCheck {
 
 // CheckCompactionCandidates detects issues eligible for compaction.
 func CheckCompactionCandidates(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check metadata.json first for custom database name

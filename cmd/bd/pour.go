@@ -172,7 +172,7 @@ func runPour(cmd *cobra.Command, args []string) {
 		})
 	}
 
-	// Apply variable defaults from formula (gt-4v1eo)
+	// Apply variable defaults from formula
 	vars = applyVariableDefaults(vars, subgraph)
 
 	// Check for missing required variables (those without defaults)
@@ -225,7 +225,7 @@ func runPour(cmd *cobra.Command, args []string) {
 	}
 
 	// Spawn as persistent mol (ephemeral=false)
-	// bd-hobo: Use "mol" prefix for distinct visual recognition
+	// Use "mol" prefix for distinct visual recognition
 	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false, "mol")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error pouring proto: %v\n", err)

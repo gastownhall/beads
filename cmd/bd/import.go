@@ -65,7 +65,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		// NOTE: We only close the daemon client connection here, not stop the daemon
 		// process. This is because import may be called as a subprocess from sync,
 		// and stopping the daemon would break the parent sync's connection.
-		// The daemon-stale-DB issue (bd-sync-corruption) is addressed separately by
+		// The daemon-stale-DB issue is addressed separately by
 		// having sync use --no-daemon mode for consistency.
 		if daemonClient != nil {
 			debug.Logf("Debug: import command forcing direct mode (closes daemon connection)\n")
@@ -75,7 +75,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			var err error
 			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
-				// Check for fresh clone scenario (bd-dmb)
+				// Check for fresh clone scenario
 				beadsDir := filepath.Dir(dbPath)
 				if handleFreshCloneError(err, beadsDir) {
 					os.Exit(1)
@@ -218,7 +218,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		}
 
 		// Check if database needs initialization (prefix not set)
-		// Detect prefix from the imported issues (bd-8an fix)
+		// Detect prefix from the imported issues
 		initCtx := rootCtx
 		configuredPrefix, err2 := store.GetConfig(initCtx, "issue_prefix")
 		if err2 != nil || strings.TrimSpace(configuredPrefix) == "" {
@@ -263,7 +263,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		}
 
 		// If --protect-left-snapshot is set, read the left snapshot and build ID set
-		// This protects locally exported issues from git-history-backfill (bd-sync-deletion fix)
+		// This protects locally exported issues from git-history-backfill
 		if protectLeftSnapshot && input != "" {
 			beadsDir := filepath.Dir(input)
 			leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
@@ -378,11 +378,11 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			flushToJSONLWithState(flushState{forceDirty: true})
 		}
 
-		// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)
+		// Update jsonl_content_hash metadata to enable content-based staleness detection
 		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
 		// ALWAYS update metadata after successful import, even if no changes were made (fixes staleness check)
 		// This ensures that running `bd import` marks the database as fresh for staleness detection
-		// Renamed from last_import_hash (bd-39o) - more accurate since updated on both import AND export
+		// Renamed from last_import_hash - more accurate since updated on both import AND export
 		if input != "" {
 			if currentHash, err := computeJSONLHash(input); err == nil {
 				if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
@@ -391,7 +391,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 					// is unavailable. This ensures import operations always succeed even if metadata storage fails.
 					debug.Logf("Warning: failed to update jsonl_content_hash: %v", err)
 				}
-				// Also update jsonl_file_hash to prevent integrity check warnings (bd-0vtq)
+				// Also update jsonl_file_hash to prevent integrity check warnings
 				// validateJSONLIntegrity() compares this hash against actual JSONL content.
 				// Without this, sync that imports but skips re-export leaves jsonl_file_hash stale,
 				// causing spurious "hash mismatch" warnings on subsequent operations.
@@ -788,7 +788,7 @@ func init() {
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
-	importCmd.Flags().Bool("protect-left-snapshot", false, "Protect issues in left snapshot from git-history-backfill (bd-sync-deletion fix)")
+	importCmd.Flags().Bool("protect-left-snapshot", false, "Protect issues in left snapshot from git-history-backfill")
 	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (passed by bd sync)")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)

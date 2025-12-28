@@ -237,7 +237,7 @@ func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage
 		return fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
-	// CRITICAL (bd-166): Set issue_prefix from first imported issue if missing
+	// CRITICAL: Set issue_prefix from first imported issue if missing
 	// This prevents derivePrefixFromPath fallback which caused duplicate issues
 	if len(issues) > 0 {
 		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")

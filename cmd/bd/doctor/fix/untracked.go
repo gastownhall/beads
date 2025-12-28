@@ -12,7 +12,7 @@ import (
 
 // UntrackedJSONL stages and commits untracked .beads/*.jsonl files.
 // This fixes the issue where bd cleanup -f creates deletions.jsonl but
-// leaves it untracked. (bd-pbj)
+// leaves it untracked.
 func UntrackedJSONL(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
@@ -72,7 +72,7 @@ func UntrackedJSONL(path string) error {
 
 	// Commit only the JSONL files we staged (using --only to preserve other staged changes)
 	// Use config-based author and signing options (GH#600)
-	commitMsg := "chore(beads): commit untracked JSONL files\n\nAuto-committed by bd doctor --fix (bd-pbj)"
+	commitMsg := "chore(beads): commit untracked JSONL files\n\nAuto-committed by bd doctor --fix"
 	commitArgs := []string{"commit", "--only"}
 
 	// Add --author if configured

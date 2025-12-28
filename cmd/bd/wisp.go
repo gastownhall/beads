@@ -160,12 +160,12 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Try to load as formula first (ephemeral proto - gt-4v1eo)
+	// Try to load as formula first (ephemeral proto)
 	// If that fails, fall back to loading from DB (legacy proto beads)
 	var subgraph *TemplateSubgraph
 	var protoID string
 
-	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
+	// Try to cook formula inline (ephemeral protos)
 	// This works for any valid formula name, not just "mol-" prefixed ones
 	sg, err := resolveAndCookFormula(args[0], nil)
 	if err == nil {
@@ -228,7 +228,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Apply variable defaults from formula (gt-4v1eo)
+	// Apply variable defaults from formula
 	vars = applyVariableDefaults(vars, subgraph)
 
 	// Check for missing required variables (those without defaults)
@@ -256,7 +256,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 	}
 
 	// Spawn as ephemeral in main database (Ephemeral=true, skips JSONL export)
-	// bd-hobo: Use "eph" prefix for distinct visual recognition
+	// Use "eph" prefix for distinct visual recognition
 	result, err := spawnMolecule(ctx, store, subgraph, vars, "", actor, true, "eph")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating wisp: %v\n", err)

@@ -6,7 +6,7 @@ import (
 )
 
 // MigrateAgentFields adds agent-specific fields to the issues table.
-// These fields support the agent-as-bead pattern (gt-v2gkv, gt-h5sza):
+// These fields support the agent-as-bead pattern:
 //   - hook_bead: current work attached to agent's hook (0..1 cardinality)
 //   - role_bead: reference to role definition bead
 //   - agent_state: agent-reported state (idle|running|stuck|stopped)

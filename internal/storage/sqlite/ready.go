@@ -13,16 +13,16 @@ import (
 
 // GetReadyWork returns issues with no open blockers
 // By default, shows both 'open' and 'in_progress' issues so epics/tasks
-// ready to close are visible (bd-165)
-// Excludes pinned issues which are persistent anchors, not actionable work (bd-92u)
+// ready to close are visible.
+// Excludes pinned issues which are persistent anchors, not actionable work.
 func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	whereClauses := []string{
-		"i.pinned = 0",                           // Exclude pinned issues (bd-92u)
-		"(i.ephemeral = 0 OR i.ephemeral IS NULL)", // Exclude wisps (hq-t15s)
+		"i.pinned = 0",                             // Exclude pinned issues
+		"(i.ephemeral = 0 OR i.ephemeral IS NULL)", // Exclude wisps
 	}
 	args := []interface{}{}
 
-	// Default to open OR in_progress if not specified (bd-165)
+	// Default to open OR in_progress if not specified
 	if filter.Status == "" {
 		whereClauses = append(whereClauses, "i.status IN ('open', 'in_progress')")
 	} else {
@@ -30,12 +30,12 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		args = append(args, filter.Status)
 	}
 
-	// Filter by issue type (gt-ktf3: MQ integration)
+	// Filter by issue type for MQ integration
 	if filter.Type != "" {
 		whereClauses = append(whereClauses, "i.issue_type = ?")
 		args = append(args, filter.Type)
 	} else {
-		// Exclude workflow types from ready work by default (gt-7xtn)
+		// Exclude workflow types from ready work by default
 		// These are internal workflow items, not work for polecats to claim:
 		// - merge-request: processed by Refinery
 		// - gate: async wait conditions
@@ -123,7 +123,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	}
 	orderBySQL := buildOrderByClause(sortPolicy)
 
-	// Use blocked_issues_cache for performance (bd-5qim)
+	// Use blocked_issues_cache for performance
 	// This optimization replaces the recursive CTE that computed blocked issues on every query.
 	// Performance improvement: 752ms → 29ms on 10K issues (25x speedup).
 	//
@@ -162,7 +162,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		return nil, err
 	}
 
-	// Filter out issues with unsatisfied external dependencies (bd-zmmy)
+	// Filter out issues with unsatisfied external dependencies
 	// Only check if external_projects are configured
 	if len(config.GetExternalProjects()) > 0 && len(issues) > 0 {
 		issues, err = s.filterByExternalDeps(ctx, issues)
@@ -324,14 +324,14 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		var sender sql.NullString
 		var ephemeral sql.NullInt64
-		// Pinned field (bd-7h5)
+		// Pinned field
 		var pinned sql.NullInt64
-		// Template field (beads-1ra)
+		// Template field
 		var isTemplate sql.NullInt64
-		// Gate fields (bd-udsi)
+		// Gate fields
 		var awaitType sql.NullString
 		var awaitID sql.NullString
 		var timeoutNs sql.NullInt64
@@ -395,22 +395,22 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
 		}
-		// Messaging fields (bd-kwro)
+		// Messaging fields
 		if sender.Valid {
 			issue.Sender = sender.String
 		}
 		if ephemeral.Valid && ephemeral.Int64 != 0 {
 			issue.Ephemeral = true
 		}
-		// Pinned field (bd-7h5)
+		// Pinned field
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
 		}
-		// Template field (beads-1ra)
+		// Template field
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
 		}
-		// Gate fields (bd-udsi)
+		// Gate fields
 		if awaitType.Valid {
 			issue.AwaitType = awaitType.String
 		}
@@ -431,18 +431,18 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 }
 
 // GetBlockedIssues returns issues that are blocked by dependencies or have status=blocked
-// Note: Pinned issues are excluded from the output (beads-ei4)
-// Note: Includes external: references in blocked_by list (bd-om4a)
+// Note: Pinned issues are excluded from the output.
+// Note: Includes external: references in blocked_by list.
 func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	// Use UNION to combine:
 	// 1. Issues with open/in_progress/blocked status that have dependency blockers
 	// 2. Issues with status=blocked (even if they have no dependency blockers)
 	// Use GROUP_CONCAT to get all blocker IDs in a single query (no N+1)
-	// Exclude pinned issues (beads-ei4)
+	// Exclude pinned issues.
 	//
 	// For blocked_by_count and blocker_ids:
 	// - Count local blockers (open issues) + external refs (external:*)
-	// - External refs are always considered "open" until resolved (bd-om4a)
+	// - External refs are always considered "open" until resolved
 
 	// Build additional WHERE clauses for filtering
 	var filterClauses []string
@@ -572,7 +572,7 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 		blocked = append(blocked, &issue)
 	}
 
-	// Filter out satisfied external dependencies from BlockedBy lists (bd-396j)
+	// Filter out satisfied external dependencies from BlockedBy lists
 	// Only check if external_projects are configured
 	if len(config.GetExternalProjects()) > 0 && len(blocked) > 0 {
 		blocked = filterBlockedByExternalDeps(ctx, blocked)

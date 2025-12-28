@@ -98,7 +98,7 @@ Examples:
 				resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
 				resp, err = daemonClient.ResolveID(resolveArgs)
 				if err != nil {
-					// Resolution failed - try auto-converting to external ref (bd-lfiu)
+					// Resolution failed - try auto-converting to external ref
 					beadsDir := getBeadsDir()
 					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
 						toID = extRef
@@ -127,7 +127,7 @@ Examples:
 			} else {
 				toID, err = utils.ResolvePartialID(ctx, store, args[1])
 				if err != nil {
-					// Resolution failed - try auto-converting to external ref (bd-lfiu)
+					// Resolution failed - try auto-converting to external ref
 					beadsDir := getBeadsDir()
 					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
 						toID = extRef
@@ -139,7 +139,7 @@ Examples:
 			}
 		}
 
-		// Check for child→parent dependency anti-pattern (bd-nim5)
+		// Check for child→parent dependency anti-pattern
 		// This creates a deadlock: child can't start (parent open), parent can't close (children not done)
 		if isChildOf(fromID, toID) {
 			FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
@@ -656,7 +656,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 
 // formatTreeNode formats a single tree node with status, ready indicator, etc.
 func formatTreeNode(node *types.TreeNode) string {
-	// Handle external dependencies specially (bd-vks2)
+	// Handle external dependencies specially
 	if IsExternalRef(node.ID) {
 		// External deps use their title directly which includes the status indicator
 		var idStr string

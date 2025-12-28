@@ -60,7 +60,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 		}
 	}
 
-	// Filter out wisps - they should never be exported to JSONL (bd-687g)
+	// Filter out wisps - they should never be exported to JSONL
 	// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 	// This prevents "zombie" issues that resurrect after mol squash deletes them.
 	filteredIssues := make([]*types.Issue, 0, len(issues))
@@ -150,9 +150,8 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	// Clear auto-flush state
 	clearAutoFlushState()
 
-	// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)
+	// Update jsonl_content_hash metadata to enable content-based staleness detection
 	// After export, database and JSONL are in sync, so update hash to prevent unnecessary auto-import
-	// Renamed from last_import_hash (bd-39o) - more accurate since updated on both import AND export
 	if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
 		if err := store.SetMetadata(ctx, "jsonl_content_hash", currentHash); err != nil {
 			// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
@@ -166,7 +165,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 			// Non-fatal warning (see above comment about graceful degradation)
 			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time: %v\n", err)
 		}
-		// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
+		// Note: mtime tracking removed because git doesn't preserve mtime
 	}
 
 	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)

@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// Valid slot names for agent beads (gt-h5sza)
+// Valid slot names for agent beads
 var validSlots = map[string]bool{
 	"hook": true, // hook_bead field - current work (0..1)
 	"role": true, // role_bead field - role definition (required)

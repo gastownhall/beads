@@ -207,7 +207,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	}
 
 	// Resolve both operands - can be issue IDs or formula names
-	// Formula names are cooked inline to in-memory subgraphs (gt-4v1eo)
+	// Formula names are cooked inline to in-memory subgraphs
 	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, store, args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -352,7 +352,7 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 
 		// For sequential/conditional bonding, add blocking dependency: B blocks on A
 		// Sequential: B runs after A completes (any outcome)
-		// Conditional: B runs only if A fails (bd-kzda)
+		// Conditional: B runs only if A fails
 		if bondType == types.BondTypeSequential || bondType == types.BondTypeConditional {
 			depType := types.DepBlocks
 			if bondType == types.BondTypeConditional {
@@ -446,7 +446,7 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgr
 	err = s.RunInTransaction(ctx, func(tx storage.Transaction) error {
 		// Add dependency from spawned root to molecule
 		// Sequential: use blocks (B runs after A completes)
-		// Conditional: use conditional-blocks (B runs only if A fails) (bd-kzda)
+		// Conditional: use conditional-blocks (B runs only if A fails)
 		// Parallel: use parent-child (organizational, no blocking)
 		// Note: Schema only allows one dependency per (issue_id, depends_on_id) pair
 		var depType types.DependencyType
@@ -492,7 +492,7 @@ func bondMolMol(ctx context.Context, s storage.Storage, molA, molB *types.Issue,
 	err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
 		// Add dependency: B links to A
 		// Sequential: use blocks (B runs after A completes)
-		// Conditional: use conditional-blocks (B runs only if A fails) (bd-kzda)
+		// Conditional: use conditional-blocks (B runs only if A fails)
 		// Parallel: use parent-child (organizational, no blocking)
 		// Note: Schema only allows one dependency per (issue_id, depends_on_id) pair
 		var depType types.DependencyType
@@ -598,7 +598,7 @@ func resolveOrCookToSubgraph(ctx context.Context, s storage.Storage, operand str
 		return nil, false, fmt.Errorf("'%s' not found (not an issue ID or formula name)", operand)
 	}
 
-	// Try to cook formula inline to in-memory subgraph (gt-4v1eo)
+	// Try to cook formula inline to in-memory subgraph
 	subgraph, err := resolveAndCookFormula(operand, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)

@@ -20,7 +20,7 @@ type CleanupEmptyResponse struct {
 
 // Hard delete mode: bypass tombstone TTL safety, use --older-than days directly
 
-// showCleanupDeprecationHint shows a hint about bd doctor --fix (bd-bqcc)
+// showCleanupDeprecationHint shows a hint about bd doctor --fix
 func showCleanupDeprecationHint() {
 	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor --fix' can now cleanup stale issues and prune tombstones"))
 }
@@ -217,7 +217,7 @@ SEE ALSO:
 		// Note: cleanup always creates tombstones first; --hard prunes them after
 		deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, "cleanup")
 
-		// Also prune expired tombstones (bd-08ea)
+		// Also prune expired tombstones
 		// This runs after closed issues are converted to tombstones, cleaning up old ones
 		// In --hard mode, customTTL overrides the default 30-day TTL
 		if dryRun {

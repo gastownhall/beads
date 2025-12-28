@@ -18,7 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// Gate commands - async coordination primitives for agent workflows (bd-udsi)
+// Gate commands - async coordination primitives for agent workflows
 //
 // Gates are wisp issues that block until external conditions are met.
 // They enable agents to wait on:

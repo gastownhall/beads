@@ -29,7 +29,7 @@ type FileWatcher struct {
 	lastHeadModTime time.Time
 	lastHeadExists bool
 	cancel         context.CancelFunc
-	wg             sync.WaitGroup // Track goroutines for graceful shutdown (bd-jo38)
+	wg             sync.WaitGroup // Track goroutines for graceful shutdown
 	// Log deduplication: track last log times to avoid duplicate messages
 	lastFileLogTime   time.Time
 	lastGitRefLogTime time.Time
@@ -350,7 +350,7 @@ func (fw *FileWatcher) Close() error {
 	if fw.cancel != nil {
 		fw.cancel()
 	}
-	// Wait for goroutines to finish before cleanup (bd-jo38)
+	// Wait for goroutines to finish before cleanup
 	fw.wg.Wait()
 	fw.debouncer.Cancel()
 	if fw.watcher != nil {

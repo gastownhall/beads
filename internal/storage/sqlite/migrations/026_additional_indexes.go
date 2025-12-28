@@ -6,14 +6,14 @@ import (
 )
 
 // MigrateAdditionalIndexes adds performance optimization indexes identified
-// during schema review (bd-h0we).
+// during schema review.
 //
 // Indexes added:
-//   - idx_issues_updated_at: For GetStaleIssues date filtering (bd-bha9)
-//   - idx_issues_status_priority: For common list query patterns (bd-a9y3)
-//   - idx_labels_label_issue: Covering index for label lookups (bd-jke6)
-//   - idx_dependencies_issue_type: For blocked issues queries (bd-8x3w)
-//   - idx_events_issue_type: For close reason queries (bd-lk39)
+//   - idx_issues_updated_at: For GetStaleIssues date filtering
+//   - idx_issues_status_priority: For common list query patterns
+//   - idx_labels_label_issue: Covering index for label lookups
+//   - idx_dependencies_issue_type: For blocked issues queries
+//   - idx_events_issue_type: For close reason queries
 func MigrateAdditionalIndexes(db *sql.DB) error {
 	indexes := []struct {
 		name string

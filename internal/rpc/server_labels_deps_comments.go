@@ -32,7 +32,7 @@ func (s *Server) handleDepAdd(req *Request) Response {
 		}
 	}
 
-	// Check for child→parent dependency anti-pattern (bd-nim5)
+	// Check for child->parent dependency anti-pattern
 	// This creates a deadlock: child can't start (parent open), parent can't close (children not done)
 	if isChildOf(depArgs.FromID, depArgs.ToID) {
 		return Response{

@@ -199,7 +199,6 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 
 // CheckLegacyJSONLConfig detects if metadata.json is configured to use the legacy
 // beads.jsonl filename and recommends migrating to the canonical issues.jsonl.
-// bd-6xd: issues.jsonl is the canonical filename
 func CheckLegacyJSONLConfig(repoPath string) DoctorCheck {
 	beadsDir := filepath.Join(repoPath, ".beads")
 
@@ -235,7 +234,7 @@ func CheckLegacyJSONLConfig(repoPath string) DoctorCheck {
 				Name:    "JSONL Config",
 				Status:  "warning",
 				Message: "Using legacy beads.jsonl filename",
-				Detail: "The canonical filename is now issues.jsonl (bd-6xd).\n" +
+				Detail: "The canonical filename is now issues.jsonl.\n" +
 					"  Legacy beads.jsonl is still supported but should be migrated.",
 				Fix: "Run 'bd doctor --fix' to auto-migrate, or manually:\n" +
 					"  1. git mv .beads/beads.jsonl .beads/issues.jsonl\n" +
@@ -367,9 +366,8 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 
 // CheckFreshClone detects if this is a fresh clone that needs 'bd init'.
 // A fresh clone has JSONL with issues but no database file.
-// bd-4ew: Recommend 'bd init --prefix <detected-prefix>' for fresh clones.
 func CheckFreshClone(repoPath string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
 
 	// Check if .beads/ exists

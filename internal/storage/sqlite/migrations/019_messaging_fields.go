@@ -6,7 +6,7 @@ import (
 )
 
 // MigrateMessagingFields adds messaging and graph link support columns to the issues table.
-// These columns support inter-agent communication (bd-kwro):
+// These columns support inter-agent communication:
 // - sender: who sent this message
 // - ephemeral: can be bulk-deleted when closed
 // - replies_to: issue ID for conversation threading

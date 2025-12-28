@@ -29,7 +29,7 @@ var showCmd = &cobra.Command{
 		showThread, _ := cmd.Flags().GetBool("thread")
 		ctx := rootCtx
 
-		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Check database freshness before reading
 		// Skip check when using daemon (daemon auto-imports on staleness)
 		if daemonClient == nil {
 			if err := ensureDatabaseFresh(ctx); err != nil {
@@ -121,7 +121,7 @@ var showCmd = &cobra.Command{
 						details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
 					}
 					details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
-					// Compute parent from dependencies (bd-qket)
+					// Compute parent from dependencies
 					for _, dep := range details.Dependencies {
 						if dep.DependencyType == types.DepParentChild {
 							details.Parent = &dep.ID
@@ -166,7 +166,7 @@ var showCmd = &cobra.Command{
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
-						// Compute parent from dependencies (bd-qket)
+						// Compute parent from dependencies
 						for _, dep := range details.Dependencies {
 							if dep.DependencyType == types.DepParentChild {
 								details.Parent = &dep.ID
@@ -397,7 +397,7 @@ var showCmd = &cobra.Command{
 				}
 
 				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID)
-				// Compute parent from dependencies (bd-qket)
+				// Compute parent from dependencies
 				for _, dep := range details.Dependencies {
 					if dep.DependencyType == types.DepParentChild {
 						details.Parent = &dep.ID
@@ -766,7 +766,7 @@ var updateCmd = &cobra.Command{
 
 				var issue types.Issue
 				if err := json.Unmarshal(resp.Data, &issue); err == nil {
-					// Run update hook (bd-kwro.8)
+					// Run update hook
 					if hookRunner != nil {
 						hookRunner.Run(hooks.EventUpdate, &issue)
 					}
@@ -788,7 +788,7 @@ var updateCmd = &cobra.Command{
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
-			// Check if issue is a template (beads-1ra): templates are read-only
+			// Check if issue is a template: templates are read-only
 			issue, err := store.GetIssue(ctx, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", id, err)
@@ -831,7 +831,7 @@ var updateCmd = &cobra.Command{
 				}
 			}
 
-			// Handle parent reparenting (bd-cj2e)
+			// Handle parent reparenting
 			if newParent, ok := updates["parent"].(string); ok {
 				// Validate new parent exists (unless empty string to remove parent)
 				if newParent != "" {
@@ -875,7 +875,7 @@ var updateCmd = &cobra.Command{
 				}
 			}
 
-			// Run update hook (bd-kwro.8)
+			// Run update hook
 			updatedIssue, _ := store.GetIssue(ctx, id)
 			if updatedIssue != nil && hookRunner != nil {
 				hookRunner.Run(hooks.EventUpdate, updatedIssue)
@@ -1169,12 +1169,12 @@ var closeCmd = &cobra.Command{
 					continue
 				}
 
-				// Handle response based on whether SuggestNext was requested (GH#679)
+				// Handle response based on whether SuggestNext was requested
 				if suggestNext {
 					var result rpc.CloseResult
 					if err := json.Unmarshal(resp.Data, &result); err == nil {
 						if result.Closed != nil {
-							// Run close hook (bd-kwro.8)
+							// Run close hook
 							if hookRunner != nil {
 								hookRunner.Run(hooks.EventClose, result.Closed)
 							}
@@ -1184,7 +1184,7 @@ var closeCmd = &cobra.Command{
 						}
 						if !jsonOutput {
 							fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
-							// Display newly unblocked issues (GH#679)
+							// Display newly unblocked issues
 							if len(result.Unblocked) > 0 {
 								fmt.Printf("\nNewly unblocked:\n")
 								for _, issue := range result.Unblocked {
@@ -1196,7 +1196,7 @@ var closeCmd = &cobra.Command{
 				} else {
 					var issue types.Issue
 					if err := json.Unmarshal(resp.Data, &issue); err == nil {
-						// Run close hook (bd-kwro.8)
+						// Run close hook
 						if hookRunner != nil {
 							hookRunner.Run(hooks.EventClose, &issue)
 						}
@@ -1210,7 +1210,7 @@ var closeCmd = &cobra.Command{
 				}
 			}
 
-			// Handle --continue flag in daemon mode (bd-ieyy)
+			// Handle --continue flag in daemon mode
 			// Note: --continue requires direct database access to walk parent-child chain
 			if continueFlag && len(closedIssues) > 0 {
 				fmt.Fprintf(os.Stderr, "\nNote: --continue requires direct database access\n")
@@ -1242,7 +1242,7 @@ var closeCmd = &cobra.Command{
 
 			closedCount++
 
-			// Run close hook (bd-kwro.8)
+			// Run close hook
 			closedIssue, _ := store.GetIssue(ctx, id)
 			if closedIssue != nil && hookRunner != nil {
 				hookRunner.Run(hooks.EventClose, closedIssue)
@@ -1257,7 +1257,7 @@ var closeCmd = &cobra.Command{
 			}
 		}
 
-		// Handle --suggest-next flag in direct mode (GH#679)
+		// Handle --suggest-next flag in direct mode
 		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
 			unblocked, err := store.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
@@ -1280,7 +1280,7 @@ var closeCmd = &cobra.Command{
 			markDirtyAndScheduleFlush()
 		}
 
-		// Handle --continue flag (bd-ieyy)
+		// Handle --continue flag
 		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
 			result, err := AdvanceToNextStep(ctx, store, resolvedIDs[0], autoClaim, actor)
@@ -1587,6 +1587,6 @@ func init() {
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
-	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing (GH#679)")
+	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
 	rootCmd.AddCommand(closeCmd)
 }

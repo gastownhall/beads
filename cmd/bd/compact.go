@@ -312,7 +312,7 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 		float64(savingBytes)/float64(originalSize)*100)
 	fmt.Printf("  Time: %v\n", elapsed)
 
-	// Prune expired tombstones (bd-okh)
+	// Prune expired tombstones
 	if tombstonePruneResult, err := pruneExpiredTombstones(0); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", err)
 	} else if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
@@ -444,7 +444,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 		fmt.Printf("  Saved: %d bytes (%.1f%%)\n", totalSaved, float64(totalSaved)/float64(totalOriginal)*100)
 	}
 
-	// Prune expired tombstones (bd-okh)
+	// Prune expired tombstones
 	if tombstonePruneResult, err := pruneExpiredTombstones(0); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", err)
 	} else if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
@@ -887,7 +887,7 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 
 	elapsed := time.Since(start)
 
-	// Prune expired tombstones from issues.jsonl (bd-okh)
+	// Prune expired tombstones from issues.jsonl
 	tombstonePruneResult, tombstoneErr := pruneExpiredTombstones(0)
 	if tombstoneErr != nil && !jsonOutput {
 		fmt.Fprintf(os.Stderr, "Warning: failed to prune expired tombstones: %v\n", tombstoneErr)
@@ -904,7 +904,7 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 			"reduction_pct":  reductionPct,
 			"elapsed_ms":     elapsed.Milliseconds(),
 		}
-		// Include tombstone pruning results (bd-okh)
+		// Include tombstone pruning results
 		if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
 			output["tombstones_pruned"] = map[string]interface{}{
 				"count":    tombstonePruneResult.PrunedCount,
@@ -919,7 +919,7 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	fmt.Printf("  %d → %d bytes (saved %d, %.1f%%)\n", originalSize, compactedSize, savingBytes, reductionPct)
 	fmt.Printf("  Time: %v\n", elapsed)
 
-	// Report tombstone pruning results (bd-okh)
+	// Report tombstone pruning results
 	if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
 		fmt.Printf("\nTombstones pruned: %d expired tombstones (older than %d days) removed\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
@@ -1032,7 +1032,7 @@ func pruneExpiredTombstones(customTTL time.Duration) (*TombstonePruneResult, err
 }
 
 // previewPruneTombstones checks what tombstones would be pruned without modifying files.
-// Used for dry-run mode in cleanup command (bd-08ea).
+// Used for dry-run mode in cleanup command.
 // If customTTL is > 0, it overrides the default TTL (bypasses MinTombstoneTTL safety).
 // If customTTL is 0, uses DefaultTombstoneTTL.
 func previewPruneTombstones(customTTL time.Duration) (*TombstonePruneResult, error) {
@@ -1090,7 +1090,7 @@ func previewPruneTombstones(customTTL time.Duration) (*TombstonePruneResult, err
 
 // runCompactPrune handles the --prune mode for standalone tombstone pruning.
 // This mode only prunes expired tombstones from issues.jsonl without doing
-// any semantic compaction. It's useful for reducing sync overhead (bd-c7y5).
+// any semantic compaction. It's useful for reducing sync overhead.
 func runCompactPrune() {
 	start := time.Now()
 

@@ -181,7 +181,7 @@ Examples:
 		labelsAny = util.NormalizeLabels(labelsAny)
 
 		// Build filter
-		// Tombstone export logic (bd-81x6):
+		// Tombstone export logic:
 		// - No status filter → include tombstones for sync propagation
 		// - --status=tombstone → include only tombstones (filter handles this)
 		// - --status=<other> → exclude tombstones (user wants specific status)
@@ -192,7 +192,7 @@ Examples:
 			// Only include tombstones if explicitly filtering for them
 			filter.IncludeTombstones = (status == types.StatusTombstone)
 		} else {
-			// No status filter: include tombstones for sync propagation (bd-dve)
+			// No status filter: include tombstones for sync propagation
 			filter.IncludeTombstones = true
 		}
 		if assignee != "" {
@@ -358,7 +358,7 @@ Examples:
 			}
 		}
 
-		// Filter out wisps - they should never be exported to JSONL (bd-687g)
+		// Filter out wisps - they should never be exported to JSONL
 		// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
 		filtered := make([]*types.Issue, 0, len(issues))
 		for _, issue := range issues {
@@ -458,7 +458,7 @@ Examples:
 			// This cancels any pending auto-flush timer and marks DB as clean
 			clearAutoFlushState()
 
-			// Store JSONL file hash for integrity validation (bd-160)
+			// Store JSONL file hash for integrity validation
 			// nolint:gosec // G304: finalPath is validated JSONL export path
 			jsonlData, err := os.ReadFile(finalPath)
 			if err == nil {

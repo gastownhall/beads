@@ -151,7 +151,7 @@ func resolveBranch() string {
 	}
 
 	// Fallback: try to get branch from git at runtime
-	// Use symbolic-ref to work in fresh repos without commits (bd-flil)
+	// Use symbolic-ref to work in fresh repos without commits
 	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
 	cmd.Dir = "."
 	if output, err := cmd.Output(); err == nil {

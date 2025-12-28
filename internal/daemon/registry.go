@@ -71,7 +71,7 @@ func (r *Registry) withFileLock(fn func() error) error {
 
 // readEntriesLocked reads all entries from the registry file.
 // Caller must hold the file lock.
-// bd-qn5: Handles missing, empty, or corrupted registry files gracefully.
+// Handles missing, empty, or corrupted registry files gracefully.
 func (r *Registry) readEntriesLocked() ([]RegistryEntry, error) {
 	data, err := os.ReadFile(r.path)
 	if err != nil {
@@ -81,7 +81,7 @@ func (r *Registry) readEntriesLocked() ([]RegistryEntry, error) {
 		return nil, fmt.Errorf("failed to read registry: %w", err)
 	}
 
-	// bd-qn5: Handle empty file or file with only whitespace/null bytes
+	// Handle empty file or file with only whitespace/null bytes
 	// This can happen if the file was created but never written to, or was corrupted
 	trimmed := make([]byte, 0, len(data))
 	for _, b := range data {
@@ -95,7 +95,7 @@ func (r *Registry) readEntriesLocked() ([]RegistryEntry, error) {
 
 	var entries []RegistryEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		// bd-qn5: If registry is corrupted, treat as empty rather than failing
+		// If registry is corrupted, treat as empty rather than failing
 		// A corrupted registry just means we'll need to rediscover daemons
 		return []RegistryEntry{}, nil
 	}

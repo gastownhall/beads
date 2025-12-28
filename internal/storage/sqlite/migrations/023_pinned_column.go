@@ -6,7 +6,7 @@ import (
 )
 
 // MigratePinnedColumn adds the pinned column to the issues table.
-// Pinned issues are persistent context markers that should not be treated as work items (bd-7h5).
+// Pinned issues are persistent context markers that should not be treated as work items.
 func MigratePinnedColumn(db *sql.DB) error {
 	// Check if column already exists
 	var columnExists bool

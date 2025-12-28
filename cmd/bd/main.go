@@ -83,10 +83,10 @@ var (
 	flushFailureCount = 0        // Consecutive flush failures
 	lastFlushError    error      // Last flush error for debugging
 
-	// Auto-flush manager (event-driven, fixes bd-52 race condition)
+	// Auto-flush manager (event-driven, fixes race condition)
 	flushManager *FlushManager
 
-	// Hook runner for extensibility (bd-kwro.8)
+	// Hook runner for extensibility
 	hookRunner *hooks.Runner
 
 	// skipFinalFlush is set by sync command when sync.branch mode completes successfully.
@@ -96,7 +96,7 @@ var (
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
 
-	// Version upgrade tracking (bd-loka)
+	// Version upgrade tracking
 	versionUpgradeDetected = false // Set to true if bd version changed since last run
 	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
 	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
@@ -474,7 +474,7 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
-		// Auto-detect sandboxed environment (bd-u3t: Phase 2 for GH #353)
+		// Auto-detect sandboxed environment (Phase 2 for GH #353)
 		// Only auto-enable if user hasn't explicitly set --sandbox or --no-daemon
 		if !cmd.Flags().Changed("sandbox") && !cmd.Flags().Changed("no-daemon") {
 			if isSandboxed() {
@@ -534,7 +534,7 @@ var rootCmd = &cobra.Command{
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {
-				// No database found - check if this is JSONL-only mode (bd-5kj)
+				// No database found - check if this is JSONL-only mode
 				beadsDir := beads.FindBeadsDir()
 				if beadsDir != "" {
 					jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
@@ -545,7 +545,7 @@ var rootCmd = &cobra.Command{
 						jsonlExists = true
 					}
 
-					// Use proper YAML parsing to detect no-db mode (bd-r6k2)
+					// Use proper YAML parsing to detect no-db mode
 					isNoDbMode := isNoDbModeConfigured(beadsDir)
 
 					// If JSONL-only mode is configured, auto-enable it
@@ -571,7 +571,7 @@ var rootCmd = &cobra.Command{
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
 				if cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - provide context-aware error message (bd-534)
+					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 
 					// Check if JSONL exists without no-db mode configured
@@ -613,7 +613,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Track bd version changes (bd-loka)
+		// Track bd version changes
 		// Best-effort tracking - failures are silent
 		trackBdVersion()
 
@@ -635,7 +635,7 @@ var rootCmd = &cobra.Command{
 			noDaemon = true
 		}
 
-		// Wisp operations auto-bypass daemon (bd-ta4r)
+		// Wisp operations auto-bypass daemon
 		// Wisps are ephemeral (Ephemeral=true) and never exported to JSONL,
 		// so daemon can't help anyway. This reduces friction in wisp workflows.
 		if isWispOperation(cmd, args) {
@@ -815,7 +815,7 @@ var rootCmd = &cobra.Command{
 			debug.Logf("using direct mode (reason: %s)", daemonStatus.FallbackReason)
 		}
 
-		// Auto-migrate database on version bump (bd-jgxi)
+		// Auto-migrate database on version bump
 		// Do this AFTER daemon check but BEFORE opening database for main operation
 		// This ensures: 1) no daemon has DB open, 2) we don't open DB twice
 		autoMigrateOnVersionBump(dbPath)
@@ -824,7 +824,7 @@ var rootCmd = &cobra.Command{
 		var err error
 		store, err = sqlite.NewWithTimeout(rootCtx, dbPath, lockTimeout)
 		if err != nil {
-			// Check for fresh clone scenario (bd-dmb)
+			// Check for fresh clone scenario
 			beadsDir := filepath.Dir(dbPath)
 			if handleFreshCloneError(err, beadsDir) {
 				os.Exit(1)
@@ -838,9 +838,9 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
-		// Initialize flush manager (fixes bd-52: race condition in auto-flush)
+		// Initialize flush manager (fixes race condition in auto-flush)
 		// Skip FlushManager creation in sandbox mode - no background goroutines needed
-		// (bd-dh8a: improves Windows exit behavior and container scenarios)
+		// (improves Windows exit behavior and container scenarios)
 		// For in-process test scenarios where commands run multiple times,
 		// we create a new manager each time. Shutdown() is idempotent so
 		// PostRun can safely shutdown whichever manager is active.
@@ -848,7 +848,7 @@ var rootCmd = &cobra.Command{
 			flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
 		}
 
-		// Initialize hook runner (bd-kwro.8)
+		// Initialize hook runner
 		// dbPath is .beads/something.db, so workspace root is parent of .beads
 		if dbPath != "" {
 			beadsDir := filepath.Dir(dbPath)
@@ -860,8 +860,8 @@ var rootCmd = &cobra.Command{
 
 		// Auto-import if JSONL is newer than DB (e.g., after git pull)
 		// Skip for import command itself to avoid recursion
-		// Skip for delete command to prevent resurrection of deleted issues (bd-8kde)
-		// Skip if sync --dry-run to avoid modifying DB in dry-run mode (bd-191)
+		// Skip for delete command to prevent resurrection of deleted issues
+		// Skip if sync --dry-run to avoid modifying DB in dry-run mode
 		if cmd.Name() != "import" && cmd.Name() != "delete" && autoImportEnabled {
 			// Check if this is sync command with --dry-run flag
 			if cmd.Name() == "sync" {
@@ -876,7 +876,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Load molecule templates from hierarchical catalog locations (gt-0ei3)
+		// Load molecule templates from hierarchical catalog locations
 		// Templates are loaded after auto-import to ensure the database is up-to-date.
 		// Skip for import command to avoid conflicts during import operations.
 		if cmd.Name() != "import" && store != nil {
@@ -965,7 +965,7 @@ var rootCmd = &cobra.Command{
 // Defaults to 5 seconds if not set or invalid
 
 // signalGasTownActivity writes an activity signal for Gas Town daemon.
-// This enables exponential backoff based on bd usage detection (gt-ws8ol).
+// This enables exponential backoff based on bd usage detection.
 // Best-effort: silent on any failure, never affects bd operation.
 func signalGasTownActivity() {
 	// Determine town root

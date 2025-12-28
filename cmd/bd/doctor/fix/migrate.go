@@ -10,7 +10,7 @@ import (
 )
 
 // DatabaseVersion fixes database version mismatches by running bd migrate,
-// or creates the database from JSONL by running bd init for fresh clones (bd-4h9).
+// or creates the database from JSONL by running bd init for fresh clones.
 func DatabaseVersion(path string) error {
 	// Validate workspace
 	if err := validateBeadsWorkspace(path); err != nil {
@@ -23,7 +23,7 @@ func DatabaseVersion(path string) error {
 		return err
 	}
 
-	// Check if database exists - if not, run init instead of migrate (bd-4h9)
+	// Check if database exists - if not, run init instead of migrate
 	beadsDir := filepath.Join(path, ".beads")
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {

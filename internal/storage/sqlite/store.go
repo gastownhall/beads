@@ -120,7 +120,7 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 
 	// For all in-memory databases (including file::memory:), force single connection.
 	// SQLite's in-memory databases are isolated per connection by default.
-	// Without this, different connections in the pool can't see each other's writes (bd-b121, bd-yvlc).
+	// Without this, different connections in the pool can't see each other's writes.
 	isInMemory := path == ":memory:" ||
 		(strings.HasPrefix(path, "file:") && strings.Contains(path, "mode=memory"))
 	if isInMemory {
@@ -130,7 +130,7 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 		// For file-based databases in daemon mode, limit connection pool to prevent
 		// connection exhaustion under concurrent load. SQLite WAL mode supports
 		// 1 writer + unlimited readers, but we limit to prevent goroutine pile-up
-		// on write lock contention (bd-qhws).
+		// on write lock contention.
 		maxConns := runtime.NumCPU() + 1 // 1 writer + N readers
 		db.SetMaxOpenConns(maxConns)
 		db.SetMaxIdleConns(2)
@@ -159,7 +159,7 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 		return nil, err
 	}
 
-	// Verify schema compatibility after migrations (bd-ckvw)
+	// Verify schema compatibility after migrations
 	// First attempt
 	if err := verifySchemaCompatibility(db); err != nil {
 		// Schema probe failed - retry migrations once
@@ -191,7 +191,7 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 		busyTimeout: busyTimeout,
 	}
 
-	// Hydrate from multi-repo config if configured (bd-307)
+	// Hydrate from multi-repo config if configured
 	// Skip for in-memory databases (used in tests)
 	if path != ":memory:" {
 		_, err := storage.HydrateFromMultiRepo(ctx)

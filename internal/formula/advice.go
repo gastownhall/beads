@@ -56,7 +56,7 @@ func MatchGlob(pattern, stepID string) bool {
 // Returns a new steps slice with advice steps inserted.
 // The original steps slice is not modified.
 //
-// Self-matching prevention (gt-8tmz.16): Advice only matches steps that
+// Self-matching prevention: Advice only matches steps that
 // existed BEFORE this call. Steps inserted by advice (before/after/around)
 // are not matched, preventing infinite recursion.
 func ApplyAdvice(steps []*Step, advice []*AdviceRule) []*Step {
@@ -64,7 +64,7 @@ func ApplyAdvice(steps []*Step, advice []*AdviceRule) []*Step {
 		return steps
 	}
 
-	// Collect original step IDs to prevent self-matching (gt-8tmz.16)
+	// Collect original step IDs to prevent self-matching
 	originalIDs := collectStepIDs(steps)
 
 	return applyAdviceWithGuard(steps, advice, originalIDs)
@@ -77,7 +77,7 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 	result := make([]*Step, 0, len(steps)*2) // Pre-allocate for insertions
 
 	for _, step := range steps {
-		// Skip steps not in original set (gt-8tmz.16)
+		// Skip steps not in original set
 		if !originalIDs[step.ID] {
 			result = append(result, step)
 			continue
@@ -170,7 +170,7 @@ func adviceStepToStep(as *AdviceStep, target *Step) *Step {
 		Title:         title,
 		Description:   desc,
 		Type:          as.Type,
-		SourceFormula: target.SourceFormula, // Inherit source formula from target (gt-8tmz.18)
+		SourceFormula: target.SourceFormula, // Inherit source formula from target
 		// SourceLocation will be "advice" to indicate this came from advice transformation
 		SourceLocation: "advice",
 	}
@@ -199,7 +199,7 @@ func cloneStep(s *Step) *Step {
 		clone.Labels = make([]string, len(s.Labels))
 		copy(clone.Labels, s.Labels)
 	}
-	// Deep copy OnComplete if present (gt-8tmz.8)
+	// Deep copy OnComplete if present
 	if s.OnComplete != nil {
 		clone.OnComplete = cloneOnComplete(s.OnComplete)
 	}
@@ -207,7 +207,7 @@ func cloneStep(s *Step) *Step {
 	return &clone
 }
 
-// cloneOnComplete creates a deep copy of an OnCompleteSpec (gt-8tmz.8).
+// cloneOnComplete creates a deep copy of an OnCompleteSpec.
 func cloneOnComplete(oc *OnCompleteSpec) *OnCompleteSpec {
 	if oc == nil {
 		return nil
@@ -233,7 +233,7 @@ func appendUnique(slice []string, item string) []string {
 }
 
 // collectStepIDs returns a set of all step IDs (including nested children).
-// Used by ApplyAdvice to prevent self-matching (gt-8tmz.16).
+// Used by ApplyAdvice to prevent self-matching.
 func collectStepIDs(steps []*Step) map[string]bool {
 	ids := make(map[string]bool)
 	var collect func([]*Step)

@@ -400,7 +400,7 @@ func (c *Client) EpicStatus(args *EpicStatusArgs) (*Response, error) {
 	return c.Execute(OpEpicStatus, args)
 }
 
-// Gate operations (bd-likt)
+// Gate operations
 
 // GateCreate creates a gate via the daemon
 func (c *Client) GateCreate(args *GateCreateArgs) (*Response, error) {

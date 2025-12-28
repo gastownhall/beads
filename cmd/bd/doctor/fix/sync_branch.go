@@ -46,8 +46,6 @@ func SyncBranchConfig(path string) error {
 // This handles two cases:
 // 1. Local sync branch diverged from remote (after force-push)
 // 2. Sync branch far behind main on source files
-//
-// bd-6rf: Detect and fix stale beads-sync branch
 func SyncBranchHealth(path, syncBranch string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err

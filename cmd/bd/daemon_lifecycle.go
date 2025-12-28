@@ -315,7 +315,7 @@ func stopDaemon(pidFile string) {
 	fmt.Println("Daemon killed")
 }
 
-// stopAllDaemons stops all running bd daemons (bd-47tn)
+// stopAllDaemons stops all running bd daemons
 func stopAllDaemons() {
 	// Discover all running daemons using the registry
 	daemons, err := daemon.DiscoverDaemons(nil)

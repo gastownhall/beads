@@ -300,7 +300,7 @@ Stops the daemon gracefully, then starts a new one.`,
 			os.Exit(1)
 		}
 		// Don't wait for daemon to exit (it will fork and continue in background)
-		// Use timeout to prevent goroutine leak if daemon never completes (bd-zqmb)
+		// Use timeout to prevent goroutine leak if daemon never completes
 		go func() {
 			done := make(chan struct{})
 			go func() {

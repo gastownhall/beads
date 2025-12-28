@@ -161,7 +161,7 @@ var createCmd = &cobra.Command{
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 		
-		// TODO: Switch to target repo for multi-repo support (bd-4ms)
+		// TODO: Switch to target repo for multi-repo support
 		// For now, we just log the target repo in debug mode
 		if repoPath != "." {
 			debug.Logf("DEBUG: Target repo: %s\n", repoPath)
@@ -205,7 +205,7 @@ var createCmd = &cobra.Command{
 			// Get database prefix from config
 			var dbPrefix string
 			if daemonClient != nil {
-				// TODO(bd-g5p7): Add RPC method to get config in daemon mode
+				// TODO: Add RPC method to get config in daemon mode
 				// For now, skip validation in daemon mode (needs RPC enhancement)
 			} else {
 				// Direct mode - check config
@@ -216,7 +216,7 @@ var createCmd = &cobra.Command{
 				FatalError("%v", err)
 			}
 
-			// Validate agent ID pattern if type is agent (gt-hlaaf)
+			// Validate agent ID pattern if type is agent
 			if issueType == "agent" {
 				if err := validation.ValidateAgentID(explicitID); err != nil {
 					FatalError("invalid agent ID: %v", err)
@@ -262,7 +262,7 @@ var createCmd = &cobra.Command{
 				FatalError("parsing response: %v", err)
 			}
 
-			// Run create hook (bd-kwro.8)
+			// Run create hook
 			if hookRunner != nil {
 				hookRunner.Run(hooks.EventCreate, &issue)
 			}
@@ -294,7 +294,7 @@ var createCmd = &cobra.Command{
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
-			CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
+			CreatedBy:          getActorWithGit(),
 		}
 
 		ctx := rootCtx
@@ -400,7 +400,7 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Add waits-for dependency if specified (bd-xo1o.2)
+		// Add waits-for dependency if specified
 		if waitsFor != "" {
 			// Validate gate type
 			gate := waitsForGate
@@ -434,7 +434,7 @@ var createCmd = &cobra.Command{
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
 
-		// Run create hook (bd-kwro.8)
+		// Run create hook
 		if hookRunner != nil {
 			hookRunner.Run(hooks.EventCreate, issue)
 		}

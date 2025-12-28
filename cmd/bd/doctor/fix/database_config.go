@@ -11,8 +11,6 @@ import (
 
 // DatabaseConfig auto-detects and fixes metadata.json database/JSONL config mismatches.
 // This fixes the issue where metadata.json gets recreated with wrong JSONL filename.
-//
-// bd-afd: bd doctor --fix should auto-fix metadata.json jsonl_export mismatch
 func DatabaseConfig(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
@@ -81,7 +79,6 @@ func DatabaseConfig(path string) error {
 
 // findActualJSONLFile scans .beads/ for the actual JSONL file in use.
 // Prefers issues.jsonl over beads.jsonl (canonical name), skips backups and merge artifacts.
-// bd-6xd: issues.jsonl is the canonical filename
 func findActualJSONLFile(beadsDir string) string {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
@@ -125,7 +122,7 @@ func findActualJSONLFile(beadsDir string) string {
 		return ""
 	}
 
-	// bd-6xd: Prefer issues.jsonl over beads.jsonl (canonical name)
+	// Prefer issues.jsonl over beads.jsonl (canonical name)
 	for _, name := range candidates {
 		if name == "issues.jsonl" {
 			return name
@@ -147,7 +144,6 @@ func isSystemJSONLFilename(name string) bool {
 
 // LegacyJSONLConfig migrates from legacy beads.jsonl to canonical issues.jsonl.
 // This renames the file, updates metadata.json, and updates .gitattributes if present.
-// bd-6xd: issues.jsonl is the canonical filename
 func LegacyJSONLConfig(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err

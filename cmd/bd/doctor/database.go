@@ -26,7 +26,7 @@ type localConfig struct {
 
 // CheckDatabaseVersion checks the database version and migration status
 func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check metadata.json first for custom database name
@@ -54,7 +54,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 
 		if jsonlPath != "" {
 			// JSONL exists but no database - check if this is no-db mode or fresh clone
-			// Use proper YAML parsing to detect no-db mode (bd-r6k2)
+			// Use proper YAML parsing to detect no-db mode
 			if isNoDbModeConfigured(beadsDir) {
 				return DoctorCheck{
 					Name:    "Database",
@@ -136,7 +136,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 
 // CheckSchemaCompatibility checks if all required tables and columns are present
 func CheckSchemaCompatibility(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check metadata.json first for custom database name
@@ -157,7 +157,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 		}
 	}
 
-	// Open database (bd-ckvw: schema probe)
+	// Open database for schema probe
 	// Note: We can't use the global 'store' because doctor can check arbitrary paths
 	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
@@ -224,9 +224,9 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseIntegrity runs SQLite's PRAGMA integrity_check (bd-2au)
+// CheckDatabaseIntegrity runs SQLite's PRAGMA integrity_check
 func CheckDatabaseIntegrity(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Get database path (same logic as CheckSchemaCompatibility)
@@ -351,7 +351,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 
 // CheckDatabaseJSONLSync checks if database and JSONL are in sync
 func CheckDatabaseJSONLSync(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Resolve database path (respects metadata.json override).
@@ -706,7 +706,7 @@ func isNoDbModeConfigured(beadsDir string) bool {
 // irreversible. The user must make an explicit decision to delete their
 // closed issue history. We only provide guidance, never action.
 func CheckDatabaseSize(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	// Follow redirect to resolve actual beads directory
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Get database path

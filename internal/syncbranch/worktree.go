@@ -45,14 +45,14 @@ type PullResult struct {
 	JSONLPath     string // Path to the synced JSONL in main repo
 	Merged        bool   // True if divergent histories were merged
 	FastForwarded bool   // True if fast-forward was possible
-	Pushed        bool   // True if changes were pushed after merge (bd-7ch)
+	Pushed        bool   // True if changes were pushed after merge
 
-	// SafetyCheckTriggered indicates mass deletion was detected during merge (bd-4u8)
+	// SafetyCheckTriggered indicates mass deletion was detected during merge
 	// When true, callers should check config option sync.require_confirmation_on_mass_delete
 	SafetyCheckTriggered bool
-	// SafetyCheckDetails contains human-readable details about the mass deletion (bd-4u8)
+	// SafetyCheckDetails contains human-readable details about the mass deletion
 	SafetyCheckDetails string
-	// SafetyWarnings contains warning messages from the safety check (bd-7z4)
+	// SafetyWarnings contains warning messages from the safety check
 	// Caller should display these to the user as appropriate for their output format
 	SafetyWarnings []string
 }
@@ -60,7 +60,7 @@ type PullResult struct {
 // CommitToSyncBranch commits JSONL changes to the sync branch using a git worktree.
 // This allows committing to a different branch without changing the user's working directory.
 //
-// IMPORTANT (bd-3s8 fix): Before committing, this function now performs a pre-emptive fetch
+// IMPORTANT: Before committing, this function now performs a pre-emptive fetch
 // and fast-forward if possible. This reduces the likelihood of divergence by ensuring we're
 // building on top of the latest remote state when possible.
 //
@@ -93,7 +93,7 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// Get remote name
 	remote := getRemoteForBranch(ctx, worktreePath, syncBranch)
 
-	// Pre-emptive fetch and fast-forward (bd-3s8 fix)
+	// Pre-emptive fetch and fast-forward
 	// This reduces divergence by ensuring we commit on top of latest remote state
 	if err := preemptiveFetchAndFastForward(ctx, worktreePath, syncBranch, remote); err != nil {
 		// Non-fatal: if fetch fails (e.g., offline), we can still commit locally
@@ -188,7 +188,7 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 // PullFromSyncBranch pulls changes from the sync branch and copies JSONL to the main repo.
 // This fetches remote changes without affecting the user's working directory.
 //
-// IMPORTANT (bd-3s8 fix): This function handles diverged histories gracefully by performing
+// IMPORTANT: This function handles diverged histories gracefully by performing
 // a content-based merge instead of relying on git's commit-level merge. When local and remote
 // sync branches have diverged:
 //  1. Fetch remote changes (don't pull)
@@ -198,11 +198,11 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //  5. Reset to remote's history (adopt remote commit graph)
 //  6. Commit merged content on top
 //
-// IMPORTANT (bd-7ch): After successful content merge, auto-pushes to remote by default.
+// IMPORTANT: After successful content merge, auto-pushes to remote by default.
 // Includes safety check: warns (but doesn't block) if >50% issues vanished AND >5 existed.
 // "Vanished" means removed from issues.jsonl entirely, NOT status=closed.
 //
-// IMPORTANT (bd-4u8): If requireMassDeleteConfirmation is true and the safety check triggers,
+// IMPORTANT: If requireMassDeleteConfirmation is true and the safety check triggers,
 // the function will NOT auto-push. Instead, it sets SafetyCheckTriggered=true in the result
 // and the caller should prompt for confirmation then call PushSyncBranch.
 //
@@ -214,12 +214,12 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //   - repoRoot: Path to the git repository root
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //   - jsonlPath: Absolute path to the JSONL file in the main repo
-//   - push: If true, push to remote after merge (bd-7ch)
-//   - requireMassDeleteConfirmation: If true and mass deletion detected, skip push (bd-4u8)
+//   - push: If true, push to remote after merge
+//   - requireMassDeleteConfirmation: If true and mass deletion detected, skip push
 //
 // Returns PullResult with details about what was done, or error if failed.
 func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath string, push bool, requireMassDeleteConfirmation ...bool) (*PullResult, error) {
-	// bd-4u8: Extract optional confirmation requirement parameter
+	// Extract optional confirmation requirement parameter
 	requireConfirmation := false
 	if len(requireMassDeleteConfirmation) > 0 {
 		requireConfirmation = requireMassDeleteConfirmation[0]
@@ -296,17 +296,17 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		return result, nil
 	}
 
-	// Case 3: DIVERGED - perform content-based merge (bd-3s8 fix)
+	// Case 3: DIVERGED - perform content-based merge
 	// This is the key fix: instead of git merge (which can fail), we:
 	// 1. Extract JSONL content from base, local, and remote
 	// 2. Merge at content level using our 3-way merge algorithm
 	// 3. Reset to remote's commit history
 	// 4. Commit merged content on top
 
-	// bd-7ch: Extract local content before merge for safety check
+	// Extract local content before merge for safety check
 	localContent, extractErr := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
 	if extractErr != nil {
-		// bd-feh: Add warning to result so callers can display appropriately (bd-dtm fix)
+		// Add warning to result so callers can display appropriately
 		result.SafetyWarnings = append(result.SafetyWarnings,
 			fmt.Sprintf("⚠️  Warning: Could not extract local content for safety check: %v", extractErr))
 	}
@@ -355,7 +355,7 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		return nil, err
 	}
 
-	// bd-7ch: Auto-push after successful content merge
+	// Auto-push after successful content merge
 	if push && hasChanges {
 		// Safety check: count issues before and after merge to detect mass deletion
 		localCount := countIssuesInContent(localContent)
@@ -369,23 +369,23 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		if localCount > 5 && mergedCount < localCount {
 			vanishedPercent := float64(localCount-mergedCount) / float64(localCount) * 100
 			if vanishedPercent > 50 {
-				// bd-4u8: Set safety check fields for caller to handle confirmation
+				// Set safety check fields for caller to handle confirmation
 				result.SafetyCheckTriggered = true
 				result.SafetyCheckDetails = fmt.Sprintf("%.0f%% of issues vanished during merge (%d → %d issues)",
 					vanishedPercent, localCount, mergedCount)
 
-				// bd-7z4: Return warnings in result instead of printing directly to stderr
+				// Return warnings in result instead of printing directly to stderr
 				result.SafetyWarnings = append(result.SafetyWarnings,
 					fmt.Sprintf("⚠️  Warning: %.0f%% of issues vanished during merge (%d → %d issues)",
 						vanishedPercent, localCount, mergedCount))
 
-				// bd-lsa: Add forensic info to warnings
+				// Add forensic info to warnings
 				localIssues := parseIssuesFromContent(localContent)
 				mergedIssues := parseIssuesFromContent(mergedContent)
 				forensicLines := formatVanishedIssues(localIssues, mergedIssues, localCount, mergedCount)
 				result.SafetyWarnings = append(result.SafetyWarnings, forensicLines...)
 
-				// bd-4u8: Check if confirmation is required before pushing
+				// Check if confirmation is required before pushing
 				if requireConfirmation {
 					result.SafetyWarnings = append(result.SafetyWarnings,
 						"   Push skipped - confirmation required (sync.require_confirmation_on_mass_delete=true)")
@@ -758,7 +758,7 @@ func isNonFastForwardError(output string) bool {
 // 4. Run 3-way content merge (respects tombstones)
 // 5. Reset to remote, commit merged content
 //
-// Fix for bd-kpy: Sync race where rebase-based divergence recovery resurrects tombstones.
+// This fixes a sync race where rebase-based divergence recovery resurrects tombstones.
 func contentMergeRecovery(ctx context.Context, worktreePath, branch, remote string) error {
 	// The JSONL is always at .beads/issues.jsonl relative to worktree
 	jsonlRelPath := filepath.Join(".beads", "issues.jsonl")
@@ -809,7 +809,7 @@ func contentMergeRecovery(ctx context.Context, worktreePath, branch, remote stri
 }
 
 // fetchAndRebaseInWorktree is DEPRECATED - kept for reference only.
-// Use contentMergeRecovery instead to avoid tombstone resurrection (bd-kpy).
+// Use contentMergeRecovery instead to avoid tombstone resurrection.
 func fetchAndRebaseInWorktree(ctx context.Context, worktreePath, branch, remote string) error {
 	// Fetch latest from remote
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, branch)
@@ -889,10 +889,10 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 
 		// Check if this is a non-fast-forward error (concurrent push conflict)
 		if isNonFastForwardError(outputStr) {
-			// bd-kpy fix: Use content-level merge instead of git rebase.
+			// Use content-level merge instead of git rebase.
 			// Git rebase is text-level and can resurrect tombstones.
 			if mergeErr := contentMergeRecovery(ctx, worktreePath, branch, remote); mergeErr != nil {
-				// Content merge failed - provide clear recovery options (bd-vckm)
+				// Content merge failed - provide clear recovery options
 				return fmt.Errorf(`sync branch diverged and automatic recovery failed
 
 The sync branch '%s' has diverged from remote '%s/%s' and automatic content merge failed.
@@ -927,7 +927,7 @@ Merge error: %v`, branch, remote, branch, branch, lastErr, mergeErr)
 	return fmt.Errorf("push failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-// PushSyncBranch pushes the sync branch to remote. (bd-4u8)
+// PushSyncBranch pushes the sync branch to remote.
 // This is used after confirmation when sync.require_confirmation_on_mass_delete is enabled
 // and a mass deletion was detected during merge.
 //
@@ -941,7 +941,7 @@ func PushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
 	// Worktree path is under .git/beads-worktrees/<branch>
 	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
 
-	// bd-k2n: Recreate worktree if it was cleaned up, using the same pattern as CommitToSyncBranch
+	// Recreate worktree if it was cleaned up, using the same pattern as CommitToSyncBranch
 	wtMgr := git.NewWorktreeManager(repoRoot)
 	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
 		return fmt.Errorf("failed to ensure worktree exists: %w", err)
@@ -1023,7 +1023,7 @@ func GetRepoRoot(ctx context.Context) (string, error) {
 }
 
 // countIssuesInContent counts the number of non-empty lines in JSONL content.
-// Each non-empty line represents one issue. Used for safety checks (bd-7ch).
+// Each non-empty line represents one issue. Used for safety checks.
 func countIssuesInContent(content []byte) int {
 	if len(content) == 0 {
 		return 0
@@ -1037,14 +1037,14 @@ func countIssuesInContent(content []byte) int {
 	return count
 }
 
-// issueSummary holds minimal issue info for forensic logging (bd-lsa)
+// issueSummary holds minimal issue info for forensic logging
 type issueSummary struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
 
 // parseIssuesFromContent extracts issue IDs and titles from JSONL content.
-// Used for forensic logging of vanished issues (bd-lsa).
+// Used for forensic logging of vanished issues.
 func parseIssuesFromContent(content []byte) map[string]issueSummary {
 	result := make(map[string]issueSummary)
 	if len(content) == 0 {
@@ -1077,7 +1077,7 @@ func formatVanishedIssues(localIssues, mergedIssues map[string]issueSummary, loc
 	lines = append(lines, fmt.Sprintf("   After merge:  %d issues", mergedCount))
 	lines = append(lines, "   Vanished issues:")
 
-	// bd-ciu: Collect vanished IDs first, then sort for deterministic output
+	// Collect vanished IDs first, then sort for deterministic output
 	var vanishedIDs []string
 	for id := range localIssues {
 		if _, exists := mergedIssues[id]; !exists {

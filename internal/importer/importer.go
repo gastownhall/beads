@@ -39,7 +39,7 @@ type Options struct {
 	SkipPrefixValidation       bool            // Skip prefix validation (for auto-import)
 	OrphanHandling             OrphanHandling  // How to handle missing parent issues (default: allow)
 	ClearDuplicateExternalRefs bool            // Clear duplicate external_ref values instead of erroring
-	ProtectLocalExportIDs      map[string]bool // IDs from left snapshot to protect from deletion (bd-sync-deletion fix)
+	ProtectLocalExportIDs      map[string]bool // IDs from left snapshot to protect from deletion
 }
 
 // Result contains statistics about the import operation
@@ -93,8 +93,8 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		}
 	}
 
-	// Compute content hashes for all incoming issues (bd-95)
-	// Always recompute to avoid stale/incorrect JSONL hashes (bd-1231)
+	// Compute content hashes for all incoming issues
+	// Always recompute to avoid stale/incorrect JSONL hashes
 	for _, issue := range issues {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
@@ -114,7 +114,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		opts.SkipPrefixValidation = true
 	}
 
-	// Clear export_hashes before import to prevent staleness (bd-160)
+	// Clear export_hashes before import to prevent staleness
 	// Import operations may add/update issues, so export_hashes entries become invalid
 	if !opts.DryRun {
 		if err := sqliteStore.ClearAllExportHashes(ctx); err != nil {
@@ -199,7 +199,7 @@ func getOrCreateStore(ctx context.Context, dbPath string, store storage.Storage)
 }
 
 // handlePrefixMismatch checks and handles prefix mismatches.
-// Returns a filtered issues slice with tombstoned issues having wrong prefixes removed (bd-6pni).
+// Returns a filtered issues slice with tombstoned issues having wrong prefixes removed.
 func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
 	configuredPrefix, err := sqliteStore.GetConfig(ctx, "issue_prefix")
 	if err != nil {
@@ -216,7 +216,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 
 	result.ExpectedPrefix = configuredPrefix
 
-	// gt-2z6s: Read allowed_prefixes config for additional valid prefixes (e.g., mol-*)
+	// Read allowed_prefixes config for additional valid prefixes (e.g., mol-*)
 	allowedPrefixesConfig, _ := sqliteStore.GetConfig(ctx, "allowed_prefixes")
 
 	// GH#686: In multi-repo mode, allow all prefixes (nil = allow all)
@@ -226,7 +226,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 	}
 
 	// Analyze prefixes in imported issues
-	// Track tombstones separately - they don't count as "real" mismatches (bd-6pni)
+	// Track tombstones separately - they don't count as "real" mismatches
 	tombstoneMismatchPrefixes := make(map[string]int)
 	nonTombstoneMismatchCount := 0
 
@@ -238,7 +238,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 		// GH#422: Check if issue ID starts with configured prefix directly
 		// rather than extracting/guessing. This handles multi-hyphen prefixes
 		// like "asianops-audit-" correctly.
-		// gt-2z6s: Also check against allowed_prefixes config
+		// Also check against allowed_prefixes config
 		prefixMatches := false
 		for prefix := range allowedPrefixes {
 			if strings.HasPrefix(issue.ID, prefix+"-") {
@@ -265,7 +265,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 		}
 	}
 
-	// bd-6pni: If ALL mismatched prefix issues are tombstones, they're just pollution
+	// If ALL mismatched prefix issues are tombstones, they're just pollution
 	// from contributor PRs that used different test prefixes. These are safe to remove.
 	if nonTombstoneMismatchCount == 0 && len(tombstoneMismatchPrefixes) > 0 {
 		// Log that we're ignoring tombstoned mismatches
@@ -323,9 +323,9 @@ func detectUpdates(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issue
 	// So same ID + different fields = normal update operation, not a collision
 	// The collisionResult.Collisions list represents issues that *may* be updated
 	// Note: We don't pre-count updates here - upsertIssues will count them after
-	// checking timestamps to ensure we only update when incoming is newer (bd-e55c)
+	// checking timestamps to ensure we only update when incoming is newer
 
-	// Phase 4: Renames removed - obsolete with hash IDs (bd-8e05)
+	// Phase 4: Renames removed - obsolete with hash IDs
 	// Hash-based IDs are content-addressed, so renames don't occur
 
 	if opts.DryRun {
@@ -401,7 +401,7 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 		}
 		return "", nil
 
-		/* OLD CODE REMOVED (bd-8e05)
+		/* OLD CODE REMOVED
 		// Different content - this is a collision during rename
 		// Allocate a new ID for the incoming issue instead of using the desired ID
 		prefix, err := s.GetConfig(ctx, "issue_prefix")
@@ -490,7 +490,7 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 		return "", fmt.Errorf("failed to create renamed issue %s: %w", incoming.ID, err)
 	}
 
-	// Reference updates removed - obsolete with hash IDs (bd-8e05)
+	// Reference updates removed - obsolete with hash IDs
 	// Hash-based IDs are deterministic, so no reference rewriting needed
 
 	return oldID, nil
@@ -499,7 +499,7 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
 	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
-	// when trying to create issues that were previously deleted (bd-sync-tombstone-fix)
+	// when trying to create issues that were previously deleted
 	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
@@ -549,7 +549,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 		seenIDs[incoming.ID] = true
 
-		// CRITICAL: Check for tombstone FIRST, before any other matching (bd-4q8 fix)
+		// CRITICAL: Check for tombstone FIRST, before any other matching
 		// This prevents ghost resurrection regardless of which phase would normally match.
 		// If this ID has a tombstone in the DB, skip importing it entirely.
 		if existingByID, found := dbByID[incoming.ID]; found {
@@ -565,7 +565,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			if existing, found := dbByExternalRef[*incoming.ExternalRef]; found {
 				// Found match by external_ref - update the existing issue
 				if !opts.SkipUpdate {
-					// Check timestamps - only update if incoming is newer (bd-e55c)
+					// Check timestamps - only update if incoming is newer
 					if !incoming.UpdatedAt.After(existing.UpdatedAt) {
 						// Local version is newer or same - skip update
 						result.Unchanged++
@@ -583,7 +583,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 					updates["notes"] = incoming.Notes
 					updates["closed_at"] = incoming.ClosedAt
-					// Pinned field (bd-phtv): Only update if explicitly true in JSONL
+					// Pinned field: Only update if explicitly true in JSONL
 					// (omitempty means false values are absent, so false = don't change existing)
 					if incoming.Pinned {
 						updates["pinned"] = incoming.Pinned
@@ -654,7 +654,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 		// Phase 2: New content - check for ID collision
 		if existingWithID, found := dbByID[incoming.ID]; found {
-			// Skip tombstones - don't try to update or resurrect deleted issues (bd-sync-tombstone-fix)
+			// Skip tombstones - don't try to update or resurrect deleted issues
 			if existingWithID.Status == types.StatusTombstone {
 				result.Skipped++
 				continue
@@ -663,7 +663,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			// The update should have been detected earlier by detectUpdates
 			// If we reach here, it means collision wasn't resolved - treat as update
 			if !opts.SkipUpdate {
-				// Check timestamps - only update if incoming is newer (bd-e55c)
+				// Check timestamps - only update if incoming is newer
 				if !incoming.UpdatedAt.After(existingWithID.UpdatedAt) {
 					// Local version is newer or same - skip update
 					result.Unchanged++
@@ -681,7 +681,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 				updates["notes"] = incoming.Notes
 				updates["closed_at"] = incoming.ClosedAt
-				// Pinned field (bd-phtv): Only update if explicitly true in JSONL
+				// Pinned field: Only update if explicitly true in JSONL
 				// (omitempty means false values are absent, so false = don't change existing)
 				if incoming.Pinned {
 					updates["pinned"] = incoming.Pinned
@@ -717,7 +717,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
-	// Filter out orphaned issues if orphan_handling is set to skip (bd-ckej)
+	// Filter out orphaned issues if orphan_handling is set to skip
 	// Pre-filter before batch creation to prevent orphans from being created then ID-cleared
 	if opts.OrphanHandling == sqlite.OrphanSkip {
 		var filteredNewIssues []*types.Issue
@@ -788,7 +788,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
-	// REMOVED (bd-c7af): Counter sync after import - no longer needed with hash IDs
+	// REMOVED: Counter sync after import - no longer needed with hash IDs
 
 	return nil
 }
@@ -980,7 +980,7 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool
 
 // buildAllowedPrefixSet returns allowed prefixes, or nil to allow all (GH#686).
 // In multi-repo mode, additional repos have their own prefixes - allow all.
-// gt-2z6s: Also accepts allowedPrefixesConfig (comma-separated list like "gt-,mol-").
+// Also accepts allowedPrefixesConfig (comma-separated list like "gt-,mol-").
 func buildAllowedPrefixSet(primaryPrefix string, allowedPrefixesConfig string) map[string]bool {
 	if config.GetMultiRepoConfig() != nil {
 		return nil // Multi-repo: allow all prefixes
@@ -988,7 +988,7 @@ func buildAllowedPrefixSet(primaryPrefix string, allowedPrefixesConfig string) m
 
 	allowed := map[string]bool{primaryPrefix: true}
 
-	// gt-2z6s: Parse allowed_prefixes config (comma-separated, with or without trailing -)
+	// Parse allowed_prefixes config (comma-separated, with or without trailing -)
 	if allowedPrefixesConfig != "" {
 		for _, prefix := range strings.Split(allowedPrefixesConfig, ",") {
 			prefix = strings.TrimSpace(prefix)

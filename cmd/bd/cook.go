@@ -25,7 +25,7 @@ var cookCmd = &cobra.Command{
 By default, cook outputs the resolved formula as JSON to stdout for
 ephemeral use. The output can be inspected, piped, or saved to a file.
 
-Two cooking modes are available (gt-8tmz.23):
+Two cooking modes are available:
 
   COMPILE-TIME (default, --mode=compile):
     Produces a proto with {{variable}} placeholders intact.
@@ -48,7 +48,7 @@ to the database. This is useful when you want to reuse the same
 proto multiple times without re-cooking.
 
 For most workflows, prefer ephemeral protos: pour and wisp commands
-accept formula names directly and cook inline (bd-rciw).
+accept formula names directly and cook inline.
 
 Examples:
   bd cook mol-feature.formula.json                    # Compile-time: keep {{vars}}
@@ -89,7 +89,7 @@ func runCook(cmd *cobra.Command, args []string) {
 	varFlags, _ := cmd.Flags().GetStringSlice("var")
 	mode, _ := cmd.Flags().GetString("mode")
 
-	// Parse variables (gt-8tmz.23)
+	// Parse variables
 	inputVars := make(map[string]string)
 	for _, v := range varFlags {
 		parts := strings.SplitN(v, "=", 2)
@@ -100,7 +100,7 @@ func runCook(cmd *cobra.Command, args []string) {
 		inputVars[parts[0]] = parts[1]
 	}
 
-	// Determine cooking mode (gt-8tmz.23)
+	// Determine cooking mode
 	// Runtime mode is triggered by: explicit --mode=runtime OR providing --var flags
 	runtimeMode := mode == "runtime" || len(inputVars) > 0
 	if mode != "" && mode != "compile" && mode != "runtime" {
@@ -143,7 +143,7 @@ func runCook(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Apply control flow operators (gt-8tmz.4) - loops, branches, gates
+	// Apply control flow operators - loops, branches, gates
 	// This must happen before advice and expansions so they can act on expanded loop steps
 	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
 	if err != nil {
@@ -152,12 +152,12 @@ func runCook(cmd *cobra.Command, args []string) {
 	}
 	resolved.Steps = controlFlowSteps
 
-	// Apply advice transformations (gt-8tmz.2)
+	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
 		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
-	// Apply inline step expansions (gt-8tmz.35)
+	// Apply inline step expansions
 	// This processes Step.Expand fields before compose.expand/map rules
 	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
 	if err != nil {
@@ -166,7 +166,7 @@ func runCook(cmd *cobra.Command, args []string) {
 	}
 	resolved.Steps = inlineExpandedSteps
 
-	// Apply expansion operators (gt-8tmz.3)
+	// Apply expansion operators
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
 		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
 		if err != nil {
@@ -176,7 +176,7 @@ func runCook(cmd *cobra.Command, args []string) {
 		resolved.Steps = expandedSteps
 	}
 
-	// Apply aspects from compose.aspects (gt-8tmz.5)
+	// Apply aspects from compose.aspects
 	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
 		for _, aspectName := range resolved.Compose.Aspects {
 			aspectFormula, err := parser.LoadByName(aspectName)
@@ -194,7 +194,7 @@ func runCook(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Apply prefix to proto ID if specified (bd-47qx)
+	// Apply prefix to proto ID if specified
 	protoID := resolved.Formula
 	if prefix != "" {
 		protoID = prefix + resolved.Formula
@@ -276,9 +276,9 @@ func runCook(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// Ephemeral mode (default): output resolved formula as JSON to stdout (bd-rciw)
+	// Ephemeral mode (default): output resolved formula as JSON to stdout
 	if !persist {
-		// Runtime mode (gt-8tmz.23): substitute variables before output
+		// Runtime mode: substitute variables before output
 		if runtimeMode {
 			// Apply defaults from formula variable definitions
 			for name, def := range resolved.Vars {
@@ -458,14 +458,14 @@ func collectStepsToSubgraph(steps []*formula.Step, parentID string, issueMap map
 			IsTemplate:     true,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
-			SourceFormula:  step.SourceFormula,  // Source tracing (gt-8tmz.18)
-			SourceLocation: step.SourceLocation, // Source tracing (gt-8tmz.18)
+			SourceFormula:  step.SourceFormula,  // Source tracing
+			SourceLocation: step.SourceLocation, // Source tracing
 		}
 
 		// Store labels in the issue's Labels field for in-memory use
 		issue.Labels = append(issue.Labels, step.Labels...)
 
-		// Add gate label for waits_for field (bd-j4cr)
+		// Add gate label for waits_for field
 		if step.WaitsFor != "" {
 			gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
 			issue.Labels = append(issue.Labels, gateLabel)
@@ -516,7 +516,7 @@ func collectDependenciesToSubgraph(step *formula.Step, idMapping map[string]stri
 		})
 	}
 
-	// Process needs field (bd-hr39) - simpler alias for sibling dependencies
+	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
 		needIssueID, ok := idMapping[needID]
 		if !ok {
@@ -530,7 +530,7 @@ func collectDependenciesToSubgraph(step *formula.Step, idMapping map[string]stri
 		})
 	}
 
-	// Process waits_for field (gt-8tmz.38) - fanout gate dependency
+	// Process waits_for field - fanout gate dependency
 	if step.WaitsFor != "" {
 		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
 		if waitsForSpec != nil {
@@ -585,26 +585,26 @@ func resolveAndCookFormula(formulaName string, searchPaths []string) (*TemplateS
 		return nil, fmt.Errorf("resolving formula %q: %w", formulaName, err)
 	}
 
-	// Apply control flow operators (gt-8tmz.4) - loops, branches, gates
+	// Apply control flow operators - loops, branches, gates
 	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
 	if err != nil {
 		return nil, fmt.Errorf("applying control flow to %q: %w", formulaName, err)
 	}
 	resolved.Steps = controlFlowSteps
 
-	// Apply advice transformations (gt-8tmz.2)
+	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
 		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
-	// Apply inline step expansions (gt-8tmz.35)
+	// Apply inline step expansions
 	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
 	if err != nil {
 		return nil, fmt.Errorf("applying inline expansions to %q: %w", formulaName, err)
 	}
 	resolved.Steps = inlineExpandedSteps
 
-	// Apply expansion operators (gt-8tmz.3)
+	// Apply expansion operators
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
 		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
 		if err != nil {
@@ -613,7 +613,7 @@ func resolveAndCookFormula(formulaName string, searchPaths []string) (*TemplateS
 		resolved.Steps = expandedSteps
 	}
 
-	// Apply aspects from compose.aspects (gt-8tmz.5)
+	// Apply aspects from compose.aspects
 	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
 		for _, aspectName := range resolved.Compose.Aspects {
 			aspectFormula, err := parser.LoadByName(aspectName)
@@ -649,7 +649,7 @@ func cookFormulaToSubgraphWithVars(f *formula.Formula, protoID string, vars map[
 			}
 		}
 	}
-	// Attach recommended phase from formula (bd-mol cleanup: warn on pour of vapor formulas)
+	// Attach recommended phase from formula (warn on pour of vapor formulas)
 	subgraph.Phase = f.Phase
 	return subgraph, nil
 }
@@ -675,7 +675,7 @@ func cookFormula(ctx context.Context, s storage.Storage, f *formula.Formula, pro
 	var deps []*types.Dependency
 	var labels []struct{ issueID, label string }
 
-	// Create root proto epic using provided protoID (may include prefix, bd-47qx)
+	// Create root proto epic using provided protoID (may include prefix)
 	rootIssue := &types.Issue{
 		ID:          protoID,
 		Title:       f.Formula, // Title is the original formula name
@@ -797,8 +797,8 @@ func collectStepsRecursive(steps []*formula.Step, parentID string, idMapping map
 			IsTemplate:     true,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
-			SourceFormula:  step.SourceFormula,  // Source tracing (gt-8tmz.18)
-			SourceLocation: step.SourceLocation, // Source tracing (gt-8tmz.18)
+			SourceFormula:  step.SourceFormula,  // Source tracing
+			SourceLocation: step.SourceLocation, // Source tracing
 		}
 		*issues = append(*issues, issue)
 
@@ -807,7 +807,7 @@ func collectStepsRecursive(steps []*formula.Step, parentID string, idMapping map
 			*labels = append(*labels, struct{ issueID, label string }{issueID, label})
 		}
 
-		// Add gate label for waits_for field (bd-j4cr)
+		// Add gate label for waits_for field
 		if step.WaitsFor != "" {
 			gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
 			*labels = append(*labels, struct{ issueID, label string }{issueID, gateLabel})
@@ -847,7 +847,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		})
 	}
 
-	// Process needs field (bd-hr39) - simpler alias for sibling dependencies
+	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
 		needIssueID, ok := idMapping[needID]
 		if !ok {
@@ -861,7 +861,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		})
 	}
 
-	// Process waits_for field (gt-8tmz.38) - fanout gate dependency
+	// Process waits_for field - fanout gate dependency
 	if step.WaitsFor != "" {
 		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
 		if waitsForSpec != nil {
@@ -947,7 +947,7 @@ func printFormulaSteps(steps []*formula.Step, indent string) {
 			typeStr = fmt.Sprintf(" (%s)", step.Type)
 		}
 
-		// Source tracing info (gt-8tmz.18)
+		// Source tracing info
 		sourceStr := ""
 		if step.SourceFormula != "" || step.SourceLocation != "" {
 			sourceStr = fmt.Sprintf(" [from: %s@%s]", step.SourceFormula, step.SourceLocation)
@@ -967,7 +967,7 @@ func printFormulaSteps(steps []*formula.Step, indent string) {
 	}
 }
 
-// substituteFormulaVars substitutes {{variable}} placeholders in a formula (gt-8tmz.23).
+// substituteFormulaVars substitutes {{variable}} placeholders in a formula.
 // This is used in runtime mode to fully resolve the formula before output.
 func substituteFormulaVars(f *formula.Formula, vars map[string]string) {
 	// Substitute in top-level fields

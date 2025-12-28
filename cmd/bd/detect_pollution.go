@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// showDetectPollutionDeprecationHint shows a hint about bd doctor consolidation (bd-kff0)
+// showDetectPollutionDeprecationHint shows a hint about bd doctor consolidation
 func showDetectPollutionDeprecationHint() {
 	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: Use 'bd doctor --check=pollution' instead (this command is deprecated)"))
 }
@@ -20,7 +20,7 @@ func showDetectPollutionDeprecationHint() {
 var detectPollutionCmd = &cobra.Command{
 	Use:        "detect-pollution",
 	GroupID:    "maint",
-	Hidden:     true, // bd-kff0: deprecated, use 'bd doctor --check=pollution' instead
+	Hidden:     true, // deprecated, use 'bd doctor --check=pollution' instead
 	Deprecated: "use 'bd doctor --check=pollution' instead",
 	Short:      "Detect and optionally clean test issues from database",
 	Long: `Detect test issues that leaked into production database using pattern matching.
@@ -140,7 +140,7 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 
 		if !clean {
 			fmt.Printf("Run 'bd detect-pollution --clean' to delete these issues (with confirmation).\n")
-			// bd-bqcc: Show hint about doctor consolidation
+			// Show hint about doctor consolidation
 			showDetectPollutionDeprecationHint()
 			return
 		}

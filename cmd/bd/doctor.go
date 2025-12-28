@@ -44,22 +44,22 @@ type doctorResult struct {
 	Checks     []doctorCheck     `json:"checks"`
 	OverallOK  bool              `json:"overall_ok"`
 	CLIVersion string            `json:"cli_version"`
-	Timestamp  string            `json:"timestamp,omitempty"` // bd-9cc: ISO8601 timestamp for historical tracking
-	Platform   map[string]string `json:"platform,omitempty"`  // bd-9cc: platform info for debugging
+	Timestamp  string            `json:"timestamp,omitempty"` // ISO8601 timestamp for historical tracking
+	Platform   map[string]string `json:"platform,omitempty"`  // platform info for debugging
 }
 
 var (
 	doctorFix            bool
 	doctorYes            bool
-	doctorInteractive    bool   // bd-3xl: per-fix confirmation mode
-	doctorDryRun         bool   // bd-a5z: preview fixes without applying
-	doctorOutput         string // bd-9cc: export diagnostics to file
-	doctorFixChildParent bool   // bd-cuek: opt-in fix for child→parent deps
+	doctorInteractive    bool   // per-fix confirmation mode
+	doctorDryRun         bool   // preview fixes without applying
+	doctorOutput         string // export diagnostics to file
+	doctorFixChildParent bool   // opt-in fix for child→parent deps
 	perfMode             bool
 	checkHealthMode      bool
-	doctorCheckFlag      string // bd-kff0: run specific check (e.g., "pollution")
-	doctorClean          bool   // bd-kff0: for pollution check, delete detected issues
-	doctorDeep           bool   // bd-cwpl: full graph integrity validation
+	doctorCheckFlag      string // run specific check (e.g., "pollution")
+	doctorClean          bool   // for pollution check, delete detected issues
+	doctorDeep           bool   // full graph integrity validation
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -122,14 +122,14 @@ Examples:
   bd doctor --json       # Machine-readable output
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
-  bd doctor --fix -i     # Confirm each fix individually (bd-3xl)
+  bd doctor --fix -i     # Confirm each fix individually
   bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
-  bd doctor --deep             # Full graph integrity validation (bd-cwpl)`,
+  bd doctor --deep             # Full graph integrity validation`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -158,7 +158,7 @@ Examples:
 			return
 		}
 
-		// Run specific check if --check flag is set (bd-kff0)
+		// Run specific check if --check flag is set
 		if doctorCheckFlag != "" {
 			switch doctorCheckFlag {
 			case "pollution":
@@ -171,7 +171,7 @@ Examples:
 			}
 		}
 
-		// Run deep validation if --deep flag is set (bd-cwpl)
+		// Run deep validation if --deep flag is set
 		if doctorDeep {
 			runDeepValidation(absPath)
 			return
@@ -180,7 +180,7 @@ Examples:
 		// Run diagnostics
 		result := runDiagnostics(absPath)
 
-		// bd-a5z: Preview fixes (dry-run) or apply fixes if requested
+		// Preview fixes (dry-run) or apply fixes if requested
 		if doctorDryRun {
 			previewFixes(result)
 		} else if doctorFix {
@@ -189,13 +189,13 @@ Examples:
 			result = runDiagnostics(absPath)
 		}
 
-		// bd-9cc: Add timestamp and platform info for export
+		// Add timestamp and platform info for export
 		if doctorOutput != "" || jsonOutput {
 			result.Timestamp = time.Now().UTC().Format(time.RFC3339)
 			result.Platform = doctor.CollectPlatformInfo(absPath)
 		}
 
-		// bd-9cc: Export to file if --output specified
+		// Export to file if --output specified
 		if doctorOutput != "" {
 			if err := exportDiagnostics(result, doctorOutput); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to export diagnostics: %v\n", err)
@@ -222,12 +222,12 @@ Examples:
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Automatically fix issues where possible")
 	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
-	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually (bd-3xl)")
-	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes (bd-a5z)")
-	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in, bd-cuek)")
+	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually")
+	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
+	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
 }
 
-// previewFixes shows what would be fixed without applying changes (bd-a5z)
+// previewFixes shows what would be fixed without applying changes
 func previewFixes(result doctorResult) {
 	// Collect all fixable issues
 	var fixableIssues []doctorCheck
@@ -285,7 +285,7 @@ func applyFixes(result doctorResult) {
 		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
 	}
 
-	// bd-3xl: Interactive mode - confirm each fix individually
+	// Interactive mode - confirm each fix individually
 	if doctorInteractive {
 		applyFixesInteractive(result.Path, fixableIssues)
 		return
@@ -313,7 +313,7 @@ func applyFixes(result doctorResult) {
 	applyFixList(result.Path, fixableIssues)
 }
 
-// applyFixesInteractive prompts for each fix individually (bd-3xl)
+// applyFixesInteractive prompts for each fix individually
 func applyFixesInteractive(path string, issues []doctorCheck) {
 	reader := bufio.NewReader(os.Stdin)
 	applyAll := false
@@ -485,7 +485,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path)
 		case "Child-Parent Dependencies":
-			// bd-cuek: Requires explicit opt-in flag (destructive, may remove intentional deps)
+			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {
 				fmt.Printf("  ⚠ Child→parent deps require explicit opt-in: bd doctor --fix --fix-child-parent\n")
 				continue
@@ -504,10 +504,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 			fmt.Printf("  ⚠ Resolve conflicts manually: git checkout --ours or --theirs .beads/issues.jsonl\n")
 			continue
 		case "Stale Closed Issues":
-			// bd-bqcc: consolidate cleanup into doctor --fix
+			// consolidate cleanup into doctor --fix
 			err = fix.StaleClosedIssues(path)
 		case "Expired Tombstones":
-			// bd-bqcc: consolidate cleanup into doctor --fix
+			// consolidate cleanup into doctor --fix
 			err = fix.ExpiredTombstones(path)
 		case "Compaction Candidates":
 			// No auto-fix: compaction requires agent review
@@ -552,7 +552,7 @@ func runCheckHealth(path string) {
 		return
 	}
 
-	// Get database path once (bd-b8h: centralized path resolution)
+	// Get database path once (centralized path resolution)
 	dbPath := getCheckHealthDBPath(beadsDir)
 
 	// Check if database exists
@@ -564,7 +564,7 @@ func runCheckHealth(path string) {
 		return
 	}
 
-	// Open database once for all checks (bd-xyc: single DB connection)
+	// Open database once for all checks (single DB connection)
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		// Can't open DB - only check hooks
@@ -610,7 +610,7 @@ func runCheckHealth(path string) {
 	// Silent exit on success
 }
 
-// runDeepValidation runs full graph integrity validation (bd-cwpl)
+// runDeepValidation runs full graph integrity validation
 func runDeepValidation(path string) {
 	// Show warning about potential slowness
 	fmt.Println("Running deep validation (may be slow on large databases)...")
@@ -646,7 +646,7 @@ func printCheckHealthHint(issues []string) {
 }
 
 // getCheckHealthDBPath returns the database path for check-health operations.
-// This centralizes the path resolution logic (bd-b8h).
+// This centralizes the path resolution logic.
 func getCheckHealthDBPath(beadsDir string) string {
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
 		return cfg.DatabasePath(beadsDir)
@@ -655,7 +655,7 @@ func getCheckHealthDBPath(beadsDir string) string {
 }
 
 // hintsDisabledDB checks if hints.doctor is set to "false" using an existing DB connection.
-// Used by runCheckHealth to avoid multiple DB opens (bd-xyc).
+// Used by runCheckHealth to avoid multiple DB opens.
 func hintsDisabledDB(db *sql.DB) bool {
 	var value string
 	err := db.QueryRow("SELECT value FROM config WHERE key = ?", ConfigKeyHintsDoctor).Scan(&value)
@@ -666,7 +666,7 @@ func hintsDisabledDB(db *sql.DB) bool {
 }
 
 // checkVersionMismatchDB checks if CLI version differs from database bd_version.
-// Uses an existing DB connection (bd-xyc).
+// Uses an existing DB connection.
 func checkVersionMismatchDB(db *sql.DB) string {
 	var dbVersion string
 	err := db.QueryRow("SELECT value FROM metadata WHERE key = 'bd_version'").Scan(&dbVersion)
@@ -712,7 +712,7 @@ func runDiagnostics(path string) doctorResult {
 		return result
 	}
 
-	// Check 1a: Fresh clone detection (bd-4ew)
+	// Check 1a: Fresh clone detection
 	// Must come early - if this is a fresh clone, other checks may be misleading
 	freshCloneCheck := convertWithCategory(doctor.CheckFreshClone(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, freshCloneCheck)
@@ -727,7 +727,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 2a: Schema compatibility (bd-ckvw)
+	// Check 2a: Schema compatibility
 	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
@@ -741,7 +741,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 2c: Database integrity (bd-2au)
+	// Check 2c: Database integrity
 	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
@@ -779,7 +779,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 6a: Legacy JSONL config (bd-6xd: migrate beads.jsonl to issues.jsonl)
+	// Check 6a: Legacy JSONL config (migrate beads.jsonl to issues.jsonl)
 	legacyConfigCheck := convertWithCategory(doctor.CheckLegacyJSONLConfig(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, legacyConfigCheck)
 	// Don't fail overall check for legacy config, just warn
@@ -791,7 +791,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 7a: Configuration value validation (bd-alz)
+	// Check 7a: Configuration value validation
 	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
@@ -876,22 +876,22 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, gitUpstreamCheck)
 	// Don't fail overall check for upstream drift, just warn
 
-	// Check 16: Metadata.json version tracking (bd-u4sb)
+	// Check 16: Metadata.json version tracking
 	metadataCheck := convertWithCategory(doctor.CheckMetadataVersionTracking(path, Version), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, metadataCheck)
 	// Don't fail overall check for metadata, just warn
 
-	// Check 17: Sync branch configuration (bd-rsua)
+	// Check 17: Sync branch configuration
 	syncBranchCheck := convertWithCategory(doctor.CheckSyncBranchConfig(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, syncBranchCheck)
 	// Don't fail overall check for missing sync.branch, just warn
 
-	// Check 17a: Sync branch health (bd-6rf)
+	// Check 17a: Sync branch health
 	syncBranchHealthCheck := convertWithCategory(doctor.CheckSyncBranchHealth(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, syncBranchHealthCheck)
 	// Don't fail overall check for sync branch health, just warn
 
-	// Check 17b: Orphaned issues - referenced in commits but still open (bd-5hrq)
+	// Check 17b: Orphaned issues - referenced in commits but still open
 	orphanedIssuesCheck := convertWithCategory(doctor.CheckOrphanedIssues(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, orphanedIssuesCheck)
 	// Don't fail overall check for orphaned issues, just warn
@@ -901,12 +901,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, deletionsCheck)
 	// Don't fail overall check for missing deletions manifest, just warn
 
-	// Check 19: Tombstones health (bd-s3v)
+	// Check 19: Tombstones health
 	tombstonesCheck := convertWithCategory(doctor.CheckTombstones(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, tombstonesCheck)
 	// Don't fail overall check for tombstone issues, just warn
 
-	// Check 20: Untracked .beads/*.jsonl files (bd-pbj)
+	// Check 20: Untracked .beads/*.jsonl files
 	untrackedCheck := convertWithCategory(doctor.CheckUntrackedBeadsFiles(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, untrackedCheck)
 	// Don't fail overall check for untracked files, just warn
@@ -921,7 +921,7 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
-	// Check 22a: Child→parent dependencies (anti-pattern, bd-nim5)
+	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
@@ -943,12 +943,12 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 26: Stale closed issues (maintenance, bd-bqcc)
+	// Check 26: Stale closed issues (maintenance)
 	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
 	result.Checks = append(result.Checks, staleClosedCheck)
 	// Don't fail overall check for stale issues, just warn
 
-	// Check 26a: Stale molecules (complete but unclosed, bd-6a5z)
+	// Check 26a: Stale molecules (complete but unclosed)
 	staleMoleculesCheck := convertDoctorCheck(doctor.CheckStaleMolecules(path))
 	result.Checks = append(result.Checks, staleMoleculesCheck)
 	// Don't fail overall check for stale molecules, just warn
@@ -958,12 +958,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, persistentMolCheck)
 	// Don't fail overall check for persistent mol issues, just warn
 
-	// Check 27: Expired tombstones (maintenance, bd-bqcc)
+	// Check 27: Expired tombstones (maintenance)
 	tombstonesExpiredCheck := convertDoctorCheck(doctor.CheckExpiredTombstones(path))
 	result.Checks = append(result.Checks, tombstonesExpiredCheck)
 	// Don't fail overall check for expired tombstones, just warn
 
-	// Check 28: Compaction candidates (maintenance, bd-bqcc)
+	// Check 28: Compaction candidates (maintenance)
 	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))
 	result.Checks = append(result.Checks, compactionCheck)
 	// Info only, not a warning - compaction requires human review
@@ -996,7 +996,7 @@ func convertWithCategory(dc doctor.DoctorCheck, category string) doctorCheck {
 	return check
 }
 
-// exportDiagnostics writes the doctor result to a JSON file (bd-9cc)
+// exportDiagnostics writes the doctor result to a JSON file
 func exportDiagnostics(result doctorResult, outputPath string) error {
 	// #nosec G304 - outputPath is a user-provided flag value for file generation
 	f, err := os.Create(outputPath)
@@ -1150,7 +1150,7 @@ func printDiagnostics(result doctorResult) {
 	}
 }
 
-// runPollutionCheck runs detailed test pollution detection (bd-kff0)
+// runPollutionCheck runs detailed test pollution detection
 // This integrates the detect-pollution command functionality into doctor.
 func runPollutionCheck(path string, clean bool, yes bool) {
 	// Ensure we have a store initialized (uses direct mode, no daemon support yet)
@@ -1288,8 +1288,8 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
-	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file (bd-9cc)")
+	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file")
 	doctorCmd.Flags().StringVar(&doctorCheckFlag, "check", "", "Run specific check in detail (e.g., 'pollution')")
 	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete detected test issues")
-	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "Validate full graph integrity (bd-cwpl)")
+	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "Validate full graph integrity")
 }

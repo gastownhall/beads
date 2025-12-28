@@ -116,7 +116,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 	// Update the duplicate issue with duplicate_of and close it
 	closedStatus := string(types.StatusClosed)
 	if daemonClient != nil {
-		// Use RPC for daemon mode (bd-fu83)
+		// Use RPC for daemon mode
 		_, err := daemonClient.Update(&rpc.UpdateArgs{
 			ID:          duplicateID,
 			DuplicateOf: &canonicalID,
@@ -214,7 +214,7 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	// Update the old issue with superseded_by and close it
 	closedStatus := string(types.StatusClosed)
 	if daemonClient != nil {
-		// Use RPC for daemon mode (bd-fu83)
+		// Use RPC for daemon mode
 		_, err := daemonClient.Update(&rpc.UpdateArgs{
 			ID:           oldID,
 			SupersededBy: &newID,

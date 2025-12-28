@@ -17,7 +17,7 @@ func validateBatchIssues(issues []*types.Issue) error {
 }
 
 // validateBatchIssuesWithCustomStatuses validates all issues in a batch,
-// allowing custom statuses in addition to built-in ones (bd-1pj6).
+// allowing custom statuses in addition to built-in ones.
 func validateBatchIssuesWithCustomStatuses(issues []*types.Issue, customStatuses []string) error {
 	now := time.Now()
 	for i, issue := range issues {
@@ -67,7 +67,7 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
 	if err == sql.ErrNoRows || prefix == "" {
-		// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
+		// CRITICAL: Reject operation if issue_prefix config is missing
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
@@ -214,7 +214,7 @@ func checkForExistingIDs(ctx context.Context, conn *sql.Conn, issues []*types.Is
 //   }
 //
 //   // After importing with explicit IDs, sync counters to prevent collisions
-// REMOVED (bd-c7af): SyncAllCounters example - no longer needed with hash IDs
+// REMOVED: SyncAllCounters example - no longer needed with hash IDs
 //
 // Performance:
 //   - 100 issues: ~30ms (vs ~900ms with CreateIssue loop)
@@ -250,7 +250,7 @@ func (s *SQLiteStorage) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		return nil
 	}
 
-	// Fetch custom statuses for validation (bd-1pj6)
+	// Fetch custom statuses for validation
 	customStatuses, err := s.GetCustomStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get custom statuses: %w", err)
@@ -268,7 +268,7 @@ func (s *SQLiteStorage) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Use retry logic with exponential backoff to handle SQLITE_BUSY under concurrent load (bd-ola6)
+	// Use retry logic with exponential backoff to handle SQLITE_BUSY under concurrent load
 	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
 	}

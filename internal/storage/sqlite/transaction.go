@@ -48,7 +48,7 @@ func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 	defer func() { _ = conn.Close() }()
 
 	// Start IMMEDIATE transaction to acquire write lock early.
-	// Use retry logic with exponential backoff to handle SQLITE_BUSY (bd-ola6)
+	// Use retry logic with exponential backoff to handle SQLITE_BUSY
 	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -91,7 +91,7 @@ func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 
 // CreateIssue creates a new issue within the transaction.
 func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
-	// Fetch custom statuses for validation (bd-1pj6)
+	// Fetch custom statuses for validation
 	customStatuses, err := t.GetCustomStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get custom statuses: %w", err)
@@ -132,7 +132,7 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Compute content hash (bd-95)
+	// Compute content hash
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
@@ -141,13 +141,13 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 	var configPrefix string
 	err = t.conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&configPrefix)
 	if err == sql.ErrNoRows || configPrefix == "" {
-		// CRITICAL: Reject operation if issue_prefix config is missing (bd-166)
+		// CRITICAL: Reject operation if issue_prefix config is missing
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
-	// Use IDPrefix override if set, combined with config prefix (bd-hobo)
+	// Use IDPrefix override if set, combined with config prefix
 	// e.g., configPrefix="bd" + IDPrefix="wisp" → "bd-wisp"
 	prefix := configPrefix
 	if issue.IDPrefix != "" {
@@ -156,14 +156,14 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 
 	// Generate or validate ID
 	if issue.ID == "" {
-		// Generate hash-based ID with adaptive length based on database size (bd-ea2a13)
+		// Generate hash-based ID with adaptive length based on database size
 		generatedID, err := GenerateIssueID(ctx, t.conn, prefix, issue, actor)
 		if err != nil {
 			return fmt.Errorf("failed to generate issue ID: %w", err)
 		}
 		issue.ID = generatedID
 	} else {
-		// Validate that explicitly provided ID matches the configured prefix (bd-177)
+		// Validate that explicitly provided ID matches the configured prefix
 		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
 			return fmt.Errorf("failed to validate issue ID prefix: %w", err)
 		}
@@ -207,7 +207,7 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 		return nil
 	}
 
-	// Fetch custom statuses for validation (bd-1pj6)
+	// Fetch custom statuses for validation
 	customStatuses, err := t.GetCustomStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get custom statuses: %w", err)
@@ -370,7 +370,7 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 		return fmt.Errorf("issue %s not found", id)
 	}
 
-	// Fetch custom statuses for validation (bd-1pj6)
+	// Fetch custom statuses for validation
 	customStatuses, err := t.GetCustomStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get custom statuses: %w", err)
@@ -398,7 +398,7 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 	// Auto-manage closed_at when status changes
 	setClauses, args = manageClosedAt(oldIssue, updates, setClauses, args)
 
-	// Recompute content_hash if any content fields changed (bd-95)
+	// Recompute content_hash if any content fields changed
 	contentChanged := false
 	contentFields := []string{"title", "description", "design", "acceptance_criteria", "notes", "status", "priority", "issue_type", "assignee", "external_ref"}
 	for _, field := range contentFields {
@@ -449,7 +449,7 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
-	// Invalidate blocked issues cache if status changed (bd-1c4h)
+	// Invalidate blocked issues cache if status changed
 	// Status changes affect which issues are blocked (blockers must be open/in_progress/blocked)
 	if _, statusChanged := updates["status"]; statusChanged {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
@@ -555,7 +555,7 @@ func (t *sqliteTxStorage) CloseIssue(ctx context.Context, id string, reason stri
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
-	// Invalidate blocked issues cache since status changed to closed (bd-1c4h)
+	// Invalidate blocked issues cache since status changed to closed
 	// Closed issues don't block others, so this affects blocking calculations
 	if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
 		return fmt.Errorf("failed to invalidate blocked cache: %w", err)
@@ -617,7 +617,7 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// External refs (external:<project>:<capability>) don't need target validation
 	// They are resolved lazily at query time by CheckExternalDep
 	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
@@ -720,7 +720,7 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		}
 	}
 
-	// Invalidate blocked cache for blocking dependencies (bd-1c4h, bd-kzda)
+	// Invalidate blocked cache for blocking dependencies
 	if dep.Type.AffectsReadyWork() {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
 			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
@@ -732,13 +732,13 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 
 // RemoveDependency removes a dependency within the transaction.
 func (t *sqliteTxStorage) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	// First, check what type of dependency is being removed (bd-1c4h)
+	// First, check what type of dependency is being removed
 	var depType types.DependencyType
 	err := t.conn.QueryRowContext(ctx, `
 		SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
 	`, issueID, dependsOnID).Scan(&depType)
 
-	// Store whether cache needs invalidation before deletion (bd-1c4h, bd-kzda)
+	// Store whether cache needs invalidation before deletion
 	needsCacheInvalidation := false
 	if err == nil {
 		needsCacheInvalidation = depType.AffectsReadyWork()
@@ -777,7 +777,7 @@ func (t *sqliteTxStorage) RemoveDependency(ctx context.Context, issueID, depends
 		return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
 	}
 
-	// Invalidate blocked cache if this was a blocking dependency (bd-1c4h)
+	// Invalidate blocked cache if this was a blocking dependency
 	if needsCacheInvalidation {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
 			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
@@ -993,7 +993,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
 	} else if !filter.IncludeTombstones {
-		// Exclude tombstones by default unless explicitly filtering for them (bd-1bu)
+		// Exclude tombstones by default unless explicitly filtering for them
 		whereClauses = append(whereClauses, "status != ?")
 		args = append(args, types.StatusTombstone)
 	}
@@ -1088,7 +1088,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
-	// Wisp filtering (bd-kwro.9)
+	// Wisp filtering
 	if filter.Ephemeral != nil {
 		if *filter.Ephemeral {
 			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
@@ -1097,7 +1097,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		}
 	}
 
-	// Pinned filtering (bd-7h5)
+	// Pinned filtering
 	if filter.Pinned != nil {
 		if *filter.Pinned {
 			whereClauses = append(whereClauses, "pinned = 1")
@@ -1106,7 +1106,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		}
 	}
 
-	// Parent filtering (bd-yqhh): filter children by parent issue
+	// Parent filtering: filter children by parent issue
 	if filter.ParentID != nil {
 		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?)")
 		args = append(args, *filter.ParentID)
@@ -1171,14 +1171,14 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
-	// Messaging fields (bd-kwro)
+	// Messaging fields
 	var sender sql.NullString
 	var wisp sql.NullInt64
-	// Pinned field (bd-7h5)
+	// Pinned field
 	var pinned sql.NullInt64
-	// Template field (beads-1ra)
+	// Template field
 	var isTemplate sql.NullInt64
-	// Gate fields (bd-udsi)
+	// Gate fields
 	var awaitType sql.NullString
 	var awaitID sql.NullString
 	var timeoutNs sql.NullInt64
@@ -1239,22 +1239,22 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
-	// Messaging fields (bd-kwro)
+	// Messaging fields
 	if sender.Valid {
 		issue.Sender = sender.String
 	}
 	if wisp.Valid && wisp.Int64 != 0 {
 		issue.Ephemeral = true
 	}
-	// Pinned field (bd-7h5)
+	// Pinned field
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
 	}
-	// Template field (beads-1ra)
+	// Template field
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
 	}
-	// Gate fields (bd-udsi)
+	// Gate fields
 	if awaitType.Valid {
 		issue.AwaitType = awaitType.String
 	}
