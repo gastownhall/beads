@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -156,6 +157,61 @@ func TestDetectPrefix(t *testing.T) {
 			t.Errorf("Expected prefix 'myproject', got '%s'", prefix)
 		}
 	})
+
+	t.Run("config override", func(t *testing.T) {
+		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
+		prev := config.GetString("issue-prefix")
+		config.Set("issue-prefix", "custom-prefix")
+		t.Cleanup(func() { config.Set("issue-prefix", prev) })
+
+		prefix, err := detectPrefix(beadsDir, memStore)
+		if err != nil {
+			t.Fatalf("detectPrefix failed: %v", err)
+		}
+		if prefix != "custom-prefix" {
+			t.Errorf("Expected config override prefix, got %q", prefix)
+		}
+	})
+
+	t.Run("sanitizes directory names", func(t *testing.T) {
+		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
+		weirdDir := filepath.Join(tempDir, "My Project!!!")
+		if err := os.MkdirAll(weirdDir, 0o755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+		t.Chdir(weirdDir)
+		prev := config.GetString("issue-prefix")
+		config.Set("issue-prefix", "")
+		t.Cleanup(func() { config.Set("issue-prefix", prev) })
+
+		prefix, err := detectPrefix(beadsDir, memStore)
+		if err != nil {
+			t.Fatalf("detectPrefix failed: %v", err)
+		}
+		if prefix != "myproject" {
+			t.Errorf("Expected sanitized prefix 'myproject', got %q", prefix)
+		}
+	})
+
+	t.Run("invalid directory falls back to bd", func(t *testing.T) {
+		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
+		emptyDir := filepath.Join(tempDir, "!!!")
+		if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+		t.Chdir(emptyDir)
+		prev := config.GetString("issue-prefix")
+		config.Set("issue-prefix", "")
+		t.Cleanup(func() { config.Set("issue-prefix", prev) })
+
+		prefix, err := detectPrefix(beadsDir, memStore)
+		if err != nil {
+			t.Fatalf("detectPrefix failed: %v", err)
+		}
+		if prefix != "bd" {
+			t.Errorf("Expected fallback prefix 'bd', got %q", prefix)
+		}
+	})
 }
 
 func TestInitializeNoDbMode_SetsStoreActive(t *testing.T) {
@@ -253,7 +309,8 @@ func TestWriteIssuesToJSONL(t *testing.T) {
 
 	issues := []*types.Issue{
 		{ID: "bd-1", Title: "Test Issue 1", Description: "Desc 1"},
-		{ID: "bd-2", Title: "Test Issue 2", Description: "Desc 2"},
+		{ID: "bd-2", Title: "Test Issue 2", Description: "Desc 2", Ephemeral: true},
+		{ID: "bd-3", Title: "Regular", Description: "Persistent"},
 	}
 	if err := memStore.LoadFromIssues(issues); err != nil {
 		t.Fatalf("Failed to load issues: %v", err)
@@ -271,6 +328,11 @@ func TestWriteIssuesToJSONL(t *testing.T) {
 	}
 
 	if len(loadedIssues) != 2 {
-		t.Errorf("Expected 2 issues in JSONL, got %d", len(loadedIssues))
+		t.Fatalf("Expected 2 non-ephemeral issues in JSONL, got %d", len(loadedIssues))
+	}
+	for _, issue := range loadedIssues {
+		if issue.Ephemeral {
+			t.Fatalf("Ephemeral issue %s should not be persisted", issue.ID)
+		}
 	}
 }

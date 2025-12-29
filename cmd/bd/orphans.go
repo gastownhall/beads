@@ -12,6 +12,13 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+var doctorFindOrphanedIssues = doctor.FindOrphanedIssues
+
+var closeIssueRunner = func(issueID string) error {
+	cmd := exec.Command("bd", "close", issueID, "--reason", "Implemented")
+	return cmd.Run()
+}
+
 var orphansCmd = &cobra.Command{
 	Use:   "orphans",
 	Short: "Identify orphaned issues (referenced in commits but still open)",
@@ -89,16 +96,16 @@ Examples:
 
 // orphanIssueOutput is the JSON output format for orphaned issues
 type orphanIssueOutput struct {
-	IssueID              string `json:"issue_id"`
-	Title                string `json:"title"`
-	Status               string `json:"status"`
-	LatestCommit         string `json:"latest_commit,omitempty"`
-	LatestCommitMessage  string `json:"latest_commit_message,omitempty"`
+	IssueID             string `json:"issue_id"`
+	Title               string `json:"title"`
+	Status              string `json:"status"`
+	LatestCommit        string `json:"latest_commit,omitempty"`
+	LatestCommitMessage string `json:"latest_commit_message,omitempty"`
 }
 
 // findOrphanedIssues wraps the shared doctor package function and converts to output format
 func findOrphanedIssues(path string) ([]orphanIssueOutput, error) {
-	orphans, err := doctor.FindOrphanedIssues(path)
+	orphans, err := doctorFindOrphanedIssues(path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to find orphaned issues: %w", err)
 	}
@@ -118,8 +125,7 @@ func findOrphanedIssues(path string) ([]orphanIssueOutput, error) {
 
 // closeIssue closes an issue using bd close
 func closeIssue(issueID string) error {
-	cmd := exec.Command("bd", "close", issueID, "--reason", "Implemented")
-	return cmd.Run()
+	return closeIssueRunner(issueID)
 }
 
 func init() {
