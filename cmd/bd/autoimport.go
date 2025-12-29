@@ -206,17 +206,10 @@ func getLocalSyncBranch(beadsDir string) string {
 
 
 
-// importFromLocalJSONL imports issues from a local JSONL file on disk.
-// Unlike importFromGit, this reads from the current working tree, preserving
-// any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
+// importFromJSONLData imports issues from raw JSONL bytes.
+// This is the shared implementation used by both importFromGit and importFromLocalJSONL.
 // Returns the number of issues imported and any error.
-func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.Storage, localPath string) (int, error) {
-	// #nosec G304 -- path provided by bd init command
-	jsonlData, err := os.ReadFile(localPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read local JSONL file: %w", err)
-	}
-
+func importFromJSONLData(ctx context.Context, dbFilePath string, store storage.Storage, jsonlData []byte) (int, error) {
 	// Parse JSONL data
 	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
 	// Increase buffer size to handle large JSONL lines (e.g., big descriptions)
@@ -241,7 +234,8 @@ func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.
 		return 0, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
-	// Set issue_prefix from first imported issue if missing
+	// CRITICAL: Set issue_prefix from first imported issue if missing
+	// This prevents derivePrefixFromPath fallback which caused duplicate issues
 	if len(issues) > 0 {
 		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
 		if err == nil && strings.TrimSpace(configuredPrefix) == "" {
@@ -254,19 +248,33 @@ func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.
 		}
 	}
 
-	// Use existing import logic
+	// Use existing import logic with auto-resolve collisions
+	// Note: SkipPrefixValidation allows mixed prefixes during auto-import
 	opts := ImportOptions{
 		DryRun:               false,
 		SkipUpdate:           false,
 		SkipPrefixValidation: true,
 	}
 
-	_, err = importIssuesCore(ctx, dbFilePath, store, issues, opts)
+	_, err := importIssuesCore(ctx, dbFilePath, store, issues, opts)
 	if err != nil {
 		return 0, err
 	}
 
 	return len(issues), nil
+}
+
+// importFromLocalJSONL imports issues from a local JSONL file on disk.
+// Unlike importFromGit, this reads from the current working tree, preserving
+// any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
+// Returns the number of issues imported and any error.
+func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.Storage, localPath string) (int, error) {
+	// #nosec G304 -- path provided by bd init command
+	jsonlData, err := os.ReadFile(localPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read local JSONL file: %w", err)
+	}
+	return importFromJSONLData(ctx, dbFilePath, store, jsonlData)
 }
 
 // importFromGit imports issues from git at the specified ref (bd-0is: supports sync-branch)
@@ -275,55 +283,6 @@ func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage
 	if err != nil {
 		return err
 	}
-
-	// Parse JSONL data
-	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
-	// Increase buffer size to handle large JSONL lines (e.g., big descriptions)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024) // allow up to 64MB per line
-	var issues []*types.Issue
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var issue types.Issue
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return fmt.Errorf("failed to parse issue: %w", err)
-		}
-		issue.SetDefaults() // Apply defaults for omitted fields (beads-399)
-		issues = append(issues, &issue)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("failed to scan JSONL: %w", err)
-	}
-
-	// CRITICAL: Set issue_prefix from first imported issue if missing
-	// This prevents derivePrefixFromPath fallback which caused duplicate issues
-	if len(issues) > 0 {
-		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
-		if err == nil && strings.TrimSpace(configuredPrefix) == "" {
-			// Database has no prefix configured - derive from first issue
-			firstPrefix := utils.ExtractIssuePrefix(issues[0].ID)
-			if firstPrefix != "" {
-				if err := store.SetConfig(ctx, "issue_prefix", firstPrefix); err != nil {
-					return fmt.Errorf("failed to set issue_prefix from imported issues: %w", err)
-				}
-			}
-		}
-	}
-
-	// Use existing import logic with auto-resolve collisions
-	// Note: SkipPrefixValidation allows mixed prefixes during auto-import
-	// (but now we set the prefix first, so CreateIssue won't use filename fallback)
-	opts := ImportOptions{
-		DryRun:               false,
-		SkipUpdate:           false,
-		SkipPrefixValidation: true,  // Auto-import is lenient about prefixes
-	}
-
-	_, err = importIssuesCore(ctx, dbFilePath, store, issues, opts)
+	_, err = importFromJSONLData(ctx, dbFilePath, store, jsonlData)
 	return err
 }
