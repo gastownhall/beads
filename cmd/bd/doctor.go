@@ -47,6 +47,7 @@ var (
 	doctorDryRun         bool   // preview fixes without applying
 	doctorOutput         string // export diagnostics to file
 	doctorFixChildParent bool   // opt-in fix for child→parent deps
+	doctorVerbose        bool   // show detailed output during fixes
 	perfMode             bool
 	checkHealthMode      bool
 	doctorCheckFlag      string // run specific check (e.g., "pollution")
@@ -217,6 +218,7 @@ func init() {
 	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually")
 	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
 	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
+	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show detailed output during fixes (e.g., list each removed dependency)")
 }
 
 func runDiagnostics(path string) doctorResult {

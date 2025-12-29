@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // ErrTestBinary is returned when getBdBinary detects it's running as a test binary.
@@ -107,4 +109,44 @@ func isWithinWorkspace(root, candidate string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// resolveBeadsDir follows .beads/redirect files to find the actual beads directory.
+// If no redirect exists, returns the original path unchanged.
+func resolveBeadsDir(beadsDir string) string {
+	redirectFile := filepath.Join(beadsDir, beads.RedirectFileName)
+	data, err := os.ReadFile(redirectFile) //nolint:gosec // redirect file path is constructed from known beadsDir
+	if err != nil {
+		// No redirect file - use original path
+		return beadsDir
+	}
+
+	// Parse the redirect target
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return beadsDir
+	}
+
+	// Skip comments
+	lines := strings.Split(target, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			target = line
+			break
+		}
+	}
+
+	// Resolve relative paths from the parent of the .beads directory
+	if !filepath.IsAbs(target) {
+		projectRoot := filepath.Dir(beadsDir)
+		target = filepath.Join(projectRoot, target)
+	}
+
+	// Verify the target exists
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		return beadsDir
+	}
+
+	return target
 }

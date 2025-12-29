@@ -269,14 +269,14 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Merge Artifacts":
 			err = fix.MergeArtifacts(path)
 		case "Orphaned Dependencies":
-			err = fix.OrphanedDependencies(path)
+			err = fix.OrphanedDependencies(path, doctorVerbose)
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {
 				fmt.Printf("  ⚠ Child→parent deps require explicit opt-in: bd doctor --fix --fix-child-parent\n")
 				continue
 			}
-			err = fix.ChildParentDependencies(path)
+			err = fix.ChildParentDependencies(path, doctorVerbose)
 		case "Duplicate Issues":
 			// No auto-fix: duplicates require user review
 			fmt.Printf("  ⚠ Run 'bd duplicates' to review and merge duplicates\n")

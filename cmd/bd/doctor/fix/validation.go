@@ -18,7 +18,7 @@ func MergeArtifacts(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Read patterns from .gitignore or use defaults
 	patterns, err := readMergeArtifactPatterns(beadsDir)
@@ -99,12 +99,13 @@ func readMergeArtifactPatterns(beadsDir string) ([]string, error) {
 }
 
 // OrphanedDependencies removes dependencies pointing to non-existent issues.
-func OrphanedDependencies(path string) error {
+// If verbose is true, prints each removed dependency; otherwise shows only summary.
+func OrphanedDependencies(path string, verbose bool) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	// Open database
@@ -146,6 +147,9 @@ func OrphanedDependencies(path string) error {
 	}
 
 	// Delete orphaned dependencies
+	// Show individual items if verbose or count is small (<20)
+	showIndividual := verbose || len(orphans) < 20
+	var removed int
 	for _, o := range orphans {
 		_, err := db.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
 			o.issueID, o.dependsOnID)
@@ -154,23 +158,27 @@ func OrphanedDependencies(path string) error {
 		} else {
 			// Mark issue as dirty for export
 			_, _ = db.Exec("INSERT OR IGNORE INTO dirty_issues (issue_id) VALUES (?)", o.issueID)
-			fmt.Printf("  Removed orphaned dependency: %s→%s\n", o.issueID, o.dependsOnID)
+			removed++
+			if showIndividual {
+				fmt.Printf("  Removed orphaned dependency: %s→%s\n", o.issueID, o.dependsOnID)
+			}
 		}
 	}
 
-	fmt.Printf("  Fixed %d orphaned dependency reference(s)\n", len(orphans))
+	fmt.Printf("  Fixed %d orphaned dependency reference(s)\n", removed)
 	return nil
 }
 
 // ChildParentDependencies removes child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // Requires explicit opt-in via --fix-child-parent flag since some workflows may use these intentionally.
-func ChildParentDependencies(path string) error {
+// If verbose is true, prints each removed dependency; otherwise shows only summary.
+func ChildParentDependencies(path string, verbose bool) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	// Open database
@@ -215,6 +223,9 @@ func ChildParentDependencies(path string) error {
 	}
 
 	// Delete child→parent blocking dependencies (preserving parent-child type)
+	// Show individual items if verbose or count is small (<20)
+	showIndividual := verbose || len(badDeps) < 20
+	var removed int
 	for _, d := range badDeps {
 		_, err := db.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ? AND type = ?",
 			d.issueID, d.dependsOnID, d.depType)
@@ -223,11 +234,14 @@ func ChildParentDependencies(path string) error {
 		} else {
 			// Mark issue as dirty for export
 			_, _ = db.Exec("INSERT OR IGNORE INTO dirty_issues (issue_id) VALUES (?)", d.issueID)
-			fmt.Printf("  Removed child→parent dependency: %s→%s\n", d.issueID, d.dependsOnID)
+			removed++
+			if showIndividual {
+				fmt.Printf("  Removed child→parent dependency: %s→%s\n", d.issueID, d.dependsOnID)
+			}
 		}
 	}
 
-	fmt.Printf("  Fixed %d child→parent dependency anti-pattern(s)\n", len(badDeps))
+	fmt.Printf("  Fixed %d child→parent dependency anti-pattern(s)\n", removed)
 	return nil
 }
 

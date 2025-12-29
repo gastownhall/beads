@@ -27,7 +27,8 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 		{"SyncBranchHealth", func(dir string) error { return SyncBranchHealth(dir, "beads-sync") }},
 		{"UntrackedJSONL", UntrackedJSONL},
 		{"MigrateTombstones", MigrateTombstones},
-		{"ChildParentDependencies", ChildParentDependencies},
+		{"ChildParentDependencies", func(dir string) error { return ChildParentDependencies(dir, false) }},
+		{"OrphanedDependencies", func(dir string) error { return OrphanedDependencies(dir, false) }},
 	}
 
 	for _, tc := range funcs {
@@ -70,7 +71,7 @@ func TestChildParentDependencies_NoBadDeps(t *testing.T) {
 	db.Close()
 
 	// Run fix - should find no bad deps
-	err = ChildParentDependencies(dir)
+	err = ChildParentDependencies(dir, false)
 	if err != nil {
 		t.Errorf("ChildParentDependencies failed: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestChildParentDependencies_FixesBadDeps(t *testing.T) {
 	db.Close()
 
 	// Run fix
-	err = ChildParentDependencies(dir)
+	err = ChildParentDependencies(dir, false)
 	if err != nil {
 		t.Errorf("ChildParentDependencies failed: %v", err)
 	}
@@ -173,7 +174,7 @@ func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {
 	db.Close()
 
 	// Run fix
-	err = ChildParentDependencies(dir)
+	err = ChildParentDependencies(dir, false)
 	if err != nil {
 		t.Fatalf("ChildParentDependencies failed: %v", err)
 	}
