@@ -1082,14 +1082,15 @@ func formatVanishedIssues(localIssues, mergedIssues map[string]issueSummary, loc
 	return lines
 }
 
-// normalizeBeadsRelPath strips any leading path components before .beads.
+// normalizeBeadsRelPath strips any leading path components before .beads/.
 // This handles bare repo worktrees where the relative path includes the worktree
 // name (e.g., "main/.beads/issues.jsonl" -> ".beads/issues.jsonl").
 // GH#785: Fix for sync failing across worktrees in bare repo setup.
 func normalizeBeadsRelPath(relPath string) string {
 	// Use filepath.ToSlash for consistent handling across platforms
 	normalized := filepath.ToSlash(relPath)
-	if idx := strings.Index(normalized, ".beads"); idx > 0 {
+	// Look for ".beads/" to ensure we match the directory, not a prefix like ".beads-backup"
+	if idx := strings.Index(normalized, ".beads/"); idx > 0 {
 		// Strip leading path components before .beads
 		return filepath.FromSlash(normalized[idx:])
 	}

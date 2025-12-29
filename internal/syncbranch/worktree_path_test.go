@@ -218,6 +218,16 @@ func TestNormalizeBeadsRelPath(t *testing.T) {
 			input:    ".beads/subdir/file.jsonl",
 			expected: ".beads/subdir/file.jsonl",
 		},
+		{
+			name:     "similar prefix like .beads-backup not matched",
+			input:    "foo/.beads-backup/.beads/issues.jsonl",
+			expected: ".beads/issues.jsonl",
+		},
+		{
+			name:     "only .beads-backup no real .beads unchanged",
+			input:    "foo/.beads-backup/file.txt",
+			expected: "foo/.beads-backup/file.txt",
+		},
 	}
 
 	for _, tt := range tests {
