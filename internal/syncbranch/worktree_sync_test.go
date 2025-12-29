@@ -349,38 +349,6 @@ func TestPreemptiveFetchAndFastForward(t *testing.T) {
 	})
 }
 
-// TestFetchAndRebaseInWorktree tests the fetch and rebase function
-func TestFetchAndRebaseInWorktree(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-
-	t.Run("returns error when fetch fails", func(t *testing.T) {
-		repoDir := setupTestRepoWithRemote(t)
-		defer os.RemoveAll(repoDir)
-
-		syncBranch := "beads-sync"
-
-		// Create sync branch locally
-		runGit(t, repoDir, "checkout", "-b", syncBranch)
-		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "initial")
-
-		// fetchAndRebaseInWorktree should fail since remote doesn't have the branch
-		err := fetchAndRebaseInWorktree(ctx, repoDir, syncBranch, "origin")
-		if err == nil {
-			// If it succeeds, it means the test setup allowed it (self remote)
-			return
-		}
-		// Expected to fail
-		if !strings.Contains(err.Error(), "fetch failed") {
-			// Some other error - still acceptable
-		}
-	})
-}
 
 // Helper: setup a test repo with a (fake) remote
 func setupTestRepoWithRemote(t *testing.T) string {

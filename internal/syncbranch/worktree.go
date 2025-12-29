@@ -745,7 +745,6 @@ func isNonFastForwardError(output string) bool {
 }
 
 // contentMergeRecovery performs a content-level merge when push fails due to divergence.
-// This replaces the old fetchAndRebaseInWorktree which used git rebase (text-level).
 //
 // The problem with git rebase: it replays commits textually, which can resurrect
 // tombstones. For example, if remote has a tombstone and local has 'closed',
@@ -808,26 +807,6 @@ func contentMergeRecovery(ctx context.Context, worktreePath, branch, remote stri
 	return nil
 }
 
-// fetchAndRebaseInWorktree is DEPRECATED - kept for reference only.
-// Use contentMergeRecovery instead to avoid tombstone resurrection.
-func fetchAndRebaseInWorktree(ctx context.Context, worktreePath, branch, remote string) error {
-	// Fetch latest from remote
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, branch)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("fetch failed: %w\n%s", err, output)
-	}
-
-	// Rebase local commits on top of remote
-	rebaseCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", fmt.Sprintf("%s/%s", remote, branch))
-	if output, err := rebaseCmd.CombinedOutput(); err != nil {
-		// Abort the failed rebase to leave worktree in clean state
-		abortCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", "--abort")
-		_ = abortCmd.Run() // Best effort
-		return fmt.Errorf("rebase failed: %w\n%s", err, output)
-	}
-
-	return nil
-}
 
 // runCmdWithTimeoutMessage runs a command and prints a helpful message if it takes too long.
 // This helps when git operations hang waiting for credential/browser auth.
