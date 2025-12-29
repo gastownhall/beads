@@ -248,6 +248,111 @@ func TestGetInvariantNames(t *testing.T) {
 	}
 }
 
+func TestCleanOrphanedRefs(t *testing.T) {
+	db := setupInvariantTestDB(t)
+	defer db.Close()
+
+	// Create a valid issue
+	_, err := db.Exec(`INSERT INTO issues (id, title) VALUES ('test-1', 'Test Issue')`)
+	if err != nil {
+		t.Fatalf("failed to insert test issue: %v", err)
+	}
+
+	// Create valid dependency and label
+	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, created_by) VALUES ('test-1', 'test-1', 'test')`)
+	if err != nil {
+		t.Fatalf("failed to insert valid dependency: %v", err)
+	}
+
+	_, err = db.Exec(`INSERT INTO labels (issue_id, label) VALUES ('test-1', 'valid-label')`)
+	if err != nil {
+		t.Fatalf("failed to insert valid label: %v", err)
+	}
+
+	// Disable FK constraints to create orphaned refs
+	_, err = db.Exec(`PRAGMA foreign_keys = OFF`)
+	if err != nil {
+		t.Fatalf("failed to disable foreign keys: %v", err)
+	}
+
+	// Create orphaned dependency (issue_id not in issues)
+	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, created_by) VALUES ('orphan-1', 'test-1', 'test')`)
+	if err != nil {
+		t.Fatalf("failed to insert orphaned dependency (issue_id): %v", err)
+	}
+
+	// Create orphaned dependency (depends_on_id not in issues)
+	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, created_by) VALUES ('test-1', 'orphan-2', 'test')`)
+	if err != nil {
+		t.Fatalf("failed to insert orphaned dependency (depends_on_id): %v", err)
+	}
+
+	// Create external dependency (should NOT be cleaned)
+	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, created_by) VALUES ('test-1', 'external:proj:cap', 'test')`)
+	if err != nil {
+		t.Fatalf("failed to insert external dependency: %v", err)
+	}
+
+	// Create orphaned label
+	_, err = db.Exec(`INSERT INTO labels (issue_id, label) VALUES ('orphan-3', 'orphan-label')`)
+	if err != nil {
+		t.Fatalf("failed to insert orphaned label: %v", err)
+	}
+
+	_, err = db.Exec(`PRAGMA foreign_keys = ON`)
+	if err != nil {
+		t.Fatalf("failed to enable foreign keys: %v", err)
+	}
+
+	// Verify we have orphaned refs (checkForeignKeys should fail)
+	err = checkForeignKeys(db, &Snapshot{})
+	if err == nil {
+		t.Error("expected checkForeignKeys to fail with orphaned refs")
+	}
+
+	// Run cleanup
+	deps, labels, err := CleanOrphanedRefs(db)
+	if err != nil {
+		t.Fatalf("CleanOrphanedRefs failed: %v", err)
+	}
+
+	// Should have cleaned 2 orphaned deps (orphan-1 and orphan-2, not external)
+	if deps != 2 {
+		t.Errorf("expected 2 orphaned deps cleaned, got %d", deps)
+	}
+
+	// Should have cleaned 1 orphaned label
+	if labels != 1 {
+		t.Errorf("expected 1 orphaned label cleaned, got %d", labels)
+	}
+
+	// Verify checkForeignKeys now passes
+	err = checkForeignKeys(db, &Snapshot{})
+	if err != nil {
+		t.Errorf("expected checkForeignKeys to pass after cleanup, got: %v", err)
+	}
+
+	// Verify valid data is still present
+	var depCount, labelCount int
+	err = db.QueryRow(`SELECT COUNT(*) FROM dependencies`).Scan(&depCount)
+	if err != nil {
+		t.Fatalf("failed to count dependencies: %v", err)
+	}
+	// Should have 2: valid self-ref + external ref
+	if depCount != 2 {
+		t.Errorf("expected 2 dependencies remaining, got %d", depCount)
+	}
+
+	err = db.QueryRow(`SELECT COUNT(*) FROM labels`).Scan(&labelCount)
+	if err != nil {
+		t.Fatalf("failed to count labels: %v", err)
+	}
+	// Should have 1: valid label
+	if labelCount != 1 {
+		t.Errorf("expected 1 label remaining, got %d", labelCount)
+	}
+}
+
 // setupInvariantTestDB creates an in-memory test database with schema
 func setupInvariantTestDB(t *testing.T) *sql.DB {
 	t.Helper()

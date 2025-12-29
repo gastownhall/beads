@@ -205,3 +205,46 @@ func GetInvariantNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// CleanOrphanedRefs removes orphaned dependencies and labels that reference non-existent issues.
+// This runs BEFORE migrations to prevent the chicken-and-egg problem where:
+// 1. bd doctor --fix tries to open the database
+// 2. Opening triggers migrations with invariant checks
+// 3. Invariant check fails due to orphaned refs from prior tombstone deletion
+// 4. Fix never runs because database won't open
+//
+// Returns counts of cleaned items for logging.
+func CleanOrphanedRefs(db *sql.DB) (deps int, labels int, err error) {
+	// Clean orphaned dependencies (issue_id not in issues)
+	result, err := db.Exec(`
+		DELETE FROM dependencies
+		WHERE NOT EXISTS (SELECT 1 FROM issues WHERE id = issue_id)
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to clean orphaned dependencies (issue_id): %w", err)
+	}
+	depsIssue, _ := result.RowsAffected()
+
+	// Clean orphaned dependencies (depends_on_id not in issues, excluding external refs)
+	result, err = db.Exec(`
+		DELETE FROM dependencies
+		WHERE NOT EXISTS (SELECT 1 FROM issues WHERE id = depends_on_id)
+		  AND depends_on_id NOT LIKE 'external:%'
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to clean orphaned dependencies (depends_on_id): %w", err)
+	}
+	depsDependsOn, _ := result.RowsAffected()
+
+	// Clean orphaned labels (issue_id not in issues)
+	result, err = db.Exec(`
+		DELETE FROM labels
+		WHERE NOT EXISTS (SELECT 1 FROM issues WHERE id = issue_id)
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to clean orphaned labels: %w", err)
+	}
+	labelsCount, _ := result.RowsAffected()
+
+	return int(depsIssue + depsDependsOn), int(labelsCount), nil
+}

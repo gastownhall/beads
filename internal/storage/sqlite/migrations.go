@@ -142,6 +142,13 @@ func RunMigrations(db *sql.DB) error {
 		}
 	}()
 
+	// Pre-migration cleanup: remove orphaned refs that would fail invariant checks.
+	// This prevents the chicken-and-egg problem where the database can't open
+	// due to orphans left behind by tombstone deletion (see bd-eko4).
+	if _, _, err := CleanOrphanedRefs(db); err != nil {
+		return fmt.Errorf("pre-migration orphan cleanup failed: %w", err)
+	}
+
 	snapshot, err := captureSnapshot(db)
 	if err != nil {
 		return fmt.Errorf("failed to capture pre-migration snapshot: %w", err)
