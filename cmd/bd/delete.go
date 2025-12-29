@@ -128,6 +128,10 @@ the issues will not resurrect from remote branches.`,
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		cascade, _ := cmd.Flags().GetBool("cascade")
 		hardDelete, _ := cmd.Flags().GetBool("hard")
+		reason, _ := cmd.Flags().GetString("reason")
+		if reason == "" {
+			reason = "delete"
+		}
 		// Use global jsonOutput set by PersistentPreRun
 		// Collect issue IDs from args and/or file
 		issueIDs := make([]string, 0, len(args))
@@ -150,7 +154,7 @@ the issues will not resurrect from remote branches.`,
 		
 		// Use daemon if available, otherwise use direct mode
 		if daemonClient != nil {
-			deleteViaDaemon(issueIDs, force, dryRun, cascade, jsonOutput, "delete")
+			deleteViaDaemon(issueIDs, force, dryRun, cascade, jsonOutput, reason)
 			return
 		}
 		
@@ -164,7 +168,7 @@ the issues will not resurrect from remote branches.`,
 		
 		// Handle batch deletion in direct mode
 		if len(issueIDs) > 1 {
-			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, hardDelete, "batch delete")
+			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, hardDelete, reason)
 			return
 		}
 		
@@ -305,7 +309,7 @@ the issues will not resurrect from remote branches.`,
 		}
 		// 4. Create tombstone (instead of deleting from database)
 		// Phase 1 dual-write: still writes to deletions.jsonl (step 0), now also creates tombstone
-		if err := createTombstone(ctx, issueID, deleteActor, "manual delete"); err != nil {
+		if err := createTombstone(ctx, issueID, deleteActor, reason); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating tombstone: %v\n", err)
 			os.Exit(1)
 		}
@@ -688,5 +692,6 @@ func init() {
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
 	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
 	deleteCmd.Flags().Bool("hard", false, "Permanently delete (skip tombstone, cannot be recovered via sync)")
+	deleteCmd.Flags().String("reason", "", "Reason for deletion (stored in tombstone for audit trail)")
 	rootCmd.AddCommand(deleteCmd)
 }
