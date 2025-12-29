@@ -31,6 +31,10 @@ and database file. Optionally specify a custom issue prefix.
 
 With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.
 
+With --from-jsonl: imports from the current .beads/issues.jsonl file on disk instead
+of scanning git history. Use this after manual JSONL cleanup (e.g., bd compact --purge-tombstones)
+to prevent deleted issues from being resurrected during re-initialization.
+
 With --stealth: configures per-repository git settings for invisible beads usage:
   • .git/info/exclude to prevent beads files from being committed
   • Claude Code settings with bd onboard instruction
@@ -45,6 +49,7 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		force, _ := cmd.Flags().GetBool("force")
+		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -385,20 +390,40 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		}
 
 		// Check if git has existing issues to import (fresh clone scenario)
-		issueCount, jsonlPath, gitRef := checkGitForIssues()
-		if issueCount > 0 {
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
-			}
-
-			if err := importFromGit(ctx, initDBPath, store, jsonlPath, gitRef); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
-					fmt.Fprintf(os.Stderr, "Try manually: git show %s:%s | bd import -i /dev/stdin\n", gitRef, jsonlPath)
+		// With --from-jsonl: import from local file instead of git history
+		if fromJSONL {
+			// Import from current working tree's JSONL file
+			localJSONLPath := filepath.Join(beadsDir, "issues.jsonl")
+			if _, err := os.Stat(localJSONLPath); err == nil {
+				issueCount, err := importFromLocalJSONL(ctx, initDBPath, store, localJSONLPath)
+				if err != nil {
+					if !quiet {
+						fmt.Fprintf(os.Stderr, "Warning: import from local JSONL failed: %v\n", err)
+					}
+					// Non-fatal - continue with empty database
+				} else if !quiet && issueCount > 0 {
+					fmt.Fprintf(os.Stderr, "✓ Imported %d issues from local %s\n\n", issueCount, localJSONLPath)
 				}
-				// Non-fatal - continue with empty database
 			} else if !quiet {
-				fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+				fmt.Fprintf(os.Stderr, "Warning: --from-jsonl specified but %s not found\n", localJSONLPath)
+			}
+		} else {
+			// Default: import from git history
+			issueCount, jsonlPath, gitRef := checkGitForIssues()
+			if issueCount > 0 {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
+				}
+
+				if err := importFromGit(ctx, initDBPath, store, jsonlPath, gitRef); err != nil {
+					if !quiet {
+						fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
+						fmt.Fprintf(os.Stderr, "Try manually: git show %s:%s | bd import -i /dev/stdin\n", gitRef, jsonlPath)
+					}
+					// Non-fatal - continue with empty database
+				} else if !quiet {
+					fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+				}
 			}
 		}
 
@@ -511,6 +536,7 @@ func init() {
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup")
 	initCmd.Flags().Bool("force", false, "Force re-initialization even if JSONL already has issues (may cause data loss)")
+	initCmd.Flags().Bool("from-jsonl", false, "Import from current .beads/issues.jsonl file instead of git history (preserves manual cleanups)")
 	rootCmd.AddCommand(initCmd)
 }
 

@@ -206,6 +206,69 @@ func getLocalSyncBranch(beadsDir string) string {
 
 
 
+// importFromLocalJSONL imports issues from a local JSONL file on disk.
+// Unlike importFromGit, this reads from the current working tree, preserving
+// any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
+// Returns the number of issues imported and any error.
+func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.Storage, localPath string) (int, error) {
+	// #nosec G304 -- path provided by bd init command
+	jsonlData, err := os.ReadFile(localPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read local JSONL file: %w", err)
+	}
+
+	// Parse JSONL data
+	scanner := bufio.NewScanner(bytes.NewReader(jsonlData))
+	// Increase buffer size to handle large JSONL lines (e.g., big descriptions)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024) // allow up to 64MB per line
+	var issues []*types.Issue
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			return 0, fmt.Errorf("failed to parse issue: %w", err)
+		}
+		issue.SetDefaults() // Apply defaults for omitted fields
+		issues = append(issues, &issue)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("failed to scan JSONL: %w", err)
+	}
+
+	// Set issue_prefix from first imported issue if missing
+	if len(issues) > 0 {
+		configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
+		if err == nil && strings.TrimSpace(configuredPrefix) == "" {
+			firstPrefix := utils.ExtractIssuePrefix(issues[0].ID)
+			if firstPrefix != "" {
+				if err := store.SetConfig(ctx, "issue_prefix", firstPrefix); err != nil {
+					return 0, fmt.Errorf("failed to set issue_prefix from imported issues: %w", err)
+				}
+			}
+		}
+	}
+
+	// Use existing import logic
+	opts := ImportOptions{
+		DryRun:               false,
+		SkipUpdate:           false,
+		SkipPrefixValidation: true,
+	}
+
+	_, err = importIssuesCore(ctx, dbFilePath, store, issues, opts)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(issues), nil
+}
+
 // importFromGit imports issues from git at the specified ref (bd-0is: supports sync-branch)
 func importFromGit(ctx context.Context, dbFilePath string, store storage.Storage, jsonlPath, gitRef string) error {
 	jsonlData, err := readFromGitRef(jsonlPath, gitRef)
