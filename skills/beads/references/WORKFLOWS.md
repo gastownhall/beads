@@ -144,41 +144,116 @@ Issue Lifecycle:
 
 ## Epic Planning {#epic-planning}
 
-**For complex multi-step features:**
+**For complex multi-step features, think in Ready Fronts, not phases.**
+
+### The Ready Front Model
+
+A **Ready Front** is the set of issues with all dependencies satisfied - what can be worked on *right now*. As issues close, the front advances. The dependency DAG IS the execution plan.
 
 ```
-Epic Planning Workflow:
+Ready Front = Issues where all dependencies are closed
+              (no blockers remaining)
+
+Static view:  Natural topology in the DAG (sync points, bottlenecks)
+Dynamic view: Current wavefront of in-progress work
+```
+
+**Why Ready Fronts, not Phases?**
+
+"Phases" trigger temporal reasoning that inverts dependencies:
+
+```
+⚠️ COGNITIVE TRAP:
+"Phase 1 before Phase 2" → brain thinks "Phase 1 blocks Phase 2"
+                         → WRONG: bd dep add phase1 phase2
+
+Correct: "Phase 2 needs Phase 1" → bd dep add phase2 phase1
+```
+
+**The fix**: Name issues by what they ARE, think about what they NEED.
+
+### Epic Planning Workflow
+
+```
+Epic Planning with Ready Fronts:
 - [ ] Create epic issue for high-level goal
-- [ ] Break down into child task issues
-- [ ] Create each child task
-- [ ] Add parent-child dependencies from epic to each child
-- [ ] Add blocks dependencies between children if needed
-- [ ] Use bd ready to work through tasks in dependency order
+- [ ] Walk backward from goal: "What does the end state need?"
+- [ ] Create child issues named by WHAT, not WHEN
+- [ ] Add deps using requirement language: "X needs Y" → bd dep add X Y
+- [ ] Verify with bd blocked (tasks blocked BY prerequisites, not dependents)
+- [ ] Use bd ready to work through in dependency order
 ```
 
-**Example**: OAuth Integration Epic
+### The Graph Walk Pattern
+
+Walk **backward** from the goal to get correct dependencies:
+
+```
+Start: "What's the final deliverable?"
+       ↓
+       "Integration tests passing" → gt-integration
+       ↓
+"What does that need?"
+       ↓
+       "Streaming support" → gt-streaming
+       "Header display" → gt-header
+       ↓
+"What do those need?"
+       ↓
+       "Message rendering" → gt-messages
+       ↓
+"What does that need?"
+       ↓
+       "Buffer layout" → gt-buffer (foundation, no deps)
+```
+
+This produces correct deps because you're asking "X needs Y", not "X before Y".
+
+### Ready Fronts Visualized
+
+```
+Ready Front 1:  gt-buffer (foundation)
+Ready Front 2:  gt-messages (needs buffer)
+Ready Front 3:  gt-streaming, gt-header (parallel, need messages)
+Ready Front 4:  gt-integration (needs streaming, header)
+```
+
+At any moment, `bd ready` shows the current front. As issues close, blocked work becomes ready.
+
+### Example: OAuth Integration
 
 ```bash
-1. Create epic:
-   bd create "Implement OAuth integration" -t epic -d "OAuth with Google and GitHub"
-     design: "Support Google and GitHub providers"
+# Create epic (the goal)
+bd create "OAuth integration" -t epic
 
-2. Create child tasks:
-   bd create "Set up OAuth client credentials" -t task
-   bd create "Implement authorization code flow" -t task
-   bd create "Add token storage and refresh" -t task
-   bd create "Create login/logout endpoints" -t task
+# Walk backward: What does OAuth need?
+bd create "Login/logout endpoints" -t task        # needs token storage
+bd create "Token storage and refresh" -t task     # needs auth flow
+bd create "Authorization code flow" -t task       # needs credentials
+bd create "OAuth client credentials" -t task      # foundation
 
-3. Link children to parent:
-   bd dep add oauth-epic oauth-setup --type parent-child
-   bd dep add oauth-epic oauth-flow --type parent-child
-   bd dep add oauth-epic oauth-storage --type parent-child
-   bd dep add oauth-epic oauth-endpoints --type parent-child
+# Add deps using requirement language: "X needs Y"
+bd dep add endpoints storage      # endpoints need storage
+bd dep add storage flow           # storage needs flow
+bd dep add flow credentials       # flow needs credentials
+# credentials has no deps - it's Ready Front 1
 
-4. Add blocks between children:
-   bd dep add oauth-setup oauth-flow
-   # Setup blocks flow implementation
+# Verify: bd blocked should show sensible blocking
+bd blocked
+# endpoints blocked by storage ✓
+# storage blocked by flow ✓
+# flow blocked by credentials ✓
+# credentials ready ✓
 ```
+
+### Validation
+
+After adding deps, verify with `bd blocked`:
+- Tasks should be blocked BY their prerequisites
+- NOT blocked by their dependents
+
+If `gt-integration` is blocked by `gt-setup` → correct
+If `gt-setup` is blocked by `gt-integration` → deps are inverted, fix them
 
 ---
 
