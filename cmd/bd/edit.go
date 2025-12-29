@@ -131,8 +131,7 @@ Examples:
 		_ = tmpFile.Close()
 
 		// Open the editor
-		// #nosec G204 -- editor comes from trusted $EDITOR/$VISUAL env or known defaults
-		editorCmd := exec.Command(editor, tmpPath)
+		editorCmd := exec.Command(editor, tmpPath) //nolint:gosec // G204: editor from trusted $EDITOR/$VISUAL env or known defaults
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = os.Stdout
 		editorCmd.Stderr = os.Stderr

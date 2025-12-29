@@ -315,7 +315,9 @@ func analyzeEpicForSwarm(ctx context.Context, s SwarmStorage, epic *types.Issue)
 }
 
 // detectStructuralIssues looks for common problems in the dependency graph.
-func detectStructuralIssues(analysis *SwarmAnalysis, issues []*types.Issue) {
+//
+//nolint:unparam // issues reserved for future use
+func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 	// 1. Find roots (issues with no dependencies within the epic)
 	//    These are the starting points. Having multiple roots is normal.
 	var roots []string

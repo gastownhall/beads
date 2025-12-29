@@ -132,14 +132,14 @@ func InstallFactory() {
 }
 
 func installFactory(env factoryEnv) error {
-	fmt.Fprintln(env.stdout, "Installing Factory.ai (Droid) integration...")
+	_, _ = fmt.Fprintln(env.stdout, "Installing Factory.ai (Droid) integration...")
 
 	var currentContent string
 	data, err := os.ReadFile(env.agentsPath)
 	if err == nil {
 		currentContent = string(data)
 	} else if !os.IsNotExist(err) {
-		fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
 		return err
 	}
 
@@ -147,31 +147,31 @@ func installFactory(env factoryEnv) error {
 		if strings.Contains(currentContent, factoryBeginMarker) {
 			newContent := updateBeadsSection(currentContent)
 			if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
-				fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
+				_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 				return err
 			}
-			fmt.Fprintln(env.stdout, "✓ Updated existing beads section in AGENTS.md")
+			_, _ = fmt.Fprintln(env.stdout, "✓ Updated existing beads section in AGENTS.md")
 		} else {
 			newContent := currentContent + "\n\n" + factoryBeadsSection
 			if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
-				fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
+				_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 				return err
 			}
-			fmt.Fprintln(env.stdout, "✓ Added beads section to existing AGENTS.md")
+			_, _ = fmt.Fprintln(env.stdout, "✓ Added beads section to existing AGENTS.md")
 		}
 	} else {
 		newContent := createNewAgentsFile()
 		if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
-			fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
+			_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 			return err
 		}
-		fmt.Fprintln(env.stdout, "✓ Created new AGENTS.md with beads integration")
+		_, _ = fmt.Fprintln(env.stdout, "✓ Created new AGENTS.md with beads integration")
 	}
 
-	fmt.Fprintln(env.stdout, "\n✓ Factory.ai (Droid) integration installed")
-	fmt.Fprintf(env.stdout, "  File: %s\n", env.agentsPath)
-	fmt.Fprintln(env.stdout, "\nFactory Droid will automatically read AGENTS.md on session start.")
-	fmt.Fprintln(env.stdout, "No additional configuration needed!")
+	_, _ = fmt.Fprintln(env.stdout, "\n✓ Factory.ai (Droid) integration installed")
+	_, _ = fmt.Fprintf(env.stdout, "  File: %s\n", env.agentsPath)
+	_, _ = fmt.Fprintln(env.stdout, "\nFactory Droid will automatically read AGENTS.md on session start.")
+	_, _ = fmt.Fprintln(env.stdout, "No additional configuration needed!")
 	return nil
 }
 
@@ -186,23 +186,23 @@ func CheckFactory() {
 func checkFactory(env factoryEnv) error {
 	data, err := os.ReadFile(env.agentsPath)
 	if os.IsNotExist(err) {
-		fmt.Fprintln(env.stdout, "✗ AGENTS.md not found")
-		fmt.Fprintln(env.stdout, "  Run: bd setup factory")
+		_, _ = fmt.Fprintln(env.stdout, "✗ AGENTS.md not found")
+		_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup factory")
 		return errAgentsFileMissing
 	} else if err != nil {
-		fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
 		return err
 	}
 
 	content := string(data)
 	if strings.Contains(content, factoryBeginMarker) {
-		fmt.Fprintf(env.stdout, "✓ Factory.ai integration installed: %s\n", env.agentsPath)
-		fmt.Fprintln(env.stdout, "  Beads section found in AGENTS.md")
+		_, _ = fmt.Fprintf(env.stdout, "✓ Factory.ai integration installed: %s\n", env.agentsPath)
+		_, _ = fmt.Fprintln(env.stdout, "  Beads section found in AGENTS.md")
 		return nil
 	}
 
-	fmt.Fprintln(env.stdout, "⚠ AGENTS.md exists but no beads section found")
-	fmt.Fprintln(env.stdout, "  Run: bd setup factory (to add beads section)")
+	_, _ = fmt.Fprintln(env.stdout, "⚠ AGENTS.md exists but no beads section found")
+	_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup factory (to add beads section)")
 	return errBeadsSectionMissing
 }
 
@@ -215,19 +215,19 @@ func RemoveFactory() {
 }
 
 func removeFactory(env factoryEnv) error {
-	fmt.Fprintln(env.stdout, "Removing Factory.ai (Droid) integration...")
+	_, _ = fmt.Fprintln(env.stdout, "Removing Factory.ai (Droid) integration...")
 	data, err := os.ReadFile(env.agentsPath)
 	if os.IsNotExist(err) {
-		fmt.Fprintln(env.stdout, "No AGENTS.md file found")
+		_, _ = fmt.Fprintln(env.stdout, "No AGENTS.md file found")
 		return nil
 	} else if err != nil {
-		fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
 		return err
 	}
 
 	content := string(data)
 	if !strings.Contains(content, factoryBeginMarker) {
-		fmt.Fprintln(env.stdout, "No beads section found in AGENTS.md")
+		_, _ = fmt.Fprintln(env.stdout, "No beads section found in AGENTS.md")
 		return nil
 	}
 
@@ -235,18 +235,18 @@ func removeFactory(env factoryEnv) error {
 	trimmed := strings.TrimSpace(newContent)
 	if trimmed == "" {
 		if err := os.Remove(env.agentsPath); err != nil {
-			fmt.Fprintf(env.stderr, "Error: failed to remove %s: %v\n", env.agentsPath, err)
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to remove %s: %v\n", env.agentsPath, err)
 			return err
 		}
-		fmt.Fprintf(env.stdout, "✓ Removed %s (file was empty after removing beads section)\n", env.agentsPath)
+		_, _ = fmt.Fprintf(env.stdout, "✓ Removed %s (file was empty after removing beads section)\n", env.agentsPath)
 		return nil
 	}
 
 	if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
-		fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 		return err
 	}
-	fmt.Fprintln(env.stdout, "✓ Removed beads section from AGENTS.md")
+	_, _ = fmt.Fprintln(env.stdout, "✓ Removed beads section from AGENTS.md")
 	return nil
 }
 

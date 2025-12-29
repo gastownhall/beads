@@ -58,10 +58,8 @@ func gitHasUpstream() bool {
 	branch := strings.TrimSpace(string(branchOutput))
 
 	// Check if remote and merge refs are configured
-	// #nosec G204 -- branch name comes from git symbolic-ref output
-	remoteCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch))
-	// #nosec G204 -- branch name comes from git symbolic-ref output
-	mergeCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.merge", branch))
+	remoteCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch)) //nolint:gosec // G204: branch from git symbolic-ref
+	mergeCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.merge", branch))   //nolint:gosec // G204: branch from git symbolic-ref
 
 	remoteErr := remoteCmd.Run()
 	mergeErr := mergeCmd.Run()
@@ -108,8 +106,7 @@ func gitHasBeadsChanges(ctx context.Context) (bool, error) {
 	relPath, err := filepath.Rel(repoRoot, beadsDir)
 	if err != nil {
 		// Fall back to absolute path if relative path fails
-		// #nosec G204 -- beadsDir comes from beads.FindBeadsDir()
-		statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain", beadsDir)
+		statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain", beadsDir) //nolint:gosec // G204: beadsDir from beads.FindBeadsDir()
 		statusOutput, err := statusCmd.Output()
 		if err != nil {
 			return false, fmt.Errorf("git status failed: %w", err)
@@ -118,8 +115,7 @@ func gitHasBeadsChanges(ctx context.Context) (bool, error) {
 	}
 
 	// Run git status with relative path from repo root
-	// #nosec G204 -- repoRoot and relPath come from internal git helpers
-	statusCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "status", "--porcelain", relPath)
+	statusCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "status", "--porcelain", relPath) //nolint:gosec // G204: paths from internal git helpers
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git status failed: %w", err)
@@ -166,7 +162,7 @@ func gitCommit(ctx context.Context, filePath string, message string) error {
 	}
 
 	// Stage the file from repo root context
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", relPath)
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", relPath) //nolint:gosec // G204: paths from internal git helpers
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
@@ -180,7 +176,7 @@ func gitCommit(ctx context.Context, filePath string, message string) error {
 	// Use pathspec to commit ONLY this file
 	// This prevents accidentally committing other staged files
 	commitArgs := buildGitCommitArgs(repoRoot, message, "--", relPath)
-	commitCmd := exec.CommandContext(ctx, "git", commitArgs...)
+	commitCmd := exec.CommandContext(ctx, "git", commitArgs...) //nolint:gosec // G204: args from buildGitCommitArgs
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed: %w\n%s", err, output)
@@ -235,7 +231,7 @@ func gitCommitBeadsDir(ctx context.Context, message string) error {
 
 	// Stage only the sync files from repo root context (worktree-aware)
 	args := append([]string{"-C", repoRoot, "add"}, filesToAdd...)
-	addCmd := exec.CommandContext(ctx, "git", args...)
+	addCmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: paths from internal git helpers
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
@@ -256,7 +252,7 @@ func gitCommitBeadsDir(ctx context.Context, message string) error {
 
 	// Use config-based author and signing options with pathspec
 	commitArgs := buildGitCommitArgs(repoRoot, message, "--", relBeadsDir)
-	commitCmd := exec.CommandContext(ctx, "git", commitArgs...)
+	commitCmd := exec.CommandContext(ctx, "git", commitArgs...) //nolint:gosec // G204: args from buildGitCommitArgs
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed: %w\n%s", err, output)
@@ -382,8 +378,7 @@ func gitPull(ctx context.Context) error {
 	branch := strings.TrimSpace(string(branchOutput))
 
 	// Get remote name for current branch (usually "origin")
-	// #nosec G204 -- branch name comes from git symbolic-ref output
-	remoteCmd := exec.CommandContext(ctx, "git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch))
+	remoteCmd := exec.CommandContext(ctx, "git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch)) //nolint:gosec // G204: branch from git symbolic-ref
 	remoteOutput, err := remoteCmd.Output()
 	if err != nil {
 		// If no remote configured, default to "origin"
@@ -445,7 +440,7 @@ func getDefaultBranch(ctx context.Context) string {
 // Checks remote HEAD first, then falls back to checking if main/master exist
 func getDefaultBranchForRemote(ctx context.Context, remote string) string {
 	// Try to get default branch from remote
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote))
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote)) //nolint:gosec // G204: remote from git config
 	output, err := cmd.Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(output))
@@ -457,12 +452,12 @@ func getDefaultBranchForRemote(ctx context.Context, remote string) string {
 	}
 
 	// Fallback: check if <remote>/main exists
-	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", fmt.Sprintf("%s/main", remote)).Run() == nil {
+	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", fmt.Sprintf("%s/main", remote)).Run() == nil { //nolint:gosec // G204: remote from git config
 		return "main"
 	}
 
 	// Fallback: check if <remote>/master exists
-	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", fmt.Sprintf("%s/master", remote)).Run() == nil {
+	if exec.CommandContext(ctx, "git", "rev-parse", "--verify", fmt.Sprintf("%s/master", remote)).Run() == nil { //nolint:gosec // G204: remote from git config
 		return "master"
 	}
 

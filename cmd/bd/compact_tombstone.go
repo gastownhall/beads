@@ -284,7 +284,7 @@ func purgeTombstonesByDependency(dryRun bool) (*PurgeTombstonesResult, error) {
 	}
 
 	// Read all issues
-	file, err := os.Open(issuesPath)
+	file, err := os.Open(issuesPath) //nolint:gosec // G304: issuesPath from beads.FindBeadsDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open issues.jsonl: %w", err)
 	}

@@ -11,6 +11,8 @@ import (
 
 // runPollutionCheck runs detailed test pollution detection
 // This integrates the detect-pollution command functionality into doctor.
+//
+//nolint:unparam // path reserved for future use
 func runPollutionCheck(_ string, clean bool, yes bool) {
 	// Ensure we have a store initialized (uses direct mode, no daemon support yet)
 	if err := ensureDirectMode("pollution check requires direct mode"); err != nil {
