@@ -517,9 +517,320 @@ func renderSwarmAnalysis(analysis *SwarmAnalysis) {
 	}
 }
 
+// SwarmStatus holds the current status of a swarm (computed from beads).
+type SwarmStatus struct {
+	EpicID       string        `json:"epic_id"`
+	EpicTitle    string        `json:"epic_title"`
+	TotalIssues  int           `json:"total_issues"`
+	Completed    []StatusIssue `json:"completed"`
+	Active       []StatusIssue `json:"active"`
+	Ready        []StatusIssue `json:"ready"`
+	Blocked      []StatusIssue `json:"blocked"`
+	Progress     float64       `json:"progress_percent"`
+	ActiveCount  int           `json:"active_count"`
+	ReadyCount   int           `json:"ready_count"`
+	BlockedCount int           `json:"blocked_count"`
+}
+
+// StatusIssue represents an issue in swarm status output.
+type StatusIssue struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Assignee  string   `json:"assignee,omitempty"`
+	BlockedBy []string `json:"blocked_by,omitempty"`
+	ClosedAt  string   `json:"closed_at,omitempty"`
+}
+
+var swarmStatusCmd = &cobra.Command{
+	Use:   "status [epic-id]",
+	Short: "Show current swarm status",
+	Long: `Show the current status of a swarm, computed from beads.
+
+Displays issues grouped by state:
+- Completed: Closed issues
+- Active: Issues currently in_progress (with assignee)
+- Ready: Open issues with all dependencies satisfied
+- Blocked: Open issues waiting on dependencies
+
+The status is COMPUTED from beads, not stored separately.
+If beads changes, status changes.
+
+Examples:
+  bd swarm status gt-epic-123       # Show swarm status
+  bd swarm status gt-epic-123 --json  # Machine-readable output`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := rootCtx
+
+		// Swarm commands require direct store access
+		if store == nil {
+			if daemonClient != nil {
+				var err error
+				store, err = sqlite.New(ctx, dbPath)
+				if err != nil {
+					FatalErrorRespectJSON("failed to open database: %v", err)
+				}
+				defer func() { _ = store.Close() }()
+			} else {
+				FatalErrorRespectJSON("no database connection")
+			}
+		}
+
+		// Resolve epic ID
+		epicID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			FatalErrorRespectJSON("epic '%s' not found: %v", args[0], err)
+		}
+
+		// Get the epic
+		epic, err := store.GetIssue(ctx, epicID)
+		if err != nil {
+			FatalErrorRespectJSON("failed to get epic: %v", err)
+		}
+		if epic == nil {
+			FatalErrorRespectJSON("epic '%s' not found", epicID)
+		}
+
+		// Verify it's an epic or molecule
+		if epic.IssueType != types.TypeEpic && epic.IssueType != types.TypeMolecule {
+			FatalErrorRespectJSON("'%s' is not an epic or molecule (type: %s)", epicID, epic.IssueType)
+		}
+
+		// Get swarm status
+		status, err := getSwarmStatus(ctx, store, epic)
+		if err != nil {
+			FatalErrorRespectJSON("failed to get swarm status: %v", err)
+		}
+
+		if jsonOutput {
+			outputJSON(status)
+			return
+		}
+
+		// Human-readable output
+		renderSwarmStatus(status)
+	},
+}
+
+// getSwarmStatus computes current swarm status from beads.
+func getSwarmStatus(ctx context.Context, s interface {
+	GetIssue(context.Context, string) (*types.Issue, error)
+	GetDependents(context.Context, string) ([]*types.Issue, error)
+	GetDependencyRecords(context.Context, string) ([]*types.Dependency, error)
+}, epic *types.Issue) (*SwarmStatus, error) {
+	status := &SwarmStatus{
+		EpicID:    epic.ID,
+		EpicTitle: epic.Title,
+		Completed: []StatusIssue{},
+		Active:    []StatusIssue{},
+		Ready:     []StatusIssue{},
+		Blocked:   []StatusIssue{},
+	}
+
+	// Get all issues that depend on the epic (children)
+	allDependents, err := s.GetDependents(ctx, epic.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get epic dependents: %w", err)
+	}
+
+	// Filter to only parent-child relationships
+	var childIssues []*types.Issue
+	for _, dependent := range allDependents {
+		deps, err := s.GetDependencyRecords(ctx, dependent.ID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range deps {
+			if dep.DependsOnID == epic.ID && dep.Type == types.DepParentChild {
+				childIssues = append(childIssues, dependent)
+				break
+			}
+		}
+	}
+
+	status.TotalIssues = len(childIssues)
+	if len(childIssues) == 0 {
+		return status, nil
+	}
+
+	// Build set of child IDs for filtering
+	childIDSet := make(map[string]bool)
+	for _, issue := range childIssues {
+		childIDSet[issue.ID] = true
+	}
+
+	// Build dependency map (within epic children only)
+	dependsOn := make(map[string][]string)
+	for _, issue := range childIssues {
+		deps, err := s.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range deps {
+			// Skip parent-child to epic itself
+			if dep.DependsOnID == epic.ID && dep.Type == types.DepParentChild {
+				continue
+			}
+			// Only track blocking dependencies within children
+			if !dep.Type.AffectsReadyWork() {
+				continue
+			}
+			if childIDSet[dep.DependsOnID] {
+				dependsOn[issue.ID] = append(dependsOn[issue.ID], dep.DependsOnID)
+			}
+		}
+	}
+
+	// Categorize each issue
+	for _, issue := range childIssues {
+		si := StatusIssue{
+			ID:       issue.ID,
+			Title:    issue.Title,
+			Assignee: issue.Assignee,
+		}
+
+		switch issue.Status {
+		case types.StatusClosed:
+			if issue.ClosedAt != nil {
+				si.ClosedAt = issue.ClosedAt.Format("2006-01-02 15:04")
+			}
+			status.Completed = append(status.Completed, si)
+
+		case types.StatusInProgress:
+			status.Active = append(status.Active, si)
+
+		default: // open or other
+			// Check if blocked by open dependencies
+			deps := dependsOn[issue.ID]
+			var blockers []string
+			for _, depID := range deps {
+				depIssue, _ := s.GetIssue(ctx, depID)
+				if depIssue != nil && depIssue.Status != types.StatusClosed {
+					blockers = append(blockers, depID)
+				}
+			}
+
+			if len(blockers) > 0 {
+				si.BlockedBy = blockers
+				status.Blocked = append(status.Blocked, si)
+			} else {
+				status.Ready = append(status.Ready, si)
+			}
+		}
+	}
+
+	// Sort each category by ID for consistent output
+	sort.Slice(status.Completed, func(i, j int) bool {
+		return status.Completed[i].ID < status.Completed[j].ID
+	})
+	sort.Slice(status.Active, func(i, j int) bool {
+		return status.Active[i].ID < status.Active[j].ID
+	})
+	sort.Slice(status.Ready, func(i, j int) bool {
+		return status.Ready[i].ID < status.Ready[j].ID
+	})
+	sort.Slice(status.Blocked, func(i, j int) bool {
+		return status.Blocked[i].ID < status.Blocked[j].ID
+	})
+
+	// Compute counts and progress
+	status.ActiveCount = len(status.Active)
+	status.ReadyCount = len(status.Ready)
+	status.BlockedCount = len(status.Blocked)
+	if status.TotalIssues > 0 {
+		status.Progress = float64(len(status.Completed)) / float64(status.TotalIssues) * 100
+	}
+
+	return status, nil
+}
+
+// renderSwarmStatus outputs human-readable swarm status.
+func renderSwarmStatus(status *SwarmStatus) {
+	fmt.Printf("\n%s Ready Front Analysis: %s\n\n", ui.RenderAccent("🐝"), status.EpicTitle)
+
+	// Completed
+	fmt.Printf("Completed:     ")
+	if len(status.Completed) == 0 {
+		fmt.Printf("(none)\n")
+	} else {
+		for i, issue := range status.Completed {
+			if i > 0 {
+				fmt.Printf("               ")
+			}
+			fmt.Printf("%s %s\n", ui.RenderPass("✓"), ui.RenderID(issue.ID))
+		}
+	}
+
+	// Active
+	fmt.Printf("Active:        ")
+	if len(status.Active) == 0 {
+		fmt.Printf("(none)\n")
+	} else {
+		var parts []string
+		for _, issue := range status.Active {
+			part := fmt.Sprintf("⟳ %s", issue.ID)
+			if issue.Assignee != "" {
+				part += fmt.Sprintf(" [%s]", issue.Assignee)
+			}
+			parts = append(parts, part)
+		}
+		fmt.Printf("%s\n", strings.Join(parts, ", "))
+	}
+
+	// Ready
+	fmt.Printf("Ready:         ")
+	if len(status.Ready) == 0 {
+		if len(status.Blocked) > 0 {
+			// Find what's blocking
+			needed := make(map[string]bool)
+			for _, b := range status.Blocked {
+				for _, dep := range b.BlockedBy {
+					needed[dep] = true
+				}
+			}
+			var neededList []string
+			for dep := range needed {
+				neededList = append(neededList, dep)
+			}
+			sort.Strings(neededList)
+			fmt.Printf("(none - waiting for %s)\n", strings.Join(neededList, ", "))
+		} else {
+			fmt.Printf("(none)\n")
+		}
+	} else {
+		var parts []string
+		for _, issue := range status.Ready {
+			parts = append(parts, fmt.Sprintf("○ %s", issue.ID))
+		}
+		fmt.Printf("%s\n", strings.Join(parts, ", "))
+	}
+
+	// Blocked
+	fmt.Printf("Blocked:       ")
+	if len(status.Blocked) == 0 {
+		fmt.Printf("(none)\n")
+	} else {
+		for i, issue := range status.Blocked {
+			if i > 0 {
+				fmt.Printf("               ")
+			}
+			blockerStr := strings.Join(issue.BlockedBy, ", ")
+			fmt.Printf("◌ %s (needs %s)\n", issue.ID, blockerStr)
+		}
+	}
+
+	// Progress summary
+	fmt.Printf("\nProgress: %d/%d complete", len(status.Completed), status.TotalIssues)
+	if status.ActiveCount > 0 {
+		fmt.Printf(", %d/%d active", status.ActiveCount, status.TotalIssues)
+	}
+	fmt.Printf(" (%.0f%%)\n\n", status.Progress)
+}
+
 func init() {
 	swarmValidateCmd.Flags().Bool("verbose", false, "Include detailed issue graph in output")
 
 	swarmCmd.AddCommand(swarmValidateCmd)
+	swarmCmd.AddCommand(swarmStatusCmd)
 	rootCmd.AddCommand(swarmCmd)
 }
