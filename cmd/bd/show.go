@@ -105,15 +105,7 @@ var showCmd = &cobra.Command{
 				}
 				if jsonOutput {
 					// Get labels and deps for JSON output
-					type IssueDetails struct {
-						*types.Issue
-						Labels       []string                             `json:"labels,omitempty"`
-						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-						Comments     []*types.Comment                     `json:"comments,omitempty"`
-						Parent       *string                              `json:"parent,omitempty"`
-					}
-					details := &IssueDetails{Issue: issue}
+					details := &types.IssueDetails{Issue: *issue}
 					details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
 					if sqliteStore, ok := issueStore.(*sqlite.SQLiteStorage); ok {
 						details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
@@ -155,15 +147,7 @@ var showCmd = &cobra.Command{
 				}
 
 				if jsonOutput {
-					type IssueDetails struct {
-						types.Issue
-						Labels       []string                             `json:"labels,omitempty"`
-						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-						Comments     []*types.Comment                     `json:"comments,omitempty"`
-						Parent       *string                              `json:"parent,omitempty"`
-					}
-					var details IssueDetails
+					var details types.IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
 						// Compute parent from dependencies
 						for _, dep := range details.Dependencies {
@@ -182,14 +166,7 @@ var showCmd = &cobra.Command{
 					}
 
 					// Parse response first to check shortMode before output
-					type IssueDetails struct {
-						types.Issue
-						Labels       []string                             `json:"labels,omitempty"`
-						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-						Comments     []*types.Comment                     `json:"comments,omitempty"`
-					}
-					var details IssueDetails
+					var details types.IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err != nil {
 						fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 						os.Exit(1)
@@ -380,15 +357,7 @@ var showCmd = &cobra.Command{
 
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
-				type IssueDetails struct {
-					*types.Issue
-					Labels       []string                             `json:"labels,omitempty"`
-					Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-					Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-					Comments     []*types.Comment                     `json:"comments,omitempty"`
-					Parent       *string                              `json:"parent,omitempty"`
-				}
-				details := &IssueDetails{Issue: issue}
+				details := &types.IssueDetails{Issue: *issue}
 				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
 
 				// Get dependencies with metadata (dependency_type field)

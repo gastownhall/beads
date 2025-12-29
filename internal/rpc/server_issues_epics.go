@@ -1305,16 +1305,8 @@ func (s *Server) handleShow(req *Request) Response {
 	comments, _ := store.GetIssueComments(ctx, issue.ID)
 
 	// Create detailed response with related data
-	type IssueDetails struct {
-		*types.Issue
-		Labels       []string                              `json:"labels,omitempty"`
-		Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-		Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-		Comments     []*types.Comment                      `json:"comments,omitempty"`
-	}
-
-	details := &IssueDetails{
-		Issue:        issue,
+	details := &types.IssueDetails{
+		Issue:        *issue,
 		Labels:       labels,
 		Dependencies: deps,
 		Dependents:   dependents,

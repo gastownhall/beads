@@ -483,6 +483,17 @@ type IssueWithCounts struct {
 	DependentCount  int `json:"dependent_count"`
 }
 
+// IssueDetails extends Issue with labels, dependencies, dependents, and comments.
+// Used for JSON serialization in bd show and RPC responses.
+type IssueDetails struct {
+	Issue
+	Labels       []string                      `json:"labels,omitempty"`
+	Dependencies []*IssueWithDependencyMetadata `json:"dependencies,omitempty"`
+	Dependents   []*IssueWithDependencyMetadata `json:"dependents,omitempty"`
+	Comments     []*Comment                     `json:"comments,omitempty"`
+	Parent       *string                        `json:"parent,omitempty"`
+}
+
 // DependencyType categorizes the relationship
 type DependencyType string
 
