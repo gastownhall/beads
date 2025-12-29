@@ -1,4 +1,4 @@
-//go:build !windows && !wasm && !freebsd && !illumos && !solaris
+//go:build illumos || solaris
 
 package main
 
@@ -9,14 +9,14 @@ import (
 // checkDiskSpace returns the available disk space in MB for the given path.
 // Returns (availableMB, true) on success, (0, false) on failure.
 func checkDiskSpace(path string) (uint64, bool) {
-	var stat unix.Statfs_t
-	if err := unix.Statfs(path, &stat); err != nil {
+	var stat unix.Statvfs_t
+	if err := unix.Statvfs(path, &stat); err != nil {
 		return 0, false
 	}
 
 	// Calculate available space in bytes, then convert to MB.
-	// On most unix platforms, Bavail is unsigned but Bsize is signed.
-	availableBytes := stat.Bavail * uint64(stat.Bsize) //nolint:gosec
+	// On Solaris/illumos, Frsize is the fragment size (fundamental block size).
+	availableBytes := stat.Bavail * stat.Frsize
 	availableMB := availableBytes / (1024 * 1024)
 
 	return availableMB, true
