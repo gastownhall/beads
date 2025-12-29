@@ -276,22 +276,9 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 		gitDir = filepath.Join(path, gitDir)
 	}
 
-	// Check for pre-push hook in standard location or shared hooks location
-	var hookPath string
-
-	// First check if core.hooksPath is configured (shared hooks)
-	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
-	hooksPathCmd.Dir = path
-	if hooksPathOutput, err := hooksPathCmd.Output(); err == nil {
-		sharedHooksDir := strings.TrimSpace(string(hooksPathOutput))
-		if !filepath.IsAbs(sharedHooksDir) {
-			sharedHooksDir = filepath.Join(path, sharedHooksDir)
-		}
-		hookPath = filepath.Join(sharedHooksDir, "pre-push")
-	} else {
-		// Use standard .git/hooks location
-		hookPath = filepath.Join(gitDir, "hooks", "pre-push")
-	}
+	// Use standard .git/hooks location for consistency with CheckGitHooks (issue #799)
+	// Note: core.hooksPath is intentionally NOT checked here to match CheckGitHooks behavior.
+	hookPath := filepath.Join(gitDir, "hooks", "pre-push")
 
 	hookContent, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
 	if err != nil {

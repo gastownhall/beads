@@ -744,16 +744,20 @@ func TestCheckSyncBranchHookCompatibility_OldHookFormat(t *testing.T) {
 			expectedStatus: "warning",
 			expectInMsg:    "Could not determine",
 		},
+		// Note: core.hooksPath is NOT respected by this check (or CheckGitHooks)
+		// Both functions use .git/hooks/ for consistency. This is a known limitation.
+		// A future fix could make both respect core.hooksPath.
 		{
-			name: "hook in shared hooks directory (core.hooksPath)",
+			name: "hook in standard location with core.hooksPath set elsewhere",
 			setup: func(t *testing.T, dir string) {
 				setupGitRepoInDir(t, dir)
-				// create shared hooks directory
-				sharedHooksDir := filepath.Join(dir, ".git-hooks")
-				os.MkdirAll(sharedHooksDir, 0755)
+				// Put hook in standard .git/hooks location
+				gitDir := filepath.Join(dir, ".git")
+				hooksDir := filepath.Join(gitDir, "hooks")
+				os.MkdirAll(hooksDir, 0755)
 				hookContent := "#!/bin/sh\n# bd-hooks-version: 0.29.0\nbd sync\n"
-				os.WriteFile(filepath.Join(sharedHooksDir, "pre-push"), []byte(hookContent), 0755)
-				// configure core.hooksPath
+				os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(hookContent), 0755)
+				// configure core.hooksPath (ignored by this check)
 				cmd := exec.Command("git", "config", "core.hooksPath", ".git-hooks")
 				cmd.Dir = dir
 				_ = cmd.Run()
