@@ -107,10 +107,18 @@ func LookupRigByName(rigName, beadsDir string) (Route, bool) {
 //   - "beads" (rig name)
 //
 // This provides good agent UX - meet them where they are.
+// It searches for routes.jsonl in the current beads dir first, then at the town level.
 func LookupRigForgiving(input, beadsDir string) (Route, bool) {
-	routes, err := LoadRoutes(beadsDir)
-	if err != nil || len(routes) == 0 {
-		return Route{}, false
+	route, _, found := lookupRigForgivingWithTown(input, beadsDir)
+	return route, found
+}
+
+// lookupRigForgivingWithTown finds a route with flexible matching and returns the town root.
+// Returns (route, townRoot, found).
+func lookupRigForgivingWithTown(input, beadsDir string) (Route, string, bool) {
+	routes, townRoot, _ := findTownRoutes(beadsDir)
+	if len(routes) == 0 {
+		return Route{}, "", false
 	}
 
 	// Normalize: remove trailing hyphen for comparison
@@ -120,17 +128,17 @@ func LookupRigForgiving(input, beadsDir string) (Route, bool) {
 		// Try exact prefix match (with or without hyphen)
 		prefixBase := strings.TrimSuffix(route.Prefix, "-")
 		if normalized == prefixBase || input == route.Prefix {
-			return route, true
+			return route, townRoot, true
 		}
 
 		// Try rig name match
 		project := ExtractProjectFromPath(route.Path)
 		if input == project {
-			return route, true
+			return route, townRoot, true
 		}
 	}
 
-	return Route{}, false
+	return Route{}, "", false
 }
 
 // ResolveBeadsDirForRig returns the beads directory for a given rig identifier.
@@ -150,14 +158,20 @@ func LookupRigForgiving(input, beadsDir string) (Route, bool) {
 //   - prefix: the issue prefix for that rig (e.g., "bd-")
 //   - err: error if rig not found or path doesn't exist
 func ResolveBeadsDirForRig(rigOrPrefix, currentBeadsDir string) (beadsDir string, prefix string, err error) {
-	route, found := LookupRigForgiving(rigOrPrefix, currentBeadsDir)
+	route, townRoot, found := lookupRigForgivingWithTown(rigOrPrefix, currentBeadsDir)
 	if !found {
 		return "", "", fmt.Errorf("rig or prefix %q not found in routes.jsonl", rigOrPrefix)
 	}
 
 	// Resolve the target beads directory
-	projectRoot := filepath.Dir(currentBeadsDir)
-	targetPath := filepath.Join(projectRoot, route.Path, ".beads")
+	var targetPath string
+	if route.Path == "." {
+		// Special case: "." means the town beads directory
+		targetPath = filepath.Join(townRoot, ".beads")
+	} else {
+		// Normal path resolution relative to town root
+		targetPath = filepath.Join(townRoot, route.Path, ".beads")
+	}
 
 	// Follow redirect if present
 	targetPath = resolveRedirect(targetPath)
@@ -168,7 +182,7 @@ func ResolveBeadsDirForRig(rigOrPrefix, currentBeadsDir string) (beadsDir string
 	}
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
-		fmt.Fprintf(os.Stderr, "[routing] Rig %q -> prefix %s, path %s\n", rigOrPrefix, route.Prefix, targetPath)
+		fmt.Fprintf(os.Stderr, "[routing] Rig %q -> prefix %s, path %s (townRoot=%s)\n", rigOrPrefix, route.Prefix, targetPath, townRoot)
 	}
 
 	return targetPath, route.Prefix, nil
@@ -207,6 +221,7 @@ func ResolveToExternalRef(id, beadsDir string) string {
 
 // ResolveBeadsDirForID determines which beads directory contains the given issue ID.
 // It first checks the local beads directory, then consults routes.jsonl for prefix-based routing.
+// If routes.jsonl is not found locally, it searches up to the Gas Town root.
 //
 // Parameters:
 //   - ctx: context for database operations
@@ -218,17 +233,23 @@ func ResolveToExternalRef(id, beadsDir string) string {
 //   - routed: true if the ID was routed to a different directory
 //   - err: any error encountered
 func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (string, bool, error) {
-	// Step 1: Check for routes.jsonl FIRST based on ID prefix
-	// This allows prefix-based routing without needing to check the local store
-	routes, loadErr := LoadRoutes(currentBeadsDir)
-	if loadErr == nil && len(routes) > 0 {
+	// Step 1: Check for routes.jsonl based on ID prefix
+	// First try local, then walk up to find town-level routes
+	routes, townRoot, _ := findTownRoutes(currentBeadsDir)
+	if len(routes) > 0 {
 		prefix := ExtractPrefix(id)
 		if prefix != "" {
 			for _, route := range routes {
 				if route.Prefix == prefix {
 					// Found a matching route - resolve the path
-					projectRoot := filepath.Dir(currentBeadsDir)
-					targetPath := filepath.Join(projectRoot, route.Path, ".beads")
+					var targetPath string
+					if route.Path == "." {
+						// Special case: "." means the town beads directory
+						targetPath = filepath.Join(townRoot, ".beads")
+					} else {
+						// Normal path resolution relative to town root
+						targetPath = filepath.Join(townRoot, route.Path, ".beads")
+					}
 
 					// Follow redirect if present
 					targetPath = resolveRedirect(targetPath)
@@ -237,9 +258,11 @@ func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (stri
 					if info, err := os.Stat(targetPath); err == nil && info.IsDir() {
 						// Debug logging
 						if os.Getenv("BD_DEBUG_ROUTING") != "" {
-							fmt.Fprintf(os.Stderr, "[routing] ID %s matched prefix %s -> %s\n", id, prefix, targetPath)
+							fmt.Fprintf(os.Stderr, "[routing] ID %s matched prefix %s -> %s (townRoot=%s)\n", id, prefix, targetPath, townRoot)
 						}
 						return targetPath, true, nil
+					} else if os.Getenv("BD_DEBUG_ROUTING") != "" {
+						fmt.Fprintf(os.Stderr, "[routing] ID %s matched prefix %s but target %s not found: %v\n", id, prefix, targetPath, err)
 					}
 				}
 			}
@@ -248,6 +271,52 @@ func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (stri
 
 	// Step 2: No route matched or no routes file - use local store
 	return currentBeadsDir, false, nil
+}
+
+// findTownRoot walks up from startDir looking for a Gas Town root.
+// Returns the town root path, or empty string if not found.
+// A town root is identified by the presence of mayor/town.json.
+func findTownRoot(startDir string) string {
+	current := startDir
+	for {
+		// Check for primary marker (mayor/town.json)
+		if _, err := os.Stat(filepath.Join(current, "mayor", "town.json")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "" // Reached filesystem root
+		}
+		current = parent
+	}
+}
+
+// findTownRoutes searches for routes.jsonl at the town level.
+// It walks up from currentBeadsDir to find the town root, then loads routes
+// from <townRoot>/.beads/routes.jsonl.
+// Returns (routes, townRoot, error).
+func findTownRoutes(currentBeadsDir string) ([]Route, string, error) {
+	// First try the current beads dir (works if we're already at town level)
+	routes, err := LoadRoutes(currentBeadsDir)
+	if err == nil && len(routes) > 0 {
+		// Return the parent of the beads dir as "town root" for path resolution
+		return routes, filepath.Dir(currentBeadsDir), nil
+	}
+
+	// Walk up to find town root
+	townRoot := findTownRoot(currentBeadsDir)
+	if townRoot == "" {
+		return nil, "", nil // Not in a Gas Town
+	}
+
+	// Load routes from town beads
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	routes, err = LoadRoutes(townBeadsDir)
+	if err != nil || len(routes) == 0 {
+		return nil, "", nil // No town routes
+	}
+
+	return routes, townRoot, nil
 }
 
 // resolveRedirect checks for a redirect file in the beads directory
