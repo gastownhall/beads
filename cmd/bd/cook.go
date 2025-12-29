@@ -410,15 +410,13 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 	issueMap[protoID] = rootIssue
 
 	// Collect issues for each step (use protoID as parent for step IDs)
-	collectStepsToSubgraph(f.Steps, protoID, issueMap, &issues, &deps)
+	// The unified collectSteps builds both issueMap and idMapping
+	idMapping := make(map[string]string)
+	collectSteps(f.Steps, protoID, idMapping, issueMap, &issues, &deps, nil) // nil = keep labels on issues
 
-	// Collect dependencies from depends_on
-	stepIDMapping := make(map[string]string)
+	// Collect dependencies from depends_on using the idMapping built above
 	for _, step := range f.Steps {
-		collectStepIDMappings(step, protoID, stepIDMapping)
-	}
-	for _, step := range f.Steps {
-		collectDependenciesToSubgraph(step, stepIDMapping, &deps)
+		collectDependencies(step, idMapping, &deps)
 	}
 
 	return &TemplateSubgraph{
@@ -429,145 +427,99 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 	}, nil
 }
 
-// collectStepsToSubgraph collects issues and dependencies for steps and their children.
-// This is the in-memory version that doesn't create labels (since those require DB).
-func collectStepsToSubgraph(steps []*formula.Step, parentID string, issueMap map[string]*types.Issue,
-	issues *[]*types.Issue, deps *[]*types.Dependency) {
+// processStepToIssue converts a formula.Step to a types.Issue.
+// The issue includes all fields including Labels populated from step.Labels and waits_for.
+// This is the shared core logic used by both DB-persisted and in-memory cooking.
+func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
+	// Generate issue ID (formula-name.step-id)
+	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
+
+	// Determine issue type (children override to epic)
+	issueType := stepTypeToIssueType(step.Type)
+	if len(step.Children) > 0 {
+		issueType = types.TypeEpic
+	}
+
+	// Determine priority
+	priority := 2
+	if step.Priority != nil {
+		priority = *step.Priority
+	}
+
+	issue := &types.Issue{
+		ID:             issueID,
+		Title:          step.Title, // Keep {{variables}} for substitution at pour time
+		Description:    step.Description,
+		Status:         types.StatusOpen,
+		Priority:       priority,
+		IssueType:      issueType,
+		Assignee:       step.Assignee,
+		IsTemplate:     true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		SourceFormula:  step.SourceFormula,  // Source tracing
+		SourceLocation: step.SourceLocation, // Source tracing
+	}
+
+	// Populate labels from step
+	issue.Labels = append(issue.Labels, step.Labels...)
+
+	// Add gate label for waits_for field
+	if step.WaitsFor != "" {
+		gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
+		issue.Labels = append(issue.Labels, gateLabel)
+	}
+
+	return issue
+}
+
+// collectSteps collects issues and dependencies for steps and their children.
+// This is the unified implementation used by both DB-persisted and in-memory cooking.
+//
+// Parameters:
+//   - idMapping: step.ID → issue.ID (always populated, used for dependency resolution)
+//   - issueMap: issue.ID → issue (optional, nil for DB path, populated for in-memory path)
+//   - labelHandler: callback for each label (if nil, labels stay on issue; if set, labels are
+//     extracted and issue.Labels is cleared - use for DB path)
+func collectSteps(steps []*formula.Step, parentID string,
+	idMapping map[string]string,
+	issueMap map[string]*types.Issue,
+	issues *[]*types.Issue,
+	deps *[]*types.Dependency,
+	labelHandler func(issueID, label string)) {
 
 	for _, step := range steps {
-		// Generate issue ID (formula-name.step-id)
-		issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
-
-		// Determine issue type (children override to epic)
-		issueType := stepTypeToIssueType(step.Type)
-		if len(step.Children) > 0 {
-			issueType = types.TypeEpic
-		}
-
-		// Determine priority
-		priority := 2
-		if step.Priority != nil {
-			priority = *step.Priority
-		}
-
-		issue := &types.Issue{
-			ID:             issueID,
-			Title:          step.Title, // Keep {{variables}} for substitution at pour time
-			Description:    step.Description,
-			Status:         types.StatusOpen,
-			Priority:       priority,
-			IssueType:      issueType,
-			Assignee:       step.Assignee,
-			IsTemplate:     true,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-			SourceFormula:  step.SourceFormula,  // Source tracing
-			SourceLocation: step.SourceLocation, // Source tracing
-		}
-
-		// Store labels in the issue's Labels field for in-memory use
-		issue.Labels = append(issue.Labels, step.Labels...)
-
-		// Add gate label for waits_for field
-		if step.WaitsFor != "" {
-			gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
-			issue.Labels = append(issue.Labels, gateLabel)
-		}
-
+		issue := processStepToIssue(step, parentID)
 		*issues = append(*issues, issue)
-		issueMap[issueID] = issue
+
+		// Build mappings
+		idMapping[step.ID] = issue.ID
+		if issueMap != nil {
+			issueMap[issue.ID] = issue
+		}
+
+		// Handle labels: extract via callback (DB path) or keep on issue (in-memory path)
+		if labelHandler != nil {
+			for _, label := range issue.Labels {
+				labelHandler(issue.ID, label)
+			}
+			issue.Labels = nil // DB stores labels separately
+		}
 
 		// Add parent-child dependency
 		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
+			IssueID:     issue.ID,
 			DependsOnID: parentID,
 			Type:        types.DepParentChild,
 		})
 
 		// Recursively collect children
 		if len(step.Children) > 0 {
-			collectStepsToSubgraph(step.Children, issueID, issueMap, issues, deps)
+			collectSteps(step.Children, issue.ID, idMapping, issueMap, issues, deps, labelHandler)
 		}
 	}
 }
 
-// collectStepIDMappings builds a map from step ID to full issue ID
-func collectStepIDMappings(step *formula.Step, parentID string, mapping map[string]string) {
-	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
-	mapping[step.ID] = issueID
-
-	for _, child := range step.Children {
-		collectStepIDMappings(child, issueID, mapping)
-	}
-}
-
-// collectDependenciesToSubgraph collects blocking dependencies from depends_on and needs fields.
-func collectDependenciesToSubgraph(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
-	issueID := idMapping[step.ID]
-
-	// Process depends_on field
-	for _, depID := range step.DependsOn {
-		depIssueID, ok := idMapping[depID]
-		if !ok {
-			continue // Will be caught during validation
-		}
-
-		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: depIssueID,
-			Type:        types.DepBlocks,
-		})
-	}
-
-	// Process needs field - simpler alias for sibling dependencies
-	for _, needID := range step.Needs {
-		needIssueID, ok := idMapping[needID]
-		if !ok {
-			continue // Will be caught during validation
-		}
-
-		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: needIssueID,
-			Type:        types.DepBlocks,
-		})
-	}
-
-	// Process waits_for field - fanout gate dependency
-	if step.WaitsFor != "" {
-		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
-		if waitsForSpec != nil {
-			// Determine spawner ID
-			spawnerStepID := waitsForSpec.SpawnerID
-			if spawnerStepID == "" && len(step.Needs) > 0 {
-				// Infer spawner from first need
-				spawnerStepID = step.Needs[0]
-			}
-
-			if spawnerStepID != "" {
-				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
-					// Create WaitsFor dependency with metadata
-					meta := types.WaitsForMeta{
-						Gate: waitsForSpec.Gate,
-					}
-					metaJSON, _ := json.Marshal(meta)
-
-					*deps = append(*deps, &types.Dependency{
-						IssueID:     issueID,
-						DependsOnID: spawnerIssueID,
-						Type:        types.DepWaitsFor,
-						Metadata:    string(metaJSON),
-					})
-				}
-			}
-		}
-	}
-
-	// Recursively handle children
-	for _, child := range step.Children {
-		collectDependenciesToSubgraph(child, idMapping, deps)
-	}
-}
 
 // resolveAndCookFormula loads a formula by name, resolves it, applies all transformations,
 // and returns an in-memory TemplateSubgraph ready for instantiation.
@@ -694,7 +646,10 @@ func cookFormula(ctx context.Context, s storage.Storage, f *formula.Formula, pro
 	labels = append(labels, struct{ issueID, label string }{protoID, MoleculeLabel})
 
 	// Collect issues for each step (use protoID as parent for step IDs)
-	collectStepsRecursive(f.Steps, protoID, idMapping, &issues, &deps, &labels)
+	// Use labelHandler to extract labels for separate DB storage
+	collectSteps(f.Steps, protoID, idMapping, nil, &issues, &deps, func(issueID, label string) {
+		labels = append(labels, struct{ issueID, label string }{issueID, label})
+	})
 
 	// Collect dependencies from depends_on
 	for _, step := range f.Steps {
@@ -753,70 +708,8 @@ func cookFormula(ctx context.Context, s storage.Storage, f *formula.Formula, pro
 	}, nil
 }
 
-// collectStepsRecursive collects issues, dependencies, and labels for steps and their children.
-func collectStepsRecursive(steps []*formula.Step, parentID string, idMapping map[string]string,
-	issues *[]*types.Issue, deps *[]*types.Dependency, labels *[]struct{ issueID, label string }) {
-
-	for _, step := range steps {
-		// Generate issue ID (formula-name.step-id)
-		issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
-
-		// Determine issue type (children override to epic)
-		issueType := stepTypeToIssueType(step.Type)
-		if len(step.Children) > 0 {
-			issueType = types.TypeEpic
-		}
-
-		// Determine priority
-		priority := 2
-		if step.Priority != nil {
-			priority = *step.Priority
-		}
-
-		issue := &types.Issue{
-			ID:             issueID,
-			Title:          step.Title, // Keep {{variables}} for substitution at pour time
-			Description:    step.Description,
-			Status:         types.StatusOpen,
-			Priority:       priority,
-			IssueType:      issueType,
-			Assignee:       step.Assignee,
-			IsTemplate:     true,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-			SourceFormula:  step.SourceFormula,  // Source tracing
-			SourceLocation: step.SourceLocation, // Source tracing
-		}
-		*issues = append(*issues, issue)
-
-		// Collect labels
-		for _, label := range step.Labels {
-			*labels = append(*labels, struct{ issueID, label string }{issueID, label})
-		}
-
-		// Add gate label for waits_for field
-		if step.WaitsFor != "" {
-			gateLabel := fmt.Sprintf("gate:%s", step.WaitsFor)
-			*labels = append(*labels, struct{ issueID, label string }{issueID, gateLabel})
-		}
-
-		idMapping[step.ID] = issueID
-
-		// Add parent-child dependency
-		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: parentID,
-			Type:        types.DepParentChild,
-		})
-
-		// Recursively collect children
-		if len(step.Children) > 0 {
-			collectStepsRecursive(step.Children, issueID, idMapping, issues, deps, labels)
-		}
-	}
-}
-
-// collectDependencies collects blocking dependencies from depends_on and needs fields.
+// collectDependencies collects blocking dependencies from depends_on, needs, and waits_for fields.
+// This is the shared implementation used by both DB-persisted and in-memory subgraph cooking.
 func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
 	issueID := idMapping[step.ID]
 
