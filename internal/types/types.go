@@ -519,6 +519,9 @@ const (
 	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
 	DepAssignedTo DependencyType = "assigned-to" // Assignment relationship
 	DepApprovedBy DependencyType = "approved-by" // Approval relationship
+
+	// Convoy tracking (non-blocking cross-project references)
+	DepTracks DependencyType = "tracks" // Convoy → issue tracking (non-blocking)
 )
 
 // IsValid checks if the dependency type value is valid.
@@ -534,7 +537,7 @@ func (d DependencyType) IsWellKnown() bool {
 	switch d {
 	case DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor, DepRelated, DepDiscoveredFrom,
 		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
-		DepAuthoredBy, DepAssignedTo, DepApprovedBy:
+		DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepTracks:
 		return true
 	}
 	return false

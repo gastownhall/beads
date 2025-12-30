@@ -221,6 +221,138 @@ Examples:
 	},
 }
 
+var depListCmd = &cobra.Command{
+	Use:   "list [issue-id]",
+	Short: "List dependencies or dependents of an issue",
+	Long: `List dependencies or dependents of an issue with optional type filtering.
+
+By default shows dependencies (what this issue depends on). Use --direction to control:
+  - down: Show dependencies (what this issue depends on) - default
+  - up:   Show dependents (what depends on this issue)
+
+Use --type to filter by dependency type (e.g., tracks, blocks, parent-child).
+
+Examples:
+  bd dep list gt-abc                     # Show what gt-abc depends on
+  bd dep list gt-abc --direction=up      # Show what depends on gt-abc
+  bd dep list gt-abc --direction=up -t tracks  # Show what tracks gt-abc (convoy tracking)`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := rootCtx
+
+		// Resolve partial ID first
+		var fullID string
+		if daemonClient != nil {
+			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
+			resp, err := daemonClient.ResolveID(resolveArgs)
+			if err != nil {
+				FatalErrorRespectJSON("resolving issue ID %s: %v", args[0], err)
+			}
+			if err := json.Unmarshal(resp.Data, &fullID); err != nil {
+				FatalErrorRespectJSON("unmarshaling resolved ID: %v", err)
+			}
+		} else {
+			var err error
+			fullID, err = utils.ResolvePartialID(ctx, store, args[0])
+			if err != nil {
+				FatalErrorRespectJSON("resolving %s: %v", args[0], err)
+			}
+		}
+
+		// If daemon is running but doesn't support this command, use direct storage
+		if daemonClient != nil && store == nil {
+			var err error
+			store, err = sqlite.New(rootCtx, dbPath)
+			if err != nil {
+				FatalErrorRespectJSON("failed to open database: %v", err)
+			}
+			defer func() { _ = store.Close() }()
+		}
+
+		direction, _ := cmd.Flags().GetString("direction")
+		typeFilter, _ := cmd.Flags().GetString("type")
+
+		if direction == "" {
+			direction = "down"
+		}
+
+		var issues []*types.IssueWithDependencyMetadata
+		var err error
+
+		if direction == "up" {
+			issues, err = store.GetDependentsWithMetadata(ctx, fullID)
+		} else {
+			issues, err = store.GetDependenciesWithMetadata(ctx, fullID)
+		}
+		if err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
+
+		// Apply type filter if specified
+		if typeFilter != "" {
+			var filtered []*types.IssueWithDependencyMetadata
+			for _, iss := range issues {
+				if string(iss.DependencyType) == typeFilter {
+					filtered = append(filtered, iss)
+				}
+			}
+			issues = filtered
+		}
+
+		if jsonOutput {
+			if issues == nil {
+				issues = []*types.IssueWithDependencyMetadata{}
+			}
+			outputJSON(issues)
+			return
+		}
+
+		if len(issues) == 0 {
+			if typeFilter != "" {
+				if direction == "up" {
+					fmt.Printf("\nNo issues depend on %s with type '%s'\n", fullID, typeFilter)
+				} else {
+					fmt.Printf("\n%s has no dependencies of type '%s'\n", fullID, typeFilter)
+				}
+			} else {
+				if direction == "up" {
+					fmt.Printf("\nNo issues depend on %s\n", fullID)
+				} else {
+					fmt.Printf("\n%s has no dependencies\n", fullID)
+				}
+			}
+			return
+		}
+
+		if direction == "up" {
+			fmt.Printf("\n%s Issues that depend on %s:\n\n", ui.RenderAccent("📋"), fullID)
+		} else {
+			fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), fullID)
+		}
+
+		for _, iss := range issues {
+			// Color the ID based on status
+			var idStr string
+			switch iss.Status {
+			case types.StatusOpen:
+				idStr = ui.StatusOpenStyle.Render(iss.ID)
+			case types.StatusInProgress:
+				idStr = ui.StatusInProgressStyle.Render(iss.ID)
+			case types.StatusBlocked:
+				idStr = ui.StatusBlockedStyle.Render(iss.ID)
+			case types.StatusClosed:
+				idStr = ui.StatusClosedStyle.Render(iss.ID)
+			default:
+				idStr = iss.ID
+			}
+
+			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
+				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+		}
+		fmt.Println()
+	},
+}
+
 var depRemoveCmd = &cobra.Command{
 	Use:     "remove [issue-id] [depends-on-id]",
 	Aliases: []string{"rm"},
@@ -842,7 +974,7 @@ func ParseExternalRef(ref string) (project, capability string) {
 }
 
 func init() {
-	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|related|parent-child|discovered-from)")
+	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
@@ -853,12 +985,17 @@ func init() {
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
+	depTreeCmd.Flags().StringP("type", "t", "", "Filter to only show dependencies of this type (e.g., tracks, blocks, parent-child)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
+
+	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
+	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
 
 	depCmd.AddCommand(depAddCmd)
 	depCmd.AddCommand(depRemoveCmd)
+	depCmd.AddCommand(depListCmd)
 	depCmd.AddCommand(depTreeCmd)
 	depCmd.AddCommand(depCyclesCmd)
 	rootCmd.AddCommand(depCmd)

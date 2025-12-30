@@ -695,6 +695,49 @@ func (m *MemoryStorage) GetDependents(ctx context.Context, issueID string) ([]*t
 	return results, nil
 }
 
+// GetDependenciesWithMetadata gets issues that this issue depends on, with dependency type
+func (m *MemoryStorage) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, dep := range m.dependencies[issueID] {
+		if issue, exists := m.issues[dep.DependsOnID]; exists {
+			issueCopy := *issue
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          issueCopy,
+				DependencyType: dep.Type,
+			})
+		}
+	}
+
+	return results, nil
+}
+
+// GetDependentsWithMetadata gets issues that depend on this issue, with dependency type
+func (m *MemoryStorage) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []*types.IssueWithDependencyMetadata
+	for id, deps := range m.dependencies {
+		for _, dep := range deps {
+			if dep.DependsOnID == issueID {
+				if issue, exists := m.issues[id]; exists {
+					issueCopy := *issue
+					results = append(results, &types.IssueWithDependencyMetadata{
+						Issue:          issueCopy,
+						DependencyType: dep.Type,
+					})
+				}
+				break
+			}
+		}
+	}
+
+	return results, nil
+}
+
 // GetDependencyCounts returns dependency and dependent counts for multiple issues
 func (m *MemoryStorage) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	m.mu.RLock()

@@ -92,6 +92,8 @@ type Storage interface {
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error
 	GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
+	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 	GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
