@@ -1053,3 +1053,204 @@ func TestHandleDelete_CascadeAndForceFlags(t *testing.T) {
 		t.Errorf("expected deleted_count=1, got %v", result["deleted_count"])
 	}
 }
+
+// TestHandleUpdate_ClaimFlag verifies atomic claim operation (gt-il2p7)
+func TestHandleUpdate_ClaimFlag(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create an issue first
+	createArgs := CreateArgs{
+		Title:     "Test Issue for Claim",
+		IssueType: "task",
+		Priority:  2,
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-user",
+	}
+
+	createResp := server.handleCreate(createReq)
+	if !createResp.Success {
+		t.Fatalf("failed to create test issue: %s", createResp.Error)
+	}
+
+	var createdIssue types.Issue
+	if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse created issue: %v", err)
+	}
+	issueID := createdIssue.ID
+
+	// Verify issue starts with no assignee
+	if createdIssue.Assignee != "" {
+		t.Fatalf("expected no assignee initially, got %s", createdIssue.Assignee)
+	}
+
+	// Claim the issue
+	updateArgs := UpdateArgs{
+		ID:    issueID,
+		Claim: true,
+	}
+	updateJSON, _ := json.Marshal(updateArgs)
+	updateReq := &Request{
+		Operation: OpUpdate,
+		Args:      updateJSON,
+		Actor:     "claiming-agent",
+	}
+
+	updateResp := server.handleUpdate(updateReq)
+	if !updateResp.Success {
+		t.Fatalf("claim operation failed: %s", updateResp.Error)
+	}
+
+	// Verify issue was claimed
+	var updatedIssue types.Issue
+	if err := json.Unmarshal(updateResp.Data, &updatedIssue); err != nil {
+		t.Fatalf("failed to parse updated issue: %v", err)
+	}
+
+	if updatedIssue.Assignee != "claiming-agent" {
+		t.Errorf("expected assignee 'claiming-agent', got %s", updatedIssue.Assignee)
+	}
+	if updatedIssue.Status != "in_progress" {
+		t.Errorf("expected status 'in_progress', got %s", updatedIssue.Status)
+	}
+}
+
+// TestHandleUpdate_ClaimFlag_AlreadyClaimed verifies double-claim returns error
+func TestHandleUpdate_ClaimFlag_AlreadyClaimed(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create an issue first
+	createArgs := CreateArgs{
+		Title:     "Test Issue for Double Claim",
+		IssueType: "task",
+		Priority:  2,
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-user",
+	}
+
+	createResp := server.handleCreate(createReq)
+	if !createResp.Success {
+		t.Fatalf("failed to create test issue: %s", createResp.Error)
+	}
+
+	var createdIssue types.Issue
+	if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse created issue: %v", err)
+	}
+	issueID := createdIssue.ID
+
+	// First claim should succeed
+	updateArgs := UpdateArgs{
+		ID:    issueID,
+		Claim: true,
+	}
+	updateJSON, _ := json.Marshal(updateArgs)
+	updateReq := &Request{
+		Operation: OpUpdate,
+		Args:      updateJSON,
+		Actor:     "first-claimer",
+	}
+
+	updateResp := server.handleUpdate(updateReq)
+	if !updateResp.Success {
+		t.Fatalf("first claim should succeed: %s", updateResp.Error)
+	}
+
+	// Second claim should fail
+	updateArgs2 := UpdateArgs{
+		ID:    issueID,
+		Claim: true,
+	}
+	updateJSON2, _ := json.Marshal(updateArgs2)
+	updateReq2 := &Request{
+		Operation: OpUpdate,
+		Args:      updateJSON2,
+		Actor:     "second-claimer",
+	}
+
+	updateResp2 := server.handleUpdate(updateReq2)
+	if updateResp2.Success {
+		t.Error("expected second claim to fail, but it succeeded")
+	}
+
+	// Verify error message
+	expectedError := "already claimed by first-claimer"
+	if updateResp2.Error != expectedError {
+		t.Errorf("expected error %q, got %q", expectedError, updateResp2.Error)
+	}
+}
+
+// TestHandleUpdate_ClaimFlag_WithOtherUpdates verifies claim can combine with other updates
+func TestHandleUpdate_ClaimFlag_WithOtherUpdates(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create an issue first
+	createArgs := CreateArgs{
+		Title:     "Test Issue for Claim with Updates",
+		IssueType: "task",
+		Priority:  2,
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-user",
+	}
+
+	createResp := server.handleCreate(createReq)
+	if !createResp.Success {
+		t.Fatalf("failed to create test issue: %s", createResp.Error)
+	}
+
+	var createdIssue types.Issue
+	if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse created issue: %v", err)
+	}
+	issueID := createdIssue.ID
+
+	// Claim and update priority at the same time
+	priority := 0 // High priority
+	updateArgs := UpdateArgs{
+		ID:       issueID,
+		Claim:    true,
+		Priority: &priority,
+	}
+	updateJSON, _ := json.Marshal(updateArgs)
+	updateReq := &Request{
+		Operation: OpUpdate,
+		Args:      updateJSON,
+		Actor:     "claiming-agent",
+	}
+
+	updateResp := server.handleUpdate(updateReq)
+	if !updateResp.Success {
+		t.Fatalf("claim with updates failed: %s", updateResp.Error)
+	}
+
+	// Verify all updates were applied
+	ctx := context.Background()
+	issue, err := store.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("failed to get issue: %v", err)
+	}
+
+	if issue.Assignee != "claiming-agent" {
+		t.Errorf("expected assignee 'claiming-agent', got %s", issue.Assignee)
+	}
+	if issue.Status != "in_progress" {
+		t.Errorf("expected status 'in_progress', got %s", issue.Status)
+	}
+	if issue.Priority != 0 {
+		t.Errorf("expected priority 0, got %d", issue.Priority)
+	}
+}

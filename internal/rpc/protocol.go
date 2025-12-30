@@ -152,6 +152,8 @@ type UpdateArgs struct {
 	EventActor    *string `json:"event_actor,omitempty"`    // Entity URI who caused this event
 	EventTarget   *string `json:"event_target,omitempty"`   // Entity URI or bead ID affected
 	EventPayload  *string `json:"event_payload,omitempty"`  // Event-specific JSON data
+	// Work queue claim operation
+	Claim bool `json:"claim,omitempty"` // If true, atomically claim issue (set assignee+status, fail if already claimed)
 }
 
 // CloseArgs represents arguments for the close operation

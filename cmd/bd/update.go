@@ -122,7 +122,10 @@ create, update, show, or close operation).`,
 			updates["issue_type"] = issueType
 		}
 
-		if len(updates) == 0 {
+		// Get claim flag
+		claimFlag, _ := cmd.Flags().GetBool("claim")
+
+		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
 			return
 		}
@@ -209,6 +212,9 @@ create, update, show, or close operation).`,
 					updateArgs.Parent = &parent
 				}
 
+				// Set claim flag for atomic claim operation
+				updateArgs.Claim = claimFlag
+
 				resp, err := daemonClient.Update(updateArgs)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
@@ -259,6 +265,24 @@ create, update, show, or close operation).`,
 			if err := validateIssueUpdatable(id, issue); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 				continue
+			}
+
+			// Handle claim operation atomically
+			if claimFlag {
+				// Check if already claimed (has non-empty assignee)
+				if issue.Assignee != "" {
+					fmt.Fprintf(os.Stderr, "Error claiming %s: already claimed by %s\n", id, issue.Assignee)
+					continue
+				}
+				// Atomically set assignee and status
+				claimUpdates := map[string]interface{}{
+					"assignee": actor,
+					"status":   "in_progress",
+				}
+				if err := store.UpdateIssue(ctx, id, claimUpdates, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+					continue
+				}
 			}
 
 			// Apply regular field updates if any
@@ -387,5 +411,6 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; fails if already claimed)")
 	rootCmd.AddCommand(updateCmd)
 }

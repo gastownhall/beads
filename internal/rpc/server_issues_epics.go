@@ -468,8 +468,31 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
-	updates := updatesFromArgs(updateArgs)
 	actor := s.reqActor(req)
+
+	// Handle claim operation atomically
+	if updateArgs.Claim {
+		// Check if already claimed (has non-empty assignee)
+		if issue.Assignee != "" {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("already claimed by %s", issue.Assignee),
+			}
+		}
+		// Atomically set assignee and status
+		claimUpdates := map[string]interface{}{
+			"assignee": actor,
+			"status":   "in_progress",
+		}
+		if err := store.UpdateIssue(ctx, updateArgs.ID, claimUpdates, actor); err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to claim issue: %v", err),
+			}
+		}
+	}
+
+	updates := updatesFromArgs(updateArgs)
 
 	// Apply regular field updates if any
 	if len(updates) > 0 {
