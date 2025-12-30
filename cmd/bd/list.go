@@ -390,8 +390,15 @@ var listCmd = &cobra.Command{
 			}
 		}
 
+		// Handle limit: --limit 0 means unlimited (explicit override)
+		// Otherwise use the value (default 50 or user-specified)
+		effectiveLimit := limit
+		if cmd.Flags().Changed("limit") && limit == 0 {
+			effectiveLimit = 0 // Explicit unlimited
+		}
+
 		filter := types.IssueFilter{
-			Limit: limit,
+			Limit: effectiveLimit,
 		}
 		if status != "" && status != "all" {
 			s := types.Status(status)
@@ -720,6 +727,10 @@ var listCmd = &cobra.Command{
 					}
 				}
 			}
+			// Show truncation hint if we hit the limit (GH#788)
+			if effectiveLimit > 0 && len(issues) == effectiveLimit {
+				fmt.Fprintf(os.Stderr, "\nShowing %d issues (use --limit 0 for all)\n", effectiveLimit)
+			}
 			return
 		}
 
@@ -755,6 +766,10 @@ var listCmd = &cobra.Command{
 		// Handle pretty format (GH#654)
 		if prettyFormat {
 			displayPrettyList(issues, false)
+			// Show truncation hint if we hit the limit (GH#788)
+			if effectiveLimit > 0 && len(issues) == effectiveLimit {
+				fmt.Fprintf(os.Stderr, "\nShowing %d issues (use --limit 0 for all)\n", effectiveLimit)
+			}
 			return
 		}
 
@@ -870,6 +885,11 @@ var listCmd = &cobra.Command{
 			}
 		}
 
+		// Show truncation hint if we hit the limit (GH#788)
+		if effectiveLimit > 0 && len(issues) == effectiveLimit {
+			fmt.Fprintf(os.Stderr, "\nShowing %d issues (use --limit 0 for all)\n", effectiveLimit)
+		}
+
 		// Show tip after successful list (direct mode only)
 		maybeShowTip(store)
 	},
@@ -884,7 +904,7 @@ func init() {
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
-	listCmd.Flags().IntP("limit", "n", 0, "Limit results")
+	listCmd.Flags().IntP("limit", "n", 50, "Limit results (default 50, use 0 for unlimited)")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues (default behavior; flag provided for CLI familiarity)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
