@@ -113,7 +113,7 @@ func Merge3Way(outputPath, basePath, leftPath, rightPath string, debug bool) err
 	}
 
 	// Perform 3-way merge
-	result, conflicts := merge3Way(baseIssues, leftIssues, rightIssues)
+	result, conflicts := merge3Way(baseIssues, leftIssues, rightIssues, debug)
 
 	if debug {
 		fmt.Fprintf(os.Stderr, "Merge complete:\n")
@@ -294,15 +294,16 @@ func IsExpiredTombstone(issue Issue, ttl time.Duration) bool {
 	return time.Now().After(expirationTime)
 }
 
-func merge3Way(base, left, right []Issue) ([]Issue, []string) {
-	return Merge3WayWithTTL(base, left, right, DefaultTombstoneTTL)
+func merge3Way(base, left, right []Issue, debug bool) ([]Issue, []string) {
+	return Merge3WayWithTTL(base, left, right, DefaultTombstoneTTL, debug)
 }
 
 // Merge3WayWithTTL performs a 3-way merge with configurable tombstone TTL.
 // This is the core merge function that handles tombstone semantics.
 // Use this when you need to configure TTL for testing, debugging, or
 // per-repository configuration. For default TTL behavior, use merge3Way.
-func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []string) {
+// When debug is true, logs resurrection events to stderr.
+func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration, debug bool) ([]Issue, []string) {
 	// Build maps for quick lookup by IssueKey
 	baseMap := make(map[IssueKey]Issue)
 	for _, issue := range base {
@@ -416,6 +417,9 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []
 			if leftTombstone && !rightTombstone {
 				if IsExpiredTombstone(leftIssue, ttl) {
 					// Tombstone expired - resurrection allowed, keep live issue
+					if debug {
+						fmt.Fprintf(os.Stderr, "Issue %s resurrected (tombstone expired)\n", rightIssue.ID)
+					}
 					result = append(result, rightIssue)
 				} else {
 					// Tombstone wins
@@ -428,6 +432,9 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []
 			if rightTombstone && !leftTombstone {
 				if IsExpiredTombstone(rightIssue, ttl) {
 					// Tombstone expired - resurrection allowed, keep live issue
+					if debug {
+						fmt.Fprintf(os.Stderr, "Issue %s resurrected (tombstone expired)\n", leftIssue.ID)
+					}
 					result = append(result, leftIssue)
 				} else {
 					// Tombstone wins
@@ -456,6 +463,9 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []
 			// CASE: Left is tombstone, right is live
 			if leftTombstone && !rightTombstone {
 				if IsExpiredTombstone(leftIssue, ttl) {
+					if debug {
+						fmt.Fprintf(os.Stderr, "Issue %s resurrected (tombstone expired)\n", rightIssue.ID)
+					}
 					result = append(result, rightIssue)
 				} else {
 					result = append(result, leftIssue)
@@ -466,6 +476,9 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration) ([]Issue, []
 			// CASE: Right is tombstone, left is live
 			if rightTombstone && !leftTombstone {
 				if IsExpiredTombstone(rightIssue, ttl) {
+					if debug {
+						fmt.Fprintf(os.Stderr, "Issue %s resurrected (tombstone expired)\n", leftIssue.ID)
+					}
 					result = append(result, leftIssue)
 				} else {
 					result = append(result, rightIssue)
