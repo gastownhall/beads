@@ -97,6 +97,9 @@ type CreateArgs struct {
 	CreatedBy string `json:"created_by,omitempty"` // Who created the issue
 	// Molecule type (for swarm coordination)
 	MolType string `json:"mol_type,omitempty"` // swarm, patrol, or work (default)
+	// Agent identity fields (only valid when IssueType == "agent")
+	RoleType string `json:"role_type,omitempty"` // polecat|crew|witness|refinery|mayor|deacon
+	Rig      string `json:"rig,omitempty"`       // Rig name (empty for town-level agents)
 }
 
 // UpdateArgs represents arguments for the update operation
@@ -134,6 +137,9 @@ type UpdateArgs struct {
 	// Agent state fields
 	AgentState   *string `json:"agent_state,omitempty"`   // Agent state (idle|running|stuck|stopped|dead)
 	LastActivity *bool   `json:"last_activity,omitempty"` // If true, update last_activity to now
+	// Agent identity fields
+	RoleType *string `json:"role_type,omitempty"` // polecat|crew|witness|refinery|mayor|deacon
+	Rig      *string `json:"rig,omitempty"`       // Rig name (empty for town-level agents)
 }
 
 // CloseArgs represents arguments for the close operation

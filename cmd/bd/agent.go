@@ -96,10 +96,36 @@ Examples:
 	RunE: runAgentShow,
 }
 
+var agentBackfillLabelsCmd = &cobra.Command{
+	Use:   "backfill-labels",
+	Short: "Backfill role_type/rig labels on existing agent beads",
+	Long: `Backfill role_type and rig labels on existing agent beads.
+
+This command scans all agent beads and:
+1. Extracts role_type and rig from description text if fields are empty
+2. Sets the role_type and rig fields on the agent bead
+3. Adds role_type:<value> and rig:<value> labels for filtering
+
+This enables queries like:
+  bd list --type=agent --label=role_type:witness
+  bd list --type=agent --label=rig:gastown
+
+Use --dry-run to see what would be changed without making changes.
+
+Examples:
+  bd agent backfill-labels           # Backfill all agent beads
+  bd agent backfill-labels --dry-run # Preview changes without applying`,
+	RunE: runAgentBackfillLabels,
+}
+
+var backfillDryRun bool
+
 func init() {
+	agentBackfillLabelsCmd.Flags().BoolVar(&backfillDryRun, "dry-run", false, "Preview changes without applying them")
 	agentCmd.AddCommand(agentStateCmd)
 	agentCmd.AddCommand(agentHeartbeatCmd)
 	agentCmd.AddCommand(agentShowCmd)
+	agentCmd.AddCommand(agentBackfillLabelsCmd)
 	rootCmd.AddCommand(agentCmd)
 }
 
@@ -401,4 +427,203 @@ func formatTimeOrNil(t *time.Time) interface{} {
 		return nil
 	}
 	return t.Format(time.RFC3339)
+}
+
+// runAgentBackfillLabels scans all agent beads and adds role_type/rig labels
+func runAgentBackfillLabels(cmd *cobra.Command, args []string) error {
+	if !backfillDryRun {
+		CheckReadonly("agent backfill-labels")
+	}
+
+	ctx := rootCtx
+
+	// List all agent beads
+	var agents []*types.Issue
+	if daemonClient != nil {
+		resp, err := daemonClient.List(&rpc.ListArgs{
+			IssueType: "agent",
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list agents: %w", err)
+		}
+		if err := json.Unmarshal(resp.Data, &agents); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+	} else {
+		agentType := types.TypeAgent
+		filter := types.IssueFilter{
+			IssueType: &agentType,
+		}
+		var err error
+		agents, err = store.SearchIssues(ctx, "", filter)
+		if err != nil {
+			return fmt.Errorf("failed to list agents: %w", err)
+		}
+	}
+
+	if len(agents) == 0 {
+		fmt.Println("No agent beads found")
+		return nil
+	}
+
+	updated := 0
+	skipped := 0
+
+	for _, agent := range agents {
+		// Skip tombstoned agents
+		if agent.Status == types.StatusTombstone {
+			continue
+		}
+
+		// Extract role_type and rig from description if not set in fields
+		roleType := agent.RoleType
+		rig := agent.Rig
+
+		if roleType == "" || rig == "" {
+			// Parse from description
+			lines := strings.Split(agent.Description, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "role_type:") && roleType == "" {
+					roleType = strings.TrimSpace(strings.TrimPrefix(line, "role_type:"))
+				}
+				if strings.HasPrefix(line, "rig:") && rig == "" {
+					rig = strings.TrimSpace(strings.TrimPrefix(line, "rig:"))
+				}
+			}
+		}
+
+		// Skip if no role_type or rig found
+		if roleType == "" && rig == "" {
+			skipped++
+			continue
+		}
+
+		// Check if labels already exist
+		var existingLabels []string
+		if daemonClient != nil {
+			// Use show to get full issue with labels
+			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: agent.ID})
+			if err == nil {
+				var fullAgent types.Issue
+				if err := json.Unmarshal(resp.Data, &fullAgent); err == nil {
+					existingLabels = fullAgent.Labels
+				}
+			}
+		} else {
+			existingLabels, _ = store.GetLabels(ctx, agent.ID)
+		}
+
+		// Determine which labels need to be added
+		needsRoleTypeLabel := roleType != "" && !containsLabel(existingLabels, "role_type:"+roleType)
+		needsRigLabel := rig != "" && !containsLabel(existingLabels, "rig:"+rig)
+		needsFieldUpdate := (roleType != "" && agent.RoleType == "") || (rig != "" && agent.Rig == "")
+
+		if !needsRoleTypeLabel && !needsRigLabel && !needsFieldUpdate {
+			skipped++
+			continue
+		}
+
+		if backfillDryRun {
+			fmt.Printf("Would update %s:\n", agent.ID)
+			if needsFieldUpdate {
+				if roleType != "" && agent.RoleType == "" {
+					fmt.Printf("  Set role_type: %s\n", roleType)
+				}
+				if rig != "" && agent.Rig == "" {
+					fmt.Printf("  Set rig: %s\n", rig)
+				}
+			}
+			if needsRoleTypeLabel {
+				fmt.Printf("  Add label: role_type:%s\n", roleType)
+			}
+			if needsRigLabel {
+				fmt.Printf("  Add label: rig:%s\n", rig)
+			}
+			updated++
+			continue
+		}
+
+		// Update fields if needed
+		if needsFieldUpdate {
+			updates := map[string]interface{}{}
+			if roleType != "" && agent.RoleType == "" {
+				updates["role_type"] = roleType
+			}
+			if rig != "" && agent.Rig == "" {
+				updates["rig"] = rig
+			}
+
+			if daemonClient != nil {
+				updateArgs := &rpc.UpdateArgs{ID: agent.ID}
+				if _, ok := updates["role_type"]; ok {
+					rt := roleType
+					updateArgs.RoleType = &rt
+				}
+				if _, ok := updates["rig"]; ok {
+					r := rig
+					updateArgs.Rig = &r
+				}
+				if _, err := daemonClient.Update(updateArgs); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update fields for %s: %v\n", agent.ID, err)
+				}
+			} else {
+				if err := store.UpdateIssue(ctx, agent.ID, updates, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update fields for %s: %v\n", agent.ID, err)
+				}
+			}
+		}
+
+		// Add labels
+		if needsRoleTypeLabel {
+			label := "role_type:" + roleType
+			if daemonClient != nil {
+				if _, err := daemonClient.AddLabel(&rpc.LabelAddArgs{ID: agent.ID, Label: label}); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, agent.ID, err)
+				}
+			} else {
+				if err := store.AddLabel(ctx, agent.ID, label, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, agent.ID, err)
+				}
+			}
+		}
+		if needsRigLabel {
+			label := "rig:" + rig
+			if daemonClient != nil {
+				if _, err := daemonClient.AddLabel(&rpc.LabelAddArgs{ID: agent.ID, Label: label}); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, agent.ID, err)
+				}
+			} else {
+				if err := store.AddLabel(ctx, agent.ID, label, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, agent.ID, err)
+				}
+			}
+		}
+
+		fmt.Printf("%s Updated %s (role_type:%s, rig:%s)\n", ui.RenderPass("✓"), agent.ID, roleType, rig)
+		updated++
+	}
+
+	// Trigger auto-flush
+	if flushManager != nil && !backfillDryRun {
+		flushManager.MarkDirty(false)
+	}
+
+	if backfillDryRun {
+		fmt.Printf("\nDry run complete: %d would be updated, %d skipped\n", updated, skipped)
+	} else {
+		fmt.Printf("\nBackfill complete: %d updated, %d skipped\n", updated, skipped)
+	}
+
+	return nil
+}
+
+// containsLabel checks if a label exists in the list
+func containsLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
 }

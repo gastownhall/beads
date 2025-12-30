@@ -121,6 +121,15 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		// Agent-specific flags
+		roleType, _ := cmd.Flags().GetString("role-type")
+		agentRig, _ := cmd.Flags().GetString("agent-rig")
+
+		// Validate agent-specific flags require --type=agent
+		if (roleType != "" || agentRig != "") && issueType != "agent" {
+			FatalError("--role-type and --agent-rig flags require --type=agent")
+		}
+
 		// Handle --rig or --prefix flag: create issue in a different rig
 		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
 		targetRig := rigOverride
@@ -258,6 +267,8 @@ var createCmd = &cobra.Command{
 				Ephemeral:          wisp,
 				CreatedBy:          getActorWithGit(),
 				MolType:            string(molType),
+				RoleType:           roleType,
+				Rig:                agentRig,
 			}
 
 			resp, err := daemonClient.Create(createArgs)
@@ -305,6 +316,8 @@ var createCmd = &cobra.Command{
 			Ephemeral:          wisp,
 			CreatedBy:          getActorWithGit(),
 			MolType:            molType,
+			RoleType:           roleType,
+			Rig:                agentRig,
 		}
 
 		ctx := rootCtx
@@ -364,6 +377,22 @@ var createCmd = &cobra.Command{
 		for _, label := range labels {
 			if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {
 				WarnError("failed to add label %s: %v", label, err)
+			}
+		}
+
+		// Auto-add role_type/rig labels for agent beads (enables filtering queries)
+		if issue.IssueType == types.TypeAgent {
+			if issue.RoleType != "" {
+				agentLabel := "role_type:" + issue.RoleType
+				if err := store.AddLabel(ctx, issue.ID, agentLabel, actor); err != nil {
+					WarnError("failed to add role_type label: %v", err)
+				}
+			}
+			if issue.Rig != "" {
+				rigLabel := "rig:" + issue.Rig
+				if err := store.AddLabel(ctx, issue.ID, rigLabel, actor); err != nil {
+					WarnError("failed to add rig label: %v", err)
+				}
 			}
 		}
 
@@ -487,6 +516,9 @@ func init() {
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (ephemeral, not exported to JSONL)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-polecat), patrol (recurring ops), work (default)")
+	// Agent-specific flags (only valid when --type=agent)
+	createCmd.Flags().String("role-type", "", "Agent role type: polecat|crew|witness|refinery|mayor|deacon (requires --type=agent)")
+	createCmd.Flags().String("agent-rig", "", "Agent's rig name (requires --type=agent)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }

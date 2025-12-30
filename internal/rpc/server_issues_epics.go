@@ -115,6 +115,13 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.LastActivity != nil && *a.LastActivity {
 		u["last_activity"] = time.Now()
 	}
+	// Agent identity fields
+	if a.RoleType != nil {
+		u["role_type"] = *a.RoleType
+	}
+	if a.Rig != nil {
+		u["rig"] = *a.Rig
+	}
 	return u
 }
 
@@ -198,6 +205,9 @@ func (s *Server) handleCreate(req *Request) Response {
 		CreatedBy: createArgs.CreatedBy,
 		// Molecule type
 		MolType: types.MolType(createArgs.MolType),
+		// Agent identity fields
+		RoleType: createArgs.RoleType,
+		Rig:      createArgs.Rig,
 	}
 	
 	// Check if any dependencies are discovered-from type
@@ -279,6 +289,28 @@ func (s *Server) handleCreate(req *Request) Response {
 			return Response{
 				Success: false,
 				Error:   fmt.Sprintf("failed to add label %s: %v", label, err),
+			}
+		}
+	}
+
+	// Auto-add role_type/rig labels for agent beads (enables filtering queries)
+	if issue.IssueType == types.TypeAgent {
+		if issue.RoleType != "" {
+			label := "role_type:" + issue.RoleType
+			if err := store.AddLabel(ctx, issue.ID, label, s.reqActor(req)); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to add role_type label: %v", err),
+				}
+			}
+		}
+		if issue.Rig != "" {
+			label := "rig:" + issue.Rig
+			if err := store.AddLabel(ctx, issue.ID, label, s.reqActor(req)); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to add rig label: %v", err),
+				}
 			}
 		}
 	}
@@ -478,6 +510,29 @@ func (s *Server) handleUpdate(req *Request) Response {
 			return Response{
 				Success: false,
 				Error:   fmt.Sprintf("failed to remove label %s: %v", label, err),
+			}
+		}
+	}
+
+	// Auto-add role_type/rig labels for agent beads when these fields are set
+	// This enables filtering queries like: bd list --type=agent --label=role_type:witness
+	if issue.IssueType == types.TypeAgent {
+		if updateArgs.RoleType != nil && *updateArgs.RoleType != "" {
+			label := "role_type:" + *updateArgs.RoleType
+			if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to add role_type label: %v", err),
+				}
+			}
+		}
+		if updateArgs.Rig != nil && *updateArgs.Rig != "" {
+			label := "rig:" + *updateArgs.Rig
+			if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
+				return Response{
+					Success: false,
+					Error:   fmt.Sprintf("failed to add rig label: %v", err),
+				}
 			}
 		}
 	}
