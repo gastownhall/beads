@@ -553,12 +553,18 @@ func doPushToJira(ctx context.Context, dryRun bool, createOnly bool, updateRefs 
 
 // findJiraScript locates the Jira Python script.
 func findJiraScript(name string) (string, error) {
+	// Check environment variable first (allows users to specify script location)
+	if envPath := os.Getenv("BD_JIRA_SCRIPT"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath, nil
+		}
+		return "", fmt.Errorf("BD_JIRA_SCRIPT points to non-existent file: %s", envPath)
+	}
+
 	// Check common locations
 	locations := []string{
 		// Relative to current working directory
 		filepath.Join("examples", "jira-import", name),
-		// Relative to executable
-		"",
 	}
 
 	// Add executable-relative path
@@ -575,9 +581,6 @@ func findJiraScript(name string) (string, error) {
 	}
 
 	for _, loc := range locations {
-		if loc == "" {
-			continue
-		}
 		if _, err := os.Stat(loc); err == nil {
 			absPath, err := filepath.Abs(loc)
 			if err == nil {
@@ -587,7 +590,19 @@ func findJiraScript(name string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("script not found: %s (looked in examples/jira-import/)", name)
+	return "", fmt.Errorf(`script not found: %s
+
+The Jira sync feature requires the Python script from the beads repository.
+
+To fix this, either:
+  1. Set BD_JIRA_SCRIPT to point to the script:
+     export BD_JIRA_SCRIPT=/path/to/jira2jsonl.py
+
+  2. Or download it from GitHub:
+     curl -o jira2jsonl.py https://raw.githubusercontent.com/steveyegge/beads/main/examples/jira-import/jira2jsonl.py
+     export BD_JIRA_SCRIPT=$PWD/jira2jsonl.py
+
+Looked in: %v`, name, locations)
 }
 
 // JiraConflict represents a conflict between local and Jira versions.
