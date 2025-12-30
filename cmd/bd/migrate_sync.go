@@ -20,8 +20,8 @@ var migrateSyncCmd = &cobra.Command{
 
 This command configures the repository to commit .beads changes to a separate
 branch (e.g., "beads-sync") instead of the current working branch. This is
-essential for multi-clone setups like Gas Town where multiple clones work
-independently but need to sync beads data.
+essential for multi-clone setups where multiple clones work independently
+but need to sync beads data.
 
 The command will:
   1. Validate the current state (not already configured, not on sync branch)

@@ -147,8 +147,8 @@ var rootCmd = &cobra.Command{
 		// Set up signal-aware context for graceful cancellation
 		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-		// Signal Gas Town daemon about bd activity (best-effort, for exponential backoff)
-		defer signalGasTownActivity()
+		// Signal orchestrator daemon about bd activity (best-effort, for exponential backoff)
+		defer signalOrchestratorActivity()
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)

@@ -456,7 +456,7 @@ func discoverRigDaemons() []rigDaemon {
 	// Find town beads directory (uses findTownBeadsDir from create.go)
 	townBeadsDir, err := findTownBeadsDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: not in a Gas Town (%v)\n", err)
+		fmt.Fprintf(os.Stderr, "Error: not in an orchestrator environment (%v)\n", err)
 		os.Exit(1)
 	}
 

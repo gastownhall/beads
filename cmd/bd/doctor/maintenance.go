@@ -311,8 +311,8 @@ func CheckCompactionCandidates(path string) DoctorCheck {
 }
 
 // resolveBeadsDir follows a redirect file if present in the beads directory.
-// This handles Gas Town's redirect mechanism where .beads/redirect points to
-// the actual beads directory location.
+// This handles the redirect mechanism where .beads/redirect points to
+// the actual beads directory location (used in multi-clone setups).
 // This is a wrapper around beads.FollowRedirect for use within the doctor package.
 func resolveBeadsDir(beadsDir string) string {
 	return beads.FollowRedirect(beadsDir)

@@ -187,7 +187,7 @@ Installed hooks:
   - post-merge: Import JSONL after pull/merge
   - pre-push: Prevent pushing stale JSONL
   - post-checkout: Import JSONL after branch checkout
-  - prepare-commit-msg: Add agent identity trailers (for Gas Town agents)`,
+  - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
@@ -694,7 +694,7 @@ type agentIdentity struct {
 // detectAgentIdentity returns agent identity if running in agent context.
 // Returns nil if not in an agent context (human commit).
 func detectAgentIdentity() *agentIdentity {
-	// Check GT_ROLE environment variable first (set by Gas Town sessions)
+	// Check GT_ROLE environment variable first (set by orchestrator sessions)
 	gtRole := os.Getenv("GT_ROLE")
 	if gtRole != "" {
 		return parseAgentIdentity(gtRole)

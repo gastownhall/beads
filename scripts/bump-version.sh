@@ -29,16 +29,14 @@ set -e
 #   For guided, resumable releases with multiple agents:
 #   bd template instantiate bd-6s61 --var version=X.Y.Z --assignee <identity>
 #
-# IMPORTANT: In Gas Town, run from mayor/rig to avoid git conflicts with bd sync
+# IMPORTANT: In multi-clone setups, run from the main clone to avoid git conflicts
 # =============================================================================
 #
-# Gas Town agents share a beads database at mayor/rig/.beads/. The bd sync
+# Multi-clone setups share a beads database at a central location. The bd sync
 # command commits from that clone. Running version bumps from a different
-# clone (e.g., crew/dave) causes push conflicts when bd sync tries to push.
+# clone causes push conflicts when bd sync tries to push.
 #
-# Always run releases from the rig root:
-#
-#   cd ~/gt/beads/mayor/rig && ./scripts/bump-version.sh X.Y.Z --commit --tag --push --all
+# Always run releases from the main clone (the one that owns the beads database).
 #
 # =============================================================================
 

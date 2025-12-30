@@ -32,7 +32,7 @@ The Rig → Cook → Run lifecycle:
 Search paths (in order):
   1. .beads/formulas/ (project)
   2. ~/.beads/formulas/ (user)
-  3. ~/gt/.beads/formulas/ (town)
+  3. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
 
 Commands:
   list   List available formulas from all search paths
@@ -48,7 +48,7 @@ var formulaListCmd = &cobra.Command{
 Search paths (in order of priority):
   1. .beads/formulas/ (project - highest priority)
   2. ~/.beads/formulas/ (user)
-  3. ~/gt/.beads/formulas/ (town)
+  3. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
 
 Formulas in earlier paths shadow those with the same name in later paths.
 
@@ -359,8 +359,11 @@ func getFormulaSearchPaths() []string {
 	// User-level formulas
 	if home, err := os.UserHomeDir(); err == nil {
 		paths = append(paths, filepath.Join(home, ".beads", "formulas"))
-		// Gas Town formulas
-		paths = append(paths, filepath.Join(home, "gt", ".beads", "formulas"))
+	}
+
+	// Orchestrator formulas (via GT_ROOT)
+	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+		paths = append(paths, filepath.Join(gtRoot, ".beads", "formulas"))
 	}
 
 	return paths

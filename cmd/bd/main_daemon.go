@@ -44,31 +44,15 @@ const (
 	GroupIntegrations = "integrations"
 )
 
-// signalGasTownActivity writes an activity signal for Gas Town daemon.
+// signalOrchestratorActivity writes an activity signal for orchestrator daemon.
 // This enables exponential backoff based on bd usage detection.
 // Best-effort: silent on any failure, never affects bd operation.
-func signalGasTownActivity() {
-	// Determine town root
-	// Priority: GT_ROOT env > detect from cwd path > skip
+func signalOrchestratorActivity() {
+	// Determine town root from environment
+	// Priority: GT_ROOT env > skip (no default path detection)
 	townRoot := os.Getenv("GT_ROOT")
 	if townRoot == "" {
-		// Try to detect from cwd - if under ~/gt/, use that as town root
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		gtRoot := filepath.Join(home, "gt")
-		cwd, err := os.Getwd()
-		if err != nil {
-			return
-		}
-		if strings.HasPrefix(cwd, gtRoot+string(os.PathSeparator)) {
-			townRoot = gtRoot
-		}
-	}
-
-	if townRoot == "" {
-		return // Not in Gas Town, skip
+		return // Not in orchestrator environment, skip
 	}
 
 	// Ensure daemon directory exists

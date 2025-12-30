@@ -221,7 +221,7 @@ func ResolveToExternalRef(id, beadsDir string) string {
 
 // ResolveBeadsDirForID determines which beads directory contains the given issue ID.
 // It first checks the local beads directory, then consults routes.jsonl for prefix-based routing.
-// If routes.jsonl is not found locally, it searches up to the Gas Town root.
+// If routes.jsonl is not found locally, it searches up to the town root.
 //
 // Parameters:
 //   - ctx: context for database operations
@@ -273,7 +273,7 @@ func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (stri
 	return currentBeadsDir, false, nil
 }
 
-// findTownRoot walks up from startDir looking for a Gas Town root.
+// findTownRoot walks up from startDir looking for a town root.
 // Returns the town root path, or empty string if not found.
 // A town root is identified by the presence of mayor/town.json.
 func findTownRoot(startDir string) string {
@@ -294,7 +294,7 @@ func findTownRoot(startDir string) string {
 // findTownRoutes searches for routes.jsonl at the town level.
 // It walks up from currentBeadsDir to find the town root, then loads routes
 // from <townRoot>/.beads/routes.jsonl.
-// Returns (routes, townRoot). Returns nil routes if not in a Gas Town or no routes found.
+// Returns (routes, townRoot). Returns nil routes if not in an orchestrator town or no routes found.
 func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	// First try the current beads dir (works if we're already at town level)
 	routes, err := LoadRoutes(currentBeadsDir)
@@ -306,7 +306,7 @@ func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	// Walk up to find town root
 	townRoot := findTownRoot(currentBeadsDir)
 	if townRoot == "" {
-		return nil, "" // Not in a Gas Town
+		return nil, "" // Not in a town
 	}
 
 	// Load routes from town beads

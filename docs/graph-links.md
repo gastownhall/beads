@@ -9,7 +9,7 @@ Beads supports several types of links between issues to create a knowledge graph
 Creates message threads, similar to email or chat conversations.
 
 **Created by:**
-- `gt mail reply <id>` command (Gas Town handles messaging)
+- Orchestrator mail reply commands (orchestrator handles messaging)
 - `bd dep add <new-id> <original-id> --type replies_to` (manual linking)
 
 **Use cases:**
@@ -20,13 +20,13 @@ Creates message threads, similar to email or chat conversations.
 **Example:**
 
 ```bash
-# Original message (via Gas Town)
-gt mail send gastown/worker -s "Review needed" -m "Please review gt-xyz"
-# Creates: gt-a1b2
+# Original message (via orchestrator mail)
+# orchestrator mail send worker/ -s "Review needed" -m "Please review issue-xyz"
+# Creates: msg-a1b2
 
 # Reply (automatically sets replies_to)
-gt mail reply gt-a1b2 -m "Done! Approved with minor comments."
-# Creates: gt-c3d4 with replies_to: gt-a1b2
+# orchestrator mail reply msg-a1b2 -m "Done! Approved with minor comments."
+# Creates: msg-c3d4 with replies_to: msg-a1b2
 ```
 
 **Viewing threads:**
@@ -256,12 +256,12 @@ bd supersede bd-rfc2 --with bd-rfc3
 
 ### Message Threading
 
-Build conversation chains (via Gas Town):
+Build conversation chains (via orchestrator mail):
 
 ```bash
-gt mail send gastown/dev -s "Question" -m "How does X work?"
-gt mail reply gt-q1 -m "X works by..."
-gt mail reply gt-q1.reply -m "Thanks!"
+# orchestrator mail send dev/ -s "Question" -m "How does X work?"
+# orchestrator mail reply msg-q1 -m "X works by..."
+# orchestrator mail reply msg-q1.reply -m "Thanks!"
 ```
 
 ## Best Practices

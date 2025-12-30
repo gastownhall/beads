@@ -603,7 +603,7 @@ func findDatabaseInTree() string {
 // FindAllDatabases scans the directory hierarchy for the closest .beads directory.
 // Returns a slice with at most one DatabaseInfo - the closest database to CWD.
 // Stops searching upward as soon as a .beads directory is found,
-// because in multi-workspace setups (like Gas Town), nested .beads directories
+// because in multi-workspace setups, nested .beads directories
 // are intentional and separate - parent directories are out of scope.
 // Redirect files are supported: if a .beads/redirect file exists, its contents
 // are used as the actual .beads directory path.

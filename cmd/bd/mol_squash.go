@@ -34,7 +34,7 @@ The squash operation:
 
 AGENT INTEGRATION:
 Use --summary to provide an AI-generated summary. This keeps bd as a pure
-tool - the calling agent (Gas Town polecat, Claude Code, etc.) is responsible
+tool - the calling agent (orchestrator worker, Claude Code, etc.) is responsible
 for generating intelligent summaries. Without --summary, a basic concatenation
 of child issue content is used.
 

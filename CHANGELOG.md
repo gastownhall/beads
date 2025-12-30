@@ -41,16 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Optional reason stored in activity log
   - Better traceability for issue cleanup
 
-- **`hooked` status** - GUPP work assignment
+- **`hooked` status** - Hook-based work assignment
   - New status for issues assigned to agent hooks
-  - Enables Gas Town Propulsion Principle
+  - Enables autonomous agent work pickup
 
 - **`mol_type` schema field** - Molecule classification
   - Track molecule type (patrol, work, etc.)
   - New migration (adds schema field)
 
 - **Agent ID canonical naming** - Validation update
-  - Updated validation for Gas Town naming conventions
+  - Updated validation for orchestrator naming conventions
   - Supports rig/role/name format
 
 ### Fixed
@@ -138,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bd slot` commands** - Agent bead slot management
   - Track agent assignments with dedicated slot operations
-  - Supports Gas Town multi-agent workflows
+  - Supports multi-agent orchestration workflows
 
 - **`bd agent state` command** - ZFC-compliant state reporting
   - Report agent state in standardized format
@@ -221,13 +221,13 @@ and muscle memory before v1.0.0 to avoid breakage.
   - Move issues between epics with `bd update <id> --parent=<new-parent>`
   - Supports clearing parent with `--parent=none`
 
-- **Redirect info in `bd prime`** - Gas Town support
+- **Redirect info in `bd prime`** - Multi-clone support
   - Shows when database is redirected to another location
   - Improves visibility into routing behavior
 
 ### Fixed
 
-- **Doctor follows redirects** - Gas Town compatibility
+- **Doctor follows redirects** - Multi-clone compatibility
   - `bd doctor` now correctly follows database redirects
   - Prevents false negatives when running from rig roots
 
@@ -245,7 +245,7 @@ and muscle memory before v1.0.0 to avoid breakage.
 
 - **Database Redirects section** - ADVANCED.md
   - Comprehensive documentation for redirect feature
-  - Explains Gas Town integration patterns
+  - Explains multi-clone integration patterns
 
 - **Community Tools update** (GH#771) - README.md
   - Added opencode-beads to community tools list
@@ -282,8 +282,8 @@ and muscle memory before v1.0.0 to avoid breakage.
 
 - **Removed unused commands**
   - `bd pin`, `bd unpin`, `bd hook` removed
-  - Functionality covered by `gt mol` commands in Gas Town
-  - Cleaner separation between beads (data) and gastown (orchestration)
+  - Functionality covered by orchestrator molecule commands
+  - Cleaner separation between beads (data) and orchestration
 
 - **`bd doctor --check=pollution`** - Integrated test pollution check
   - Detects test artifacts left in production database
@@ -481,10 +481,10 @@ and muscle memory before v1.0.0 to avoid breakage.
   - JSON provides better tooling support and validation
   - Existing YAML formulas need migration
 
-- **Removed `bd mol run`** - Orchestration moved to Gas Town
-  - Molecule execution now handled by `gt` commands
+- **Removed `bd mol run`** - Orchestration delegated to orchestrator
+  - Molecule execution now handled by orchestrator commands
   - `bd` focuses on issue tracking primitives
-  - Use `gt mol run` for molecule orchestration
+  - Use orchestrator's molecule runner for execution
 
 - **Simplified wisp architecture** - Single database model
   - Wisps stored in main database with `Wisp=true` flag

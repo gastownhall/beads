@@ -64,7 +64,7 @@ func TestFindAllDatabases(t *testing.T) {
 	databases := FindAllDatabases()
 
 	// Should find only the closest database (gt-bzd: stop searching when .beads found)
-	// Parent .beads directories are out of scope in multi-workspace setups like Gas Town
+	// Parent .beads directories are out of scope in multi-workspace setups
 	if len(databases) != 1 {
 		t.Fatalf("expected 1 database (closest only), got %d", len(databases))
 	}

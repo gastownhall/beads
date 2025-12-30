@@ -9,17 +9,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// mailCmd delegates to an external mail provider (e.g., gt mail)
+// mailCmd delegates to an external mail provider.
 // This enables agents to use 'bd mail' consistently, while the actual
-// mail implementation is provided by the orchestrator (Gas Town, etc.)
+// mail implementation is provided by the orchestrator.
 var mailCmd = &cobra.Command{
 	Use:   "mail [subcommand] [args...]",
 	Short: "Delegate to mail provider (e.g., gt mail)",
 	Long: `Delegates mail operations to an external mail provider.
 
 Agents often type 'bd mail' when working with beads, but mail functionality
-is typically provided by an orchestrator like Gas Town (gt). This command
-bridges that gap by delegating to the configured mail provider.
+is typically provided by the orchestrator. This command bridges that gap
+by delegating to the configured mail provider.
 
 Configuration (checked in order):
   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable

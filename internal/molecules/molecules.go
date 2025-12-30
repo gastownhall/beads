@@ -8,7 +8,7 @@
 //
 // Molecules are loaded from multiple locations in priority order (later overrides earlier):
 //  1. Built-in molecules (shipped with bd binary)
-//  2. Town-level: ~/gt/.beads/molecules.jsonl (if Gas Town is detected)
+//  2. Town-level: $GT_ROOT/.beads/molecules.jsonl (if orchestrator detected via GT_ROOT)
 //  3. User-level: ~/.beads/molecules.jsonl
 //  4. Project-level: .beads/molecules.jsonl in the current project
 //
@@ -77,7 +77,7 @@ func (l *Loader) LoadAll(ctx context.Context, beadsDir string) (*LoadResult, err
 		}
 	}
 
-	// 2. Load town-level molecules (Gas Town: ~/gt/.beads/molecules.jsonl)
+	// 2. Load town-level molecules ($GT_ROOT/.beads/molecules.jsonl)
 	townPath := getTownMoleculesPath()
 	if townPath != "" {
 		if molecules, err := loadMoleculesFromFile(townPath); err == nil && len(molecules) > 0 {
@@ -220,15 +220,15 @@ func loadMoleculesFromFile(path string) ([]*types.Issue, error) {
 }
 
 // getTownMoleculesPath returns the path to town-level molecules.jsonl
-// if Gas Town is detected (~/gt/.beads/molecules.jsonl).
+// if an orchestrator is detected via GT_ROOT environment variable.
 func getTownMoleculesPath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	gtRoot := os.Getenv("GT_ROOT")
+	if gtRoot == "" {
 		return ""
 	}
 
-	// Check for Gas Town installation
-	gtPath := filepath.Join(homeDir, "gt", ".beads", MoleculeFileName)
+	// Check for orchestrator molecules file
+	gtPath := filepath.Join(gtRoot, ".beads", MoleculeFileName)
 	if _, err := os.Stat(gtPath); err == nil {
 		return gtPath
 	}

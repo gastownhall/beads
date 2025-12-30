@@ -113,7 +113,7 @@ bd mol bond A B --type conditional # B runs only if A fails
 - Agent can continue from A into B seamlessly
 - The compound work graph can span days
 
-This is how Gas Town runs autonomous workflows - agents follow the dependency graph, handing off between sessions, until all work closes.
+This is how orchestrators run autonomous workflows - agents follow the dependency graph, handing off between sessions, until all work closes.
 
 ## Phase Metaphor (Templates)
 

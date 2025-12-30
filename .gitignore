@@ -114,7 +114,7 @@ bd-trace-*.out
 # AI planning documents (ephemeral)
 history/
 
-# Gas Town agent state
+# Orchestrator agent state
 state.json
 .beads/redirect
 

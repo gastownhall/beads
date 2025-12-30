@@ -39,7 +39,7 @@ type Parser struct {
 
 // NewParser creates a new formula parser.
 // searchPaths are directories to search for formulas when resolving extends.
-// Default paths are: .beads/formulas, ~/.beads/formulas, ~/gt/.beads/formulas
+// Default paths are: .beads/formulas, ~/.beads/formulas, $GT_ROOT/.beads/formulas
 func NewParser(searchPaths ...string) *Parser {
 	paths := searchPaths
 	if len(paths) == 0 {
@@ -65,9 +65,11 @@ func defaultSearchPaths() []string {
 	// User-level formulas
 	if home, err := os.UserHomeDir(); err == nil {
 		paths = append(paths, filepath.Join(home, ".beads", "formulas"))
+	}
 
-		// Gas Town formulas
-		paths = append(paths, filepath.Join(home, "gt", ".beads", "formulas"))
+	// Orchestrator formulas (via GT_ROOT)
+	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+		paths = append(paths, filepath.Join(gtRoot, ".beads", "formulas"))
 	}
 
 	return paths

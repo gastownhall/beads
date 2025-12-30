@@ -574,7 +574,7 @@ bd sync
 - `tombstone` - Deleted issue (suppresses resurrections)
 - `pinned` - Stays open indefinitely (used for hooks, anchors)
 
-**Note:** The `pinned` status is used by Gas Town for hook management and persistent work items that should never be auto-closed or cleaned up.
+**Note:** The `pinned` status is used by orchestrators for hook management and persistent work items that should never be auto-closed or cleaned up.
 
 ## Priorities
 
