@@ -64,45 +64,103 @@ def _register_client_for_cleanup(client: BdClientBase) -> None:
         pass
 
 
+def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
+    """Follow a .beads/redirect file to the actual beads directory.
+
+    Args:
+        beads_dir: Path to the .beads directory that may contain a redirect
+        workspace_root: The workspace root directory (parent of beads_dir)
+
+    Returns:
+        Resolved workspace root if redirect is valid, None otherwise
+    """
+    import glob
+
+    redirect_path = os.path.join(beads_dir, "redirect")
+    if not os.path.isfile(redirect_path):
+        return None
+
+    try:
+        with open(redirect_path, 'r') as f:
+            redirect_target = f.read().strip()
+
+        if not redirect_target:
+            return None
+
+        # Resolve relative to workspace_root (the redirect is written from the perspective
+        # of being inside workspace_root, not inside workspace_root/.beads)
+        # e.g., redirect contains "../../mayor/rig/.beads"
+        # from polecats/capable/, this resolves to mayor/rig/.beads
+        resolved = os.path.normpath(os.path.join(workspace_root, redirect_target))
+
+        if not os.path.isdir(resolved):
+            logger.debug(f"Redirect target {resolved} does not exist")
+            return None
+
+        # Verify the redirected location has a valid database
+        db_files = glob.glob(os.path.join(resolved, "*.db"))
+        valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
+
+        if not valid_dbs:
+            logger.debug(f"Redirect target {resolved} has no valid .db files")
+            return None
+
+        # Return the workspace root of the redirected location (parent of .beads)
+        return os.path.dirname(resolved)
+
+    except Exception as e:
+        logger.debug(f"Failed to follow redirect: {e}")
+        return None
+
+
 def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
     """Walk up directory tree looking for .beads/*.db (matches Go CLI behavior).
-    
+
+    Also follows .beads/redirect files to shared beads locations, which is
+    essential for polecat/crew directories that share a central database.
+
     Args:
         start_dir: Starting directory (default: current working directory)
-        
+
     Returns:
         Absolute path to workspace root containing .beads/*.db, or None if not found
     """
     import glob
-    
+
     try:
         current = os.path.abspath(start_dir or os.getcwd())
-        
+
         # Resolve symlinks like Go CLI does
         try:
             current = os.path.realpath(current)
         except Exception:
             pass
-        
+
         # Walk up directory tree
         while True:
             beads_dir = os.path.join(current, ".beads")
             if os.path.isdir(beads_dir):
-                # Find any .db file in .beads/ (excluding backups)
+                # First, check for redirect file (polecat/crew directories use this)
+                redirected = _resolve_beads_redirect(beads_dir, current)
+                if redirected:
+                    logger.debug(f"Followed redirect from {current} to {redirected}")
+                    return redirected
+
+                # No redirect, check for local .db files
                 db_files = glob.glob(os.path.join(beads_dir, "*.db"))
                 valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
-                
+
                 if valid_dbs:
                     # Return workspace root (parent of .beads), not the db path
                     return current
-            
+
             parent = os.path.dirname(current)
             if parent == current:  # Reached filesystem root
                 break
             current = parent
-        
+
         return None
-        
+
     except Exception as e:
         logger.debug(f"Failed to search for .beads in tree: {e}")
         return None

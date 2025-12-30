@@ -135,22 +135,139 @@ async def test_get_client_prefers_context_var_over_auto_detect():
         current_workspace.reset(token)
 
 
-@pytest.mark.asyncio  
+@pytest.mark.asyncio
 async def test_get_client_env_var_over_auto_detect():
     """Test that BEADS_WORKING_DIR env var takes precedence over auto-detect."""
     env_workspace = "/env/path"
-    
+
     token = current_workspace.set(None)
     try:
         with patch.dict(os.environ, {"BEADS_WORKING_DIR": env_workspace}):
             with patch("beads_mcp.tools._canonicalize_path", return_value=env_workspace):
                 mock_client = AsyncMock()
                 mock_client.ping = AsyncMock(return_value=None)
-                
+
                 with patch("beads_mcp.tools.create_bd_client", return_value=mock_client):
                     client = await _get_client()
-                    
+
                     # Should use env var, not call auto-detect
                     assert client is not None
     finally:
         current_workspace.reset(token)
+
+
+def test_find_beads_db_follows_redirect():
+    """Test that _find_beads_db_in_tree follows .beads/redirect files (gt-tnw).
+
+    This is essential for polecat/crew directories that use redirect files
+    to share a central beads database.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create main workspace with actual database
+        main_dir = Path(tmpdir) / "mayor" / "rig"
+        main_dir.mkdir(parents=True)
+        main_beads = main_dir / ".beads"
+        main_beads.mkdir()
+        (main_beads / "beads.db").touch()
+
+        # Create polecat directory with redirect
+        polecat_dir = Path(tmpdir) / "polecats" / "capable"
+        polecat_dir.mkdir(parents=True)
+        polecat_beads = polecat_dir / ".beads"
+        polecat_beads.mkdir()
+
+        # Write redirect file (relative path from polecat dir)
+        redirect_file = polecat_beads / "redirect"
+        redirect_file.write_text("../../mayor/rig/.beads")
+
+        # Should find workspace via redirect
+        result = _find_beads_db_in_tree(str(polecat_dir))
+        assert result == os.path.realpath(str(main_dir))
+
+
+def test_find_beads_db_redirect_invalid_target():
+    """Test that invalid redirect targets are handled gracefully."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create polecat directory with redirect to nonexistent location
+        polecat_dir = Path(tmpdir) / "polecats" / "capable"
+        polecat_dir.mkdir(parents=True)
+        polecat_beads = polecat_dir / ".beads"
+        polecat_beads.mkdir()
+
+        # Write redirect file pointing to nonexistent location
+        redirect_file = polecat_beads / "redirect"
+        redirect_file.write_text("../../nonexistent/.beads")
+
+        # Should return None (graceful failure)
+        result = _find_beads_db_in_tree(str(polecat_dir))
+        assert result is None
+
+
+def test_find_beads_db_redirect_empty():
+    """Test that empty redirect files are handled gracefully."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        polecat_dir = Path(tmpdir) / "polecats" / "capable"
+        polecat_dir.mkdir(parents=True)
+        polecat_beads = polecat_dir / ".beads"
+        polecat_beads.mkdir()
+
+        # Write empty redirect file
+        redirect_file = polecat_beads / "redirect"
+        redirect_file.write_text("")
+
+        # Should return None (graceful failure)
+        result = _find_beads_db_in_tree(str(polecat_dir))
+        assert result is None
+
+
+def test_find_beads_db_redirect_no_db_at_target():
+    """Test that redirects to directories without .db files are handled."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create main workspace WITHOUT database
+        main_dir = Path(tmpdir) / "mayor" / "rig"
+        main_dir.mkdir(parents=True)
+        main_beads = main_dir / ".beads"
+        main_beads.mkdir()  # No .db file!
+
+        # Create polecat directory with redirect
+        polecat_dir = Path(tmpdir) / "polecats" / "capable"
+        polecat_dir.mkdir(parents=True)
+        polecat_beads = polecat_dir / ".beads"
+        polecat_beads.mkdir()
+
+        redirect_file = polecat_beads / "redirect"
+        redirect_file.write_text("../../mayor/rig/.beads")
+
+        # Should return None (redirect target has no valid db)
+        result = _find_beads_db_in_tree(str(polecat_dir))
+        assert result is None
+
+
+def test_find_beads_db_prefers_redirect_over_parent():
+    """Test that redirect in current dir is followed before walking up."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create two beads locations
+        # 1. Parent directory with its own database
+        parent_dir = Path(tmpdir)
+        parent_beads = parent_dir / ".beads"
+        parent_beads.mkdir()
+        (parent_beads / "beads.db").touch()
+
+        # 2. Remote directory that redirect points to
+        remote_dir = Path(tmpdir) / "remote"
+        remote_dir.mkdir()
+        remote_beads = remote_dir / ".beads"
+        remote_beads.mkdir()
+        (remote_beads / "beads.db").touch()
+
+        # Create child directory with redirect to remote
+        child_dir = Path(tmpdir) / "child"
+        child_dir.mkdir()
+        child_beads = child_dir / ".beads"
+        child_beads.mkdir()
+        redirect_file = child_beads / "redirect"
+        redirect_file.write_text("../remote/.beads")
+
+        # Should follow redirect (to remote), not walk up to parent
+        result = _find_beads_db_in_tree(str(child_dir))
+        assert result == os.path.realpath(str(remote_dir))
