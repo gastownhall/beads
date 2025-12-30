@@ -3,9 +3,38 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// envSnapshot saves and clears BD_/BEADS_ environment variables.
+// Returns a restore function that should be deferred.
+func envSnapshot(t *testing.T) func() {
+	t.Helper()
+	saved := make(map[string]string)
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+			parts := strings.SplitN(env, "=", 2)
+			key := parts[0]
+			saved[key] = os.Getenv(key)
+			os.Unsetenv(key)
+		}
+	}
+	return func() {
+		// Clear any test-set variables first
+		for _, env := range os.Environ() {
+			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+				parts := strings.SplitN(env, "=", 2)
+				os.Unsetenv(parts[0])
+			}
+		}
+		// Restore original values
+		for key, val := range saved {
+			os.Setenv(key, val)
+		}
+	}
+}
 
 func TestInitialize(t *testing.T) {
 	// Test that initialization doesn't error
@@ -20,6 +49,10 @@ func TestInitialize(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
+	// Isolate from environment variables
+	restore := envSnapshot(t)
+	defer restore()
+
 	// Reset viper for test isolation
 	err := Initialize()
 	if err != nil {
@@ -90,6 +123,10 @@ func TestEnvironmentBinding(t *testing.T) {
 }
 
 func TestConfigFile(t *testing.T) {
+	// Isolate from environment variables
+	restore := envSnapshot(t)
+	defer restore()
+
 	// Create a temporary directory for config file
 	tmpDir := t.TempDir()
 	
