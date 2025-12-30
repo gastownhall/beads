@@ -249,28 +249,66 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	// Open database in read-only mode for integrity check
 	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
 	if err != nil {
+		// Classify the error type for better recovery guidance
+		errMsg := err.Error()
+		var errorType string
+		var recoverySteps string
+
 		// Check if JSONL recovery is possible
 		jsonlCount, _, jsonlErr := CountJSONLIssues(filepath.Join(beadsDir, "issues.jsonl"))
 		if jsonlErr != nil {
 			jsonlCount, _, jsonlErr = CountJSONLIssues(filepath.Join(beadsDir, "beads.jsonl"))
 		}
 
-		if jsonlErr == nil && jsonlCount > 0 {
-			return DoctorCheck{
-				Name:    "Database Integrity",
-				Status:  StatusError,
-				Message: fmt.Sprintf("Failed to open database (JSONL has %d issues for recovery)", jsonlCount),
-				Detail:  err.Error(),
-				Fix:     "Run 'bd doctor --fix' to recover from JSONL backup",
+		// Classify error type
+		if strings.Contains(errMsg, "database is locked") {
+			errorType = "Database is locked"
+			recoverySteps = "1. Check for running bd processes: ps aux | grep bd\n" +
+				"2. Kill any stale processes\n" +
+				"3. Remove stale locks: rm .beads/beads.db-shm .beads/beads.db-wal .beads/daemon.lock\n" +
+				"4. Retry: bd doctor --fix"
+		} else if strings.Contains(errMsg, "not a database") || strings.Contains(errMsg, "file is not a database") {
+			errorType = "File is not a valid SQLite database"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Database file is corrupted beyond repair.\n\n"+
+					"Recovery steps:\n"+
+					"1. Backup corrupt database: mv .beads/beads.db .beads/beads.db.broken\n"+
+					"2. Rebuild from JSONL (%d issues): bd doctor --fix --force --source=jsonl\n"+
+					"3. Verify: bd stats", jsonlCount)
+			} else {
+				recoverySteps = "Database file is corrupted and no JSONL backup found.\n" +
+					"Manual recovery required:\n" +
+					"1. Restore from git: git checkout HEAD -- .beads/issues.jsonl\n" +
+					"2. Rebuild database: bd doctor --fix --force"
+			}
+		} else if strings.Contains(errMsg, "migration") || strings.Contains(errMsg, "validation failed") {
+			errorType = "Database migration or validation failed"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Database has validation errors (possibly orphaned dependencies).\n\n"+
+					"Recovery steps:\n"+
+					"1. Backup database: mv .beads/beads.db .beads/beads.db.broken\n"+
+					"2. Rebuild from JSONL (%d issues): bd doctor --fix --force --source=jsonl\n"+
+					"3. Verify: bd stats\n\n"+
+					"Alternative: bd doctor --fix --force (attempts to repair in-place)", jsonlCount)
+			} else {
+				recoverySteps = "Database validation failed and no JSONL backup available.\n" +
+					"Try: bd doctor --fix --force"
+			}
+		} else {
+			errorType = "Failed to open database"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Run 'bd doctor --fix --source=jsonl' to rebuild from JSONL (%d issues)", jsonlCount)
+			} else {
+				recoverySteps = "Run 'bd doctor --fix --force' to attempt recovery"
 			}
 		}
 
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
-			Message: "Failed to open database for integrity check",
-			Detail:  err.Error(),
-			Fix:     "Run 'bd doctor --fix' to back up the corrupt DB and rebuild from JSONL (if available), or restore from backup",
+			Message: errorType,
+			Detail:  fmt.Sprintf("%s\n\nError: %s", recoverySteps, errMsg),
+			Fix:     "See recovery steps above",
 		}
 	}
 	defer db.Close()
@@ -279,28 +317,66 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	// This checks the entire database for corruption
 	rows, err := db.Query("PRAGMA integrity_check")
 	if err != nil {
+		// Classify the error type for better recovery guidance
+		errMsg := err.Error()
+		var errorType string
+		var recoverySteps string
+
 		// Check if JSONL recovery is possible
 		jsonlCount, _, jsonlErr := CountJSONLIssues(filepath.Join(beadsDir, "issues.jsonl"))
 		if jsonlErr != nil {
 			jsonlCount, _, jsonlErr = CountJSONLIssues(filepath.Join(beadsDir, "beads.jsonl"))
 		}
 
-		if jsonlErr == nil && jsonlCount > 0 {
-			return DoctorCheck{
-				Name:    "Database Integrity",
-				Status:  StatusError,
-				Message: fmt.Sprintf("Failed to run integrity check (JSONL has %d issues for recovery)", jsonlCount),
-				Detail:  err.Error(),
-				Fix:     "Run 'bd doctor --fix' to recover from JSONL backup",
+		// Classify error type (same logic as opening errors)
+		if strings.Contains(errMsg, "database is locked") {
+			errorType = "Database is locked"
+			recoverySteps = "1. Check for running bd processes: ps aux | grep bd\n" +
+				"2. Kill any stale processes\n" +
+				"3. Remove stale locks: rm .beads/beads.db-shm .beads/beads.db-wal .beads/daemon.lock\n" +
+				"4. Retry: bd doctor --fix"
+		} else if strings.Contains(errMsg, "not a database") || strings.Contains(errMsg, "file is not a database") {
+			errorType = "File is not a valid SQLite database"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Database file is corrupted beyond repair.\n\n"+
+					"Recovery steps:\n"+
+					"1. Backup corrupt database: mv .beads/beads.db .beads/beads.db.broken\n"+
+					"2. Rebuild from JSONL (%d issues): bd doctor --fix --force --source=jsonl\n"+
+					"3. Verify: bd stats", jsonlCount)
+			} else {
+				recoverySteps = "Database file is corrupted and no JSONL backup found.\n" +
+					"Manual recovery required:\n" +
+					"1. Restore from git: git checkout HEAD -- .beads/issues.jsonl\n" +
+					"2. Rebuild database: bd doctor --fix --force"
+			}
+		} else if strings.Contains(errMsg, "migration") || strings.Contains(errMsg, "validation failed") {
+			errorType = "Database migration or validation failed"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Database has validation errors (possibly orphaned dependencies).\n\n"+
+					"Recovery steps:\n"+
+					"1. Backup database: mv .beads/beads.db .beads/beads.db.broken\n"+
+					"2. Rebuild from JSONL (%d issues): bd doctor --fix --force --source=jsonl\n"+
+					"3. Verify: bd stats\n\n"+
+					"Alternative: bd doctor --fix --force (attempts to repair in-place)", jsonlCount)
+			} else {
+				recoverySteps = "Database validation failed and no JSONL backup available.\n" +
+					"Try: bd doctor --fix --force"
+			}
+		} else {
+			errorType = "Failed to run integrity check"
+			if jsonlErr == nil && jsonlCount > 0 {
+				recoverySteps = fmt.Sprintf("Run 'bd doctor --fix --force --source=jsonl' to rebuild from JSONL (%d issues)", jsonlCount)
+			} else {
+				recoverySteps = "Run 'bd doctor --fix --force' to attempt recovery"
 			}
 		}
 
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
-			Message: "Failed to run integrity check",
-			Detail:  err.Error(),
-			Fix:     "Run 'bd doctor --fix' to back up the corrupt DB and rebuild from JSONL (if available), or restore from backup",
+			Message: errorType,
+			Detail:  fmt.Sprintf("%s\n\nError: %s", recoverySteps, errMsg),
+			Fix:     "See recovery steps above",
 		}
 	}
 	defer rows.Close()

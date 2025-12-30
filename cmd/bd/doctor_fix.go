@@ -237,7 +237,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.DatabaseVersion(path)
 		case "Database Integrity":
 			// Corruption detected - try recovery from JSONL
-			err = fix.DatabaseCorruptionRecovery(path)
+			// Pass force and source flags for enhanced recovery
+			err = fix.DatabaseCorruptionRecoveryWithOptions(path, doctorForce, doctorSource)
 		case "Schema Compatibility":
 			err = fix.SchemaCompatibility(path)
 		case "Repo Fingerprint":
