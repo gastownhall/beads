@@ -522,6 +522,7 @@ var rootCmd = &cobra.Command{
 								}
 								health, healthErr = client.Health()
 								if healthErr == nil && health.Status == statusHealthy {
+									client.SetActor(actor)
 									daemonClient = client
 									daemonStatus.Mode = cmdDaemon
 									daemonStatus.Connected = true
@@ -539,6 +540,7 @@ var rootCmd = &cobra.Command{
 							health.Version, Version)
 					} else {
 						// Daemon is healthy and compatible - use it
+						client.SetActor(actor)
 						daemonClient = client
 						daemonStatus.Mode = cmdDaemon
 						daemonStatus.Connected = true
@@ -589,6 +591,7 @@ var rootCmd = &cobra.Command{
 						// Check health of auto-started daemon
 						health, healthErr := client.Health()
 						if healthErr == nil && health.Status == statusHealthy {
+							client.SetActor(actor)
 							daemonClient = client
 							daemonStatus.Mode = cmdDaemon
 							daemonStatus.Connected = true

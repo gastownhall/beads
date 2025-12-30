@@ -37,6 +37,7 @@ type Client struct {
 	socketPath string
 	timeout    time.Duration
 	dbPath     string // Expected database path for validation
+	actor      string // Actor for audit trail (who is performing operations)
 }
 
 // TryConnect attempts to connect to the daemon socket
@@ -157,6 +158,11 @@ func (c *Client) SetDatabasePath(dbPath string) {
 	c.dbPath = dbPath
 }
 
+// SetActor sets the actor for audit trail (who is performing operations)
+func (c *Client) SetActor(actor string) {
+	c.actor = actor
+}
+
 // Execute sends an RPC request and waits for a response
 func (c *Client) Execute(operation string, args interface{}) (*Response, error) {
 	return c.ExecuteWithCwd(operation, args, "")
@@ -177,6 +183,7 @@ func (c *Client) ExecuteWithCwd(operation string, args interface{}, cwd string) 
 	req := Request{
 		Operation:     operation,
 		Args:          argsJSON,
+		Actor:         c.actor, // Who is performing this operation
 		ClientVersion: ClientVersion,
 		Cwd:           cwd,
 		ExpectedDB:    c.dbPath, // Send expected database path for validation
