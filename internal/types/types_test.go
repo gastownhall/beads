@@ -464,12 +464,12 @@ func TestIssueCompoundHelpers(t *testing.T) {
 		t.Fatalf("expected nil constituents for non-compound issue")
 	}
 
-	bonded := &Issue{BondedFrom: []BondRef{{ProtoID: "proto-1", BondType: BondTypeSequential}}}
+	bonded := &Issue{BondedFrom: []BondRef{{SourceID: "proto-1", BondType: BondTypeSequential}}}
 	if !bonded.IsCompound() {
 		t.Fatalf("issue with bonded refs should be compound")
 	}
 	refs := bonded.GetConstituents()
-	if len(refs) != 1 || refs[0].ProtoID != "proto-1" {
+	if len(refs) != 1 || refs[0].SourceID != "proto-1" {
 		t.Fatalf("unexpected constituents: %#v", refs)
 	}
 }

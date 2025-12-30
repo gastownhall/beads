@@ -317,8 +317,8 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 			Priority:    minPriority(protoA.Priority, protoB.Priority),
 			IssueType:   types.TypeEpic,
 			BondedFrom: []types.BondRef{
-				{ProtoID: protoA.ID, BondType: bondType, BondPoint: ""},
-				{ProtoID: protoB.ID, BondType: bondType, BondPoint: ""},
+				{SourceID: protoA.ID, BondType: bondType, BondPoint: ""},
+				{SourceID: protoB.ID, BondType: bondType, BondPoint: ""},
 			},
 		}
 		if err := tx.CreateIssue(ctx, compound, actorName); err != nil {

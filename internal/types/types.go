@@ -128,7 +128,7 @@ func (i *Issue) ComputeContentHash() string {
 
 	// Bonded molecules
 	for _, br := range i.BondedFrom {
-		w.str(br.ProtoID)
+		w.str(br.SourceID)
 		w.str(br.BondType)
 		w.str(br.BondPoint)
 	}
@@ -795,7 +795,7 @@ type EpicStatus struct {
 // When protos or molecules are bonded together, BondRefs record
 // which sources were combined and how they were attached.
 type BondRef struct {
-	ProtoID   string `json:"proto_id"`             // Source proto/molecule ID
+	SourceID  string `json:"source_id"`            // Source proto or molecule ID
 	BondType  string `json:"bond_type"`            // sequential, parallel, conditional
 	BondPoint string `json:"bond_point,omitempty"` // Attachment site (issue ID or empty for root)
 }
