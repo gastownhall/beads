@@ -1672,6 +1672,151 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 	}
 }
 
+// handleGetConfig retrieves a config value from the database
+func (s *Server) handleGetConfig(req *Request) Response {
+	var args GetConfigArgs
+	if err := json.Unmarshal(req.Args, &args); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid get_config args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available",
+		}
+	}
+
+	ctx := s.reqCtx(req)
+
+	// Get config value from database
+	value, err := store.GetConfig(ctx, args.Key)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get config %q: %v", args.Key, err),
+		}
+	}
+
+	result := GetConfigResponse{
+		Key:   args.Key,
+		Value: value,
+	}
+
+	data, _ := json.Marshal(result)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+// handleMolStale finds stale molecules (complete-but-unclosed)
+func (s *Server) handleMolStale(req *Request) Response {
+	var args MolStaleArgs
+	if err := json.Unmarshal(req.Args, &args); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid mol_stale args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available",
+		}
+	}
+
+	ctx := s.reqCtx(req)
+
+	// Get all epics eligible for closure (complete but unclosed)
+	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to query epics: %v", err),
+		}
+	}
+
+	// Get blocked issues to find what each stale molecule is blocking
+	blockedIssues, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to query blocked issues: %v", err),
+		}
+	}
+
+	// Build map of issue ID -> what issues it's blocking
+	blockingMap := make(map[string][]string)
+	for _, blocked := range blockedIssues {
+		for _, blockerID := range blocked.BlockedBy {
+			blockingMap[blockerID] = append(blockingMap[blockerID], blocked.ID)
+		}
+	}
+
+	var staleMolecules []*StaleMolecule
+	blockingCount := 0
+
+	for _, es := range epicStatuses {
+		// Skip if not eligible for close (not all children closed)
+		if !es.EligibleForClose {
+			continue
+		}
+
+		// Skip if no children and not showing all
+		if es.TotalChildren == 0 && !args.ShowAll {
+			continue
+		}
+
+		// Filter by unassigned if requested
+		if args.UnassignedOnly && es.Epic.Assignee != "" {
+			continue
+		}
+
+		// Find what this molecule is blocking
+		blocking := blockingMap[es.Epic.ID]
+		blockingIssueCount := len(blocking)
+
+		// Filter by blocking if requested
+		if args.BlockingOnly && blockingIssueCount == 0 {
+			continue
+		}
+
+		mol := &StaleMolecule{
+			ID:             es.Epic.ID,
+			Title:          es.Epic.Title,
+			TotalChildren:  es.TotalChildren,
+			ClosedChildren: es.ClosedChildren,
+			Assignee:       es.Epic.Assignee,
+			BlockingIssues: blocking,
+			BlockingCount:  blockingIssueCount,
+		}
+
+		staleMolecules = append(staleMolecules, mol)
+
+		if blockingIssueCount > 0 {
+			blockingCount++
+		}
+	}
+
+	result := &MolStaleResponse{
+		StaleMolecules: staleMolecules,
+		TotalCount:     len(staleMolecules),
+		BlockingCount:  blockingCount,
+	}
+
+	data, _ := json.Marshal(result)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
 // Gate handlers
 
 func (s *Server) handleGateCreate(req *Request) Response {

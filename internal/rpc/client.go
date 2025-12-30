@@ -442,6 +442,36 @@ func (c *Client) GetWorkerStatus(args *GetWorkerStatusArgs) (*GetWorkerStatusRes
 	return &result, nil
 }
 
+// GetConfig retrieves a config value from the daemon's database
+func (c *Client) GetConfig(args *GetConfigArgs) (*GetConfigResponse, error) {
+	resp, err := c.Execute(OpGetConfig, args)
+	if err != nil {
+		return nil, err
+	}
+
+	var result GetConfigResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// MolStale retrieves stale molecules (complete-but-unclosed) via the daemon
+func (c *Client) MolStale(args *MolStaleArgs) (*MolStaleResponse, error) {
+	resp, err := c.Execute(OpMolStale, args)
+	if err != nil {
+		return nil, err
+	}
+
+	var result MolStaleResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal mol stale response: %w", err)
+	}
+
+	return &result, nil
+}
+
 // cleanupStaleDaemonArtifacts removes stale daemon.pid file when socket is missing and lock is free.
 // This prevents stale artifacts from accumulating after daemon crashes.
 // Only removes pid file - lock file is managed by OS (released on process exit).

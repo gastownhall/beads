@@ -225,6 +225,10 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleGetMoleculeProgress(req)
 	case OpGetWorkerStatus:
 		resp = s.handleGetWorkerStatus(req)
+	case OpGetConfig:
+		resp = s.handleGetConfig(req)
+	case OpMolStale:
+		resp = s.handleMolStale(req)
 	case OpShutdown:
 		resp = s.handleShutdown(req)
 	// Gate operations

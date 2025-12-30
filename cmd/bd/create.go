@@ -222,8 +222,12 @@ var createCmd = &cobra.Command{
 			// Get database prefix from config
 			var dbPrefix string
 			if daemonClient != nil {
-				// TODO(bd-ag35): Add RPC method to get config in daemon mode
-				// For now, skip validation in daemon mode (needs RPC enhancement)
+				// Daemon mode - use RPC to get config
+				configResp, err := daemonClient.GetConfig(&rpc.GetConfigArgs{Key: "issue_prefix"})
+				if err == nil {
+					dbPrefix = configResp.Value
+				}
+				// If error, continue without validation (non-fatal)
 			} else {
 				// Direct mode - check config
 				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")

@@ -43,6 +43,8 @@ const (
 	OpShutdown            = "shutdown"
 	OpDelete              = "delete"
 	OpGetWorkerStatus     = "get_worker_status"
+	OpGetConfig           = "get_config"
+	OpMolStale            = "mol_stale"
 
 	// Gate operations
 	OpGateCreate = "gate_create"
@@ -557,4 +559,40 @@ type MoleculeProgress struct {
 	Title      string         `json:"title"`
 	Assignee   string         `json:"assignee"`
 	Steps      []MoleculeStep `json:"steps"`
+}
+
+// GetConfigArgs represents arguments for getting daemon config
+type GetConfigArgs struct {
+	Key string `json:"key"` // Config key to retrieve (e.g., "issue_prefix")
+}
+
+// GetConfigResponse represents the response from get_config operation
+type GetConfigResponse struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// MolStaleArgs represents arguments for the mol stale operation
+type MolStaleArgs struct {
+	BlockingOnly   bool `json:"blocking_only"`   // Only show molecules blocking other work
+	UnassignedOnly bool `json:"unassigned_only"` // Only show unassigned molecules
+	ShowAll        bool `json:"show_all"`        // Include molecules with 0 children
+}
+
+// StaleMolecule holds info about a stale molecule (for RPC response)
+type StaleMolecule struct {
+	ID             string   `json:"id"`
+	Title          string   `json:"title"`
+	TotalChildren  int      `json:"total_children"`
+	ClosedChildren int      `json:"closed_children"`
+	Assignee       string   `json:"assignee,omitempty"`
+	BlockingIssues []string `json:"blocking_issues,omitempty"`
+	BlockingCount  int      `json:"blocking_count"`
+}
+
+// MolStaleResponse holds the result of the mol stale operation
+type MolStaleResponse struct {
+	StaleMolecules []*StaleMolecule `json:"stale_molecules"`
+	TotalCount     int              `json:"total_count"`
+	BlockingCount  int              `json:"blocking_count"`
 }

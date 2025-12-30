@@ -296,3 +296,170 @@ func TestEpicStatus(t *testing.T) {
 		t.Errorf("EpicStatus (eligible only) failed: %s", resp2.Error)
 	}
 }
+
+func TestGetConfig(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Test getting the issue_prefix config
+	args := &GetConfigArgs{Key: "issue_prefix"}
+	resp, err := client.GetConfig(args)
+	if err != nil {
+		t.Fatalf("GetConfig failed: %v", err)
+	}
+
+	// Note: The test database may or may not have this config key set
+	// Success is indicated by the RPC returning without error
+	if resp.Key != "issue_prefix" {
+		t.Errorf("GetConfig returned wrong key: got %q, want %q", resp.Key, "issue_prefix")
+	}
+}
+
+func TestGetConfig_UnknownKey(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Test getting a non-existent config key - should return empty value
+	args := &GetConfigArgs{Key: "nonexistent_key"}
+	resp, err := client.GetConfig(args)
+	if err != nil {
+		t.Fatalf("GetConfig failed: %v", err)
+	}
+
+	// Unknown keys return empty string (not an error)
+	if resp.Value != "" {
+		t.Errorf("GetConfig for unknown key returned non-empty value: %q", resp.Value)
+	}
+}
+
+func TestMolStale(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Test basic mol stale - should work even with no stale molecules
+	args := &MolStaleArgs{
+		BlockingOnly:   false,
+		UnassignedOnly: false,
+		ShowAll:        false,
+	}
+	resp, err := client.MolStale(args)
+	if err != nil {
+		t.Fatalf("MolStale failed: %v", err)
+	}
+
+	// TotalCount should be >= 0
+	if resp.TotalCount < 0 {
+		t.Errorf("MolStale returned invalid TotalCount: %d", resp.TotalCount)
+	}
+}
+
+func TestMolStale_WithStaleMolecule(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Create an epic that will become stale (all children closed)
+	epicArgs := &CreateArgs{
+		Title:       "Test Stale Epic",
+		Description: "Epic that will become stale",
+		IssueType:   "epic",
+		Priority:    2,
+	}
+	epicResp, err := client.Create(epicArgs)
+	if err != nil {
+		t.Fatalf("Create epic failed: %v", err)
+	}
+
+	var epic types.Issue
+	json.Unmarshal(epicResp.Data, &epic)
+
+	// Create and link a subtask
+	taskArgs := &CreateArgs{
+		Title:       "Subtask for stale test",
+		Description: "Will be closed",
+		IssueType:   "task",
+		Priority:    2,
+	}
+	taskResp, err := client.Create(taskArgs)
+	if err != nil {
+		t.Fatalf("Create task failed: %v", err)
+	}
+
+	var task types.Issue
+	json.Unmarshal(taskResp.Data, &task)
+
+	// Link task to epic
+	depArgs := &DepAddArgs{
+		FromID:  task.ID,
+		ToID:    epic.ID,
+		DepType: "parent-child",
+	}
+	_, err = client.AddDependency(depArgs)
+	if err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// Close the subtask - epic should become stale
+	closeArgs := &CloseArgs{ID: task.ID, Reason: "Test complete"}
+	_, err = client.CloseIssue(closeArgs)
+	if err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
+	}
+
+	// Now check for stale molecules
+	args := &MolStaleArgs{
+		BlockingOnly:   false,
+		UnassignedOnly: false,
+		ShowAll:        false,
+	}
+	resp, err := client.MolStale(args)
+	if err != nil {
+		t.Fatalf("MolStale failed: %v", err)
+	}
+
+	// Should find the stale epic
+	found := false
+	for _, mol := range resp.StaleMolecules {
+		if mol.ID == epic.ID {
+			found = true
+			if mol.TotalChildren != 1 {
+				t.Errorf("Expected 1 total child, got %d", mol.TotalChildren)
+			}
+			if mol.ClosedChildren != 1 {
+				t.Errorf("Expected 1 closed child, got %d", mol.ClosedChildren)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected to find stale epic %s in results", epic.ID)
+	}
+}
+
+func TestMolStale_BlockingOnly(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Test with BlockingOnly filter
+	args := &MolStaleArgs{
+		BlockingOnly:   true,
+		UnassignedOnly: false,
+		ShowAll:        false,
+	}
+	resp, err := client.MolStale(args)
+	if err != nil {
+		t.Fatalf("MolStale (blocking only) failed: %v", err)
+	}
+
+	// All returned molecules should be blocking something
+	for _, mol := range resp.StaleMolecules {
+		if mol.BlockingCount == 0 {
+			t.Errorf("MolStale with BlockingOnly returned non-blocking molecule: %s", mol.ID)
+		}
+	}
+}
