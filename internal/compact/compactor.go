@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 const (
@@ -24,9 +25,22 @@ type Config struct {
 
 // Compactor handles issue compaction using AI summarization.
 type Compactor struct {
-	store  *sqlite.SQLiteStorage
-	haiku  *HaikuClient
-	config *Config
+	store      issueStore
+	summarizer summarizer
+	config     *Config
+}
+
+type issueStore interface {
+	CheckEligibility(ctx context.Context, issueID string, tier int) (bool, string, error)
+	GetIssue(ctx context.Context, issueID string) (*types.Issue, error)
+	UpdateIssue(ctx context.Context, issueID string, updates map[string]interface{}, actor string) error
+	ApplyCompaction(ctx context.Context, issueID string, tier int, originalSize int, compactedSize int, commitHash string) error
+	AddComment(ctx context.Context, issueID, actor, comment string) error
+	MarkIssueDirty(ctx context.Context, issueID string) error
+}
+
+type summarizer interface {
+	SummarizeTier1(ctx context.Context, issue *types.Issue) (string, error)
 }
 
 // New creates a new Compactor instance with the given configuration.
@@ -43,7 +57,7 @@ func New(store *sqlite.SQLiteStorage, apiKey string, config *Config) (*Compactor
 		config.APIKey = apiKey
 	}
 
-	var haikuClient *HaikuClient
+	var haikuClient summarizer
 	var err error
 	if !config.DryRun {
 		haikuClient, err = NewHaikuClient(config.APIKey)
@@ -55,15 +69,15 @@ func New(store *sqlite.SQLiteStorage, apiKey string, config *Config) (*Compactor
 			}
 		}
 	}
-	if haikuClient != nil {
-		haikuClient.auditEnabled = config.AuditEnabled
-		haikuClient.auditActor = config.Actor
+	if hc, ok := haikuClient.(*HaikuClient); ok {
+		hc.auditEnabled = config.AuditEnabled
+		hc.auditActor = config.Actor
 	}
 
 	return &Compactor{
-		store:  store,
-		haiku:  haikuClient,
-		config: config,
+		store:      store,
+		summarizer: haikuClient,
+		config:     config,
 	}, nil
 }
 
@@ -104,7 +118,10 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 		return fmt.Errorf("dry-run: would compact %s (original size: %d bytes)", issueID, originalSize)
 	}
 
-	summary, err := c.haiku.SummarizeTier1(ctx, issue)
+	if c.summarizer == nil {
+		return fmt.Errorf("summarizer not configured")
+	}
+	summary, err := c.summarizer.SummarizeTier1(ctx, issue)
 	if err != nil {
 		return fmt.Errorf("failed to summarize with Haiku: %w", err)
 	}
@@ -249,7 +266,10 @@ func (c *Compactor) compactSingleWithResult(ctx context.Context, issueID string,
 
 	result.OriginalSize = len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 
-	summary, err := c.haiku.SummarizeTier1(ctx, issue)
+	if c.summarizer == nil {
+		return fmt.Errorf("summarizer not configured")
+	}
+	summary, err := c.summarizer.SummarizeTier1(ctx, issue)
 	if err != nil {
 		return fmt.Errorf("failed to summarize with Haiku: %w", err)
 	}

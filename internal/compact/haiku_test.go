@@ -3,12 +3,20 @@ package compact
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
@@ -178,6 +186,11 @@ func TestIsRetryable(t *testing.T) {
 		{"context canceled", context.Canceled, false},
 		{"context deadline exceeded", context.DeadlineExceeded, false},
 		{"generic error", errors.New("some error"), false},
+		{"timeout error", timeoutErr{}, true},
+		{"anthropic 429", &anthropic.Error{StatusCode: 429}, true},
+		{"anthropic 500", &anthropic.Error{StatusCode: 500}, true},
+		{"anthropic 400", &anthropic.Error{StatusCode: 400}, false},
+		{"wrapped timeout", fmt.Errorf("wrap: %w", timeoutErr{}), true},
 	}
 
 	for _, tt := range tests {
@@ -187,5 +200,18 @@ func TestIsRetryable(t *testing.T) {
 				t.Errorf("isRetryable(%v) = %v, want %v", tt.err, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestBytesWriterAppends(t *testing.T) {
+	w := &bytesWriter{}
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if _, err := w.Write([]byte(" world")); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+	if got := string(w.buf); got != "hello world" {
+		t.Fatalf("unexpected buffer content: %q", got)
 	}
 }

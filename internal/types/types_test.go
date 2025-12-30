@@ -414,6 +414,66 @@ func TestIssueTypeIsValid(t *testing.T) {
 	}
 }
 
+func TestAgentStateIsValid(t *testing.T) {
+	cases := []struct {
+		name  string
+		state AgentState
+		want  bool
+	}{
+		{"idle", StateIdle, true},
+		{"running", StateRunning, true},
+		{"empty", AgentState(""), true}, // empty allowed for non-agent beads
+		{"invalid", AgentState("dormant"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.state.IsValid(); got != tc.want {
+				t.Fatalf("AgentState(%q).IsValid() = %v, want %v", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMolTypeIsValid(t *testing.T) {
+	cases := []struct {
+		name  string
+		type_ MolType
+		want  bool
+	}{
+		{"swarm", MolTypeSwarm, true},
+		{"patrol", MolTypePatrol, true},
+		{"work", MolTypeWork, true},
+		{"empty", MolType(""), true},
+		{"unknown", MolType("custom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.type_.IsValid(); got != tc.want {
+				t.Fatalf("MolType(%q).IsValid() = %v, want %v", tc.type_, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIssueCompoundHelpers(t *testing.T) {
+	issue := &Issue{}
+	if issue.IsCompound() {
+		t.Fatalf("issue with no bonded refs should not be compound")
+	}
+	if constituents := issue.GetConstituents(); constituents != nil {
+		t.Fatalf("expected nil constituents for non-compound issue")
+	}
+
+	bonded := &Issue{BondedFrom: []BondRef{{ProtoID: "proto-1", BondType: BondTypeSequential}}}
+	if !bonded.IsCompound() {
+		t.Fatalf("issue with bonded refs should be compound")
+	}
+	refs := bonded.GetConstituents()
+	if len(refs) != 1 || refs[0].ProtoID != "proto-1" {
+		t.Fatalf("unexpected constituents: %#v", refs)
+	}
+}
+
 func TestDependencyTypeIsValid(t *testing.T) {
 	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
 	tests := []struct {
@@ -431,9 +491,9 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DepAuthoredBy, true},
 		{DepAssignedTo, true},
 		{DepApprovedBy, true},
-		{DependencyType("custom-type"), true},  // Custom types are now valid
-		{DependencyType("any-string"), true},   // Any non-empty string is valid
-		{DependencyType(""), false},            // Empty is still invalid
+		{DependencyType("custom-type"), true}, // Custom types are now valid
+		{DependencyType("any-string"), true},  // Any non-empty string is valid
+		{DependencyType(""), false},           // Empty is still invalid
 		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
@@ -624,25 +684,25 @@ func TestTreeNodeEmbedding(t *testing.T) {
 
 func TestComputeContentHash(t *testing.T) {
 	issue1 := Issue{
-		ID:                "test-1",
-		Title:             "Test Issue",
-		Description:       "Description",
-		Status:            StatusOpen,
-		Priority:          2,
-		IssueType:         TypeFeature,
-		EstimatedMinutes:  intPtr(60),
+		ID:               "test-1",
+		Title:            "Test Issue",
+		Description:      "Description",
+		Status:           StatusOpen,
+		Priority:         2,
+		IssueType:        TypeFeature,
+		EstimatedMinutes: intPtr(60),
 	}
 
 	// Same content should produce same hash
 	issue2 := Issue{
-		ID:                "test-2", // Different ID
-		Title:             "Test Issue",
-		Description:       "Description",
-		Status:            StatusOpen,
-		Priority:          2,
-		IssueType:         TypeFeature,
-		EstimatedMinutes:  intPtr(60),
-		CreatedAt:         time.Now(), // Different timestamp
+		ID:               "test-2", // Different ID
+		Title:            "Test Issue",
+		Description:      "Description",
+		Status:           StatusOpen,
+		Priority:         2,
+		IssueType:        TypeFeature,
+		EstimatedMinutes: intPtr(60),
+		CreatedAt:        time.Now(), // Different timestamp
 	}
 
 	hash1 := issue1.ComputeContentHash()

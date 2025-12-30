@@ -242,3 +242,20 @@ func TestResolveForWrite(t *testing.T) {
 		}
 	})
 }
+
+func TestFindMoleculesJSONLInDir(t *testing.T) {
+	root := t.TempDir()
+	molecules := filepath.Join(root, "molecules.jsonl")
+	if err := os.WriteFile(molecules, []byte("[]"), 0o644); err != nil {
+		t.Fatalf("failed to create molecules.jsonl: %v", err)
+	}
+
+	if got := FindMoleculesJSONLInDir(root); got != molecules {
+		t.Fatalf("expected %q, got %q", molecules, got)
+	}
+
+	otherDir := t.TempDir()
+	if got := FindMoleculesJSONLInDir(otherDir); got != "" {
+		t.Fatalf("expected empty path when file missing, got %q", got)
+	}
+}

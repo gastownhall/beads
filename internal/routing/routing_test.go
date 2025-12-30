@@ -203,11 +203,52 @@ func TestDetectUserRole_ConfigOverrideMaintainer(t *testing.T) {
 	}
 }
 
+func TestDetectUserRole_ConfigOverrideContributor(t *testing.T) {
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: "contributor\n"},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	role, err := DetectUserRole("/repo")
+	if err != nil {
+		t.Fatalf("DetectUserRole error = %v", err)
+	}
+	if role != Contributor {
+		t.Fatalf("expected %s, got %s", Contributor, role)
+	}
+}
+
 func TestDetectUserRole_PushURLMaintainer(t *testing.T) {
 	orig := gitCommandRunner
 	stub := &gitStub{t: t, responses: []gitResponse{
 		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: "unknown"},
 		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "git@github.com:owner/repo.git"},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	role, err := DetectUserRole("/repo")
+	if err != nil {
+		t.Fatalf("DetectUserRole error = %v", err)
+	}
+	if role != Maintainer {
+		t.Fatalf("expected %s, got %s", Maintainer, role)
+	}
+}
+
+func TestDetectUserRole_HTTPSCredentialsMaintainer(t *testing.T) {
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: ""},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "https://token@github.com/owner/repo.git"},
 	}}
 	gitCommandRunner = stub.run
 	t.Cleanup(func() {
