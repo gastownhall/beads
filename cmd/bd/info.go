@@ -297,6 +297,30 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.41.0",
+		Date:    "2025-12-29",
+		Changes: []string{
+			"NEW: bd swarm commands - Create/status/validate for multi-agent batch coordination",
+			"NEW: bd repair command - Detect and repair orphaned foreign key references",
+			"NEW: bd compact --purge-tombstones - Dependency-aware tombstone cleanup",
+			"NEW: bd init --from-jsonl - Preserve manual JSONL edits on reinit",
+			"NEW: bd human command - Focused help menu for humans",
+			"NEW: bd show --short - Compact output mode for scripting",
+			"NEW: bd delete --reason - Audit trail for deletions",
+			"NEW: 'hooked' status - GUPP work assignment for Gas Town",
+			"NEW: mol_type schema field - Molecule classification tracking",
+			"FIX: --var flag allows commas in values (GH#786)",
+			"FIX: bd sync in bare repo worktrees (GH#785)",
+			"FIX: bd delete --cascade recursive deletion (GH#787)",
+			"FIX: bd doctor pre-push hook detection (GH#799)",
+			"FIX: Illumos/Solaris disk space check (GH#798)",
+			"FIX: hq- prefix routing - Correctly finds town root for routes.jsonl",
+			"FIX: Pre-migration orphan cleanup - Avoids chicken-and-egg failures",
+			"CHANGED: CLI command consolidation - Reduced top-level surface area",
+			"CHANGED: Code organization - Split large cmd/bd files to meet 800-line limit",
+		},
+	},
+	{
 		Version: "0.39.1",
 		Date:    "2025-12-27",
 		Changes: []string{

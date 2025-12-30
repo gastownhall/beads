@@ -5,6 +5,129 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.0] - 2025-12-29
+
+### Added
+
+- **`bd swarm` commands** - Multi-agent batch work coordination
+  - `bd swarm create` - Create swarm from epic with children
+  - `bd swarm status` - Show swarm progress and blocked work
+  - `bd swarm validate` - Validate swarm structure and dependencies
+  - N+1 query fix for blocked checks (performance optimization)
+
+- **`bd repair` command** - Orphaned reference repair
+  - Detect and repair orphaned foreign key references
+  - Support for comments/events orphan detection
+  - `--json` flag for machine-readable output
+  - Transaction safety with backup and dirty_issues marking
+
+- **`bd compact --purge-tombstones`** - Dependency-aware cleanup
+  - Remove tombstones while respecting dependency order
+  - Safe cleanup that won't break DAG structure
+
+- **`bd init --from-jsonl`** - Manual cleanup preservation
+  - Initialize database from curated JSONL file
+  - Preserves manual edits made to JSONL
+
+- **`bd human` command** - Focused help menu
+  - Human-friendly command reference
+  - Quick overview without CLI verbosity
+
+- **`bd show --short`** - Compact output mode
+  - Brief issue summary for scripting
+  - Less verbose than default format
+
+- **`bd delete --reason`** - Audit trail for deletions
+  - Optional reason stored in activity log
+  - Better traceability for issue cleanup
+
+- **`hooked` status** - GUPP work assignment
+  - New status for issues assigned to agent hooks
+  - Enables Gas Town Propulsion Principle
+
+- **`mol_type` schema field** - Molecule classification
+  - Track molecule type (patrol, work, etc.)
+  - New migration (adds schema field)
+
+- **Agent ID canonical naming** - Validation update
+  - Updated validation for Gas Town naming conventions
+  - Supports rig/role/name format
+
+### Fixed
+
+- **`--var` flag allows commas in values** (GH#786)
+  - Variables like `--var files=a.go,b.go` now work correctly
+  - Parser respects quoted values
+
+- **`bd sync` in bare repo worktrees** (GH#785)
+  - Fixed sync failure when working in worktrees of bare repos
+  - Correctly detects git configuration
+
+- **`bd delete --cascade` recursive deletion** (GH#787)
+  - Now properly deletes all transitive dependents
+  - Previously only deleted direct children
+
+- **`bd doctor` pre-push hook detection** (GH#799)
+  - No longer falsely reports hook issues
+  - Correctly identifies bd-managed hooks
+
+- **Gitignore fork protection** (GH#796)
+  - Removed negations that could override protection
+  - Safer fork handling
+
+- **Illumos/Solaris disk space check** (GH#798)
+  - Added platform support for disk space detection
+  - Expands OS compatibility
+
+- **Pre-migration orphan cleanup** - Chicken-and-egg fix
+  - Clean orphans before migration to avoid failures
+  - Smoother upgrade path
+
+- **`hq-` prefix routing** - Town root discovery
+  - Correctly finds routes.jsonl from anywhere in town
+  - Fixes cross-rig routing for HQ beads
+
+- **Config.yaml database override warning**
+  - Shows warning when config overrides db location
+  - Helps debug unexpected behavior
+
+- **`normalizeBeadsRelPath` edge case** - Similar prefix handling
+  - Fixes path normalization for similar prefix names
+  - e.g., `beads` vs `beads-sync`
+
+- **`bd doctor --fix` redirect handling**
+  - Properly follows .beads/redirect files
+  - Limited verbose output for cleaner runs
+
+### Changed
+
+- **CLI command consolidation** - Reduced surface area
+  - Grouped related commands under parent commands
+  - Cleaner `bd --help` output
+
+- **Code organization** - File size limits
+  - Split large cmd/bd files to meet 800-line limit
+  - init.go: 1928 → 705 lines
+  - Improved maintainability
+
+- **Documentation updates**
+  - Replace Epic Planning with Ready Front model
+  - Add components overview (CLI vs Plugin vs MCP)
+  - Add installation method comparison table
+
+### Internal
+
+- Extract IssueDetails to shared type
+- Export FollowRedirect and consolidate implementations
+- Extract shared getEpicChildren helper for swarm commands
+- Extract hashFieldWriter to reduce ComputeContentHash repetition
+- Break up runCook (275 lines) into focused helpers
+- Break up flushToJSONLWithState (280 lines) into focused helpers
+- Extract shared importFromJSONLData function
+- Consolidate duplicated step collection functions
+- Add git helper and guard annotations for tests
+- Fix golangci-lint errors (errcheck, gosec, unparam)
+
 ## [0.40.0] - 2025-12-28
 
 ### Added
