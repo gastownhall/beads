@@ -166,12 +166,12 @@ type Step struct {
 	Assignee string `json:"assignee,omitempty"`
 
 	// Expand references an expansion formula to inline here.
-	// When set, this step is replaced by the expansion's steps.
-	// TODO(bd-7zka): Not yet implemented in bd cook. Filed as future work.
+	// When set, this step is replaced by the expansion's template steps.
+	// See ApplyInlineExpansions in expand.go for implementation.
 	Expand string `json:"expand,omitempty"`
 
 	// ExpandVars are variable overrides for the expansion.
-	// TODO(bd-7zka): Not yet implemented in bd cook. Filed as future work.
+	// Merged with the expansion formula's default vars during inline expansion.
 	ExpandVars map[string]string `json:"expand_vars,omitempty"`
 
 	// Condition makes this step optional based on a variable.
