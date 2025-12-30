@@ -7,7 +7,15 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
+
+func init() {
+	// Disable colors when not appropriate (non-TTY, NO_COLOR, etc.)
+	if !ShouldUseColor() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
+}
 
 // Ayu theme color palette
 // Dark: https://terminalcolors.com/themes/ayu/dark/
