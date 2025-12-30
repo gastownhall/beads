@@ -19,7 +19,7 @@ var hooksFS embed.FS
 
 func getEmbeddedHooks() (map[string]string, error) {
 	hooks := make(map[string]string)
-	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
+	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, name := range hookNames {
 		content, err := hooksFS.ReadFile("templates/hooks/" + name)
@@ -46,7 +46,7 @@ type HookStatus struct {
 
 // CheckGitHooks checks the status of bd git hooks in .git/hooks/
 func CheckGitHooks() []HookStatus {
-	hooks := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
+	hooks := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 	statuses := make([]HookStatus, 0, len(hooks))
 
 	// Get actual git directory (handles worktrees)
@@ -169,7 +169,8 @@ The hooks ensure that:
 - pre-commit: Flushes pending changes to JSONL before commit
 - post-merge: Imports updated JSONL after pull/merge
 - pre-push: Prevents pushing stale JSONL
-- post-checkout: Imports JSONL after branch checkout`,
+- post-checkout: Imports JSONL after branch checkout
+- prepare-commit-msg: Adds agent identity trailers for forensics`,
 }
 
 var hooksInstallCmd = &cobra.Command{
@@ -185,7 +186,8 @@ Installed hooks:
   - pre-commit: Flush changes to JSONL before commit
   - post-merge: Import JSONL after pull/merge
   - pre-push: Prevent pushing stale JSONL
-  - post-checkout: Import JSONL after branch checkout`,
+  - post-checkout: Import JSONL after branch checkout
+  - prepare-commit-msg: Add agent identity trailers (for Gas Town agents)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
@@ -374,7 +376,7 @@ func uninstallHooks() error {
 		return err
 	}
 	hooksDir := filepath.Join(gitDir, "hooks")
-	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
+	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
@@ -608,6 +610,265 @@ func runPostCheckoutHook(args []string) int {
 	return 0
 }
 
+// runPrepareCommitMsgHook adds agent identity trailers to commit messages.
+// args: [commit-msg-file, source, sha1]
+// Returns 0 on success (or if not applicable), non-zero on error.
+//
+//nolint:unparam // Always returns 0 by design - we don't block commits
+func runPrepareCommitMsgHook(args []string) int {
+	if len(args) < 1 {
+		return 0 // No message file provided
+	}
+
+	msgFile := args[0]
+	source := ""
+	if len(args) >= 2 {
+		source = args[1]
+	}
+
+	// Skip for merge commits (they already have their own format)
+	if source == "merge" {
+		return 0
+	}
+
+	// Detect agent context
+	identity := detectAgentIdentity()
+	if identity == nil {
+		return 0 // Not in agent context, nothing to add
+	}
+
+	// Read current message
+	content, err := os.ReadFile(msgFile) // #nosec G304 -- path from git
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read commit message: %v\n", err)
+		return 0
+	}
+
+	// Check if trailers already present (avoid duplicates on amend)
+	// Look for "Executed-By:" at the start of a line (actual trailer format)
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "Executed-By:") {
+			return 0
+		}
+	}
+
+	// Build trailers
+	var trailers []string
+	trailers = append(trailers, fmt.Sprintf("Executed-By: %s", identity.FullIdentity))
+	if identity.Rig != "" {
+		trailers = append(trailers, fmt.Sprintf("Rig: %s", identity.Rig))
+	}
+	if identity.Role != "" {
+		trailers = append(trailers, fmt.Sprintf("Role: %s", identity.Role))
+	}
+	if identity.Molecule != "" {
+		trailers = append(trailers, fmt.Sprintf("Molecule: %s", identity.Molecule))
+	}
+
+	// Append trailers to message
+	msg := strings.TrimRight(string(content), "\n\r\t ")
+	var sb strings.Builder
+	sb.WriteString(msg)
+	sb.WriteString("\n\n")
+	for _, trailer := range trailers {
+		sb.WriteString(trailer)
+		sb.WriteString("\n")
+	}
+
+	// Write back
+	if err := os.WriteFile(msgFile, []byte(sb.String()), 0644); err != nil { // #nosec G306
+		fmt.Fprintf(os.Stderr, "Warning: could not write commit message: %v\n", err)
+	}
+
+	return 0
+}
+
+// agentIdentity holds detected agent context information.
+type agentIdentity struct {
+	FullIdentity string // e.g., "beads/crew/dave"
+	Rig          string // e.g., "beads"
+	Role         string // e.g., "crew"
+	Molecule     string // e.g., "bd-xyz" (if attached)
+}
+
+// detectAgentIdentity returns agent identity if running in agent context.
+// Returns nil if not in an agent context (human commit).
+func detectAgentIdentity() *agentIdentity {
+	// Check GT_ROLE environment variable first (set by Gas Town sessions)
+	gtRole := os.Getenv("GT_ROLE")
+	if gtRole != "" {
+		return parseAgentIdentity(gtRole)
+	}
+
+	// Fall back to cwd-based detection
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	// Detect from path patterns
+	return detectAgentFromPath(cwd)
+}
+
+// parseAgentIdentity parses a GT_ROLE value into agent identity.
+func parseAgentIdentity(role string) *agentIdentity {
+	// GT_ROLE can be:
+	// - Simple: "crew", "polecat", "witness", "refinery", "mayor"
+	// - Compound: "beads/crew/dave", "gastown/polecat/Nux-123"
+
+	if strings.Contains(role, "/") {
+		// Compound format
+		parts := strings.Split(role, "/")
+		identity := &agentIdentity{FullIdentity: role}
+
+		if len(parts) >= 1 {
+			identity.Rig = parts[0]
+		}
+		if len(parts) >= 2 {
+			identity.Role = parts[1]
+		}
+
+		// Check for molecule
+		identity.Molecule = getPinnedMolecule()
+
+		return identity
+	}
+
+	// Simple format - need to combine with env vars
+	rig := os.Getenv("GT_RIG")
+	identity := &agentIdentity{Role: role, Rig: rig}
+
+	switch role {
+	case "crew":
+		crew := os.Getenv("GT_CREW")
+		if rig != "" && crew != "" {
+			identity.FullIdentity = fmt.Sprintf("%s/crew/%s", rig, crew)
+		}
+	case "polecat":
+		polecat := os.Getenv("GT_POLECAT")
+		if rig != "" && polecat != "" {
+			identity.FullIdentity = fmt.Sprintf("%s/%s", rig, polecat)
+		}
+	case "witness":
+		if rig != "" {
+			identity.FullIdentity = fmt.Sprintf("%s/witness", rig)
+		}
+	case "refinery":
+		if rig != "" {
+			identity.FullIdentity = fmt.Sprintf("%s/refinery", rig)
+		}
+	case "mayor":
+		identity.FullIdentity = "mayor"
+		identity.Rig = "" // Mayor is rig-agnostic
+	case "deacon":
+		identity.FullIdentity = "deacon"
+		identity.Rig = "" // Deacon is rig-agnostic
+	}
+
+	if identity.FullIdentity == "" {
+		return nil
+	}
+
+	identity.Molecule = getPinnedMolecule()
+	return identity
+}
+
+// detectAgentFromPath detects agent identity from cwd path patterns.
+func detectAgentFromPath(cwd string) *agentIdentity {
+	// Match patterns like:
+	// - /Users/.../gt/<rig>/crew/<name>/...
+	// - /Users/.../gt/<rig>/polecats/<name>/...
+	// - /Users/.../gt/<rig>/witness/...
+	// - /Users/.../gt/<rig>/refinery/...
+
+	// Crew pattern
+	if strings.Contains(cwd, "/crew/") {
+		parts := strings.Split(cwd, "/crew/")
+		if len(parts) >= 2 {
+			rigPath := parts[0]
+			crewPath := parts[1]
+			rig := filepath.Base(rigPath)
+			crew := strings.Split(crewPath, "/")[0]
+			return &agentIdentity{
+				FullIdentity: fmt.Sprintf("%s/crew/%s", rig, crew),
+				Rig:          rig,
+				Role:         "crew",
+				Molecule:     getPinnedMolecule(),
+			}
+		}
+	}
+
+	// Polecat pattern
+	if strings.Contains(cwd, "/polecats/") {
+		parts := strings.Split(cwd, "/polecats/")
+		if len(parts) >= 2 {
+			rigPath := parts[0]
+			polecatPath := parts[1]
+			rig := filepath.Base(rigPath)
+			polecat := strings.Split(polecatPath, "/")[0]
+			return &agentIdentity{
+				FullIdentity: fmt.Sprintf("%s/%s", rig, polecat),
+				Rig:          rig,
+				Role:         "polecat",
+				Molecule:     getPinnedMolecule(),
+			}
+		}
+	}
+
+	// Witness pattern
+	if strings.Contains(cwd, "/witness/") || strings.HasSuffix(cwd, "/witness") {
+		parts := strings.Split(cwd, "/witness")
+		if len(parts) >= 1 {
+			rig := filepath.Base(parts[0])
+			return &agentIdentity{
+				FullIdentity: fmt.Sprintf("%s/witness", rig),
+				Rig:          rig,
+				Role:         "witness",
+			}
+		}
+	}
+
+	// Refinery pattern
+	if strings.Contains(cwd, "/refinery/") || strings.HasSuffix(cwd, "/refinery") {
+		parts := strings.Split(cwd, "/refinery")
+		if len(parts) >= 1 {
+			rig := filepath.Base(parts[0])
+			return &agentIdentity{
+				FullIdentity: fmt.Sprintf("%s/refinery", rig),
+				Rig:          rig,
+				Role:         "refinery",
+			}
+		}
+	}
+
+	return nil
+}
+
+// getPinnedMolecule checks if there's a molecule attached via gt mol status.
+func getPinnedMolecule() string {
+	// Try gt mol status --json
+	cmd := exec.Command("gt", "mol", "status", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse JSON response
+	var status struct {
+		HasMolecule bool   `json:"has_molecule"`
+		MoleculeID  string `json:"molecule_id"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil {
+		return ""
+	}
+
+	if status.HasMolecule && status.MoleculeID != "" {
+		return status.MoleculeID
+	}
+
+	return ""
+}
+
 // =============================================================================
 // Hook Helper Functions
 // =============================================================================
@@ -673,6 +934,7 @@ Supported hooks:
   - post-merge: Import JSONL after pull/merge
   - pre-push: Prevent pushing stale JSONL
   - post-checkout: Import JSONL after branch checkout
+  - prepare-commit-msg: Add agent identity trailers for forensics
 
 The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.`,
@@ -691,6 +953,8 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 			exitCode = runPrePushHook()
 		case "post-checkout":
 			exitCode = runPostCheckoutHook(hookArgs)
+		case "prepare-commit-msg":
+			exitCode = runPrepareCommitMsgHook(hookArgs)
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown hook: %s\n", hookName)
 			os.Exit(1)
