@@ -516,8 +516,17 @@ func (s *Server) handleUpdate(req *Request) Response {
 
 	// Auto-add role_type/rig labels for agent beads when these fields are set
 	// This enables filtering queries like: bd list --type=agent --label=role_type:witness
+	// Note: We remove old role_type/rig labels first to prevent accumulation
 	if issue.IssueType == types.TypeAgent {
 		if updateArgs.RoleType != nil && *updateArgs.RoleType != "" {
+			// Remove any existing role_type:* labels first
+			existingLabels, _ := store.GetLabels(ctx, updateArgs.ID)
+			for _, l := range existingLabels {
+				if strings.HasPrefix(l, "role_type:") {
+					_ = store.RemoveLabel(ctx, updateArgs.ID, l, actor)
+				}
+			}
+			// Add new label
 			label := "role_type:" + *updateArgs.RoleType
 			if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
 				return Response{
@@ -527,6 +536,14 @@ func (s *Server) handleUpdate(req *Request) Response {
 			}
 		}
 		if updateArgs.Rig != nil && *updateArgs.Rig != "" {
+			// Remove any existing rig:* labels first
+			existingLabels, _ := store.GetLabels(ctx, updateArgs.ID)
+			for _, l := range existingLabels {
+				if strings.HasPrefix(l, "rig:") {
+					_ = store.RemoveLabel(ctx, updateArgs.ID, l, actor)
+				}
+			}
+			// Add new label
 			label := "rig:" + *updateArgs.Rig
 			if err := store.AddLabel(ctx, updateArgs.ID, label, actor); err != nil {
 				return Response{
