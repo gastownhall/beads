@@ -13,25 +13,24 @@ import (
 
 var molBurnCmd = &cobra.Command{
 	Use:   "burn <molecule-id>",
-	Short: "Delete a wisp molecule without creating a digest",
-	Long: `Burn a wisp molecule, deleting it without creating a digest.
+	Short: "Delete a molecule without creating a digest",
+	Long: `Burn a molecule, deleting it without creating a digest.
 
 Unlike squash (which creates a permanent digest before deletion), burn
-completely removes the wisp with no trace. Use this for:
+completely removes the molecule with no trace. Use this for:
   - Abandoned patrol cycles
   - Crashed or failed workflows
-  - Test/debug wisps you don't want to preserve
+  - Test/debug molecules you don't want to preserve
 
-The burn operation:
-  1. Verifies the molecule has Ephemeral=true (is ephemeral)
-  2. Deletes the molecule and all its ephemeral children
-  3. No digest is created (use 'bd mol squash' if you want a digest)
+The burn operation differs based on molecule phase:
+  - Wisp (ephemeral): Direct delete, no tombstones
+  - Mol (persistent): Cascade delete with tombstones (syncs to remotes)
 
-CAUTION: This is a destructive operation. The wisp's data will be
+CAUTION: This is a destructive operation. The molecule's data will be
 permanently lost. If you want to preserve a summary, use 'bd mol squash'.
 
 Example:
-  bd mol burn bd-abc123              # Delete wisp with no trace
+  bd mol burn bd-abc123              # Delete molecule with no trace
   bd mol burn bd-abc123 --dry-run    # Preview what would be deleted
   bd mol burn bd-abc123 --force      # Skip confirmation`,
 	Args: cobra.ExactArgs(1),
@@ -76,14 +75,18 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Verify it's a wisp
-	if !rootIssue.Ephemeral {
-		fmt.Fprintf(os.Stderr, "Error: molecule %s is not a wisp (Ephemeral=false)\n", resolvedID)
-		fmt.Fprintf(os.Stderr, "Hint: mol burn only works with wisp molecules\n")
-		fmt.Fprintf(os.Stderr, "      Use 'bd delete' to remove non-wisp issues\n")
-		os.Exit(1)
+	// Branch based on molecule phase
+	if rootIssue.Ephemeral {
+		// Wisp: direct delete without tombstones
+		burnWispMolecule(ctx, resolvedID, dryRun, force)
+	} else {
+		// Mol: cascade delete with tombstones
+		burnPersistentMolecule(ctx, resolvedID, dryRun, force)
 	}
+}
 
+// burnWispMolecule handles wisp deletion (no tombstones, ephemeral-only)
+func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool) {
 	// Load the molecule subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, store, resolvedID)
 	if err != nil {
@@ -164,6 +167,71 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 	fmt.Printf("%s Burned wisp: %d issues deleted\n", ui.RenderPass("✓"), result.DeletedCount)
 	fmt.Printf("  Ephemeral: %s\n", resolvedID)
 	fmt.Printf("  No digest created.\n")
+}
+
+// burnPersistentMolecule handles mol deletion (with tombstones, cascade delete)
+func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, force bool) {
+	// Load the molecule subgraph to show what will be deleted
+	subgraph, err := loadTemplateSubgraph(ctx, store, resolvedID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading molecule: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Collect all issue IDs in the molecule
+	var issueIDs []string
+	for _, issue := range subgraph.Issues {
+		issueIDs = append(issueIDs, issue.ID)
+	}
+
+	if len(issueIDs) == 0 {
+		if jsonOutput {
+			outputJSON(BurnResult{
+				MoleculeID:   resolvedID,
+				DeletedCount: 0,
+			})
+		} else {
+			fmt.Printf("No issues found for molecule %s\n", resolvedID)
+		}
+		return
+	}
+
+	if dryRun {
+		fmt.Printf("\nDry run: would burn mol %s\n\n", resolvedID)
+		fmt.Printf("Root: %s\n", subgraph.Root.Title)
+		fmt.Printf("\nIssues to delete (%d total):\n", len(issueIDs))
+		for _, issue := range subgraph.Issues {
+			status := string(issue.Status)
+			if issue.ID == subgraph.Root.ID {
+				fmt.Printf("  - [%s] %s (%s) [ROOT]\n", status, issue.Title, issue.ID)
+			} else {
+				fmt.Printf("  - [%s] %s (%s)\n", status, issue.Title, issue.ID)
+			}
+		}
+		fmt.Printf("\nNote: Persistent mol - will create tombstones (syncs to remotes).\n")
+		fmt.Printf("No digest will be created (use 'bd mol squash' to create one).\n")
+		return
+	}
+
+	// Confirm unless --force
+	if !force && !jsonOutput {
+		fmt.Printf("About to burn mol %s (%d issues)\n", resolvedID, len(issueIDs))
+		fmt.Printf("This will permanently delete all molecule data with no digest.\n")
+		fmt.Printf("Note: Persistent mol - tombstones will sync to remotes.\n")
+		fmt.Printf("Use 'bd mol squash' instead if you want to preserve a summary.\n")
+		fmt.Printf("\nContinue? [y/N] ")
+
+		var response string
+		_, _ = fmt.Scanln(&response)
+		if response != "y" && response != "Y" {
+			fmt.Println("Canceled.")
+			return
+		}
+	}
+
+	// Use deleteBatch with cascade=false (we already have all IDs from subgraph)
+	// force=true, hardDelete=false (keep tombstones for sync)
+	deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, "mol burn")
 }
 
 // burnWisps deletes all wisp issues without creating a digest
