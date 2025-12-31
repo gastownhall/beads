@@ -412,6 +412,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, issuesTrackingCheck)
 	// Don't fail overall check for tracking issues, just warn
 
+	// Check 14b: Redirect file not tracked (worktree support)
+	redirectCheck := convertWithCategory(doctor.CheckRedirectNotTracked(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectCheck)
+	// Don't fail overall check for redirect tracking, just warn
+
 	// Check 15: Git merge driver configuration
 	mergeDriverCheck := convertWithCategory(doctor.CheckMergeDriver(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, mergeDriverCheck)
