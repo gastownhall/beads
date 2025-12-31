@@ -130,6 +130,67 @@ def generate_hash_id(
     return f"{prefix}-{short_hash}"
 
 
+def adf_to_text(node: Any) -> str:
+    """
+    Convert Atlassian Document Format (ADF) to plain text/markdown.
+
+    ADF is returned by Jira API v3 for rich text fields like description.
+    """
+    if node is None:
+        return ""
+
+    if isinstance(node, str):
+        return node
+
+    if not isinstance(node, dict):
+        return ""
+
+    node_type = node.get("type", "")
+    content = node.get("content", [])
+    text = node.get("text", "")
+
+    # Text node - just return the text
+    if node_type == "text":
+        return text
+
+    # Recursively process content
+    children_text = "".join(adf_to_text(child) for child in content)
+
+    # Handle different node types
+    if node_type == "doc":
+        return children_text.strip()
+    elif node_type == "paragraph":
+        return children_text + "\n\n"
+    elif node_type == "heading":
+        level = node.get("attrs", {}).get("level", 1)
+        prefix = "#" * level
+        return f"{prefix} {children_text}\n\n"
+    elif node_type == "bulletList":
+        return children_text
+    elif node_type == "orderedList":
+        return children_text
+    elif node_type == "listItem":
+        return f"- {children_text.strip()}\n"
+    elif node_type == "codeBlock":
+        lang = node.get("attrs", {}).get("language", "")
+        return f"```{lang}\n{children_text}```\n\n"
+    elif node_type == "blockquote":
+        lines = children_text.strip().split("\n")
+        return "\n".join(f"> {line}" for line in lines) + "\n\n"
+    elif node_type == "hardBreak":
+        return "\n"
+    elif node_type == "rule":
+        return "---\n\n"
+    elif node_type == "inlineCard":
+        url = node.get("attrs", {}).get("url", "")
+        return url
+    elif node_type == "mention":
+        return f"@{node.get('attrs', {}).get('text', '')}"
+    else:
+        # For unknown types, just return children text
+        return children_text
+
+
 def get_bd_config(key: str) -> Optional[str]:
     """Get a configuration value from bd config."""
     try:
@@ -382,7 +443,7 @@ class JiraToBeads:
             # Use API v3 (v2 deprecated and returns HTTP 410 Gone)
             # See: https://developer.atlassian.com/changelog/#CHANGE-2046
             api_url = f"{url}/rest/api/3/search/jql"
-            params = f"jql={quote(query)}&startAt={start_at}&maxResults={max_results}&expand=changelog"
+            params = f"jql={quote(query)}&startAt={start_at}&maxResults={max_results}&fields=*all&expand=changelog"
             full_url = f"{api_url}?{params}"
 
             headers = {
@@ -546,7 +607,8 @@ class JiraToBeads:
             bd_id = None
             max_length = 8
             title = fields.get("summary", "")
-            description = fields.get("description") or ""
+            raw_desc = fields.get("description")
+            description = adf_to_text(raw_desc) if isinstance(raw_desc, dict) else (raw_desc or "")
 
             for length in range(self.hash_length, max_length + 1):
                 for nonce in range(10):
@@ -586,11 +648,13 @@ class JiraToBeads:
         updated_at = self.parse_jira_timestamp(fields.get("updated"))
         resolved_at = self.parse_jira_timestamp(fields.get("resolutiondate"))
 
-        # Build bd issue
+        # Build bd issue - convert ADF description to text
+        raw_desc = fields.get("description")
+        desc_text = adf_to_text(raw_desc) if isinstance(raw_desc, dict) else (raw_desc or "")
         issue = {
             "id": bd_id,
             "title": fields.get("summary", ""),
-            "description": fields.get("description") or "",
+            "description": desc_text,
             "status": self.map_status(fields.get("status")),
             "priority": self.map_priority(fields.get("priority")),
             "issue_type": self.map_issue_type(fields.get("issuetype")),

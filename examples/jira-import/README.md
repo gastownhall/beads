@@ -345,6 +345,7 @@ python jira2jsonl.py --from-config --id-mode hash | bd import
 - Verify you're using your email as username
 - Create a fresh API token at https://id.atlassian.com/manage-profile/security/api-tokens
 - Ensure the token has access to the project
+- **Silent auth failure**: The Jira API may return HTTP 200 with empty results instead of 401. Check for `X-Seraph-Loginreason: AUTHENTICATED_FAILED` header in responses.
 
 **Jira Server/DC:**
 - Try using a Personal Access Token instead of password
@@ -375,6 +376,30 @@ Jira Cloud has rate limits. For large imports:
 - **Jira Server/DC**: Depends on configuration
 
 This script fetches 100 issues per request, so a 1000-issue project requires ~10 API calls.
+
+## Jira API v3 Notes
+
+This script uses the Jira REST API v3 `/rest/api/3/search/jql` endpoint. The older `/rest/api/3/search` endpoint was deprecated (returns HTTP 410 Gone). Two important considerations:
+
+### Explicit Field Selection
+
+The v3 search endpoint returns only issue IDs by default. The script explicitly requests `fields=*all` to retrieve all fields. Without this parameter, you'll get issues with no title, description, or other metadata.
+
+### Atlassian Document Format (ADF)
+
+Jira API v3 returns rich text fields (like `description`) in Atlassian Document Format - a JSON structure rather than plain text or HTML. The script automatically converts ADF to markdown:
+
+**ADF input:**
+```json
+{"type": "doc", "content": [{"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Overview"}]}]}
+```
+
+**Converted output:**
+```markdown
+### Overview
+```
+
+Supported ADF node types: paragraph, heading, bulletList, orderedList, listItem, codeBlock, blockquote, hardBreak, rule, inlineCard, mention, and text nodes.
 
 ---
 
