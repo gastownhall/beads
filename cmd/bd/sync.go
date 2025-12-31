@@ -305,7 +305,12 @@ Use --merge to merge the sync branch back to main branch.`,
 		beadsDir := filepath.Dir(jsonlPath)
 		isExternal := isExternalBeadsDir(ctx, beadsDir)
 
-		if isExternal {
+		// GH#812/bd-n663: When sync.branch is configured, skip external direct-commit mode.
+		// The redirect may point to another clone/worktree in the same repo, but cross
+		// directory boundaries that trigger isExternalBeadsDir=true. When sync.branch is
+		// configured, we should use the sync.branch workflow which properly handles copying
+		// JSONL files to the sync branch worktree, regardless of where the source .beads lives.
+		if isExternal && !hasSyncBranchConfig {
 			// External BEADS_DIR: commit/pull directly to the beads repo
 			fmt.Println("→ External BEADS_DIR detected, using direct commit...")
 
