@@ -480,8 +480,21 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 		}
 
 		// Only warn if majority of issues have wrong prefix
+		// BUT: recognize that <prefix>-mol and <prefix>-wisp are valid variants
+		// created by molecule/wisp workflows (see internal/storage/sqlite/queries.go:166-170)
 		if mostCommonPrefix != dbPrefix && maxCount > jsonlCount/2 {
-			issues = append(issues, fmt.Sprintf("Prefix mismatch: database uses %q but most JSONL issues use %q", dbPrefix, mostCommonPrefix))
+			// Check if the common prefix is a known workflow variant of the db prefix
+			isValidVariant := false
+			for _, suffix := range []string{"-mol", "-wisp", "-eph"} {
+				if mostCommonPrefix == dbPrefix+suffix {
+					isValidVariant = true
+					break
+				}
+			}
+
+			if !isValidVariant {
+				issues = append(issues, fmt.Sprintf("Prefix mismatch: database uses %q but most JSONL issues use %q", dbPrefix, mostCommonPrefix))
+			}
 		}
 	}
 

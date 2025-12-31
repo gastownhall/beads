@@ -870,6 +870,145 @@ also not json
 	}
 }
 
+// TestCheckDatabaseJSONLSync_MoleculePrefix verifies that molecule/wisp prefixes
+// are recognized as valid variants and don't trigger false positive warnings.
+// Regression test for GitHub issue #811.
+func TestCheckDatabaseJSONLSync_MoleculePrefix(t *testing.T) {
+	tests := []struct {
+		name           string
+		dbPrefix       string
+		jsonlContent   string
+		expectWarning  bool
+		warningMessage string
+	}{
+		{
+			name:     "mol prefix is valid variant",
+			dbPrefix: "my-project",
+			// 3 out of 4 issues have the -mol prefix (majority)
+			jsonlContent: `{"id":"my-project-mol-001","title":"Mol Issue 1"}
+{"id":"my-project-mol-002","title":"Mol Issue 2"}
+{"id":"my-project-mol-003","title":"Mol Issue 3"}
+{"id":"my-project-004","title":"Regular Issue"}
+`,
+			expectWarning:  false, // Should NOT warn - mol is a valid variant
+			warningMessage: "",
+		},
+		{
+			name:     "wisp prefix is valid variant",
+			dbPrefix: "my-project",
+			jsonlContent: `{"id":"my-project-wisp-001","title":"Wisp Issue 1"}
+{"id":"my-project-wisp-002","title":"Wisp Issue 2"}
+{"id":"my-project-wisp-003","title":"Wisp Issue 3"}
+`,
+			expectWarning:  false, // Should NOT warn - wisp is a valid variant
+			warningMessage: "",
+		},
+		{
+			name:     "eph prefix is valid variant",
+			dbPrefix: "my-project",
+			jsonlContent: `{"id":"my-project-eph-001","title":"Ephemeral Issue 1"}
+{"id":"my-project-eph-002","title":"Ephemeral Issue 2"}
+{"id":"my-project-eph-003","title":"Ephemeral Issue 3"}
+`,
+			expectWarning:  false, // Should NOT warn - eph is a valid variant
+			warningMessage: "",
+		},
+		{
+			name:     "unrelated prefix SHOULD warn",
+			dbPrefix: "my-project",
+			jsonlContent: `{"id":"other-project-001","title":"Wrong Project 1"}
+{"id":"other-project-002","title":"Wrong Project 2"}
+{"id":"other-project-003","title":"Wrong Project 3"}
+`,
+			expectWarning:  true, // SHOULD warn - different project entirely
+			warningMessage: "Prefix mismatch",
+		},
+		{
+			name:     "mixed valid variants do not warn",
+			dbPrefix: "bd",
+			jsonlContent: `{"id":"bd-mol-001","title":"Mol Issue"}
+{"id":"bd-wisp-001","title":"Wisp Issue"}
+{"id":"bd-001","title":"Regular Issue"}
+`,
+			expectWarning:  false, // All are valid variants of "bd"
+			warningMessage: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create database with config table containing the prefix
+			dbPath := filepath.Join(beadsDir, "beads.db")
+			db, err := sql.Open("sqlite3", dbPath)
+			if err != nil {
+				t.Fatalf("failed to create database: %v", err)
+			}
+
+			// Create issues table
+			_, err = db.Exec(`CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT, status TEXT)`)
+			if err != nil {
+				db.Close()
+				t.Fatalf("failed to create issues table: %v", err)
+			}
+
+			// Create config table with prefix
+			_, err = db.Exec(`CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)`)
+			if err != nil {
+				db.Close()
+				t.Fatalf("failed to create config table: %v", err)
+			}
+			_, err = db.Exec(`INSERT INTO config (key, value) VALUES ('issue_prefix', ?)`, tt.dbPrefix)
+			if err != nil {
+				db.Close()
+				t.Fatalf("failed to insert prefix: %v", err)
+			}
+
+			// Count issues in JSONL and insert matching count into DB
+			lines := strings.Split(strings.TrimSpace(tt.jsonlContent), "\n")
+			issueCount := 0
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					issueCount++
+				}
+			}
+			for i := 0; i < issueCount; i++ {
+				_, err = db.Exec(`INSERT INTO issues (id, title, status) VALUES (?, ?, ?)`,
+					fmt.Sprintf("db-issue-%d", i), fmt.Sprintf("DB Issue %d", i), "open")
+				if err != nil {
+					db.Close()
+					t.Fatalf("failed to insert issue: %v", err)
+				}
+			}
+			db.Close()
+
+			// Create JSONL file
+			jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+			if err := os.WriteFile(jsonlPath, []byte(tt.jsonlContent), 0600); err != nil {
+				t.Fatalf("failed to create JSONL: %v", err)
+			}
+
+			check := CheckDatabaseJSONLSync(tmpDir)
+
+			hasPrefixWarning := strings.Contains(check.Message, "Prefix mismatch")
+
+			if tt.expectWarning && !hasPrefixWarning {
+				t.Errorf("expected prefix mismatch warning, but got: status=%s, message=%s",
+					check.Status, check.Message)
+			}
+			if !tt.expectWarning && hasPrefixWarning {
+				t.Errorf("did NOT expect prefix mismatch warning, but got: status=%s, message=%s",
+					check.Status, check.Message)
+			}
+		})
+	}
+}
+
 func TestCountJSONLIssues_Performance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping performance test in short mode")
