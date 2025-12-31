@@ -65,6 +65,23 @@ func ValidateBranchName(name string) error {
 	return nil
 }
 
+// ValidateSyncBranchName checks if a branch name is valid for use as sync.branch.
+// GH#807: Setting sync.branch to 'main' or 'master' causes problems because the
+// worktree mechanism will check out that branch, preventing the user from checking
+// it out in their working directory.
+func ValidateSyncBranchName(name string) error {
+	if err := ValidateBranchName(name); err != nil {
+		return err
+	}
+
+	// GH#807: Reject main/master as sync branch - these cause worktree conflicts
+	if name == "main" || name == "master" {
+		return fmt.Errorf("cannot use '%s' as sync branch: git worktrees prevent checking out the same branch in multiple locations. Use a dedicated branch like 'beads-sync' instead", name)
+	}
+
+	return nil
+}
+
 // Get retrieves the sync branch configuration with the following precedence:
 // 1. BEADS_SYNC_BRANCH environment variable
 // 2. sync-branch from config.yaml (version controlled, shared across clones)
@@ -178,7 +195,8 @@ func getConfigFromDB(dbPath string, key string) string {
 
 // Set stores the sync branch configuration in the database
 func Set(ctx context.Context, store storage.Storage, branch string) error {
-	if err := ValidateBranchName(branch); err != nil {
+	// GH#807: Use sync-specific validation that rejects main/master
+	if err := ValidateSyncBranchName(branch); err != nil {
 		return err
 	}
 

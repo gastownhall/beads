@@ -287,16 +287,13 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			os.Exit(1)
 		}
 
-		// Set sync.branch: use explicit --branch flag, or auto-detect current branch
-		// This ensures bd sync --status works after bd init
-		if branch == "" && isGitRepo() {
-			// Auto-detect current branch if not specified
-			currentBranch, err := getGitBranch()
-			if err == nil && currentBranch != "" {
-				branch = currentBranch
-			}
-		}
-
+		// Set sync.branch only if explicitly specified via --branch flag
+		// GH#807: Do NOT auto-detect current branch - if sync.branch is set to main/master,
+		// the worktree created by bd sync will check out main, preventing the user from
+		// checking out main in their working directory (git error: "'main' is already checked out")
+		//
+		// When --branch is not specified, bd sync will commit directly to the current branch
+		// (the original behavior before sync branch feature)
 		if branch != "" {
 			if err := syncbranch.Set(ctx, store, branch); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)

@@ -48,6 +48,36 @@ func TestValidateBranchName(t *testing.T) {
 	}
 }
 
+func TestValidateSyncBranchName(t *testing.T) {
+	tests := []struct {
+		name    string
+		branch  string
+		wantErr bool
+	}{
+		// Valid sync branches
+		{"beads-sync is valid", "beads-sync", false},
+		{"feature branch is valid", "feature-branch", false},
+		{"empty is valid", "", false},
+
+		// GH#807: main and master should be rejected for sync branch
+		{"main is invalid for sync", "main", true},
+		{"master is invalid for sync", "master", true},
+
+		// Standard branch name validation still applies
+		{"invalid: HEAD", "HEAD", true},
+		{"invalid: contains ..", "feature..branch", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSyncBranchName(tt.branch)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateSyncBranchName(%q) error = %v, wantErr %v", tt.branch, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func newTestStore(t *testing.T) *sqlite.SQLiteStorage {
 	t.Helper()
 	store, err := sqlite.New(context.Background(), "file::memory:?mode=memory&cache=private")
