@@ -474,6 +474,41 @@ func (m *MemoryStorage) CloseIssue(ctx context.Context, id string, reason string
 	}, actor)
 }
 
+// CreateTombstone converts an existing issue to a tombstone record.
+// This is a soft-delete that preserves the issue with status="tombstone".
+func (m *MemoryStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	issue, ok := m.issues[id]
+	if !ok {
+		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	now := time.Now()
+	issue.OriginalType = string(issue.IssueType)
+	issue.Status = types.StatusTombstone
+	issue.DeletedAt = &now
+	issue.DeletedBy = actor
+	issue.DeleteReason = reason
+	issue.UpdatedAt = now
+
+	// Mark as dirty for export
+	m.dirty[id] = true
+
+	// Record tombstone creation event
+	event := &types.Event{
+		IssueID:   id,
+		EventType: "deleted",
+		Actor:     actor,
+		Comment:   &reason,
+		CreatedAt: now,
+	}
+	m.events[id] = append(m.events[id], event)
+
+	return nil
+}
+
 // DeleteIssue permanently deletes an issue and all associated data
 func (m *MemoryStorage) DeleteIssue(ctx context.Context, id string) error {
 	m.mu.Lock()

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestHandleDelete_DryRun verifies that dry-run mode returns what would be deleted
@@ -308,11 +309,15 @@ func TestHandleDelete_WithReason(t *testing.T) {
 		t.Fatalf("delete with reason failed: %s", resp.Error)
 	}
 
-	// Verify issue was deleted
+	// Verify issue was converted to tombstone (now that MemoryStorage supports CreateTombstone)
 	ctx := context.Background()
 	issue, _ := store.GetIssue(ctx, issueIDs[0])
-	if issue != nil {
-		t.Error("issue should have been deleted")
+	if issue == nil {
+		t.Error("issue should exist as tombstone")
+	} else if issue.Status != types.StatusTombstone {
+		t.Errorf("issue should be tombstone, got status=%s", issue.Status)
+	} else if issue.DeleteReason != "test deletion with reason" {
+		t.Errorf("expected DeleteReason='test deletion with reason', got '%s'", issue.DeleteReason)
 	}
 }
 

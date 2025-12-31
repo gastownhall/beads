@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -946,6 +947,68 @@ func TestStatistics_TombstonesExcludedFromTotal(t *testing.T) {
 	}
 	if stats.ClosedIssues != 1 {
 		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
+	}
+}
+
+func TestCreateTombstone(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Create an issue
+	issue := &types.Issue{
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+	issueID := issue.ID
+
+	// Create tombstone
+	if err := store.CreateTombstone(ctx, issueID, "test-actor", "test deletion"); err != nil {
+		t.Fatalf("CreateTombstone failed: %v", err)
+	}
+
+	// Verify the issue is now a tombstone
+	updated, err := store.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("GetIssue failed: %v", err)
+	}
+
+	if updated.Status != types.StatusTombstone {
+		t.Errorf("Expected status=%s, got %s", types.StatusTombstone, updated.Status)
+	}
+	if updated.DeletedAt == nil {
+		t.Error("Expected DeletedAt to be set")
+	}
+	if updated.DeletedBy != "test-actor" {
+		t.Errorf("Expected DeletedBy=test-actor, got %s", updated.DeletedBy)
+	}
+	if updated.DeleteReason != "test deletion" {
+		t.Errorf("Expected DeleteReason='test deletion', got %s", updated.DeleteReason)
+	}
+	if updated.OriginalType != string(types.TypeTask) {
+		t.Errorf("Expected OriginalType=%s, got %s", types.TypeTask, updated.OriginalType)
+	}
+}
+
+func TestCreateTombstone_NotFound(t *testing.T) {
+	store := setupTestMemory(t)
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Try to create tombstone for non-existent issue
+	err := store.CreateTombstone(ctx, "nonexistent", "test", "reason")
+	if err == nil {
+		t.Fatal("Expected error for non-existent issue")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("Expected 'not found' error, got: %v", err)
 	}
 }
 
