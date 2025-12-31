@@ -618,6 +618,31 @@ func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade boo
 		return
 	}
 
+	// Pre-collect connected issues before deletion (for text reference updates)
+	connectedIssues := make(map[string]*types.Issue)
+	idSet := make(map[string]bool)
+	for _, id := range issueIDs {
+		idSet[id] = true
+	}
+	for _, id := range issueIDs {
+		deps, err := store.GetDependencies(ctx, id)
+		if err == nil {
+			for _, dep := range deps {
+				if !idSet[dep.ID] {
+					connectedIssues[dep.ID] = dep
+				}
+			}
+		}
+		dependents, err := store.GetDependents(ctx, id)
+		if err == nil {
+			for _, dep := range dependents {
+				if !idSet[dep.ID] {
+					connectedIssues[dep.ID] = dep
+				}
+			}
+		}
+	}
+
 	// Delete each issue
 	deleteActor := getActorWithGit()
 	deletedCount := 0
@@ -652,6 +677,9 @@ func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade boo
 		deletedCount++
 	}
 
+	// Update text references in connected issues
+	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
+
 	// Hard delete: remove from JSONL immediately
 	if hardDelete {
 		for _, id := range issueIDs {
@@ -668,10 +696,12 @@ func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade boo
 			"deleted":              issueIDs,
 			"deleted_count":        deletedCount,
 			"dependencies_removed": depsRemoved,
+			"references_updated":   updatedCount,
 		})
 	} else {
 		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), deletedCount)
 		fmt.Printf("  Removed %d dependency link(s)\n", depsRemoved)
+		fmt.Printf("  Updated text references in %d issue(s)\n", updatedCount)
 	}
 }
 
