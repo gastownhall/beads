@@ -84,6 +84,35 @@ func TestEvaluateStepCondition(t *testing.T) {
 			want:      true,
 			wantErr:   false,
 		},
+		// Negated truthy checks: !{{var}}
+		{
+			name:      "negated - truthy value becomes false",
+			condition: "!{{enabled}}",
+			vars:      map[string]string{"enabled": "true"},
+			want:      false,
+			wantErr:   false,
+		},
+		{
+			name:      "negated - falsy value becomes true",
+			condition: "!{{enabled}}",
+			vars:      map[string]string{"enabled": "false"},
+			want:      true,
+			wantErr:   false,
+		},
+		{
+			name:      "negated - empty value becomes true",
+			condition: "!{{enabled}}",
+			vars:      map[string]string{"enabled": ""},
+			want:      true,
+			wantErr:   false,
+		},
+		{
+			name:      "negated - missing variable becomes true",
+			condition: "!{{enabled}}",
+			vars:      map[string]string{},
+			want:      true,
+			wantErr:   false,
+		},
 		// Equality checks: {{var}} == value
 		{
 			name:      "equality - match",

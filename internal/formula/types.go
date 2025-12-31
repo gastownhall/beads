@@ -175,7 +175,7 @@ type Step struct {
 	ExpandVars map[string]string `json:"expand_vars,omitempty"`
 
 	// Condition makes this step optional based on a variable.
-	// Format: "{{var}}" (truthy) or "{{var}} == value" or "{{var}} != value".
+	// Format: "{{var}}" (truthy), "!{{var}}" (negated), "{{var}} == value", "{{var}} != value".
 	// Evaluated at cook/pour time via FilterStepsByCondition.
 	Condition string `json:"condition,omitempty"`
 

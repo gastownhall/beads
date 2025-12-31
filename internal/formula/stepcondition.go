@@ -5,6 +5,7 @@
 //
 // Supported formats:
 //   - "{{var}}" - truthy check (non-empty, non-"false", non-"0")
+//   - "!{{var}}" - negated truthy check (include if var is falsy)
 //   - "{{var}} == value" - equality check
 //   - "{{var}} != value" - inequality check
 package formula
@@ -20,6 +21,9 @@ var (
 	// {{var}} - simple variable reference for truthy check
 	stepCondVarPattern = regexp.MustCompile(`^\{\{(\w+)\}\}$`)
 
+	// !{{var}} - negated truthy check
+	stepCondNegatedVarPattern = regexp.MustCompile(`^!\{\{(\w+)\}\}$`)
+
 	// {{var}} == value or {{var}} != value
 	stepCondComparePattern = regexp.MustCompile(`^\{\{(\w+)\}\}\s*(==|!=)\s*(.+)$`)
 )
@@ -30,6 +34,7 @@ var (
 // Condition formats:
 //   - "" (empty) - always include
 //   - "{{var}}" - include if var is truthy (non-empty, non-"false", non-"0")
+//   - "!{{var}}" - include if var is NOT truthy (negated)
 //   - "{{var}} == value" - include if var equals value
 //   - "{{var}} != value" - include if var does not equal value
 func EvaluateStepCondition(condition string, vars map[string]string) (bool, error) {
@@ -45,6 +50,13 @@ func EvaluateStepCondition(condition string, vars map[string]string) (bool, erro
 		varName := m[1]
 		value := vars[varName]
 		return isTruthy(value), nil
+	}
+
+	// Try negated truthy pattern: !{{var}}
+	if m := stepCondNegatedVarPattern.FindStringSubmatch(condition); m != nil {
+		varName := m[1]
+		value := vars[varName]
+		return !isTruthy(value), nil
 	}
 
 	// Try comparison pattern: {{var}} == value or {{var}} != value
