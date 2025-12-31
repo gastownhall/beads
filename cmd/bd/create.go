@@ -130,6 +130,17 @@ var createCmd = &cobra.Command{
 			FatalError("--role-type and --agent-rig flags require --type=agent")
 		}
 
+		// Event-specific flags
+		eventCategory, _ := cmd.Flags().GetString("event-category")
+		eventActor, _ := cmd.Flags().GetString("event-actor")
+		eventTarget, _ := cmd.Flags().GetString("event-target")
+		eventPayload, _ := cmd.Flags().GetString("event-payload")
+
+		// Validate event-specific flags require --type=event
+		if (eventCategory != "" || eventActor != "" || eventTarget != "" || eventPayload != "") && issueType != "event" {
+			FatalError("--event-category, --event-actor, --event-target, and --event-payload flags require --type=event")
+		}
+
 		// Handle --rig or --prefix flag: create issue in a different rig
 		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
 		targetRig := rigOverride
@@ -273,6 +284,10 @@ var createCmd = &cobra.Command{
 				MolType:            string(molType),
 				RoleType:           roleType,
 				Rig:                agentRig,
+				EventCategory:      eventCategory,
+				EventActor:         eventActor,
+				EventTarget:        eventTarget,
+				EventPayload:       eventPayload,
 			}
 
 			resp, err := daemonClient.Create(createArgs)
@@ -322,6 +337,10 @@ var createCmd = &cobra.Command{
 			MolType:            molType,
 			RoleType:           roleType,
 			Rig:                agentRig,
+			EventKind:          eventCategory,
+			Actor:              eventActor,
+			Target:             eventTarget,
+			Payload:            eventPayload,
 		}
 
 		ctx := rootCtx
@@ -503,7 +522,7 @@ func init() {
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|convoy)")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|convoy|event)")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
@@ -523,6 +542,11 @@ func init() {
 	// Agent-specific flags (only valid when --type=agent)
 	createCmd.Flags().String("role-type", "", "Agent role type: polecat|crew|witness|refinery|mayor|deacon (requires --type=agent)")
 	createCmd.Flags().String("agent-rig", "", "Agent's rig name (requires --type=agent)")
+	// Event-specific flags (only valid when --type=event)
+	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
+	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")
+	createCmd.Flags().String("event-target", "", "Entity URI or bead ID affected (requires --type=event)")
+	createCmd.Flags().String("event-payload", "", "Event-specific JSON data (requires --type=event)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }

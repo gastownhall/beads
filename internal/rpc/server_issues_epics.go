@@ -122,6 +122,19 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Rig != nil {
 		u["rig"] = *a.Rig
 	}
+	// Event fields
+	if a.EventCategory != nil {
+		u["event_category"] = *a.EventCategory
+	}
+	if a.EventActor != nil {
+		u["event_actor"] = *a.EventActor
+	}
+	if a.EventTarget != nil {
+		u["event_target"] = *a.EventTarget
+	}
+	if a.EventPayload != nil {
+		u["event_payload"] = *a.EventPayload
+	}
 	return u
 }
 
@@ -208,6 +221,11 @@ func (s *Server) handleCreate(req *Request) Response {
 		// Agent identity fields
 		RoleType: createArgs.RoleType,
 		Rig:      createArgs.Rig,
+		// Event fields (map protocol names to internal names)
+		EventKind: createArgs.EventCategory,
+		Actor:     createArgs.EventActor,
+		Target:    createArgs.EventTarget,
+		Payload:   createArgs.EventPayload,
 	}
 	
 	// Check if any dependencies are discovered-from type

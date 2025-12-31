@@ -102,6 +102,11 @@ type CreateArgs struct {
 	// Agent identity fields (only valid when IssueType == "agent")
 	RoleType string `json:"role_type,omitempty"` // polecat|crew|witness|refinery|mayor|deacon
 	Rig      string `json:"rig,omitempty"`       // Rig name (empty for town-level agents)
+	// Event fields (only valid when IssueType == "event")
+	EventCategory string `json:"event_category,omitempty"` // Namespaced category (e.g., patrol.muted, agent.started)
+	EventActor    string `json:"event_actor,omitempty"`    // Entity URI who caused this event
+	EventTarget   string `json:"event_target,omitempty"`   // Entity URI or bead ID affected
+	EventPayload  string `json:"event_payload,omitempty"`  // Event-specific JSON data
 }
 
 // UpdateArgs represents arguments for the update operation
@@ -142,6 +147,11 @@ type UpdateArgs struct {
 	// Agent identity fields
 	RoleType *string `json:"role_type,omitempty"` // polecat|crew|witness|refinery|mayor|deacon
 	Rig      *string `json:"rig,omitempty"`       // Rig name (empty for town-level agents)
+	// Event fields (only valid when IssueType == "event")
+	EventCategory *string `json:"event_category,omitempty"` // Namespaced category (e.g., patrol.muted, agent.started)
+	EventActor    *string `json:"event_actor,omitempty"`    // Entity URI who caused this event
+	EventTarget   *string `json:"event_target,omitempty"`   // Entity URI or bead ID affected
+	EventPayload  *string `json:"event_payload,omitempty"`  // Event-specific JSON data
 }
 
 // CloseArgs represents arguments for the close operation

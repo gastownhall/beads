@@ -680,6 +680,11 @@ var allowedUpdateFields = map[string]bool{
 	"rig":           true,
 	// Molecule type field
 	"mol_type": true,
+	// Event fields
+	"event_category": true,
+	"event_actor":    true,
+	"event_target":   true,
+	"event_payload":  true,
 }
 
 // validatePriority validates a priority value
