@@ -10,6 +10,9 @@ const stillActive = 259
 
 // isProcessRunning checks if a process with the given PID is running
 func isProcessRunning(pid int) bool {
+	if pid <= 0 {
+		return false // Invalid PID
+	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false
