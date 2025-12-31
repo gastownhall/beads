@@ -41,7 +41,8 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		// - gate: async wait conditions
 		// - molecule: workflow containers
 		// - message: mail/communication items
-		whereClauses = append(whereClauses, "i.issue_type NOT IN ('merge-request', 'gate', 'molecule', 'message')")
+		// - agent: identity/state tracking beads
+		whereClauses = append(whereClauses, "i.issue_type NOT IN ('merge-request', 'gate', 'molecule', 'message', 'agent')")
 	}
 
 	if filter.Priority != nil {
