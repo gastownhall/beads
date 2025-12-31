@@ -1,52 +1,24 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 )
 
-func TestCapitalizeFirst(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"tests", "Tests"},
-		{"lint", "Lint"},
-		{"", ""},
-		{"A", "A"},
-		{"already Capitalized", "Already Capitalized"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := capitalizeFirst(tt.input)
-			if result != tt.expected {
-				t.Errorf("capitalizeFirst(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestPrintCheckResult_Passed(t *testing.T) {
-	// Capture stdout by redirecting to buffer
+func TestCheckResult_Passed(t *testing.T) {
 	r := CheckResult{
-		Name:    "tests",
+		Name:    "Tests pass",
 		Passed:  true,
 		Command: "go test ./...",
 		Output:  "",
 	}
 
-	var buf bytes.Buffer
-	// We can't easily capture stdout, so just verify the function doesn't panic
-	// and test the logic directly
 	if !r.Passed {
 		t.Error("Expected result to be passed")
 	}
-	if r.Name != "tests" {
-		t.Errorf("Expected name 'tests', got %q", r.Name)
+	if r.Name != "Tests pass" {
+		t.Errorf("Expected name 'Tests pass', got %q", r.Name)
 	}
-	_ = buf // keep compiler happy
 }
 
 func TestPrintCheckResult_Failed(t *testing.T) {
@@ -82,14 +54,14 @@ func TestCheckResult_JSONFields(t *testing.T) {
 	}
 }
 
-func TestPreflightResults_AllPassed(t *testing.T) {
-	results := PreflightResults{
+func TestPreflightResult_AllPassed(t *testing.T) {
+	results := PreflightResult{
 		Checks: []CheckResult{
-			{Name: "tests", Passed: true, Command: "go test ./..."},
-			{Name: "lint", Passed: true, Command: "golangci-lint run"},
+			{Name: "Tests pass", Passed: true, Command: "go test ./..."},
+			{Name: "Lint passes", Passed: true, Command: "golangci-lint run"},
 		},
 		Passed:  true,
-		Summary: "2 passed, 0 failed",
+		Summary: "2/2 checks passed",
 	}
 
 	if !results.Passed {
@@ -100,14 +72,14 @@ func TestPreflightResults_AllPassed(t *testing.T) {
 	}
 }
 
-func TestPreflightResults_SomeFailed(t *testing.T) {
-	results := PreflightResults{
+func TestPreflightResult_SomeFailed(t *testing.T) {
+	results := PreflightResult{
 		Checks: []CheckResult{
-			{Name: "tests", Passed: true, Command: "go test ./..."},
-			{Name: "lint", Passed: false, Command: "golangci-lint run", Output: "linting errors"},
+			{Name: "Tests pass", Passed: true, Command: "go test ./..."},
+			{Name: "Lint passes", Passed: false, Command: "golangci-lint run", Output: "linting errors"},
 		},
 		Passed:  false,
-		Summary: "1 passed, 1 failed",
+		Summary: "1/2 checks passed",
 	}
 
 	if results.Passed {
@@ -128,28 +100,34 @@ func TestPreflightResults_SomeFailed(t *testing.T) {
 	}
 }
 
-func TestOutputTruncation(t *testing.T) {
-	// Test that long output is properly truncated
-	lines := make([]string, 100)
-	for i := range lines {
-		lines[i] = "ok  	github.com/example/pkg" + strings.Repeat("x", 50)
+func TestTruncateOutput(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		wantTrunc bool
+	}{
+		{"short string", "hello world", 500, false},
+		{"exact length", strings.Repeat("x", 500), 500, false},
+		{"over length", strings.Repeat("x", 600), 500, true},
+		{"empty string", "", 500, false},
 	}
-	output := strings.Join(lines, "\n")
 
-	// Simulate the truncation logic
-	if len(output) > 3000 {
-		splitLines := strings.Split(output, "\n")
-		if len(splitLines) > 50 {
-			firstPart := strings.Join(splitLines[:30], "\n")
-			lastPart := strings.Join(splitLines[len(splitLines)-20:], "\n")
-			truncated := firstPart + "\n\n...(truncated)...\n\n" + lastPart
-
-			if !strings.Contains(truncated, "truncated") {
-				t.Error("Expected truncation marker in output")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateOutput(tt.input, tt.maxLen)
+			if tt.wantTrunc {
+				if !strings.Contains(result, "truncated") {
+					t.Error("Expected truncation marker in output")
+				}
+				if len(result) > tt.maxLen+20 { // allow some slack for marker
+					t.Errorf("Result too long: got %d chars", len(result))
+				}
+			} else {
+				if strings.Contains(result, "truncated") {
+					t.Error("Did not expect truncation marker")
+				}
 			}
-			if len(strings.Split(truncated, "\n")) > 55 {
-				t.Error("Truncated output should be around 50 lines plus marker")
-			}
-		}
+		})
 	}
 }
