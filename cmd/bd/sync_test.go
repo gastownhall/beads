@@ -746,3 +746,151 @@ func TestResolveNoGitHistoryForFromMain(t *testing.T) {
 		})
 	}
 }
+
+// TestGetGitCommonDir tests that getGitCommonDir correctly returns the shared
+// git directory for both regular repos and worktrees.
+func TestGetGitCommonDir(t *testing.T) {
+	ctx := context.Background()
+
+	// Test 1: Regular repo
+	t.Run("regular repo", func(t *testing.T) {
+		repoDir, cleanup := setupGitRepo(t)
+		defer cleanup()
+
+		commonDir, err := getGitCommonDir(ctx, repoDir)
+		if err != nil {
+			t.Fatalf("getGitCommonDir failed: %v", err)
+		}
+
+		// For a regular repo, git-common-dir should point to .git
+		expectedGitDir := filepath.Join(repoDir, ".git")
+		// Resolve symlinks for comparison (macOS /var -> /private/var)
+		if resolved, err := filepath.EvalSymlinks(expectedGitDir); err == nil {
+			expectedGitDir = resolved
+		}
+		if commonDir != expectedGitDir {
+			t.Errorf("getGitCommonDir = %q, want %q", commonDir, expectedGitDir)
+		}
+	})
+
+	// Test 2: Worktree (non-bare) shares common dir with main repo
+	t.Run("worktree shares common dir with main repo", func(t *testing.T) {
+		repoDir, cleanup := setupGitRepo(t)
+		defer cleanup()
+
+		// Create a branch for the worktree
+		if err := exec.Command("git", "-C", repoDir, "branch", "test-branch").Run(); err != nil {
+			t.Fatalf("git branch failed: %v", err)
+		}
+
+		// Create worktree
+		worktreeDir := filepath.Join(t.TempDir(), "worktree")
+		if output, err := exec.Command("git", "-C", repoDir, "worktree", "add", worktreeDir, "test-branch").CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add failed: %v\n%s", err, output)
+		}
+
+		// Get common dir for both
+		mainCommonDir, err := getGitCommonDir(ctx, repoDir)
+		if err != nil {
+			t.Fatalf("getGitCommonDir(main) failed: %v", err)
+		}
+
+		worktreeCommonDir, err := getGitCommonDir(ctx, worktreeDir)
+		if err != nil {
+			t.Fatalf("getGitCommonDir(worktree) failed: %v", err)
+		}
+
+		// Both should return the same common dir
+		if mainCommonDir != worktreeCommonDir {
+			t.Errorf("common dirs differ: main=%q, worktree=%q", mainCommonDir, worktreeCommonDir)
+		}
+	})
+}
+
+// TestIsExternalBeadsDir tests that isExternalBeadsDir correctly identifies
+// when beads directory is in the same vs different git repo.
+// GH#810: This was broken for bare repo worktrees.
+func TestIsExternalBeadsDir(t *testing.T) {
+	ctx := context.Background()
+
+	// Test 1: Same directory - not external
+	t.Run("same directory is not external", func(t *testing.T) {
+		repoDir, cleanup := setupGitRepo(t)
+		defer cleanup()
+
+		beadsDir := filepath.Join(repoDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+
+		// Change to the repo directory (isExternalBeadsDir uses cwd)
+		origDir, _ := os.Getwd()
+		if err := os.Chdir(repoDir); err != nil {
+			t.Fatalf("chdir failed: %v", err)
+		}
+		defer func() { _ = os.Chdir(origDir) }()
+
+		if isExternalBeadsDir(ctx, beadsDir) {
+			t.Error("expected local beads dir to not be external")
+		}
+	})
+
+	// Test 2: Different repo - is external
+	t.Run("different repo is external", func(t *testing.T) {
+		repo1Dir, cleanup1 := setupGitRepo(t)
+		defer cleanup1()
+		repo2Dir, cleanup2 := setupGitRepo(t)
+		defer cleanup2()
+
+		beadsDir := filepath.Join(repo2Dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+
+		// Change to repo1
+		origDir, _ := os.Getwd()
+		if err := os.Chdir(repo1Dir); err != nil {
+			t.Fatalf("chdir failed: %v", err)
+		}
+		defer func() { _ = os.Chdir(origDir) }()
+
+		if !isExternalBeadsDir(ctx, beadsDir) {
+			t.Error("expected beads dir in different repo to be external")
+		}
+	})
+
+	// Test 3: Worktree with beads - not external (GH#810 fix)
+	t.Run("worktree beads dir is not external", func(t *testing.T) {
+		repoDir, cleanup := setupGitRepo(t)
+		defer cleanup()
+
+		// Create a branch for the worktree
+		if err := exec.Command("git", "-C", repoDir, "branch", "test-branch").Run(); err != nil {
+			t.Fatalf("git branch failed: %v", err)
+		}
+
+		// Create worktree
+		worktreeDir := filepath.Join(t.TempDir(), "worktree")
+		if output, err := exec.Command("git", "-C", repoDir, "worktree", "add", worktreeDir, "test-branch").CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add failed: %v\n%s", err, output)
+		}
+
+		// Create beads dir in worktree
+		beadsDir := filepath.Join(worktreeDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+
+		// Change to worktree
+		origDir, _ := os.Getwd()
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("chdir failed: %v", err)
+		}
+		defer func() { _ = os.Chdir(origDir) }()
+
+		// Beads dir in same worktree should NOT be external
+		if isExternalBeadsDir(ctx, beadsDir) {
+			t.Error("expected beads dir in same worktree to not be external")
+		}
+	})
+}

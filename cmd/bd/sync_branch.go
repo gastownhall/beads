@@ -183,20 +183,56 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 // isExternalBeadsDir checks if the beads directory is in a different git repo than cwd.
 // This is used to detect when BEADS_DIR points to a separate repository.
 // Contributed by dand-oss (https://github.com/steveyegge/beads/pull/533)
+//
+// GH#810: Use git-common-dir for comparison instead of repo root.
+// For bare repo worktrees, GetRepoRoot returns incorrect values, causing
+// local worktrees to be incorrectly identified as "external". Using
+// git-common-dir correctly identifies that worktrees of the same repo
+// share the same git directory.
 func isExternalBeadsDir(ctx context.Context, beadsDir string) bool {
-	// Get repo root of cwd
-	cwdRepoRoot, err := syncbranch.GetRepoRoot(ctx)
+	// Get git common dir of cwd
+	cwdCommonDir, err := getGitCommonDir(ctx, ".")
 	if err != nil {
 		return false // Can't determine, assume local
 	}
 
-	// Get repo root of beads dir
-	beadsRepoRoot, err := getRepoRootFromPath(ctx, beadsDir)
+	// Get git common dir of beads dir
+	beadsCommonDir, err := getGitCommonDir(ctx, beadsDir)
 	if err != nil {
 		return false // Can't determine, assume local
 	}
 
-	return cwdRepoRoot != beadsRepoRoot
+	return cwdCommonDir != beadsCommonDir
+}
+
+// getGitCommonDir returns the shared git directory for a path.
+// For regular repos, this is the .git directory.
+// For worktrees, this returns the shared git directory (common to all worktrees).
+// This is the correct way to determine if two paths are in the same git repo,
+// especially for bare repos and worktrees.
+// GH#810: Added to fix bare repo worktree detection.
+func getGitCommonDir(ctx context.Context, path string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir for %s: %w", path, err)
+	}
+	result := strings.TrimSpace(string(output))
+	// Make absolute for reliable comparison
+	if !filepath.IsAbs(result) {
+		// Resolve the input path to absolute first
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to get absolute path for %s: %w", path, err)
+		}
+		result = filepath.Join(absPath, result)
+	}
+	result = filepath.Clean(result)
+	// Resolve symlinks for consistent comparison (macOS /var -> /private/var)
+	if resolved, err := filepath.EvalSymlinks(result); err == nil {
+		result = resolved
+	}
+	return result, nil
 }
 
 // getRepoRootFromPath returns the git repository root for a given path.
