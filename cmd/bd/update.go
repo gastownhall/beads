@@ -143,10 +143,17 @@ create, update, show, or close operation).`,
 
 		ctx := rootCtx
 
-		// Resolve partial IDs first
+		// Resolve partial IDs first, checking for cross-rig routing
 		var resolvedIDs []string
+		var routedArgs []string // IDs that need cross-repo routing (bypass daemon)
 		if daemonClient != nil {
+			// In daemon mode, resolve via RPC - but check routing first
 			for _, id := range args {
+				// Check if this ID needs routing to a different beads directory
+				if needsRouting(id) {
+					routedArgs = append(routedArgs, id)
+					continue
+				}
 				resolveArgs := &rpc.ResolveIDArgs{ID: id}
 				resp, err := daemonClient.ResolveID(resolveArgs)
 				if err != nil {
@@ -250,6 +257,104 @@ create, update, show, or close operation).`,
 				if firstUpdatedID == "" {
 					firstUpdatedID = id
 				}
+			}
+
+			// Handle routed IDs via direct mode (bypass daemon)
+			for _, id := range routedArgs {
+				result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+				if err != nil {
+					if result != nil {
+						result.Close()
+					}
+					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+					continue
+				}
+				if result == nil || result.Issue == nil {
+					if result != nil {
+						result.Close()
+					}
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					continue
+				}
+				issue := result.Issue
+				issueStore := result.Store
+
+				if err := validateIssueUpdatable(id, issue); err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					result.Close()
+					continue
+				}
+
+				// Handle claim operation atomically
+				if claimFlag {
+					if issue.Assignee != "" {
+						fmt.Fprintf(os.Stderr, "Error claiming %s: already claimed by %s\n", id, issue.Assignee)
+						result.Close()
+						continue
+					}
+					claimUpdates := map[string]interface{}{
+						"assignee": actor,
+						"status":   "in_progress",
+					}
+					if err := issueStore.UpdateIssue(ctx, result.ResolvedID, claimUpdates, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+						result.Close()
+						continue
+					}
+				}
+
+				// Apply regular field updates if any
+				regularUpdates := make(map[string]interface{})
+				for k, v := range updates {
+					if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" {
+						regularUpdates[k] = v
+					}
+				}
+				if len(regularUpdates) > 0 {
+					if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+						result.Close()
+						continue
+					}
+				}
+
+				// Handle label operations
+				var setLabels, addLabels, removeLabels []string
+				if v, ok := updates["set_labels"].([]string); ok {
+					setLabels = v
+				}
+				if v, ok := updates["add_labels"].([]string); ok {
+					addLabels = v
+				}
+				if v, ok := updates["remove_labels"].([]string); ok {
+					removeLabels = v
+				}
+				if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
+					if err := applyLabelUpdates(ctx, issueStore, result.ResolvedID, actor, setLabels, addLabels, removeLabels); err != nil {
+						fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
+						result.Close()
+						continue
+					}
+				}
+
+				// Run update hook
+				updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
+				if updatedIssue != nil && hookRunner != nil {
+					hookRunner.Run(hooks.EventUpdate, updatedIssue)
+				}
+
+				if jsonOutput {
+					if updatedIssue != nil {
+						updatedIssues = append(updatedIssues, updatedIssue)
+					}
+				} else {
+					fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), result.ResolvedID)
+				}
+
+				if firstUpdatedID == "" {
+					firstUpdatedID = result.ResolvedID
+				}
+				result.Close()
 			}
 
 			if jsonOutput && len(updatedIssues) > 0 {
