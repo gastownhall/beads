@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,17 +22,17 @@ daemon.log
 daemon.pid
 bd.sock
 sync-state.json
-last-touched
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
-# Worktree redirect file (created by bd worktree, points to main repo's .beads)
-redirect
-
 # Legacy database files
 db.sqlite
 bd.db
+
+# Worktree redirect file (contains relative path to main repo's .beads/)
+# Must not be committed as paths would be wrong in other clones
+redirect
 
 # Merge artifacts (temporary files from 3-way merge)
 beads.base.jsonl
@@ -57,7 +58,7 @@ var requiredPatterns = []string{
 	"beads.left.meta.json",
 	"beads.right.meta.json",
 	"*.db?*",
-	"redirect", // worktree redirect files should never be committed
+	"redirect",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date
@@ -127,79 +128,6 @@ func FixGitignore() error {
 	return nil
 }
 
-// CheckRedirectNotTracked verifies that .beads/redirect is NOT tracked by git.
-// Redirect files are created by bd worktree and should never be committed.
-// If accidentally committed (e.g., via git add .), they cause "redirect target does not exist"
-// warnings in other clones.
-func CheckRedirectNotTracked() DoctorCheck {
-	redirectPath := filepath.Join(".beads", "redirect")
-
-	// Check if file exists
-	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
-		// File doesn't exist - nothing to check
-		return DoctorCheck{
-			Name:    "Redirect Not Tracked",
-			Status:  StatusOK,
-			Message: "No redirect file (not a worktree)",
-		}
-	}
-
-	// Check if git tracks this file
-	// git ls-files exits 0 and outputs filename if tracked, empty if not
-	cmd := exec.Command("git", "ls-files", redirectPath)
-	output, err := cmd.Output()
-	if err != nil {
-		// Not in a git repo or other error - skip
-		return DoctorCheck{
-			Name:    "Redirect Not Tracked",
-			Status:  StatusOK,
-			Message: "N/A (not a git repository)",
-		}
-	}
-
-	if strings.TrimSpace(string(output)) != "" {
-		// File is tracked - this is bad
-		return DoctorCheck{
-			Name:    "Redirect Not Tracked",
-			Status:  StatusWarning,
-			Message: "Redirect file is tracked by git",
-			Detail:  "The .beads/redirect file was accidentally committed. This causes 'redirect target does not exist' warnings in other clones.",
-			Fix:     "Run 'bd doctor --fix' to untrack, or manually: git rm --cached .beads/redirect",
-		}
-	}
-
-	return DoctorCheck{
-		Name:    "Redirect Not Tracked",
-		Status:  StatusOK,
-		Message: "Redirect file not tracked (correct)",
-	}
-}
-
-// FixRedirectTracking untracks .beads/redirect if it was accidentally committed.
-func FixRedirectTracking() error {
-	redirectPath := filepath.Join(".beads", "redirect")
-
-	// Check if file exists
-	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
-		return nil // Nothing to fix
-	}
-
-	// Check if tracked
-	cmd := exec.Command("git", "ls-files", redirectPath)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil // Not in a git repo
-	}
-
-	if strings.TrimSpace(string(output)) == "" {
-		return nil // Not tracked, nothing to fix
-	}
-
-	// Untrack the file (keep it on disk)
-	cmd = exec.Command("git", "rm", "--cached", redirectPath)
-	return cmd.Run()
-}
-
 // CheckIssuesTracking verifies that issues.jsonl is tracked by git.
 // This catches cases where global gitignore patterns (e.g., *.jsonl) would
 // cause issues.jsonl to be ignored, breaking bd sync.
@@ -243,4 +171,78 @@ func CheckIssuesTracking() DoctorCheck {
 		Status:  "ok",
 		Message: "issues.jsonl is tracked by git",
 	}
+}
+
+// CheckRedirectNotTracked verifies that .beads/redirect is NOT tracked by git.
+// Redirect files contain relative paths that only work in the original worktree.
+// If committed, they cause warnings in other clones where the path is invalid.
+func CheckRedirectNotTracked() DoctorCheck {
+	redirectPath := filepath.Join(".beads", "redirect")
+
+	// First check if the file exists
+	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
+		// File doesn't exist - nothing to check
+		return DoctorCheck{
+			Name:    "Redirect Tracking",
+			Status:  StatusOK,
+			Message: "No redirect file present",
+		}
+	}
+
+	// Check if git considers this file tracked
+	// git ls-files exits 0 and outputs the filename if tracked, empty if untracked
+	cmd := exec.Command("git", "ls-files", redirectPath)
+	output, err := cmd.Output()
+	if err != nil {
+		// Not in a git repo or git error - skip check
+		return DoctorCheck{
+			Name:    "Redirect Tracking",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	trackedPath := strings.TrimSpace(string(output))
+	if trackedPath == "" {
+		// File exists but is not tracked - this is correct
+		return DoctorCheck{
+			Name:    "Redirect Tracking",
+			Status:  StatusOK,
+			Message: "redirect file not tracked (correct)",
+		}
+	}
+
+	// File is tracked - this is a problem
+	return DoctorCheck{
+		Name:    "Redirect Tracking",
+		Status:  StatusWarning,
+		Message: "redirect file is tracked by git",
+		Detail:  "The .beads/redirect file contains a relative path that only works in this worktree. When committed, it causes warnings in other clones.",
+		Fix:     "Run 'bd doctor --fix' to untrack, or manually: git rm --cached .beads/redirect",
+	}
+}
+
+// FixRedirectTracking untracks the .beads/redirect file from git
+func FixRedirectTracking() error {
+	redirectPath := filepath.Join(".beads", "redirect")
+
+	// Check if file is actually tracked first
+	cmd := exec.Command("git", "ls-files", redirectPath)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil // Not a git repo, nothing to do
+	}
+
+	trackedPath := strings.TrimSpace(string(output))
+	if trackedPath == "" {
+		return nil // Not tracked, nothing to do
+	}
+
+	// Untrack the file (keeps the local copy)
+	cmd = exec.Command("git", "rm", "--cached", redirectPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to untrack redirect file: %w", err)
+	}
+
+	return nil
 }
