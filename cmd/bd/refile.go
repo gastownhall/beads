@@ -54,6 +54,11 @@ Examples:
 		sourceIssue := result.Issue
 		resolvedSourceID := result.ResolvedID
 
+		// Warn if source issue is already closed
+		if sourceIssue.Status == types.StatusClosed {
+			fmt.Fprintf(os.Stderr, "%s Source issue %s is already closed\n", ui.RenderWarn("⚠"), resolvedSourceID)
+		}
+
 		// Step 2: Find the town-level beads directory
 		townBeadsDir, err := findTownBeadsDir()
 		if err != nil {
@@ -97,8 +102,12 @@ Examples:
 			Assignee:           sourceIssue.Assignee,
 			ExternalRef:        sourceIssue.ExternalRef,
 			EstimatedMinutes:   sourceIssue.EstimatedMinutes,
+			SourceRepo:         sourceIssue.SourceRepo,
+			Ephemeral:          sourceIssue.Ephemeral,
+			MolType:            sourceIssue.MolType,
+			RoleType:           sourceIssue.RoleType,
+			Rig:                sourceIssue.Rig,
 			CreatedBy:          actor,
-			// Add note about origin
 		}
 
 		// Append refiled note to description
@@ -115,7 +124,9 @@ Examples:
 		labels, err := result.Store.GetLabels(ctx, resolvedSourceID)
 		if err == nil && len(labels) > 0 {
 			for _, label := range labels {
-				_ = targetStore.AddLabel(ctx, newIssue.ID, label, actor)
+				if err := targetStore.AddLabel(ctx, newIssue.ID, label, actor); err != nil {
+					WarnError("failed to copy label %s: %v", label, err)
+				}
 			}
 		}
 
@@ -124,6 +135,10 @@ Examples:
 			closeReason := fmt.Sprintf("Refiled to %s", newIssue.ID)
 			if err := result.Store.CloseIssue(ctx, resolvedSourceID, closeReason, actor); err != nil {
 				WarnError("failed to close source issue: %v", err)
+			}
+			// Schedule auto-flush if source was local store
+			if !result.Routed {
+				markDirtyAndScheduleFlush()
 			}
 		}
 
