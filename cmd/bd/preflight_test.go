@@ -100,6 +100,32 @@ func TestPreflightResult_SomeFailed(t *testing.T) {
 	}
 }
 
+func TestPreflightResult_WithSkipped(t *testing.T) {
+	results := PreflightResult{
+		Checks: []CheckResult{
+			{Name: "Tests pass", Passed: true, Command: "go test ./..."},
+			{Name: "Lint passes", Passed: false, Skipped: true, Command: "golangci-lint run", Output: "not installed"},
+		},
+		Passed:  true,
+		Summary: "1/1 checks passed (1 skipped)",
+	}
+
+	// Skipped checks don't count as failures
+	if !results.Passed {
+		t.Error("Expected result to pass (skipped doesn't count as failure)")
+	}
+
+	skipCount := 0
+	for _, c := range results.Checks {
+		if c.Skipped {
+			skipCount++
+		}
+	}
+	if skipCount != 1 {
+		t.Errorf("Expected 1 skipped, got %d", skipCount)
+	}
+}
+
 func TestTruncateOutput(t *testing.T) {
 	tests := []struct {
 		name     string

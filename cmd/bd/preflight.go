@@ -14,6 +14,7 @@ import (
 type CheckResult struct {
 	Name    string `json:"name"`
 	Passed  bool   `json:"passed"`
+	Skipped bool   `json:"skipped,omitempty"`
 	Output  string `json:"output,omitempty"`
 	Command string `json:"command"`
 }
@@ -89,18 +90,29 @@ func runChecks(jsonOutput bool) {
 	testResult := runTestCheck()
 	results = append(results, testResult)
 
+	// Run lint check
+	lintResult := runLintCheck()
+	results = append(results, lintResult)
+
 	// Calculate overall result
 	allPassed := true
 	passCount := 0
+	skipCount := 0
 	for _, r := range results {
-		if r.Passed {
+		if r.Skipped {
+			skipCount++
+		} else if r.Passed {
 			passCount++
 		} else {
 			allPassed = false
 		}
 	}
 
-	summary := fmt.Sprintf("%d/%d checks passed", passCount, len(results))
+	runCount := len(results) - skipCount
+	summary := fmt.Sprintf("%d/%d checks passed", passCount, runCount)
+	if skipCount > 0 {
+		summary += fmt.Sprintf(" (%d skipped)", skipCount)
+	}
 
 	if jsonOutput {
 		result := PreflightResult{
@@ -114,13 +126,18 @@ func runChecks(jsonOutput bool) {
 	} else {
 		// Human-readable output
 		for _, r := range results {
-			if r.Passed {
+			if r.Skipped {
+				fmt.Printf("⚠ %s (skipped)\n", r.Name)
+			} else if r.Passed {
 				fmt.Printf("✓ %s\n", r.Name)
 			} else {
 				fmt.Printf("✗ %s\n", r.Name)
 			}
 			fmt.Printf("  Command: %s\n", r.Command)
-			if !r.Passed && r.Output != "" {
+			if r.Skipped && r.Output != "" {
+				// Show skip reason
+				fmt.Printf("  Reason: %s\n", r.Output)
+			} else if !r.Passed && r.Output != "" {
 				// Truncate output for terminal display
 				output := truncateOutput(r.Output, 500)
 				fmt.Printf("  Output:\n")
@@ -146,6 +163,32 @@ func runTestCheck() CheckResult {
 
 	return CheckResult{
 		Name:    "Tests pass",
+		Passed:  err == nil,
+		Output:  string(output),
+		Command: command,
+	}
+}
+
+// runLintCheck runs golangci-lint and returns the result.
+func runLintCheck() CheckResult {
+	command := "golangci-lint run ./..."
+
+	// Check if golangci-lint is available
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		return CheckResult{
+			Name:    "Lint passes",
+			Passed:  false,
+			Skipped: true,
+			Output:  "golangci-lint not found in PATH",
+			Command: command,
+		}
+	}
+
+	cmd := exec.Command("golangci-lint", "run", "./...")
+	output, err := cmd.CombinedOutput()
+
+	return CheckResult{
+		Name:    "Lint passes",
 		Passed:  err == nil,
 		Output:  string(output),
 		Command: command,
