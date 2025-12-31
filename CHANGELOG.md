@@ -5,6 +5,61 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0] - 2025-12-30
+
+### Added
+
+- **`llms.txt` standard support** - AI agent discoverability (#784)
+  - Standard endpoint for AI agents to discover project info
+  - Helps LLM-powered tools understand your project
+
+- **`bd preflight` command** - PR readiness checks
+  - Static checklist for pre-commit/pre-push verification
+  - Phase 1 implementation with test, lint, and version checks planned
+
+- **`--claim` flag for `bd update`** - Work queue semantics
+  - Atomic claim-and-assign for multi-agent coordination
+  - Prevents race conditions in work assignment
+
+- **`bd state` and `bd set-state`** - Label-based state management
+  - Helper commands for operational state patterns
+  - Documents labels-as-state pattern
+
+- **`bd activity --town`** - Cross-rig activity feed
+  - Aggregated view across all rigs in town
+  - Better visibility into multi-rig workflows
+
+- **Convoy issue type** - Reactive completion tracking
+  - Issues that complete when all tracked items complete
+  - `tracks` relation type for convoy membership
+
+- **Agent identity trailers** - prepare-commit-msg hook
+  - Automatically adds agent identity to commits
+  - Structured labels for agent beads
+
+- **Daemon RPC endpoints** - Config and mol stale
+  - Remote config queries via daemon
+  - Stale molecule detection endpoint
+
+- **Non-TTY auto-detection** - Cleaner output in pipes
+  - Automatically adjusts output for non-interactive use
+
+### Fixed
+
+- **Git hook chaining** now works correctly (GH#816)
+- **`.beads/redirect` not committed** - Prevents worktree conflicts (GH#814)
+- **`bd sync` with sync-branch** - Fixes worktree copy direction (GH#810, #812)
+- **`sync.branch` validation** - Rejects main/master as sync branch (GH#807)
+- **Read operations read-only** - No more database writes on list/ready/show (GH#804)
+- **`bd list` defaults** - Non-closed issues, 50 limit to protect context (GH#788)
+- **External direct-commit bypass** - When sync.branch configured (bd-n663)
+- **Migration 022 syntax** - SQL error on v0.30.3 upgrade path
+- **MCP redirect support** - Plugin follows .beads/redirect files
+- **Jira sync error** - Better message when Python script not found (GH#803)
+- **Doctor false positives** - For molecule/wisp prefix variants
+- **BD_ACTOR in direct mode** - Consistent actor handling
+- **Label accumulation** - When updating agent role_type/rig
+
 ## [0.41.0] - 2025-12-29
 
 ### Added

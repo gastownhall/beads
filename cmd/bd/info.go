@@ -297,6 +297,31 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.42.0",
+		Date:    "2025-12-30",
+		Changes: []string{
+			"NEW: llms.txt standard support - AI agent discoverability endpoint (#784)",
+			"NEW: bd preflight command - PR readiness checks (Phase 1)",
+			"NEW: --claim flag for bd update - Atomic work queue semantics",
+			"NEW: bd state/set-state commands - Label-based state management",
+			"NEW: bd activity --town - Cross-rig aggregated activity feed",
+			"NEW: Convoy issue type - Reactive completion with 'tracks' relation",
+			"NEW: prepare-commit-msg hook - Agent identity trailers in commits",
+			"NEW: Daemon RPC endpoints - Config and mol stale queries",
+			"NEW: Non-TTY auto-detection - Cleaner output in pipes",
+			"FIX: Git hook chaining now works correctly (GH#816)",
+			"FIX: .beads/redirect not committed - Prevents worktree conflicts (GH#814)",
+			"FIX: bd sync with sync-branch - Worktree copy direction fixed (GH#810, #812)",
+			"FIX: sync.branch validation - Rejects main/master as sync branch (GH#807)",
+			"FIX: Read operations read-only - No DB writes on list/ready/show (GH#804)",
+			"FIX: bd list defaults - Non-closed issues, 50 limit (GH#788)",
+			"FIX: External direct-commit bypass when sync.branch configured (bd-n663)",
+			"FIX: Migration 022 SQL syntax error on v0.30.3 upgrade",
+			"FIX: MCP plugin follows .beads/redirect files",
+			"FIX: Jira sync error message when Python script not found (GH#803)",
+		},
+	},
+	{
 		Version: "0.41.0",
 		Date:    "2025-12-29",
 		Changes: []string{
