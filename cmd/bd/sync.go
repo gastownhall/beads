@@ -518,6 +518,10 @@ Use --merge to merge the sync branch back to main branch.`,
 						fmt.Printf("✓ Pushed %s to remote\n", syncBranchName)
 						pushedViaSyncBranch = true
 					}
+				} else {
+					// GH#812: When useSyncBranch is true, we always attempt commit
+					// (bypassing gitHasBeadsChanges). Report when worktree has no changes.
+					fmt.Println("→ No changes to commit")
 				}
 			} else {
 				// Regular commit to current branch
