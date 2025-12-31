@@ -10,6 +10,19 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// lookupIssueMeta fetches title and assignee for mutation events.
+// Returns empty strings on error (acceptable for non-critical mutation metadata).
+func (s *Server) lookupIssueMeta(ctx context.Context, issueID string) (title, assignee string) {
+	if s.storage == nil {
+		return "", ""
+	}
+	issue, err := s.storage.GetIssue(ctx, issueID)
+	if err != nil || issue == nil {
+		return "", ""
+	}
+	return issue.Title, issue.Assignee
+}
+
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
 func isChildOf(childID, parentID string) bool {
@@ -64,8 +77,8 @@ func (s *Server) handleDepAdd(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	// Title/assignee empty for dependency operations (would require extra lookup)
-	s.emitMutation(MutationUpdate, depArgs.FromID, "", "")
+	title, assignee := s.lookupIssueMeta(ctx, depArgs.FromID)
+	s.emitMutation(MutationUpdate, depArgs.FromID, title, assignee)
 
 	return Response{Success: true}
 }
@@ -97,8 +110,8 @@ func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc 
 	}
 
 	// Emit mutation event for event-driven daemon
-	// Title/assignee empty for simple store operations (would require extra lookup)
-	s.emitMutation(MutationUpdate, issueID, "", "")
+	title, assignee := s.lookupIssueMeta(ctx, issueID)
+	s.emitMutation(MutationUpdate, issueID, title, assignee)
 
 	return Response{Success: true}
 }
@@ -172,8 +185,8 @@ func (s *Server) handleCommentAdd(req *Request) Response {
 	}
 
 	// Emit mutation event for event-driven daemon
-	// Title/assignee empty for comment operations (would require extra lookup)
-	s.emitMutation(MutationComment, commentArgs.ID, "", "")
+	title, assignee := s.lookupIssueMeta(ctx, commentArgs.ID)
+	s.emitMutation(MutationComment, commentArgs.ID, title, assignee)
 
 	data, _ := json.Marshal(comment)
 	return Response{
