@@ -3,6 +3,7 @@ package syncbranch
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/sqlite"
@@ -216,10 +217,37 @@ func TestSet(t *testing.T) {
 	t.Run("rejects invalid branch name", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		err := Set(ctx, store, "invalid..branch")
 		if err == nil {
 			t.Error("Set() expected error for invalid branch name, got nil")
+		}
+	})
+
+	// GH#807: Verify Set() rejects main/master (not just ValidateSyncBranchName)
+	t.Run("rejects main as sync branch", func(t *testing.T) {
+		store := newTestStore(t)
+		defer store.Close()
+
+		err := Set(ctx, store, "main")
+		if err == nil {
+			t.Error("Set() expected error for 'main', got nil")
+		}
+		if err != nil && !strings.Contains(err.Error(), "cannot use 'main'") {
+			t.Errorf("Set() error should mention 'cannot use main', got: %v", err)
+		}
+	})
+
+	t.Run("rejects master as sync branch", func(t *testing.T) {
+		store := newTestStore(t)
+		defer store.Close()
+
+		err := Set(ctx, store, "master")
+		if err == nil {
+			t.Error("Set() expected error for 'master', got nil")
+		}
+		if err != nil && !strings.Contains(err.Error(), "cannot use 'master'") {
+			t.Errorf("Set() error should mention 'cannot use master', got: %v", err)
 		}
 	})
 }
