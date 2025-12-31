@@ -2,7 +2,7 @@
   "formula": "beads-release",
   "type": "workflow",
   "description": "Beads release workflow - from version bump to verified release.\n\nThis formula orchestrates a complete release cycle:\n1. Preflight checks (clean git, synced beads, up to date)\n2. Documentation updates (CHANGELOG, info.go)\n3. Version bump (all components)\n4. Git operations (commit, tag, push)\n5. CI verification (GitHub Actions)\n6. Artifact verification (GitHub, npm, PyPI)\n7. Local installation update (with verification gate)\n8. Daemon restart (with version verification)\n9. Post-release cleanup\n\n## Usage\n\n```bash\nbd wisp create beads-release --var version=0.37.0\n```\n\nOr assign to a polecat:\n```bash\ngt sling beads/polecats/p1 --formula beads-release --var version=0.37.0\n```",
-  "version": 2,
+  "version": 1,
   "vars": {
     "version": {
       "description": "The semantic version to release (e.g., 0.37.0)",
