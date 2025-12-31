@@ -183,7 +183,9 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 	}
 
 	// Copy data from old table to new table (excluding deprecated columns)
-	_, err = db.Exec(`
+	// NOTE: We use fmt.Sprintf here (not db.Exec parameters) because we're interpolating
+	// column names/expressions, not values. db.Exec parameters only work for VALUES.
+	copySQL := fmt.Sprintf(`
 		INSERT INTO issues_new (
 			id, content_hash, title, description, design, acceptance_criteria,
 			notes, status, priority, issue_type, assignee, estimated_minutes,
@@ -203,6 +205,7 @@ func MigrateDropEdgeColumns(db *sql.DB) error {
 			COALESCE(close_reason, '')
 		FROM issues
 	`, pinnedExpr, isTemplateExpr, awaitTypeExpr, awaitIDExpr, timeoutNsExpr, waitersExpr)
+	_, err = db.Exec(copySQL)
 	if err != nil {
 		return fmt.Errorf("failed to copy issues data: %w", err)
 	}
