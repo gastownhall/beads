@@ -17,9 +17,22 @@ var closeCmd = &cobra.Command{
 	Use:     "close [id...]",
 	GroupID: "issues",
 	Short:   "Close one or more issues",
-	Args:    cobra.MinimumNArgs(1),
+	Long: `Close one or more issues.
+
+If no issue ID is provided, closes the last touched issue (from most recent
+create, update, show, or close operation).`,
+	Args: cobra.MinimumNArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("close")
+
+		// If no IDs provided, use last touched issue
+		if len(args) == 0 {
+			lastTouched := GetLastTouchedID()
+			if lastTouched == "" {
+				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+			}
+			args = []string{lastTouched}
+		}
 		reason, _ := cmd.Flags().GetString("reason")
 		if reason == "" {
 			// Check --resolution alias (Jira CLI convention)

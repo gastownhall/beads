@@ -18,9 +18,23 @@ var updateCmd = &cobra.Command{
 	Use:     "update [id...]",
 	GroupID: "issues",
 	Short:   "Update one or more issues",
-	Args:    cobra.MinimumNArgs(1),
+	Long: `Update one or more issues.
+
+If no issue ID is provided, updates the last touched issue (from most recent
+create, update, show, or close operation).`,
+	Args: cobra.MinimumNArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("update")
+
+		// If no IDs provided, use last touched issue
+		if len(args) == 0 {
+			lastTouched := GetLastTouchedID()
+			if lastTouched == "" {
+				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+			}
+			args = []string{lastTouched}
+		}
+
 		updates := make(map[string]interface{})
 
 		if cmd.Flags().Changed("status") {
@@ -141,6 +155,7 @@ var updateCmd = &cobra.Command{
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			updatedIssues := []*types.Issue{}
+			var firstUpdatedID string // Track first successful update for last-touched
 			for _, id := range resolvedIDs {
 				updateArgs := &rpc.UpdateArgs{ID: id}
 
@@ -213,16 +228,27 @@ var updateCmd = &cobra.Command{
 				if !jsonOutput {
 					fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 				}
+
+				// Track first successful update for last-touched
+				if firstUpdatedID == "" {
+					firstUpdatedID = id
+				}
 			}
 
 			if jsonOutput && len(updatedIssues) > 0 {
 				outputJSON(updatedIssues)
+			}
+
+			// Set last touched after all updates complete
+			if firstUpdatedID != "" {
+				SetLastTouchedID(firstUpdatedID)
 			}
 			return
 		}
 
 		// Direct mode
 		updatedIssues := []*types.Issue{}
+		var firstUpdatedID string // Track first successful update for last-touched
 		for _, id := range resolvedIDs {
 			// Check if issue is a template: templates are read-only
 			issue, err := store.GetIssue(ctx, id)
@@ -324,6 +350,16 @@ var updateCmd = &cobra.Command{
 			} else {
 				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 			}
+
+			// Track first successful update for last-touched
+			if firstUpdatedID == "" {
+				firstUpdatedID = id
+			}
+		}
+
+		// Set last touched after all updates complete
+		if firstUpdatedID != "" {
+			SetLastTouchedID(firstUpdatedID)
 		}
 
 		// Schedule auto-flush if any issues were updated

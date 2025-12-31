@@ -316,6 +316,9 @@ var createCmd = &cobra.Command{
 				fmt.Printf("  Priority: P%d\n", issue.Priority)
 				fmt.Printf("  Status: %s\n", issue.Status)
 			}
+
+			// Track as last touched issue
+			SetLastTouchedID(issue.ID)
 			return
 		}
 
@@ -514,6 +517,9 @@ var createCmd = &cobra.Command{
 			// Show tip after successful create (direct mode only)
 			maybeShowTip(store)
 		}
+
+		// Track as last touched issue
+		SetLastTouchedID(issue.ID)
 	},
 }
 

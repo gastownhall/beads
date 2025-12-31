@@ -332,6 +332,13 @@ var showCmd = &cobra.Command{
 			if jsonOutput && len(allDetails) > 0 {
 				outputJSON(allDetails)
 			}
+
+			// Track first shown issue as last touched
+			if len(resolvedIDs) > 0 {
+				SetLastTouchedID(resolvedIDs[0])
+			} else if len(routedArgs) > 0 {
+				SetLastTouchedID(routedArgs[0])
+			}
 			return
 		}
 
@@ -563,6 +570,11 @@ var showCmd = &cobra.Command{
 		} else if len(allDetails) > 0 {
 			// Show tip after successful show (non-JSON mode)
 			maybeShowTip(store)
+		}
+
+		// Track first shown issue as last touched
+		if len(args) > 0 {
+			SetLastTouchedID(args[0])
 		}
 	},
 }
