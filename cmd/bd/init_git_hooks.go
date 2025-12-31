@@ -160,6 +160,16 @@ func installGitHooks() error {
 		switch choice {
 		case "1", "":
 			chainHooks = true
+			// Chain mode - rename existing hooks to .old so they can be called
+			for _, hook := range existingHooks {
+				if hook.exists && !hook.isBdHook {
+					oldPath := hook.path + ".old"
+					if err := os.Rename(hook.path, oldPath); err != nil {
+						return fmt.Errorf("failed to rename %s to .old: %w", hook.name, err)
+					}
+					fmt.Printf("  Renamed %s to %s\n", hook.name, filepath.Base(oldPath))
+				}
+			}
 		case "2":
 			// Overwrite mode - backup existing hooks
 			for _, hook := range existingHooks {
@@ -211,12 +221,11 @@ func installGitHooks() error {
 // buildPreCommitHook generates the pre-commit hook content
 func buildPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
 	if chainHooks {
-		// Find existing pre-commit hook
+		// Find existing pre-commit hook (already renamed to .old by caller)
 		var existingPreCommit string
 		for _, hook := range existingHooks {
 			if hook.name == "pre-commit" && hook.exists && !hook.isBdHook {
 				existingPreCommit = hook.path + ".old"
-				// Note: caller handles the rename
 				break
 			}
 		}
@@ -309,7 +318,7 @@ exit 0
 // buildPostMergeHook generates the post-merge hook content
 func buildPostMergeHook(chainHooks bool, existingHooks []hookInfo) string {
 	if chainHooks {
-		// Find existing post-merge hook
+		// Find existing post-merge hook (already renamed to .old by caller)
 		var existingPostMerge string
 		for _, hook := range existingHooks {
 			if hook.name == "post-merge" && hook.exists && !hook.isBdHook {

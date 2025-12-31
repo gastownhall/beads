@@ -51,7 +51,7 @@ func TestInstallHooks(t *testing.T) {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
 
-		if err := installHooks(hooks, false, false); err != nil {
+		if err := installHooks(hooks, false, false, false); err != nil {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
@@ -103,7 +103,7 @@ func TestInstallHooksBackup(t *testing.T) {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
 
-		if err := installHooks(hooks, false, false); err != nil {
+		if err := installHooks(hooks, false, false, false); err != nil {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
@@ -148,7 +148,7 @@ func TestInstallHooksForce(t *testing.T) {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
 
-		if err := installHooks(hooks, true, false); err != nil {
+		if err := installHooks(hooks, true, false, false); err != nil {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
@@ -176,7 +176,7 @@ func TestUninstallHooks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
-		if err := installHooks(hooks, false, false); err != nil {
+		if err := installHooks(hooks, false, false, false); err != nil {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
@@ -211,7 +211,7 @@ func TestHooksCheckGitHooks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
-		if err := installHooks(hooks, false, false); err != nil {
+		if err := installHooks(hooks, false, false, false); err != nil {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
@@ -245,7 +245,7 @@ func TestInstallHooksShared(t *testing.T) {
 			t.Fatalf("getEmbeddedHooks() failed: %v", err)
 		}
 
-		if err := installHooks(hooks, false, true); err != nil {
+		if err := installHooks(hooks, false, true, false); err != nil {
 			t.Fatalf("installHooks() with shared=true failed: %v", err)
 		}
 
@@ -279,6 +279,66 @@ func TestInstallHooksShared(t *testing.T) {
 			if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
 				t.Errorf("Hook %s should not be in .git/hooks/ when using --shared", hookName)
 			}
+		}
+	})
+}
+
+func TestInstallHooksChaining(t *testing.T) {
+	tmpDir := t.TempDir()
+	runInDir(t, tmpDir, func() {
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Skipf("Skipping test: git init failed: %v", err)
+		}
+
+		gitDirPath, err := git.GetGitDir()
+		if err != nil {
+			t.Fatalf("git.GetGitDir() failed: %v", err)
+		}
+		gitDir := filepath.Join(gitDirPath, "hooks")
+		if err := os.MkdirAll(gitDir, 0750); err != nil {
+			t.Fatalf("Failed to create hooks directory: %v", err)
+		}
+
+		// Create an existing hook
+		existingHook := filepath.Join(gitDir, "pre-commit")
+		existingContent := "#!/bin/sh\necho old hook\n"
+		if err := os.WriteFile(existingHook, []byte(existingContent), 0755); err != nil {
+			t.Fatalf("Failed to create existing hook: %v", err)
+		}
+
+		hooks, err := getEmbeddedHooks()
+		if err != nil {
+			t.Fatalf("getEmbeddedHooks() failed: %v", err)
+		}
+
+		// Install with chain=true
+		if err := installHooks(hooks, false, false, true); err != nil {
+			t.Fatalf("installHooks() with chain=true failed: %v", err)
+		}
+
+		// Verify the original hook was renamed to .old
+		oldPath := existingHook + ".old"
+		if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+			t.Errorf("Existing hook was not renamed to .old for chaining")
+		}
+
+		oldContent, err := os.ReadFile(oldPath)
+		if err != nil {
+			t.Fatalf("Failed to read .old hook: %v", err)
+		}
+		if string(oldContent) != existingContent {
+			t.Errorf(".old hook content mismatch: got %q, want %q", string(oldContent), existingContent)
+		}
+
+		// Verify new hook was installed
+		if _, err := os.Stat(existingHook); os.IsNotExist(err) {
+			t.Errorf("New pre-commit hook was not installed")
+		}
+
+		// Verify .backup was NOT created (chain mode uses .old, not .backup)
+		backupPath := existingHook + ".backup"
+		if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+			t.Errorf("Backup was created but should not be in chain mode")
 		}
 	})
 }
