@@ -420,6 +420,37 @@ func (t IssueType) IsValid() bool {
 	return false
 }
 
+// RequiredSection describes a recommended section for an issue type.
+// Used by bd lint and bd create --validate for template validation.
+type RequiredSection struct {
+	Heading string // Markdown heading, e.g., "## Steps to Reproduce"
+	Hint    string // Guidance for what to include
+}
+
+// RequiredSections returns the recommended sections for this issue type.
+// Returns nil for types with no specific section requirements.
+func (t IssueType) RequiredSections() []RequiredSection {
+	switch t {
+	case TypeBug:
+		return []RequiredSection{
+			{Heading: "## Steps to Reproduce", Hint: "Describe how to reproduce the bug"},
+			{Heading: "## Acceptance Criteria", Hint: "Define criteria to verify the fix"},
+		}
+	case TypeTask, TypeFeature:
+		return []RequiredSection{
+			{Heading: "## Acceptance Criteria", Hint: "Define criteria to verify completion"},
+		}
+	case TypeEpic:
+		return []RequiredSection{
+			{Heading: "## Success Criteria", Hint: "Define high-level success criteria"},
+		}
+	default:
+		// Chore, message, molecule, gate, agent, role, convoy, event, merge-request
+		// have no required sections
+		return nil
+	}
+}
+
 // AgentState represents the self-reported state of an agent
 type AgentState string
 

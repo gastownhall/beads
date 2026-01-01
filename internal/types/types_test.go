@@ -414,6 +414,42 @@ func TestIssueTypeIsValid(t *testing.T) {
 	}
 }
 
+func TestIssueTypeRequiredSections(t *testing.T) {
+	tests := []struct {
+		issueType     IssueType
+		expectCount   int
+		expectHeading string // First heading if any
+	}{
+		{TypeBug, 2, "## Steps to Reproduce"},
+		{TypeFeature, 1, "## Acceptance Criteria"},
+		{TypeTask, 1, "## Acceptance Criteria"},
+		{TypeEpic, 1, "## Success Criteria"},
+		{TypeChore, 0, ""},
+		{TypeMessage, 0, ""},
+		{TypeMolecule, 0, ""},
+		{TypeGate, 0, ""},
+		{TypeAgent, 0, ""},
+		{TypeRole, 0, ""},
+		{TypeConvoy, 0, ""},
+		{TypeEvent, 0, ""},
+		{TypeMergeRequest, 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.issueType), func(t *testing.T) {
+			sections := tt.issueType.RequiredSections()
+			if len(sections) != tt.expectCount {
+				t.Errorf("IssueType(%q).RequiredSections() returned %d sections, want %d",
+					tt.issueType, len(sections), tt.expectCount)
+			}
+			if tt.expectCount > 0 && sections[0].Heading != tt.expectHeading {
+				t.Errorf("IssueType(%q).RequiredSections()[0].Heading = %q, want %q",
+					tt.issueType, sections[0].Heading, tt.expectHeading)
+			}
+		})
+	}
+}
+
 func TestAgentStateIsValid(t *testing.T) {
 	cases := []struct {
 		name  string
