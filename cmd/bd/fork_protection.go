@@ -13,19 +13,34 @@ import (
 // ensureForkProtection prevents contributors from accidentally committing
 // the upstream issue database when working in a fork.
 //
-// When we detect this is a fork (origin != steveyegge/beads), we add
-// .beads/issues.jsonl to .git/info/exclude so it won't be staged.
+// When we detect this is a fork (any remote points to steveyegge/beads),
+// we add .beads/issues.jsonl to .git/info/exclude so it won't be staged.
 // This is a per-clone setting that doesn't modify tracked files.
+//
+// Users can disable this with: git config beads.fork-protection false
 func ensureForkProtection() {
-	// Find git root
+	// Find git root first (needed for git config check)
 	gitRoot := git.GetRepoRoot()
 	if gitRoot == "" {
 		return // Not in a git repo
 	}
 
+	// Check if fork protection is explicitly disabled via git config (GH#823)
+	// Use: git config beads.fork-protection false
+	if isForkProtectionDisabled(gitRoot) {
+		debug.Printf("fork protection: disabled via git config")
+		return
+	}
+
 	// Check if this is the upstream repo (maintainers)
 	if isUpstreamRepo(gitRoot) {
 		return // Maintainers can commit issues.jsonl
+	}
+
+	// Only protect actual forks - repos with any remote pointing to beads (GH#823)
+	// This prevents false positives on user's own projects that just use beads
+	if !isForkOfBeads(gitRoot) {
+		return // Not a fork of beads, user's own project
 	}
 
 	// Check if already excluded
@@ -67,6 +82,32 @@ func isUpstreamRepo(gitRoot string) bool {
 	}
 
 	return false
+}
+
+// isForkOfBeads checks if ANY remote points to steveyegge/beads.
+// This handles any remote naming convention (origin, upstream, github, etc.)
+// and correctly identifies actual beads forks vs user's own projects. (GH#823)
+func isForkOfBeads(gitRoot string) bool {
+	cmd := exec.Command("git", "-C", gitRoot, "remote", "-v")
+	out, err := cmd.Output()
+	if err != nil {
+		return false // No remotes or git error - not a fork
+	}
+
+	// If any remote URL contains steveyegge/beads, this is a beads-related repo
+	return strings.Contains(string(out), "steveyegge/beads")
+}
+
+// isForkProtectionDisabled checks if fork protection is disabled via git config.
+// Users can opt out with: git config beads.fork-protection false
+// Only exact "false" disables; any other value or unset means enabled.
+func isForkProtectionDisabled(gitRoot string) bool {
+	cmd := exec.Command("git", "-C", gitRoot, "config", "--get", "beads.fork-protection")
+	out, err := cmd.Output()
+	if err != nil {
+		return false // Not set or error - default to enabled
+	}
+	return strings.TrimSpace(string(out)) == "false"
 }
 
 // isAlreadyExcluded checks if issues.jsonl is already in the exclude file
