@@ -504,7 +504,7 @@ func discoverRigDaemons() []rigDaemon {
 // Similar to routing.resolveRedirect but simplified for activity use.
 func resolveBeadsRedirect(beadsDir string) string {
 	redirectFile := filepath.Join(beadsDir, "redirect")
-	data, err := os.ReadFile(redirectFile)
+	data, err := os.ReadFile(redirectFile) // #nosec G304 - redirects are trusted within beads rig paths
 	if err != nil {
 		return beadsDir
 	}
@@ -729,7 +729,9 @@ func runTownActivityFollow(sinceTime time.Time) {
 func closeDaemons(daemons []rigDaemon) {
 	for _, d := range daemons {
 		if d.client != nil {
-			d.client.Close()
+			if err := d.client.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to close daemon client: %v\n", err)
+			}
 		}
 	}
 }

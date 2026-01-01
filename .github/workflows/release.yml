@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -36,7 +37,9 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean
+          args: >
+            release --clean
+            ${{ github.repository != 'steveyegge/beads' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Windows code signing (optional - signing is skipped if not set)
@@ -46,7 +49,7 @@ jobs:
   publish-pypi:
     runs-on: ubuntu-latest
     needs: goreleaser
-    if: always()  # Run even if goreleaser fails
+    if: ${{ always() && github.repository == 'steveyegge/beads' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -75,6 +78,7 @@ jobs:
   publish-npm:
     runs-on: ubuntu-latest
     needs: goreleaser
+    if: ${{ github.repository == 'steveyegge/beads' }}
     permissions:
       contents: read
       id-token: write  # Required for npm provenance/trusted publishing
@@ -101,6 +105,7 @@ jobs:
   update-homebrew:
     runs-on: ubuntu-latest
     needs: goreleaser
+    if: ${{ github.repository == 'steveyegge/beads' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6

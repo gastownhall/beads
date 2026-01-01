@@ -139,7 +139,9 @@ func runChecks(jsonOutput bool) {
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(result)
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding preflight result: %v\n", err)
+		}
 	} else {
 		// Human-readable output
 		for _, r := range results {

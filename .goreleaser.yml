@@ -99,6 +99,23 @@ builds:
         # Requires WINDOWS_SIGNING_CERT_PFX_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD secrets
         - ./scripts/sign-windows.sh "{{ .Path }}"
 
+  - id: bd-freebsd-amd64
+    main: ./cmd/bd
+    binary: bd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - freebsd
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Build={{.ShortCommit}}
+      - -X main.Commit={{.Commit}}
+      - -X main.Branch={{.Branch}}
+
+
 archives:
   - id: bd-archive
     format: tar.gz

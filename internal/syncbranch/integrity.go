@@ -79,7 +79,7 @@ func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 	status.Remote = getRemoteForBranch(ctx, worktreePath, syncBranch)
 
 	// Fetch from remote to get latest state
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "fetch", status.Remote, syncBranch)
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "fetch", status.Remote, syncBranch) // #nosec G204 - repoRoot/syncBranch are validated git inputs
 	fetchOutput, err := fetchCmd.CombinedOutput()
 	if err != nil {
 		// Check if remote branch doesn't exist
@@ -92,7 +92,7 @@ func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 
 	// Get current remote SHA
 	remoteRef := fmt.Sprintf("%s/%s", status.Remote, syncBranch)
-	revParseCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", remoteRef)
+	revParseCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", remoteRef) // #nosec G204 - remoteRef constructed from trusted config
 	revParseOutput, err := revParseCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get remote SHA: %w", err)
@@ -107,7 +107,7 @@ func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 
 	// Check if stored SHA is an ancestor of current remote SHA
 	// This means remote was updated normally (fast-forward)
-	isAncestorCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "merge-base", "--is-ancestor", storedSHA, status.CurrentRemoteSHA)
+	isAncestorCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "merge-base", "--is-ancestor", storedSHA, status.CurrentRemoteSHA) // #nosec G204 - args derive from git SHAs we validated earlier
 	if isAncestorCmd.Run() == nil {
 		// Stored SHA is ancestor - normal update, no force-push
 		status.Message = "Remote sync branch updated normally (fast-forward)"
@@ -146,12 +146,12 @@ func UpdateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot,
 
 	// Get current remote SHA
 	remoteRef := fmt.Sprintf("%s/%s", remote, syncBranch)
-	revParseCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", remoteRef)
+	revParseCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", remoteRef) // #nosec G204 - remoteRef is internal config
 	revParseOutput, err := revParseCmd.Output()
 	if err != nil {
 		// Remote branch might not exist yet (first push)
 		// Try local branch instead
-		revParseCmd = exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", syncBranch)
+		revParseCmd = exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", syncBranch) // #nosec G204 - branch name from config
 		revParseOutput, err = revParseCmd.Output()
 		if err != nil {
 			return fmt.Errorf("failed to get sync branch SHA: %w", err)

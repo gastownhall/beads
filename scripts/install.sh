@@ -34,6 +34,17 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
+release_has_asset() {
+    local release_json=$1
+    local asset_name=$2
+
+    if echo "$release_json" | grep -Fq "\"name\": \"$asset_name\""; then
+        return 0
+    fi
+
+    return 1
+}
+
 # Re-sign binary for macOS to avoid slow Gatekeeper checks
 # See: https://github.com/steveyegge/beads/issues/466
 resign_for_macos() {
@@ -70,6 +81,9 @@ detect_platform() {
         Linux)
             os="linux"
             ;;
+        FreeBSD)
+            os="freebsd"
+            ;;
         *)
             log_error "Unsupported operating system: $(uname -s)"
             exit 1
@@ -82,6 +96,9 @@ detect_platform() {
             ;;
         aarch64|arm64)
             arch="arm64"
+            ;;
+        armv7*|armv6*|armhf|arm)
+            arch="arm"
             ;;
         *)
             log_error "Unsupported architecture: $(uname -m)"
@@ -104,15 +121,18 @@ install_from_release() {
     log_info "Fetching latest release..."
     local latest_url="https://api.github.com/repos/steveyegge/beads/releases/latest"
     local version
-    
+    local release_json
+
     if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+        release_json=$(curl -fsSL "$latest_url")
     elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$latest_url" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+        release_json=$(wget -qO- "$latest_url")
     else
         log_error "Neither curl nor wget found. Please install one of them."
         return 1
     fi
+
+    version=$(echo "$release_json" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
 
     if [ -z "$version" ]; then
         log_error "Failed to fetch latest version"
@@ -124,6 +144,12 @@ install_from_release() {
     # Download URL
     local archive_name="beads_${version#v}_${platform}.tar.gz"
     local download_url="https://github.com/steveyegge/beads/releases/download/${version}/${archive_name}"
+
+    if ! release_has_asset "$release_json" "$archive_name"; then
+        log_warning "No prebuilt archive available for platform ${platform}. Falling back to source installation methods."
+        rm -rf "$tmp_dir"
+        return 1
+    fi
     
     log_info "Downloading $archive_name..."
     

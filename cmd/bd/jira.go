@@ -23,22 +23,22 @@ import (
 
 // JiraSyncStats tracks statistics for a Jira sync operation.
 type JiraSyncStats struct {
-	Pulled   int `json:"pulled"`
-	Pushed   int `json:"pushed"`
-	Created  int `json:"created"`
-	Updated  int `json:"updated"`
-	Skipped  int `json:"skipped"`
-	Errors   int `json:"errors"`
+	Pulled    int `json:"pulled"`
+	Pushed    int `json:"pushed"`
+	Created   int `json:"created"`
+	Updated   int `json:"updated"`
+	Skipped   int `json:"skipped"`
+	Errors    int `json:"errors"`
 	Conflicts int `json:"conflicts"`
 }
 
 // JiraSyncResult represents the result of a Jira sync operation.
 type JiraSyncResult struct {
-	Success   bool           `json:"success"`
-	Stats     JiraSyncStats  `json:"stats"`
-	LastSync  string         `json:"last_sync,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Warnings  []string       `json:"warnings,omitempty"`
+	Success  bool          `json:"success"`
+	Stats    JiraSyncStats `json:"stats"`
+	LastSync string        `json:"last_sync,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 var jiraCmd = &cobra.Command{
@@ -288,13 +288,13 @@ var jiraStatusCmd = &cobra.Command{
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
-				"configured":       configured,
-				"jira_url":         jiraURL,
-				"jira_project":     jiraProject,
-				"last_sync":        lastSync,
-				"total_issues":     len(allIssues),
-				"with_jira_ref":    withJiraRef,
-				"pending_push":     pendingPush,
+				"configured":    configured,
+				"jira_url":      jiraURL,
+				"jira_project":  jiraProject,
+				"last_sync":     lastSync,
+				"total_issues":  len(allIssues),
+				"with_jira_ref": withJiraRef,
+				"pending_push":  pendingPush,
 			})
 			return
 		}
@@ -610,9 +610,9 @@ Looked in: %v`, name, locations)
 
 // JiraConflict represents a conflict between local and Jira versions.
 type JiraConflict struct {
-	IssueID        string
-	LocalUpdated   time.Time
-	JiraUpdated    time.Time
+	IssueID         string
+	LocalUpdated    time.Time
+	JiraUpdated     time.Time
 	JiraExternalRef string
 }
 
@@ -854,7 +854,9 @@ func fetchJiraIssueTimestamp(ctx context.Context, jiraKey string) (time.Time, er
 	if err != nil {
 		return zero, fmt.Errorf("failed to fetch issue %s: %w", jiraKey, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

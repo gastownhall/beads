@@ -782,7 +782,7 @@ func runPrepareCommitMsgHook(args []string) int {
 	}
 
 	// Write back
-	if err := os.WriteFile(msgFile, []byte(sb.String()), 0644); err != nil { // #nosec G306
+	if err := os.WriteFile(msgFile, []byte(sb.String()), 0600); err != nil { // Restrict permissions per gosec G306
 		fmt.Fprintf(os.Stderr, "Warning: could not write commit message: %v\n", err)
 	}
 

@@ -56,7 +56,7 @@ func DetectPendingMigrations(path string) []PendingMigration {
 	}
 
 	// Check for missing sync-branch config (sync migration)
-	if needsSyncMigration(beadsDir, path) {
+	if needsSyncMigration(path) {
 		pending = append(pending, PendingMigration{
 			Name:        "sync",
 			Description: "Configure sync branch for multi-clone setup",
@@ -206,7 +206,7 @@ func needsTombstonesMigration(beadsDir string) bool {
 }
 
 // needsSyncMigration checks if sync-branch should be configured
-func needsSyncMigration(beadsDir, repoPath string) bool {
+func needsSyncMigration(repoPath string) bool {
 	// Check if already configured
 	if syncbranch.GetFromYAML() != "" {
 		return false
