@@ -191,7 +191,7 @@ create, update, show, or close operation).`,
 					continue
 				}
 
-				if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor); err != nil {
+				if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor, session); err != nil {
 					result.Close()
 					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 					continue
@@ -283,7 +283,7 @@ create, update, show, or close operation).`,
 				continue
 			}
 
-			if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor); err != nil {
+			if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor, session); err != nil {
 				result.Close()
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
