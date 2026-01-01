@@ -64,10 +64,16 @@ create, update, show, or close operation).`,
 			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
-		// Resolve partial IDs first
+		// Resolve partial IDs first, handling cross-rig routing
 		var resolvedIDs []string
+		var routedArgs []string // IDs that need cross-repo routing (bypass daemon)
 		if daemonClient != nil {
 			for _, id := range args {
+				// Check if this ID needs routing to a different beads directory
+				if needsRouting(id) {
+					routedArgs = append(routedArgs, id)
+					continue
+				}
 				resolveArgs := &rpc.ResolveIDArgs{ID: id}
 				resp, err := daemonClient.ResolveID(resolveArgs)
 				if err != nil {
@@ -80,10 +86,17 @@ create, update, show, or close operation).`,
 				resolvedIDs = append(resolvedIDs, resolvedID)
 			}
 		} else {
-			var err error
-			resolvedIDs, err = utils.ResolvePartialIDs(ctx, store, args)
-			if err != nil {
-				FatalErrorRespectJSON("%v", err)
+			// Direct mode - check routing for each ID
+			for _, id := range args {
+				if needsRouting(id) {
+					routedArgs = append(routedArgs, id)
+				} else {
+					resolved, err := utils.ResolvePartialID(ctx, store, id)
+					if err != nil {
+						FatalErrorRespectJSON("resolving ID %s: %v", id, err)
+					}
+					resolvedIDs = append(resolvedIDs, resolved)
+				}
 			}
 		}
 
@@ -157,6 +170,49 @@ create, update, show, or close operation).`,
 				}
 			}
 
+			// Handle routed IDs via direct mode (cross-rig)
+			for _, id := range routedArgs {
+				result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+					continue
+				}
+				if result == nil || result.Issue == nil {
+					if result != nil {
+						result.Close()
+					}
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					continue
+				}
+
+				if err := validateIssueClosable(result.ResolvedID, result.Issue, force); err != nil {
+					result.Close()
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					continue
+				}
+
+				if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor); err != nil {
+					result.Close()
+					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+					continue
+				}
+
+				// Get updated issue for hook
+				closedIssue, _ := result.Store.GetIssue(ctx, result.ResolvedID)
+				if closedIssue != nil && hookRunner != nil {
+					hookRunner.Run(hooks.EventClose, closedIssue)
+				}
+
+				if jsonOutput {
+					if closedIssue != nil {
+						closedIssues = append(closedIssues, closedIssue)
+					}
+				} else {
+					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), result.ResolvedID, reason)
+				}
+				result.Close()
+			}
+
 			// Handle --continue flag in daemon mode
 			// Note: --continue requires direct database access to walk parent-child chain
 			if continueFlag && len(closedIssues) > 0 {
@@ -173,6 +229,8 @@ create, update, show, or close operation).`,
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		closedCount := 0
+
+		// Handle local IDs
 		for _, id := range resolvedIDs {
 			// Get issue for checks
 			issue, _ := store.GetIssue(ctx, id)
@@ -202,6 +260,51 @@ create, update, show, or close operation).`,
 			} else {
 				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
 			}
+		}
+
+		// Handle routed IDs (cross-rig)
+		for _, id := range routedArgs {
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				continue
+			}
+			if result == nil || result.Issue == nil {
+				if result != nil {
+					result.Close()
+				}
+				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				continue
+			}
+
+			if err := validateIssueClosable(result.ResolvedID, result.Issue, force); err != nil {
+				result.Close()
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				continue
+			}
+
+			if err := result.Store.CloseIssue(ctx, result.ResolvedID, reason, actor); err != nil {
+				result.Close()
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+				continue
+			}
+
+			closedCount++
+
+			// Get updated issue for hook
+			closedIssue, _ := result.Store.GetIssue(ctx, result.ResolvedID)
+			if closedIssue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventClose, closedIssue)
+			}
+
+			if jsonOutput {
+				if closedIssue != nil {
+					closedIssues = append(closedIssues, closedIssue)
+				}
+			} else {
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), result.ResolvedID, reason)
+			}
+			result.Close()
 		}
 
 		// Handle --suggest-next flag in direct mode
