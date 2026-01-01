@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # bd-shim v1
 # bd-hooks-version: 0.41.0
 #
