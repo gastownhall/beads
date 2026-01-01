@@ -223,8 +223,12 @@ func TestMemoryStorage_DependencyCounts_Records_Tree_Cycles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDependencyTree: %v", err)
 	}
-	if len(nodes) != 2 || nodes[0].Depth != 1 {
-		t.Fatalf("unexpected tree: %+v", nodes)
+	// Expect 3 nodes: root (A) at depth 0, plus 2 dependencies (B, C) at depth 1
+	if len(nodes) != 3 {
+		t.Fatalf("expected 3 nodes (root + 2 deps), got %d", len(nodes))
+	}
+	if nodes[0].ID != a.ID || nodes[0].Depth != 0 {
+		t.Fatalf("expected root node %s at depth 0, got %s at depth %d", a.ID, nodes[0].ID, nodes[0].Depth)
 	}
 
 	cycles, err := store.DetectCycles(ctx)

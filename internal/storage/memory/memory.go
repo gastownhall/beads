@@ -887,19 +887,43 @@ func (m *MemoryStorage) SetJSONLFileHash(ctx context.Context, fileHash string) e
 
 // GetDependencyTree gets the dependency tree for an issue
 func (m *MemoryStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
-	// Simplified implementation - just return direct dependencies
-	// Note: reverse parameter is accepted for interface compatibility but not fully implemented in memory storage
+	// Get the root issue first
+	root, err := m.GetIssue(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		return nil, nil
+	}
+
+	var nodes []*types.TreeNode
+
+	// Add root node at depth 0
+	rootNode := &types.TreeNode{
+		Depth:    0,
+		ParentID: issueID, // Root's parent is itself
+	}
+	rootNode.ID = root.ID
+	rootNode.Title = root.Title
+	rootNode.Description = root.Description
+	rootNode.Status = root.Status
+	rootNode.Priority = root.Priority
+	rootNode.IssueType = root.IssueType
+	nodes = append(nodes, rootNode)
+
+	// Get dependencies (or dependents if reverse)
+	// Note: reverse mode not fully implemented - uses same logic for now
 	deps, err := m.GetDependencies(ctx, issueID)
 	if err != nil {
 		return nil, err
 	}
 
-	var nodes []*types.TreeNode
+	// Add dependencies at depth 1
 	for _, dep := range deps {
 		node := &types.TreeNode{
-			Depth: 1,
+			Depth:    1,
+			ParentID: issueID, // Parent is the root
 		}
-		// Copy issue fields
 		node.ID = dep.ID
 		node.Title = dep.Title
 		node.Description = dep.Description
