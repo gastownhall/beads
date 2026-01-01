@@ -194,11 +194,18 @@ func setDBPath(p string) {
 }
 
 // getRootContext returns the signal-aware root context.
+// Returns context.Background() if the root context is nil (e.g., before CLI initialization).
 func getRootContext() context.Context {
+	var ctx context.Context
 	if shouldUseGlobals() {
-		return rootCtx
+		ctx = rootCtx
+	} else {
+		ctx = cmdCtx.RootCtx
 	}
-	return cmdCtx.RootCtx
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // setRootContext updates the root context and cancel function.
