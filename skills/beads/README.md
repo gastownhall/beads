@@ -35,10 +35,13 @@ The skill activates when conversations involve:
 ```
 beads/
 ├── SKILL.md                 # Main skill file (Claude reads this first)
+├── CLAUDE.md                # Maintenance guide for updating the skill
 ├── README.md                # This file (for humans)
-└── references/              # Detailed documentation (loaded on demand)
+├── adr/                     # Architectural Decision Records
+│   └── 0001-bd-prime-as-source-of-truth.md
+└── resources/               # Detailed documentation (loaded on demand)
     ├── BOUNDARIES.md        # When to use bd vs TodoWrite
-    ├── CLI_BOOTSTRAP_ADMIN.md # CLI command reference
+    ├── CLI_REFERENCE.md     # CLI command reference
     ├── DEPENDENCIES.md      # Dependency semantics (A blocks B vs B blocks A)
     ├── INTEGRATION_PATTERNS.md # TodoWrite and other tool integration
     ├── ISSUE_CREATION.md    # When and how to create issues
@@ -47,7 +50,11 @@ beads/
     ├── RESUMABILITY.md      # Writing notes for post-compaction recovery
     ├── STATIC_DATA.md       # Using bd for reference databases
     ├── TROUBLESHOOTING.md   # Common issues and fixes
-    └── WORKFLOWS.md         # Step-by-step workflow guides
+    ├── WORKFLOWS.md         # Step-by-step workflow guides
+    ├── AGENTS.md            # Agent bead tracking (v0.40+)
+    ├── ASYNC_GATES.md       # Human-in-the-loop gates
+    ├── CHEMISTRY_PATTERNS.md # Mol vs Wisp decision tree
+    └── WORKTREES.md         # Parallel development patterns
 ```
 
 ## Key Concepts
@@ -90,9 +97,13 @@ NEXT: Implement rate limiting"
 
 ## Version Compatibility
 
-- **v0.34.0+**: Full support including molecules, wisps, and cross-project dependencies
-- **v0.15.0+**: Core functionality (dependencies, notes, status tracking)
-- **Earlier versions**: Basic functionality but some features may be missing
+| Version | Features |
+|---------|----------|
+| v0.43.0+ | Full support: agents, gates, worktrees, chemistry patterns |
+| v0.40.0+ | Agent beads, async gates, worktree management |
+| v0.34.0+ | Molecules, wisps, cross-project dependencies |
+| v0.15.0+ | Core: dependencies, notes, status tracking |
+| Earlier | Basic functionality, some features missing |
 
 ## Contributing
 
