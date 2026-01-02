@@ -459,3 +459,86 @@ func TestHasBeadsJSONL(t *testing.T) {
 		t.Error("hasBeadsJSONL() = false, want true (issues.jsonl exists)")
 	}
 }
+
+// TestInstallHooksChainingSkipsBdShim verifies that bd hooks install --chain
+// does NOT rename existing bd shims to .old (which would cause infinite recursion).
+// See: https://github.com/steveyegge/beads/issues/843
+func TestInstallHooksChainingSkipsBdShim(t *testing.T) {
+	tmpDir := t.TempDir()
+	runInDir(t, tmpDir, func() {
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Skipf("Skipping test: git init failed: %v", err)
+		}
+
+		gitDirPath, err := git.GetGitDir()
+		if err != nil {
+			t.Fatalf("git.GetGitDir() failed: %v", err)
+		}
+		gitDir := filepath.Join(gitDirPath, "hooks")
+		if err := os.MkdirAll(gitDir, 0750); err != nil {
+			t.Fatalf("Failed to create hooks directory: %v", err)
+		}
+
+		// Create an existing hook that IS a bd shim
+		existingHook := filepath.Join(gitDir, "pre-commit")
+		shimContent := "#!/bin/sh\n# bd-shim v1\nexec bd hooks run pre-commit \"$@\"\n"
+		if err := os.WriteFile(existingHook, []byte(shimContent), 0755); err != nil {
+			t.Fatalf("Failed to create existing shim hook: %v", err)
+		}
+
+		hooks, err := getEmbeddedHooks()
+		if err != nil {
+			t.Fatalf("getEmbeddedHooks() failed: %v", err)
+		}
+
+		// Install with chain=true
+		if err := installHooks(hooks, false, false, true); err != nil {
+			t.Fatalf("installHooks() with chain=true failed: %v", err)
+		}
+
+		// Verify the shim was NOT renamed to .old (would cause infinite loop)
+		oldPath := existingHook + ".old"
+		if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+			t.Errorf("bd shim was renamed to .old - this would cause infinite recursion!")
+		}
+
+		// Verify new hook was installed (overwrote the shim)
+		if _, err := os.Stat(existingHook); os.IsNotExist(err) {
+			t.Errorf("New pre-commit hook was not installed")
+		}
+	})
+}
+
+// TestRunChainedHookSkipsBdShim verifies that runChainedHook() skips
+// .old hooks that are bd shims (to prevent infinite recursion).
+// See: https://github.com/steveyegge/beads/issues/843
+func TestRunChainedHookSkipsBdShim(t *testing.T) {
+	tmpDir := t.TempDir()
+	runInDir(t, tmpDir, func() {
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Skipf("Skipping test: git init failed: %v", err)
+		}
+
+		gitDirPath, err := git.GetGitDir()
+		if err != nil {
+			t.Fatalf("git.GetGitDir() failed: %v", err)
+		}
+		gitDir := filepath.Join(gitDirPath, "hooks")
+		if err := os.MkdirAll(gitDir, 0750); err != nil {
+			t.Fatalf("Failed to create hooks directory: %v", err)
+		}
+
+		// Create a .old hook that IS a bd shim (simulating the problematic state)
+		oldHook := filepath.Join(gitDir, "pre-commit.old")
+		shimContent := "#!/bin/sh\n# bd-shim v1\nexec bd hooks run pre-commit \"$@\"\n"
+		if err := os.WriteFile(oldHook, []byte(shimContent), 0755); err != nil {
+			t.Fatalf("Failed to create .old shim hook: %v", err)
+		}
+
+		// runChainedHook should return 0 (skip the shim) instead of executing it
+		exitCode := runChainedHook("pre-commit", nil)
+		if exitCode != 0 {
+			t.Errorf("runChainedHook() = %d, want 0 (should skip bd shim)", exitCode)
+		}
+	})
+}

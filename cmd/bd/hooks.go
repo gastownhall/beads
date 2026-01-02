@@ -345,10 +345,17 @@ func installHooks(embeddedHooks map[string]string, force bool, shared bool, chai
 		if _, err := os.Stat(hookPath); err == nil {
 			if chain {
 				// Chain mode - rename to .old so bd hooks run can call it
-				oldPath := hookPath + ".old"
-				if err := os.Rename(hookPath, oldPath); err != nil {
-					return fmt.Errorf("failed to rename %s to .old for chaining: %w", hookName, err)
+				// But skip if existing hook is already a bd shim - renaming it would
+				// cause infinite recursion. See: https://github.com/steveyegge/beads/issues/843
+				versionInfo, verr := getHookVersion(hookPath)
+				if verr != nil || !versionInfo.IsShim {
+					// Not a bd shim - safe to rename for chaining
+					oldPath := hookPath + ".old"
+					if err := os.Rename(hookPath, oldPath); err != nil {
+						return fmt.Errorf("failed to rename %s to .old for chaining: %w", hookName, err)
+					}
 				}
+				// If it IS a bd shim, just overwrite it (no rename needed)
 			} else if !force {
 				// Default mode - back it up
 				backupPath := hookPath + ".backup"
@@ -442,6 +449,15 @@ func runChainedHook(hookName string, args []string) int {
 	}
 	if info.Mode().Perm()&0111 == 0 {
 		return 0 // Not executable
+	}
+
+	// Check if .old is itself a bd shim - skip to prevent infinite recursion
+	// This can happen if user runs `bd hooks install --chain` multiple times,
+	// renaming an existing bd shim to .old. See: https://github.com/steveyegge/beads/issues/843
+	versionInfo, err := getHookVersion(oldHookPath)
+	if err == nil && versionInfo.IsShim {
+		// Skip execution - .old is a bd shim which would call us again
+		return 0
 	}
 
 	// Run the chained hook
