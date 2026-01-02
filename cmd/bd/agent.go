@@ -146,45 +146,107 @@ func runAgentState(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve agent ID
+	// Resolve agent ID - if not found, we'll auto-create the agent bead
 	var agentID string
+	var notFound bool
 	if daemonClient != nil {
 		resp, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: agentArg})
 		if err != nil {
-			return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
-		}
-		if err := json.Unmarshal(resp.Data, &agentID); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
+			// Check if it's a "not found" error
+			if strings.Contains(err.Error(), "no issue found matching") {
+				notFound = true
+				agentID = agentArg // Use the input as the ID for creation
+			} else {
+				return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
+			}
+		} else {
+			if err := json.Unmarshal(resp.Data, &agentID); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
 		}
 	} else {
 		var err error
 		agentID, err = utils.ResolvePartialID(ctx, store, agentArg)
 		if err != nil {
-			return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
+			// Check if it's a "not found" error
+			if strings.Contains(err.Error(), "no issue found matching") {
+				notFound = true
+				agentID = agentArg // Use the input as the ID for creation
+			} else {
+				return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
+			}
 		}
 	}
 
-	// Get agent bead to verify it's an agent
 	var agent *types.Issue
-	if daemonClient != nil {
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: agentID})
-		if err != nil {
-			return fmt.Errorf("agent bead not found: %s", agentID)
+
+	// If agent not found, auto-create it
+	if notFound {
+		roleType, rig := parseAgentIDFields(agentID)
+		agent = &types.Issue{
+			ID:        agentID,
+			Title:     fmt.Sprintf("Agent: %s", agentID),
+			IssueType: types.TypeAgent,
+			Status:    types.StatusOpen,
+			RoleType:  roleType,
+			Rig:       rig,
+			CreatedBy: actor,
 		}
-		if err := json.Unmarshal(resp.Data, &agent); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
+
+		if daemonClient != nil {
+			createArgs := &rpc.CreateArgs{
+				ID:        agentID,
+				Title:     agent.Title,
+				IssueType: string(types.TypeAgent),
+				RoleType:  roleType,
+				Rig:       rig,
+				CreatedBy: actor,
+			}
+			resp, err := daemonClient.Create(createArgs)
+			if err != nil {
+				return fmt.Errorf("failed to auto-create agent bead %s: %w", agentID, err)
+			}
+			if err := json.Unmarshal(resp.Data, &agent); err != nil {
+				return fmt.Errorf("parsing create response: %w", err)
+			}
+		} else {
+			if err := store.CreateIssue(ctx, agent, actor); err != nil {
+				return fmt.Errorf("failed to auto-create agent bead %s: %w", agentID, err)
+			}
+			// Add role_type and rig labels for filtering
+			if roleType != "" {
+				if err := store.AddLabel(ctx, agent.ID, "role_type:"+roleType, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to add role_type label: %v\n", err)
+				}
+			}
+			if rig != "" {
+				if err := store.AddLabel(ctx, agent.ID, "rig:"+rig, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to add rig label: %v\n", err)
+				}
+			}
 		}
 	} else {
-		var err error
-		agent, err = store.GetIssue(ctx, agentID)
-		if err != nil || agent == nil {
-			return fmt.Errorf("agent bead not found: %s", agentID)
+		// Get existing agent bead to verify it's an agent
+		if daemonClient != nil {
+			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: agentID})
+			if err != nil {
+				return fmt.Errorf("agent bead not found: %s", agentID)
+			}
+			if err := json.Unmarshal(resp.Data, &agent); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
+		} else {
+			var err error
+			agent, err = store.GetIssue(ctx, agentID)
+			if err != nil || agent == nil {
+				return fmt.Errorf("agent bead not found: %s", agentID)
+			}
 		}
-	}
 
-	// Verify agent bead is actually an agent
-	if agent.IssueType != "agent" {
-		return fmt.Errorf("%s is not an agent bead (type=%s)", agentID, agent.IssueType)
+		// Verify agent bead is actually an agent
+		if agent.IssueType != "agent" {
+			return fmt.Errorf("%s is not an agent bead (type=%s)", agentID, agent.IssueType)
+		}
 	}
 
 	// Update state and last_activity
@@ -626,4 +688,58 @@ func containsLabel(labels []string, label string) bool {
 		}
 	}
 	return false
+}
+
+// parseAgentIDFields extracts role_type and rig from an agent bead ID.
+// Agent ID patterns:
+//   - Town-level: <prefix>-<role> (e.g., gt-mayor) → role="mayor", rig=""
+//   - Per-rig singleton: <prefix>-<rig>-<role> (e.g., gt-gastown-witness) → role="witness", rig="gastown"
+//   - Per-rig named: <prefix>-<rig>-<role>-<name> (e.g., gt-gastown-polecat-nux) → role="polecat", rig="gastown"
+func parseAgentIDFields(agentID string) (roleType, rig string) {
+	// Must contain a hyphen to have a prefix
+	hyphenIdx := strings.Index(agentID, "-")
+	if hyphenIdx <= 0 {
+		return "", ""
+	}
+
+	// Split into parts after the prefix
+	rest := agentID[hyphenIdx+1:] // Skip "<prefix>-"
+	parts := strings.Split(rest, "-")
+
+	if len(parts) < 1 {
+		return "", ""
+	}
+
+	// Known roles for classification
+	townLevelRoles := map[string]bool{"mayor": true, "deacon": true}
+	rigLevelRoles := map[string]bool{"witness": true, "refinery": true}
+	namedRoles := map[string]bool{"crew": true, "polecat": true}
+
+	// Case 1: Town-level roles (gt-mayor, gt-deacon)
+	if len(parts) == 1 {
+		role := parts[0]
+		if townLevelRoles[role] {
+			return role, ""
+		}
+		return "", "" // Unknown format
+	}
+
+	// Case 2: Rig-level roles (<prefix>-<rig>-witness, <prefix>-<rig>-refinery)
+	if len(parts) == 2 {
+		potentialRig, potentialRole := parts[0], parts[1]
+		if rigLevelRoles[potentialRole] {
+			return potentialRole, potentialRig
+		}
+		return "", "" // Unknown format
+	}
+
+	// Case 3: Named roles (<prefix>-<rig>-crew-<name>, <prefix>-<rig>-polecat-<name>)
+	if len(parts) >= 3 {
+		potentialRig, potentialRole := parts[0], parts[1]
+		if namedRoles[potentialRole] {
+			return potentialRole, potentialRig
+		}
+	}
+
+	return "", "" // Unknown format
 }
