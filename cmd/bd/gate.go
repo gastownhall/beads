@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -245,7 +246,7 @@ Gate types:
   gh       - Check all GitHub gates (gh:run and gh:pr)
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
-  timer    - Check timer gates (Phase 2)
+  timer    - Check timer gates (auto-expire based on timeout)
   all      - Check all gate types
 
 GitHub gates use the 'gh' CLI to query status:
@@ -255,6 +256,7 @@ GitHub gates use the 'gh' CLI to query status:
 A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
+  - timer: current time > created_at + timeout
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, cancelled)
@@ -264,18 +266,23 @@ Examples:
   bd gate check              # Check all gates
   bd gate check --type=gh    # Check only GitHub gates
   bd gate check --type=gh:run # Check only workflow run gates
-  bd gate check --dry-run    # Show what would happen without changes`,
+  bd gate check --type=timer # Check only timer gates
+  bd gate check --dry-run    # Show what would happen without changes
+  bd gate check --escalate   # Escalate expired/failed gates`,
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("gate check")
 
 		gateTypeFilter, _ := cmd.Flags().GetString("type")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		escalateFlag, _ := cmd.Flags().GetBool("escalate")
+		limit, _ := cmd.Flags().GetInt("limit")
 
 		// Get open gates
 		gateType := types.TypeGate
 		filter := types.IssueFilter{
 			IssueType:     &gateType,
 			ExcludeStatus: []types.Status{types.StatusClosed},
+			Limit:         limit,
 		}
 
 		ctx := rootCtx
@@ -286,6 +293,7 @@ Examples:
 			listArgs := &rpc.ListArgs{
 				IssueType:     "gate",
 				ExcludeStatus: []string{"closed"},
+				Limit:         limit,
 			}
 			resp, rerr := daemonClient.List(listArgs)
 			if rerr != nil {
@@ -332,6 +340,7 @@ Examples:
 		results := make([]checkResult, 0, len(filteredGates))
 
 		// Check each gate
+		now := time.Now()
 		for _, gate := range filteredGates {
 			result := checkResult{gate: gate}
 
@@ -340,8 +349,10 @@ Examples:
 				result.resolved, result.escalated, result.reason, result.err = checkGHRun(gate)
 			case strings.HasPrefix(gate.AwaitType, "gh:pr"):
 				result.resolved, result.escalated, result.reason, result.err = checkGHPR(gate)
+			case gate.AwaitType == "timer":
+				result.resolved, result.escalated, result.reason, result.err = checkTimer(gate, now)
 			default:
-				// Skip unsupported gate types
+				// Skip unsupported gate types (human gates need manual resolution)
 				continue
 			}
 
@@ -386,6 +397,10 @@ Examples:
 				} else {
 					fmt.Printf("%s %s: ESCALATE - %s\n",
 						ui.RenderWarn("⚠"), r.gate.ID, r.reason)
+					// Actually escalate if flag is set
+					if escalateFlag {
+						escalateGate(r.gate, r.reason)
+					}
 				}
 			} else {
 				// Still pending
@@ -535,6 +550,22 @@ func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err 
 	}
 }
 
+// checkTimer checks a timer gate for expiration
+func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, reason string, err error) {
+	if gate.Timeout == 0 {
+		return false, false, "timer gate without timeout configured", fmt.Errorf("no timeout set")
+	}
+
+	expiresAt := gate.CreatedAt.Add(gate.Timeout)
+	if now.After(expiresAt) {
+		expired := now.Sub(expiresAt).Round(time.Second)
+		return true, false, fmt.Sprintf("timer expired %s ago", expired), nil
+	}
+
+	remaining := expiresAt.Sub(now).Round(time.Second)
+	return false, false, fmt.Sprintf("expires in %s", remaining), nil
+}
+
 // closeGate closes a gate issue with the given reason
 func closeGate(ctx interface{}, gateID, reason string) error {
 	if daemonClient != nil {
@@ -559,6 +590,24 @@ func closeGate(ctx interface{}, gateID, reason string) error {
 	return nil
 }
 
+// escalateGate sends an escalation for a failed/expired gate
+func escalateGate(gate *types.Issue, reason string) {
+	topic := fmt.Sprintf("Gate escalation: %s", gate.ID)
+	message := fmt.Sprintf("Gate %s needs attention.\nType: %s\nReason: %s\nCreated: %s",
+		gate.ID,
+		gate.AwaitType,
+		reason,
+		gate.CreatedAt.Format(time.RFC3339))
+
+	// Call gt escalate if available
+	escalateCmd := exec.Command("gt", "escalate", topic, "-s", "HIGH", "-m", message)
+	escalateCmd.Stdout = os.Stdout
+	escalateCmd.Stderr = os.Stderr
+	if err := escalateCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: escalation failed for %s: %v\n", gate.ID, err)
+	}
+}
+
 func init() {
 	// gate list flags
 	gateListCmd.Flags().BoolP("all", "a", false, "Show all gates including closed")
@@ -570,6 +619,8 @@ func init() {
 	// gate check flags
 	gateCheckCmd.Flags().StringP("type", "t", "", "Gate type to check (gh, gh:run, gh:pr, timer, all)")
 	gateCheckCmd.Flags().Bool("dry-run", false, "Show what would happen without making changes")
+	gateCheckCmd.Flags().BoolP("escalate", "e", false, "Escalate failed/expired gates")
+	gateCheckCmd.Flags().IntP("limit", "n", 100, "Limit results (default 100)")
 
 	// Add subcommands
 	gateCmd.AddCommand(gateListCmd)
