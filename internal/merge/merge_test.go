@@ -2391,3 +2391,72 @@ func TestMerge3Way_TombstoneVsLiveTimestampPrecisionMismatch(t *testing.T) {
 		}
 	})
 }
+
+// TestMerge3Way_DeterministicOutputOrder verifies that merge output is sorted by ID
+// for consistent, reproducible results regardless of input order or map iteration.
+// This is important for:
+// - Reproducible git diffs between merges
+// - Cross-machine consistency
+// - Matching bd export behavior
+func TestMerge3Way_DeterministicOutputOrder(t *testing.T) {
+	// Create issues with IDs that would appear in different orders
+	// if map iteration order determined output order
+	issueA := Issue{ID: "beads-aaa", Title: "A", Status: "open", CreatedAt: "2024-01-01T00:00:00Z"}
+	issueB := Issue{ID: "beads-bbb", Title: "B", Status: "open", CreatedAt: "2024-01-02T00:00:00Z"}
+	issueC := Issue{ID: "beads-ccc", Title: "C", Status: "open", CreatedAt: "2024-01-03T00:00:00Z"}
+	issueZ := Issue{ID: "beads-zzz", Title: "Z", Status: "open", CreatedAt: "2024-01-04T00:00:00Z"}
+	issueM := Issue{ID: "beads-mmm", Title: "M", Status: "open", CreatedAt: "2024-01-05T00:00:00Z"}
+
+	t.Run("output is sorted by ID", func(t *testing.T) {
+		// Input in arbitrary (non-sorted) order
+		base := []Issue{}
+		left := []Issue{issueZ, issueA, issueM}
+		right := []Issue{issueC, issueB}
+
+		result, conflicts := merge3Way(base, left, right, false)
+
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+
+		if len(result) != 5 {
+			t.Fatalf("expected 5 issues, got %d", len(result))
+		}
+
+		// Verify output is sorted by ID
+		expectedOrder := []string{"beads-aaa", "beads-bbb", "beads-ccc", "beads-mmm", "beads-zzz"}
+		for i, expected := range expectedOrder {
+			if result[i].ID != expected {
+				t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, expected)
+			}
+		}
+	})
+
+	t.Run("deterministic across multiple runs", func(t *testing.T) {
+		// Run merge multiple times to verify consistent ordering
+		base := []Issue{}
+		left := []Issue{issueZ, issueA, issueM}
+		right := []Issue{issueC, issueB}
+
+		var firstRunIDs []string
+		for run := 0; run < 10; run++ {
+			result, _ := merge3Way(base, left, right, false)
+
+			var ids []string
+			for _, issue := range result {
+				ids = append(ids, issue.ID)
+			}
+
+			if run == 0 {
+				firstRunIDs = ids
+			} else {
+				// Compare to first run
+				for i, id := range ids {
+					if id != firstRunIDs[i] {
+						t.Errorf("run %d: result[%d].ID = %q, want %q (non-deterministic output)", run, i, id, firstRunIDs[i])
+					}
+				}
+			}
+		}
+	})
+}

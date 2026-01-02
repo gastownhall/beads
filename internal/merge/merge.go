@@ -29,9 +29,11 @@ package merge
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -522,6 +524,11 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration, debug bool) 
 			result = append(result, rightIssue)
 		}
 	}
+
+	// Sort by ID for deterministic output (matches bd export behavior)
+	slices.SortFunc(result, func(a, b Issue) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 
 	return result, conflicts
 }
