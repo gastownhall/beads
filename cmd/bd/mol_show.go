@@ -70,13 +70,26 @@ func showMolecule(subgraph *MoleculeSubgraph) {
 			"issues":       subgraph.Issues,
 			"dependencies": subgraph.Dependencies,
 			"variables":    extractAllVariables(subgraph),
+			"is_compound":  subgraph.Root.IsCompound(),
+			"bonded_from":  subgraph.Root.BondedFrom,
 		})
 		return
 	}
 
-	fmt.Printf("\n%s Molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
+	// Determine molecule type label
+	moleculeType := "Molecule"
+	if subgraph.Root.IsCompound() {
+		moleculeType = "Compound"
+	}
+
+	fmt.Printf("\n%s %s: %s\n", ui.RenderAccent("🧪"), moleculeType, subgraph.Root.Title)
 	fmt.Printf("   ID: %s\n", subgraph.Root.ID)
 	fmt.Printf("   Steps: %d\n", len(subgraph.Issues))
+
+	// Show compound bonding info if this is a compound molecule
+	if subgraph.Root.IsCompound() {
+		showCompoundBondingInfo(subgraph.Root)
+	}
 
 	vars := extractAllVariables(subgraph)
 	if len(vars) > 0 {
@@ -89,6 +102,52 @@ func showMolecule(subgraph *MoleculeSubgraph) {
 	fmt.Printf("\n%s Structure:\n", ui.RenderPass("🌲"))
 	printMoleculeTree(subgraph, subgraph.Root.ID, 0, true)
 	fmt.Println()
+}
+
+// showCompoundBondingInfo displays the bonding lineage for compound molecules
+func showCompoundBondingInfo(root *types.Issue) {
+	if !root.IsCompound() {
+		return
+	}
+
+	constituents := root.GetConstituents()
+	fmt.Printf("\n%s Bonded from:\n", ui.RenderAccent("🔗"))
+
+	for i, ref := range constituents {
+		connector := "├──"
+		if i == len(constituents)-1 {
+			connector = "└──"
+		}
+
+		// Format bond type for display
+		bondTypeDisplay := formatBondType(ref.BondType)
+
+		// Show source ID with bond type
+		if ref.BondPoint != "" {
+			fmt.Printf("   %s %s (%s, at %s)\n", connector, ref.SourceID, bondTypeDisplay, ref.BondPoint)
+		} else {
+			fmt.Printf("   %s %s (%s)\n", connector, ref.SourceID, bondTypeDisplay)
+		}
+	}
+}
+
+// formatBondType returns a human-readable bond type description
+func formatBondType(bondType string) string {
+	switch bondType {
+	case types.BondTypeSequential:
+		return "sequential"
+	case types.BondTypeParallel:
+		return "parallel"
+	case types.BondTypeConditional:
+		return "on-failure"
+	case types.BondTypeRoot:
+		return "root"
+	default:
+		if bondType == "" {
+			return "default"
+		}
+		return bondType
+	}
 }
 
 // ParallelInfo holds parallel analysis information for a step
@@ -327,13 +386,26 @@ func showMoleculeWithParallel(subgraph *MoleculeSubgraph) {
 			"dependencies": subgraph.Dependencies,
 			"variables":    extractAllVariables(subgraph),
 			"parallel":     analysis,
+			"is_compound":  subgraph.Root.IsCompound(),
+			"bonded_from":  subgraph.Root.BondedFrom,
 		})
 		return
 	}
 
-	fmt.Printf("\n%s Molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
+	// Determine molecule type label
+	moleculeType := "Molecule"
+	if subgraph.Root.IsCompound() {
+		moleculeType = "Compound"
+	}
+
+	fmt.Printf("\n%s %s: %s\n", ui.RenderAccent("🧪"), moleculeType, subgraph.Root.Title)
 	fmt.Printf("   ID: %s\n", subgraph.Root.ID)
 	fmt.Printf("   Steps: %d (%d ready)\n", analysis.TotalSteps, analysis.ReadySteps)
+
+	// Show compound bonding info if this is a compound molecule
+	if subgraph.Root.IsCompound() {
+		showCompoundBondingInfo(subgraph.Root)
+	}
 
 	// Show parallel groups summary
 	if len(analysis.ParallelGroups) > 0 {

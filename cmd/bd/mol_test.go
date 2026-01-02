@@ -2527,3 +2527,103 @@ func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 		}
 	}
 }
+
+// TestCompoundMoleculeVisualization tests the compound molecule display in mol show
+func TestCompoundMoleculeVisualization(t *testing.T) {
+	// Test IsCompound() and GetConstituents()
+	tests := []struct {
+		name          string
+		bondedFrom    []types.BondRef
+		isCompound    bool
+		expectedCount int
+	}{
+		{
+			name:          "not a compound - no BondedFrom",
+			bondedFrom:    nil,
+			isCompound:    false,
+			expectedCount: 0,
+		},
+		{
+			name:          "not a compound - empty BondedFrom",
+			bondedFrom:    []types.BondRef{},
+			isCompound:    false,
+			expectedCount: 0,
+		},
+		{
+			name: "compound with one constituent",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential},
+			},
+			isCompound:    true,
+			expectedCount: 1,
+		},
+		{
+			name: "compound with two constituents - sequential bond",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential},
+				{SourceID: "proto-b", BondType: types.BondTypeSequential},
+			},
+			isCompound:    true,
+			expectedCount: 2,
+		},
+		{
+			name: "compound with parallel bond",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeParallel},
+				{SourceID: "proto-b", BondType: types.BondTypeParallel},
+			},
+			isCompound:    true,
+			expectedCount: 2,
+		},
+		{
+			name: "compound with bond point",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential, BondPoint: "step-2"},
+			},
+			isCompound:    true,
+			expectedCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{
+				ID:         "test-compound",
+				Title:      "Test Compound Molecule",
+				BondedFrom: tt.bondedFrom,
+			}
+
+			if got := issue.IsCompound(); got != tt.isCompound {
+				t.Errorf("IsCompound() = %v, want %v", got, tt.isCompound)
+			}
+
+			constituents := issue.GetConstituents()
+			if len(constituents) != tt.expectedCount {
+				t.Errorf("GetConstituents() returned %d items, want %d", len(constituents), tt.expectedCount)
+			}
+		})
+	}
+}
+
+// TestFormatBondType tests the formatBondType helper function
+func TestFormatBondType(t *testing.T) {
+	tests := []struct {
+		bondType string
+		expected string
+	}{
+		{types.BondTypeSequential, "sequential"},
+		{types.BondTypeParallel, "parallel"},
+		{types.BondTypeConditional, "on-failure"},
+		{types.BondTypeRoot, "root"},
+		{"", "default"},
+		{"custom-type", "custom-type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.bondType, func(t *testing.T) {
+			if got := formatBondType(tt.bondType); got != tt.expected {
+				t.Errorf("formatBondType(%q) = %q, want %q", tt.bondType, got, tt.expected)
+			}
+		})
+	}
+}
