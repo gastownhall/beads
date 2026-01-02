@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
@@ -144,6 +145,52 @@ func TestConfigNamespaces(t *testing.T) {
 	for key, expected := range namespaces {
 		if config[key] != expected {
 			t.Errorf("Expected '%s' for %s in GetAllConfig, got '%s'", expected, key, config[key])
+		}
+	}
+}
+
+// TestYamlOnlyConfigWithoutDatabase verifies that yaml-only config keys
+// (like no-db, no-daemon) can be set/get without requiring a SQLite database.
+// This is the fix for GH#536 - the chicken-and-egg problem where you couldn't
+// run `bd config set no-db true` without first having a database.
+func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
+	// Create a temp directory with only config.yaml (no database)
+	tmpDir, err := os.MkdirTemp("", "bd-test-yaml-config-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create config.yaml with a prefix but NO database
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("prefix: test\n"), 0644); err != nil {
+		t.Fatalf("Failed to create config.yaml: %v", err)
+	}
+
+	// Create empty issues.jsonl (simulates fresh clone)
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(""), 0644); err != nil {
+		t.Fatalf("Failed to create issues.jsonl: %v", err)
+	}
+
+	// Test that IsYamlOnlyKey correctly identifies yaml-only keys
+	yamlOnlyKeys := []string{"no-db", "no-daemon", "no-auto-flush", "json", "sync.branch", "routing.mode"}
+	for _, key := range yamlOnlyKeys {
+		if !config.IsYamlOnlyKey(key) {
+			t.Errorf("Expected %q to be a yaml-only key", key)
+		}
+	}
+
+	// Test that non-yaml-only keys are correctly identified
+	nonYamlKeys := []string{"jira.url", "linear.team_id", "status.custom"}
+	for _, key := range nonYamlKeys {
+		if config.IsYamlOnlyKey(key) {
+			t.Errorf("Expected %q to NOT be a yaml-only key", key)
 		}
 	}
 }

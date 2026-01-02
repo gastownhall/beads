@@ -434,7 +434,14 @@ var rootCmd = &cobra.Command{
 				// Allow some commands to run without a database
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
-				if cmd.Name() != "import" && cmd.Name() != "setup" {
+				// - config set/get for yaml-only keys: writes to config.yaml, not SQLite (GH#536)
+				isYamlOnlyConfigOp := false
+				if (cmd.Name() == "set" || cmd.Name() == "get") && cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+					if len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
+						isYamlOnlyConfigOp = true
+					}
+				}
+				if cmd.Name() != "import" && cmd.Name() != "setup" && !isYamlOnlyConfigOp {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 
