@@ -104,12 +104,9 @@ func showMolecule(subgraph *MoleculeSubgraph) {
 	fmt.Println()
 }
 
-// showCompoundBondingInfo displays the bonding lineage for compound molecules
+// showCompoundBondingInfo displays the bonding lineage for compound molecules.
+// Caller must ensure root.IsCompound() is true.
 func showCompoundBondingInfo(root *types.Issue) {
-	if !root.IsCompound() {
-		return
-	}
-
 	constituents := root.GetConstituents()
 	fmt.Printf("\n%s Bonded from:\n", ui.RenderAccent("🔗"))
 
