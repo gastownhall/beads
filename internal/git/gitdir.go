@@ -149,8 +149,13 @@ func GetMainRepoRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The main repo root is the parent of the .git directory (commonDir)
-	return filepath.Dir(ctx.commonDir), nil
+	if ctx.isWorktree {
+		// For worktrees, the main repo root is the parent of the shared .git directory.
+		return filepath.Dir(ctx.commonDir), nil
+	}
+
+	// For regular repos (including submodules), repoRoot is the correct root.
+	return ctx.repoRoot, nil
 }
 
 // GetRepoRoot returns the root directory of the current git repository.
