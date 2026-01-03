@@ -135,9 +135,12 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.EventPayload != nil {
 		u["event_payload"] = *a.EventPayload
 	}
-	// Gate fields (bd-z6kw: support await_id updates for gate discovery)
+	// Gate fields
 	if a.AwaitID != nil {
 		u["await_id"] = *a.AwaitID
+	}
+	if len(a.Waiters) > 0 {
+		u["waiters"] = a.Waiters
 	}
 	return u
 }
