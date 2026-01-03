@@ -16,7 +16,7 @@ Beads (`bd`) is an issue tracker designed specifically for AI-supervised coding 
 
 1. Install beads CLI:
 ```bash
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 ```
 
 2. Install Python and uv (for MCP server):
@@ -310,7 +310,7 @@ The plugin requires the `bd` CLI to be installed. Update it separately:
 
 ```bash
 # Quick update
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 
 # Or with go
 go install github.com/steveyegge/beads/cmd/bd@latest

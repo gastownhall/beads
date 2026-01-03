@@ -66,7 +66,7 @@ class Config(BaseSettings):
                     f"bd executable not found at: {v}\n\n"
                     + "The beads Claude Code plugin requires the bd CLI to be installed.\n\n"
                     + "Install bd CLI:\n"
-                    + "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash\n\n"
+                    + "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash\n\n"
                     + "Or visit: https://github.com/steveyegge/beads#installation\n\n"
                     + "After installation, restart Claude Code to reload the MCP server."
                 )
@@ -154,7 +154,7 @@ def load_config() -> Config:
             "Beads MCP Server Configuration Error\n\n"
             + f"{e}\n\n"
             + "Common fix: Install the bd CLI first:\n"
-            + "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash\n\n"
+            + "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash\n\n"
             + "Or visit: https://github.com/steveyegge/beads#installation\n\n"
             + "After installation, restart Claude Code.\n\n"
             + "Advanced configuration (optional):\n"
