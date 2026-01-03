@@ -961,10 +961,14 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				IssueType:          oldIssue.IssueType,
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Ephemeral:               opts.Ephemeral,   // mark for cleanup when closed
-				IDPrefix:           opts.Prefix, // distinct prefixes for mols/wisps
-				CreatedAt:          time.Now(),
-				UpdatedAt:          time.Now(),
+				Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+				IDPrefix:           opts.Prefix,   // distinct prefixes for mols/wisps
+				// Gate fields (for async coordination)
+				AwaitType: oldIssue.AwaitType,
+				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
+				Timeout:   oldIssue.Timeout,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 
 			// Generate custom ID for dynamic bonding if ParentID is set
