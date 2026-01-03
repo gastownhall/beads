@@ -340,6 +340,17 @@ func startDaemonProcess(socketPath string) bool {
 
 	recordDaemonStartFailure()
 	debugLog("daemon socket not ready after 5 seconds")
+
+	// Check for daemon-error file which contains the actual failure reason
+	beadsDir := filepath.Dir(dbPath)
+	errFile := filepath.Join(beadsDir, "daemon-error")
+	if errContent, err := os.ReadFile(errFile); err == nil && len(errContent) > 0 {
+		// Show the actual error from the daemon
+		fmt.Fprintf(os.Stderr, "%s Daemon failed to start:\n", ui.RenderWarn("Warning:"))
+		fmt.Fprintf(os.Stderr, "%s\n", string(errContent))
+		return false
+	}
+
 	// Emit visible warning so user understands why command was slow
 	fmt.Fprintf(os.Stderr, "%s Daemon took too long to start (>5s). Running in direct mode.\n", ui.RenderWarn("Warning:"))
 	fmt.Fprintf(os.Stderr, "  %s Run 'bd doctor' to diagnose daemon issues\n", ui.RenderMuted("Hint:"))

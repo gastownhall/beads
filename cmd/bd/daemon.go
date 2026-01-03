@@ -452,6 +452,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	} else if err := validateDatabaseFingerprint(ctx, store, &log); err != nil {
 		if os.Getenv("BEADS_IGNORE_REPO_MISMATCH") != "1" {
 			log.Error("repository fingerprint validation failed", "error", err)
+			// Write error to daemon-error file so user sees it instead of just "daemon took too long"
+			errFile := filepath.Join(beadsDir, "daemon-error")
+			// nolint:gosec // G306: Error file needs to be readable for debugging
+			if writeErr := os.WriteFile(errFile, []byte(err.Error()), 0644); writeErr != nil {
+				log.Warn("could not write daemon-error file", "error", writeErr)
+			}
 			return // Use return instead of os.Exit to allow defers to run
 		}
 		log.Warn("repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")

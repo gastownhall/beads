@@ -441,12 +441,12 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	err = db.QueryRow("SELECT value FROM metadata WHERE key = 'repo_id'").Scan(&storedRepoID)
 	if err != nil {
 		if err == sql.ErrNoRows || strings.Contains(err.Error(), "no such table") {
-			// Legacy database without repo_id
+			// Legacy database without repo_id - this is an error because daemon won't start
 			return DoctorCheck{
 				Name:    "Repo Fingerprint",
-				Status:  StatusWarning,
+				Status:  StatusError,
 				Message: "Legacy database (no fingerprint)",
-				Detail:  "Database was created before version 0.17.5",
+				Detail:  "Database was created before version 0.17.5. Daemon will fail to start.",
 				Fix:     "Run 'bd migrate --update-repo-id' to add fingerprint",
 			}
 		}
@@ -458,13 +458,13 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	// If repo_id is empty, treat as legacy
+	// If repo_id is empty, treat as legacy - this is an error because daemon won't start
 	if storedRepoID == "" {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
-			Status:  StatusWarning,
+			Status:  StatusError,
 			Message: "Legacy database (empty fingerprint)",
-			Detail:  "Database was created before version 0.17.5",
+			Detail:  "Database was created before version 0.17.5. Daemon will fail to start.",
 			Fix:     "Run 'bd migrate --update-repo-id' to add fingerprint",
 		}
 	}
