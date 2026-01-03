@@ -130,11 +130,13 @@ func SetYamlConfig(key, value string) error {
 
 // GetYamlConfig gets a configuration value from config.yaml.
 // Returns empty string if key is not found or is commented out.
+// Keys are normalized to their canonical yaml format (e.g., sync.branch -> sync-branch).
 func GetYamlConfig(key string) string {
 	if v == nil {
 		return ""
 	}
-	return v.GetString(key)
+	normalizedKey := normalizeYamlKey(key)
+	return v.GetString(normalizedKey)
 }
 
 // findProjectConfigYaml finds the project's .beads/config.yaml file.

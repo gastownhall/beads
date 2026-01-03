@@ -224,6 +224,53 @@ sync-branch: old-value
 	}
 }
 
+func TestGetYamlConfig_KeyNormalization(t *testing.T) {
+	// Create a temp directory with .beads/config.yaml
+	tmpDir, err := os.MkdirTemp("", "beads-yaml-get-key-norm-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Write config with canonical key name (sync-branch, not sync.branch)
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	initialConfig := `# Beads Config
+sync-branch: test-value
+`
+	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
+		t.Fatalf("Failed to write config.yaml: %v", err)
+	}
+
+	// Change to temp directory for the test
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	// Initialize viper to read the config
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	// Test GetYamlConfig with aliased key (sync.branch should find sync-branch value)
+	got := GetYamlConfig("sync.branch")
+	if got != "test-value" {
+		t.Errorf("GetYamlConfig(\"sync.branch\") = %q, want %q", got, "test-value")
+	}
+
+	// Also verify canonical key works
+	got = GetYamlConfig("sync-branch")
+	if got != "test-value" {
+		t.Errorf("GetYamlConfig(\"sync-branch\") = %q, want %q", got, "test-value")
+	}
+}
+
 func TestSetYamlConfig(t *testing.T) {
 	// Create a temp directory with .beads/config.yaml
 	tmpDir, err := os.MkdirTemp("", "beads-yaml-test-*")
