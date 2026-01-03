@@ -1,0 +1,408 @@
+# Beads Release Formula v2 (Gate-Aware)
+#
+# This formula uses gates for async waits during CI, enabling clean phase handoffs.
+# Instead of polling, the polecat completes Phase 1, and a gate blocks Phase 2
+# until GitHub Actions finishes.
+#
+# Phases:
+#   1. Prep & Push: preflight → push-tag (polecat work)
+#   2. Gate: await-ci (async wait for release.yml)
+#   3. Verify: verify-github, verify-npm, verify-pypi (parallel)
+#   4. Install: local-install → release-complete (fan-in)
+
+formula = "beads-release"
+description = """
+Beads release workflow v2 - gate-aware async release.
+
+This formula orchestrates a complete release cycle with async gates:
+
+Phase 1 (Polecat Work):
+  1. Preflight checks (clean git, up to date)
+  2. Documentation updates (CHANGELOG, info.go)
+  3. Version bump (all components)
+  4. Git operations (commit, tag, push)
+
+Gate (Async Wait):
+  5. await-ci: Gate on GitHub Actions release.yml completion
+
+Phase 2 (Parallel Verification):
+  6. Verify GitHub release, npm package, PyPI package (concurrent)
+
+Phase 3 (Installation):
+  7. Local installation update
+  8. Daemon restart
+
+## Usage
+
+```bash
+bd mol wisp create beads-release --var version=0.44.0
+```
+
+Or assign to a polecat:
+```bash
+gt sling beads/polecats/p1 --formula beads-release --var version=0.44.0
+```
+
+The polecat will complete Phase 1, then signal phase-complete. The gate blocks
+until release.yml finishes. A new polecat (or the same one) resumes for Phases 2-3.
+"""
+type = "workflow"
+version = 1
+
+[vars.version]
+description = "The semantic version to release (e.g., 0.44.0)"
+required = true
+
+# =============================================================================
+# Phase 1: Prep & Push
+# =============================================================================
+
+[[steps]]
+id = "preflight-git"
+title = "Preflight: Check git status"
+description = """
+Ensure working tree is clean before starting release.
+
+```bash
+git status
+```
+
+If there are uncommitted changes, either:
+- Commit them first
+- Stash them: `git stash`
+- Abort and resolve
+"""
+
+[[steps]]
+id = "preflight-pull"
+title = "Preflight: Pull latest"
+needs = ["preflight-git"]
+description = """
+Ensure we're up to date with origin.
+
+```bash
+git pull --rebase
+```
+
+Resolve any conflicts before proceeding.
+"""
+
+[[steps]]
+id = "review-changes"
+title = "Review changes since last release"
+needs = ["preflight-pull"]
+description = """
+Understand what's being released.
+
+```bash
+git log $(git describe --tags --abbrev=0)..HEAD --oneline
+```
+
+Categorize changes:
+- Features (feat:)
+- Fixes (fix:)
+- Breaking changes
+- Documentation
+"""
+
+[[steps]]
+id = "update-changelog"
+title = "Update CHANGELOG.md"
+needs = ["review-changes"]
+description = """
+Write the [Unreleased] section with all changes for {{version}}.
+
+Format: Keep a Changelog (https://keepachangelog.com)
+
+Sections:
+- ### Added
+- ### Changed
+- ### Fixed
+- ### Documentation
+
+The bump script will stamp the date automatically.
+"""
+
+[[steps]]
+id = "update-info-go"
+title = "Update info.go versionChanges"
+needs = ["update-changelog"]
+description = """
+Add entry to versionChanges in cmd/bd/info.go.
+
+This powers `bd info --whats-new` for agents.
+
+```go
+"{{version}}": {
+    "summary": "Brief description",
+    "changes": []string{
+        "Key change 1",
+        "Key change 2",
+    },
+},
+```
+
+Focus on workflow-impacting changes agents need to know.
+"""
+
+[[steps]]
+id = "run-bump-script"
+title = "Run bump-version.sh"
+needs = ["update-info-go"]
+description = """
+Update all component versions atomically.
+
+```bash
+./scripts/bump-version.sh {{version}}
+```
+
+This updates:
+- cmd/bd/version.go
+- .claude-plugin/*.json
+- integrations/beads-mcp/pyproject.toml
+- integrations/beads-mcp/src/beads_mcp/__init__.py
+- npm-package/package.json
+- Hook templates
+- README.md
+- CHANGELOG.md (adds date)
+"""
+
+[[steps]]
+id = "verify-versions"
+title = "Verify version consistency"
+needs = ["run-bump-script"]
+description = """
+Confirm all versions match {{version}}.
+
+```bash
+grep 'Version = ' cmd/bd/version.go
+jq -r '.version' .claude-plugin/plugin.json
+jq -r '.version' npm-package/package.json
+grep 'version = ' integrations/beads-mcp/pyproject.toml
+```
+
+All should show {{version}}.
+"""
+
+[[steps]]
+id = "commit-release"
+title = "Commit release"
+needs = ["verify-versions"]
+description = """
+Stage and commit all version changes.
+
+```bash
+git add -A
+git commit -m "chore: Bump version to {{version}}"
+```
+
+Review the commit to ensure all expected files are included.
+"""
+
+[[steps]]
+id = "create-tag"
+title = "Create release tag"
+needs = ["commit-release"]
+description = """
+Create annotated git tag.
+
+```bash
+git tag -a v{{version}} -m "Release v{{version}}"
+```
+
+Verify: `git tag -l | tail -5`
+"""
+
+[[steps]]
+id = "push-main"
+title = "Push to main"
+needs = ["create-tag"]
+description = """
+Push the release commit to origin.
+
+```bash
+git push origin main
+```
+
+If rejected, someone else pushed. Pull, rebase, try again.
+"""
+
+[[steps]]
+id = "push-tag"
+title = "Push release tag"
+needs = ["push-main"]
+description = """
+Push the version tag to trigger CI release.
+
+```bash
+git push origin v{{version}}
+```
+
+This triggers GitHub Actions to build artifacts and publish.
+
+**Phase 1 Complete**: After this step, signal phase-complete:
+```bash
+gt done --phase-complete
+```
+
+The gate will block until CI finishes. A new session will resume at Phase 2.
+"""
+
+# =============================================================================
+# Gate: CI Completion
+# =============================================================================
+
+[[steps]]
+id = "await-ci"
+title = "Await CI: release.yml completion"
+needs = ["push-tag"]
+description = """
+Gate step: Wait for GitHub Actions release workflow to complete.
+
+This gate blocks until the release.yml workflow run succeeds.
+The Refinery auto-discovers the workflow run triggered by v{{version}}
+and closes this gate when it completes.
+
+Expected time: 5-10 minutes
+
+The gate monitors:
+- Build artifacts (all platforms)
+- Test suite pass
+- npm publish
+- PyPI publish
+
+If the workflow fails, this gate remains open and requires manual intervention.
+"""
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+timeout = "30m"
+
+# =============================================================================
+# Phase 2: Verification (Parallel)
+# =============================================================================
+
+[[steps]]
+id = "verify-github"
+title = "Verify GitHub release"
+needs = ["await-ci"]
+description = """
+Check the GitHub releases page.
+
+https://github.com/steveyegge/beads/releases/tag/v{{version}}
+
+Verify:
+- Release created
+- Binaries attached (linux, darwin, windows)
+- Checksums present
+
+```bash
+gh release view v{{version}} --json assets --jq '.assets[].name'
+```
+"""
+
+[[steps]]
+id = "verify-npm"
+title = "Verify npm package"
+needs = ["await-ci"]
+description = """
+Confirm npm package published.
+
+```bash
+npm show @beads/bd version
+```
+
+Should show {{version}}.
+
+Also check: https://www.npmjs.com/package/@beads/bd
+
+Note: npm registry may have a small propagation delay (1-2 min).
+"""
+
+[[steps]]
+id = "verify-pypi"
+title = "Verify PyPI package"
+needs = ["await-ci"]
+description = """
+Confirm PyPI package published.
+
+```bash
+pip index versions beads-mcp 2>/dev/null | head -3
+```
+
+Or check: https://pypi.org/project/beads-mcp/
+
+Should show {{version}}.
+
+Note: PyPI may have a small propagation delay (1-2 min).
+"""
+
+# =============================================================================
+# Phase 3: Installation (Fan-in)
+# =============================================================================
+
+[[steps]]
+id = "local-install"
+title = "Update local installation"
+needs = ["verify-github", "verify-npm", "verify-pypi"]
+description = """
+Update local bd to the new version.
+
+Option 1 - Homebrew:
+```bash
+brew upgrade bd
+```
+
+Option 2 - Install script:
+```bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+Verify:
+```bash
+bd --version
+```
+
+Should show {{version}}.
+"""
+
+[[steps]]
+id = "restart-daemons"
+title = "Restart daemons"
+needs = ["local-install"]
+description = """
+Restart bd daemons to pick up new version.
+
+```bash
+bd daemons killall
+```
+
+Daemons will auto-restart with new version on next bd command.
+
+Verify:
+```bash
+bd daemons list
+```
+"""
+
+[[steps]]
+id = "release-complete"
+title = "Release complete"
+needs = ["restart-daemons"]
+description = """
+Release v{{version}} is complete!
+
+Summary:
+- All version files updated
+- Git tag pushed
+- CI artifacts built (via gate)
+- npm and PyPI packages verified
+- Local installation updated
+- Daemons restarted
+
+Optional next steps:
+- Announce on social media
+- Update documentation site
+- Close related milestone
+"""
