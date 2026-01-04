@@ -389,40 +389,24 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 }
 
 // configureSparseCheckout sets up sparse checkout to only include .beads/
+// Uses `git sparse-checkout` command which properly scopes the config to the
+// worktree, avoiding GH#886 where core.sparseCheckout leaked to main repo.
 func (wm *WorktreeManager) configureSparseCheckout(worktreePath string) error {
-	// Get the actual git directory (for worktrees, .git is a file)
-	gitFile := filepath.Join(worktreePath, ".git")
-	gitContent, err := os.ReadFile(gitFile) // #nosec G304 - controlled path
+	// Initialize sparse checkout in non-cone mode (supports glob patterns)
+	// This uses extensions.worktreeConfig to scope sparseCheckout to this worktree only
+	initCmd := exec.Command("git", "sparse-checkout", "init", "--no-cone")
+	initCmd.Dir = worktreePath
+	output, err := initCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to read .git file: %w", err)
+		return fmt.Errorf("failed to init sparse checkout: %w\nOutput: %s", err, string(output))
 	}
 
-	// Parse "gitdir: /path/to/git/dir"
-	gitDirLine := strings.TrimSpace(string(gitContent))
-	if !strings.HasPrefix(gitDirLine, "gitdir: ") {
-		return fmt.Errorf("invalid .git file format: %s", gitDirLine)
-	}
-	gitDir := strings.TrimPrefix(gitDirLine, "gitdir: ")
-
-	// Enable sparse checkout config
-	cmd := exec.Command("git", "config", "core.sparseCheckout", "true")
-	cmd.Dir = worktreePath
-	output, err := cmd.CombinedOutput()
+	// Set sparse checkout to only include .beads/
+	setCmd := exec.Command("git", "sparse-checkout", "set", "/.beads/")
+	setCmd.Dir = worktreePath
+	output, err = setCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to enable sparse checkout: %w\nOutput: %s", err, string(output))
-	}
-
-	// Create info directory if it doesn't exist
-	infoDir := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(infoDir, 0750); err != nil {
-		return fmt.Errorf("failed to create info directory: %w", err)
-	}
-
-	// Write sparse-checkout file to include only .beads/
-	sparseFile := filepath.Join(infoDir, "sparse-checkout")
-	sparseContent := ".beads/*\n"
-	if err := os.WriteFile(sparseFile, []byte(sparseContent), 0644); err != nil { // #nosec G306 - sparse-checkout config file needs standard permissions
-		return fmt.Errorf("failed to write sparse-checkout file: %w", err)
+		return fmt.Errorf("failed to set sparse checkout patterns: %w\nOutput: %s", err, string(output))
 	}
 
 	return nil
@@ -445,34 +429,16 @@ func NormalizeBeadsRelPath(relPath string) string {
 
 // verifySparseCheckout checks if sparse checkout is configured correctly
 func (wm *WorktreeManager) verifySparseCheckout(worktreePath string) error {
-	// Check if sparse-checkout file exists and contains .beads
-	sparseFile := filepath.Join(worktreePath, ".git", "info", "sparse-checkout")
-	
-	// For worktrees, .git is a file pointing to the actual git dir
-	// We need to read the actual git directory location
-	gitFile := filepath.Join(worktreePath, ".git")
-	gitContent, err := os.ReadFile(gitFile) // #nosec G304 - controlled path
+	// Use git sparse-checkout list to verify configuration
+	cmd := exec.Command("git", "sparse-checkout", "list")
+	cmd.Dir = worktreePath
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to read .git file: %w", err)
-	}
-
-	// Parse "gitdir: /path/to/git/dir"
-	gitDirLine := strings.TrimSpace(string(gitContent))
-	if !strings.HasPrefix(gitDirLine, "gitdir: ") {
-		return fmt.Errorf("invalid .git file format")
-	}
-	gitDir := strings.TrimPrefix(gitDirLine, "gitdir: ")
-	
-	// Sparse checkout file is in the git directory
-	sparseFile = filepath.Join(gitDir, "info", "sparse-checkout")
-	
-	data, err := os.ReadFile(sparseFile) // #nosec G304 - controlled path
-	if err != nil {
-		return fmt.Errorf("sparse-checkout file not found: %w", err)
+		return fmt.Errorf("failed to list sparse checkout patterns: %w\nOutput: %s", err, string(output))
 	}
 
 	// Verify it contains .beads
-	if !strings.Contains(string(data), ".beads") {
+	if !strings.Contains(string(output), ".beads") {
 		return fmt.Errorf("sparse-checkout does not include .beads")
 	}
 

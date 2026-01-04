@@ -547,8 +547,9 @@ func TestVerifySparseCheckoutErrors(t *testing.T) {
 		if err == nil {
 			t.Error("verifySparseCheckout should fail with invalid .git file format")
 		}
-		if !strings.Contains(err.Error(), "invalid .git file format") {
-			t.Errorf("Expected 'invalid .git file format' error, got: %v", err)
+		// git sparse-checkout list will fail when .git file is invalid
+		if !strings.Contains(err.Error(), "failed to list sparse checkout patterns") {
+			t.Errorf("Expected 'failed to list sparse checkout patterns' error, got: %v", err)
 		}
 	})
 }
