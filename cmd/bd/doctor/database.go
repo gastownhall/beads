@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -468,6 +469,35 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 		issues = append(issues, fmt.Sprintf("Count mismatch: database has %d issues, JSONL has %d", dbCount, jsonlCount))
 	}
 
+	// GH#885: Content-level comparison to detect status mismatches
+	// This catches the case where counts match but issue statuses differ
+	// (e.g., JSONL shows "open" but DB shows "closed")
+	var statusMismatchDetail string
+	if dbCount == jsonlCount && jsonlCount > 0 {
+		statusMismatches, contentErr := compareIssueStatuses(db, jsonlPath)
+		if contentErr != nil {
+			// Non-fatal: log warning but continue with other checks
+			fmt.Fprintf(os.Stderr, "Warning: status comparison failed: %v\n", contentErr)
+		} else if len(statusMismatches) > 0 {
+			// Report up to 3 mismatches in detail
+			statusMismatchDetail = "Status mismatches detected:\n"
+			showCount := len(statusMismatches)
+			if showCount > 3 {
+				showCount = 3
+			}
+			for i := 0; i < showCount; i++ {
+				statusMismatchDetail += fmt.Sprintf("  %s: DB=%s, JSONL=%s\n",
+					statusMismatches[i].ID,
+					statusMismatches[i].DBStatus,
+					statusMismatches[i].JSONLStatus)
+			}
+			if len(statusMismatches) > 3 {
+				statusMismatchDetail += fmt.Sprintf("  ... and %d more\n", len(statusMismatches)-3)
+			}
+			issues = append(issues, fmt.Sprintf("Status mismatch: %d issue(s) have different status in DB vs JSONL", len(statusMismatches)))
+		}
+	}
+
 	// Prefix mismatch (only check most common prefix in JSONL)
 	if dbPrefix != "" && len(jsonlPrefixes) > 0 {
 		var mostCommonPrefix string
@@ -502,22 +532,29 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 	if len(issues) > 0 {
 		// Provide direction-specific guidance
 		var fixMsg string
+		var detail string
 		if dbCount > jsonlCount {
 			fixMsg = "Run 'bd doctor --fix' to automatically export DB to JSONL, or manually run 'bd export'"
 		} else if jsonlCount > dbCount {
 			fixMsg = "Run 'bd doctor --fix' to automatically import JSONL to DB, or manually run 'bd sync --import-only'"
 		} else {
-			// Equal counts but other issues (like prefix mismatch)
+			// Equal counts but other issues (like prefix mismatch or status mismatch)
 			fixMsg = "Run 'bd doctor --fix' to fix automatically, or manually run 'bd sync --import-only' or 'bd export' depending on which has newer data"
 		}
 		if strings.Contains(strings.Join(issues, " "), "Prefix mismatch") {
 			fixMsg = "Run 'bd import -i " + filepath.Base(jsonlPath) + " --rename-on-import' to fix prefixes"
+		}
+		// GH#885: For status mismatches, provide specific guidance and include detail
+		if strings.Contains(strings.Join(issues, " "), "Status mismatch") {
+			fixMsg = "Run 'bd export -o " + filepath.Base(jsonlPath) + "' to update JSONL from DB (DB is usually source of truth)"
+			detail = statusMismatchDetail
 		}
 
 		return DoctorCheck{
 			Name:    "DB-JSONL Sync",
 			Status:  StatusWarning,
 			Message: strings.Join(issues, "; "),
+			Detail:  detail,
 			Fix:     fixMsg,
 		}
 	}
@@ -835,4 +872,122 @@ func CheckDatabaseSize(path string) DoctorCheck {
 		Status:  StatusOK,
 		Message: fmt.Sprintf("%d closed issues (threshold: %d)", closedCount, threshold),
 	}
+}
+
+// statusMismatch represents a status difference between DB and JSONL for an issue
+type statusMismatch struct {
+	ID          string
+	DBStatus    string
+	JSONLStatus string
+}
+
+// compareIssueStatuses compares issue statuses between the database and JSONL file.
+// Returns a slice of mismatches found. For performance, samples up to 500 issues
+// when there are many issues. This is sufficient to detect sync problems while
+// keeping the check fast.
+//
+// GH#885: This detects the case where sync failure leaves JSONL stale while
+// the DB has the correct state (e.g., JSONL shows "open" but DB shows "closed").
+func compareIssueStatuses(db *sql.DB, jsonlPath string) ([]statusMismatch, error) {
+	// Read JSONL statuses into a map
+	jsonlStatuses, err := readJSONLStatuses(jsonlPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSONL statuses: %w", err)
+	}
+
+	if len(jsonlStatuses) == 0 {
+		return nil, nil // No issues to compare
+	}
+
+	// For performance, sample issues if there are many
+	// 500 samples is enough to detect sync problems with high confidence
+	const maxSamples = 500
+	issueIDs := make([]string, 0, len(jsonlStatuses))
+	for id := range jsonlStatuses {
+		issueIDs = append(issueIDs, id)
+	}
+
+	// If we have more issues than the sample size, take a deterministic sample
+	// by sorting and taking every Nth issue
+	if len(issueIDs) > maxSamples {
+		// Sort for deterministic results
+		slices.Sort(issueIDs)
+		step := len(issueIDs) / maxSamples
+		sampled := make([]string, 0, maxSamples)
+		for i := 0; i < len(issueIDs); i += step {
+			sampled = append(sampled, issueIDs[i])
+			if len(sampled) >= maxSamples {
+				break
+			}
+		}
+		issueIDs = sampled
+	}
+
+	// Query DB statuses for the sampled issues
+	var mismatches []statusMismatch
+	for _, id := range issueIDs {
+		var dbStatus string
+		err := db.QueryRow("SELECT status FROM issues WHERE id = ?", id).Scan(&dbStatus)
+		if err == sql.ErrNoRows {
+			// Issue exists in JSONL but not in DB - this is a count mismatch issue
+			// which is already caught by the count check
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to query status for %s: %w", id, err)
+		}
+
+		jsonlStatus := jsonlStatuses[id]
+		if dbStatus != jsonlStatus {
+			mismatches = append(mismatches, statusMismatch{
+				ID:          id,
+				DBStatus:    dbStatus,
+				JSONLStatus: jsonlStatus,
+			})
+		}
+	}
+
+	return mismatches, nil
+}
+
+// readJSONLStatuses reads issue IDs and their statuses from a JSONL file.
+// Returns a map of issue ID -> status.
+func readJSONLStatuses(jsonlPath string) (map[string]string, error) {
+	// jsonlPath is safe: constructed from filepath.Join(beadsDir, hardcoded name)
+	file, err := os.Open(jsonlPath) //nolint:gosec
+	if err != nil {
+		return nil, fmt.Errorf("failed to open JSONL file: %w", err)
+	}
+	defer file.Close()
+
+	statuses := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	// Increase buffer for large JSON lines
+	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Parse just the id and status fields (more efficient than full parse)
+		var partial struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(line, &partial); err != nil {
+			continue // Skip malformed lines
+		}
+
+		if partial.ID != "" {
+			statuses[partial.ID] = partial.Status
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read JSONL file: %w", err)
+	}
+
+	return statuses, nil
 }

@@ -161,6 +161,30 @@ func TestCheckDatabaseJSONLSync(t *testing.T) {
 			},
 			expectedStatus: "warning",
 		},
+		{
+			// GH#885: Status mismatch detection
+			name: "status mismatch - same count different status",
+			setup: func(t *testing.T, dir string) {
+				// Create database with issue status "closed"
+				dbPath := setupTestDatabase(t, dir)
+				db, _ := sql.Open("sqlite3", dbPath)
+				defer db.Close()
+				// Add config table for prefix check (required by CheckDatabaseJSONLSync)
+				_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)`)
+				_, _ = db.Exec(`INSERT INTO config (key, value) VALUES ('issue_prefix', 'test')`)
+				_, _ = db.Exec(`INSERT INTO issues (id, title, status) VALUES ('test-1', 'Test Issue', 'closed')`)
+
+				// Create JSONL with same issue but status "open" (stale JSONL)
+				jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+				content := `{"id":"test-1","title":"Test Issue","status":"open"}
+`
+				if err := os.WriteFile(jsonlPath, []byte(content), 0600); err != nil {
+					t.Fatalf("failed to create JSONL: %v", err)
+				}
+			},
+			expectedStatus: "warning",
+			expectMessage:  "Status mismatch: 1 issue(s) have different status in DB vs JSONL",
+		},
 	}
 
 	for _, tt := range tests {
