@@ -285,21 +285,27 @@ var createCmd = &cobra.Command{
 			// Validate prefix matches database prefix
 			ctx := rootCtx
 
-			// Get database prefix from config
-			var dbPrefix string
+			// Get database prefix and allowed prefixes from config
+			var dbPrefix, allowedPrefixes string
 			if daemonClient != nil {
 				// Daemon mode - use RPC to get config
 				configResp, err := daemonClient.GetConfig(&rpc.GetConfigArgs{Key: "issue_prefix"})
 				if err == nil {
 					dbPrefix = configResp.Value
 				}
+				// Also get allowed_prefixes for multi-prefix support (e.g., Gas Town)
+				allowedResp, err := daemonClient.GetConfig(&rpc.GetConfigArgs{Key: "allowed_prefixes"})
+				if err == nil {
+					allowedPrefixes = allowedResp.Value
+				}
 				// If error, continue without validation (non-fatal)
 			} else {
 				// Direct mode - check config
 				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+				allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
 			}
 
-			if err := validation.ValidatePrefix(requestedPrefix, dbPrefix, forceCreate); err != nil {
+			if err := validation.ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				FatalError("%v", err)
 			}
 

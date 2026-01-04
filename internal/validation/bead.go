@@ -72,10 +72,36 @@ func ValidateIDFormat(id string) (string, error) {
 // ValidatePrefix checks that the requested prefix matches the database prefix.
 // Returns an error if they don't match (unless force is true).
 func ValidatePrefix(requestedPrefix, dbPrefix string, force bool) error {
+	return ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, "", force)
+}
+
+// ValidatePrefixWithAllowed checks that the requested prefix is allowed.
+// It matches if:
+// - force is true
+// - dbPrefix is empty
+// - requestedPrefix matches dbPrefix
+// - requestedPrefix is in the comma-separated allowedPrefixes list
+// Returns an error if none of these conditions are met.
+func ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes string, force bool) error {
 	if force || dbPrefix == "" || dbPrefix == requestedPrefix {
 		return nil
 	}
 
+	// Check if requestedPrefix is in the allowed list
+	if allowedPrefixes != "" {
+		for _, allowed := range strings.Split(allowedPrefixes, ",") {
+			allowed = strings.TrimSpace(allowed)
+			if allowed == requestedPrefix {
+				return nil
+			}
+		}
+	}
+
+	// Build helpful error message
+	if allowedPrefixes != "" {
+		return fmt.Errorf("prefix mismatch: database uses '%s' (allowed: %s) but you specified '%s' (use --force to override)",
+			dbPrefix, allowedPrefixes, requestedPrefix)
+	}
 	return fmt.Errorf("prefix mismatch: database uses '%s' but you specified '%s' (use --force to override)", dbPrefix, requestedPrefix)
 }
 

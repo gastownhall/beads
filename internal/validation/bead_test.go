@@ -195,6 +195,43 @@ func TestValidatePrefix(t *testing.T) {
 	}
 }
 
+func TestValidatePrefixWithAllowed(t *testing.T) {
+	tests := []struct {
+		name            string
+		requestedPrefix string
+		dbPrefix        string
+		allowedPrefixes string
+		force           bool
+		wantError       bool
+	}{
+		// Basic cases (same as ValidatePrefix)
+		{"matching prefixes", "bd", "bd", "", false, false},
+		{"empty db prefix", "bd", "", "", false, false},
+		{"mismatched with force", "foo", "bd", "", true, false},
+		{"mismatched without force", "foo", "bd", "", false, true},
+
+		// Multi-prefix cases (Gas Town use case)
+		{"allowed prefix gt", "gt", "hq", "gt,hmc", false, false},
+		{"allowed prefix hmc", "hmc", "hq", "gt,hmc", false, false},
+		{"primary prefix still works", "hq", "hq", "gt,hmc", false, false},
+		{"prefix not in allowed list", "foo", "hq", "gt,hmc", false, true},
+
+		// Edge cases
+		{"allowed with spaces", "gt", "hq", "gt, hmc, foo", false, false},
+		{"empty allowed list", "gt", "hq", "", false, true},
+		{"single allowed prefix", "gt", "hq", "gt", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePrefixWithAllowed(tt.requestedPrefix, tt.dbPrefix, tt.allowedPrefixes, tt.force)
+			if (err != nil) != tt.wantError {
+				t.Errorf("ValidatePrefixWithAllowed() error = %v, wantError %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateAgentID(t *testing.T) {
 	tests := []struct {
 		name          string
