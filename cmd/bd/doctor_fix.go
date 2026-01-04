@@ -251,6 +251,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// No auto-fix: sync-branch should be added to config.yaml (version controlled)
 			fmt.Printf("  ⚠ Add 'sync-branch: beads-sync' to .beads/config.yaml\n")
 			continue
+		case "Sync Branch Gitignore":
+			err = doctor.FixSyncBranchGitignore()
 		case "Database Config":
 			err = fix.DatabaseConfig(path)
 		case "JSONL Config":

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -835,6 +836,15 @@ Use --merge to merge the sync branch back to main branch.`,
 					// Non-fatal - just means git status will show modified files
 					debug.Logf("sync: failed to restore .beads/ from branch: %v", err)
 				}
+
+				// GH#870: Set git index flags to hide .beads/issues.jsonl from git status.
+				// This prevents the file from appearing modified on main when using sync-branch.
+				if cwd, err := os.Getwd(); err == nil {
+					if err := fix.SyncBranchGitignore(cwd); err != nil {
+						debug.Logf("sync: failed to set gitignore flags: %v", err)
+					}
+				}
+
 				// Skip final flush in PersistentPostRun - we've already exported to sync branch
 				// and restored the working directory to match the current branch
 				skipFinalFlush = true

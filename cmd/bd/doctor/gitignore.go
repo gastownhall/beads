@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
@@ -261,4 +262,94 @@ func FixRedirectTracking() error {
 	}
 
 	return nil
+}
+
+// CheckSyncBranchGitignore checks if git index flags are set on issues.jsonl when sync.branch is configured.
+// Without these flags, the file appears modified in git status even though changes go to the sync branch.
+// GH#797, GH#801, GH#870.
+func CheckSyncBranchGitignore() DoctorCheck {
+	// Only relevant when sync.branch is configured
+	branch := syncbranch.GetFromYAML()
+	if branch == "" {
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusOK,
+			Message: "N/A (sync.branch not configured)",
+		}
+	}
+
+	issuesPath := filepath.Join(".beads", "issues.jsonl")
+
+	// Check if file exists
+	if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusOK,
+			Message: "No issues.jsonl yet",
+		}
+	}
+
+	// Check if file is tracked by git
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", issuesPath) // #nosec G204 - args are hardcoded paths
+	if err := cmd.Run(); err != nil {
+		// File is not tracked - check if it's excluded
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusOK,
+			Message: "issues.jsonl is not tracked (via .gitignore or exclude)",
+		}
+	}
+
+	// File is tracked - check for git index flags
+	cwd, err := os.Getwd()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusWarning,
+			Message: "Cannot determine current directory",
+		}
+	}
+
+	hasAssumeUnchanged, hasSkipWorktree, err := fix.HasSyncBranchGitignoreFlags(cwd)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusWarning,
+			Message: "Cannot check git index flags",
+			Detail:  err.Error(),
+		}
+	}
+
+	if hasAssumeUnchanged || hasSkipWorktree {
+		return DoctorCheck{
+			Name:    "Sync Branch Gitignore",
+			Status:  StatusOK,
+			Message: "Git index flags set (issues.jsonl hidden from git status)",
+		}
+	}
+
+	// No flags set - this is the problem case
+	return DoctorCheck{
+		Name:    "Sync Branch Gitignore",
+		Status:  StatusWarning,
+		Message: "issues.jsonl shows as modified (missing git index flags)",
+		Detail:  fmt.Sprintf("sync.branch='%s' configured but issues.jsonl appears in git status", branch),
+		Fix:     "Run 'bd doctor --fix' or 'bd sync' to set git index flags",
+	}
+}
+
+// FixSyncBranchGitignore sets git index flags on issues.jsonl when sync.branch is configured.
+func FixSyncBranchGitignore() error {
+	// Only relevant when sync.branch is configured
+	branch := syncbranch.GetFromYAML()
+	if branch == "" {
+		return nil // Not in sync-branch mode, nothing to do
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine current directory: %w", err)
+	}
+
+	return fix.SyncBranchGitignore(cwd)
 }

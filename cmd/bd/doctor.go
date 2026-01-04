@@ -457,6 +457,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, orphanedIssuesCheck)
 	// Don't fail overall check for orphaned issues, just warn
 
+	// Check 17c: Sync branch gitignore flags (GH#870)
+	syncBranchGitignoreCheck := convertWithCategory(doctor.CheckSyncBranchGitignore(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, syncBranchGitignoreCheck)
+	// Don't fail overall check for sync branch gitignore, just warn
+
 	// Check 18: Deletions manifest (legacy, now replaced by tombstones)
 	deletionsCheck := convertWithCategory(doctor.CheckDeletionsManifest(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, deletionsCheck)
