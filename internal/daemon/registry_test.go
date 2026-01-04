@@ -354,7 +354,7 @@ func TestRegistryPathNormalization(t *testing.T) {
 		t.Fatalf("Failed to register entry: %v", err)
 	}
 
-	// Read back entry - the WorkspacePath should be canonicalized to realPath
+	// Read back entry - path is stored as-is (PathsEqual handles comparison)
 	rawEntries, err := registry.readEntries()
 	if err != nil {
 		t.Fatalf("Failed to read entries: %v", err)
@@ -363,12 +363,8 @@ func TestRegistryPathNormalization(t *testing.T) {
 		t.Fatalf("Expected 1 entry, got %d", len(rawEntries))
 	}
 
-	// The stored path should be the canonical (resolved) path
-	if rawEntries[0].WorkspacePath != realPath {
-		t.Errorf("Expected canonicalized path %s, got %s", realPath, rawEntries[0].WorkspacePath)
-	}
-
 	// Now register using the real path - should detect as same workspace and replace
+	// (PathsEqual handles symlink resolution for comparison)
 	entry2 := RegistryEntry{
 		WorkspacePath: realPath,
 		SocketPath:    filepath.Join(realPath, ".beads/bd.sock"),

@@ -118,9 +118,22 @@ func runSlotSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve bead ID
+	// Resolve bead ID - use routing for cross-beads references (e.g., hq-* from rig beads)
 	var beadID string
-	if daemonClient != nil {
+	if needsRouting(beadArg) {
+		// Cross-beads reference - resolve via routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, beadArg)
+		if result != nil {
+			defer result.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("failed to resolve bead %s: %w", beadArg, err)
+		}
+		if result == nil || result.Issue == nil {
+			return fmt.Errorf("failed to resolve bead %s: no issue found matching %q", beadArg, beadArg)
+		}
+		beadID = result.ResolvedID
+	} else if daemonClient != nil {
 		resp, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: beadArg})
 		if err != nil {
 			return fmt.Errorf("failed to resolve bead %s: %w", beadArg, err)
