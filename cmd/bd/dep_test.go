@@ -250,6 +250,35 @@ func TestDepCommandsInit(t *testing.T) {
 	}
 }
 
+func TestDepAddFlagAliases(t *testing.T) {
+	// Test that --blocked-by flag exists on depAddCmd
+	blockedByFlag := depAddCmd.Flags().Lookup("blocked-by")
+	if blockedByFlag == nil {
+		t.Fatal("depAddCmd should have --blocked-by flag")
+	}
+	if blockedByFlag.DefValue != "" {
+		t.Errorf("Expected default blocked-by='', got %q", blockedByFlag.DefValue)
+	}
+
+	// Test that --depends-on flag exists on depAddCmd
+	dependsOnFlag := depAddCmd.Flags().Lookup("depends-on")
+	if dependsOnFlag == nil {
+		t.Fatal("depAddCmd should have --depends-on flag")
+	}
+	if dependsOnFlag.DefValue != "" {
+		t.Errorf("Expected default depends-on='', got %q", dependsOnFlag.DefValue)
+	}
+
+	// Verify the help text mentions the flags
+	longDesc := depAddCmd.Long
+	if !strings.Contains(longDesc, "--blocked-by") {
+		t.Error("Expected Long description to mention --blocked-by flag")
+	}
+	if !strings.Contains(longDesc, "--depends-on") {
+		t.Error("Expected Long description to mention --depends-on flag")
+	}
+}
+
 func TestDepTreeFormatFlag(t *testing.T) {
 	// Test that the --format flag exists on depTreeCmd
 	flag := depTreeCmd.Flags().Lookup("format")

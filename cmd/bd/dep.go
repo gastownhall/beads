@@ -53,6 +53,14 @@ var depAddCmd = &cobra.Command{
 	Short: "Add a dependency",
 	Long: `Add a dependency between two issues.
 
+The depends-on-id can be provided as:
+  - A positional argument: bd dep add issue-123 issue-456
+  - A flag: bd dep add issue-123 --blocked-by issue-456
+  - A flag: bd dep add issue-123 --depends-on issue-456
+
+The --blocked-by and --depends-on flags are aliases and both mean "issue-123
+depends on (is blocked by) the specified issue."
+
 The depends-on-id can be:
   - A local issue ID (e.g., bd-xyz)
   - An external reference: external:<project>:<capability>
@@ -62,12 +70,47 @@ the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
 Examples:
-  bd dep add bd-42 bd-41                              # Local dependency
+  bd dep add bd-42 bd-41                              # Positional args
+  bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
+  bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency`,
-	Args: cobra.ExactArgs(2),
+	Args: func(cmd *cobra.Command, args []string) error {
+		blockedBy, _ := cmd.Flags().GetString("blocked-by")
+		dependsOn, _ := cmd.Flags().GetString("depends-on")
+		hasFlag := blockedBy != "" || dependsOn != ""
+
+		if hasFlag {
+			// If a flag is provided, we only need 1 positional arg (the dependent issue)
+			if len(args) < 1 {
+				return fmt.Errorf("requires at least 1 arg(s), only received %d", len(args))
+			}
+			if len(args) > 1 {
+				return fmt.Errorf("cannot use both positional depends-on-id and --blocked-by/--depends-on flag")
+			}
+			return nil
+		}
+		// No flag provided, need exactly 2 positional args
+		if len(args) != 2 {
+			return fmt.Errorf("requires 2 arg(s), only received %d (or use --blocked-by/--depends-on flag)", len(args))
+		}
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("dep add")
 		depType, _ := cmd.Flags().GetString("type")
+
+		// Get the dependency target from flag or positional arg
+		blockedBy, _ := cmd.Flags().GetString("blocked-by")
+		dependsOn, _ := cmd.Flags().GetString("depends-on")
+
+		var dependsOnArg string
+		if blockedBy != "" {
+			dependsOnArg = blockedBy
+		} else if dependsOn != "" {
+			dependsOnArg = dependsOn
+		} else {
+			dependsOnArg = args[1]
+		}
 
 		ctx := rootCtx
 
@@ -75,7 +118,7 @@ Examples:
 		var fromID, toID string
 
 		// Check if toID is an external reference (don't resolve it)
-		isExternalRef := strings.HasPrefix(args[1], "external:")
+		isExternalRef := strings.HasPrefix(dependsOnArg, "external:")
 
 		if daemonClient != nil {
 			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
@@ -89,22 +132,22 @@ Examples:
 
 			if isExternalRef {
 				// External references are stored as-is
-				toID = args[1]
+				toID = dependsOnArg
 				// Validate format: external:<project>:<capability>
 				if err := validateExternalRef(toID); err != nil {
 					FatalErrorRespectJSON("%v", err)
 				}
 			} else {
-				resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
+				resolveArgs = &rpc.ResolveIDArgs{ID: dependsOnArg}
 				resp, err = daemonClient.ResolveID(resolveArgs)
 				if err != nil {
 					// Resolution failed - try auto-converting to external ref
 					beadsDir := getBeadsDir()
-					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
+					if extRef := routing.ResolveToExternalRef(dependsOnArg, beadsDir); extRef != "" {
 						toID = extRef
 						isExternalRef = true
 					} else {
-						FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+						FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
 					}
 				} else if err := json.Unmarshal(resp.Data, &toID); err != nil {
 					FatalErrorRespectJSON("unmarshaling resolved ID: %v", err)
@@ -119,21 +162,21 @@ Examples:
 
 			if isExternalRef {
 				// External references are stored as-is
-				toID = args[1]
+				toID = dependsOnArg
 				// Validate format: external:<project>:<capability>
 				if err := validateExternalRef(toID); err != nil {
 					FatalErrorRespectJSON("%v", err)
 				}
 			} else {
-				toID, err = utils.ResolvePartialID(ctx, store, args[1])
+				toID, err = utils.ResolvePartialID(ctx, store, dependsOnArg)
 				if err != nil {
 					// Resolution failed - try auto-converting to external ref
 					beadsDir := getBeadsDir()
-					if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
+					if extRef := routing.ResolveToExternalRef(dependsOnArg, beadsDir); extRef != "" {
 						toID = extRef
 						isExternalRef = true
 					} else {
-						FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+						FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
 					}
 				}
 			}
@@ -164,7 +207,7 @@ Examples:
 			}
 
 			fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-				ui.RenderPass("✓"), args[0], args[1], depType)
+				ui.RenderPass("✓"), args[0], dependsOnArg, depType)
 			return
 		}
 
@@ -975,8 +1018,8 @@ func ParseExternalRef(ref string) (project, capability string) {
 
 func init() {
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
-	// Note: --json flag is defined as a persistent flag in main.go, not here
-
+	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
+	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
