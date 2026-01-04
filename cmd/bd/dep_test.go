@@ -237,8 +237,8 @@ func TestDepCommandsInit(t *testing.T) {
 		t.Fatal("depCmd should be initialized")
 	}
 
-	if depCmd.Use != "dep" {
-		t.Errorf("Expected Use='dep', got %q", depCmd.Use)
+	if depCmd.Use != "dep [issue-id]" {
+		t.Errorf("Expected Use='dep [issue-id]', got %q", depCmd.Use)
 	}
 
 	if depAddCmd == nil {
@@ -276,6 +276,103 @@ func TestDepAddFlagAliases(t *testing.T) {
 	}
 	if !strings.Contains(longDesc, "--depends-on") {
 		t.Error("Expected Long description to mention --depends-on flag")
+	}
+}
+
+func TestDepBlocksFlag(t *testing.T) {
+	// Test that the --blocks flag exists on depCmd
+	flag := depCmd.Flags().Lookup("blocks")
+	if flag == nil {
+		t.Fatal("depCmd should have --blocks flag")
+	}
+
+	// Test shorthand is -b
+	if flag.Shorthand != "b" {
+		t.Errorf("Expected shorthand='b', got %q", flag.Shorthand)
+	}
+
+	// Test default value is empty string
+	if flag.DefValue != "" {
+		t.Errorf("Expected default blocks='', got %q", flag.DefValue)
+	}
+
+	// Test usage text
+	if !strings.Contains(flag.Usage, "blocks") {
+		t.Errorf("Expected flag usage to mention 'blocks', got %q", flag.Usage)
+	}
+}
+
+func TestDepBlocksFlagFunctionality(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create test issues
+	issues := []*types.Issue{
+		{
+			ID:        "test-blocks-1",
+			Title:     "Blocker Issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		},
+		{
+			ID:        "test-blocks-2",
+			Title:     "Blocked Issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		},
+	}
+
+	for _, issue := range issues {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Add dependency using the same logic as --blocks flag would:
+	// "blocker --blocks blocked" means blocked depends on blocker
+	dep := &types.Dependency{
+		IssueID:     "test-blocks-2", // blocked issue
+		DependsOnID: "test-blocks-1", // blocker issue
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// Verify the blocked issue now depends on the blocker
+	deps, err := s.GetDependencies(ctx, "test-blocks-2")
+	if err != nil {
+		t.Fatalf("GetDependencies failed: %v", err)
+	}
+
+	if len(deps) != 1 {
+		t.Fatalf("Expected 1 dependency, got %d", len(deps))
+	}
+
+	if deps[0].ID != "test-blocks-1" {
+		t.Errorf("Expected blocked issue to depend on test-blocks-1, got %s", deps[0].ID)
+	}
+
+	// Verify the blocker has a dependent
+	dependents, err := s.GetDependents(ctx, "test-blocks-1")
+	if err != nil {
+		t.Fatalf("GetDependents failed: %v", err)
+	}
+
+	if len(dependents) != 1 {
+		t.Fatalf("Expected 1 dependent, got %d", len(dependents))
+	}
+
+	if dependents[0].ID != "test-blocks-2" {
+		t.Errorf("Expected test-blocks-1 to have dependent test-blocks-2, got %s", dependents[0].ID)
 	}
 }
 
