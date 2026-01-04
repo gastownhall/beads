@@ -310,7 +310,7 @@ func CheckSyncBranchGitignore() DoctorCheck {
 		}
 	}
 
-	hasAssumeUnchanged, hasSkipWorktree, err := fix.HasSyncBranchGitignoreFlags(cwd)
+	hasAnyFlag, _, err := fix.HasSyncBranchGitignoreFlags(cwd)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Sync Branch Gitignore",
@@ -320,7 +320,7 @@ func CheckSyncBranchGitignore() DoctorCheck {
 		}
 	}
 
-	if hasAssumeUnchanged || hasSkipWorktree {
+	if hasAnyFlag {
 		return DoctorCheck{
 			Name:    "Sync Branch Gitignore",
 			Status:  StatusOK,

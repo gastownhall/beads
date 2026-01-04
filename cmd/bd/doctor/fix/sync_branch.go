@@ -168,73 +168,114 @@ func SyncBranchGitignore(path string) error {
 		return fmt.Errorf(".beads directory not found at %s", beadsDir)
 	}
 
-	// Check if issues.jsonl exists and is tracked by git
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		// File doesn't exist, nothing to hide
-		return nil
+	// Process both JSONL files that need hiding
+	filesToHide := []string{"issues.jsonl", "interactions.jsonl"}
+	anyChanged := false
+
+	for _, filename := range filesToHide {
+		jsonlPath := filepath.Join(beadsDir, filename)
+		if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+			continue // File doesn't exist, skip
+		}
+
+		changed, err := setGitIndexFlags(path, jsonlPath, ".beads/"+filename)
+		if err != nil {
+			return err
+		}
+		if changed {
+			anyChanged = true
+		}
 	}
 
-	// Check if file is tracked by git
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", jsonlPath)
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		// File is not tracked - add to .git/info/exclude instead
-		return addToGitExclude(path, ".beads/issues.jsonl")
+	if anyChanged {
+		fmt.Println("  ✓ Set git index flags to hide .beads/*.jsonl from git status")
 	}
-
-	// File is tracked - set both git index flags
-	// These must be separate commands (git quirk)
-	cmd = exec.Command("git", "update-index", "--assume-unchanged", jsonlPath)
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to set assume-unchanged: %w\n%s", err, out)
-	}
-
-	cmd = exec.Command("git", "update-index", "--skip-worktree", jsonlPath)
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		// Revert assume-unchanged if skip-worktree fails
-		revertCmd := exec.Command("git", "update-index", "--no-assume-unchanged", jsonlPath)
-		revertCmd.Dir = path
-		_ = revertCmd.Run()
-		return fmt.Errorf("failed to set skip-worktree: %w\n%s", err, out)
-	}
-
-	fmt.Println("  ✓ Set git index flags to hide .beads/issues.jsonl")
 	return nil
 }
 
-// ClearSyncBranchGitignore removes git index flags from .beads/issues.jsonl.
+// setGitIndexFlags sets assume-unchanged and skip-worktree flags on a file.
+// Returns true if flags were changed, false if already set or file not tracked.
+func setGitIndexFlags(repoPath, filePath, excludePattern string) (bool, error) {
+	// Check if file is tracked by git
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", filePath)
+	cmd.Dir = repoPath
+	if err := cmd.Run(); err != nil {
+		// File is not tracked - add to .git/info/exclude instead
+		return false, addToGitExclude(repoPath, excludePattern)
+	}
+
+	// Check if flags are already set (skip-worktree takes precedence in ls-files -v output)
+	cmd = exec.Command("git", "ls-files", "-v", filePath)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err == nil {
+		line := strings.TrimSpace(string(output))
+		if len(line) > 0 {
+			firstChar := line[0]
+			// 'S' = skip-worktree (our target state), 'h' = assume-unchanged only
+			if firstChar == 'S' {
+				return false, nil // Already has skip-worktree, nothing to do
+			}
+		}
+	}
+
+	// Set both git index flags (must be separate commands - git quirk)
+	cmd = exec.Command("git", "update-index", "--assume-unchanged", filePath)
+	cmd.Dir = repoPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("failed to set assume-unchanged on %s: %w\n%s", filePath, err, out)
+	}
+
+	cmd = exec.Command("git", "update-index", "--skip-worktree", filePath)
+	cmd.Dir = repoPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Revert assume-unchanged if skip-worktree fails
+		revertCmd := exec.Command("git", "update-index", "--no-assume-unchanged", filePath)
+		revertCmd.Dir = repoPath
+		_ = revertCmd.Run()
+		return false, fmt.Errorf("failed to set skip-worktree on %s: %w\n%s", filePath, err, out)
+	}
+
+	return true, nil
+}
+
+// ClearSyncBranchGitignore removes git index flags from .beads/*.jsonl files.
 // Called when sync.branch is disabled to restore normal git tracking.
 func ClearSyncBranchGitignore(path string) error {
 	beadsDir := filepath.Join(path, ".beads")
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	filesToClear := []string{"issues.jsonl", "interactions.jsonl"}
 
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return nil // File doesn't exist, nothing to do
+	for _, filename := range filesToClear {
+		jsonlPath := filepath.Join(beadsDir, filename)
+
+		if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+			continue // File doesn't exist, skip
+		}
+
+		// Check if file is tracked
+		cmd := exec.Command("git", "ls-files", "--error-unmatch", jsonlPath)
+		cmd.Dir = path
+		if err := cmd.Run(); err != nil {
+			continue // Not tracked, skip
+		}
+
+		// Clear both flags (ignore errors - flags might not be set)
+		cmd = exec.Command("git", "update-index", "--no-assume-unchanged", jsonlPath)
+		cmd.Dir = path
+		_ = cmd.Run()
+
+		cmd = exec.Command("git", "update-index", "--no-skip-worktree", jsonlPath)
+		cmd.Dir = path
+		_ = cmd.Run()
 	}
-
-	// Check if file is tracked
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", jsonlPath)
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		return nil // Not tracked, nothing to clear
-	}
-
-	// Clear both flags
-	cmd = exec.Command("git", "update-index", "--no-assume-unchanged", jsonlPath)
-	cmd.Dir = path
-	_ = cmd.Run() // Ignore errors - flag might not be set
-
-	cmd = exec.Command("git", "update-index", "--no-skip-worktree", jsonlPath)
-	cmd.Dir = path
-	_ = cmd.Run() // Ignore errors - flag might not be set
 
 	return nil
 }
 
-// HasSyncBranchGitignoreFlags checks if git index flags are set on .beads/issues.jsonl
+// HasSyncBranchGitignoreFlags checks if git index flags are set on .beads/issues.jsonl.
+// Returns (hasAnyFlag, hasSkipWorktree, error).
+// Note: When both assume-unchanged and skip-worktree are set, git shows 'S' (skip-worktree
+// takes precedence). So hasAnyFlag being true means the file is hidden from git status.
 func HasSyncBranchGitignoreFlags(path string) (bool, bool, error) {
 	beadsDir := filepath.Join(path, ".beads")
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
@@ -244,7 +285,8 @@ func HasSyncBranchGitignoreFlags(path string) (bool, bool, error) {
 	}
 
 	// Get file status from git ls-files -v
-	// 'h' = assume-unchanged, 'S' = skip-worktree
+	// 'H' = tracked normally, 'h' = assume-unchanged, 'S' = skip-worktree
+	// When both flags are set, 'S' is shown (skip-worktree takes precedence)
 	cmd := exec.Command("git", "ls-files", "-v", jsonlPath)
 	cmd.Dir = path
 	output, err := cmd.Output()
@@ -257,13 +299,12 @@ func HasSyncBranchGitignoreFlags(path string) (bool, bool, error) {
 		return false, false, nil
 	}
 
-	// First character indicates status:
-	// 'H' = tracked, 'h' = assume-unchanged, 'S' = skip-worktree
 	firstChar := line[0]
-	hasAssumeUnchanged := firstChar == 'h'
+	// 'h' = assume-unchanged only, 'S' = skip-worktree (possibly with assume-unchanged too)
+	hasAnyFlag := firstChar == 'h' || firstChar == 'S'
 	hasSkipWorktree := firstChar == 'S'
 
-	return hasAssumeUnchanged, hasSkipWorktree, nil
+	return hasAnyFlag, hasSkipWorktree, nil
 }
 
 // addToGitExclude adds a pattern to .git/info/exclude
@@ -288,10 +329,13 @@ func addToGitExclude(path, pattern string) error {
 		return fmt.Errorf("failed to create info directory: %w", err)
 	}
 
-	// Check if pattern already exists
+	// Check if pattern already exists (exact line match)
 	content, _ := os.ReadFile(excludePath)
-	if strings.Contains(string(content), pattern) {
-		return nil // Already excluded
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == pattern {
+			return nil // Already excluded
+		}
 	}
 
 	// Append pattern
