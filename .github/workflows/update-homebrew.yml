@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   update-formula:
+    # Guard: only run homebrew update in the canonical repository (not in forks)
+    if: ${{ github.repository == 'steveyegge/beads' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout beads repo

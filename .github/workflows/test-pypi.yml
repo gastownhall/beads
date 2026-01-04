@@ -5,6 +5,8 @@ on:
 
 jobs:
   test-publish:
+    # Guard: only allow test PyPI publish runs in the canonical repository
+    if: ${{ github.repository == 'steveyegge/beads' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
