@@ -18,6 +18,7 @@ var (
 	primeFullMode    bool
 	primeMCPMode     bool
 	primeStealthMode bool
+	primeExportMode  bool
 )
 
 var primeCmd = &cobra.Command{
@@ -36,7 +37,11 @@ agents from forgetting bd workflow after context compaction.
 Config options:
 - no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
   Set via: bd config set no-git-ops true
-  Useful when you want to control when commits happen manually.`,
+  Useful when you want to control when commits happen manually.
+
+Workflow customization:
+- Place a .beads/PRIME.md file to override the default output entirely.
+- Use --export to dump the default content for customization.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Find .beads/ directory (supports both database and JSONL-only mode)
 		beadsDir := beads.FindBeadsDir()
@@ -60,6 +65,27 @@ Config options:
 		// This allows users to disable git ops in session close protocol via config
 		stealthMode := primeStealthMode || config.GetBool("no-git-ops")
 
+		// Check for custom PRIME.md override (unless --export flag)
+		// This allows users to fully customize workflow instructions
+		// Check local .beads/ first (even if redirected), then redirected location
+		if !primeExportMode {
+			localPrimePath := filepath.Join(".beads", "PRIME.md")
+			redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
+
+			// Try local first (user's clone-specific customization)
+			// #nosec G304 -- path is relative to cwd
+			if content, err := os.ReadFile(localPrimePath); err == nil {
+				fmt.Print(string(content))
+				return
+			}
+			// Fall back to redirected location (shared customization)
+			// #nosec G304 -- path is constructed from beadsDir which we control
+			if content, err := os.ReadFile(redirectedPrimePath); err == nil {
+				fmt.Print(string(content))
+				return
+			}
+		}
+
 		// Output workflow context (adaptive based on MCP and stealth mode)
 		if err := outputPrimeContext(os.Stdout, mcpMode, stealthMode); err != nil {
 			// Suppress all errors - silent exit with success
@@ -73,6 +99,7 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeFullMode, "full", false, "Force full CLI output (ignore MCP detection)")
 	primeCmd.Flags().BoolVar(&primeMCPMode, "mcp", false, "Force MCP mode (minimal output)")
 	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
+	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	rootCmd.AddCommand(primeCmd)
 }
 
