@@ -120,7 +120,7 @@ Examples:
 				FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 			}
 
-			// If daemon is running, use RPC
+			// Add the dependency via daemon or direct mode
 			if daemonClient != nil {
 				depArgs := &rpc.DepAddArgs{
 					FromID:  fromID,
@@ -128,36 +128,27 @@ Examples:
 					DepType: depType,
 				}
 
-				resp, err := daemonClient.AddDependency(depArgs)
+				_, err := daemonClient.AddDependency(depArgs)
 				if err != nil {
 					FatalErrorRespectJSON("%v", err)
 				}
-
-				if jsonOutput {
-					fmt.Println(string(resp.Data))
-					return
+			} else {
+				// Direct mode
+				dep := &types.Dependency{
+					IssueID:     fromID,
+					DependsOnID: toID,
+					Type:        types.DependencyType(depType),
 				}
 
-				fmt.Printf("%s Added dependency: %s blocks %s\n",
-					ui.RenderPass("✓"), blockerID, blocksID)
-				return
+				if err := store.AddDependency(ctx, dep, actor); err != nil {
+					FatalErrorRespectJSON("%v", err)
+				}
+
+				// Schedule auto-flush
+				markDirtyAndScheduleFlush()
 			}
 
-			// Direct mode
-			dep := &types.Dependency{
-				IssueID:     fromID,
-				DependsOnID: toID,
-				Type:        types.DependencyType(depType),
-			}
-
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				FatalErrorRespectJSON("%v", err)
-			}
-
-			// Schedule auto-flush
-			markDirtyAndScheduleFlush()
-
-			// Check for cycles after adding dependency
+			// Check for cycles after adding dependency (both daemon and direct mode)
 			cycles, err := store.DetectCycles(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
@@ -183,10 +174,10 @@ Examples:
 
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
-					"status":        "added",
-					"blocker_id":    toID,
-					"blocked_id":    fromID,
-					"type":          depType,
+					"status":     "added",
+					"blocker_id": toID,
+					"blocked_id": fromID,
+					"type":       depType,
 				})
 				return
 			}
