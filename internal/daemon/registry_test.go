@@ -309,3 +309,101 @@ func TestRegistryUnregisterNonExistent(t *testing.T) {
 		t.Errorf("Expected empty registry, got %d entries", len(rawEntries))
 	}
 }
+
+// TestRegistryPathNormalization tests that paths are canonicalized for consistent
+// matching across symlinks and case-insensitive filesystems (GH#880).
+func TestRegistryPathNormalization(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", oldHome)
+
+	registry, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("Failed to create registry: %v", err)
+	}
+
+	// Create a real directory for symlink test
+	realPath := filepath.Join(tmpDir, "real-workspace")
+	if err := os.MkdirAll(realPath, 0755); err != nil {
+		t.Fatalf("Failed to create real workspace: %v", err)
+	}
+
+	// Canonicalize realPath too (on macOS, /var -> /private/var)
+	if canonReal, err := filepath.EvalSymlinks(realPath); err == nil {
+		realPath = canonReal
+	}
+
+	// Create a symlink to it
+	symlinkPath := filepath.Join(tmpDir, "symlink-workspace")
+	if err := os.Symlink(realPath, symlinkPath); err != nil {
+		t.Skipf("Cannot create symlink (platform limitation): %v", err)
+	}
+
+	// Register using the symlink path
+	entry := RegistryEntry{
+		WorkspacePath: symlinkPath,
+		SocketPath:    filepath.Join(symlinkPath, ".beads/bd.sock"),
+		DatabasePath:  filepath.Join(symlinkPath, ".beads/beads.db"),
+		PID:           12345,
+		Version:       "0.43.0",
+		StartedAt:     time.Now(),
+	}
+
+	if err := registry.Register(entry); err != nil {
+		t.Fatalf("Failed to register entry: %v", err)
+	}
+
+	// Read back entry - the WorkspacePath should be canonicalized to realPath
+	rawEntries, err := registry.readEntries()
+	if err != nil {
+		t.Fatalf("Failed to read entries: %v", err)
+	}
+	if len(rawEntries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(rawEntries))
+	}
+
+	// The stored path should be the canonical (resolved) path
+	if rawEntries[0].WorkspacePath != realPath {
+		t.Errorf("Expected canonicalized path %s, got %s", realPath, rawEntries[0].WorkspacePath)
+	}
+
+	// Now register using the real path - should detect as same workspace and replace
+	entry2 := RegistryEntry{
+		WorkspacePath: realPath,
+		SocketPath:    filepath.Join(realPath, ".beads/bd.sock"),
+		DatabasePath:  filepath.Join(realPath, ".beads/beads.db"),
+		PID:           54321,
+		Version:       "0.43.0",
+		StartedAt:     time.Now(),
+	}
+
+	if err := registry.Register(entry2); err != nil {
+		t.Fatalf("Failed to register second entry: %v", err)
+	}
+
+	// Should still have only 1 entry (replaced, not added)
+	rawEntries, err = registry.readEntries()
+	if err != nil {
+		t.Fatalf("Failed to read entries: %v", err)
+	}
+	if len(rawEntries) != 1 {
+		t.Errorf("Expected 1 entry after registering same workspace via different path, got %d", len(rawEntries))
+	}
+	if rawEntries[0].PID != 54321 {
+		t.Errorf("Expected PID 54321, got %d", rawEntries[0].PID)
+	}
+
+	// Test unregister using symlink path - should match the canonicalized path
+	if err := registry.Unregister(symlinkPath, 54321); err != nil {
+		t.Fatalf("Failed to unregister via symlink: %v", err)
+	}
+
+	rawEntries, err = registry.readEntries()
+	if err != nil {
+		t.Fatalf("Failed to read entries: %v", err)
+	}
+	if len(rawEntries) != 0 {
+		t.Errorf("Expected empty registry after unregister, got %d entries", len(rawEntries))
+	}
+}
