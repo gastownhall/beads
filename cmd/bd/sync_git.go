@@ -447,6 +447,45 @@ func restoreBeadsDirFromBranch(ctx context.Context) error {
 	return nil
 }
 
+// gitHasUncommittedBeadsChanges checks if .beads/issues.jsonl has uncommitted changes.
+// This detects the failure mode where a previous sync exported but failed before commit.
+// Returns true if the JSONL file has staged or unstaged changes (M or A status).
+// GH#885: Pre-flight safety check to detect incomplete sync operations.
+func gitHasUncommittedBeadsChanges(ctx context.Context) (bool, error) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return false, nil // No beads dir, nothing to check
+	}
+
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	// Check git status for the JSONL file specifically
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", jsonlPath) //nolint:gosec // G204: jsonlPath from internal beads.FindBeadsDir()
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status failed: %w", err)
+	}
+
+	// Parse status output - look for modified/added files
+	// Format: XY filename where X=staged, Y=unstaged
+	// M = modified, A = added, ? = untracked
+	statusLine := strings.TrimSpace(string(output))
+	if statusLine == "" {
+		return false, nil // No changes
+	}
+
+	// Any status (M, A, MM, AM, etc.) indicates uncommitted changes
+	if len(statusLine) >= 2 {
+		x, y := statusLine[0], statusLine[1]
+		// Check for modifications (staged or unstaged)
+		if x == 'M' || x == 'A' || y == 'M' || y == 'A' {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // getDefaultBranch returns the default branch name (main or master) for origin remote
 // Checks remote HEAD first, then falls back to checking if main/master exist
 func getDefaultBranch(ctx context.Context) string {
