@@ -118,6 +118,13 @@ func checkGitForIssues() (int, string, string) {
 		return 0, "", ""
 	}
 
+	// GH#896: Reject beadsDir that is outside the git repository.
+	// This prevents bd init from inheriting issues from a parent hub
+	// when initializing a new project in a subdirectory.
+	if strings.HasPrefix(relBeads, "..") {
+		return 0, "", ""
+	}
+
 	// Determine which branch to read from (bd-0is fix)
 	// If sync-branch is configured in local config.yaml, use it; otherwise fall back to HEAD
 	// We read sync-branch directly from local config file rather than using cached global config
