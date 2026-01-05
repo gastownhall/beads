@@ -47,6 +47,7 @@ The polecat will complete Phase 1, then signal phase-complete. The gate blocks
 until release.yml finishes. A new polecat (or the same one) resumes for Phases 2-3.
 """
 type = "workflow"
+phase = "vapor"  # Ensures this runs as a wisp - bd pour will warn, gt sling --formula creates wisp
 version = 1
 
 [vars.version]
