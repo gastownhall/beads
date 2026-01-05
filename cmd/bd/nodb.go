@@ -73,10 +73,11 @@ func initializeNoDbMode() error {
 	debug.Logf("using prefix '%s'", prefix)
 
 	// Set global store and mark as active (fixes bd comment --no-db)
-	storeMutex.Lock()
-	store = memStore
-	storeActive = true
-	storeMutex.Unlock()
+	// GH#897: Use accessor functions to also set cmdCtx fields, not just globals
+	lockStore()
+	setStore(memStore)
+	setStoreActive(true)
+	unlockStore()
 	return nil
 }
 

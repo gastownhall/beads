@@ -301,6 +301,71 @@ func TestInitializeNoDbMode_SetsStoreActive(t *testing.T) {
 	}
 }
 
+func TestInitializeNoDbMode_SetsCmdCtxStoreActive(t *testing.T) {
+	// GH#897: Verify that initializeNoDbMode sets cmdCtx.StoreActive, not just the global.
+	// This is critical for commands like `comments add` that call ensureStoreActive().
+	ensureCleanGlobalState(t)
+
+	tempDir := t.TempDir()
+	beadsDir := filepath.Join(tempDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	// Create a minimal JSONL file with one issue
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	content := `{"id":"mmm-155","title":"Test Issue","status":"open"}
+`
+	if err := os.WriteFile(jsonlPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("Failed to write JSONL: %v", err)
+	}
+
+	// Initialize CommandContext (simulates what PersistentPreRun does)
+	initCommandContext()
+
+	oldCwd, _ := os.Getwd()
+	defer func() {
+		_ = os.Chdir(oldCwd)
+		resetCommandContext()
+	}()
+
+	// Change to temp dir so initializeNoDbMode finds .beads
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+
+	// Initialize no-db mode
+	if err := initializeNoDbMode(); err != nil {
+		t.Fatalf("initializeNoDbMode failed: %v", err)
+	}
+
+	// Verify cmdCtx.StoreActive is true (this was the bug - it was only setting globals)
+	ctx := GetCommandContext()
+	if ctx == nil {
+		t.Fatal("cmdCtx should not be nil after initCommandContext")
+	}
+	if !ctx.StoreActive {
+		t.Error("cmdCtx.StoreActive should be true after initializeNoDbMode (GH#897)")
+	}
+	if ctx.Store == nil {
+		t.Error("cmdCtx.Store should not be nil after initializeNoDbMode")
+	}
+
+	// ensureStoreActive should succeed
+	if err := ensureStoreActive(); err != nil {
+		t.Errorf("ensureStoreActive should succeed after initializeNoDbMode: %v", err)
+	}
+
+	// Comments should work
+	comment, err := ctx.Store.AddIssueComment(rootCtx, "mmm-155", "testuser", "Test comment")
+	if err != nil {
+		t.Fatalf("AddIssueComment failed: %v", err)
+	}
+	if comment.Text != "Test comment" {
+		t.Errorf("Expected 'Test comment', got %s", comment.Text)
+	}
+}
+
 func TestWriteIssuesToJSONL(t *testing.T) {
 	tempDir := t.TempDir()
 	beadsDir := filepath.Join(tempDir, ".beads")
