@@ -466,12 +466,18 @@ func gitHasUncommittedBeadsChanges(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("git status failed: %w", err)
 	}
 
-	// Parse status output - look for modified/added files
-	// Format: XY filename where X=staged, Y=unstaged
-	// M = modified, A = added, ? = untracked
-	statusLine := strings.TrimSpace(string(output))
+	return parseGitStatusForBeadsChanges(string(output)), nil
+}
+
+// parseGitStatusForBeadsChanges parses git status --porcelain output and returns
+// true if the status indicates uncommitted changes (modified or added).
+// Format: XY filename where X=staged, Y=unstaged
+// M = modified, A = added, ? = untracked, D = deleted
+// Only M and A in either position indicate changes we care about.
+func parseGitStatusForBeadsChanges(statusOutput string) bool {
+	statusLine := strings.TrimSpace(statusOutput)
 	if statusLine == "" {
-		return false, nil // No changes
+		return false // No changes
 	}
 
 	// Any status (M, A, MM, AM, etc.) indicates uncommitted changes
@@ -479,11 +485,11 @@ func gitHasUncommittedBeadsChanges(ctx context.Context) (bool, error) {
 		x, y := statusLine[0], statusLine[1]
 		// Check for modifications (staged or unstaged)
 		if x == 'M' || x == 'A' || y == 'M' || y == 'A' {
-			return true, nil
+			return true
 		}
 	}
 
-	return false, nil
+	return false
 }
 
 // getDefaultBranch returns the default branch name (main or master) for origin remote
