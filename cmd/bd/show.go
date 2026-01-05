@@ -231,6 +231,9 @@ var showCmd = &cobra.Command{
 					if issue.DeferUntil != nil {
 						fmt.Printf("Deferred until: %s\n", issue.DeferUntil.Format("2006-01-02 15:04"))
 					}
+					if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+						fmt.Printf("External Ref: %s\n", *issue.ExternalRef)
+					}
 
 					// Show compaction status
 					if issue.CompactionLevel > 0 {
@@ -456,6 +459,9 @@ var showCmd = &cobra.Command{
 			}
 			if issue.DeferUntil != nil {
 				fmt.Printf("Deferred until: %s\n", issue.DeferUntil.Format("2006-01-02 15:04"))
+			}
+			if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+				fmt.Printf("External Ref: %s\n", *issue.ExternalRef)
 			}
 
 			// Show compaction status footer
