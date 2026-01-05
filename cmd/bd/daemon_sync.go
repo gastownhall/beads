@@ -474,8 +474,11 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 				return
 			}
 
-			// If sync branch not configured, use regular commit
-			if !committed {
+			if committed {
+				// GH#885: Finalize after sync branch commit succeeded
+				finalizeExportMetadata()
+			} else {
+				// If sync branch not configured, use regular commit
 				hasChanges, err := gitHasChanges(exportCtx, jsonlPath)
 				if err != nil {
 					log.log("Error checking git status: %v", err)
@@ -490,6 +493,10 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 					}
 					log.log("Committed changes")
 
+					// GH#885: Finalize after git commit succeeded, before push
+					// Push failure shouldn't prevent metadata update since commit succeeded
+					finalizeExportMetadata()
+
 					// Auto-push if enabled (GH#872: use sync.remote config)
 					if autoPush {
 						configuredRemote, _ := store.GetConfig(exportCtx, "sync.remote")
@@ -499,11 +506,11 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 						}
 						log.log("Pushed to remote")
 					}
+				} else {
+					// No git changes but export happened - finalize metadata
+					finalizeExportMetadata()
 				}
 			}
-
-			// GH#885: NOW finalize metadata after git commit succeeded
-			finalizeExportMetadata()
 		} else if skipGit {
 			// Git-free mode: finalize immediately since there's no git to wait for
 			finalizeExportMetadata()
