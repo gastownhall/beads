@@ -252,6 +252,78 @@ func TestSet(t *testing.T) {
 	})
 }
 
+// TestSetUpdatesConfigYAML verifies GH#909 fix: Set() writes to config.yaml
+func TestSetUpdatesConfigYAML(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("updates config.yaml when it exists", func(t *testing.T) {
+		// Create temp directory with .beads/config.yaml
+		tmpDir, err := os.MkdirTemp("", "test-syncbranch-yaml-*")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		beadsDir := tmpDir + "/.beads"
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("Failed to create .beads dir: %v", err)
+		}
+
+		// Create initial config.yaml with sync-branch commented out
+		configPath := beadsDir + "/config.yaml"
+		initialConfig := `# beads configuration
+# sync-branch: ""
+auto-start-daemon: true
+`
+		if err := os.WriteFile(configPath, []byte(initialConfig), 0600); err != nil {
+			t.Fatalf("Failed to create config.yaml: %v", err)
+		}
+
+		// Change to temp dir so findProjectConfigYaml can find it
+		origWd, _ := os.Getwd()
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to chdir: %v", err)
+		}
+		defer os.Chdir(origWd)
+
+		// Create test store
+		store := newTestStore(t)
+		defer store.Close()
+
+		// Call Set() which should update both database and config.yaml
+		if err := Set(ctx, store, "beads-sync"); err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+
+		// Verify database was updated
+		dbValue, err := store.GetConfig(ctx, ConfigKey)
+		if err != nil {
+			t.Fatalf("GetConfig() error = %v", err)
+		}
+		if dbValue != "beads-sync" {
+			t.Errorf("Database value = %q, want %q", dbValue, "beads-sync")
+		}
+
+		// Verify config.yaml was updated (key uncommented and value set)
+		yamlContent, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("Failed to read config.yaml: %v", err)
+		}
+
+		yamlStr := string(yamlContent)
+		if !strings.Contains(yamlStr, "sync-branch:") {
+			t.Error("config.yaml should contain 'sync-branch:' (uncommented)")
+		}
+		if !strings.Contains(yamlStr, "beads-sync") {
+			t.Errorf("config.yaml should contain 'beads-sync', got:\n%s", yamlStr)
+		}
+		// Should NOT contain the commented version anymore
+		if strings.Contains(yamlStr, "# sync-branch:") {
+			t.Error("config.yaml still has commented '# sync-branch:', should be uncommented")
+		}
+	})
+}
+
 func TestUnset(t *testing.T) {
 	ctx := context.Background()
 

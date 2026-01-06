@@ -193,13 +193,29 @@ func getConfigFromDB(dbPath string, key string) string {
 	return value
 }
 
-// Set stores the sync branch configuration in the database
+// Set stores the sync branch configuration in both config.yaml AND the database.
+// GH#909: Writing to both ensures bd doctor and migrate detection work correctly.
+//
+// Config precedence on read (from Get function):
+//   1. BEADS_SYNC_BRANCH env var
+//   2. sync-branch in config.yaml (recommended, version controlled)
+//   3. sync.branch in database (legacy, for backward compatibility)
 func Set(ctx context.Context, store storage.Storage, branch string) error {
 	// GH#807: Use sync-specific validation that rejects main/master
 	if err := ValidateSyncBranchName(branch); err != nil {
 		return err
 	}
 
+	// GH#909: Write to config.yaml first (primary source for doctor/migration checks)
+	// This also handles uncommenting if the key was commented out
+	if err := config.SetYamlConfig(ConfigYAMLKey, branch); err != nil {
+		// Log warning but don't fail - database write is still valuable
+		// This can fail if config.yaml doesn't exist yet (pre-init state)
+		// In that case, the database config still works for backward compatibility
+		fmt.Fprintf(os.Stderr, "Warning: could not update config.yaml: %v\n", err)
+	}
+
+	// Write to database for backward compatibility
 	return store.SetConfig(ctx, ConfigKey, branch)
 }
 

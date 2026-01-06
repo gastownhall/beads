@@ -1188,6 +1188,64 @@ func TestInitBranchPersistsToConfigYaml(t *testing.T) {
 	}
 }
 
+// TestInitReinitWithBranch verifies that --branch flag works on reinit
+// GH#927: When reinitializing with --branch, config.yaml should be updated even if it exists
+func TestInitReinitWithBranch(t *testing.T) {
+	// Reset global state
+	origDBPath := dbPath
+	defer func() { dbPath = origDBPath }()
+	dbPath = ""
+
+	// Reset Cobra flags
+	initCmd.Flags().Set("branch", "")
+	initCmd.Flags().Set("force", "false")
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo first
+	if err := runCommandInDir(tmpDir, "git", "init", "--initial-branch=dev"); err != nil {
+		t.Fatalf("Failed to init git: %v", err)
+	}
+
+	// First init WITHOUT --branch (creates config.yaml with commented sync-branch)
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("First init failed: %v", err)
+	}
+
+	// Verify config.yaml has commented sync-branch initially
+	configPath := filepath.Join(tmpDir, ".beads", "config.yaml")
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(content), "# sync-branch:") {
+		t.Errorf("Initial config.yaml should have commented sync-branch")
+	}
+
+	// Reset Cobra flags for reinit
+	initCmd.Flags().Set("branch", "")
+	initCmd.Flags().Set("force", "false")
+
+	// Reinit WITH --branch (should update existing config.yaml)
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--branch", "beads-sync", "--force", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Reinit with --branch failed: %v", err)
+	}
+
+	// Verify config.yaml now has uncommented sync-branch
+	content, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read config.yaml after reinit: %v", err)
+	}
+
+	configStr := string(content)
+	if !strings.Contains(configStr, "sync-branch: \"beads-sync\"") {
+		t.Errorf("After reinit with --branch, config.yaml should contain uncommented 'sync-branch: \"beads-sync\"', got:\n%s", configStr)
+	}
+}
+
 // TestSetupGlobalGitIgnore_ReadOnly verifies graceful handling when the
 // gitignore file cannot be written (prints manual instructions instead of failing).
 func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
