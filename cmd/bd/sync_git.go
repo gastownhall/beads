@@ -90,11 +90,29 @@ func getRepoRootForWorktree(_ context.Context) string {
 
 // gitHasBeadsChanges checks if any tracked files in .beads/ have uncommitted changes
 // This function is worktree-aware and handles bare repo worktree setups (GH#827).
+// It also handles redirected beads directories (bd-arjb) by running git commands
+// from the directory containing the actual .beads/.
 func gitHasBeadsChanges(ctx context.Context) (bool, error) {
 	// Get the absolute path to .beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return false, fmt.Errorf("no .beads directory found")
+	}
+
+	// Check if beads directory is redirected (bd-arjb)
+	// When redirected, beadsDir points outside the current repo, so we need to
+	// run git commands from the directory containing the actual .beads/
+	redirectInfo := beads.GetRedirectInfo()
+	if redirectInfo.IsRedirected {
+		// beadsDir is the target (e.g., /path/to/mayor/rig/.beads)
+		// We need to run git from the parent of .beads (e.g., /path/to/mayor/rig)
+		targetRepoDir := filepath.Dir(beadsDir)
+		statusCmd := exec.CommandContext(ctx, "git", "-C", targetRepoDir, "status", "--porcelain", beadsDir) //nolint:gosec // G204: beadsDir from beads.FindBeadsDir()
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return false, fmt.Errorf("git status failed: %w", err)
+		}
+		return len(strings.TrimSpace(string(statusOutput))) > 0, nil
 	}
 
 	// Run git status with absolute path from current directory.
@@ -451,6 +469,7 @@ func restoreBeadsDirFromBranch(ctx context.Context) error {
 // This detects the failure mode where a previous sync exported but failed before commit.
 // Returns true if the JSONL file has staged or unstaged changes (M or A status).
 // GH#885: Pre-flight safety check to detect incomplete sync operations.
+// Also handles redirected beads directories (bd-arjb).
 func gitHasUncommittedBeadsChanges(ctx context.Context) (bool, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -458,6 +477,20 @@ func gitHasUncommittedBeadsChanges(ctx context.Context) (bool, error) {
 	}
 
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	// Check if beads directory is redirected (bd-arjb)
+	// When redirected, beadsDir points outside the current repo, so we need to
+	// run git commands from the directory containing the actual .beads/
+	redirectInfo := beads.GetRedirectInfo()
+	if redirectInfo.IsRedirected {
+		targetRepoDir := filepath.Dir(beadsDir)
+		cmd := exec.CommandContext(ctx, "git", "-C", targetRepoDir, "status", "--porcelain", jsonlPath) //nolint:gosec // G204: jsonlPath from internal beads.FindBeadsDir()
+		output, err := cmd.Output()
+		if err != nil {
+			return false, fmt.Errorf("git status failed: %w", err)
+		}
+		return parseGitStatusForBeadsChanges(string(output)), nil
+	}
 
 	// Check git status for the JSONL file specifically
 	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", jsonlPath) //nolint:gosec // G204: jsonlPath from internal beads.FindBeadsDir()
