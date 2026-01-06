@@ -64,7 +64,7 @@ jobs:
           # Windows: full test suite, no race detector (slower on Windows)
           - os: windows-latest
             coverage: false
-            test-flags: '-v -short -timeout=20m'
+            test-flags: '-v -short -timeout=30m'
     steps:
       - uses: actions/checkout@v6
 
