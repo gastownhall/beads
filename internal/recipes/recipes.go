@@ -100,7 +100,7 @@ type UserRecipes struct {
 // LoadUserRecipes loads recipes from .beads/recipes.toml if it exists.
 func LoadUserRecipes(beadsDir string) (map[string]Recipe, error) {
 	path := filepath.Join(beadsDir, "recipes.toml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is constructed from validated beadsDir
 	if os.IsNotExist(err) {
 		return nil, nil // No user recipes, that's fine
 	}
@@ -173,7 +173,7 @@ func SaveUserRecipe(beadsDir, name, path string) error {
 
 	// Load existing user recipes
 	var userRecipes UserRecipes
-	data, err := os.ReadFile(recipesPath)
+	data, err := os.ReadFile(recipesPath) // #nosec G304 -- path is constructed from validated beadsDir
 	if err == nil {
 		if err := toml.Unmarshal(data, &userRecipes); err != nil {
 			return fmt.Errorf("parse recipes.toml: %w", err)
@@ -199,7 +199,7 @@ func SaveUserRecipe(beadsDir, name, path string) error {
 	}
 
 	// Write back
-	f, err := os.Create(recipesPath)
+	f, err := os.Create(recipesPath) // #nosec G304 -- path is constructed from validated beadsDir
 	if err != nil {
 		return fmt.Errorf("create recipes.toml: %w", err)
 	}

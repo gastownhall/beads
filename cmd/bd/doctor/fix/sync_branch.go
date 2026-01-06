@@ -339,7 +339,7 @@ func addToGitExclude(path, pattern string) error {
 	}
 
 	// Append pattern
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) // #nosec G302 -- .git/info/exclude needs to be readable
 	if err != nil {
 		return fmt.Errorf("failed to open exclude file: %w", err)
 	}

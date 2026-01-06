@@ -257,6 +257,7 @@ func checkProjectCapabilities(ctx context.Context, project string, capabilities 
 	}
 
 	// Query returns which provides: labels exist on closed issues
+	// #nosec G202 -- placeholders are generated as "?" markers, not user input
 	query := `
 		SELECT DISTINCT l.label FROM labels l
 		JOIN issues i ON l.issue_id = i.id

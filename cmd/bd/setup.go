@@ -131,7 +131,7 @@ func writeToPath(path string) error {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(recipes.Template), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(recipes.Template), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 		return fmt.Errorf("write file: %w", err)
 	}
 	return nil
@@ -225,7 +225,7 @@ func runRecipe(name string) {
 		}
 	}
 
-	if err := os.WriteFile(recipe.Path, []byte(recipes.Template), 0o644); err != nil {
+	if err := os.WriteFile(recipe.Path, []byte(recipes.Template), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 		fmt.Fprintf(os.Stderr, "Error: write file: %v\n", err)
 		os.Exit(1)
 	}

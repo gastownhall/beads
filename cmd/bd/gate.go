@@ -442,7 +442,7 @@ A gate is resolved when:
   - bead: target bead status=closed
 
 A gate is escalated when:
-  - gh:run: status=completed AND conclusion in (failure, cancelled)
+  - gh:run: status=completed AND conclusion in (failure, canceled)
   - gh:pr: state=CLOSED AND merged=false
 
 Examples:
@@ -645,7 +645,7 @@ func checkGHRun(gate *types.Issue) (resolved, escalated bool, reason string, err
 	}
 
 	// Run: gh run view <id> --json status,conclusion,name
-	cmd := exec.Command("gh", "run", "view", gate.AwaitID, "--json", "status,conclusion,name")
+	cmd := exec.Command("gh", "run", "view", gate.AwaitID, "--json", "status,conclusion,name") // #nosec G204 -- gate.AwaitID is a validated GitHub run ID
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -676,8 +676,8 @@ func checkGHRun(gate *types.Issue) (resolved, escalated bool, reason string, err
 			return true, false, fmt.Sprintf("workflow '%s' succeeded", status.Name), nil
 		case "failure":
 			return false, true, fmt.Sprintf("workflow '%s' failed", status.Name), nil
-		case "cancelled":
-			return false, true, fmt.Sprintf("workflow '%s' was cancelled", status.Name), nil
+		case "cancelled", "canceled":
+			return false, true, fmt.Sprintf("workflow '%s' was canceled", status.Name), nil
 		case "skipped":
 			return true, false, fmt.Sprintf("workflow '%s' was skipped", status.Name), nil
 		default:
@@ -697,7 +697,7 @@ func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err 
 	}
 
 	// Run: gh pr view <id> --json state,merged,title
-	cmd := exec.Command("gh", "pr", "view", gate.AwaitID, "--json", "state,merged,title")
+	cmd := exec.Command("gh", "pr", "view", gate.AwaitID, "--json", "state,merged,title") // #nosec G204 -- gate.AwaitID is a validated GitHub PR number
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -737,7 +737,8 @@ func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err 
 }
 
 // checkTimer checks a timer gate for expiration
-func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, reason string, err error) {
+// Note: timers resolve but never escalate (escalated is always false by design)
+func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, reason string, err error) { //nolint:unparam // escalated intentionally always false
 	if gate.Timeout == 0 {
 		return false, false, "timer gate without timeout configured", fmt.Errorf("no timeout set")
 	}
@@ -815,7 +816,7 @@ func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 }
 
 // closeGate closes a gate issue with the given reason
-func closeGate(ctx interface{}, gateID, reason string) error {
+func closeGate(_ interface{}, gateID, reason string) error {
 	if daemonClient != nil {
 		closeArgs := &rpc.CloseArgs{
 			ID:     gateID,

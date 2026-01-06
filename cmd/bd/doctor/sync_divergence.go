@@ -124,7 +124,7 @@ func checkJSONLGitDivergence(path, beadsDir string) *SyncDivergenceIssue {
 	}
 
 	// Check if file is tracked by git
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", relPath)
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", relPath) // #nosec G204 -- relPath is derived from validated file path
 	cmd.Dir = path
 	if err := cmd.Run(); err != nil {
 		// File not tracked by git
@@ -132,7 +132,7 @@ func checkJSONLGitDivergence(path, beadsDir string) *SyncDivergenceIssue {
 	}
 
 	// Compare current file with HEAD
-	cmd = exec.Command("git", "diff", "--quiet", "HEAD", "--", relPath)
+	cmd = exec.Command("git", "diff", "--quiet", "HEAD", "--", relPath) // #nosec G204 -- relPath is derived from validated file path
 	cmd.Dir = path
 	if err := cmd.Run(); err != nil {
 		// Exit code non-zero means there are differences
@@ -147,7 +147,7 @@ func checkJSONLGitDivergence(path, beadsDir string) *SyncDivergenceIssue {
 }
 
 // checkSQLiteMtimeDivergence checks if SQLite last_import_time matches JSONL mtime.
-func checkSQLiteMtimeDivergence(path, beadsDir string) *SyncDivergenceIssue {
+func checkSQLiteMtimeDivergence(_, beadsDir string) *SyncDivergenceIssue { //nolint:unparam // path reserved for future use
 	// Get database path
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
@@ -235,7 +235,7 @@ func checkUncommittedBeadsChanges(path, beadsDir string) *SyncDivergenceIssue {
 	}
 
 	// Check for uncommitted changes in .beads/
-	cmd := exec.Command("git", "status", "--porcelain", "--", relBeadsDir)
+	cmd := exec.Command("git", "status", "--porcelain", "--", relBeadsDir) // #nosec G204 -- relBeadsDir is derived from validated path
 	cmd.Dir = path
 	out, err := cmd.Output()
 	if err != nil {
