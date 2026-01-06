@@ -67,26 +67,38 @@ func CheckGitHooks() DoctorCheck {
 	if len(externalManagers) > 0 {
 		// External manager detected - check if it's configured to call bd
 		integration := fix.CheckExternalHookManagerIntegration(repoRoot)
-		if integration != nil && integration.Configured {
-			// Check if any hooks are missing bd integration
-			if len(integration.HooksWithoutBd) > 0 {
+		if integration != nil {
+			// Detection-only managers - we can't verify their config
+			if integration.DetectionOnly {
 				return DoctorCheck{
 					Name:    "Git Hooks",
-					Status:  StatusWarning,
-					Message: fmt.Sprintf("%s hooks not calling bd", integration.Manager),
-					Detail:  fmt.Sprintf("Missing bd: %s", strings.Join(integration.HooksWithoutBd, ", ")),
-					Fix:     "Add or upgrade to 'bd hooks run <hook>'. See " + hooksUpgradeURL,
+					Status:  StatusOK,
+					Message: fmt.Sprintf("%s detected (cannot verify bd integration)", integration.Manager),
+					Detail:  "Ensure your hook config calls 'bd hooks run <hook>'",
 				}
 			}
 
-			// All hooks calling bd - success
-			return DoctorCheck{
-				Name:    "Git Hooks",
-				Status:  StatusOK,
-				Message: fmt.Sprintf("All hooks via %s", integration.Manager),
-				Detail:  fmt.Sprintf("bd hooks run: %s", strings.Join(integration.HooksWithBd, ", ")),
+			if integration.Configured {
+				// Check if any hooks are missing bd integration
+				if len(integration.HooksWithoutBd) > 0 {
+					return DoctorCheck{
+						Name:    "Git Hooks",
+						Status:  StatusWarning,
+						Message: fmt.Sprintf("%s hooks not calling bd", integration.Manager),
+						Detail:  fmt.Sprintf("Missing bd: %s", strings.Join(integration.HooksWithoutBd, ", ")),
+						Fix:     "Add or upgrade to 'bd hooks run <hook>'. See " + hooksUpgradeURL,
+					}
+				}
+
+				// All hooks calling bd - success
+				return DoctorCheck{
+					Name:    "Git Hooks",
+					Status:  StatusOK,
+					Message: fmt.Sprintf("All hooks via %s", integration.Manager),
+					Detail:  fmt.Sprintf("bd hooks run: %s", strings.Join(integration.HooksWithBd, ", ")),
+				}
 			}
-		} else {
+
 			// External manager exists but doesn't call bd at all
 			return DoctorCheck{
 				Name:    "Git Hooks",
@@ -350,37 +362,49 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 
 			// Check if external manager has bd integration
 			integration := fix.CheckExternalHookManagerIntegration(path)
-			if integration != nil && integration.Configured {
-				// Has bd integration - check if pre-push is covered
-				hasPrepush := false
-				for _, h := range integration.HooksWithBd {
-					if h == "pre-push" {
-						hasPrepush = true
-						break
-					}
-				}
-
-				if hasPrepush {
-					var detail string
-					// Only report hooks that ARE in config but lack bd integration
-					if len(integration.HooksWithoutBd) > 0 {
-						detail = fmt.Sprintf("Hooks without bd: %s", strings.Join(integration.HooksWithoutBd, ", "))
-					}
+			if integration != nil {
+				// Detection-only managers - we can't verify their config
+				if integration.DetectionOnly {
 					return DoctorCheck{
 						Name:    "Sync Branch Hook Compatibility",
 						Status:  StatusOK,
-						Message: fmt.Sprintf("Managed by %s with bd integration", integration.Manager),
-						Detail:  detail,
+						Message: fmt.Sprintf("Managed by %s (cannot verify bd integration)", names),
+						Detail:  "Ensure pre-push hook calls 'bd hooks run pre-push' for sync-branch",
 					}
 				}
 
-				// Has bd integration but missing pre-push
-				return DoctorCheck{
-					Name:    "Sync Branch Hook Compatibility",
-					Status:  StatusWarning,
-					Message: fmt.Sprintf("Managed by %s (missing pre-push bd integration)", integration.Manager),
-					Detail:  "pre-push hook needs 'bd hooks run pre-push' for sync-branch",
-					Fix:     fmt.Sprintf("Add or upgrade to 'bd hooks run pre-push' in %s. See %s", integration.Manager, hooksExamplesURL),
+				if integration.Configured {
+					// Has bd integration - check if pre-push is covered
+					hasPrepush := false
+					for _, h := range integration.HooksWithBd {
+						if h == "pre-push" {
+							hasPrepush = true
+							break
+						}
+					}
+
+					if hasPrepush {
+						var detail string
+						// Only report hooks that ARE in config but lack bd integration
+						if len(integration.HooksWithoutBd) > 0 {
+							detail = fmt.Sprintf("Hooks without bd: %s", strings.Join(integration.HooksWithoutBd, ", "))
+						}
+						return DoctorCheck{
+							Name:    "Sync Branch Hook Compatibility",
+							Status:  StatusOK,
+							Message: fmt.Sprintf("Managed by %s with bd integration", integration.Manager),
+							Detail:  detail,
+						}
+					}
+
+					// Has bd integration but missing pre-push
+					return DoctorCheck{
+						Name:    "Sync Branch Hook Compatibility",
+						Status:  StatusWarning,
+						Message: fmt.Sprintf("Managed by %s (missing pre-push bd integration)", integration.Manager),
+						Detail:  "pre-push hook needs 'bd hooks run pre-push' for sync-branch",
+						Fix:     fmt.Sprintf("Add or upgrade to 'bd hooks run pre-push' in %s. See %s", integration.Manager, hooksExamplesURL),
+					}
 				}
 			}
 

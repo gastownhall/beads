@@ -608,11 +608,12 @@ func slicesEqual(a, b []string) bool {
 
 func TestCheckExternalHookManagerIntegration(t *testing.T) {
 	tests := []struct {
-		name             string
-		setup            func(dir string) error
-		expectNil        bool
-		expectManager    string
-		expectConfigured bool
+		name                string
+		setup               func(dir string) error
+		expectNil           bool
+		expectManager       string
+		expectConfigured    bool
+		expectDetectionOnly bool
 	}{
 		{
 			name: "no managers",
@@ -631,9 +632,10 @@ func TestCheckExternalHookManagerIntegration(t *testing.T) {
 `
 				return os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte(config), 0644)
 			},
-			expectNil:        false,
-			expectManager:    "lefthook",
-			expectConfigured: true,
+			expectNil:           false,
+			expectManager:       "lefthook",
+			expectConfigured:    true,
+			expectDetectionOnly: false,
 		},
 		{
 			name: "husky with bd integration",
@@ -644,18 +646,20 @@ func TestCheckExternalHookManagerIntegration(t *testing.T) {
 				}
 				return os.WriteFile(filepath.Join(huskyDir, "pre-commit"), []byte("#!/bin/sh\nbd hooks run pre-commit\n"), 0755)
 			},
-			expectNil:        false,
-			expectManager:    "husky",
-			expectConfigured: true,
+			expectNil:           false,
+			expectManager:       "husky",
+			expectConfigured:    true,
+			expectDetectionOnly: false,
 		},
 		{
 			name: "unsupported manager (pre-commit framework)",
 			setup: func(dir string) error {
 				return os.WriteFile(filepath.Join(dir, ".pre-commit-config.yaml"), []byte("repos:\n"), 0644)
 			},
-			expectNil:        false,
-			expectManager:    "pre-commit",
-			expectConfigured: false,
+			expectNil:           false,
+			expectManager:       "pre-commit",
+			expectConfigured:    false,
+			expectDetectionOnly: true,
 		},
 		{
 			name: "lefthook without bd",
@@ -667,9 +671,10 @@ func TestCheckExternalHookManagerIntegration(t *testing.T) {
 `
 				return os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte(config), 0644)
 			},
-			expectNil:        false,
-			expectManager:    "lefthook",
-			expectConfigured: false,
+			expectNil:           false,
+			expectManager:       "lefthook",
+			expectConfigured:    false,
+			expectDetectionOnly: false, // lefthook IS supported, we can verify its config
 		},
 	}
 
@@ -699,6 +704,10 @@ func TestCheckExternalHookManagerIntegration(t *testing.T) {
 
 			if result.Configured != tt.expectConfigured {
 				t.Errorf("Configured: expected %v, got %v", tt.expectConfigured, result.Configured)
+			}
+
+			if result.DetectionOnly != tt.expectDetectionOnly {
+				t.Errorf("DetectionOnly: expected %v, got %v", tt.expectDetectionOnly, result.DetectionOnly)
 			}
 		})
 	}

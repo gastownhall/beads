@@ -79,6 +79,7 @@ type HookIntegrationStatus struct {
 	HooksWithoutBd   []string // Hooks configured but without bd integration
 	HooksNotInConfig []string // Recommended hooks not in config at all
 	Configured       bool     // Whether any bd integration was found
+	DetectionOnly    bool     // True if we detected the manager but can't verify its config
 }
 
 // bdHookPattern matches the recommended bd hooks run pattern with word boundaries
@@ -330,10 +331,11 @@ func CheckExternalHookManagerIntegration(path string) *HookIntegrationStatus {
 		}
 	}
 
-	// Return basic status for unsupported managers
+	// Return basic status for unsupported managers (detection only, can't verify config)
 	return &HookIntegrationStatus{
-		Manager:    ManagerNames(managers),
-		Configured: false,
+		Manager:       ManagerNames(managers),
+		Configured:    false,
+		DetectionOnly: true,
 	}
 }
 
