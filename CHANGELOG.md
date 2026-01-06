@@ -5,6 +5,17 @@ All notable changes to the beads project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **External hook manager detection** - `bd doctor` now detects lefthook, husky, pre-commit, and other hook managers
+  - Checks if external managers have `bd hooks run` integration configured
+  - Reports which hooks have bd integration vs which are missing
+  - `bd doctor --fix` uses `--chain` flag when external managers detected to preserve existing hooks
+  - Supports YAML, TOML, and JSON config formats for lefthook
+  - Detects active manager from git hooks when multiple managers present
+
 ## [0.44.0] - 2026-01-04
 
 ### Added
