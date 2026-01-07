@@ -638,10 +638,29 @@ type ghPRStatus struct {
 	Title  string `json:"title"`
 }
 
+// isNumericID returns true if the string is a valid numeric ID
+func isNumericID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // checkGHRun checks a GitHub Actions workflow run gate
 func checkGHRun(gate *types.Issue) (resolved, escalated bool, reason string, err error) {
 	if gate.AwaitID == "" {
-		return false, false, "no run ID specified", nil
+		return false, false, "no run ID specified - run 'bd gate discover' first", nil
+	}
+
+	// Check if AwaitID is a numeric run ID or a workflow name hint
+	if !isNumericID(gate.AwaitID) {
+		// Non-numeric AwaitID is a workflow name hint, needs discovery
+		return false, false, fmt.Sprintf("awaiting discovery (workflow hint: %s) - run 'bd gate discover'", gate.AwaitID), nil
 	}
 
 	// Run: gh run view <id> --json status,conclusion,name

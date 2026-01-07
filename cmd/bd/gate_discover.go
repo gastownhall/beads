@@ -79,7 +79,7 @@ func runGateDiscover(cmd *cobra.Command, args []string) {
 	}
 
 	if len(gates) == 0 {
-		fmt.Println("No pending gh:run gates found (all gates have await_id set)")
+		fmt.Println("No pending gh:run gates found (all gates have numeric run IDs)")
 		return
 	}
 
@@ -145,7 +145,40 @@ func runGateDiscover(cmd *cobra.Command, args []string) {
 	}
 }
 
-// findPendingGates returns open gh:run gates that have no await_id set
+// isNumericRunID returns true if the string looks like a GitHub numeric run ID
+func isNumericRunID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// needsDiscovery returns true if a gh:run gate needs run ID discovery.
+// This is true when AwaitID is empty OR contains a non-numeric workflow name hint.
+func needsDiscovery(g *types.Issue) bool {
+	if g.AwaitType != "gh:run" {
+		return false
+	}
+	// Empty AwaitID or non-numeric (workflow name hint) needs discovery
+	return g.AwaitID == "" || !isNumericRunID(g.AwaitID)
+}
+
+// getWorkflowNameHint extracts the workflow name hint from AwaitID if present.
+// Returns empty string if AwaitID is empty or numeric (already resolved).
+func getWorkflowNameHint(g *types.Issue) string {
+	if g.AwaitID == "" || isNumericRunID(g.AwaitID) {
+		return ""
+	}
+	return g.AwaitID
+}
+
+// findPendingGates returns open gh:run gates that need run ID discovery.
+// This includes gates with empty AwaitID OR non-numeric AwaitID (workflow name hint).
 func findPendingGates() ([]*types.Issue, error) {
 	var gates []*types.Issue
 
@@ -165,9 +198,9 @@ func findPendingGates() ([]*types.Issue, error) {
 			return nil, fmt.Errorf("parse gates: %w", err)
 		}
 
-		// Filter to gh:run gates without await_id
+		// Filter to gh:run gates that need discovery
 		for _, g := range allGates {
-			if g.AwaitType == "gh:run" && g.AwaitID == "" {
+			if needsDiscovery(g) {
 				gates = append(gates, g)
 			}
 		}
@@ -185,7 +218,7 @@ func findPendingGates() ([]*types.Issue, error) {
 		}
 
 		for _, g := range allGates {
-			if g.AwaitType == "gh:run" && g.AwaitID == "" {
+			if needsDiscovery(g) {
 				gates = append(gates, g)
 			}
 		}
@@ -249,11 +282,13 @@ func queryGitHubRuns(branch string, limit int) ([]GHWorkflowRun, error) {
 	return runs, nil
 }
 
-// matchGateToRun finds the best matching run for a gate using heuristics
+// matchGateToRun finds the best matching run for a gate using heuristics.
+// If the gate has a workflow name hint in AwaitID, only runs matching that workflow are considered.
 func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duration) *GHWorkflowRun {
 	now := time.Now()
 	currentCommit := getGitCommitForGateDiscovery()
 	currentBranch := getGitBranchForGateDiscovery()
+	workflowHint := getWorkflowNameHint(gate)
 
 	var bestMatch *GHWorkflowRun
 	var bestScore int
@@ -267,7 +302,21 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 			continue
 		}
 
-		// Heuristic 1: Commit SHA match (strongest signal)
+		// If gate has a workflow name hint, require matching workflow
+		// Match against both WorkflowName (display name) and Name (filename)
+		if workflowHint != "" {
+			workflowMatches := strings.EqualFold(run.WorkflowName, workflowHint) ||
+				strings.EqualFold(run.Name, workflowHint) ||
+				strings.EqualFold(run.WorkflowName, strings.TrimSuffix(workflowHint, ".yml")) ||
+				strings.EqualFold(run.WorkflowName, strings.TrimSuffix(workflowHint, ".yaml"))
+			if !workflowMatches {
+				continue // Skip runs that don't match the workflow hint
+			}
+			// Workflow match is a strong signal
+			score += 200
+		}
+
+		// Heuristic 1: Commit SHA match (strongest signal after workflow match)
 		if currentCommit != "" && run.HeadSha == currentCommit {
 			score += 100
 		}
@@ -288,11 +337,7 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 			score += 10
 		}
 
-		// Heuristic 4: Workflow name match (if gate has workflow specified)
-		// The gate's AwaitType might include workflow info in the future
-		// For now, we prioritize any recent run
-
-		// Heuristic 5: Prefer in_progress or queued runs (more likely to be current)
+		// Heuristic 4: Prefer in_progress or queued runs (more likely to be current)
 		if run.Status == "in_progress" || run.Status == "queued" {
 			score += 5
 		}
@@ -304,6 +349,8 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 	}
 
 	// Require at least some confidence in the match
+	// With workflow hint, workflow match (200) alone is sufficient
+	// Without workflow hint, require branch or commit match (30+ from time proximity)
 	if bestScore >= 30 {
 		return bestMatch
 	}
