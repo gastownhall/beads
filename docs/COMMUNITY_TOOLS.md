@@ -32,6 +32,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Beadster](https://github.com/beadster/beadster)** - macOS app for browsing and managing issues from `.beads/` directories in git repositories. Built by [@podviaznikov](https://github.com/podviaznikov). (Swift)
 
+-  **[Parade](https://github.com/JeremyKalmus/parade)** - Electron app for workflow orchestration with visual Kanban board, discovery wizard, and task visualization. Run with `npx parade-init`. Built by [@JeremyKalmus](https://github.com/JeremyKalmus). (Electron/React)
+
 ## Historical / Stale
 
 - **[beady](https://github.com/maphew/beady)** - Early prototype effort, now stale. Built by [@maphew](https://github.com/maphew). (Go)
