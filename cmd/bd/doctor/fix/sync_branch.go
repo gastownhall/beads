@@ -272,6 +272,20 @@ func ClearSyncBranchGitignore(path string) error {
 	return nil
 }
 
+// parseGitLsFilesFlag interprets the flag character from git ls-files -v output.
+// Returns (hasAnyFlag, hasSkipWorktree) based on the first character of the line.
+//
+// Git ls-files -v output flags:
+//   'H' = tracked normally (no flags)
+//   'h' = assume-unchanged only
+//   'S' = skip-worktree only
+//   's' = both skip-worktree + assume-unchanged (lowercase due to assume-unchanged)
+func parseGitLsFilesFlag(flag byte) (hasAnyFlag bool, hasSkipWorktree bool) {
+	hasAnyFlag = flag == 'h' || flag == 'S' || flag == 's'
+	hasSkipWorktree = flag == 'S' || flag == 's'
+	return hasAnyFlag, hasSkipWorktree
+}
+
 // HasSyncBranchGitignoreFlags checks if git index flags are set on .beads/issues.jsonl.
 // Returns (hasAnyFlag, hasSkipWorktree, error).
 // Note: When both assume-unchanged and skip-worktree are set, git shows 'S' (skip-worktree
@@ -285,8 +299,10 @@ func HasSyncBranchGitignoreFlags(path string) (bool, bool, error) {
 	}
 
 	// Get file status from git ls-files -v
-	// 'H' = tracked normally, 'h' = assume-unchanged, 'S' = skip-worktree
-	// When both flags are set, 'S' is shown (skip-worktree takes precedence)
+	// 'H' = tracked normally
+	// 'h' = assume-unchanged only
+	// 'S' = skip-worktree only
+	// 's' = skip-worktree + assume-unchanged (lowercase due to assume-unchanged)
 	cmd := exec.Command("git", "ls-files", "-v", jsonlPath)
 	cmd.Dir = path
 	output, err := cmd.Output()
@@ -299,11 +315,7 @@ func HasSyncBranchGitignoreFlags(path string) (bool, bool, error) {
 		return false, false, nil
 	}
 
-	firstChar := line[0]
-	// 'h' = assume-unchanged only, 'S' = skip-worktree (possibly with assume-unchanged too)
-	hasAnyFlag := firstChar == 'h' || firstChar == 'S'
-	hasSkipWorktree := firstChar == 'S'
-
+	hasAnyFlag, hasSkipWorktree := parseGitLsFilesFlag(line[0])
 	return hasAnyFlag, hasSkipWorktree, nil
 }
 
