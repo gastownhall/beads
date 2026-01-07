@@ -45,7 +45,7 @@ linters:
           - gosec
         text: "G306"
       # G304: Safe file reads from known JSONL and error paths
-      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon_autostart\.go|cmd/bd/doctor/fix/sync_branch\.go|internal/beads/beads\.go|internal/daemon/discovery\.go|internal/daemonrunner/sync\.go|internal/syncbranch/worktree\.go'
+      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon_autostart\.go|cmd/bd/doctor/fix/sync_branch\.go|cmd/bd/rename_prefix\.go|internal/beads/beads\.go|internal/daemon/discovery\.go|internal/daemonrunner/sync\.go|internal/syncbranch/worktree\.go'
         linters:
           - gosec
         text: "G304"
