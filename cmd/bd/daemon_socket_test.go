@@ -2,9 +2,8 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
 )
 
 // TestSocketPathEnvOverride verifies that BD_SOCKET env var overrides default socket path.
@@ -18,7 +17,9 @@ func TestSocketPathEnvOverride(t *testing.T) {
 
 	// Verify getSocketPath returns custom path
 	got := getSocketPath()
-	assert.Equal(t, customSocket, got)
+	if got != customSocket {
+		t.Errorf("getSocketPath() = %q, want %q", got, customSocket)
+	}
 }
 
 // TestSocketPathForPIDEnvOverride verifies that BD_SOCKET env var overrides PID-derived path.
@@ -33,7 +34,9 @@ func TestSocketPathForPIDEnvOverride(t *testing.T) {
 	// Verify getSocketPathForPID returns custom path (ignoring pidFile)
 	pidFile := "/some/other/path/daemon.pid"
 	got := getSocketPathForPID(pidFile)
-	assert.Equal(t, customSocket, got)
+	if got != customSocket {
+		t.Errorf("getSocketPathForPID(%q) = %q, want %q", pidFile, got, customSocket)
+	}
 }
 
 // TestSocketPathDefaultBehavior verifies default behavior when BD_SOCKET is not set.
@@ -44,7 +47,10 @@ func TestSocketPathDefaultBehavior(t *testing.T) {
 	// Verify getSocketPathForPID derives from PID file path
 	pidFile := "/path/to/.beads/daemon.pid"
 	got := getSocketPathForPID(pidFile)
-	assert.Equal(t, "/path/to/.beads/bd.sock", got)
+	want := "/path/to/.beads/bd.sock"
+	if got != want {
+		t.Errorf("getSocketPathForPID(%q) = %q, want %q", pidFile, got, want)
+	}
 }
 
 // TestDaemonSocketIsolation demonstrates that two test instances can use different sockets.
@@ -66,10 +72,14 @@ func TestDaemonSocketIsolation(t *testing.T) {
 			t.Setenv("BD_SOCKET", socketPath)
 
 			got := getSocketPath()
-			assert.Equal(t, socketPath, got)
+			if got != socketPath {
+				t.Errorf("getSocketPath() = %q, want %q", got, socketPath)
+			}
 
 			// Verify paths are unique per instance
-			assert.Contains(t, got, tt.sockSuffix)
+			if !strings.Contains(got, tt.sockSuffix) {
+				t.Errorf("getSocketPath() = %q, want it to contain %q", got, tt.sockSuffix)
+			}
 		})
 	}
 }
