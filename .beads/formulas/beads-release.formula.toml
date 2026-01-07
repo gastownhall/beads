@@ -153,11 +153,27 @@ needs = ["update-info-go"]
 description = """
 Update all component versions atomically.
 
+**The bump-version.sh script is the authority for release mechanics.**
+
+Basic version bump (just updates files):
 ```bash
 ./scripts/bump-version.sh {{version}}
 ```
 
-This updates:
+Full release with local install (recommended for devs):
+```bash
+./scripts/bump-version.sh {{version}} --commit --tag --push --all
+```
+
+The `--all` flag includes: `--install --mcp-local --restart-daemons`
+
+This handles:
+- Version updates across all components
+- macOS codesigning (critical - without this, binary gets SIGKILL'd)
+- Local MCP installation
+- Daemon restart
+
+Files updated:
 - cmd/bd/version.go
 - .claude-plugin/*.json
 - integrations/beads-mcp/pyproject.toml
@@ -166,6 +182,8 @@ This updates:
 - Hook templates
 - README.md
 - CHANGELOG.md (adds date)
+
+See `./scripts/bump-version.sh --help` for all options.
 """
 
 [[steps]]
@@ -358,6 +376,15 @@ brew upgrade bd
 Option 2 - Install script:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+Option 3 - Build from source (for developers releasing from this clone):
+```bash
+go build -o bd ./cmd/bd
+cp bd ~/.local/bin/bd
+
+# macOS ONLY: Codesign to prevent SIGKILL (Killed: 9)
+[[ $(uname) == 'Darwin' ]] && codesign --force --sign - ~/.local/bin/bd
 ```
 
 Verify:
