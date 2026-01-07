@@ -572,6 +572,7 @@ func generateRepairHashID(ctx context.Context, conn *sql.Conn, prefix string, is
 
 // parseJSONLFile reads and parses a JSONL file into a slice of issues
 func parseJSONLFile(jsonlPath string) ([]*types.Issue, error) {
+	// #nosec G304 - jsonlPath is from findJSONLPath() which uses trusted paths
 	f, err := os.Open(jsonlPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open JSONL file: %w", err)

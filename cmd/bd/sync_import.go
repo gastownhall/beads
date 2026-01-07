@@ -65,7 +65,7 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 // This avoids path resolution issues when running from directories with .beads/redirect.
 // The parent process's store and dbPath are used, ensuring consistent path resolution.
 // (bd-ysal fix)
-func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, noGitHistory bool) error {
+func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, _ /* noGitHistory */ bool) error {
 	// Verify we have an active store
 	if store == nil {
 		return fmt.Errorf("no database store available for inline import")
