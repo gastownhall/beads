@@ -287,24 +287,6 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			os.Exit(1)
 		}
 
-		// Set sync.branch only if explicitly specified via --branch flag
-		// GH#807: Do NOT auto-detect current branch - if sync.branch is set to main/master,
-		// the worktree created by bd sync will check out main, preventing the user from
-		// checking out main in their working directory (git error: "'main' is already checked out")
-		//
-		// When --branch is not specified, bd sync will commit directly to the current branch
-		// (the original behavior before sync branch feature)
-		if branch != "" {
-			if err := syncbranch.Set(ctx, store, branch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
-				_ = store.Close()
-				os.Exit(1)
-			}
-			if !quiet {
-				fmt.Printf("  Sync branch: %s\n", branch)
-			}
-		}
-
 		// === TRACKING METADATA (Pattern B: Warn and Continue) ===
 		// Tracking metadata enhances functionality (diagnostics, version checks, collision detection)
 		// but the system works without it. Failures here degrade gracefully - we warn but continue.
@@ -383,6 +365,27 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			if err := createReadme(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", err)
 				// Non-fatal - continue anyway
+			}
+		}
+
+		// Set sync.branch only if explicitly specified via --branch flag
+		// GH#807: Do NOT auto-detect current branch - if sync.branch is set to main/master,
+		// the worktree created by bd sync will check out main, preventing the user from
+		// checking out main in their working directory (git error: "'main' is already checked out")
+		//
+		// When --branch is not specified, bd sync will commit directly to the current branch
+		// (the original behavior before sync branch feature)
+		//
+		// GH#927: This must run AFTER createConfigYaml() so that config.yaml exists
+		// and syncbranch.Set() can update it via config.SetYamlConfig() (PR#910 mechanism)
+		if branch != "" {
+			if err := syncbranch.Set(ctx, store, branch); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
+				_ = store.Close()
+				os.Exit(1)
+			}
+			if !quiet {
+				fmt.Printf("  Sync branch: %s\n", branch)
 			}
 		}
 
