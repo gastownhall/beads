@@ -238,6 +238,23 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
+	// Parse DeferUntil if provided (GH#820, GH#950)
+	var deferUntil *time.Time
+	if createArgs.DeferUntil != "" {
+		// Try date-only format first (YYYY-MM-DD)
+		if t, err := time.ParseInLocation("2006-01-02", createArgs.DeferUntil, time.Local); err == nil {
+			deferUntil = &t
+		} else if t, err := time.Parse(time.RFC3339, createArgs.DeferUntil); err == nil {
+			// Try RFC3339 format (2025-01-15T10:00:00Z)
+			deferUntil = &t
+		} else {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("invalid defer_until format %q. Examples: 2025-01-15, 2025-01-15T10:00:00Z", createArgs.DeferUntil),
+			}
+		}
+	}
+
 	issue := &types.Issue{
 		ID:                 issueID,
 		Title:              createArgs.Title,
@@ -268,8 +285,9 @@ func (s *Server) handleCreate(req *Request) Response {
 		Actor:     createArgs.EventActor,
 		Target:    createArgs.EventTarget,
 		Payload:   createArgs.EventPayload,
-		// Time-based scheduling (GH#820)
-		DueAt: dueAt,
+		// Time-based scheduling (GH#820, GH#950)
+		DueAt:      dueAt,
+		DeferUntil: deferUntil,
 	}
 	
 	// Check if any dependencies are discovered-from type
