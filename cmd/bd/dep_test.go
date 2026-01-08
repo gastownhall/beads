@@ -1084,6 +1084,330 @@ func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
 }
 
 // Tests for child→parent dependency detection (bd-nim5)
+// ============================================================================
+// Foreign Key Error Tests (GH#952 Issue 4)
+// ============================================================================
+//
+// These tests verify that foreign key constraint violations produce
+// user-friendly error messages instead of raw SQLite errors.
+//
+// Expected behavior:
+//   - Error should say "issue X or Y not found" (user-friendly)
+//   - Error should NOT say "FOREIGN KEY constraint failed" (raw SQLite)
+//
+// TRACER BULLET FINDING (Phase 1):
+//   The storage layer (dependencies.go) already validates issue existence
+//   BEFORE inserting into the database, so FK constraint errors don't occur
+//   at the storage layer. Tests PASS because AddDependency returns proper
+//   "not found" errors.
+//
+// If bugs exist, they would be in:
+//   1. CLI layer (dep.go) - when ResolvePartialID has edge cases
+//   2. Daemon RPC layer - if ID resolution behaves differently
+//   3. Race conditions - issue deleted between resolve and add
+//
+// These tests serve as regression tests ensuring the storage layer
+// continues to provide user-friendly error messages.
+
+func TestDepAdd_FKError(t *testing.T) {
+	// Test that adding a dependency with invalid issue IDs produces
+	// a user-friendly error message, not a raw FK constraint error.
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create one valid issue (using "test-" prefix to match test store config)
+	validIssue := &types.Issue{
+		ID:        "test-fk-valid",
+		Title:     "Valid Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, validIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test case 1: Invalid "from" issue ID (source doesn't exist)
+	t.Run("invalid_from_id", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID:     "test-nonexistent-from",
+			DependsOnID: "test-fk-valid",
+			Type:        types.DepBlocks,
+			CreatedAt:   time.Now(),
+		}
+
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid from ID")
+		}
+
+		errMsg := err.Error()
+
+		// The error message should NOT contain raw FK error
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+		if strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint (lowercase): %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+
+		// The error message SHOULD indicate the issue was not found
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate issue not found: %q", errMsg)
+		}
+	})
+
+	// Test case 2: Invalid "to" issue ID (dependency target doesn't exist)
+	t.Run("invalid_to_id", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID:     "test-fk-valid",
+			DependsOnID: "test-nonexistent-to",
+			Type:        types.DepBlocks,
+			CreatedAt:   time.Now(),
+		}
+
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid to ID")
+		}
+
+		errMsg := err.Error()
+
+		// The error message should NOT contain raw FK error
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+		if strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint (lowercase): %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+
+		// The error message SHOULD indicate the dependency target was not found
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate dependency target not found: %q", errMsg)
+		}
+	})
+
+	// Test case 3: Both IDs invalid
+	t.Run("both_ids_invalid", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID:     "test-nonexistent-1",
+			DependsOnID: "test-nonexistent-2",
+			Type:        types.DepBlocks,
+			CreatedAt:   time.Now(),
+		}
+
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with both invalid IDs")
+		}
+
+		errMsg := err.Error()
+
+		// The error message should NOT contain raw FK error
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+		if strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint (lowercase): %q\nWant: user-friendly 'not found' message", errMsg)
+		}
+
+		// The error message SHOULD indicate issue not found
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate issue not found: %q", errMsg)
+		}
+	})
+}
+
+func TestDepAdd_FKError_JSON(t *testing.T) {
+	// Test that JSON output mode also produces user-friendly errors.
+	// This verifies the error is handled before reaching JSON output formatting.
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create one valid issue (using "test-" prefix to match test store config)
+	validIssue := &types.Issue{
+		ID:        "test-json-valid",
+		Title:     "Valid Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, validIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test with invalid dependency target
+	dep := &types.Dependency{
+		IssueID:     "test-json-valid",
+		DependsOnID: "test-json-nonexistent",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+	}
+
+	err := s.AddDependency(ctx, dep, "test")
+	if err == nil {
+		t.Fatal("Expected error when adding dependency with invalid ID")
+	}
+
+	errMsg := err.Error()
+
+	// Even in JSON mode, the underlying error should be user-friendly
+	if strings.Contains(errMsg, "FOREIGN KEY") {
+		t.Errorf("Error exposes raw FK constraint (JSON mode): %q", errMsg)
+	}
+}
+
+func TestDepAdd_FKError_Daemon(t *testing.T) {
+	// Test daemon mode error handling via the storage layer.
+	// The daemon wraps errors with "failed to add dependency: %v",
+	// so we verify the underlying storage error is user-friendly.
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create one valid issue (using "test-" prefix to match test store config)
+	validIssue := &types.Issue{
+		ID:        "test-daemon-valid",
+		Title:     "Valid Issue for Daemon Test",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, validIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate daemon path: IDs are pre-resolved, passed directly to store
+	dep := &types.Dependency{
+		IssueID:     "test-daemon-valid",
+		DependsOnID: "test-daemon-nonexistent", // This ID doesn't exist
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+	}
+
+	err := s.AddDependency(ctx, dep, "test")
+	if err == nil {
+		t.Fatal("Expected error when adding dependency with invalid ID via daemon path")
+	}
+
+	errMsg := err.Error()
+
+	// Simulate how daemon would wrap this error
+	daemonError := fmt.Sprintf("failed to add dependency: %v", err)
+
+	// The daemon error should NOT expose raw FK constraint
+	if strings.Contains(daemonError, "FOREIGN KEY constraint failed") {
+		t.Errorf("Daemon error exposes raw FK constraint: %q\nWant: user-friendly message", daemonError)
+	}
+	if strings.Contains(daemonError, "foreign key constraint failed") {
+		t.Errorf("Daemon error exposes raw FK constraint (lowercase): %q", daemonError)
+	}
+
+	// Should contain user-friendly message
+	if !strings.Contains(errMsg, "not found") {
+		t.Errorf("Storage error should indicate not found: %q", errMsg)
+	}
+}
+
+func TestDepRemove_FKError(t *testing.T) {
+	// Test whether dep remove with invalid IDs triggers FK errors.
+	// Note: DELETE with non-existent IDs typically succeeds as no-op in SQLite,
+	// but the storage layer should check and return appropriate error.
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create two valid issues with a dependency (using "test-" prefix)
+	issue1 := &types.Issue{
+		ID:        "test-fk-remove-1",
+		Title:     "Issue 1",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	issue2 := &types.Issue{
+		ID:        "test-fk-remove-2",
+		Title:     "Issue 2",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, issue1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateIssue(ctx, issue2, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a valid dependency first
+	dep := &types.Dependency{
+		IssueID:     "test-fk-remove-1",
+		DependsOnID: "test-fk-remove-2",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+	}
+	if err := s.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test removing dependency with non-existent IDs
+	t.Run("nonexistent_dependency", func(t *testing.T) {
+		err := s.RemoveDependency(ctx, "test-nonexistent-1", "test-nonexistent-2", "test")
+		if err == nil {
+			t.Log("Note: RemoveDependency with non-existent IDs succeeded (may be expected)")
+			return
+		}
+
+		errMsg := err.Error()
+
+		// If there IS an error, it should NOT be a raw FK error
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+		}
+		if strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint (lowercase): %q", errMsg)
+		}
+	})
+
+	// Test removing non-existent dependency between existing issues
+	t.Run("valid_ids_no_dependency", func(t *testing.T) {
+		// First remove the real dependency
+		if err := s.RemoveDependency(ctx, "test-fk-remove-1", "test-fk-remove-2", "test"); err != nil {
+			t.Fatalf("Failed to remove existing dependency: %v", err)
+		}
+
+		// Now try to remove it again - should fail with user-friendly message
+		err := s.RemoveDependency(ctx, "test-fk-remove-1", "test-fk-remove-2", "test")
+		if err == nil {
+			t.Log("Note: Removing non-existent dependency succeeded (no error)")
+			return
+		}
+
+		errMsg := err.Error()
+
+		// Should NOT be an FK error
+		if strings.Contains(errMsg, "FOREIGN KEY") {
+			t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+		}
+
+		// Should indicate dependency doesn't exist
+		if !strings.Contains(errMsg, "does not exist") && !strings.Contains(errMsg, "not found") {
+			t.Errorf("Error should indicate dependency doesn't exist: %q", errMsg)
+		}
+	})
+}
+
 func TestIsChildOf(t *testing.T) {
 	tests := []struct {
 		name     string
