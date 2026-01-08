@@ -430,8 +430,8 @@ var createCmd = &cobra.Command{
 				EventActor:         eventActor,
 				EventTarget:        eventTarget,
 				EventPayload:       eventPayload,
-				DueAt:              dueStr,
-				DeferUntil:         deferStr,
+				DueAt:              formatTimeForRPC(dueAt),
+				DeferUntil:         formatTimeForRPC(deferUntil),
 			}
 
 			resp, err := daemonClient.Create(createArgs)
@@ -876,4 +876,13 @@ func findTownBeadsDir() (string, error) {
 	}
 
 	return "", fmt.Errorf("no routes.jsonl found in any parent .beads directory")
+}
+
+// formatTimeForRPC converts a *time.Time to RFC3339 string for daemon RPC calls.
+// Returns empty string if t is nil, allowing the daemon to distinguish "not set" from "set to zero".
+func formatTimeForRPC(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }

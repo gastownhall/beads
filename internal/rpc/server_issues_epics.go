@@ -52,7 +52,7 @@ func strValue(p *string) string {
 	return *p
 }
 
-func updatesFromArgs(a UpdateArgs) map[string]interface{} {
+func updatesFromArgs(a UpdateArgs) (map[string]interface{}, error) {
 	u := map[string]interface{}{}
 	if a.Title != nil {
 		u["title"] = *a.Title
@@ -156,7 +156,38 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	if a.Holder != nil {
 		u["holder"] = *a.Holder
 	}
-	return u
+	// Time-based scheduling fields (GH#820)
+	if a.DueAt != nil {
+		if *a.DueAt == "" {
+			u["due_at"] = nil // Clear the field
+		} else {
+			// Try date-only format first (YYYY-MM-DD)
+			if t, err := time.ParseInLocation("2006-01-02", *a.DueAt, time.Local); err == nil {
+				u["due_at"] = t
+			} else if t, err := time.Parse(time.RFC3339, *a.DueAt); err == nil {
+				// Try RFC3339 format (2025-01-15T10:00:00Z)
+				u["due_at"] = t
+			} else {
+				return nil, fmt.Errorf("invalid due_at format %q: use YYYY-MM-DD or RFC3339", *a.DueAt)
+			}
+		}
+	}
+	if a.DeferUntil != nil {
+		if *a.DeferUntil == "" {
+			u["defer_until"] = nil // Clear the field
+		} else {
+			// Try date-only format first (YYYY-MM-DD)
+			if t, err := time.ParseInLocation("2006-01-02", *a.DeferUntil, time.Local); err == nil {
+				u["defer_until"] = t
+			} else if t, err := time.Parse(time.RFC3339, *a.DeferUntil); err == nil {
+				// Try RFC3339 format (2025-01-15T10:00:00Z)
+				u["defer_until"] = t
+			} else {
+				return nil, fmt.Errorf("invalid defer_until format %q: use YYYY-MM-DD or RFC3339", *a.DeferUntil)
+			}
+		}
+	}
+	return u, nil
 }
 
 func (s *Server) handleCreate(req *Request) Response {
@@ -238,7 +269,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
-	// Parse DeferUntil if provided (GH#820, GH#950)
+	// Parse DeferUntil if provided (GH#820, GH#950, GH#952)
 	var deferUntil *time.Time
 	if createArgs.DeferUntil != "" {
 		// Try date-only format first (YYYY-MM-DD)
@@ -285,7 +316,7 @@ func (s *Server) handleCreate(req *Request) Response {
 		Actor:     createArgs.EventActor,
 		Target:    createArgs.EventTarget,
 		Payload:   createArgs.EventPayload,
-		// Time-based scheduling (GH#820, GH#950)
+		// Time-based scheduling (GH#820, GH#950, GH#952)
 		DueAt:      dueAt,
 		DeferUntil: deferUntil,
 	}
@@ -555,7 +586,13 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
-	updates := updatesFromArgs(updateArgs)
+	updates, err := updatesFromArgs(updateArgs)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
 
 	// Apply regular field updates if any
 	if len(updates) > 0 {
