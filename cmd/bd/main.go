@@ -468,7 +468,10 @@ var rootCmd = &cobra.Command{
 					os.Exit(1)
 				}
 				// For import/setup commands, set default database path
-				dbPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
+				// Invariant: dbPath must always be absolute for filepath.Rel() compatibility
+				// in daemon sync-branch code path. Use CanonicalizePath for OS-agnostic
+				// handling (symlinks, case normalization on macOS).
+				dbPath = utils.CanonicalizePath(filepath.Join(".beads", beads.CanonicalDatabaseName))
 			}
 		}
 
