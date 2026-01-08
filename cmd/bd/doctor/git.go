@@ -21,6 +21,12 @@ const (
 	hooksUpgradeURL  = "https://github.com/steveyegge/beads/issues/615"
 )
 
+// bdShimMarker identifies bd shim hooks (GH#946)
+const bdShimMarker = "# bd-shim"
+
+// bdHooksRunPattern matches hooks that call bd hooks run
+var bdHooksRunPattern = regexp.MustCompile(`\bbd\s+hooks\s+run\b`)
+
 // CheckGitHooks verifies that recommended git hooks are installed.
 func CheckGitHooks() DoctorCheck {
 	// Check if we're in a git repository using worktree-aware detection
@@ -65,6 +71,18 @@ func CheckGitHooks() DoctorCheck {
 	// Check for external hook managers (lefthook, husky, etc.)
 	externalManagers := fix.DetectExternalHookManagers(repoRoot)
 	if len(externalManagers) > 0 {
+		// First, check if bd shims are installed (GH#946)
+		// If the actual hooks are bd shims, they're calling bd regardless of what
+		// the external manager config says (user may have leftover config files)
+		if hasBdShims, bdHooks := areBdShimsInstalled(hooksDir); hasBdShims {
+			return DoctorCheck{
+				Name:    "Git Hooks",
+				Status:  StatusOK,
+				Message: "bd shims installed (ignoring external manager config)",
+				Detail:  fmt.Sprintf("bd hooks run: %s", strings.Join(bdHooks, ", ")),
+			}
+		}
+
 		// External manager detected - check if it's configured to call bd
 		integration := fix.CheckExternalHookManagerIntegration(repoRoot)
 		if integration != nil {
@@ -138,6 +156,30 @@ func CheckGitHooks() DoctorCheck {
 		Detail:  fmt.Sprintf("Recommended: %s", strings.Join([]string{"pre-commit", "post-merge", "pre-push"}, ", ")),
 		Fix:     hookInstallMsg,
 	}
+}
+
+// areBdShimsInstalled checks if the installed hooks are bd shims or call bd hooks run.
+// This helps detect when bd hooks are installed directly but an external manager config exists.
+// Returns (true, installedHooks) if bd shims are detected, (false, nil) otherwise.
+// (GH#946)
+func areBdShimsInstalled(hooksDir string) (bool, []string) {
+	hooks := []string{"pre-commit", "post-merge", "pre-push"}
+	var bdHooks []string
+
+	for _, hookName := range hooks {
+		hookPath := filepath.Join(hooksDir, hookName)
+		content, err := os.ReadFile(hookPath)
+		if err != nil {
+			continue
+		}
+		contentStr := string(content)
+		// Check for bd-shim marker or bd hooks run call
+		if strings.Contains(contentStr, bdShimMarker) || bdHooksRunPattern.MatchString(contentStr) {
+			bdHooks = append(bdHooks, hookName)
+		}
+	}
+
+	return len(bdHooks) > 0, bdHooks
 }
 
 // CheckGitWorkingTree checks if the git working tree is clean.
