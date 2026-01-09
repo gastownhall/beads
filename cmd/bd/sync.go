@@ -71,6 +71,14 @@ Use --merge to merge the sync branch back to main branch.`,
 			daemonClient = nil
 		}
 
+		// Initialize local store after daemon disconnect.
+		// When daemon was connected, PersistentPreRun returns early without initializing
+		// the store global. Commands like --import-only need the store, so we must
+		// initialize it here after closing the daemon connection.
+		if err := ensureStoreActive(); err != nil {
+			FatalError("failed to initialize store: %v", err)
+		}
+
 		// Resolve noGitHistory based on fromMain (fixes #417)
 		noGitHistory = resolveNoGitHistoryForFromMain(fromMain, noGitHistory)
 
