@@ -342,7 +342,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
-	// Check 7b: JSONL integrity (malformed lines, missing IDs)
+	// Check 7b: Multi-repo custom types discovery (bd-9ji4z)
+	multiRepoTypesCheck := convertWithCategory(doctor.CheckMultiRepoTypes(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, multiRepoTypesCheck)
+	// Don't fail overall check for multi-repo types, just informational
+
+	// Check 7c: JSONL integrity (malformed lines, missing IDs)
 	jsonlIntegrityCheck := convertWithCategory(doctor.CheckJSONLIntegrity(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, jsonlIntegrityCheck)
 	if jsonlIntegrityCheck.Status == statusWarning || jsonlIntegrityCheck.Status == statusError {
