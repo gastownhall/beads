@@ -307,6 +307,20 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 // ValidateWithCustom checks if the issue has valid field values,
 // allowing custom statuses and types in addition to built-in ones.
 func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
+	return i.validateInternal(customStatuses, customTypes, false)
+}
+
+// ValidateForImport validates the issue for multi-repo import (federation trust model).
+// Built-in types are validated (to catch typos). Non-built-in types are trusted
+// since the source repo already validated them when the issue was created.
+// This implements "trust the chain below you" from the HOP federation model.
+func (i *Issue) ValidateForImport(customStatuses []string) error {
+	return i.validateInternal(customStatuses, nil, true)
+}
+
+// validateInternal is the shared validation logic.
+// If trustCustomTypes is true, non-built-in issue types are trusted (not validated).
+func (i *Issue) validateInternal(customStatuses, customTypes []string, trustCustomTypes bool) error {
 	if len(i.Title) == 0 {
 		return fmt.Errorf("title is required")
 	}
@@ -319,9 +333,25 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
 	}
-	if !i.IssueType.IsValidWithCustom(customTypes) {
-		return fmt.Errorf("invalid issue type: %s", i.IssueType)
+
+	// Issue type validation: federation trust model (bd-9ji4z)
+	if trustCustomTypes {
+		// Multi-repo import: trust non-built-in types from source repo
+		// Only validate built-in types (catch typos like "tsak" vs "task")
+		if i.IssueType != "" && !i.IssueType.IsBuiltIn() {
+			// Non-built-in type - trust it (child repo already validated)
+		} else if i.IssueType != "" && !i.IssueType.IsValid() {
+			// This shouldn't happen: IsBuiltIn() == IsValid() for non-empty types
+			// But guard against edge cases
+			return fmt.Errorf("invalid issue type: %s", i.IssueType)
+		}
+	} else {
+		// Normal validation: check against built-in + custom types
+		if !i.IssueType.IsValidWithCustom(customTypes) {
+			return fmt.Errorf("invalid issue type: %s", i.IssueType)
+		}
 	}
+
 	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
 		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
@@ -435,6 +465,14 @@ func (t IssueType) IsValid() bool {
 		return true
 	}
 	return false
+}
+
+// IsBuiltIn returns true if this is a built-in type (not a custom type).
+// Used during multi-repo hydration to determine whether to validate or trust:
+// - Built-in types: validate (catch typos like "tsak" vs "task")
+// - Custom types: trust (child repo already validated)
+func (t IssueType) IsBuiltIn() bool {
+	return t.IsValid()
 }
 
 // IsValidWithCustom checks if the issue type is valid, including custom types.

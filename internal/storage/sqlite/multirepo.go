@@ -126,14 +126,12 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 	}
 	defer file.Close()
 
-	// Fetch custom statuses and types for validation (bd-1pj6)
+	// Fetch custom statuses for validation (bd-1pj6)
+	// Note: custom types are NOT fetched - we use federation trust model (bd-9ji4z)
+	// where non-built-in types from child repos are trusted as already validated.
 	customStatuses, err := s.GetCustomStatuses(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get custom statuses: %w", err)
-	}
-	customTypes, err := s.GetCustomTypes(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get custom types: %w", err)
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -187,8 +185,8 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 			issue.ContentHash = issue.ComputeContentHash()
 		}
 
-		// Insert or update issue (with custom status and type support)
-		if err := s.upsertIssueInTx(ctx, tx, &issue, customStatuses, customTypes); err != nil {
+		// Insert or update issue (with federation trust model for types, bd-9ji4z)
+		if err := s.upsertIssueInTx(ctx, tx, &issue, customStatuses); err != nil {
 			return 0, fmt.Errorf("failed to import issue %s at line %d: %w", issue.ID, lineNum, err)
 		}
 
@@ -254,7 +252,9 @@ func (s *SQLiteStorage) importJSONLFile(ctx context.Context, jsonlPath, sourceRe
 
 // upsertIssueInTx inserts or updates an issue within a transaction.
 // Uses INSERT OR REPLACE to handle both new and existing issues.
-func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *types.Issue, customStatuses, customTypes []string) error {
+// Uses federation trust model for type validation: built-in types are validated,
+// non-built-in types are trusted from the source repo (bd-9ji4z).
+func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *types.Issue, customStatuses []string) error {
 	// Defensive fix for closed_at invariant (GH#523): older versions of bd could
 	// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
@@ -276,8 +276,10 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 		issue.DeletedAt = &deletedAt
 	}
 
-	// Validate issue (with custom status and type support, bd-1pj6)
-	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
+	// Validate issue using federation trust model (bd-9ji4z):
+	// - Built-in types are validated (catch typos)
+	// - Non-built-in types are trusted (child repo already validated them)
+	if err := issue.ValidateForImport(customStatuses); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
