@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,6 +20,27 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/tetratelabs/wazero"
 )
+
+// wslWindowsPathPattern matches WSL paths to Windows filesystems like /mnt/c/, /mnt/d/, etc.
+var wslWindowsPathPattern = regexp.MustCompile(`^/mnt/[a-zA-Z]/`)
+
+// isWSL2WindowsPath returns true if running under WSL2 and the path is on a Windows filesystem.
+// SQLite WAL mode doesn't work reliably across the WSL2/Windows boundary (GH#920).
+func isWSL2WindowsPath(path string) bool {
+	// Check if path looks like a Windows filesystem mounted in WSL (/mnt/c/, /mnt/d/, etc.)
+	if !wslWindowsPathPattern.MatchString(path) {
+		return false
+	}
+
+	// Check if we're running under WSL by examining /proc/version
+	// WSL2 contains "microsoft" or "WSL" in the version string
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false // Not Linux or can't read - not WSL
+	}
+	version := strings.ToLower(string(data))
+	return strings.Contains(version, "microsoft") || strings.Contains(version, "wsl")
+}
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
@@ -139,9 +161,15 @@ func NewWithTimeout(ctx context.Context, path string, busyTimeout time.Duration)
 	}
 
 	// For file-based databases, enable WAL mode once after opening the connection.
+	// Exception: On WSL2 with Windows filesystem (/mnt/c/), WAL doesn't work reliably
+	// due to shared-memory limitations across the 9P filesystem boundary (GH#920).
 	if !isInMemory {
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+		journalMode := "WAL"
+		if isWSL2WindowsPath(path) {
+			journalMode = "DELETE" // Fallback for WSL2 Windows filesystem
+		}
+		if _, err := db.Exec("PRAGMA journal_mode=" + journalMode); err != nil {
+			return nil, fmt.Errorf("failed to enable %s mode: %w", journalMode, err)
 		}
 	}
 
@@ -476,13 +504,17 @@ func (s *SQLiteStorage) reconnect() error {
 	// Restore connection pool settings
 	s.configureConnectionPool(db)
 
-	// Re-enable WAL mode for file-based databases
+	// Re-enable WAL mode for file-based databases (or DELETE for WSL2 Windows paths)
 	isInMemory := s.dbPath == ":memory:" ||
 		(strings.HasPrefix(s.connStr, "file:") && strings.Contains(s.connStr, "mode=memory"))
 	if !isInMemory {
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		journalMode := "WAL"
+		if isWSL2WindowsPath(s.dbPath) {
+			journalMode = "DELETE" // Fallback for WSL2 Windows filesystem (GH#920)
+		}
+		if _, err := db.Exec("PRAGMA journal_mode=" + journalMode); err != nil {
 			_ = db.Close()
-			return fmt.Errorf("failed to enable WAL mode on reconnect: %w", err)
+			return fmt.Errorf("failed to enable %s mode on reconnect: %w", journalMode, err)
 		}
 	}
 
