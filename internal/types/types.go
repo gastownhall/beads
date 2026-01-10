@@ -292,14 +292,13 @@ func (i *Issue) IsExpired(ttl time.Duration) bool {
 	return time.Now().After(expirationTime)
 }
 
-// Validate checks if the issue has valid field values (built-in statuses and types only)
+// Validate checks if the issue has valid field values (built-in statuses only)
 func (i *Issue) Validate() error {
-	return i.ValidateWithCustom(nil, nil)
+	return i.ValidateWithCustomStatuses(nil)
 }
 
 // ValidateWithCustomStatuses checks if the issue has valid field values,
 // allowing custom statuses in addition to built-in ones.
-// Deprecated: Use ValidateWithCustom instead.
 func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 	return i.ValidateWithCustom(customStatuses, nil)
 }
@@ -307,20 +306,6 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 // ValidateWithCustom checks if the issue has valid field values,
 // allowing custom statuses and types in addition to built-in ones.
 func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
-	return i.validateInternal(customStatuses, customTypes, false)
-}
-
-// ValidateForImport validates the issue for multi-repo import (federation trust model).
-// Built-in types are validated (to catch typos). Non-built-in types are trusted
-// since the source repo already validated them when the issue was created.
-// This implements "trust the chain below you" from the HOP federation model.
-func (i *Issue) ValidateForImport(customStatuses []string) error {
-	return i.validateInternal(customStatuses, nil, true)
-}
-
-// validateInternal is the shared validation logic.
-// If trustCustomTypes is true, non-built-in issue types are trusted (not validated).
-func (i *Issue) validateInternal(customStatuses, customTypes []string, trustCustomTypes bool) error {
 	if len(i.Title) == 0 {
 		return fmt.Errorf("title is required")
 	}
@@ -333,25 +318,9 @@ func (i *Issue) validateInternal(customStatuses, customTypes []string, trustCust
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
 	}
-
-	// Issue type validation: federation trust model (bd-9ji4z)
-	if trustCustomTypes {
-		// Multi-repo import: trust non-built-in types from source repo
-		// Only validate built-in types (catch typos like "tsak" vs "task")
-		if i.IssueType != "" && !i.IssueType.IsBuiltIn() {
-			// Non-built-in type - trust it (child repo already validated)
-		} else if i.IssueType != "" && !i.IssueType.IsValid() {
-			// This shouldn't happen: IsBuiltIn() == IsValid() for non-empty types
-			// But guard against edge cases
-			return fmt.Errorf("invalid issue type: %s", i.IssueType)
-		}
-	} else {
-		// Normal validation: check against built-in + custom types
-		if !i.IssueType.IsValidWithCustom(customTypes) {
-			return fmt.Errorf("invalid issue type: %s", i.IssueType)
-		}
+	if !i.IssueType.IsValidWithCustom(customTypes) {
+		return fmt.Errorf("invalid issue type: %s", i.IssueType)
 	}
-
 	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
 		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
@@ -364,6 +333,55 @@ func (i *Issue) validateInternal(customStatuses, customTypes []string, trustCust
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
 	// Enforce tombstone invariants: deleted_at must be set for tombstones, and only for tombstones
+	if i.Status == StatusTombstone && i.DeletedAt == nil {
+		return fmt.Errorf("tombstone issues must have deleted_at timestamp")
+	}
+	if i.Status != StatusTombstone && i.DeletedAt != nil {
+		return fmt.Errorf("non-tombstone issues cannot have deleted_at timestamp")
+	}
+	// Validate agent state if set
+	if !i.AgentState.IsValid() {
+		return fmt.Errorf("invalid agent state: %s", i.AgentState)
+	}
+	return nil
+}
+
+// ValidateForImport validates the issue for multi-repo import (federation trust model).
+// Built-in types are validated (to catch typos). Non-built-in types are trusted
+// since the source repo already validated them when the issue was created.
+// This implements "trust the chain below you" from the HOP federation model.
+func (i *Issue) ValidateForImport(customStatuses []string) error {
+	if len(i.Title) == 0 {
+		return fmt.Errorf("title is required")
+	}
+	if len(i.Title) > 500 {
+		return fmt.Errorf("title must be 500 characters or less (got %d)", len(i.Title))
+	}
+	if i.Priority < 0 || i.Priority > 4 {
+		return fmt.Errorf("priority must be between 0 and 4 (got %d)", i.Priority)
+	}
+	if !i.Status.IsValidWithCustom(customStatuses) {
+		return fmt.Errorf("invalid status: %s", i.Status)
+	}
+	// Issue type validation: federation trust model
+	// Only validate built-in types (catch typos like "tsak" vs "task")
+	// Trust non-built-in types from source repo
+	if i.IssueType != "" && i.IssueType.IsValid() {
+		// Built-in type - it's valid
+	} else if i.IssueType != "" && !i.IssueType.IsValid() {
+		// Non-built-in type - trust it (child repo already validated)
+	}
+	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
+		return fmt.Errorf("estimated_minutes cannot be negative")
+	}
+	// Enforce closed_at invariant
+	if i.Status == StatusClosed && i.ClosedAt == nil {
+		return fmt.Errorf("closed issues must have closed_at timestamp")
+	}
+	if i.Status != StatusClosed && i.Status != StatusTombstone && i.ClosedAt != nil {
+		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
+	}
+	// Enforce tombstone invariants
 	if i.Status == StatusTombstone && i.DeletedAt == nil {
 		return fmt.Errorf("tombstone issues must have deleted_at timestamp")
 	}
@@ -454,27 +472,18 @@ const (
 	TypeGate         IssueType = "gate"          // Async coordination gate
 	TypeAgent        IssueType = "agent"         // Agent identity bead
 	TypeRole         IssueType = "role"          // Agent role definition
-	TypeRig          IssueType = "rig"           // Rig identity bead (project container)
 	TypeConvoy       IssueType = "convoy"        // Cross-project tracking with reactive completion
 	TypeEvent        IssueType = "event"         // Operational state change record
 	TypeSlot         IssueType = "slot"          // Exclusive access slot (merge-slot gate)
 )
 
-// IsValid checks if the issue type value is valid (built-in types only)
+// IsValid checks if the issue type value is valid
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule, TypeGate, TypeAgent, TypeRole, TypeRig, TypeConvoy, TypeEvent, TypeSlot:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeMessage, TypeMergeRequest, TypeMolecule, TypeGate, TypeAgent, TypeRole, TypeConvoy, TypeEvent, TypeSlot:
 		return true
 	}
 	return false
-}
-
-// IsBuiltIn returns true if this is a built-in type (not a custom type).
-// Used during multi-repo hydration to determine whether to validate or trust:
-// - Built-in types: validate (catch typos like "tsak" vs "task")
-// - Custom types: trust (child repo already validated)
-func (t IssueType) IsBuiltIn() bool {
-	return t.IsValid()
 }
 
 // IsValidWithCustom checks if the issue type is valid, including custom types.
@@ -518,7 +527,7 @@ func (t IssueType) RequiredSections() []RequiredSection {
 			{Heading: "## Success Criteria", Hint: "Define high-level success criteria"},
 		}
 	default:
-		// Chore, message, molecule, gate, event, merge-request
+		// Chore, message, molecule, gate, agent, role, convoy, event, merge-request
 		// have no required sections
 		return nil
 	}
@@ -819,10 +828,10 @@ type IssueFilter struct {
 	Labels      []string  // AND semantics: issue must have ALL these labels
 	LabelsAny   []string  // OR semantics: issue must have AT LEAST ONE of these labels
 	TitleSearch string
-	IDs         []string // Filter by specific issue IDs
-	IDPrefix    string   // Filter by ID prefix (for shell completion)
+	IDs         []string  // Filter by specific issue IDs
+	IDPrefix    string    // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
 	Limit       int
-	
+
 	// Pattern matching
 	TitleContains       string
 	DescriptionContains string

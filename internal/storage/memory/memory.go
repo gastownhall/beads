@@ -621,8 +621,10 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 		}
 
 		// ID prefix filtering (for shell completion)
-		if filter.IDPrefix != "" && !strings.HasPrefix(issue.ID, filter.IDPrefix) {
-			continue
+		if filter.IDPrefix != "" {
+			if !strings.HasPrefix(issue.ID, filter.IDPrefix) {
+				continue
+			}
 		}
 
 		// Parent filtering (bd-yqhh): filter children by parent issue
@@ -1661,8 +1663,8 @@ func (m *MemoryStorage) GetCustomStatuses(ctx context.Context) ([]string, error)
 	return parseCustomStatuses(value), nil
 }
 
-// parseCommaSeparated splits a comma-separated string into a slice of trimmed values.
-func parseCommaSeparated(value string) []string {
+// parseCustomStatuses splits a comma-separated string into a slice of trimmed status names.
+func parseCustomStatuses(value string) []string {
 	if value == "" {
 		return nil
 	}
@@ -1677,11 +1679,6 @@ func parseCommaSeparated(value string) []string {
 	return result
 }
 
-// Alias for backwards compatibility in tests
-func parseCustomStatuses(value string) []string {
-	return parseCommaSeparated(value)
-}
-
 // GetCustomTypes retrieves the list of custom issue types from config.
 func (m *MemoryStorage) GetCustomTypes(ctx context.Context) ([]string, error) {
 	value, err := m.GetConfig(ctx, "types.custom")
@@ -1691,7 +1688,7 @@ func (m *MemoryStorage) GetCustomTypes(ctx context.Context) ([]string, error) {
 	if value == "" {
 		return nil, nil
 	}
-	return parseCommaSeparated(value), nil
+	return parseCustomStatuses(value), nil
 }
 
 // Metadata

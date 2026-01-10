@@ -976,7 +976,7 @@ func (t *sqliteTxStorage) GetCustomStatuses(ctx context.Context) ([]string, erro
 	if value == "" {
 		return nil, nil
 	}
-	return parseCommaSeparated(value), nil
+	return parseCommaSeparatedList(value), nil
 }
 
 // GetCustomTypes retrieves the list of custom issue types from config within the transaction.
@@ -988,7 +988,7 @@ func (t *sqliteTxStorage) GetCustomTypes(ctx context.Context) ([]string, error) 
 	if value == "" {
 		return nil, nil
 	}
-	return parseCommaSeparated(value), nil
+	return parseCommaSeparatedList(value), nil
 }
 
 // SetMetadata sets a metadata value within the transaction.

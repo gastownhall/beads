@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/session-start.sh"
+            "command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\" && gt prime --hook && gt nudge deacon session-started"
           }
         ]
       }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gt prime"
+            "command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\" && gt prime"
           }
         ]
       }
@@ -31,7 +31,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gt mail check --inject"
+            "command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\" && gt mail check --inject"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\" && gt costs record"
           }
         ]
       }
