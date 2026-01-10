@@ -340,6 +340,11 @@ func TestDaemonAutostart_RestartDaemonForVersionMismatch_Stubbed(t *testing.T) {
 		t.Fatalf("getPIDFilePath: %v", err)
 	}
 	sock := getSocketPath()
+	// Create socket directory if needed (GH#1001 - socket may be in /tmp/beads-{hash}/)
+	sockDir := filepath.Dir(sock)
+	if err := os.MkdirAll(sockDir, 0o750); err != nil {
+		t.Fatalf("MkdirAll sockDir: %v", err)
+	}
 	if err := os.WriteFile(pidFile, []byte("999999\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile pid: %v", err)
 	}
