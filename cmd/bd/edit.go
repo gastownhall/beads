@@ -130,8 +130,10 @@ Examples:
 		}
 		_ = tmpFile.Close()
 
-		// Open the editor
-		editorCmd := exec.Command(editor, tmpPath) //nolint:gosec // G204: editor from trusted $EDITOR/$VISUAL env or known defaults
+		// Open the editor - parse command and args (handles "vim -w" or "zeditor --wait")
+		editorParts := strings.Fields(editor)
+		editorArgs := append(editorParts[1:], tmpPath)
+		editorCmd := exec.Command(editorParts[0], editorArgs...) //nolint:gosec // G204: editor from trusted $EDITOR/$VISUAL env or known defaults
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = os.Stdout
 		editorCmd.Stderr = os.Stderr
