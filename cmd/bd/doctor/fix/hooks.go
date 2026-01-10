@@ -222,45 +222,58 @@ func CheckLefthookBdIntegration(path string) *HookIntegrationStatus {
 }
 
 // hasBdInCommands checks if any command's "run" field contains bd hooks run.
-// Walks the lefthook structure: hookSection.commands.*.run
+// Walks the lefthook structure for both syntaxes:
+// - commands (map-based, older): hookSection.commands.*.run
+// - jobs (array-based, v1.10.0+): hookSection.jobs[*].run
 func hasBdInCommands(hookSection interface{}) bool {
 	sectionMap, ok := hookSection.(map[string]interface{})
 	if !ok {
 		return false
 	}
 
-	commands, ok := sectionMap["commands"]
-	if !ok {
-		return false
+	// Check "commands" syntax (map-based, older)
+	if commands, ok := sectionMap["commands"]; ok {
+		if commandsMap, ok := commands.(map[string]interface{}); ok {
+			for _, cmdConfig := range commandsMap {
+				if hasBdInRunField(cmdConfig) {
+					return true
+				}
+			}
+		}
 	}
 
-	commandsMap, ok := commands.(map[string]interface{})
-	if !ok {
-		return false
-	}
-
-	for _, cmdConfig := range commandsMap {
-		cmdMap, ok := cmdConfig.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		runVal, ok := cmdMap["run"]
-		if !ok {
-			continue
-		}
-
-		runStr, ok := runVal.(string)
-		if !ok {
-			continue
-		}
-
-		if bdHookPattern.MatchString(runStr) {
-			return true
+	// Check "jobs" syntax (array-based, v1.10.0+)
+	if jobs, ok := sectionMap["jobs"]; ok {
+		if jobsList, ok := jobs.([]interface{}); ok {
+			for _, job := range jobsList {
+				if hasBdInRunField(job) {
+					return true
+				}
+			}
 		}
 	}
 
 	return false
+}
+
+// hasBdInRunField checks if a command/job config has bd hooks run in its "run" field.
+func hasBdInRunField(config interface{}) bool {
+	configMap, ok := config.(map[string]interface{})
+	if !ok {
+		return false
+	}
+
+	runVal, ok := configMap["run"]
+	if !ok {
+		return false
+	}
+
+	runStr, ok := runVal.(string)
+	if !ok {
+		return false
+	}
+
+	return bdHookPattern.MatchString(runStr)
 }
 
 // precommitConfigFiles lists pre-commit config files.
