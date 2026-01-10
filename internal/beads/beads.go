@@ -144,6 +144,7 @@ func findLocalBeadsDir() string {
 	}
 
 	// Check for worktree - use main repo's .beads
+	// Note: GetMainRepoRoot() is safe to call outside a git repo - it returns an error
 	mainRepoRoot, err := git.GetMainRepoRoot()
 	if err == nil && mainRepoRoot != "" {
 		beadsDir := filepath.Join(mainRepoRoot, ".beads")
@@ -158,11 +159,21 @@ func findLocalBeadsDir() string {
 		return ""
 	}
 
-	for dir := cwd; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+	for dir := cwd; dir != "/" && dir != "."; {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
+
+		// Move up one directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root (works on both Unix and Windows)
+			// On Unix: filepath.Dir("/") returns "/"
+			// On Windows: filepath.Dir("C:\\") returns "C:\\"
+			break
+		}
+		dir = parent
 	}
 
 	return ""
