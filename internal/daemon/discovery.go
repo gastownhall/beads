@@ -411,9 +411,9 @@ func stopDaemonWithTimeout(daemon DaemonInfo) error {
 		}
 	}
 
-	// Try SIGTERM with 3 second timeout
+	// Try graceful kill with 3 second timeout
 	if err := killProcess(daemon.PID); err != nil {
-		return fmt.Errorf("SIGTERM failed: %w", err)
+		return fmt.Errorf("kill process failed: %w", err)
 	}
 
 	// Wait up to 3 seconds for process to die
@@ -424,9 +424,9 @@ func stopDaemonWithTimeout(daemon DaemonInfo) error {
 		}
 	}
 
-	// SIGTERM timeout, try SIGKILL with 1 second timeout
+	// Graceful kill timeout, try force kill with 1 second timeout
 	if err := forceKillProcess(daemon.PID); err != nil {
-		return fmt.Errorf("SIGKILL failed: %w", err)
+		return fmt.Errorf("force kill failed: %w", err)
 	}
 
 	// Wait up to 1 second for process to die
@@ -437,5 +437,5 @@ func stopDaemonWithTimeout(daemon DaemonInfo) error {
 		}
 	}
 
-	return fmt.Errorf("process %d did not die after SIGKILL", daemon.PID)
+	return fmt.Errorf("process %d did not die after force kill", daemon.PID)
 }
