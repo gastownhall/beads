@@ -1855,3 +1855,53 @@ func TestParentIDEmptyParent(t *testing.T) {
 		t.Fatalf("Expected 0 ready issues for empty parent, got %d", len(ready))
 	}
 }
+
+// TestIsBlocked tests the IsBlocked method (GH#962)
+func TestIsBlocked(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	// Create issues:
+	// issue1: open, no dependencies → NOT BLOCKED
+	// issue2: open, depends on issue1 (open) → BLOCKED by issue1
+	// issue3: open, depends on issue4 (closed) → NOT BLOCKED (blocker is closed)
+	issue1 := env.CreateIssue("Open No Deps")
+	issue2 := env.CreateIssue("Blocked by open")
+	issue3 := env.CreateIssue("Blocked by closed")
+	issue4 := env.CreateIssue("Will be closed")
+
+	env.AddDep(issue2, issue1) // issue2 depends on issue1 (open)
+	env.AddDep(issue3, issue4) // issue3 depends on issue4
+
+	env.Close(issue4, "Done") // Close issue4
+
+	// Test issue1: not blocked
+	blocked, blockers, err := env.Store.IsBlocked(ctx, issue1.ID)
+	if err != nil {
+		t.Fatalf("IsBlocked failed: %v", err)
+	}
+	if blocked {
+		t.Errorf("Expected issue1 to NOT be blocked, got blocked=true with blockers=%v", blockers)
+	}
+
+	// Test issue2: blocked by issue1
+	blocked, blockers, err = env.Store.IsBlocked(ctx, issue2.ID)
+	if err != nil {
+		t.Fatalf("IsBlocked failed: %v", err)
+	}
+	if !blocked {
+		t.Error("Expected issue2 to be blocked")
+	}
+	if len(blockers) != 1 || blockers[0] != issue1.ID {
+		t.Errorf("Expected blockers=[%s], got %v", issue1.ID, blockers)
+	}
+
+	// Test issue3: not blocked (issue4 is closed)
+	blocked, blockers, err = env.Store.IsBlocked(ctx, issue3.ID)
+	if err != nil {
+		t.Fatalf("IsBlocked failed: %v", err)
+	}
+	if blocked {
+		t.Errorf("Expected issue3 to NOT be blocked (blocker is closed), got blocked=true with blockers=%v", blockers)
+	}
+}

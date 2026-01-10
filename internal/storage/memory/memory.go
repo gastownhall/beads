@@ -1281,6 +1281,19 @@ func (m *MemoryStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 	return results, nil
 }
 
+// IsBlocked checks if an issue is blocked by open dependencies (GH#962).
+// Returns true if the issue has open blockers, along with the list of blocker IDs.
+func (m *MemoryStorage) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	blockers := m.getOpenBlockers(issueID)
+	if len(blockers) == 0 {
+		return false, nil, nil
+	}
+	return true, blockers, nil
+}
+
 // getAllDescendants returns all descendant IDs of a parent issue recursively
 func (m *MemoryStorage) getAllDescendants(parentID string) map[string]bool {
 	descendants := make(map[string]bool)

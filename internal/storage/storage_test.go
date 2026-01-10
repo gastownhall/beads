@@ -98,6 +98,9 @@ func (m *mockStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter)
 func (m *mockStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	return nil, nil
 }
+func (m *mockStorage) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
+	return false, nil, nil
+}
 func (m *mockStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
 	return nil, nil
 }

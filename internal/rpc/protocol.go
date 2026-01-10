@@ -174,6 +174,7 @@ type CloseArgs struct {
 	Reason      string `json:"reason,omitempty"`
 	Session     string `json:"session,omitempty"`      // Claude Code session ID that closed this issue
 	SuggestNext bool   `json:"suggest_next,omitempty"` // Return newly unblocked issues (GH#679)
+	Force       bool   `json:"force,omitempty"`        // Force close even with open blockers (GH#962)
 }
 
 // CloseResult is returned when SuggestNext is true (GH#679)

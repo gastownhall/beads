@@ -680,6 +680,52 @@ func filterBlockedByExternalDeps(ctx context.Context, blocked []*types.BlockedIs
 	return result
 }
 
+// IsBlocked checks if an issue is blocked by open dependencies (GH#962).
+// Returns true if the issue is in the blocked_issues_cache, along with a list
+// of issue IDs that are blocking it.
+// This is used to prevent closing issues that still have open blockers.
+func (s *SQLiteStorage) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
+	// First check if the issue is in the blocked cache
+	var inCache bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM blocked_issues_cache WHERE issue_id = ?)
+	`, issueID).Scan(&inCache)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to check blocked status: %w", err)
+	}
+
+	if !inCache {
+		return false, nil, nil
+	}
+
+	// Get the blocking issue IDs
+	// We query dependencies for 'blocks' type where the blocker is still open
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.depends_on_id
+		FROM dependencies d
+		JOIN issues blocker ON d.depends_on_id = blocker.id
+		WHERE d.issue_id = ?
+		  AND d.type = 'blocks'
+		  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
+		ORDER BY blocker.priority ASC
+	`, issueID)
+	if err != nil {
+		return true, nil, fmt.Errorf("failed to get blockers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var blockers []string
+	for rows.Next() {
+		var blockerID string
+		if err := rows.Scan(&blockerID); err != nil {
+			return true, nil, fmt.Errorf("failed to scan blocker ID: %w", err)
+		}
+		blockers = append(blockers, blockerID)
+	}
+
+	return true, blockers, rows.Err()
+}
+
 // GetNewlyUnblockedByClose returns issues that became unblocked when the given issue was closed.
 // This is used by the --suggest-next flag on bd close to show what work is now available.
 // An issue is "newly unblocked" if:

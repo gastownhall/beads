@@ -831,6 +831,23 @@ func (s *Server) handleClose(req *Request) Response {
 		}
 	}
 
+	// Check if issue has open blockers (GH#962)
+	if !closeArgs.Force {
+		blocked, blockers, err := store.IsBlocked(ctx, closeArgs.ID)
+		if err != nil {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to check blockers: %v", err),
+			}
+		}
+		if blocked && len(blockers) > 0 {
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("cannot close %s: blocked by open issues %v (use --force to override)", closeArgs.ID, blockers),
+			}
+		}
+	}
+
 	// Capture old status for rich mutation event
 	oldStatus := ""
 	if issue != nil {
