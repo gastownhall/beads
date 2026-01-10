@@ -470,7 +470,7 @@ func FindBeadsDir() string {
 		gitRoot = mainRepoRoot
 	}
 
-	for dir := cwd; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+	for dir := cwd; dir != "/" && dir != "."; {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -486,6 +486,16 @@ func FindBeadsDir() string {
 		if gitRoot != "" && dir == gitRoot {
 			break
 		}
+
+		// Move up one directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root (works on both Unix and Windows)
+			// On Unix: filepath.Dir("/") returns "/"
+			// On Windows: filepath.Dir("C:\\") returns "C:\\"
+			break
+		}
+		dir = parent
 	}
 
 	return ""
