@@ -55,8 +55,8 @@ func TestShow_ExternalRef(t *testing.T) {
 	}
 
 	out := string(showOut)
-	if !strings.Contains(out, "External Ref:") {
-		t.Errorf("expected 'External Ref:' in output, got: %s", out)
+	if !strings.Contains(out, "External:") {
+		t.Errorf("expected 'External:' in output, got: %s", out)
 	}
 	if !strings.Contains(out, "https://example.com/spec.md") {
 		t.Errorf("expected external ref URL in output, got: %s", out)
@@ -108,7 +108,7 @@ func TestShow_NoExternalRef(t *testing.T) {
 	}
 
 	out := string(showOut)
-	if strings.Contains(out, "External Ref:") {
-		t.Errorf("expected no 'External Ref:' line for issue without external ref, got: %s", out)
+	if strings.Contains(out, "External:") {
+		t.Errorf("expected no 'External:' line for issue without external ref, got: %s", out)
 	}
 }

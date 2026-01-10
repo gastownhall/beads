@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -42,76 +43,131 @@ func pinIndicator(issue *types.Issue) string {
 	return ""
 }
 
-// Priority symbols for pretty output (GH#654)
-var prioritySymbols = map[int]string{
-	0: "🔴", // P0 - Critical
-	1: "🟠", // P1 - High
-	2: "🟡", // P2 - Medium (default)
-	3: "🔵", // P3 - Low
-	4: "⚪", // P4 - Lowest
+// Priority tags for pretty output - simple text, semantic colors applied via ui package
+// Design principle: only P0/P1 get color for attention, P2-P4 are neutral
+func renderPriorityTag(priority int) string {
+	return ui.RenderPriority(priority)
 }
 
-// Status symbols for pretty output (GH#654)
-var statusSymbols = map[types.Status]string{
-	"open":        "○",
-	"in_progress": "◐",
-	"blocked":     "⊗",
-	"deferred":    "◇",
-	"closed":      "●",
+// renderStatusIcon returns the status icon with semantic coloring applied
+// Delegates to the shared ui.RenderStatusIcon for consistency across commands
+func renderStatusIcon(status types.Status) string {
+	return ui.RenderStatusIcon(string(status))
 }
 
 // formatPrettyIssue formats a single issue for pretty output
+// Uses semantic colors: status icon colored, priority P0/P1 colored, rest neutral
 func formatPrettyIssue(issue *types.Issue) string {
-	prioritySym := prioritySymbols[issue.Priority]
-	if prioritySym == "" {
-		prioritySym = "⚪"
-	}
-	statusSym := statusSymbols[issue.Status]
-	if statusSym == "" {
-		statusSym = "○"
-	}
+	// Use shared helpers from ui package
+	statusIcon := ui.RenderStatusIcon(string(issue.Status))
+	priorityTag := renderPriorityTag(issue.Priority)
 
+	// Type badge - only show for notable types
 	typeBadge := ""
 	switch issue.IssueType {
 	case "epic":
-		typeBadge = "[EPIC] "
-	case "feature":
-		typeBadge = "[FEAT] "
+		typeBadge = ui.TypeEpicStyle.Render("[epic]") + " "
 	case "bug":
-		typeBadge = "[BUG] "
+		typeBadge = ui.TypeBugStyle.Render("[bug]") + " "
 	}
 
-	return fmt.Sprintf("%s %s %s - %s%s", statusSym, prioritySym, issue.ID, typeBadge, issue.Title)
+	// Format: STATUS_ICON ID PRIORITY [Type] Title
+	// Priority uses ● icon with color, no brackets needed
+	// Closed issues: entire line is muted
+	if issue.Status == types.StatusClosed {
+		return fmt.Sprintf("%s %s %s %s%s",
+			statusIcon,
+			ui.RenderMuted(issue.ID),
+			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(string(issue.IssueType)),
+			ui.RenderMuted(" "+issue.Title))
+	}
+
+	return fmt.Sprintf("%s %s %s %s%s", statusIcon, issue.ID, priorityTag, typeBadge, issue.Title)
 }
 
 // buildIssueTree builds parent-child tree structure from issues
+// Uses actual parent-child dependencies from the database when store is provided
 func buildIssueTree(issues []*types.Issue) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
+	return buildIssueTreeWithDeps(issues, nil)
+}
+
+// buildIssueTreeWithDeps builds parent-child tree using dependency records
+// If allDeps is nil, falls back to dotted ID hierarchy (e.g., "parent.1")
+// Treats any dependency on an epic as a parent-child relationship
+func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.Dependency) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
 	issueMap := make(map[string]*types.Issue)
 	childrenMap = make(map[string][]*types.Issue)
+	isChild := make(map[string]bool)
 
+	// Build issue map and identify epics
+	epicIDs := make(map[string]bool)
 	for _, issue := range issues {
 		issueMap[issue.ID] = issue
+		if issue.IssueType == "epic" {
+			epicIDs[issue.ID] = true
+		}
 	}
 
+	// If we have dependency records, use them to find parent-child relationships
+	if allDeps != nil {
+		for issueID, deps := range allDeps {
+			for _, dep := range deps {
+				parentID := dep.DependsOnID
+				// Only include if both parent and child are in the issue set
+				child, childOk := issueMap[issueID]
+				_, parentOk := issueMap[parentID]
+				if !childOk || !parentOk {
+					continue
+				}
+
+				// Treat as parent-child if:
+				// 1. Explicit parent-child dependency type, OR
+				// 2. Any dependency where the target is an epic
+				if dep.Type == types.DepParentChild || epicIDs[parentID] {
+					childrenMap[parentID] = append(childrenMap[parentID], child)
+					isChild[issueID] = true
+				}
+			}
+		}
+	}
+
+	// Fallback: check for hierarchical subtask IDs (e.g., "parent.1")
 	for _, issue := range issues {
-		// Check if this is a hierarchical subtask (e.g., "parent.1")
+		if isChild[issue.ID] {
+			continue // Already a child via dependency
+		}
 		if strings.Contains(issue.ID, ".") {
 			parts := strings.Split(issue.ID, ".")
 			parentID := strings.Join(parts[:len(parts)-1], ".")
 			if _, exists := issueMap[parentID]; exists {
 				childrenMap[parentID] = append(childrenMap[parentID], issue)
+				isChild[issue.ID] = true
 				continue
 			}
 		}
-		roots = append(roots, issue)
+	}
+
+	// Roots are issues that aren't children of any other issue
+	for _, issue := range issues {
+		if !isChild[issue.ID] {
+			roots = append(roots, issue)
+		}
 	}
 
 	return roots, childrenMap
 }
 
 // printPrettyTree recursively prints the issue tree
+// Children are sorted by priority (P0 first) for intuitive reading
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string) {
 	children := childrenMap[parentID]
+
+	// Sort children by priority (ascending: P0 before P1 before P2...)
+	slices.SortFunc(children, func(a, b *types.Issue) int {
+		return cmp.Compare(a.Priority, b.Priority)
+	})
+
 	for i, child := range children {
 		isLast := i == len(children)-1
 		connector := "├── "
@@ -129,7 +185,13 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 }
 
 // displayPrettyList displays issues in pretty tree format (GH#654)
+// Uses buildIssueTree which only supports dotted ID hierarchy
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
+	displayPrettyListWithDeps(issues, showHeader, nil)
+}
+
+// displayPrettyListWithDeps displays issues in tree format using dependency data
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -144,14 +206,11 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 		return
 	}
 
-	roots, childrenMap := buildIssueTree(issues)
+	roots, childrenMap := buildIssueTreeWithDeps(issues, allDeps)
 
-	for i, issue := range roots {
+	for _, issue := range roots {
 		fmt.Println(formatPrettyIssue(issue))
 		printPrettyTree(childrenMap, issue.ID, "")
-		if i < len(roots)-1 {
-			fmt.Println()
-		}
 	}
 
 	// Summary
@@ -169,7 +228,7 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 	}
 	fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
 	fmt.Println()
-	fmt.Println("Legend: ○ open | ◐ in progress | ⊗ blocked | 🔴 P0 | 🟠 P1 | 🟡 P2 | 🔵 P3 | ⚪ P4")
+	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 }
 
 // watchIssues starts watching for changes and re-displays (GH#654)
@@ -330,6 +389,8 @@ func formatAgentIssue(buf *strings.Builder, issue *types.Issue) {
 }
 
 // formatIssueCompact formats a single issue in compact format to a buffer
+// Uses status icons for better scanability - consistent with bd graph
+// Format: [icon] [pin] ID [Priority] [Type] @assignee [labels] - Title
 func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []string) {
 	labelsStr := ""
 	if len(labels) > 0 {
@@ -339,20 +400,25 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 	if issue.Assignee != "" {
 		assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 	}
-	status := string(issue.Status)
-	if status == "closed" {
-		line := fmt.Sprintf("%s%s [P%d] [%s] %s%s%s - %s",
-			pinIndicator(issue), issue.ID, issue.Priority,
-			issue.IssueType, status, assigneeStr, labelsStr, issue.Title)
+
+	// Get styled status icon
+	statusIcon := renderStatusIcon(issue.Status)
+
+	if issue.Status == types.StatusClosed {
+		// Closed issues: entire line muted (fades visually)
+		line := fmt.Sprintf("%s %s%s [P%d] [%s]%s%s - %s",
+			statusIcon, pinIndicator(issue), issue.ID, issue.Priority,
+			issue.IssueType, assigneeStr, labelsStr, issue.Title)
 		buf.WriteString(ui.RenderClosedLine(line))
 		buf.WriteString("\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%s%s [%s] [%s] %s%s%s - %s\n",
+		// Active issues: status icon + semantic colors for priority/type
+		buf.WriteString(fmt.Sprintf("%s %s%s [%s] [%s]%s%s - %s\n",
+			statusIcon,
 			pinIndicator(issue),
 			ui.RenderID(issue.ID),
 			ui.RenderPriority(issue.Priority),
 			ui.RenderType(string(issue.IssueType)),
-			ui.RenderStatus(status),
 			assigneeStr, labelsStr, issue.Title))
 	}
 }
@@ -437,6 +503,8 @@ var listCmd = &cobra.Command{
 
 		// Pretty and watch flags (GH#654)
 		prettyFormat, _ := cmd.Flags().GetBool("pretty")
+		treeFormat, _ := cmd.Flags().GetBool("tree")
+		prettyFormat = prettyFormat || treeFormat // --tree is alias for --pretty
 		watchMode, _ := cmd.Flags().GetBool("watch")
 
 		// Pager control (bd-jdz3)
@@ -827,6 +895,33 @@ var listCmd = &cobra.Command{
 			// Apply sorting
 			sortIssues(issues, sortBy, reverse)
 
+			// Handle watch mode (GH#654)
+			if watchMode {
+				watchIssues(ctx, store, filter, sortBy, reverse)
+				return
+			}
+
+			// Handle pretty/tree format (GH#654)
+			if prettyFormat {
+				// Load dependencies for tree structure
+				// In daemon mode, open a read-only store to get dependencies
+				var allDeps map[string][]*types.Dependency
+				if store != nil {
+					allDeps, _ = store.GetAllDependencyRecords(ctx)
+				} else if dbPath != "" {
+					// Daemon mode: open read-only connection for tree deps
+					if roStore, err := sqlite.NewReadOnlyWithTimeout(ctx, dbPath, lockTimeout); err == nil {
+						allDeps, _ = roStore.GetAllDependencyRecords(ctx)
+						_ = roStore.Close()
+					}
+				}
+				displayPrettyListWithDeps(issues, false, allDeps)
+				if effectiveLimit > 0 && len(issues) == effectiveLimit {
+					fmt.Fprintf(os.Stderr, "\nShowing %d issues (use --limit 0 for all)\n", effectiveLimit)
+				}
+				return
+			}
+
 			// Build output in buffer for pager support (bd-jdz3)
 			var buf strings.Builder
 			if ui.IsAgentMode() {
@@ -894,7 +989,9 @@ var listCmd = &cobra.Command{
 
 		// Handle pretty format (GH#654)
 		if prettyFormat {
-			displayPrettyList(issues, false)
+			// Load dependencies for tree structure
+			allDeps, _ := store.GetAllDependencyRecords(ctx)
+			displayPrettyListWithDeps(issues, false, allDeps)
 			// Show truncation hint if we hit the limit (GH#788)
 			if effectiveLimit > 0 && len(issues) == effectiveLimit {
 				fmt.Fprintf(os.Stderr, "\nShowing %d issues (use --limit 0 for all)\n", effectiveLimit)
@@ -1058,6 +1155,7 @@ func init() {
 
 	// Pretty and watch flags (GH#654)
 	listCmd.Flags().Bool("pretty", false, "Display issues in a tree format with status/priority symbols")
+	listCmd.Flags().Bool("tree", false, "Alias for --pretty: hierarchical tree format")
 	listCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-update display (implies --pretty)")
 
 	// Pager control (bd-jdz3)

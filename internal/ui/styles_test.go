@@ -57,21 +57,27 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		}
 	}
 
+	// RenderPriority now includes the priority icon (●)
 	priorityCases := []struct {
 		priority int
 		want     string
 	}{
-		{0, PriorityP0Style.Render("P0")},
-		{1, PriorityP1Style.Render("P1")},
-		{2, PriorityP2Style.Render("P2")},
-		{3, PriorityP3Style.Render("P3")},
-		{4, PriorityP4Style.Render("P4")},
-		{5, "P5"},
+		{0, PriorityP0Style.Render(PriorityIcon + " P0")},
+		{1, PriorityP1Style.Render(PriorityIcon + " P1")},
+		{2, PriorityP2Style.Render(PriorityIcon + " P2")},
+		{3, PriorityP3Style.Render(PriorityIcon + " P3")},
+		{4, PriorityP4Style.Render(PriorityIcon + " P4")},
+		{5, PriorityIcon + " P5"},
 	}
 	for _, tc := range priorityCases {
 		if got := RenderPriority(tc.priority); got != tc.want {
 			t.Fatalf("priority %d mismatch: got %q want %q", tc.priority, got, tc.want)
 		}
+	}
+
+	// RenderPriorityCompact returns just "P0" without icon
+	if got := RenderPriorityCompact(0); !strings.Contains(got, "P0") {
+		t.Fatalf("compact priority should contain P0, got %q", got)
 	}
 
 	if got := RenderPriorityForStatus(0, "closed"); got != "P0" {

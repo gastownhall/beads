@@ -57,8 +57,8 @@ func TestListFormatPrettyIssue_BadgesAndDefaults(t *testing.T) {
 	if !strings.Contains(out, "bd-1") || !strings.Contains(out, "Hello") {
 		t.Fatalf("unexpected output: %q", out)
 	}
-	if !strings.Contains(out, "[BUG]") {
-		t.Fatalf("expected BUG badge: %q", out)
+	if !strings.Contains(out, "[bug]") {
+		t.Fatalf("expected bug badge: %q", out)
 	}
 }
 

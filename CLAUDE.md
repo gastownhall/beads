@@ -210,6 +210,93 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 - Use `bd dep tree` to understand complex dependencies
 - Priority 0-1 issues are usually more important than 2-4
 
+## Visual Design System
+
+When adding CLI output features, follow these design principles for consistent, cognitively-friendly visuals.
+
+### CRITICAL: No Emoji-Style Icons
+
+**NEVER use large colored emoji icons** like 🔴🟠🟡🔵⚪ for priorities or status.
+These cause cognitive overload and break visual consistency.
+
+**ALWAYS use small Unicode symbols** with semantic colors applied via lipgloss:
+- Status: `○ ◐ ● ✓ ❄`
+- Priority: `●` (filled circle with color)
+
+### Status Icons (use consistently across all commands)
+
+```
+○ open        - Available to work (white/default)
+◐ in_progress - Currently being worked (yellow)
+● blocked     - Waiting on dependencies (red)
+✓ closed      - Completed (muted gray)
+❄ deferred    - Scheduled for later (blue/muted)
+```
+
+### Priority Icons and Colors
+
+Format: `● P0` (filled circle icon + label, colored by priority)
+
+- **● P0**: Red + bold (critical)
+- **● P1**: Orange (high)
+- **● P2-P4**: Default text (normal)
+
+### Issue Type Colors
+
+- **bug**: Red (problems need attention)
+- **epic**: Purple (larger scope)
+- **Others**: Default text
+
+### Design Principles
+
+1. **Small Unicode symbols only** - NO emoji blobs (🔴🟠 etc.)
+2. **Semantic colors only for actionable items** - Don't color everything
+3. **Closed items fade** - Use muted gray to show "done"
+4. **Icons > text labels** - More scannable, less cognitive load
+5. **Consistency across commands** - Same icons in list, graph, show, etc.
+6. **Tree connectors** - Use `├──`, `└──`, `│` for hierarchies (file explorer pattern)
+7. **Reduce cognitive noise** - Don't show "needs:1" when it's just the parent epic
+
+### Semantic Styles (internal/ui/styles.go)
+
+Use exported styles from the `ui` package:
+
+```go
+// Status styles
+ui.StatusInProgressStyle  // Yellow - active work
+ui.StatusBlockedStyle     // Red - needs attention
+ui.StatusClosedStyle      // Muted gray - done
+
+// Priority styles
+ui.PriorityP0Style        // Red + bold
+ui.PriorityP1Style        // Orange
+
+// Type styles
+ui.TypeBugStyle           // Red
+ui.TypeEpicStyle          // Purple
+
+// General styles
+ui.PassStyle, ui.WarnStyle, ui.FailStyle
+ui.MutedStyle, ui.AccentStyle
+ui.RenderMuted(text), ui.RenderAccent(text)
+```
+
+### Example Usage
+
+```go
+// Status icon with semantic color
+switch issue.Status {
+case types.StatusOpen:
+    icon = "○"  // no color - available but not urgent
+case types.StatusInProgress:
+    icon = ui.StatusInProgressStyle.Render("◐")  // yellow
+case types.StatusBlocked:
+    icon = ui.StatusBlockedStyle.Render("●")     // red
+case types.StatusClosed:
+    icon = ui.StatusClosedStyle.Render("✓")      // muted
+}
+```
+
 ## Building and Testing
 
 ```bash
