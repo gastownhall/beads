@@ -37,6 +37,10 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"daemon.auto_pull", true},
 		{"daemon.custom_setting", true}, // prefix match
 
+		// Hierarchy settings (GH#995)
+		{"hierarchy.max-depth", true},
+		{"hierarchy.custom_setting", true}, // prefix match
+
 		// SQLite keys (should return false)
 		{"jira.url", false},
 		{"jira.project", false},
@@ -164,10 +168,10 @@ func TestNormalizeYamlKey(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"sync.branch", "sync-branch"},  // alias should be normalized
-		{"sync-branch", "sync-branch"},  // already canonical
-		{"no-db", "no-db"},              // no alias, unchanged
-		{"json", "json"},                // no alias, unchanged
+		{"sync.branch", "sync-branch"},   // alias should be normalized
+		{"sync-branch", "sync-branch"},   // already canonical
+		{"no-db", "no-db"},               // no alias, unchanged
+		{"json", "json"},                 // no alias, unchanged
 		{"routing.mode", "routing.mode"}, // no alias for this one
 	}
 
@@ -326,5 +330,55 @@ other-setting: value
 	}
 	if !strings.Contains(contentStr, "other-setting: value") {
 		t.Errorf("config.yaml should preserve other settings, got:\n%s", contentStr)
+	}
+}
+
+// TestValidateYamlConfigValue_HierarchyMaxDepth tests validation of hierarchy.max-depth (GH#995)
+func TestValidateYamlConfigValue_HierarchyMaxDepth(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr bool
+		errMsg    string
+	}{
+		{"valid positive integer", "5", false, ""},
+		{"valid minimum value", "1", false, ""},
+		{"valid large value", "100", false, ""},
+		{"invalid zero", "0", true, "hierarchy.max-depth must be at least 1, got 0"},
+		{"invalid negative", "-1", true, "hierarchy.max-depth must be at least 1, got -1"},
+		{"invalid non-integer", "abc", true, "hierarchy.max-depth must be a positive integer, got \"abc\""},
+		{"invalid float", "3.5", true, "hierarchy.max-depth must be a positive integer, got \"3.5\""},
+		{"invalid empty", "", true, "hierarchy.max-depth must be a positive integer, got \"\""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue("hierarchy.max-depth", tt.value)
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error for value %q, got nil", tt.value)
+				} else if err.Error() != tt.errMsg {
+					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for value %q: %v", tt.value, err)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateYamlConfigValue_OtherKeys tests that other keys are not validated
+func TestValidateYamlConfigValue_OtherKeys(t *testing.T) {
+	// Other keys should pass validation regardless of value
+	err := validateYamlConfigValue("no-db", "invalid")
+	if err != nil {
+		t.Errorf("unexpected error for no-db: %v", err)
+	}
+
+	err = validateYamlConfigValue("routing.mode", "anything")
+	if err != nil {
+		t.Errorf("unexpected error for routing.mode: %v", err)
 	}
 }

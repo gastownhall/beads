@@ -90,3 +90,25 @@ func ParseHierarchicalID(id string) (rootID, parentID string, depth int) {
 // MaxHierarchyDepth is the maximum nesting level for hierarchical IDs.
 // Prevents over-decomposition and keeps IDs manageable.
 const MaxHierarchyDepth = 3
+
+// CheckHierarchyDepth validates that adding a child to parentID won't exceed maxDepth.
+// Returns an error if the depth would be exceeded.
+// If maxDepth < 1, it defaults to MaxHierarchyDepth.
+func CheckHierarchyDepth(parentID string, maxDepth int) error {
+	if maxDepth < 1 {
+		maxDepth = MaxHierarchyDepth
+	}
+
+	// Count dots to determine current depth
+	depth := 0
+	for _, ch := range parentID {
+		if ch == '.' {
+			depth++
+		}
+	}
+
+	if depth >= maxDepth {
+		return fmt.Errorf("maximum hierarchy depth (%d) exceeded for parent %s", maxDepth, parentID)
+	}
+	return nil
+}

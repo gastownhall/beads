@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -424,6 +425,81 @@ this is not json either
 	expectedID := "bd-test456.1"
 	if childID != expectedID {
 		t.Errorf("expected child ID %s, got %s", expectedID, childID)
+	}
+}
+
+// TestGetNextChildID_ConfigurableMaxDepth tests that hierarchy.max-depth config is respected (GH#995)
+func TestGetNextChildID_ConfigurableMaxDepth(t *testing.T) {
+	// Initialize config for testing
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("failed to initialize config: %v", err)
+	}
+
+	// Ensure config is reset even if test fails or panics
+	t.Cleanup(func() {
+		config.Set("hierarchy.max-depth", 3)
+	})
+
+	tmpFile := t.TempDir() + "/test.db"
+	defer os.Remove(tmpFile)
+	store := newTestStore(t, tmpFile)
+	defer store.Close()
+	ctx := context.Background()
+
+	// Create a chain of issues up to depth 3
+	issues := []struct {
+		id    string
+		title string
+	}{
+		{"bd-depth", "Root"},
+		{"bd-depth.1", "Level 1"},
+		{"bd-depth.1.1", "Level 2"},
+		{"bd-depth.1.1.1", "Level 3"},
+	}
+
+	for _, issue := range issues {
+		iss := &types.Issue{
+			ID:          issue.id,
+			Title:       issue.title,
+			Description: "Test issue",
+			Status:      types.StatusOpen,
+			Priority:    1,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.id, err)
+		}
+	}
+
+	// Test 1: With default max-depth (3), depth 4 should fail
+	config.Set("hierarchy.max-depth", 3)
+	_, err := store.GetNextChildID(ctx, "bd-depth.1.1.1")
+	if err == nil {
+		t.Errorf("expected error for depth 4 with max-depth=3, got nil")
+	}
+	if err != nil && err.Error() != "maximum hierarchy depth (3) exceeded for parent bd-depth.1.1.1" {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// Test 2: With max-depth=5, depth 4 should succeed
+	config.Set("hierarchy.max-depth", 5)
+	childID, err := store.GetNextChildID(ctx, "bd-depth.1.1.1")
+	if err != nil {
+		t.Errorf("depth 4 should be allowed with max-depth=5, got error: %v", err)
+	}
+	expectedID := "bd-depth.1.1.1.1"
+	if childID != expectedID {
+		t.Errorf("expected %s, got %s", expectedID, childID)
+	}
+
+	// Test 3: With max-depth=2, depth 3 should fail
+	config.Set("hierarchy.max-depth", 2)
+	_, err = store.GetNextChildID(ctx, "bd-depth.1.1")
+	if err == nil {
+		t.Errorf("expected error for depth 3 with max-depth=2, got nil")
+	}
+	if err != nil && err.Error() != "maximum hierarchy depth (2) exceeded for parent bd-depth.1.1" {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

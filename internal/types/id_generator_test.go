@@ -209,3 +209,46 @@ func BenchmarkGenerateChildID(b *testing.B) {
 		GenerateChildID("bd-af78e9a2", 42)
 	}
 }
+
+func TestCheckHierarchyDepth(t *testing.T) {
+	tests := []struct {
+		name     string
+		parentID string
+		maxDepth int
+		wantErr  bool
+		errMsg   string
+	}{
+		// Default maxDepth (uses MaxHierarchyDepth = 3)
+		{"root parent with default depth", "bd-abc123", 0, false, ""},
+		{"depth 1 parent with default depth", "bd-abc123.1", 0, false, ""},
+		{"depth 2 parent with default depth", "bd-abc123.1.2", 0, false, ""},
+		{"depth 3 parent with default depth - exceeds", "bd-abc123.1.2.3", 0, true, "maximum hierarchy depth (3) exceeded for parent bd-abc123.1.2.3"},
+
+		// Custom maxDepth
+		{"root parent with max=1", "bd-abc123", 1, false, ""},
+		{"depth 1 parent with max=1 - exceeds", "bd-abc123.1", 1, true, "maximum hierarchy depth (1) exceeded for parent bd-abc123.1"},
+		{"depth 3 parent with max=5", "bd-abc123.1.2.3", 5, false, ""},
+		{"depth 4 parent with max=5", "bd-abc123.1.2.3.4", 5, false, ""},
+		{"depth 5 parent with max=5 - exceeds", "bd-abc123.1.2.3.4.5", 5, true, "maximum hierarchy depth (5) exceeded for parent bd-abc123.1.2.3.4.5"},
+
+		// Negative maxDepth falls back to default
+		{"negative maxDepth uses default", "bd-abc123.1.2.3", -1, true, "maximum hierarchy depth (3) exceeded for parent bd-abc123.1.2.3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckHierarchyDepth(tt.parentID, tt.maxDepth)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				} else if err.Error() != tt.errMsg {
+					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}

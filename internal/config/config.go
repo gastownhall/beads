@@ -69,7 +69,7 @@ func Initialize() error {
 	// Environment variables take precedence over config file
 	// E.g., BD_JSON, BD_NO_DAEMON, BD_ACTOR, BD_DB
 	v.SetEnvPrefix("BD")
-	
+
 	// Replace hyphens and dots with underscores for env var mapping
 	// This allows BD_NO_DAEMON to map to "no-daemon" config key
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
@@ -85,20 +85,20 @@ func Initialize() error {
 	v.SetDefault("actor", "")
 	v.SetDefault("issue-prefix", "")
 	v.SetDefault("lock-timeout", "30s")
-	
+
 	// Additional environment variables (not prefixed with BD_)
 	// These are bound explicitly for backward compatibility
 	_ = v.BindEnv("flush-debounce", "BEADS_FLUSH_DEBOUNCE")
 	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")
 	_ = v.BindEnv("identity", "BEADS_IDENTITY")
 	_ = v.BindEnv("remote-sync-interval", "BEADS_REMOTE_SYNC_INTERVAL")
-	
+
 	// Set defaults for additional settings
 	v.SetDefault("flush-debounce", "30s")
 	v.SetDefault("auto-start-daemon", true)
 	v.SetDefault("identity", "")
 	v.SetDefault("remote-sync-interval", "30s")
-	
+
 	// Routing configuration defaults
 	v.SetDefault("routing.mode", "auto")
 	v.SetDefault("routing.default", ".")
@@ -122,8 +122,13 @@ func Initialize() error {
 	v.SetDefault("validation.on-create", "none")
 	v.SetDefault("validation.on-sync", "none")
 
+	// Hierarchy configuration defaults (GH#995)
+	// Maximum nesting depth for hierarchical IDs (e.g., bd-abc.1.2.3)
+	// Default matches types.MaxHierarchyDepth constant
+	v.SetDefault("hierarchy.max-depth", 3)
+
 	// Git configuration defaults (GH#600)
-	v.SetDefault("git.author", "")        // Override commit author (e.g., "beads-bot <beads@example.com>")
+	v.SetDefault("git.author", "")         // Override commit author (e.g., "beads-bot <beads@example.com>")
 	v.SetDefault("git.no-gpg-sign", false) // Disable GPG signing for beads commits
 
 	// Directory-aware label scoping (GH#541)
@@ -200,7 +205,10 @@ func GetValueSource(key string) ConfigSource {
 // CheckOverrides checks for configuration overrides and returns a list of detected overrides.
 // This is useful for informing users when env vars or flags override config file values.
 // flagOverrides is a map of key -> (flagValue, flagWasSet) for flags that were explicitly set.
-func CheckOverrides(flagOverrides map[string]struct{ Value interface{}; WasSet bool }) []ConfigOverride {
+func CheckOverrides(flagOverrides map[string]struct {
+	Value  interface{}
+	WasSet bool
+}) []ConfigOverride {
 	var overrides []ConfigOverride
 
 	for key, flagInfo := range flagOverrides {
