@@ -330,7 +330,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template,
+		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE id = ?
@@ -1308,6 +1308,8 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var pinned sql.NullInt64
 	// Template field
 	var isTemplate sql.NullInt64
+	// Crystallizes field (work economics)
+	var crystallizes sql.NullInt64
 	// Gate fields
 	var awaitType sql.NullString
 	var awaitID sql.NullString
@@ -1321,7 +1323,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &wisp, &pinned, &isTemplate,
+		&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 	if err != nil {
@@ -1386,6 +1388,10 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	// Template field
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
+	}
+	// Crystallizes field (work economics)
+	if crystallizes.Valid && crystallizes.Int64 != 0 {
+		issue.Crystallizes = true
 	}
 	// Gate fields
 	if awaitType.Valid {

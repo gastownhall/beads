@@ -249,7 +249,7 @@ func (s *SQLiteStorage) GetDependenciesWithMetadata(ctx context.Context, issueID
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
@@ -272,7 +272,7 @@ func (s *SQLiteStorage) GetDependentsWithMetadata(ctx context.Context, issueID s
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
@@ -879,6 +879,8 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var pinned sql.NullInt64
 		// Template field
 		var isTemplate sql.NullInt64
+		// Crystallizes field (work economics)
+		var crystallizes sql.NullInt64
 		// Gate fields
 		var awaitType sql.NullString
 		var awaitID sql.NullString
@@ -891,7 +893,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &wisp, &pinned, &isTemplate,
+			&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
 		)
 		if err != nil {
@@ -947,6 +949,10 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		// Template field
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
+		}
+		// Crystallizes field (work economics)
+		if crystallizes.Valid && crystallizes.Int64 != 0 {
+			issue.Crystallizes = true
 		}
 		// Gate fields
 		if awaitType.Valid {
@@ -1005,6 +1011,8 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		var pinned sql.NullInt64
 		// Template field
 		var isTemplate sql.NullInt64
+		// Crystallizes field (work economics)
+		var crystallizes sql.NullInt64
 		// Gate fields
 		var awaitType sql.NullString
 		var awaitID sql.NullString
@@ -1018,7 +1026,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &wisp, &pinned, &isTemplate,
+			&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
 			&depType,
 		)
@@ -1072,6 +1080,10 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		// Template field
 		if isTemplate.Valid && isTemplate.Int64 != 0 {
 			issue.IsTemplate = true
+		}
+		// Crystallizes field (work economics)
+		if crystallizes.Valid && crystallizes.Int64 != 0 {
+			issue.Crystallizes = true
 		}
 		// Gate fields
 		if awaitType.Valid {
