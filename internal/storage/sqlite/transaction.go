@@ -296,6 +296,13 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 		seenIDs[issue.ID] = true
 	}
 
+	// GH#956: Check for conflicts with existing IDs in database before inserting.
+	// This prevents INSERT OR IGNORE from silently skipping duplicates, which would
+	// cause FK constraint failures when recording events for non-inserted issues.
+	if err := checkForExistingIDs(ctx, t.conn, issues); err != nil {
+		return err
+	}
+
 	// Insert all issues
 	if err := insertIssues(ctx, t.conn, issues); err != nil {
 		return fmt.Errorf("failed to insert issues: %w", err)

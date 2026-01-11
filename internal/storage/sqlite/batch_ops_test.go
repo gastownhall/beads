@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -593,6 +594,95 @@ func TestDefensiveClosedAtFix(t *testing.T) {
 		expectedDeletedAt := pastTime.Add(time.Hour).Add(time.Second)
 		if !issues[0].DeletedAt.Equal(expectedDeletedAt) {
 			t.Errorf("deleted_at mismatch: want %v, got %v", expectedDeletedAt, *issues[0].DeletedAt)
+		}
+	})
+}
+
+// TestGH956_BatchCreateExistingID tests that batch creation properly rejects
+// issues with IDs that already exist in the database, preventing FK constraint
+// failures when recording events for issues that were silently skipped by
+// INSERT OR IGNORE.
+func TestGH956_BatchCreateExistingID(t *testing.T) {
+	s, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create an existing issue first
+	existingIssue := &types.Issue{
+		Title:     "Existing Issue",
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+	err := s.CreateIssue(ctx, existingIssue, "test")
+	if err != nil {
+		t.Fatalf("failed to create existing issue: %v", err)
+	}
+
+	t.Run("rejects batch with duplicate existing ID", func(t *testing.T) {
+		// Try to create a batch where one issue has an ID that already exists
+		issues := []*types.Issue{
+			{
+				Title:     "New Issue 1",
+				Priority:  1,
+				IssueType: types.TypeTask,
+				Status:    types.StatusOpen,
+			},
+			{
+				ID:        existingIssue.ID, // This ID already exists!
+				Title:     "Duplicate Issue",
+				Priority:  1,
+				IssueType: types.TypeTask,
+				Status:    types.StatusOpen,
+			},
+		}
+
+		err := s.CreateIssues(ctx, issues, "test")
+		if err == nil {
+			t.Fatal("expected error for duplicate ID, got nil")
+		}
+
+		// The error should indicate the ID already exists, not be a FK constraint error
+		errStr := err.Error()
+		if !strings.Contains(errStr, "already exists") {
+			t.Errorf("expected error to contain 'already exists', got: %s", errStr)
+		}
+		if strings.Contains(errStr, "FOREIGN KEY") {
+			t.Errorf("should not be a FK constraint error, got: %s", errStr)
+		}
+	})
+
+	t.Run("transaction batch with duplicate existing ID", func(t *testing.T) {
+		// Test the transaction-based batch creation path (sqliteTxStorage.CreateIssues)
+		err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
+			issues := []*types.Issue{
+				{
+					Title:     "Tx New Issue",
+					Priority:  1,
+					IssueType: types.TypeTask,
+					Status:    types.StatusOpen,
+				},
+				{
+					ID:        existingIssue.ID, // This ID already exists!
+					Title:     "Tx Duplicate Issue",
+					Priority:  1,
+					IssueType: types.TypeTask,
+					Status:    types.StatusOpen,
+				},
+			}
+			return tx.CreateIssues(ctx, issues, "test")
+		})
+		if err == nil {
+			t.Fatal("expected error for duplicate ID in transaction, got nil")
+		}
+
+		// The error should indicate the ID already exists, not be a FK constraint error
+		errStr := err.Error()
+		if !strings.Contains(errStr, "already exists") {
+			t.Errorf("expected error to contain 'already exists', got: %s", errStr)
+		}
+		if strings.Contains(errStr, "FOREIGN KEY") {
+			t.Errorf("should not be a FK constraint error, got: %s", errStr)
 		}
 	})
 }
