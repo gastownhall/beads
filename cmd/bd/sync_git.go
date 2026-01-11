@@ -455,6 +455,14 @@ func restoreBeadsDirFromBranch(ctx context.Context) error {
 		return fmt.Errorf("no .beads directory found")
 	}
 
+	// Skip restore when beads directory is redirected (bd-lmqhe)
+	// When redirected, the beads directory is in a different repo, so
+	// git checkout from the current repo won't work for paths outside it.
+	redirectInfo := beads.GetRedirectInfo()
+	if redirectInfo.IsRedirected {
+		return nil
+	}
+
 	// Restore .beads/ from HEAD (current branch's committed state)
 	// Using -- to ensure .beads/ is treated as a path, not a branch name
 	cmd := exec.CommandContext(ctx, "git", "checkout", "HEAD", "--", beadsDir) //nolint:gosec // G204: beadsDir from FindBeadsDir(), not user input
