@@ -31,12 +31,7 @@ func CheckMultiRepoTypes(repoPath string) DoctorCheck {
 
 	// Discover types from each child repo
 	for _, repoPathStr := range multiRepo.Additional {
-		childTypes, err := discoverChildTypes(repoPathStr)
-		if err != nil {
-			details = append(details, fmt.Sprintf("  %s: unable to read (%v)", repoPathStr, err))
-			continue
-		}
-
+		childTypes := discoverChildTypes(repoPathStr)
 		if len(childTypes) > 0 {
 			details = append(details, fmt.Sprintf("  %s: %s", repoPathStr, strings.Join(childTypes, ", ")))
 		} else {
@@ -70,8 +65,9 @@ func CheckMultiRepoTypes(repoPath string) DoctorCheck {
 	}
 }
 
-// discoverChildTypes reads custom types from a child repo's config or database
-func discoverChildTypes(repoPath string) ([]string, error) {
+// discoverChildTypes reads custom types from a child repo's config or database.
+// Returns nil if no custom types are found (not an error - child may not have any).
+func discoverChildTypes(repoPath string) []string {
 	// Expand tilde
 	if strings.HasPrefix(repoPath, "~") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -84,17 +80,17 @@ func discoverChildTypes(repoPath string) ([]string, error) {
 	// First try reading from database config table
 	types, err := readTypesFromDB(beadsDir)
 	if err == nil && len(types) > 0 {
-		return types, nil
+		return types
 	}
 
 	// Fall back to reading from config.yaml
 	types, err = readTypesFromYAML(beadsDir)
 	if err == nil {
-		return types, nil
+		return types
 	}
 
-	// No custom types found (not an error - child may not have any)
-	return nil, nil
+	// No custom types found
+	return nil
 }
 
 // readTypesFromDB reads types.custom from the database config table
@@ -232,11 +228,9 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 
 	// Add child types
 	for _, repoPathStr := range multiRepo.Additional {
-		childTypes, err := discoverChildTypes(repoPathStr)
-		if err == nil {
-			for _, t := range childTypes {
-				knownTypes[t] = true
-			}
+		childTypes := discoverChildTypes(repoPathStr)
+		for _, t := range childTypes {
+			knownTypes[t] = true
 		}
 	}
 

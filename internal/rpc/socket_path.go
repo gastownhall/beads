@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/utils"
@@ -54,21 +53,16 @@ func shortSocketDir(canonicalPath string) string {
 	hash := sha256.Sum256([]byte(canonicalPath))
 	hashStr := hex.EncodeToString(hash[:4]) // 8 hex chars from 4 bytes
 
-	dir := filepath.Join(tmpDir(), "beads-"+hashStr)
+	dir := filepath.Join(tmpDir, "beads-"+hashStr)
 	return filepath.Join(dir, "bd.sock")
 }
 
-// tmpDir returns the appropriate temp directory for sockets.
-// On macOS, /tmp is a symlink to /private/tmp, but /tmp is shorter.
-func tmpDir() string {
-	if runtime.GOOS == "darwin" {
-		// On macOS, prefer /tmp over $TMPDIR which can be long
-		// (/var/folders/xx/xxxxxxxxxxxx/T/)
-		return "/tmp"
-	}
-	// On Linux and other Unix, use /tmp
-	return "/tmp"
-}
+// tmpDir returns the temp directory for sockets.
+// We always use /tmp because:
+// - On macOS, $TMPDIR is very long (/var/folders/xx/xxxxxxxxxxxx/T/)
+// - On Linux, /tmp is standard
+// - We need short paths due to Unix socket length limits
+const tmpDir = "/tmp"
 
 // EnsureSocketDir creates the socket directory if it doesn't exist.
 // Returns the socket path (unchanged) and any error.
@@ -78,7 +72,7 @@ func EnsureSocketDir(socketPath string) (string, error) {
 
 	// Only create if it's a /tmp/beads-* directory
 	// Don't create .beads directories - those should exist
-	if strings.HasPrefix(dir, filepath.Join(tmpDir(), "beads-")) {
+	if strings.HasPrefix(dir, filepath.Join(tmpDir, "beads-")) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return "", err
 		}
@@ -93,7 +87,7 @@ func CleanupSocketDir(socketPath string) error {
 	dir := filepath.Dir(socketPath)
 
 	// Only remove if it's a /tmp/beads-* directory we created
-	if strings.HasPrefix(dir, filepath.Join(tmpDir(), "beads-")) {
+	if strings.HasPrefix(dir, filepath.Join(tmpDir, "beads-")) {
 		// Remove socket file first
 		_ = os.Remove(socketPath)
 		// Remove directory (will fail if not empty, which is fine)
