@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -1252,5 +1253,207 @@ func TestHandleUpdate_ClaimFlag_WithOtherUpdates(t *testing.T) {
 	}
 	if issue.Priority != 0 {
 		t.Errorf("expected priority 0, got %d", issue.Priority)
+	}
+}
+
+// TestHandleClose_BlockerCheck verifies that close operation checks for open blockers (GH#962)
+func TestHandleClose_BlockerCheck(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+	ctx := context.Background()
+
+	// Create two issues: blocker and blocked
+	blockerArgs := CreateArgs{
+		Title:     "Blocker Issue",
+		IssueType: "bug",
+		Priority:  1,
+	}
+	blockerJSON, _ := json.Marshal(blockerArgs)
+	blockerReq := &Request{
+		Operation: OpCreate,
+		Args:      blockerJSON,
+		Actor:     "test-user",
+	}
+
+	blockerResp := server.handleCreate(blockerReq)
+	if !blockerResp.Success {
+		t.Fatalf("failed to create blocker issue: %s", blockerResp.Error)
+	}
+
+	var blockerIssue types.Issue
+	if err := json.Unmarshal(blockerResp.Data, &blockerIssue); err != nil {
+		t.Fatalf("failed to parse blocker issue: %v", err)
+	}
+
+	blockedArgs := CreateArgs{
+		Title:     "Blocked Issue",
+		IssueType: "task",
+		Priority:  2,
+	}
+	blockedJSON, _ := json.Marshal(blockedArgs)
+	blockedReq := &Request{
+		Operation: OpCreate,
+		Args:      blockedJSON,
+		Actor:     "test-user",
+	}
+
+	blockedResp := server.handleCreate(blockedReq)
+	if !blockedResp.Success {
+		t.Fatalf("failed to create blocked issue: %s", blockedResp.Error)
+	}
+
+	var blockedIssue types.Issue
+	if err := json.Unmarshal(blockedResp.Data, &blockedIssue); err != nil {
+		t.Fatalf("failed to parse blocked issue: %v", err)
+	}
+
+	// Add dependency: blockedIssue depends on blockerIssue (blockerIssue blocks blockedIssue)
+	dep := &types.Dependency{
+		IssueID:     blockedIssue.ID,
+		DependsOnID: blockerIssue.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	// Try to close the blocked issue - should FAIL
+	closeArgs := CloseArgs{
+		ID:     blockedIssue.ID,
+		Reason: "attempting to close blocked issue",
+	}
+	closeJSON, _ := json.Marshal(closeArgs)
+	closeReq := &Request{
+		Operation: OpClose,
+		Args:      closeJSON,
+		Actor:     "test-user",
+	}
+
+	closeResp := server.handleClose(closeReq)
+	if closeResp.Success {
+		t.Error("expected close to fail for blocked issue, but it succeeded")
+	}
+
+	// Verify error message mentions blockers
+	if closeResp.Error == "" {
+		t.Error("expected error message about blockers")
+	}
+	_ = "cannot close " + blockedIssue.ID + ": blocked by open issues" // expectedError
+	if !strings.Contains(closeResp.Error, "blocked by open issues") {
+		t.Errorf("expected error to mention 'blocked by open issues', got: %s", closeResp.Error)
+	}
+
+	// Try to close with --force flag - should SUCCEED
+	forceCloseArgs := CloseArgs{
+		ID:     blockedIssue.ID,
+		Reason: "force closing blocked issue",
+		Force:  true,
+	}
+	forceCloseJSON, _ := json.Marshal(forceCloseArgs)
+	forceCloseReq := &Request{
+		Operation: OpClose,
+		Args:      forceCloseJSON,
+		Actor:     "test-user",
+	}
+
+	forceCloseResp := server.handleClose(forceCloseReq)
+	if !forceCloseResp.Success {
+		t.Errorf("expected force close to succeed, but got error: %s", forceCloseResp.Error)
+	}
+}
+
+// TestHandleClose_BlockerCheck_ClosedBlocker verifies close succeeds when blocker is closed (GH#962)
+func TestHandleClose_BlockerCheck_ClosedBlocker(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+	ctx := context.Background()
+
+	// Create two issues
+	blockerArgs := CreateArgs{
+		Title:     "Blocker That Will Be Closed",
+		IssueType: "bug",
+		Priority:  1,
+	}
+	blockerJSON, _ := json.Marshal(blockerArgs)
+	blockerReq := &Request{
+		Operation: OpCreate,
+		Args:      blockerJSON,
+		Actor:     "test-user",
+	}
+
+	blockerResp := server.handleCreate(blockerReq)
+	if !blockerResp.Success {
+		t.Fatalf("failed to create blocker issue: %s", blockerResp.Error)
+	}
+
+	var blockerIssue types.Issue
+	if err := json.Unmarshal(blockerResp.Data, &blockerIssue); err != nil {
+		t.Fatalf("failed to parse blocker issue: %v", err)
+	}
+
+	blockedArgs := CreateArgs{
+		Title:     "Issue That Can Be Closed After Blocker",
+		IssueType: "task",
+		Priority:  2,
+	}
+	blockedJSON, _ := json.Marshal(blockedArgs)
+	blockedReq := &Request{
+		Operation: OpCreate,
+		Args:      blockedJSON,
+		Actor:     "test-user",
+	}
+
+	blockedResp := server.handleCreate(blockedReq)
+	if !blockedResp.Success {
+		t.Fatalf("failed to create blocked issue: %s", blockedResp.Error)
+	}
+
+	var blockedIssue types.Issue
+	if err := json.Unmarshal(blockedResp.Data, &blockedIssue); err != nil {
+		t.Fatalf("failed to parse blocked issue: %v", err)
+	}
+
+	// Add dependency
+	dep := &types.Dependency{
+		IssueID:     blockedIssue.ID,
+		DependsOnID: blockerIssue.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	// First close the blocker
+	closeBlockerArgs := CloseArgs{
+		ID:     blockerIssue.ID,
+		Reason: "blocker fixed",
+	}
+	closeBlockerJSON, _ := json.Marshal(closeBlockerArgs)
+	closeBlockerReq := &Request{
+		Operation: OpClose,
+		Args:      closeBlockerJSON,
+		Actor:     "test-user",
+	}
+
+	closeBlockerResp := server.handleClose(closeBlockerReq)
+	if !closeBlockerResp.Success {
+		t.Fatalf("failed to close blocker: %s", closeBlockerResp.Error)
+	}
+
+	// Now close the blocked issue - should SUCCEED because blocker is closed
+	closeBlockedArgs := CloseArgs{
+		ID:     blockedIssue.ID,
+		Reason: "now unblocked",
+	}
+	closeBlockedJSON, _ := json.Marshal(closeBlockedArgs)
+	closeBlockedReq := &Request{
+		Operation: OpClose,
+		Args:      closeBlockedJSON,
+		Actor:     "test-user",
+	}
+
+	closeBlockedResp := server.handleClose(closeBlockedReq)
+	if !closeBlockedResp.Success {
+		t.Errorf("expected close to succeed after blocker was closed, got error: %s", closeBlockedResp.Error)
 	}
 }
