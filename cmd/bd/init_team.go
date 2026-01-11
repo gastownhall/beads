@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -71,8 +72,8 @@ func runTeamWizard(ctx context.Context, store storage.Storage) error {
 
 		fmt.Printf("\n%s Sync branch set to: %s\n", ui.RenderPass("✓"), syncBranch)
 
-		// Set sync.branch config
-		if err := store.SetConfig(ctx, "sync.branch", syncBranch); err != nil {
+		// Set sync.branch config (GH#923: use syncbranch.Set for validation)
+		if err := syncbranch.Set(ctx, store, syncBranch); err != nil {
 			return fmt.Errorf("failed to set sync branch: %w", err)
 		}
 
