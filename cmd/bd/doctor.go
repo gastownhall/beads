@@ -450,6 +450,21 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, redirectTrackingCheck)
 	// Don't fail overall check for redirect tracking, just warn
 
+	// Check 14c: redirect target validity (target exists and has valid db)
+	redirectTargetCheck := convertWithCategory(doctor.CheckRedirectTargetValid(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectTargetCheck)
+	// Don't fail overall check for redirect target, just warn
+
+	// Check 14d: redirect target sync worktree (target has beads-sync if needed)
+	redirectTargetSyncCheck := convertWithCategory(doctor.CheckRedirectTargetSyncWorktree(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectTargetSyncCheck)
+	// Don't fail overall check for redirect target sync, just warn
+
+	// Check 14e: vestigial sync worktrees (unused worktrees in redirected repos)
+	vestigialWorktreesCheck := convertWithCategory(doctor.CheckNoVestigialSyncWorktrees(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, vestigialWorktreesCheck)
+	// Don't fail overall check for vestigial worktrees, just warn
+
 	// Check 15: Git merge driver configuration
 	mergeDriverCheck := convertWithCategory(doctor.CheckMergeDriver(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, mergeDriverCheck)

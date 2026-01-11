@@ -271,6 +271,255 @@ func FixRedirectTracking() error {
 	return nil
 }
 
+// CheckRedirectTargetValid verifies that the redirect target exists and has a valid beads database.
+// This catches cases where the redirect points to a non-existent directory or one without a database.
+func CheckRedirectTargetValid() DoctorCheck {
+	redirectPath := filepath.Join(".beads", "redirect")
+
+	// Check if redirect file exists
+	data, err := os.ReadFile(redirectPath) // #nosec G304 - path is hardcoded
+	if os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusOK,
+			Message: "No redirect configured",
+		}
+	}
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusWarning,
+			Message: "Cannot read redirect file",
+			Detail:  err.Error(),
+		}
+	}
+
+	// Parse redirect target
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusWarning,
+			Message: "Redirect file is empty",
+			Fix:     "Remove the empty redirect file or add a valid path",
+		}
+	}
+
+	// Resolve the redirect path relative to the parent of .beads
+	cwd, err := os.Getwd()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusWarning,
+			Message: "Cannot determine current directory",
+		}
+	}
+
+	resolvedTarget := filepath.Clean(filepath.Join(cwd, target))
+
+	// Check if target directory exists
+	info, err := os.Stat(resolvedTarget)
+	if os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusError,
+			Message: "Redirect target does not exist",
+			Detail:  fmt.Sprintf("Target: %s", resolvedTarget),
+			Fix:     "Fix the redirect path or create the target directory",
+		}
+	}
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusWarning,
+			Message: "Cannot access redirect target",
+			Detail:  err.Error(),
+		}
+	}
+	if !info.IsDir() {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusError,
+			Message: "Redirect target is not a directory",
+			Detail:  fmt.Sprintf("Target: %s", resolvedTarget),
+		}
+	}
+
+	// Check for valid beads database in target
+	dbPath := filepath.Join(resolvedTarget, "beads.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// Also check for any .db file
+		matches, _ := filepath.Glob(filepath.Join(resolvedTarget, "*.db"))
+		if len(matches) == 0 {
+			return DoctorCheck{
+				Name:    "Redirect Target Valid",
+				Status:  StatusWarning,
+				Message: "Redirect target has no beads database",
+				Detail:  fmt.Sprintf("Target: %s", resolvedTarget),
+				Fix:     "Run 'bd init' in the target directory or check redirect path",
+			}
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Redirect Target Valid",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Redirect target valid: %s", resolvedTarget),
+	}
+}
+
+// CheckRedirectTargetSyncWorktree verifies that the redirect target has a working beads-sync worktree.
+// This is important for repos using sync-branch mode with redirects.
+func CheckRedirectTargetSyncWorktree() DoctorCheck {
+	redirectPath := filepath.Join(".beads", "redirect")
+
+	// Check if redirect file exists
+	data, err := os.ReadFile(redirectPath) // #nosec G304 - path is hardcoded
+	if os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK,
+			Message: "No redirect configured",
+		}
+	}
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK, // Don't warn if we can't read - other check handles that
+			Message: "N/A (cannot read redirect)",
+		}
+	}
+
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK,
+			Message: "N/A (empty redirect)",
+		}
+	}
+
+	// Resolve the target path
+	cwd, err := os.Getwd()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK,
+			Message: "N/A (cannot determine cwd)",
+		}
+	}
+
+	resolvedTarget := filepath.Clean(filepath.Join(cwd, target))
+
+	// Check if the target has a sync-branch configured in config.yaml
+	configPath := filepath.Join(resolvedTarget, "config.yaml")
+	configData, err := os.ReadFile(configPath) // #nosec G304 - constructed from known path
+	if err != nil {
+		// No config.yaml means no sync-branch, which is fine
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK,
+			Message: "N/A (target not using sync-branch mode)",
+		}
+	}
+
+	// Simple check for sync-branch in config
+	if !strings.Contains(string(configData), "sync-branch:") {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusOK,
+			Message: "N/A (target not using sync-branch mode)",
+		}
+	}
+
+	// Target uses sync-branch - check for beads-sync worktree in the repo containing the target
+	// The target is inside a .beads dir, so the repo is the parent of .beads
+	targetRepoRoot := filepath.Dir(resolvedTarget)
+
+	// Check for beads-sync worktree
+	worktreePath := filepath.Join(targetRepoRoot, ".beads-sync")
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Redirect Target Sync",
+			Status:  StatusWarning,
+			Message: "Redirect target missing beads-sync worktree",
+			Detail:  fmt.Sprintf("Expected worktree at: %s", worktreePath),
+			Fix:     fmt.Sprintf("Run 'bd sync' in %s to create the worktree", targetRepoRoot),
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Redirect Target Sync",
+		Status:  StatusOK,
+		Message: "Redirect target has beads-sync worktree",
+	}
+}
+
+// CheckNoVestigialSyncWorktrees detects beads-sync worktrees in redirected repos that are unused.
+// When a repo uses .beads/redirect, it doesn't need its own beads-sync worktree since
+// sync operations happen in the redirect target. These vestigial worktrees waste space.
+func CheckNoVestigialSyncWorktrees() DoctorCheck {
+	redirectPath := filepath.Join(".beads", "redirect")
+
+	// Check if redirect file exists
+	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
+		// No redirect - this check doesn't apply
+		return DoctorCheck{
+			Name:    "Vestigial Sync Worktrees",
+			Status:  StatusOK,
+			Message: "N/A (no redirect configured)",
+		}
+	}
+
+	// Check for local .beads-sync worktree
+	cwd, err := os.Getwd()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Vestigial Sync Worktrees",
+			Status:  StatusOK,
+			Message: "N/A (cannot determine cwd)",
+		}
+	}
+
+	// Walk up to find git root
+	gitRoot := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(gitRoot)
+		if parent == gitRoot {
+			// Reached filesystem root, not in a git repo
+			return DoctorCheck{
+				Name:    "Vestigial Sync Worktrees",
+				Status:  StatusOK,
+				Message: "N/A (not in git repository)",
+			}
+		}
+		gitRoot = parent
+	}
+
+	// Check for .beads-sync worktree
+	syncWorktreePath := filepath.Join(gitRoot, ".beads-sync")
+	if _, err := os.Stat(syncWorktreePath); os.IsNotExist(err) {
+		// No local worktree - good
+		return DoctorCheck{
+			Name:    "Vestigial Sync Worktrees",
+			Status:  StatusOK,
+			Message: "No vestigial sync worktrees found",
+		}
+	}
+
+	// Found a local .beads-sync but we have a redirect - this is vestigial
+	return DoctorCheck{
+		Name:    "Vestigial Sync Worktrees",
+		Status:  StatusWarning,
+		Message: "Vestigial .beads-sync worktree found",
+		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", syncWorktreePath),
+		Fix:     fmt.Sprintf("Remove with: rm -rf %s", syncWorktreePath),
+	}
+}
+
 // CheckSyncBranchGitignore checks if git index flags are set on issues.jsonl when sync.branch is configured.
 // Without these flags, the file appears modified in git status even though changes go to the sync branch.
 // GH#797, GH#801, GH#870.
