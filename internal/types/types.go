@@ -488,7 +488,7 @@ const (
 	TypeGate         IssueType = "gate"          // Async coordination gate
 	TypeAgent        IssueType = "agent"         // Agent identity bead
 	TypeRole         IssueType = "role"          // Agent role definition
-	TypeRig          IssueType = "rig"           // Rig identity bead
+	TypeRig          IssueType = "rig"           // Rig identity bead (multi-repo workspace)
 	TypeConvoy       IssueType = "convoy"        // Cross-project tracking with reactive completion
 	TypeEvent        IssueType = "event"         // Operational state change record
 	TypeSlot         IssueType = "slot"          // Exclusive access slot (merge-slot gate)
