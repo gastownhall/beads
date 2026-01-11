@@ -46,7 +46,8 @@ type Issue struct {
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
 
 	// ===== External Integration =====
-	ExternalRef *string `json:"external_ref,omitempty"` // e.g., "gh-9", "jira-ABC"
+	ExternalRef  *string `json:"external_ref,omitempty"`  // e.g., "gh-9", "jira-ABC"
+	SourceSystem string  `json:"source_system,omitempty"` // Adapter/system that created this issue (federation)
 
 	// ===== Compaction Metadata =====
 	CompactionLevel   int        `json:"compaction_level,omitempty"`
@@ -83,8 +84,10 @@ type Issue struct {
 	BondedFrom []BondRef `json:"bonded_from,omitempty"` // For compounds: constituent protos
 
 	// ===== HOP Fields (entity tracking for CV chains) =====
-	Creator     *EntityRef   `json:"creator,omitempty"`     // Who created (human, agent, or org)
-	Validations []Validation `json:"validations,omitempty"` // Who validated/approved
+	Creator      *EntityRef   `json:"creator,omitempty"`       // Who created (human, agent, or org)
+	Validations  []Validation `json:"validations,omitempty"`   // Who validated/approved
+	QualityScore *float32     `json:"quality_score,omitempty"` // Aggregate quality (0.0-1.0), set by Refineries on merge
+	Crystallizes bool         `json:"crystallizes,omitempty"`  // Work that compounds (true: code, features) vs evaporates (false: ops, support) - affects CV weighting per Decision 006
 
 	// ===== Gate Fields (async coordination primitives) =====
 	AwaitType string        `json:"await_type,omitempty"` // Condition type: gh:run, gh:pr, timer, human, mail
@@ -109,6 +112,9 @@ type Issue struct {
 
 	// ===== Molecule Type Fields (swarm coordination) =====
 	MolType MolType `json:"mol_type,omitempty"` // Molecule type: swarm|patrol|work (empty = work)
+
+	// ===== Work Type Fields (assignment model - Decision 006) =====
+	WorkType WorkType `json:"work_type,omitempty"` // Work type: mutex|open_competition (empty = mutex)
 
 	// ===== Event Fields (operational state changes) =====
 	EventKind string `json:"event_kind,omitempty"` // Namespaced event type: patrol.muted, agent.started
@@ -139,6 +145,7 @@ func (i *Issue) ComputeContentHash() string {
 
 	// Optional fields
 	w.strPtr(i.ExternalRef)
+	w.str(i.SourceSystem)
 	w.flag(i.Pinned, "pinned")
 	w.flag(i.IsTemplate, "template")
 
@@ -160,6 +167,10 @@ func (i *Issue) ComputeContentHash() string {
 		w.float32Ptr(v.Score)
 	}
 
+	// HOP aggregate quality score and crystallizes
+	w.float32Ptr(i.QualityScore)
+	w.flag(i.Crystallizes, "crystallizes")
+
 	// Gate fields for async coordination
 	w.str(i.AwaitType)
 	w.str(i.AwaitID)
@@ -180,6 +191,9 @@ func (i *Issue) ComputeContentHash() string {
 
 	// Molecule type
 	w.str(string(i.MolType))
+
+	// Work type
+	w.str(string(i.WorkType))
 
 	// Event fields
 	w.str(i.EventKind)
@@ -587,6 +601,24 @@ func (m MolType) IsValid() bool {
 	return false
 }
 
+// WorkType categorizes how work assignment operates for a bead (Decision 006)
+type WorkType string
+
+// WorkType constants
+const (
+	WorkTypeMutex           WorkType = "mutex"            // One worker, exclusive assignment (default)
+	WorkTypeOpenCompetition WorkType = "open_competition" // Many submit, buyer picks
+)
+
+// IsValid checks if the work type value is valid
+func (w WorkType) IsValid() bool {
+	switch w {
+	case WorkTypeMutex, WorkTypeOpenCompetition, "":
+		return true // empty is valid (defaults to mutex)
+	}
+	return false
+}
+
 // Dependency represents a relationship between issues
 type Dependency struct {
 	IssueID     string         `json:"issue_id"`
@@ -667,6 +699,9 @@ const (
 	DepUntil     DependencyType = "until"     // Active until target closes (e.g., muted until issue resolved)
 	DepCausedBy  DependencyType = "caused-by" // Triggered by target (audit trail)
 	DepValidates DependencyType = "validates" // Approval/validation relationship
+
+	// Delegation types (work delegation chains)
+	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
 
 // IsValid checks if the dependency type value is valid.
@@ -683,7 +718,7 @@ func (d DependencyType) IsWellKnown() bool {
 	case DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor, DepRelated, DepDiscoveredFrom,
 		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
 		DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests, DepTracks,
-		DepUntil, DepCausedBy, DepValidates:
+		DepUntil, DepCausedBy, DepValidates, DepDelegatedFrom:
 		return true
 	}
 	return false

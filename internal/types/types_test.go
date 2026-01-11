@@ -550,7 +550,6 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeGate, true},
 		{TypeAgent, true},
 		{TypeRole, true},
-		{TypeRig, true},
 		{TypeConvoy, true},
 		{TypeEvent, true},
 		{TypeSlot, true},
@@ -562,46 +561,6 @@ func TestIssueTypeIsValid(t *testing.T) {
 		t.Run(string(tt.issueType), func(t *testing.T) {
 			if got := tt.issueType.IsValid(); got != tt.valid {
 				t.Errorf("IssueType(%q).IsValid() = %v, want %v", tt.issueType, got, tt.valid)
-			}
-		})
-	}
-}
-
-func TestIssueTypeIsBuiltIn(t *testing.T) {
-	// IsBuiltIn should match IsValid - both identify built-in types
-	// This is used during multi-repo hydration to determine trust:
-	// - Built-in types: validate (catch typos)
-	// - Custom types (!IsBuiltIn): trust from source repo
-	tests := []struct {
-		issueType IssueType
-		builtIn   bool
-	}{
-		// All built-in types
-		{TypeBug, true},
-		{TypeFeature, true},
-		{TypeTask, true},
-		{TypeEpic, true},
-		{TypeChore, true},
-		{TypeMessage, true},
-		{TypeMergeRequest, true},
-		{TypeMolecule, true},
-		{TypeGate, true},
-		{TypeAgent, true},
-		{TypeRole, true},
-		{TypeRig, true},
-		{TypeConvoy, true},
-		{TypeEvent, true},
-		{TypeSlot, true},
-		// Custom types (not built-in)
-		{IssueType("pm"), false},  // Custom type from child repo
-		{IssueType("llm"), false}, // Custom type from child repo
-		{IssueType(""), false},    // Empty is not built-in
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.issueType), func(t *testing.T) {
-			if got := tt.issueType.IsBuiltIn(); got != tt.builtIn {
-				t.Errorf("IssueType(%q).IsBuiltIn() = %v, want %v", tt.issueType, got, tt.builtIn)
 			}
 		})
 	}

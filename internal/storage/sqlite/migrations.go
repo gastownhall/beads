@@ -53,6 +53,10 @@ var migrationsList = []Migration{
 	{"closed_by_session_column", migrations.MigrateClosedBySessionColumn},
 	{"due_defer_columns", migrations.MigrateDueDeferColumns},
 	{"owner_column", migrations.MigrateOwnerColumn},
+	{"crystallizes_column", migrations.MigrateCrystallizesColumn},
+	{"work_type_column", migrations.MigrateWorkTypeColumn},
+	{"source_system_column", migrations.MigrateSourceSystemColumn},
+	{"quality_score_column", migrations.MigrateQualityScoreColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -113,6 +117,10 @@ func getMigrationDescription(name string) string {
 		"closed_by_session_column":     "Adds closed_by_session column for tracking which Claude Code session closed an issue",
 		"due_defer_columns":            "Adds due_at and defer_until columns for time-based task scheduling (GH#820)",
 		"owner_column":                 "Adds owner column for human attribution in HOP CV chains (Decision 008)",
+		"crystallizes_column":          "Adds crystallizes column for work economics (compounds vs evaporates) per Decision 006",
+		"work_type_column":             "Adds work_type column for work assignment model (mutex vs open_competition per Decision 006)",
+		"source_system_column":         "Adds source_system column for federation adapter tracking",
+		"quality_score_column":         "Adds quality_score column for aggregate quality (0.0-1.0) set by Refineries",
 	}
 
 	if desc, ok := descriptions[name]; ok {
