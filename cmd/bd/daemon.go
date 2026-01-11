@@ -478,7 +478,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	// Get workspace path (.beads directory) - beadsDir already defined above
 	// Get actual workspace root (parent of .beads)
 	workspacePath := filepath.Dir(beadsDir)
-	socketPath := filepath.Join(beadsDir, "bd.sock")
+	// Use short socket path to avoid Unix socket path length limits (macOS: 104 chars)
+	socketPath, err := rpc.EnsureSocketDir(rpc.ShortSocketPath(workspacePath))
+	if err != nil {
+		log.Error("failed to create socket directory", "error", err)
+		return
+	}
 	serverCtx, serverCancel := context.WithCancel(ctx)
 	defer serverCancel()
 
