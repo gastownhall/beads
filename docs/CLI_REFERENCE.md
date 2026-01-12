@@ -373,6 +373,33 @@ bd rename-prefix kw- --dry-run  # Preview changes
 bd rename-prefix kw- --json     # Apply rename
 ```
 
+### Reset
+
+Remove all local beads data and return to uninitialized state.
+
+```bash
+# Preview what would be removed (dry-run)
+bd admin reset
+
+# Actually perform the reset
+bd admin reset --force
+```
+
+**What gets removed:**
+- `.beads/` directory (database, JSONL, config)
+- Git hooks installed by bd
+- Merge driver configuration
+- Sync branch worktrees (`.git/beads-worktrees/`)
+
+**What does NOT get removed:**
+- Remote sync branch (if configured)
+- JSONL history in git commits
+- Remote repository data
+
+**Important:** If you want a complete clean slate (including remote data), see [Troubleshooting: Old data returns after reset](TROUBLESHOOTING.md#old-data-returns-after-reset).
+
+**Note:** The `--hard` and `--skip-init` flags mentioned in some discussions were never implemented. Use `--force` to perform the reset.
+
 ## Molecular Chemistry
 
 Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md](MOLECULES.md) for full documentation.
