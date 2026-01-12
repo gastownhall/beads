@@ -6,8 +6,17 @@ from typing import Literal, Any
 from pydantic import BaseModel, Field, field_validator
 
 # Type aliases for issue statuses, types, and dependencies
-IssueStatus = Literal["open", "in_progress", "blocked", "deferred", "closed"]
-IssueType = Literal["bug", "feature", "task", "epic", "chore"]
+#
+# IssueStatus and IssueType are strings (not Literals) to support custom
+# statuses and types configured via:
+#   bd config set status.custom "awaiting_review,awaiting_testing"
+#   bd config set types.custom "agent,molecule,event"
+#
+# The CLI handles validation of these values against the configured options.
+# Built-in statuses: open, in_progress, blocked, deferred, closed
+# Built-in types: bug, feature, task, epic, chore
+IssueStatus = str
+IssueType = str
 DependencyType = Literal["blocks", "related", "parent-child", "discovered-from"]
 OperationAction = Literal["created", "updated", "closed", "reopened"]
 

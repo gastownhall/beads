@@ -76,7 +76,7 @@ wheels = [
 
 [[package]]
 name = "beads-mcp"
-version = "0.34.0"
+version = "0.47.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
