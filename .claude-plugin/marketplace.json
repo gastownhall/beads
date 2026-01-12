@@ -9,7 +9,7 @@
       "name": "beads",
       "source": "./claude-plugin",
       "description": "AI-supervised issue tracker for coding workflows",
-      "version": "0.47.0"
+      "version": "0.47.1"
     }
   ]
 }

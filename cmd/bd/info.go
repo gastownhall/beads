@@ -297,6 +297,21 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.47.1",
+		Date:    "2026-01-12",
+		Changes: []string{
+			"NEW: bd list --ready flag - Show only issues with no blockers (bd-ihu31)",
+			"NEW: Markdown rendering in comments - Enhanced display for notes (#1019)",
+			"FIX: Nil pointer in wisp create - Prevent panic in molecule creation",
+			"FIX: Route prefix for rig issues - Use correct prefix when creating (#1028)",
+			"FIX: Duplicate merge target - Prefer issues with children/deps (GH#1022)",
+			"FIX: SQLite cache rebuild after rename-prefix (GH#1016)",
+			"FIX: MCP custom types - Support non-built-in types/statuses (#1023)",
+			"FIX: Hyphenated prefix validation - Support hyphens in prefixes (#1013)",
+			"FIX: Git worktree initialization - Prevent bd init in worktrees (#1026)",
+		},
+	},
+	{
 		Version: "0.47.0",
 		Date:    "2026-01-11",
 		Changes: []string{

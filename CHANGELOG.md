@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.47.0] - 2026-01-11
+## [0.47.1] - 2026-01-12
+
+### Added
+
+- **`bd list --ready` flag** - Show only issues with no blockers (bd-ihu31)
+  - Filters to issues that are immediately actionable
+  - Equivalent to `bd ready` but integrated into list command
+
+- **Markdown rendering in comments** - Comment text now renders Markdown (#1019)
+  - Enhanced readability for formatted notes and descriptions
+
+### Changed
+
+- **Release formula improvements** - Updated beads-release formula with v0.47.0 learnings
+  - Better gate handling and step organization
+
+### Fixed
+
+- **Nil pointer in wisp create** - Prevent panic when creating wisps (mol)
+  - Fixed nil pointer dereference in molecule creation
+
+- **Route prefix for rig issues** - Use correct prefix when creating issues in rigs (#1028)
+  - Issues created in rigs now use the proper routing prefix
+
+- **Duplicate merge target selection** - Prefer issues with children/deps (GH#1022)
+  - Better heuristics for choosing merge target in duplicate detection
+
+- **SQLite cache rebuild** - Rebuild blocked_issues_cache after rename-prefix (GH#1016)
+  - Ensures cache consistency after prefix changes
+
+- **Doctor JSONL check** - Exclude sync_base.jsonl from multiple files check (#1021)
+  - Reduces false positives in doctor diagnostics
+
+- **Merge struct completeness** - Add QualityScore field to merge Issue struct
+  - Ensures all fields preserved during merge operations
+
+- **MCP custom types** - Support custom issue types and statuses in MCP (#1023)
+  - MCP server now handles non-built-in types correctly
+
+- **Hyphenated prefix validation** - Support hyphens in ValidateIDFormat (#1013)
+  - Prefixes like `my-project-` now validate correctly
+
+- **Git worktree initialization** - Prevent bd init inside git worktrees (#1026)
+  - Avoids configuration issues when initializing in worktree directories
+
+### Documentation
+
+- **bd reset clarification** - Document command behavior and workarounds (GH#922)
+  - Clearer guidance on reset command usage
 
 ## [0.47.0] - 2026-01-11
 
