@@ -59,39 +59,173 @@ required = true
 # =============================================================================
 
 [[steps]]
+id = "preflight-worktree"
+title = "Preflight: Verify git context"
+description = """
+Ensure we're in the correct git directory, especially for worktree setups.
+
+```bash
+# Check current repo root and remote
+git rev-parse --show-toplevel
+git remote get-url origin
+
+# Verify this is the main worktree (not a linked worktree)
+git worktree list
+```
+
+For worktree setups, releases should be done from the **main worktree** to ensure:
+- Correct file paths in commits
+- Proper tag association
+- Clean branch history
+
+If you're in a linked worktree:
+1. Note the path to the main worktree (first line of `git worktree list`)
+2. Switch to that directory before proceeding
+3. Or use: `cd $(git worktree list | head -1 | cut -d' ' -f1)`
+
+**Red flags:**
+- Remote URL doesn't match expected repository
+- You're in a linked worktree (not the main one)
+- `git status` shows different files than expected
+"""
+
+[[steps]]
 id = "preflight-git"
-title = "Preflight: Check git status"
+title = "Preflight: Check git status & auto-stash"
+needs = ["preflight-worktree"]
 description = """
 Ensure working tree is clean before starting release.
 
 ```bash
-git status
+git status --short
 ```
 
-If there are uncommitted changes, either:
-- Commit them first
-- Stash them: `git stash`
-- Abort and resolve
+**Handling uncommitted changes:**
+
+If changes are in release-related files (CHANGELOG, version files), you may want to:
+- Include them in the release commit
+- Or stash and apply after version bump
+
+If changes are in **non-release files** (e.g., .beads/config.yaml, .claude/settings.json, local configs):
+```bash
+# Auto-stash non-release files
+git stash push -m "pre-release: non-release changes" -- .beads/ .claude/ *.local* .env*
+
+# Verify working tree is now clean (or only has release files)
+git status --short
+```
+
+**Important:** The bump script may fail if non-release files are modified. Always stash:
+- `.beads/` directory (local config)
+- `.claude/` directory (agent settings)
+- Any `.local`, `.env`, or personal config files
+
+After release completes, restore with:
+```bash
+git stash pop
+```
 """
 
 [[steps]]
 id = "preflight-pull"
-title = "Preflight: Pull latest"
+title = "Preflight: Pull latest & verify sync"
 needs = ["preflight-git"]
 description = """
-Ensure we're up to date with origin.
+Ensure we're up to date with origin and branch is properly synced.
 
 ```bash
+# Fetch latest from origin
+git fetch origin
+
+# Check branch status BEFORE pulling
+git status -sb
+```
+
+**Branch sync verification:**
+- "Your branch is behind" → Pull needed, proceed with `git pull --rebase`
+- "Your branch is ahead" → You have unpushed commits - review before release!
+- "Your branch has diverged" → **STOP** - resolve divergence first
+
+```bash
+# If branch is behind or even, pull latest
 git pull --rebase
 ```
 
-Resolve any conflicts before proceeding.
+**Recovering from divergence:**
+If your branch has diverged from origin (e.g., after a botched commit):
+```bash
+# Option 1: Reset to origin (loses local commits)
+git reset --hard origin/main
+
+# Option 2: Rebase local commits on top of origin
+git rebase origin/main
+
+# Option 3: Create a backup branch first
+git branch backup-before-release
+git reset --hard origin/main
+```
+
+**After pulling, verify sync:**
+```bash
+git status -sb
+# Should show: "## main...origin/main" (no ahead/behind)
+```
+"""
+
+[[steps]]
+id = "detect-half-done-release"
+title = "Detect half-done release"
+needs = ["preflight-pull"]
+description = """
+Check if a previous release was started but not completed (version mismatch).
+
+**Compare versions across all sources:**
+```bash
+# Last git tag
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+echo "Last tag: $LAST_TAG"
+
+# Version in code
+CODE_VERSION=$(grep 'Version = ' cmd/bd/version.go | cut -d'"' -f2)
+echo "Code version: $CODE_VERSION"
+
+# Version in CHANGELOG (most recent versioned section)
+CHANGELOG_VERSION=$(grep -E '## \\[[0-9]+\\.[0-9]+\\.[0-9]+\\]' CHANGELOG.md | head -1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+')
+echo "CHANGELOG version: $CHANGELOG_VERSION"
+
+# Version in npm package
+NPM_VERSION=$(jq -r '.version' npm-package/package.json)
+echo "npm version: $NPM_VERSION"
+```
+
+**Healthy state (ready for new release):**
+- All versions match (e.g., all show 0.46.0)
+- Last tag matches code version
+
+**Half-done release detected if:**
+- CHANGELOG shows {{version}} but code shows previous version
+- Code version doesn't match last tag
+- npm/PyPI versions are out of sync
+
+**Recovery from half-done release:**
+```bash
+# If CHANGELOG was updated but code wasn't bumped:
+# Either complete the release or revert CHANGELOG changes
+
+# Check what state we're in
+git diff $LAST_TAG -- CHANGELOG.md | head -50
+```
+
+If mismatch detected, either:
+1. Complete the partial release (bump remaining files)
+2. Revert partial changes and start fresh
+3. Carefully verify what's already pushed vs local-only
 """
 
 [[steps]]
 id = "review-changes"
 title = "Review changes since last release"
-needs = ["preflight-pull"]
+needs = ["detect-half-done-release"]
 description = """
 Understand what's being released.
 
@@ -107,9 +241,53 @@ Categorize changes:
 """
 
 [[steps]]
+id = "verify-changelog-complete"
+title = "Verify CHANGELOG completeness"
+needs = ["review-changes"]
+description = """
+Ensure CHANGELOG captures ALL commits since the last release.
+
+**Step 1: Count commits since last tag**
+```bash
+LAST_TAG=$(git describe --tags --abbrev=0)
+COMMIT_COUNT=$(git rev-list $LAST_TAG..HEAD --count)
+echo "Commits since $LAST_TAG: $COMMIT_COUNT"
+```
+
+**Step 2: List all commits with their messages**
+```bash
+git log $LAST_TAG..HEAD --oneline --no-merges
+```
+
+**Step 3: Cross-reference with CHANGELOG**
+Open CHANGELOG.md and verify every significant commit is documented in [Unreleased].
+
+**Red flags for stale CHANGELOG:**
+- If CHANGELOG was last modified days ago but there are recent commits
+- If commit count seems high but [Unreleased] section is sparse
+- If PR titles in commits don't match CHANGELOG entries
+
+```bash
+# Check when CHANGELOG was last modified
+git log -1 --format="%ar" -- CHANGELOG.md
+
+# Compare to latest commit date
+git log -1 --format="%ar"
+```
+
+**If CHANGELOG is stale:**
+1. Review all commits since last tag
+2. Add missing entries to appropriate sections (Added/Changed/Fixed)
+3. Group related changes
+4. Focus on user-facing changes and breaking changes
+
+Don't proceed until CHANGELOG is complete - it's the release notes!
+"""
+
+[[steps]]
 id = "update-changelog"
 title = "Update CHANGELOG.md"
-needs = ["review-changes"]
+needs = ["verify-changelog-complete"]
 description = """
 Write the [Unreleased] section with all changes for {{version}}.
 
