@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // ParsePriority extracts and validates a priority value from content.
@@ -51,6 +52,7 @@ func ValidatePriority(priorityStr string) (int, error) {
 
 // ValidateIDFormat validates that an ID has the correct format.
 // Supports: prefix-number (bd-42), prefix-hash (bd-a3f8e9), or hierarchical (bd-a3f8e9.1)
+// Also supports hyphenated prefixes like "bead-me-up-3e9" or "web-app-abc123".
 // Returns the prefix part or an error if invalid.
 func ValidateIDFormat(id string) (string, error) {
 	if id == "" {
@@ -62,9 +64,11 @@ func ValidateIDFormat(id string) (string, error) {
 		return "", fmt.Errorf("invalid ID format '%s' (expected format: prefix-hash or prefix-hash.number, e.g., 'bd-a3f8e9' or 'bd-a3f8e9.1')", id)
 	}
 
-	// Extract prefix (before the first hyphen)
-	hyphenIdx := strings.Index(id, "-")
-	prefix := id[:hyphenIdx]
+	// Use ExtractIssuePrefix which correctly handles hyphenated prefixes
+	// by looking at the last hyphen and checking if suffix is hash-like.
+	// This fixes the bug where "bead-me-up-3e9" was parsed as prefix "bead"
+	// instead of "bead-me-up".
+	prefix := utils.ExtractIssuePrefix(id)
 
 	return prefix, nil
 }
