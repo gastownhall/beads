@@ -57,9 +57,17 @@ func gitHasUpstream() bool {
 	}
 	branch := strings.TrimSpace(string(branchOutput))
 
-	// Check if remote and merge refs are configured
-	remoteCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch)) //nolint:gosec // G204: branch from git symbolic-ref
-	mergeCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.merge", branch))   //nolint:gosec // G204: branch from git symbolic-ref
+	return gitBranchHasUpstream(branch)
+}
+
+// gitBranchHasUpstream checks if a specific branch has an upstream configured.
+// Unlike gitHasUpstream(), this works even when HEAD is detached (e.g., jj/jujutsu).
+// This is critical for sync-branch workflows where the sync branch has upstream
+// tracking but the main working copy may be in detached HEAD state.
+func gitBranchHasUpstream(branch string) bool {
+	// Check if remote and merge refs are configured for the branch
+	remoteCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.remote", branch)) //nolint:gosec // G204: branch from caller
+	mergeCmd := exec.Command("git", "config", "--get", fmt.Sprintf("branch.%s.merge", branch))   //nolint:gosec // G204: branch from caller
 
 	remoteErr := remoteCmd.Run()
 	mergeErr := mergeCmd.Run()
