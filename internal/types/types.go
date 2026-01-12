@@ -56,8 +56,9 @@ type Issue struct {
 	OriginalSize      int        `json:"original_size,omitempty"`
 
 	// ===== Internal Routing (not exported to JSONL) =====
-	SourceRepo string `json:"-"` // Which repo owns this issue (multi-repo support)
-	IDPrefix   string `json:"-"` // Override prefix for ID generation
+	SourceRepo     string `json:"-"` // Which repo owns this issue (multi-repo support)
+	IDPrefix       string `json:"-"` // Override prefix for ID generation (appends to config prefix)
+	PrefixOverride string `json:"-"` // Completely replace config prefix (for cross-rig creation)
 
 	// ===== Relational Data (populated for export/import) =====
 	Labels       []string      `json:"labels,omitempty"`

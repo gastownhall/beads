@@ -167,10 +167,14 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
-	// Use IDPrefix override if set, combined with config prefix
-	// e.g., configPrefix="bd" + IDPrefix="wisp" → "bd-wisp"
+	// Determine prefix for ID generation and validation:
+	// 1. PrefixOverride completely replaces config prefix (for cross-rig creation)
+	// 2. IDPrefix appends to config prefix (e.g., "bd" + "wisp" → "bd-wisp")
+	// 3. Otherwise use config prefix as-is
 	prefix := configPrefix
-	if issue.IDPrefix != "" {
+	if issue.PrefixOverride != "" {
+		prefix = issue.PrefixOverride
+	} else if issue.IDPrefix != "" {
 		prefix = configPrefix + "-" + issue.IDPrefix
 	}
 
