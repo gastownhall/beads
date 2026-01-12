@@ -286,8 +286,9 @@ var showCmd = &cobra.Command{
 						fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
 						for _, comment := range details.Comments {
 							fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.Format("2006-01-02")), comment.Author)
-							commentLines := strings.Split(comment.Text, "\n")
-							for _, line := range commentLines {
+							rendered := ui.RenderMarkdown(comment.Text)
+							// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+							for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
 								fmt.Printf("    %s\n", line)
 							}
 						}
@@ -491,8 +492,9 @@ var showCmd = &cobra.Command{
 				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
 				for _, comment := range comments {
 					fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.Format("2006-01-02")), comment.Author)
-					commentLines := strings.Split(comment.Text, "\n")
-					for _, line := range commentLines {
+					rendered := ui.RenderMarkdown(comment.Text)
+					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
 						fmt.Printf("    %s\n", line)
 					}
 				}
