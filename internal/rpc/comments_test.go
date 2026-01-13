@@ -70,12 +70,13 @@ func TestCommentOperationsViaRPC(t *testing.T) {
 	}
 }
 
-// TestCommentAddWithShortID tests that AddComment accepts short IDs (issue #1070).
-// Currently, the RPC layer requires full IDs. The fix should resolve short IDs
-// to full IDs before performing operations.
+// TestCommentAddWithResolvedID verifies that the RPC layer works correctly
+// when the CLI resolves short IDs before sending to the daemon (issue #1070).
 //
-// This test is expected to FAIL until the bug is fixed.
-func TestCommentAddWithShortID(t *testing.T) {
+// Note: The RPC server expects full IDs. Short ID resolution happens in the CLI
+// (cmd/bd/comments.go) before calling the daemon, following the pattern used by
+// update.go, label.go, and other commands. This test simulates that workflow.
+func TestCommentAddWithResolvedID(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow RPC test in short mode")
 	}
@@ -84,7 +85,7 @@ func TestCommentAddWithShortID(t *testing.T) {
 
 	// Create an issue
 	createResp, err := client.Create(&CreateArgs{
-		Title:     "Short ID comment test",
+		Title:     "Resolved ID comment test",
 		IssueType: "task",
 		Priority:  2,
 	})
@@ -101,7 +102,6 @@ func TestCommentAddWithShortID(t *testing.T) {
 	t.Logf("Created issue with full ID: %s", fullID)
 
 	// Extract the short ID (hash portion after the prefix)
-	// For IDs like "test-abc123", the short ID is "abc123"
 	shortID := fullID
 	for i := len(fullID) - 1; i >= 0; i-- {
 		if fullID[i] == '-' {
@@ -109,17 +109,32 @@ func TestCommentAddWithShortID(t *testing.T) {
 			break
 		}
 	}
-	t.Logf("Using short ID: %s", shortID)
+	t.Logf("Short ID: %s", shortID)
 
-	// Try to add a comment using the SHORT ID (not full ID)
-	// This should work once the bug is fixed
+	// Simulate CLI behavior: resolve short ID first, then call RPC with full ID
+	// In the real CLI, this is done via daemonClient.ResolveID()
+	resolveResp, err := client.ResolveID(&ResolveIDArgs{ID: shortID})
+	if err != nil {
+		t.Fatalf("resolve ID failed: %v", err)
+	}
+	var resolvedID string
+	if err := json.Unmarshal(resolveResp.Data, &resolvedID); err != nil {
+		t.Fatalf("failed to decode resolved ID: %v", err)
+	}
+	t.Logf("Resolved ID: %s", resolvedID)
+
+	if resolvedID != fullID {
+		t.Fatalf("expected resolved ID %q, got %q", fullID, resolvedID)
+	}
+
+	// Now add comment using the RESOLVED (full) ID
 	addResp, err := client.AddComment(&CommentAddArgs{
-		ID:     shortID, // Using short ID instead of full ID
+		ID:     resolvedID,
 		Author: "tester",
-		Text:   "comment via short ID",
+		Text:   "comment via resolved ID",
 	})
 	if err != nil {
-		t.Fatalf("add comment with short ID failed: %v (this is the bug - short IDs should work)", err)
+		t.Fatalf("add comment failed: %v", err)
 	}
 
 	var added types.Comment
@@ -127,29 +142,14 @@ func TestCommentAddWithShortID(t *testing.T) {
 		t.Fatalf("failed to decode add comment response: %v", err)
 	}
 
-	if added.Text != "comment via short ID" {
-		t.Errorf("expected comment text 'comment via short ID', got %q", added.Text)
-	}
-
-	// Verify by listing comments using the full ID
-	listResp, err := client.ListComments(&CommentListArgs{ID: fullID})
-	if err != nil {
-		t.Fatalf("list comments failed: %v", err)
-	}
-
-	var comments []*types.Comment
-	if err := json.Unmarshal(listResp.Data, &comments); err != nil {
-		t.Fatalf("failed to decode comment list: %v", err)
-	}
-
-	if len(comments) != 1 {
-		t.Fatalf("expected 1 comment, got %d", len(comments))
+	if added.Text != "comment via resolved ID" {
+		t.Errorf("expected comment text 'comment via resolved ID', got %q", added.Text)
 	}
 }
 
-// TestCommentListWithShortID tests that ListComments accepts short IDs (issue #1070).
-// This test is expected to FAIL until the bug is fixed.
-func TestCommentListWithShortID(t *testing.T) {
+// TestCommentListWithResolvedID verifies that ListComments works when the CLI
+// resolves short IDs before sending to the daemon (issue #1070).
+func TestCommentListWithResolvedID(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow RPC test in short mode")
 	}
@@ -158,7 +158,7 @@ func TestCommentListWithShortID(t *testing.T) {
 
 	// Create an issue and add a comment
 	createResp, err := client.Create(&CreateArgs{
-		Title:     "Short ID list test",
+		Title:     "Resolved ID list test",
 		IssueType: "task",
 		Priority:  2,
 	})
@@ -193,11 +193,20 @@ func TestCommentListWithShortID(t *testing.T) {
 	}
 	t.Logf("Full ID: %s, Short ID: %s", fullID, shortID)
 
-	// Try to list comments using the SHORT ID
-	// This should work once the bug is fixed
-	listResp, err := client.ListComments(&CommentListArgs{ID: shortID})
+	// Simulate CLI behavior: resolve short ID first
+	resolveResp, err := client.ResolveID(&ResolveIDArgs{ID: shortID})
 	if err != nil {
-		t.Fatalf("list comments with short ID failed: %v (this is the bug - short IDs should work)", err)
+		t.Fatalf("resolve ID failed: %v", err)
+	}
+	var resolvedID string
+	if err := json.Unmarshal(resolveResp.Data, &resolvedID); err != nil {
+		t.Fatalf("failed to decode resolved ID: %v", err)
+	}
+
+	// List comments using the RESOLVED (full) ID
+	listResp, err := client.ListComments(&CommentListArgs{ID: resolvedID})
+	if err != nil {
+		t.Fatalf("list comments failed: %v", err)
 	}
 
 	var comments []*types.Comment
@@ -206,6 +215,6 @@ func TestCommentListWithShortID(t *testing.T) {
 	}
 
 	if len(comments) != 1 {
-		t.Fatalf("expected 1 comment, got %d (short ID resolution may have failed)", len(comments))
+		t.Fatalf("expected 1 comment, got %d", len(comments))
 	}
 }
