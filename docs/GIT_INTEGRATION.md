@@ -197,36 +197,23 @@ During `git merge`, beads-merge:
 - Merges dependency/label changes intelligently
 - Only conflicts on true semantic conflicts
 
-### Alternative: Standalone beads-merge Binary
-
-**If you prefer the standalone binary (same algorithm):**
-
-```bash
-# Install (requires Go 1.24+)
-git clone https://github.com/neongreen/mono.git
-cd mono/beads-merge
-go install
-
-# Configure Git merge driver
-git config merge.beads.name "JSONL merge driver for beads"
-git config merge.beads.driver "beads-merge %A %O %A %B"
-```
-
 ### Jujutsu Integration
 
-**For Jujutsu users**, add to `~/.jjconfig.toml`:
+**For Jujutsu users**, add to `~/.config/jj/config.toml`:
 
 ```toml
 [merge-tools.beads-merge]
-program = "beads-merge"
-merge-args = ["$output", "$base", "$left", "$right"]
+program = "bd"
+merge-args = ["merge", "$output", "$base", "$left", "$right"]
 merge-conflict-exit-codes = [1]
 ```
 
 Then resolve with:
 ```bash
-jj resolve --tool=beads-merge
+jj resolve --tool=beads-merge .beads/issues.jsonl
 ```
+
+**Note:** This only works for `.beads/issues.jsonl` since `bd merge` is a specialized JSONL merge tool.
 
 ## Protected Branch Workflows
 
