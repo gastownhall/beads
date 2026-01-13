@@ -972,4 +972,128 @@ func TestCLI_CreateDryRun(t *testing.T) {
 	})
 }
 
+// TestCLI_CommentsAddShortID tests that 'comments add' accepts short IDs (issue #1070)
+// Most bd commands accept short IDs (e.g., "5wbm") but comments add previously required
+// full IDs (e.g., "mike.vibe-coding-5wbm"). This test ensures short IDs work.
+//
+// Note: This test runs with --no-daemon (direct mode) where short IDs already work
+// because the code calls utils.ResolvePartialID(). The actual bug (GitHub #1070) is
+// in daemon mode where the ID isn't resolved before being sent to the RPC server.
+// The fix should add daemonClient.ResolveID() before daemonClient.AddComment(),
+// following the pattern in update.go and label.go.
+func TestCLI_CommentsAddShortID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+
+	t.Run("ShortIDWithCommentsAdd", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+
+		// Create an issue and get its full ID
+		out := runBDInProcess(t, tmpDir, "create", "Issue for comment test", "-p", "1", "--json")
+
+		jsonStart := strings.Index(out, "{")
+		if jsonStart < 0 {
+			t.Fatalf("No JSON found in output: %s", out)
+		}
+		jsonOut := out[jsonStart:]
+
+		var issue map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonOut), &issue); err != nil {
+			t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, jsonOut)
+		}
+
+		fullID := issue["id"].(string)
+		t.Logf("Created issue with full ID: %s", fullID)
+
+		// Extract short ID (the part after the last hyphen in prefix-hash format)
+		// For IDs like "test-abc123", the short ID is "abc123"
+		parts := strings.Split(fullID, "-")
+		if len(parts) < 2 {
+			t.Fatalf("Unexpected ID format: %s", fullID)
+		}
+		shortID := parts[len(parts)-1]
+		t.Logf("Using short ID: %s", shortID)
+
+		// Add a comment using the SHORT ID (not full ID)
+		stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "add", shortID, "Test comment with short ID")
+		if err != nil {
+			t.Fatalf("comments add failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+		}
+
+		if !strings.Contains(stdout, "Comment added") {
+			t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
+		}
+
+		// Verify the comment was actually added by listing comments (use full ID for list)
+		stdout, stderr, err = runBDInProcessAllowError(t, tmpDir, "comments", fullID)
+		if err != nil {
+			t.Fatalf("comments list failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+		}
+
+		if !strings.Contains(stdout, "Test comment with short ID") {
+			t.Errorf("Expected comment text in list output, got: %s", stdout)
+		}
+	})
+
+	t.Run("PartialIDWithCommentsAdd", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+
+		// Create an issue
+		out := runBDInProcess(t, tmpDir, "create", "Issue for partial ID test", "-p", "1", "--json")
+
+		jsonStart := strings.Index(out, "{")
+		jsonOut := out[jsonStart:]
+
+		var issue map[string]interface{}
+		json.Unmarshal([]byte(jsonOut), &issue)
+		fullID := issue["id"].(string)
+
+		// Extract short ID and use only first 4 characters (partial match)
+		parts := strings.Split(fullID, "-")
+		shortID := parts[len(parts)-1]
+		if len(shortID) > 4 {
+			shortID = shortID[:4] // Use only first 4 chars for partial match
+		}
+		t.Logf("Full ID: %s, Partial ID: %s", fullID, shortID)
+
+		// Add comment using partial ID
+		stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "add", shortID, "Comment via partial ID")
+		if err != nil {
+			t.Fatalf("comments add with partial ID failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+		}
+
+		if !strings.Contains(stdout, "Comment added") {
+			t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
+		}
+	})
+
+	t.Run("CommentAliasWithShortID", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+
+		// Create an issue
+		out := runBDInProcess(t, tmpDir, "create", "Issue for alias test", "-p", "1", "--json")
+
+		jsonStart := strings.Index(out, "{")
+		jsonOut := out[jsonStart:]
+
+		var issue map[string]interface{}
+		json.Unmarshal([]byte(jsonOut), &issue)
+		fullID := issue["id"].(string)
+
+		// Extract short ID
+		parts := strings.Split(fullID, "-")
+		shortID := parts[len(parts)-1]
+
+		// Use the 'comment' alias (deprecated but should still work)
+		stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", shortID, "Comment via alias with short ID")
+		if err != nil {
+			t.Fatalf("comment alias failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+		}
+
+		if !strings.Contains(stdout, "Comment added") {
+			t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
+		}
+	})
+}
 
