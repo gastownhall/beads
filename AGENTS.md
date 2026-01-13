@@ -1,6 +1,6 @@
 # Agent Instructions
 
-See [CLAUDE.md](CLAUDE.md) for full instructions.
+See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full instructions.
 
 This file exists for compatibility with tools that look for AGENTS.md.
 
