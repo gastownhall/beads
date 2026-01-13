@@ -209,10 +209,21 @@ func gitCommitBeadsDir(ctx context.Context, message string) error {
 		return fmt.Errorf("no .beads directory found")
 	}
 
-	// Get the repository root (handles worktrees properly)
-	repoRoot := getRepoRootForWorktree(ctx)
-	if repoRoot == "" {
-		return fmt.Errorf("cannot determine repository root")
+	// Determine the repository root
+	// When beads directory is redirected (bd-arjb), we need to run git commands
+	// from the directory containing the actual .beads/, not the current working directory
+	var repoRoot string
+	redirectInfo := beads.GetRedirectInfo()
+	if redirectInfo.IsRedirected {
+		// beadsDir is the target (e.g., /path/to/mayor/rig/.beads)
+		// We need to run git from the parent of .beads (e.g., /path/to/mayor/rig)
+		repoRoot = filepath.Dir(beadsDir)
+	} else {
+		// Get the repository root (handles worktrees properly)
+		repoRoot = getRepoRootForWorktree(ctx)
+		if repoRoot == "" {
+			return fmt.Errorf("cannot determine repository root")
+		}
 	}
 
 	// Stage only the specific sync-related files
