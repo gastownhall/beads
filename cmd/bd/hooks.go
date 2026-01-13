@@ -593,9 +593,9 @@ func runPostMergeHook() int {
 
 // runPrePushHook prevents pushing stale JSONL.
 // Returns 0 to allow push, non-zero to block.
-func runPrePushHook() int {
+func runPrePushHook(args []string) int {
 	// Run chained hook first (if exists)
-	if exitCode := runChainedHook("pre-push", nil); exitCode != 0 {
+	if exitCode := runChainedHook("pre-push", args); exitCode != 0 {
 		return exitCode
 	}
 
@@ -640,9 +640,9 @@ func runPrePushHook() int {
 	}
 
 	// Check for uncommitted changes using git status
-	args := append([]string{"status", "--porcelain", "--"}, files...)
-	// #nosec G204 - args built from hardcoded list and git subcommands
-	statusCmd := exec.Command("git", args...)
+	statusArgs := append([]string{"status", "--porcelain", "--"}, files...)
+	// #nosec G204 - statusArgs built from hardcoded list and git subcommands
+	statusCmd := exec.Command("git", statusArgs...)
 	output, _ := statusCmd.Output()
 	if len(output) > 0 {
 		fmt.Fprintln(os.Stderr, "❌ Error: Uncommitted changes detected")
@@ -1114,7 +1114,7 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		case "post-merge":
 			exitCode = runPostMergeHook()
 		case "pre-push":
-			exitCode = runPrePushHook()
+			exitCode = runPrePushHook(hookArgs)
 		case "post-checkout":
 			exitCode = runPostCheckoutHook(hookArgs)
 		case "prepare-commit-msg":
