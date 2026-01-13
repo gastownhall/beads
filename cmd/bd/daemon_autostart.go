@@ -235,7 +235,7 @@ func acquireStartLock(lockPath, socketPath string) bool {
 
 		// PID is alive - but is daemon actually running/starting?
 		// Use flock-based check as authoritative source (immune to PID reuse)
-		beadsDir := filepath.Dir(socketPath)
+		beadsDir := filepath.Dir(dbPath)
 		if running, _ := lockfile.TryDaemonLock(beadsDir); !running {
 			// Daemon lock not held - the start attempt failed or process was reused
 			debugLog("startlock PID %d alive but daemon lock not held, cleaning up", lockPID)
@@ -267,7 +267,7 @@ func handleStaleLock(lockPath, socketPath string) bool {
 	}
 
 	// PID is alive - but check daemon lock as authoritative source (immune to PID reuse)
-	beadsDir := filepath.Dir(socketPath)
+	beadsDir := filepath.Dir(dbPath)
 	if running, _ := lockfile.TryDaemonLock(beadsDir); !running {
 		debugLog("lock PID %d alive but daemon lock not held, removing and retrying", lockPID)
 		_ = os.Remove(lockPath)
@@ -291,7 +291,7 @@ func handleExistingSocket(socketPath string) bool {
 
 	// Use flock-based check as authoritative source (immune to PID reuse)
 	// If daemon lock is not held, daemon is definitely dead regardless of PID file
-	beadsDir := filepath.Dir(socketPath)
+	beadsDir := filepath.Dir(dbPath)
 	if running, pid := lockfile.TryDaemonLock(beadsDir); running {
 		debugLog("daemon lock held (PID %d), waiting for socket", pid)
 		return waitForSocketReadiness(socketPath, 5*time.Second)
@@ -400,8 +400,8 @@ func setupDaemonIO(cmd *exec.Cmd) {
 
 // getPIDFileForSocket returns the PID file path for a given socket path
 func getPIDFileForSocket(socketPath string) string {
-	// PID file is in same directory as socket, named daemon.pid
-	dir := filepath.Dir(socketPath)
+	// PID file is in .beads directory, not socket directory (socket may be in /tmp for short paths)
+	dir := filepath.Dir(dbPath)
 	return filepath.Join(dir, "daemon.pid")
 }
 
