@@ -90,6 +90,12 @@ var BuiltinRecipes = map[string]Recipe{
 		Description: "Aider config and instruction files",
 		Paths:       []string{".aider.conf.yml", ".aider/BEADS.md", ".aider/README.md"},
 	},
+	"junie": {
+		Name:        "Junie",
+		Type:        TypeMultiFile,
+		Description: "Junie guidelines and MCP configuration",
+		Paths:       []string{".junie/guidelines.md", ".junie/mcp/mcp.json"},
+	},
 }
 
 // UserRecipes holds recipes loaded from user config file.

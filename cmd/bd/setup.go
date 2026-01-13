@@ -172,6 +172,9 @@ func runRecipe(name string) {
 	case "cursor":
 		runCursorRecipe()
 		return
+	case "junie":
+		runJunieRecipe()
+		return
 	}
 
 	// For all other recipes (built-in or user), use generic file-based install
@@ -294,6 +297,18 @@ func runAiderRecipe() {
 		return
 	}
 	setup.InstallAider()
+}
+
+func runJunieRecipe() {
+	if setupCheck {
+		setup.CheckJunie()
+		return
+	}
+	if setupRemove {
+		setup.RemoveJunie()
+		return
+	}
+	setup.InstallJunie()
 }
 
 func findBeadsDir() string {
