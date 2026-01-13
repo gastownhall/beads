@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 var daemonCmd = &cobra.Command{
@@ -194,10 +195,22 @@ Run 'bd daemon --help' to see all subcommands.`,
 		}
 
 		// Check for upstream if auto-push enabled
-		if autoPush && !gitHasUpstream() {
-			fmt.Fprintf(os.Stderr, "Error: no upstream configured (required for --auto-push)\n")
-			fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name>\n")
-			os.Exit(1)
+		// When sync-branch is configured, check that branch's upstream instead of current HEAD.
+		// This fixes compatibility with jj/jujutsu which always operates in detached HEAD mode.
+		if autoPush {
+			hasUpstream := false
+			if syncBranch := syncbranch.GetFromYAML(); syncBranch != "" {
+				// sync-branch configured: check that branch's upstream
+				hasUpstream = gitBranchHasUpstream(syncBranch)
+			} else {
+				// No sync-branch: check current HEAD's upstream (original behavior)
+				hasUpstream = gitHasUpstream()
+			}
+			if !hasUpstream {
+				fmt.Fprintf(os.Stderr, "Error: no upstream configured (required for --auto-push)\n")
+				fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name>\n")
+				os.Exit(1)
+			}
 		}
 
 		// Warn if starting daemon in a git worktree
