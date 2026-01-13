@@ -297,14 +297,15 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	// GH#956: Check for conflicts with existing IDs in database before inserting.
-	// This prevents INSERT OR IGNORE from silently skipping duplicates, which would
-	// cause FK constraint failures when recording events for non-inserted issues.
+	// This prevents duplicates from causing FK constraint failures when recording events.
 	if err := checkForExistingIDs(ctx, t.conn, issues); err != nil {
 		return err
 	}
 
-	// Insert all issues
-	if err := insertIssues(ctx, t.conn, issues); err != nil {
+	// Insert all issues using strict mode (fails on duplicates)
+	// GH#956: Use insertIssuesStrict instead of insertIssues to prevent FK constraint errors
+	// from silent INSERT OR IGNORE failures under concurrent load.
+	if err := insertIssuesStrict(ctx, t.conn, issues); err != nil {
 		return fmt.Errorf("failed to insert issues: %w", err)
 	}
 

@@ -87,9 +87,10 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	return nil
 }
 
-// bulkInsertIssues delegates to insertIssues helper
+// bulkInsertIssues delegates to insertIssuesStrict helper for fresh issue creation.
+// GH#956: Using strict insert prevents FK constraint errors from silent INSERT OR IGNORE failures.
 func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
-	return insertIssues(ctx, conn, issues)
+	return insertIssuesStrict(ctx, conn, issues)
 }
 
 // bulkRecordEvents delegates to recordCreatedEvents helper
