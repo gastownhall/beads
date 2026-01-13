@@ -25,13 +25,13 @@ func getCurrentBranch(ctx context.Context) (string, error) {
 // getCurrentBranchOrHEAD returns the current branch name, or "HEAD" if in detached HEAD state.
 // This is useful for jj/jujutsu compatibility where HEAD is always detached but we still
 // need a reference for git operations like log and diff.
-func getCurrentBranchOrHEAD(ctx context.Context) (string, error) {
+func getCurrentBranchOrHEAD(ctx context.Context) string {
 	branch, err := getCurrentBranch(ctx)
 	if err != nil {
 		// Detached HEAD - return "HEAD" as the reference
-		return "HEAD", nil
+		return "HEAD"
 	}
-	return branch, nil
+	return branch
 }
 
 // getSyncBranch returns the configured sync branch name
@@ -59,10 +59,7 @@ func showSyncStatus(ctx context.Context) error {
 		return fmt.Errorf("not in a git repository")
 	}
 
-	currentBranch, err := getCurrentBranchOrHEAD(ctx)
-	if err != nil {
-		return err
-	}
+	currentBranch := getCurrentBranchOrHEAD(ctx)
 
 	syncBranch, err := getSyncBranch(ctx)
 	if err != nil {
