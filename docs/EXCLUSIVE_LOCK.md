@@ -180,7 +180,7 @@ Check daemon logs (default: `.beads/daemon.log`) to troubleshoot lock issues.
 
 ## Testing Your Integration
 
-1. **Start the daemon**: `bd daemon --interval 1m`
+1. **Start the daemon**: `bd daemon start --interval 1m`
 2. **Create a lock**: Use your tool to create `.beads/.exclusive-lock`
 3. **Verify daemon skips**: Check daemon logs for "Skipping database" message
 4. **Release lock**: Remove `.beads/.exclusive-lock`

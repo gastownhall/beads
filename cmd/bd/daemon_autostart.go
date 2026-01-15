@@ -125,7 +125,7 @@ func restartDaemonForVersionMismatch() bool {
 		return false
 	}
 
-	args := []string{"daemon", "--start"}
+	args := []string{"daemon", "start"}
 	cmd := execCommandFn(exe, args...)
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
 
@@ -343,7 +343,7 @@ func startDaemonProcess(socketPath string) bool {
 		binPath = os.Args[0]
 	}
 
-	args := []string{"daemon", "--start"}
+	args := []string{"daemon", "start"}
 
 	cmd := execCommandFn(binPath, args...)
 	setupDaemonIO(cmd)
@@ -497,7 +497,7 @@ func emitVerboseWarning() {
 	case FallbackConnectFailed:
 		fmt.Fprintf(os.Stderr, "Warning: Daemon unreachable at %s. Running in direct mode. Hint: bd daemon status\n", daemonStatus.SocketPath)
 	case FallbackHealthFailed:
-		fmt.Fprintf(os.Stderr, "Warning: Daemon unhealthy. Falling back to direct mode. Hint: bd daemon --health\n")
+		fmt.Fprintf(os.Stderr, "Warning: Daemon unhealthy. Falling back to direct mode. Hint: bd daemon status --all\n")
 	case FallbackAutoStartDisabled:
 		fmt.Fprintf(os.Stderr, "Warning: Auto-start disabled (BEADS_AUTO_START_DAEMON=false). Running in direct mode. Hint: bd daemon\n")
 	case FallbackAutoStartFailed:
