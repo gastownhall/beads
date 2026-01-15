@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -26,6 +27,7 @@ func setupGitRepoWithBeads(t *testing.T) (repoPath string, cleanup func()) {
 	}
 
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Initialize git repo
 	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
@@ -33,6 +35,7 @@ func setupGitRepoWithBeads(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Configure git
 	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
@@ -61,6 +64,7 @@ func setupGitRepoWithBeads(t *testing.T) (repoPath string, cleanup func()) {
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
 		git.ResetCaches()
+		beads.ResetCaches()
 	}
 
 	return tmpDir, cleanup
@@ -169,10 +173,12 @@ func setupRedirectedBeadsRepo(t *testing.T) (sourcePath, targetPath string, clea
 		t.Fatalf("failed to change to source directory: %v", err)
 	}
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
 		git.ResetCaches()
+		beads.ResetCaches()
 	}
 
 	return sourcePath, targetPath, cleanup
@@ -468,13 +474,22 @@ func TestGitBranchHasUpstream(t *testing.T) {
 		}
 	}
 
+	// Create .beads directory (required for RepoContext)
+	beadsDir := filepath.Join(localDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte{}, 0644); err != nil {
+		t.Fatalf("Failed to write issues.jsonl: %v", err)
+	}
+
 	// Create initial commit on main
 	testFile := filepath.Join(localDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 	cmds = [][]string{
-		{"git", "add", "test.txt"},
+		{"git", "add", "."},
 		{"git", "commit", "-m", "initial"},
 		{"git", "push", "-u", "origin", "main"},
 	}
@@ -504,7 +519,14 @@ func TestGitBranchHasUpstream(t *testing.T) {
 	if err := os.Chdir(localDir); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	// Reset caches after changing directory so RepoContext uses this repo
+	git.ResetCaches()
+	beads.ResetCaches()
+	defer func() {
+		os.Chdir(origDir)
+		git.ResetCaches()
+		beads.ResetCaches()
+	}()
 
 	// Test 1: beads-sync branch should have upstream
 	t.Run("branch with upstream returns true", func(t *testing.T) {

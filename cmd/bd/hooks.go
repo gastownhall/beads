@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -385,7 +387,13 @@ func installHooks(embeddedHooks map[string]string, force bool, shared bool, chai
 
 func configureSharedHooksPath() error {
 	// Set git config core.hooksPath to .beads-hooks
+	// Note: This may run before .beads exists, so it uses git.GetRepoRoot() directly
+	repoRoot := git.GetRepoRoot()
+	if repoRoot == "" {
+		return fmt.Errorf("not in a git repository")
+	}
 	cmd := exec.Command("git", "config", "core.hooksPath", ".beads-hooks")
+	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git config failed: %w (output: %s)", err, string(output))
 	}
@@ -535,10 +543,18 @@ func runPreCommitHook() int {
 		}
 	} else {
 		// Default: auto-stage JSONL files
+		rc, rcErr := beads.GetRepoContext()
+		ctx := context.Background()
 		for _, f := range jsonlFiles {
 			if _, err := os.Stat(f); err == nil {
-				// #nosec G204 - f is from hardcoded list above, not user input
-				gitAdd := exec.Command("git", "add", f)
+				var gitAdd *exec.Cmd
+				if rcErr == nil {
+					gitAdd = rc.GitCmdCWD(ctx, "add", f)
+				} else {
+					// Fallback if RepoContext unavailable
+					// #nosec G204 -- f comes from jsonlFiles (controlled, hardcoded paths)
+					gitAdd = exec.Command("git", "add", f)
+				}
 				_ = gitAdd.Run() // Ignore errors - file may not exist
 			}
 		}
@@ -619,6 +635,10 @@ func runPrePushHook(args []string) int {
 	flushCmd := exec.Command("bd", "sync", "--flush-only", "--no-daemon")
 	_ = flushCmd.Run() // Ignore errors
 
+	// Get RepoContext for git operations
+	rc, rcErr := beads.GetRepoContext()
+	ctx := context.Background()
+
 	// Check for uncommitted JSONL changes
 	files := []string{}
 	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"} {
@@ -627,8 +647,13 @@ func runPrePushHook(args []string) int {
 			files = append(files, f)
 		} else {
 			// Check if tracked by git
-			// #nosec G204 - f is from hardcoded list above, not user input
-			checkCmd := exec.Command("git", "ls-files", "--error-unmatch", f)
+			var checkCmd *exec.Cmd
+			if rcErr == nil {
+				checkCmd = rc.GitCmdCWD(ctx, "ls-files", "--error-unmatch", f)
+			} else {
+				// #nosec G204 - f is from hardcoded list above, not user input
+				checkCmd = exec.Command("git", "ls-files", "--error-unmatch", f)
+			}
 			if checkCmd.Run() == nil {
 				files = append(files, f)
 			}
@@ -641,8 +666,13 @@ func runPrePushHook(args []string) int {
 
 	// Check for uncommitted changes using git status
 	statusArgs := append([]string{"status", "--porcelain", "--"}, files...)
-	// #nosec G204 - statusArgs built from hardcoded list and git subcommands
-	statusCmd := exec.Command("git", statusArgs...)
+	var statusCmd *exec.Cmd
+	if rcErr == nil {
+		statusCmd = rc.GitCmdCWD(ctx, statusArgs...)
+	} else {
+		// #nosec G204 - statusArgs built from hardcoded list and git subcommands
+		statusCmd = exec.Command("git", statusArgs...)
+	}
 	output, _ := statusCmd.Output()
 	if len(output) > 0 {
 		fmt.Fprintln(os.Stderr, "❌ Error: Uncommitted changes detected")
@@ -1053,8 +1083,14 @@ func hasBeadsJSONL() bool {
 // Returns true if the file needs to be staged before commit.
 func hasUnstagedChanges(path string) bool {
 	// Check git status for this specific file
-	// #nosec G204 - path is from hardcoded list in caller
-	cmd := exec.Command("git", "status", "--porcelain", "--", path)
+	rc, rcErr := beads.GetRepoContext()
+	var cmd *exec.Cmd
+	if rcErr == nil {
+		cmd = rc.GitCmdCWD(context.Background(), "status", "--porcelain", "--", path)
+	} else {
+		// #nosec G204 - path is from hardcoded list in caller
+		cmd = exec.Command("git", "status", "--porcelain", "--", path)
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return false // If git fails, assume no changes

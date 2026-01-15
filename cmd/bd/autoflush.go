@@ -86,20 +86,10 @@ func findJSONLPath() string {
 	if err := os.MkdirAll(dbDir, 0750); err != nil {
 		// If we can't create the directory, return discovered path anyway
 		// (the subsequent write will fail with a clearer error)
-		return canonicalizeIfRelative(jsonlPath)
+		return utils.CanonicalizeIfRelative(jsonlPath)
 	}
 
-	return canonicalizeIfRelative(jsonlPath)
-}
-
-// canonicalizeIfRelative ensures path is absolute for filepath.Rel() compatibility.
-// Guards against any code path that might set dbPath to relative.
-// See GH#959 for root cause analysis.
-func canonicalizeIfRelative(path string) string {
-	if path != "" && !filepath.IsAbs(path) {
-		return utils.CanonicalizePath(path)
-	}
-	return path
+	return utils.CanonicalizeIfRelative(jsonlPath)
 }
 
 // detectPrefixFromJSONL extracts the issue prefix from JSONL data.

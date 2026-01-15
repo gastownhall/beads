@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -176,9 +176,12 @@ func isMCPActive() bool {
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	err := cmd.Run()
-	return err != nil
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		return true // Default to ephemeral if we can't determine context
+	}
+	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	return cmd.Run() != nil
 }
 
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)

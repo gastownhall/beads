@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 func TestMigrateSyncValidation(t *testing.T) {
@@ -96,6 +99,13 @@ func TestMigrateSyncDryRun(t *testing.T) {
 	// Note: We need to run this from tmpDir context since branchExistsLocal uses git in cwd
 	ctx := context.Background()
 	t.Chdir(tmpDir)
+	// Reset caches so RepoContext picks up new CWD
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
 
 	if branchExistsLocal(ctx, "beads-sync") {
 		t.Error("branchExistsLocal should return false for non-existent branch")

@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime/debug"
 	"strings"
 
@@ -152,11 +152,13 @@ func resolveBranch() string {
 
 	// Fallback: try to get branch from git at runtime
 	// Use symbolic-ref to work in fresh repos without commits
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
-	cmd.Dir = "."
-	if output, err := cmd.Output(); err == nil {
-		if branch := strings.TrimSpace(string(output)); branch != "" && branch != "HEAD" {
-			return branch
+	// Uses CWD repo context since this shows user's current branch
+	if rc, err := beads.GetRepoContext(); err == nil {
+		cmd := rc.GitCmdCWD(context.Background(), "symbolic-ref", "--short", "HEAD")
+		if output, err := cmd.Output(); err == nil {
+			if branch := strings.TrimSpace(string(output)); branch != "" && branch != "HEAD" {
+				return branch
+			}
 		}
 	}
 

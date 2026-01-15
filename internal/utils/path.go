@@ -187,3 +187,18 @@ func NormalizePathForComparison(path string) string {
 func PathsEqual(path1, path2 string) bool {
 	return NormalizePathForComparison(path1) == NormalizePathForComparison(path2)
 }
+
+// CanonicalizeIfRelative ensures a path is absolute for filepath.Rel() compatibility.
+// If the path is non-empty and relative, it is canonicalized using CanonicalizePath.
+// Absolute paths and empty strings are returned unchanged.
+//
+// This guards against code paths that might set paths to relative values,
+// which would cause filepath.Rel() to fail or produce incorrect results.
+//
+// See GH#959 for root cause analysis of the original autoflush bug.
+func CanonicalizeIfRelative(path string) string {
+	if path != "" && !filepath.IsAbs(path) {
+		return CanonicalizePath(path)
+	}
+	return path
+}

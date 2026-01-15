@@ -201,8 +201,8 @@ Use --merge to merge the sync branch back to main branch.`,
 		if err := ensureStoreActive(); err == nil && store != nil {
 			if sb, _ := syncbranch.Get(ctx, store); sb != "" {
 				syncBranchName = sb
-				if rr, err := syncbranch.GetRepoRoot(ctx); err == nil {
-					syncBranchRepoRoot = rr
+				if rc, err := beads.GetRepoContext(); err == nil {
+					syncBranchRepoRoot = rc.RepoRoot
 				}
 			}
 		}

@@ -972,6 +972,10 @@ func getRemoteForBranch(ctx context.Context, worktreePath, branch string) string
 // GetRepoRoot returns the git repository root directory
 // For worktrees, this returns the main repository root (not the worktree root)
 // The returned path is canonicalized to fix case on case-insensitive filesystems (GH#880)
+//
+// Deprecated: Use beads.GetRepoContext().RepoRoot instead. GetRepoContext provides
+// a unified API that correctly handles BEADS_DIR, worktrees, and redirects.
+// This function will be removed in a future release.
 func GetRepoRoot(ctx context.Context) (string, error) {
 	var repoRoot string
 

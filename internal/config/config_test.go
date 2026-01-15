@@ -787,6 +787,160 @@ func TestConfigSourceConstants(t *testing.T) {
 	}
 }
 
+// TestResolveExternalProjectPathFromRepoRoot tests that external_projects paths
+// are resolved from repo root (parent of .beads/), NOT from CWD.
+// This is the fix for oss-lbp (related to Bug 3 in the spec).
+func TestResolveExternalProjectPathFromRepoRoot(t *testing.T) {
+	// Helper to canonicalize paths for comparison (handles macOS /var -> /private/var symlink)
+	canonicalize := func(path string) string {
+		if path == "" {
+			return ""
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return path
+		}
+		return resolved
+	}
+
+	t.Run("relative path resolved from repo root not CWD", func(t *testing.T) {
+		// Create a repo structure:
+		// tmpDir/
+		//   .beads/
+		//     config.yaml
+		//   beads-project/     <- relative path should resolve here
+		tmpDir := t.TempDir()
+
+		// Create .beads directory with config file
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("failed to create .beads dir: %v", err)
+		}
+
+		// Create the target project directory
+		projectDir := filepath.Join(tmpDir, "beads-project")
+		if err := os.MkdirAll(projectDir, 0750); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
+		}
+
+		// Create config file with relative path
+		configContent := `
+external_projects:
+  beads: beads-project
+`
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+
+		// Change to a DIFFERENT directory (to test that CWD doesn't affect resolution)
+		// This simulates daemon context where CWD is .beads/
+		origDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("failed to get cwd: %v", err)
+		}
+		if err := os.Chdir(beadsDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer os.Chdir(origDir)
+
+		// Reload config from the new location
+		if err := Initialize(); err != nil {
+			t.Fatalf("failed to initialize config: %v", err)
+		}
+
+		// Verify ConfigFileUsed() returns the config path
+		usedConfig := ConfigFileUsed()
+		if usedConfig == "" {
+			t.Skip("config file not loaded - skipping test")
+		}
+
+		// Resolve the external project path
+		got := ResolveExternalProjectPath("beads")
+
+		// The path should resolve to tmpDir/beads-project (repo root + relative path)
+		// NOT to .beads/beads-project (CWD + relative path)
+		// Use canonicalize to handle macOS /var -> /private/var symlink
+		if canonicalize(got) != canonicalize(projectDir) {
+			t.Errorf("ResolveExternalProjectPath(beads) = %q, want %q", got, projectDir)
+		}
+
+		// Verify the wrong path doesn't exist (CWD-based resolution)
+		wrongPath := filepath.Join(beadsDir, "beads-project")
+		if canonicalize(got) == canonicalize(wrongPath) {
+			t.Errorf("path was incorrectly resolved from CWD: %s", wrongPath)
+		}
+	})
+
+	t.Run("CWD should not affect resolution", func(t *testing.T) {
+		// Create two different directory structures
+		tmpDir := t.TempDir()
+
+		// Create main repo with .beads and target project
+		mainRepoDir := filepath.Join(tmpDir, "main-repo")
+		beadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("failed to create .beads dir: %v", err)
+		}
+
+		// Create the target project as a sibling directory
+		siblingProject := filepath.Join(tmpDir, "sibling-project")
+		if err := os.MkdirAll(siblingProject, 0750); err != nil {
+			t.Fatalf("failed to create sibling project: %v", err)
+		}
+
+		// Create config file with parent-relative path
+		configContent := `
+external_projects:
+  sibling: ../sibling-project
+`
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+
+		// Test from multiple different CWDs
+		// Note: We only test from mainRepoDir and beadsDir, not from tmpDir
+		// because when CWD is tmpDir, the config file at mainRepoDir/.beads/config.yaml
+		// won't be discovered (viper searches from CWD upward)
+		testDirs := []string{
+			mainRepoDir, // From repo root
+			beadsDir,    // From .beads/ (daemon context)
+		}
+
+		for _, testDir := range testDirs {
+			// Change to test directory
+			origDir, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("failed to get cwd: %v", err)
+			}
+			if err := os.Chdir(testDir); err != nil {
+				t.Fatalf("failed to chdir to %s: %v", testDir, err)
+			}
+
+			// Reload config
+			if err := Initialize(); err != nil {
+				os.Chdir(origDir)
+				t.Fatalf("failed to initialize config: %v", err)
+			}
+
+			// Resolve the external project path
+			got := ResolveExternalProjectPath("sibling")
+
+			// Restore CWD before checking result
+			os.Chdir(origDir)
+
+			// Path should always resolve to the sibling project,
+			// regardless of which directory we were in
+			// Use canonicalize to handle macOS /var -> /private/var symlink
+			if canonicalize(got) != canonicalize(siblingProject) {
+				t.Errorf("from CWD=%s: ResolveExternalProjectPath(sibling) = %q, want %q",
+					testDir, got, siblingProject)
+			}
+		}
+	})
+}
+
 func TestValidationConfigDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

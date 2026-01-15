@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+
 // preCommitFrameworkPattern matches pre-commit or prek framework hooks.
 // Uses same patterns as hookManagerPatterns in doctor/fix/hooks.go for consistency.
 // Includes all detection patterns: pre-commit run, prek run/hook-impl, config file refs, and pre-commit env vars.
@@ -409,8 +410,9 @@ exit 0
 }
 
 // mergeDriverInstalled checks if bd merge driver is configured correctly
+// Note: This runs during bd init BEFORE .beads exists, so it runs git in CWD.
 func mergeDriverInstalled() bool {
-	// Check git config for merge driver
+	// Check git config for merge driver (runs in CWD)
 	cmd := exec.Command("git", "config", "merge.beads.driver")
 	output, err := cmd.Output()
 	if err != nil || len(output) == 0 {
@@ -441,8 +443,9 @@ func mergeDriverInstalled() bool {
 }
 
 // installMergeDriver configures git to use bd merge for JSONL files
+// Note: This runs during bd init BEFORE .beads exists, so it runs git in CWD.
 func installMergeDriver() error {
-	// Configure git merge driver
+	// Configure git merge driver (runs in CWD)
 	cmd := exec.Command("git", "config", "merge.beads.driver", "bd merge %A %O %A %B")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to configure git merge driver: %w\n%s", err, output)

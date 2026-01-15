@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,9 +122,11 @@ func TestResolveWorktreePathByName(t *testing.T) {
 		_ = cmd.Run()
 	}()
 
+	ctx := context.Background()
+
 	t.Run("resolves by name when worktree is in subdirectory", func(t *testing.T) {
 		// This should find the worktree by consulting git's registry
-		resolved, err := resolveWorktreePath(mainDir, "test-wt")
+		resolved, err := resolveWorktreePath(ctx, mainDir, "test-wt")
 		if err != nil {
 			t.Errorf("resolveWorktreePath(repoRoot, \"test-wt\") failed: %v", err)
 			return
@@ -138,7 +141,7 @@ func TestResolveWorktreePathByName(t *testing.T) {
 
 	t.Run("resolves by relative path", func(t *testing.T) {
 		// This should work via the existing relative-to-repo-root logic
-		resolved, err := resolveWorktreePath(mainDir, ".worktrees/test-wt")
+		resolved, err := resolveWorktreePath(ctx, mainDir, ".worktrees/test-wt")
 		if err != nil {
 			t.Errorf("resolveWorktreePath(repoRoot, \".worktrees/test-wt\") failed: %v", err)
 			return
@@ -149,7 +152,7 @@ func TestResolveWorktreePathByName(t *testing.T) {
 	})
 
 	t.Run("resolves by absolute path", func(t *testing.T) {
-		resolved, err := resolveWorktreePath(mainDir, worktreePath)
+		resolved, err := resolveWorktreePath(ctx, mainDir, worktreePath)
 		if err != nil {
 			t.Errorf("resolveWorktreePath(repoRoot, absolutePath) failed: %v", err)
 			return
@@ -160,7 +163,7 @@ func TestResolveWorktreePathByName(t *testing.T) {
 	})
 
 	t.Run("returns error for non-existent worktree", func(t *testing.T) {
-		_, err := resolveWorktreePath(mainDir, "non-existent")
+		_, err := resolveWorktreePath(ctx, mainDir, "non-existent")
 		if err == nil {
 			t.Error("resolveWorktreePath should return error for non-existent worktree")
 		}

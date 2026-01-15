@@ -356,6 +356,106 @@ func TestCanonicalizePathCase(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeIfRelative(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		validate func(t *testing.T, result string)
+	}{
+		{
+			name:  "empty string returns empty",
+			input: "",
+			validate: func(t *testing.T, result string) {
+				if result != "" {
+					t.Errorf("expected empty string, got %q", result)
+				}
+			},
+		},
+		{
+			name:  "absolute path returns unchanged",
+			input: "/tmp/test/path",
+			validate: func(t *testing.T, result string) {
+				if result != "/tmp/test/path" {
+					t.Errorf("expected /tmp/test/path, got %q", result)
+				}
+			},
+		},
+		{
+			name:  "relative path returns canonicalized absolute",
+			input: ".",
+			validate: func(t *testing.T, result string) {
+				if !filepath.IsAbs(result) {
+					t.Errorf("expected absolute path, got %q", result)
+				}
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatalf("failed to get cwd: %v", err)
+				}
+				// Result should be related to cwd
+				canonicalCwd := CanonicalizePath(cwd)
+				if result != canonicalCwd {
+					t.Errorf("expected %q, got %q", canonicalCwd, result)
+				}
+			},
+		},
+		{
+			name:  "relative subdirectory path",
+			input: "subdir/file.txt",
+			validate: func(t *testing.T, result string) {
+				if !filepath.IsAbs(result) {
+					t.Errorf("expected absolute path, got %q", result)
+				}
+				if !strings.HasSuffix(result, "subdir/file.txt") && !strings.HasSuffix(result, "subdir\\file.txt") {
+					t.Errorf("expected path to end with subdir/file.txt, got %q", result)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := CanonicalizeIfRelative(tt.input)
+			tt.validate(t, result)
+		})
+	}
+}
+
+func TestCanonicalizeIfRelativeTilde(t *testing.T) {
+	// Test tilde expansion - CanonicalizeIfRelative does NOT expand tilde
+	// because ~ is not detected as relative by filepath.IsAbs()
+	// This documents the current behavior - tilde paths need separate handling
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("could not get home directory")
+	}
+
+	// ~/path is technically not absolute, but filepath.IsAbs treats it as relative
+	tildeInput := "~/testpath"
+	result := CanonicalizeIfRelative(tildeInput)
+
+	// The function should canonicalize it since ~ is not absolute
+	// But CanonicalizePath doesn't expand tilde, so we get cwd + ~/testpath
+	// This documents the expected behavior - tilde expansion must happen before
+	// calling CanonicalizeIfRelative
+	if result == tildeInput {
+		t.Logf("tilde path returned unchanged - tilde expansion happens elsewhere")
+	} else if strings.Contains(result, home) {
+		t.Logf("tilde was expanded to home directory")
+	}
+	// Either behavior is acceptable - this test documents it
+
+	// Verify absolute tilde-expanded paths work correctly
+	absoluteWithHome := filepath.Join(home, "testpath")
+	result = CanonicalizeIfRelative(absoluteWithHome)
+	if result != absoluteWithHome {
+		// May differ on macOS due to /var -> /private/var symlink resolution
+		// Just verify it's still absolute and contains the expected path
+		if !filepath.IsAbs(result) {
+			t.Errorf("expected absolute path, got %q", result)
+		}
+	}
+}
+
 func TestPathsEqual(t *testing.T) {
 	t.Run("identical paths", func(t *testing.T) {
 		tmpDir := t.TempDir()

@@ -893,6 +893,226 @@ func TestExportToMultiRepo(t *testing.T) {
 	})
 }
 
+// TestExportToMultiRepoPathResolution tests that relative paths in repos.additional
+// are resolved from repo root (parent of .beads/), NOT from CWD.
+// This is the fix for oss-lbp.
+func TestExportToMultiRepoPathResolution(t *testing.T) {
+	t.Run("relative path resolved from repo root not CWD", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+
+		// Initialize config
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("failed to initialize config: %v", err)
+		}
+
+		// Create a repo structure:
+		// tmpDir/
+		//   .beads/
+		//     config.yaml
+		//     beads.db
+		//   oss/               <- relative path "oss/" should resolve here
+		//     .beads/
+		//       issues.jsonl   <- export destination
+		tmpDir := t.TempDir()
+
+		// Create .beads directory with config file
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatalf("failed to create .beads dir: %v", err)
+		}
+
+		// Create config file so ConfigFileUsed() returns a valid path
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		configContent := `repos:
+  primary: .
+  additional:
+    - oss/
+`
+		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+
+		// Create oss/ subdirectory (the additional repo)
+		ossDir := filepath.Join(tmpDir, "oss")
+		ossBeadsDir := filepath.Join(ossDir, ".beads")
+		if err := os.MkdirAll(ossBeadsDir, 0755); err != nil {
+			t.Fatalf("failed to create oss/.beads dir: %v", err)
+		}
+
+		// Change to a DIFFERENT directory (to test that CWD doesn't affect resolution)
+		// This simulates daemon context where CWD is .beads/
+		origDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("failed to get cwd: %v", err)
+		}
+		if err := os.Chdir(beadsDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer os.Chdir(origDir)
+
+		// Reload config from the new location
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("failed to reinitialize config: %v", err)
+		}
+
+		// Verify config was loaded correctly
+		multiRepo := config.GetMultiRepoConfig()
+		if multiRepo == nil {
+			t.Skip("config not loaded - skipping test")
+		}
+
+		ctx := context.Background()
+
+		// Create an issue destined for the "oss/" repo
+		issue := &types.Issue{
+			ID:         "bd-oss-1",
+			Title:      "OSS Issue",
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: "oss/", // Will be matched against repos.additional
+		}
+		issue.ContentHash = issue.ComputeContentHash()
+
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+
+		// Export - this should resolve "oss/" relative to tmpDir (repo root), not .beads/ (CWD)
+		results, err := store.ExportToMultiRepo(ctx)
+		if err != nil {
+			t.Fatalf("ExportToMultiRepo() error = %v", err)
+		}
+
+		// Check the export count
+		if results["oss/"] != 1 {
+			t.Errorf("expected 1 issue exported to oss/, got %d", results["oss/"])
+		}
+
+		// Verify the JSONL was written to the correct location (tmpDir/oss/.beads/issues.jsonl)
+		// NOT to .beads/oss/.beads/issues.jsonl (which would happen with CWD-based resolution)
+		expectedJSONL := filepath.Join(ossBeadsDir, "issues.jsonl")
+		wrongJSONL := filepath.Join(beadsDir, "oss", ".beads", "issues.jsonl")
+
+		if _, err := os.Stat(expectedJSONL); os.IsNotExist(err) {
+			t.Errorf("JSONL not written to expected location: %s", expectedJSONL)
+		}
+
+		if _, err := os.Stat(wrongJSONL); err == nil {
+			t.Errorf("JSONL was incorrectly written to CWD-relative path: %s", wrongJSONL)
+		}
+	})
+
+	t.Run("absolute path returned unchanged", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+
+		// Initialize config
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("failed to initialize config: %v", err)
+		}
+
+		// Create repos with absolute paths
+		primaryDir := t.TempDir()
+		additionalDir := t.TempDir()
+
+		// Create .beads directories
+		primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+		additionalBeadsDir := filepath.Join(additionalDir, ".beads")
+		if err := os.MkdirAll(primaryBeadsDir, 0755); err != nil {
+			t.Fatalf("failed to create primary .beads dir: %v", err)
+		}
+		if err := os.MkdirAll(additionalBeadsDir, 0755); err != nil {
+			t.Fatalf("failed to create additional .beads dir: %v", err)
+		}
+
+		// Set config with ABSOLUTE paths
+		config.Set("repos.primary", primaryDir)
+		config.Set("repos.additional", []string{additionalDir})
+
+		ctx := context.Background()
+
+		// Create issue for additional repo (using absolute path as source_repo)
+		issue := &types.Issue{
+			ID:         "bd-abs-1",
+			Title:      "Absolute Path Issue",
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: additionalDir,
+		}
+		issue.ContentHash = issue.ComputeContentHash()
+
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+
+		// Export
+		results, err := store.ExportToMultiRepo(ctx)
+		if err != nil {
+			t.Fatalf("ExportToMultiRepo() error = %v", err)
+		}
+
+		// Verify export to absolute path
+		if results[additionalDir] != 1 {
+			t.Errorf("expected 1 issue exported to %s, got %d", additionalDir, results[additionalDir])
+		}
+
+		// Verify JSONL was written to the correct location
+		expectedJSONL := filepath.Join(additionalBeadsDir, "issues.jsonl")
+		if _, err := os.Stat(expectedJSONL); os.IsNotExist(err) {
+			t.Errorf("JSONL not written to expected location: %s", expectedJSONL)
+		}
+	})
+
+	t.Run("empty config handled gracefully", func(t *testing.T) {
+		store, cleanup := setupTestDB(t)
+		defer cleanup()
+
+		// Initialize config fresh
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("failed to initialize config: %v", err)
+		}
+
+		// Explicitly clear repos config
+		config.Set("repos.primary", "")
+		config.Set("repos.additional", nil)
+
+		ctx := context.Background()
+
+		// Create an issue
+		issue := &types.Issue{
+			ID:         "bd-empty-1",
+			Title:      "Empty Config Issue",
+			Status:     types.StatusOpen,
+			Priority:   1,
+			IssueType:  types.TypeTask,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			SourceRepo: ".",
+		}
+		issue.ContentHash = issue.ComputeContentHash()
+
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+
+		// Export should return nil gracefully (single-repo mode)
+		results, err := store.ExportToMultiRepo(ctx)
+		if err != nil {
+			t.Errorf("ExportToMultiRepo() should not error with empty config: %v", err)
+		}
+		if results != nil {
+			t.Errorf("expected nil results with empty config, got %v", results)
+		}
+	})
+}
+
 // TestUpsertPreservesGateFields tests that gate await fields are preserved during upsert (bd-gr4q).
 // Gates are wisps and aren't exported to JSONL. When an issue with the same ID is imported,
 // the await fields should NOT be cleared.

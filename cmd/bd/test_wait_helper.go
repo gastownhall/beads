@@ -3,9 +3,11 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -24,7 +26,7 @@ func waitFor(t *testing.T, timeout, poll time.Duration, pred func() bool) {
 }
 
 // setupGitRepo creates a temporary git repository and returns its path and cleanup function.
-// The repo is initialized with git config and an initial commit.
+// The repo is initialized with git config, a .beads directory, and an initial commit.
 // The current directory is changed to the new repo.
 func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 	t.Helper()
@@ -39,8 +41,9 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
+	// Reset caches after changing directory
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Initialize git repo with 'main' as default branch (modern git convention)
 	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
@@ -48,17 +51,29 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Configure git
 	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
 	_ = exec.Command("git", "config", "user.name", "Test User").Run()
+
+	// Create .beads directory with minimal issues.jsonl (required for RepoContext)
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte{}, 0600); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to write issues.jsonl: %v", err)
+	}
 
 	// Create initial commit
 	if err := os.WriteFile("test.txt", []byte("test"), 0600); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	_ = exec.Command("git", "add", "test.txt").Run()
+	_ = exec.Command("git", "add", ".").Run()
 	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
@@ -67,6 +82,7 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
 		git.ResetCaches()
+		beads.ResetCaches()
 	}
 
 	return tmpDir, cleanup
@@ -87,8 +103,9 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
+	// Reset caches after changing directory
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Initialize git repo with specific branch
 	if err := exec.Command("git", "init", "-b", branch).Run(); err != nil {
@@ -96,17 +113,29 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Configure git
 	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
 	_ = exec.Command("git", "config", "user.name", "Test User").Run()
+
+	// Create .beads directory with minimal issues.jsonl (required for RepoContext)
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte{}, 0600); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to write issues.jsonl: %v", err)
+	}
 
 	// Create initial commit
 	if err := os.WriteFile("test.txt", []byte("test"), 0600); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	_ = exec.Command("git", "add", "test.txt").Run()
+	_ = exec.Command("git", "add", ".").Run()
 	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
@@ -115,6 +144,7 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
 		git.ResetCaches()
+		beads.ResetCaches()
 	}
 
 	return tmpDir, cleanup
@@ -135,8 +165,9 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		t.Fatalf("failed to change to temp directory: %v", err)
 	}
 
-	// Reset git caches after changing directory
+	// Reset caches after changing directory
 	git.ResetCaches()
+	beads.ResetCaches()
 
 	// Initialize git repo with 'main' as default branch (modern git convention)
 	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
@@ -151,6 +182,7 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 	cleanup = func() {
 		_ = os.Chdir(originalWd)
 		git.ResetCaches()
+		beads.ResetCaches()
 	}
 
 	return tmpDir, cleanup

@@ -8,6 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 func TestInitCommand(t *testing.T) {
@@ -480,12 +483,18 @@ func TestInitNoDbMode(t *testing.T) {
 	// Set BEADS_DIR to prevent git repo detection from finding project's .beads
 	origBeadsDir := os.Getenv("BEADS_DIR")
 	os.Setenv("BEADS_DIR", filepath.Join(tmpDir, ".beads"))
+	// Reset caches so RepoContext picks up new BEADS_DIR and CWD
+	beads.ResetCaches()
+	git.ResetCaches()
 	defer func() {
 		if origBeadsDir != "" {
 			os.Setenv("BEADS_DIR", origBeadsDir)
 		} else {
 			os.Unsetenv("BEADS_DIR")
 		}
+		// Reset caches on cleanup too
+		beads.ResetCaches()
+		git.ResetCaches()
 	}()
 
 	// Initialize with --no-db flag
