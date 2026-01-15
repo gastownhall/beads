@@ -6,7 +6,7 @@ Common issues encountered when using bd and how to resolve them.
 
 **MCP tools (local environment):**
 - MCP tools require bd daemon running
-- Check daemon status: `bd daemon --status` (CLI)
+- Check daemon status: `bd daemon status` (CLI)
 - If MCP tools fail, verify daemon is running and restart if needed
 - MCP tools automatically use daemon mode (no --no-daemon option)
 

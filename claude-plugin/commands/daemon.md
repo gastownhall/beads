@@ -1,6 +1,6 @@
 ---
 description: Manage background sync daemon
-argument-hint: [--start] [--stop] [--status] [--health]
+argument-hint: [start] [stop] [status] [--health]
 ---
 
 Manage the per-project background daemon that handles database connections and syncs with git.
@@ -39,9 +39,9 @@ Each project runs its own daemon at `.beads/bd.sock` for complete database isola
 
 ## Common Operations
 
-- **Start**: `bd daemon --start` (or auto-starts on first `bd` command)
-- **Stop**: `bd daemon --stop`
-- **Status**: `bd daemon --status`
+- **Start**: `bd daemon start` (or auto-starts on first `bd` command)
+- **Stop**: `bd daemon stop`
+- **Status**: `bd daemon status`
 - **Health**: `bd daemon --health` - shows uptime, cache stats, performance metrics
 - **Metrics**: `bd daemon --metrics` - detailed operational telemetry
 

@@ -77,7 +77,7 @@ bd config set sync.branch ""
 
 # Stop and restart daemon
 bd daemon stop
-bd daemon --start
+bd daemon start
 
 # Clean up existing worktrees
 rm -rf .git/beads-worktrees

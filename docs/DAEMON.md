@@ -246,10 +246,10 @@ Event-driven mode is the **default** as of v0.21.0. No configuration needed.
 
 ```bash
 # Event-driven mode starts automatically
-bd daemon --start
+bd daemon start
 
 # Explicitly enable (same as default)
-BEADS_DAEMON_MODE=events bd daemon --start
+BEADS_DAEMON_MODE=events bd daemon start
 ```
 
 **Available modes:**
@@ -308,10 +308,10 @@ For edge cases (NFS, containers, WSL) where fsnotify is unreliable:
 
 ```bash
 # Explicitly use polling mode
-BEADS_DAEMON_MODE=poll bd daemon --start
+BEADS_DAEMON_MODE=poll bd daemon start
 
 # With custom interval
-bd daemon --start --interval 10s
+bd daemon start --interval 10s
 ```
 
 ### Troubleshooting Event-Driven Mode
@@ -380,7 +380,7 @@ bd info --json | grep daemon_running
 export BEADS_AUTO_START_DAEMON=false
 
 # Start manually
-bd daemon --start
+bd daemon start
 ```
 
 **Auto-start with exponential backoff:**

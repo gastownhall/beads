@@ -629,7 +629,7 @@ See [integrations/beads-mcp/README.md](../integrations/beads-mcp/README.md) for 
 
 **Common symptoms:**
 - "Database out of sync with JSONL" errors that persist after running `bd import`
-- `bd daemon --stop` fails with "operation not permitted"
+- `bd daemon stop` fails with "operation not permitted"
 - Cannot kill daemon process with `kill <pid>`
 - JSONL hash mismatch warnings (bd-160)
 - Commands intermittently fail with staleness errors

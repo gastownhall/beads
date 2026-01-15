@@ -153,7 +153,7 @@ Run 'bd daemon --help' to see all subcommands.`,
 					// If we can check version and it's compatible, exit
 					if healthErr == nil && health.Compatible {
 						fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d, version %s)\n", pid, health.Version)
-						fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
+						fmt.Fprintf(os.Stderr, "Use 'bd daemon stop' to stop it first\n")
 						os.Exit(1)
 					}
 
@@ -167,7 +167,7 @@ Run 'bd daemon --help' to see all subcommands.`,
 				} else {
 					// Can't check version - assume incompatible
 					fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d)\n", pid)
-					fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
+					fmt.Fprintf(os.Stderr, "Use 'bd daemon stop' to stop it first\n")
 					os.Exit(1)
 				}
 			}

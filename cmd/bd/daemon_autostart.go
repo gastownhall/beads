@@ -495,13 +495,13 @@ func getSocketPath() string {
 func emitVerboseWarning() {
 	switch daemonStatus.FallbackReason {
 	case FallbackConnectFailed:
-		fmt.Fprintf(os.Stderr, "Warning: Daemon unreachable at %s. Running in direct mode. Hint: bd daemon --status\n", daemonStatus.SocketPath)
+		fmt.Fprintf(os.Stderr, "Warning: Daemon unreachable at %s. Running in direct mode. Hint: bd daemon status\n", daemonStatus.SocketPath)
 	case FallbackHealthFailed:
 		fmt.Fprintf(os.Stderr, "Warning: Daemon unhealthy. Falling back to direct mode. Hint: bd daemon --health\n")
 	case FallbackAutoStartDisabled:
 		fmt.Fprintf(os.Stderr, "Warning: Auto-start disabled (BEADS_AUTO_START_DAEMON=false). Running in direct mode. Hint: bd daemon\n")
 	case FallbackAutoStartFailed:
-		fmt.Fprintf(os.Stderr, "Warning: Failed to auto-start daemon. Running in direct mode. Hint: bd daemon --status\n")
+		fmt.Fprintf(os.Stderr, "Warning: Failed to auto-start daemon. Running in direct mode. Hint: bd daemon status\n")
 	case FallbackDaemonUnsupported:
 		fmt.Fprintf(os.Stderr, "Warning: Daemon does not support this command yet. Running in direct mode. Hint: update daemon or use local mode.\n")
 	case FallbackWorktreeSafety:

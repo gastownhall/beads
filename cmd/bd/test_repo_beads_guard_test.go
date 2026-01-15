@@ -160,9 +160,9 @@ func stopRepoDaemon(repoRoot string) {
 		return // no daemon running
 	}
 
-	// Shell out to bd daemon --stop. We can't call the daemon functions directly
+	// Shell out to bd daemon stop. We can't call the daemon functions directly
 	// from TestMain because they have complex dependencies. Using exec is cleaner.
-	cmd := exec.Command("bd", "daemon", "--stop")
+	cmd := exec.Command("bd", "daemon", "stop")
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
 
