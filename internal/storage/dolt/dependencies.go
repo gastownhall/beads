@@ -201,6 +201,7 @@ func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) 
 	inClause := strings.Join(placeholders, ",")
 
 	// Query for dependencies (blockers)
+	// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
 	depQuery := fmt.Sprintf(`
 		SELECT issue_id, COUNT(*) as cnt
 		FROM dependencies
@@ -231,6 +232,7 @@ func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) 
 	}
 
 	// Query for dependents (blocking)
+	// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
 	blockingQuery := fmt.Sprintf(`
 		SELECT depends_on_id, COUNT(*) as cnt
 		FROM dependencies

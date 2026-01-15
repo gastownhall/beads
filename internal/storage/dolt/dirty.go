@@ -55,6 +55,7 @@ func (s *DoltStore) ClearDirtyIssuesByID(ctx context.Context, issueIDs []string)
 		args[i] = id
 	}
 
+	// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
 	query := fmt.Sprintf("DELETE FROM dirty_issues WHERE issue_id IN (%s)", strings.Join(placeholders, ","))
 	_, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {

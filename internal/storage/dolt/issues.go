@@ -265,6 +265,7 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// nolint:gosec // G201: setClauses contains only column names (e.g. "status = ?"), actual values passed via args
 	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", "))
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("failed to update issue: %w", err)
@@ -600,7 +601,8 @@ func markDirty(ctx context.Context, tx *sql.Tx, issueID string) error {
 	return err
 }
 
-func generateIssueID(ctx context.Context, tx *sql.Tx, prefix string, issue *types.Issue, actor string) (string, error) {
+// nolint:unparam // error return kept for interface consistency
+func generateIssueID(_ context.Context, _ *sql.Tx, prefix string, issue *types.Issue, _ string) (string, error) {
 	// Simple hash-based ID generation
 	// Use first 6 chars of content hash
 	hash := issue.ComputeContentHash()

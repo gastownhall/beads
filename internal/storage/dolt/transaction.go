@@ -137,6 +137,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 	}
 
 	args = append(args, id)
+	// nolint:gosec // G201: setClauses contains only column names (e.g. "status = ?"), actual values passed via args
 	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", "))
 	_, err := t.tx.ExecContext(ctx, query, args...)
 	return err

@@ -124,6 +124,7 @@ func (s *DoltStore) GetCommentsForIssues(ctx context.Context, issueIDs []string)
 		args[i] = id
 	}
 
+	// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
 	query := fmt.Sprintf(`
 		SELECT id, issue_id, author, text, created_at
 		FROM comments

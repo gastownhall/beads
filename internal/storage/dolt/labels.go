@@ -64,6 +64,7 @@ func (s *DoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (
 		args[i] = id
 	}
 
+	// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
 	query := fmt.Sprintf(`
 		SELECT issue_id, label FROM labels
 		WHERE issue_id IN (%s)

@@ -100,10 +100,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// Create the database if it doesn't exist
 	_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database))
 	if err != nil {
-		initDB.Close()
+		_ = initDB.Close() // nolint:gosec // G104: error ignored on early return
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
-	initDB.Close()
+	_ = initDB.Close() // nolint:gosec // G104: connection no longer needed
 
 	// Now connect with the database specified
 	connStr := fmt.Sprintf(

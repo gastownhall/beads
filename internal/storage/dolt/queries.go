@@ -211,6 +211,7 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
+	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
 	querySQL := fmt.Sprintf(`
 		SELECT id FROM issues
 		%s
@@ -272,6 +273,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
+	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		%s
@@ -338,12 +340,12 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		for blockerRows.Next() {
 			var blockerID string
 			if err := blockerRows.Scan(&blockerID); err != nil {
-				blockerRows.Close()
+				_ = blockerRows.Close() // nolint:gosec // G104: error ignored on early return
 				return nil, err
 			}
 			blockerIDs = append(blockerIDs, blockerID)
 		}
-		blockerRows.Close()
+		_ = blockerRows.Close() // nolint:gosec // G104: rows already read successfully
 
 		results = append(results, &types.BlockedIssue{
 			Issue:          *issue,
@@ -407,6 +409,7 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 		statusClause = "status = ?"
 	}
 
+	// nolint:gosec // G201: statusClause contains only literal SQL or a single ? placeholder
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		WHERE updated_at < ?

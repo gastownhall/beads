@@ -134,7 +134,7 @@ func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string
 	var assignee, owner, contentHash sql.NullString
 	var estimatedMinutes sql.NullInt64
 
-	// Note: AS OF requires literal value, but we've validated ref is safe
+	// nolint:gosec // G201: ref is validated by validateRef() above - AS OF requires literal
 	query := fmt.Sprintf(`
 		SELECT id, content_hash, title, description, status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at
@@ -216,7 +216,7 @@ func (s *DoltStore) GetIssueDiff(ctx context.Context, issueID, fromRef, toRef st
 		return nil, fmt.Errorf("invalid toRef: %w", err)
 	}
 
-	// Note: dolt_diff_issues requires literal values, but we've validated refs are safe
+	// nolint:gosec // G201: refs are validated by validateRef() above - dolt_diff_issues requires literal
 	query := fmt.Sprintf(`
 		SELECT
 			from_id, to_id,
