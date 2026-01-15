@@ -106,26 +106,42 @@ type RedirectInfo struct {
 // GetRedirectInfo checks if the current beads directory is redirected.
 // It searches for the local .beads/ directory and checks if it contains a redirect file.
 // Returns RedirectInfo with IsRedirected=true if a redirect is active.
+//
+// bd-wayc3: This function now also checks the git repo's local .beads directory even when
+// BEADS_DIR is set. This handles the case where BEADS_DIR is pre-set to the redirect target
+// (e.g., by shell environment or tooling), but we still need to detect that a redirect exists.
 func GetRedirectInfo() RedirectInfo {
-	info := RedirectInfo{}
-
-	// Find the local .beads directory without following redirects
-	localBeadsDir := findLocalBeadsDir()
-	if localBeadsDir == "" {
-		return info
+	// First, always check the git repo's local .beads directory for redirects
+	// This handles the case where BEADS_DIR is pre-set to the redirect target
+	if localBeadsDir := findLocalBdsDirInRepo(); localBeadsDir != "" {
+		if info := checkRedirectInDir(localBeadsDir); info.IsRedirected {
+			return info
+		}
 	}
-	info.LocalDir = localBeadsDir
+
+	// Fall back to original logic for non-git-repo cases
+	if localBeadsDir := findLocalBeadsDir(); localBeadsDir != "" {
+		return checkRedirectInDir(localBeadsDir)
+	}
+
+	return RedirectInfo{}
+}
+
+// checkRedirectInDir checks if a beads directory has a redirect file and returns redirect info.
+// Returns RedirectInfo with IsRedirected=true if a valid redirect exists.
+func checkRedirectInDir(beadsDir string) RedirectInfo {
+	info := RedirectInfo{LocalDir: beadsDir}
 
 	// Check if this directory has a redirect file
-	redirectFile := filepath.Join(localBeadsDir, RedirectFileName)
+	redirectFile := filepath.Join(beadsDir, RedirectFileName)
 	if _, err := os.Stat(redirectFile); err != nil {
 		// No redirect file
 		return info
 	}
 
 	// There's a redirect - find the target
-	targetDir := FollowRedirect(localBeadsDir)
-	if targetDir == localBeadsDir {
+	targetDir := FollowRedirect(beadsDir)
+	if targetDir == beadsDir {
 		// Redirect file exists but failed to resolve (invalid target)
 		return info
 	}
@@ -133,6 +149,24 @@ func GetRedirectInfo() RedirectInfo {
 	info.IsRedirected = true
 	info.TargetDir = targetDir
 	return info
+}
+
+// findLocalBdsDirInRepo finds the .beads directory relative to the git repo root.
+// This ignores BEADS_DIR to find the "true local" .beads for redirect detection.
+// bd-wayc3: Added to detect redirects even when BEADS_DIR is pre-set.
+func findLocalBdsDirInRepo() string {
+	// Get git repo root
+	repoRoot := git.GetRepoRoot()
+	if repoRoot == "" {
+		return ""
+	}
+
+	beadsDir := filepath.Join(repoRoot, ".beads")
+	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		return beadsDir
+	}
+
+	return ""
 }
 
 // findLocalBeadsDir finds the local .beads directory without following redirects.

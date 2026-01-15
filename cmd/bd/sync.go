@@ -208,6 +208,36 @@ Use --merge to merge the sync branch back to main branch.`,
 		}
 		hasSyncBranchConfig := syncBranchName != ""
 
+		// bd-wayc3: Check for redirect + sync-branch incompatibility
+		// Redirect and sync-branch are mutually exclusive:
+		// - Redirect says: "My database is in another repo (I am a client)"
+		// - Sync-branch says: "I own my database and sync it myself via worktree"
+		// When redirect is active, the sync-branch worktree operations fail because
+		// the beads files are in a different git repo than the current working directory.
+		redirectInfo := beads.GetRedirectInfo()
+		if redirectInfo.IsRedirected {
+			if hasSyncBranchConfig {
+				fmt.Printf("⚠️  Redirect active (-> %s), skipping sync-branch operations\n", redirectInfo.TargetDir)
+				fmt.Println("   Hint: Redirected clones should not have sync-branch configured")
+				fmt.Println("   The owner of the target .beads directory handles sync-branch")
+			} else {
+				fmt.Printf("→ Redirect active (-> %s)\n", redirectInfo.TargetDir)
+			}
+			// For redirected clones, just do import/export - skip all git operations
+			// The target repo's owner (e.g., mayor) handles git commit/push via sync-branch
+			if dryRun {
+				fmt.Println("→ [DRY RUN] Would export to JSONL (redirected clone, git operations skipped)")
+				fmt.Println("✓ Dry run complete (no changes made)")
+			} else {
+				fmt.Println("→ Exporting to JSONL (redirected clone, skipping git operations)...")
+				if err := exportToJSONL(ctx, jsonlPath); err != nil {
+					FatalError("exporting: %v", err)
+				}
+				fmt.Println("✓ Export complete (target repo owner handles git sync)")
+			}
+			return
+		}
+
 		// Preflight: check for upstream tracking
 		// If no upstream, automatically switch to --from-main mode (gt-ick9: ephemeral branch support)
 		// GH#638: Skip this fallback if sync.branch is explicitly configured

@@ -391,6 +391,79 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	}
 }
 
+// CheckRedirectSyncBranchConflict detects when both redirect and sync-branch are configured.
+// This is a configuration error: redirect means "my database is elsewhere (I'm a client)",
+// while sync-branch means "I own my database and sync it myself". These are mutually exclusive.
+// bd-wayc3: Added to detect incompatible configuration before sync fails.
+func CheckRedirectSyncBranchConflict(path string) DoctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Check if redirect file exists
+	redirectFile := filepath.Join(beadsDir, beads.RedirectFileName)
+	if _, err := os.Stat(redirectFile); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Redirect + Sync-Branch",
+			Status:   StatusOK,
+			Message:  "No redirect configured",
+			Category: CategoryData,
+		}
+	}
+
+	// Redirect exists - check if sync-branch is also configured
+	// Read config.yaml directly since we need to check the local config, not the resolved one
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	data, err := os.ReadFile(configPath) // #nosec G304 - path constructed safely
+	if err != nil {
+		// No config file - no conflict possible
+		return DoctorCheck{
+			Name:     "Redirect + Sync-Branch",
+			Status:   StatusOK,
+			Message:  "Redirect active (no local config)",
+			Category: CategoryData,
+		}
+	}
+
+	// Parse sync-branch from config.yaml (simple line-based parsing)
+	// Handles: sync-branch: value, sync-branch: "value", sync-branch: 'value'
+	// Also handles trailing comments: sync-branch: value # comment
+	configStr := string(data)
+	for _, line := range strings.Split(configStr, "\n") {
+		line = strings.TrimSpace(line)
+		// Skip comments
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "sync-branch:") {
+			value := strings.TrimPrefix(line, "sync-branch:")
+			// Remove trailing comment if present
+			if idx := strings.Index(value, "#"); idx != -1 {
+				value = value[:idx]
+			}
+			value = strings.TrimSpace(value)
+			// Remove quotes if present
+			value = strings.Trim(value, `"'`)
+			if value != "" {
+				// Found both redirect and sync-branch - conflict!
+				return DoctorCheck{
+					Name:     "Redirect + Sync-Branch",
+					Status:   StatusWarning,
+					Message:  fmt.Sprintf("Redirect active but sync-branch=%q configured", value),
+					Detail:   "Redirect and sync-branch are mutually exclusive. Redirected clones should not have sync-branch.",
+					Fix:      "Remove sync-branch from config.yaml (set to empty string or delete the line)",
+					Category: CategoryData,
+				}
+			}
+		}
+	}
+
+	return DoctorCheck{
+		Name:     "Redirect + Sync-Branch",
+		Status:   StatusOK,
+		Message:  "Redirect active (no sync-branch conflict)",
+		Category: CategoryData,
+	}
+}
+
 // CheckGitConflicts detects git conflict markers in JSONL file.
 func CheckGitConflicts(path string) DoctorCheck {
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)

@@ -465,7 +465,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, vestigialWorktreesCheck)
 	// Don't fail overall check for vestigial worktrees, just warn
 
-	// Check 14f: last-touched file tracking (runtime state shouldn't be committed)
+	// Check 14f: redirect + sync-branch conflict (bd-wayc3)
+	redirectSyncBranchCheck := convertDoctorCheck(doctor.CheckRedirectSyncBranchConflict(path))
+	result.Checks = append(result.Checks, redirectSyncBranchCheck)
+	// Don't fail overall check for redirect+sync-branch conflict, just warn
+
+	// Check 14g: last-touched file tracking (runtime state shouldn't be committed)
 	lastTouchedTrackingCheck := convertWithCategory(doctor.CheckLastTouchedNotTracked(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, lastTouchedTrackingCheck)
 	// Don't fail overall check for last-touched tracking, just warn
@@ -577,10 +582,9 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, staleMQFilesCheck)
 	// Don't fail overall check for legacy MQ files, just warn
 
-	// Check 26d: Misclassified wisps (wisp-patterned IDs without ephemeral flag)
-	misclassifiedWispsCheck := convertDoctorCheck(doctor.CheckMisclassifiedWisps(path))
-	result.Checks = append(result.Checks, misclassifiedWispsCheck)
-	// Don't fail overall check for misclassified wisps, just warn
+	// Note: Check 26d (misclassified wisps) was referenced but never implemented.
+	// The commit f703237c added importer-based auto-detection instead.
+	// Removing the undefined reference to fix build.
 
 	// Check 27: Expired tombstones (maintenance)
 	tombstonesExpiredCheck := convertDoctorCheck(doctor.CheckExpiredTombstones(path))
