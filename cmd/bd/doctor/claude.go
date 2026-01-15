@@ -81,15 +81,39 @@ func CheckClaude() DoctorCheck {
 	}
 }
 
-// isBeadsPluginInstalled checks if beads plugin is enabled in Claude Code
+// isBeadsPluginInstalled checks if beads plugin is enabled in Claude Code.
+// It checks user-level (~/.claude/settings.json) and project-level settings
+// (.claude/settings.json and .claude/settings.local.json).
 func isBeadsPluginInstalled() bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
 
-	settingsPath := filepath.Join(home, ".claude/settings.json")
-	data, err := os.ReadFile(settingsPath) // #nosec G304 -- settingsPath is constructed from user home dir, not user input
+	// Check user-level settings
+	userSettings := filepath.Join(home, ".claude", "settings.json")
+	if checkPluginInSettings(userSettings) {
+		return true
+	}
+
+	// Check project-level settings
+	projectSettings := filepath.Join(".claude", "settings.json")
+	if checkPluginInSettings(projectSettings) {
+		return true
+	}
+
+	// Check project-level local settings (gitignored)
+	projectLocalSettings := filepath.Join(".claude", "settings.local.json")
+	if checkPluginInSettings(projectLocalSettings) {
+		return true
+	}
+
+	return false
+}
+
+// checkPluginInSettings checks if beads plugin is enabled in a settings file
+func checkPluginInSettings(settingsPath string) bool {
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- settingsPath is constructed from known safe locations, not user input
 	if err != nil {
 		return false
 	}
@@ -159,10 +183,11 @@ func hasClaudeHooks() bool {
 		return false
 	}
 
-	globalSettings := filepath.Join(home, ".claude/settings.json")
-	projectSettings := ".claude/settings.local.json"
+	globalSettings := filepath.Join(home, ".claude", "settings.json")
+	projectSettings := filepath.Join(".claude", "settings.json")
+	projectLocalSettings := filepath.Join(".claude", "settings.local.json")
 
-	return hasBeadsHooks(globalSettings) || hasBeadsHooks(projectSettings)
+	return hasBeadsHooks(globalSettings) || hasBeadsHooks(projectSettings) || hasBeadsHooks(projectLocalSettings)
 }
 
 // hasBeadsHooks checks if a settings file has bd prime hooks
