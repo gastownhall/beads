@@ -344,7 +344,6 @@ var createCmd = &cobra.Command{
 		// Switch to target repo for multi-repo support (bd-6x6g)
 		// When routing to a different repo, we bypass daemon mode and use direct storage
 		var targetStore storage.Storage
-		var routedToTarget bool
 		if repoPath != "." {
 			targetBeadsDir := routing.ExpandPath(repoPath)
 			debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
@@ -371,9 +370,7 @@ var createCmd = &cobra.Command{
 			// This also bypasses daemon mode since daemon owns the current repo's store
 			store = targetStore
 			daemonClient = nil // Bypass daemon for routed issues (T013)
-			routedToTarget = true
 		}
-		_ = routedToTarget // Used for logging context
 
 		// Check for conflicting flags
 		if explicitID != "" && parentID != "" {
