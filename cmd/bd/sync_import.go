@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -162,6 +163,7 @@ func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
 // This fetches beads from main and imports them, discarding local beads changes.
 // If sync.remote is configured (e.g., "upstream" for fork workflows), uses that remote
 // instead of "origin".
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool, noGitHistory bool) error {
 	// Determine which remote to use (default: origin, but can be configured via sync.remote)
 	remote := "origin"
@@ -190,8 +192,14 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 		return fmt.Errorf("no git remote configured")
 	}
 
+	// Get RepoContext for beads repo
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return fmt.Errorf("failed to get repo context: %w", err)
+	}
+
 	// Verify the configured remote exists
-	checkRemoteCmd := exec.CommandContext(ctx, "git", "remote", "get-url", remote)
+	checkRemoteCmd := rc.GitCmd(ctx, "remote", "get-url", remote)
 	if err := checkRemoteCmd.Run(); err != nil {
 		return fmt.Errorf("configured sync.remote '%s' does not exist (run 'git remote add %s <url>')", remote, remote)
 	}
@@ -200,14 +208,14 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 
 	// Step 1: Fetch from main
 	fmt.Printf("→ Fetching from %s/%s...\n", remote, defaultBranch)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, defaultBranch) //nolint:gosec // remote and defaultBranch from config
+	fetchCmd := rc.GitCmd(ctx, "fetch", remote, defaultBranch)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s %s failed: %w\n%s", remote, defaultBranch, err, output)
 	}
 
 	// Step 2: Checkout .beads/ directory from main
 	fmt.Printf("→ Checking out beads from %s/%s...\n", remote, defaultBranch)
-	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/") //nolint:gosec // remote and defaultBranch from config
+	checkoutCmd := rc.GitCmd(ctx, "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/")
 	if output, err := checkoutCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout .beads/ from %s/%s failed: %w\n%s", remote, defaultBranch, err, output)
 	}

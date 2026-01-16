@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -178,7 +180,8 @@ Examples:
 	},
 }
 
-// getGitActivity calculates activity stats from git log of issues.jsonl
+// getGitActivity calculates activity stats from git log of issues.jsonl.
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func getGitActivity(hours int) *RecentActivitySummary {
 	activity := &RecentActivitySummary{
 		HoursTracked: hours,
@@ -186,7 +189,12 @@ func getGitActivity(hours int) *RecentActivitySummary {
 
 	// Run git log to get patches for the last N hours
 	since := fmt.Sprintf("%d hours ago", hours)
-	cmd := exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	var cmd *exec.Cmd
+	if rc, err := beads.GetRepoContext(); err == nil {
+		cmd = rc.GitCmd(context.Background(), "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/issues.jsonl")
+	} else {
+		cmd = exec.Command("git", "log", "--since="+since, "--numstat", "--pretty=format:%H", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	}
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -222,7 +230,11 @@ func getGitActivity(hours int) *RecentActivitySummary {
 	}
 
 	// Get detailed diff to analyze changes
-	cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	if rc, err := beads.GetRepoContext(); err == nil {
+		cmd = rc.GitCmd(context.Background(), "log", "--since="+since, "-p", ".beads/issues.jsonl")
+	} else {
+		cmd = exec.Command("git", "log", "--since="+since, "-p", ".beads/issues.jsonl") // #nosec G204 -- bounded arguments for local git history inspection
+	}
 	output, err = cmd.Output()
 	if err != nil {
 		return nil
