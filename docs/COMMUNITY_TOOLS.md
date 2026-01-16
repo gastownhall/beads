@@ -32,6 +32,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Agent Native Abstraction Layer for Beads](https://marketplace.visualstudio.com/items?itemName=AgentNativeAbstractionLayer.agent-native-kanban)** (ANAL Beads) - VS Code Kanban board. Maintained by [@sebcook-ctrl](https://github.com/sebcook-ctrl). (Node.js)
 
+- **[Beads-Kanban](https://github.com/davidcforbes/Beads-Kanban)** - VS Code Kanban board for Beads issue tracking. Maintained by [@davidcforbes](https://github.com/davidcforbes). (TypeScript)
+
 - **[opencode-beads](https://github.com/joshuadavidthomas/opencode-beads)** - OpenCode plugin with automatic context injection, `/bd-*` slash commands, and autonomous task agent. Built by [@joshuadavidthomas](https://github.com/joshuadavidthomas). (Node.js)
 
 - **[nvim-beads](https://github.com/joeblubaugh/nvim-beads)** - Neovim plugin for managing beads. Built by [@joeblubaugh](https://github.com/joeblubaugh). (Lua)
