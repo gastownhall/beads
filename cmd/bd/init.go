@@ -509,10 +509,27 @@ With --stealth: configures per-repository git settings for invisible beads usage
 
 		// Check if we're in a git repo and hooks aren't installed
 		// Install by default unless --skip-hooks is passed
+		// For Dolt backend, install hooks to .beads/hooks/ (uses git config core.hooksPath)
 		if !skipHooks && isGitRepo() && !hooksInstalled() {
-			if err := installGitHooks(); err != nil && !quiet {
-				fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", ui.RenderWarn("⚠"), err)
-				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
+			if backend == configfile.BackendDolt {
+				// Dolt backend: install hooks to .beads/hooks/
+				embeddedHooks, err := getEmbeddedHooks()
+				if err == nil {
+					if err := installHooksWithOptions(embeddedHooks, false, false, false, true); err != nil && !quiet {
+						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
+						fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
+					} else if !quiet {
+						fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+					}
+				} else if !quiet {
+					fmt.Fprintf(os.Stderr, "\n%s Failed to load embedded hooks: %v\n", ui.RenderWarn("⚠"), err)
+				}
+			} else {
+				// SQLite backend: use traditional hook installation
+				if err := installGitHooks(); err != nil && !quiet {
+					fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", ui.RenderWarn("⚠"), err)
+					fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
+				}
 			}
 		}
 
