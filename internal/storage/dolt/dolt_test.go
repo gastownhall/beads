@@ -3,15 +3,29 @@ package dolt
 import (
 	"context"
 	"os"
+	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// testTimeout is the maximum time for any single test operation.
+// The embedded Dolt driver can be slow, especially for complex JOIN queries.
+// If tests are timing out, it may indicate an issue with the embedded Dolt
+// driver's async operations rather than with the DoltStore implementation.
+const testTimeout = 30 * time.Second
+
+// testContext returns a context with timeout for test operations
+func testContext(t *testing.T) (context.Context, context.CancelFunc) {
+	t.Helper()
+	return context.WithTimeout(context.Background(), testTimeout)
+}
+
 // skipIfNoDolt skips the test if Dolt is not installed
 func skipIfNoDolt(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat("/usr/local/bin/dolt"); os.IsNotExist(err) {
+	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("Dolt not installed, skipping test")
 	}
 }
@@ -21,7 +35,9 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
 
-	ctx := context.Background()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
 	tmpDir, err := os.MkdirTemp("", "dolt-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -306,7 +322,8 @@ func TestDoltStoreDependencies(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// Create parent and child issues
 	parent := &types.Issue{
