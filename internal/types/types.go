@@ -528,6 +528,17 @@ func (t IssueType) IsValidWithCustom(customTypes []string) bool {
 	return false
 }
 
+// Normalize maps issue type aliases to their canonical form.
+// For example, "enhancement" -> "feature".
+func (t IssueType) Normalize() IssueType {
+	switch t {
+	case "enhancement":
+		return TypeFeature
+	default:
+		return t
+	}
+}
+
 // RequiredSection describes a recommended section for an issue type.
 // Used by bd lint and bd create --validate for template validation.
 type RequiredSection struct {

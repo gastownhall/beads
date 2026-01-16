@@ -28,8 +28,10 @@ func ParsePriority(content string) int {
 
 // ParseIssueType extracts and validates an issue type from content.
 // Returns the validated type or error if invalid.
+// Supports type aliases like "enhancement" -> "feature".
 func ParseIssueType(content string) (types.IssueType, error) {
-	issueType := types.IssueType(strings.TrimSpace(content))
+	// Normalize to support aliases like "enhancement" -> "feature"
+	issueType := types.IssueType(strings.TrimSpace(content)).Normalize()
 
 	// Use the canonical IsValid() from types package
 	if !issueType.IsValid() {

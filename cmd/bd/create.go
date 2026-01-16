@@ -197,7 +197,7 @@ var createCmd = &cobra.Command{
 				Notes:              notes,
 				Status:             types.StatusOpen,
 				Priority:           priority,
-				IssueType:          types.IssueType(issueType),
+				IssueType:          types.IssueType(issueType).Normalize(),
 				Assignee:           assignee,
 				ExternalRef:        externalRefPtr,
 				Ephemeral:          wisp,
@@ -520,7 +520,7 @@ var createCmd = &cobra.Command{
 			Notes:              notes,
 			Status:             types.StatusOpen,
 			Priority:           priority,
-			IssueType:          types.IssueType(issueType),
+			IssueType:          types.IssueType(issueType).Normalize(),
 			Assignee:           assignee,
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
@@ -729,7 +729,7 @@ func init() {
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|rig|convoy|event)")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|rig|convoy|event); enhancement is alias for feature")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
@@ -854,7 +854,7 @@ func createInRig(cmd *cobra.Command, rigName, title, description, issueType stri
 		Notes:              notes,
 		Status:             types.StatusOpen,
 		Priority:           priority,
-		IssueType:          types.IssueType(issueType),
+		IssueType:          types.IssueType(issueType).Normalize(),
 		Assignee:           assignee,
 		ExternalRef:        externalRefPtr,
 		Ephemeral:          wisp,

@@ -108,7 +108,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.Storage, fv *creat
 		AcceptanceCriteria: fv.AcceptanceCriteria,
 		Status:             types.StatusOpen,
 		Priority:           fv.Priority,
-		IssueType:          types.IssueType(fv.IssueType),
+		IssueType:          types.IssueType(fv.IssueType).Normalize(),
 		Assignee:           fv.Assignee,
 		ExternalRef:        externalRefPtr,
 		CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
