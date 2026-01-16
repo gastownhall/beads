@@ -355,6 +355,8 @@ var rootCmd = &cobra.Command{
 		// Skip database initialization for commands that don't need a database
 		noDbCommands := []string{
 			cmdDaemon,
+			"__complete",       // Cobra's internal completion command (shell completions work without db)
+			"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
 			"bash",
 			"completion",
 			"doctor",
