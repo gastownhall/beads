@@ -512,33 +512,6 @@ func checkMergeDriverConfig() {
 	}
 }
 
-// restoreBeadsDirFromBranch restores .beads/ directory from the current branch's committed state.
-// This is used after sync when sync.branch is configured to keep the working directory clean.
-// The actual beads data lives on the sync branch; the main branch's .beads/ is just a snapshot.
-// Uses RepoContext to ensure git commands run in the correct repository.
-func restoreBeadsDirFromBranch(ctx context.Context) error {
-	rc, err := beads.GetRepoContext()
-	if err != nil {
-		return fmt.Errorf("getting repo context: %w", err)
-	}
-
-	// Skip restore when beads directory is redirected (bd-lmqhe)
-	// When redirected, the beads directory is in a different repo, so
-	// git checkout from the current repo won't work for paths outside it.
-	if rc.IsRedirected {
-		return nil
-	}
-
-	// Restore .beads/ from HEAD (current branch's committed state)
-	// Using -- to ensure .beads/ is treated as a path, not a branch name
-	cmd := rc.GitCmd(ctx, "checkout", "HEAD", "--", rc.BeadsDir) //nolint:gosec // G204: beadsDir from RepoContext
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git checkout failed: %w\n%s", err, output)
-	}
-	return nil
-}
-
 // gitHasUncommittedBeadsChanges checks if .beads/issues.jsonl has uncommitted changes.
 // This detects the failure mode where a previous sync exported but failed before commit.
 // Returns true if the JSONL file has staged or unstaged changes (M or A status).
