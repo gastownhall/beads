@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # bd-shim v1
-# bd-hooks-version: 0.47.2
+# bd-hooks-version: 0.48.0
 #
 # bd (beads) post-checkout hook - thin shim
 #
-# This shim delegates to 'bd hooks run post-checkout' which contains
+# This shim delegates to 'bd hook post-checkout' which contains
 # the actual hook logic. This pattern ensures hook behavior is always
 # in sync with the installed bd version - no manual updates needed.
 
@@ -14,4 +14,4 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
-exec bd hooks run post-checkout "$@"
+exec bd hook post-checkout "$@"

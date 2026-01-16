@@ -129,7 +129,7 @@ func saveExportState(beadsDir, worktreeRoot string, state *ExportState) error {
 // computeJSONLHashForHook computes a hash of the JSONL file contents for hook state tracking.
 // This is a wrapper around computeJSONLHash that handles missing files gracefully.
 func computeJSONLHashForHook(jsonlPath string) (string, error) {
-	hash, err := computeJSONLHashForHook(jsonlPath)
+	hash, err := computeJSONLHash(jsonlPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
