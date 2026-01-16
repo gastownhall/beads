@@ -16,7 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
@@ -299,7 +299,7 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		if backend == configfile.BackendDolt {
 			// Dolt uses a directory, not a file
 			storagePath = filepath.Join(beadsDir, "dolt")
-			store, err = dolt.New(ctx, &dolt.Config{Path: storagePath})
+			store, err = factory.New(ctx, backend, storagePath)
 		} else {
 			storagePath = initDBPath
 			store, err = sqlite.New(ctx, storagePath)

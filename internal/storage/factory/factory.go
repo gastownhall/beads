@@ -9,9 +9,19 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
+
+// BackendFactory is a function that creates a storage backend
+type BackendFactory func(ctx context.Context, path string, opts Options) (storage.Storage, error)
+
+// backendRegistry holds registered backend factories
+var backendRegistry = make(map[string]BackendFactory)
+
+// RegisterBackend registers a storage backend factory
+func RegisterBackend(name string, factory BackendFactory) {
+	backendRegistry[name] = factory
+}
 
 // Options configures how the storage backend is opened
 type Options struct {
@@ -40,9 +50,15 @@ func NewWithOptions(ctx context.Context, backend, path string, opts Options) (st
 			return sqlite.NewWithTimeout(ctx, path, opts.LockTimeout)
 		}
 		return sqlite.New(ctx, path)
-	case configfile.BackendDolt:
-		return dolt.New(ctx, &dolt.Config{Path: path, ReadOnly: opts.ReadOnly})
 	default:
+		// Check if backend is registered (e.g., dolt with CGO)
+		if factory, ok := backendRegistry[backend]; ok {
+			return factory(ctx, path, opts)
+		}
+		// Provide helpful error for dolt on systems without CGO
+		if backend == configfile.BackendDolt {
+			return nil, fmt.Errorf("dolt backend requires CGO (not available on this build); use sqlite backend or install from pre-built binaries")
+		}
 		return nil, fmt.Errorf("unknown storage backend: %s (supported: sqlite, dolt)", backend)
 	}
 }
