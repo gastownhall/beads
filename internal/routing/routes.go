@@ -291,20 +291,52 @@ func findTownRoot(startDir string) string {
 	}
 }
 
+// findTownRootFromCWD walks up from the current working directory looking for a town root.
+// This is used to handle symlinked .beads directories correctly.
+// By starting from CWD instead of the beads directory path, we find the correct
+// town root even when .beads is a symlink that points elsewhere.
+func findTownRootFromCWD() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return findTownRoot(cwd)
+}
+
 // findTownRoutes searches for routes.jsonl at the town level.
 // It walks up from currentBeadsDir to find the town root, then loads routes
 // from <townRoot>/.beads/routes.jsonl.
 // Returns (routes, townRoot). Returns nil routes if not in an orchestrator town or no routes found.
+//
+// IMPORTANT: This function handles symlinked .beads directories correctly.
+// When .beads is a symlink (e.g., ~/gt/.beads -> ~/gt/olympus/.beads), we must
+// use findTownRoot() starting from CWD to determine the actual town root rather
+// than starting from currentBeadsDir, which may be the resolved symlink path.
 func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	// First try the current beads dir (works if we're already at town level)
 	routes, err := LoadRoutes(currentBeadsDir)
 	if err == nil && len(routes) > 0 {
-		// Return the parent of the beads dir as "town root" for path resolution
+		// Use findTownRoot() starting from CWD to determine the actual town root.
+		// We must NOT use currentBeadsDir as the starting point because if .beads
+		// is a symlink (e.g., ~/gt/.beads -> ~/gt/olympus/.beads), currentBeadsDir
+		// will be the resolved path (e.g., ~/gt/olympus/.beads) and walking up
+		// from there would find ~/gt/olympus as the town root instead of ~/gt.
+		townRoot := findTownRootFromCWD()
+		if townRoot != "" {
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (via findTownRootFromCWD)\n", currentBeadsDir, townRoot)
+			}
+			return routes, townRoot
+		}
+		// Fallback to parent dir if not in a town structure (for non-Gas Town repos)
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (fallback to parent dir)\n", currentBeadsDir, filepath.Dir(currentBeadsDir))
+		}
 		return routes, filepath.Dir(currentBeadsDir)
 	}
 
-	// Walk up to find town root
-	townRoot := findTownRoot(currentBeadsDir)
+	// Walk up from CWD to find town root
+	townRoot := findTownRootFromCWD()
 	if townRoot == "" {
 		return nil, "" // Not in a town
 	}
@@ -314,6 +346,10 @@ func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	routes, err = LoadRoutes(townBeadsDir)
 	if err != nil || len(routes) == 0 {
 		return nil, "" // No town routes
+	}
+
+	if os.Getenv("BD_DEBUG_ROUTING") != "" {
+		fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: loaded routes from %s, townRoot=%s\n", townBeadsDir, townRoot)
 	}
 
 	return routes, townRoot
