@@ -20,6 +20,21 @@ func skipIfTestBinary(t *testing.T) {
 	}
 }
 
+// isWSL returns true if running under Windows Subsystem for Linux.
+// WSL doesn't fully respect Unix file permission semantics - the file owner
+// can bypass read-only restrictions similar to macOS.
+func isWSL() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	version := strings.ToLower(string(data))
+	return strings.Contains(version, "microsoft") || strings.Contains(version, "wsl")
+}
+
 // =============================================================================
 // End-to-End Fix Tests
 // =============================================================================
@@ -752,6 +767,10 @@ func TestMergeDriverWithLockedConfig_E2E(t *testing.T) {
 		// Skip on macOS - file owner can bypass read-only permissions
 		if runtime.GOOS == "darwin" {
 			t.Skip("skipping on macOS: file owner can write to read-only files")
+		}
+		// Skip on WSL - similar to macOS, file owner can bypass read-only permissions
+		if isWSL() {
+			t.Skip("skipping on WSL: file owner can write to read-only files")
 		}
 		// Skip in CI - containers may have CAP_DAC_OVERRIDE or other capabilities
 		// that bypass file permission checks
