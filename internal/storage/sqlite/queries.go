@@ -1343,6 +1343,32 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Mark issues that depend on this one as dirty so they get re-exported
+	// without the stale dependency reference (fixes orphan deps in JSONL)
+	rows, err := tx.QueryContext(ctx, `SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to query dependent issues: %w", err)
+	}
+	var dependentIDs []string
+	for rows.Next() {
+		var depID string
+		if err := rows.Scan(&depID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("failed to scan dependent issue ID: %w", err)
+		}
+		dependentIDs = append(dependentIDs, depID)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate dependent issues: %w", err)
+	}
+
+	if len(dependentIDs) > 0 {
+		if err := markIssuesDirtyTx(ctx, tx, dependentIDs); err != nil {
+			return fmt.Errorf("failed to mark dependent issues dirty: %w", err)
+		}
+	}
+
 	// Delete dependencies (both directions)
 	_, err = tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
 	if err != nil {

@@ -325,3 +325,94 @@ func TestBuildSQLInClause(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteIssueMarksDependentsDirty verifies that when an issue is deleted,
+// all issues that depend on it are marked dirty so their stale dependencies
+// are removed on next JSONL export. This prevents orphan dependencies in JSONL.
+func TestDeleteIssueMarksDependentsDirty(t *testing.T) {
+	store := newTestStore(t, "file::memory:?mode=memory&cache=private")
+	ctx := context.Background()
+
+	// Create a wisp (will be deleted)
+	wisp := &types.Issue{
+		ID:        "bd-wisp-1",
+		Title:     "Ephemeral Wisp",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("Failed to create wisp: %v", err)
+	}
+
+	// Create a digest that depends on the wisp
+	digest := &types.Issue{
+		ID:        "bd-digest-1",
+		Title:     "Digest: Test",
+		Status:    types.StatusClosed,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Ephemeral: false, // Digest is persistent
+	}
+	if err := store.CreateIssue(ctx, digest, "test"); err != nil {
+		t.Fatalf("Failed to create digest: %v", err)
+	}
+
+	// Create dependency: digest depends on wisp (parent-child)
+	dep := &types.Dependency{
+		IssueID:     "bd-digest-1",
+		DependsOnID: "bd-wisp-1",
+		Type:        types.DepParentChild,
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	// Clear dirty state (simulate post-flush state)
+	if err := store.ClearDirtyIssuesByID(ctx, []string{"bd-wisp-1", "bd-digest-1"}); err != nil {
+		t.Fatalf("Failed to clear dirty state: %v", err)
+	}
+
+	// Verify digest is NOT dirty initially
+	dirtyBefore, err := store.GetDirtyIssues(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get dirty issues: %v", err)
+	}
+	for _, id := range dirtyBefore {
+		if id == "bd-digest-1" {
+			t.Fatal("Digest should not be dirty before wisp deletion")
+		}
+	}
+
+	// Delete the wisp
+	if err := store.DeleteIssue(ctx, "bd-wisp-1"); err != nil {
+		t.Fatalf("Failed to delete wisp: %v", err)
+	}
+
+	// Verify digest IS now dirty (so it gets re-exported without stale dep)
+	dirtyAfter, err := store.GetDirtyIssues(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get dirty issues after delete: %v", err)
+	}
+
+	found := false
+	for _, id := range dirtyAfter {
+		if id == "bd-digest-1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Digest should be marked dirty after wisp deletion to remove orphan dependency")
+	}
+
+	// Verify the dependency is gone from the digest
+	digestIssue, err := store.GetIssue(ctx, "bd-digest-1")
+	if err != nil {
+		t.Fatalf("Failed to get digest: %v", err)
+	}
+	if len(digestIssue.Dependencies) != 0 {
+		t.Errorf("Digest should have no dependencies after wisp deleted, got %d", len(digestIssue.Dependencies))
+	}
+}
