@@ -30,9 +30,22 @@ Commands:
   bd sync              Export to JSONL (prep for push)
   bd sync --import     Import from JSONL (after pull)
   bd sync --status     Show sync state
-  bd sync --resolve    Resolve conflicts
+  bd sync --resolve    Resolve conflicts (uses configured strategy)
   bd sync --force      Force full export/import (skip incremental)
   bd sync --full       Full sync: pull → merge → export → commit → push (legacy)
+
+Conflict Resolution:
+  bd sync --resolve              Use configured conflict.strategy
+  bd sync --resolve --ours       Keep local versions
+  bd sync --resolve --theirs     Keep remote versions
+  bd sync --resolve --manual     Interactive resolution with prompts
+
+The --manual flag shows a diff for each conflict and prompts you to choose:
+  l/local  - Keep local version
+  r/remote - Keep remote version
+  m/merge  - Auto-merge (LWW for scalars, union for collections)
+  s/skip   - Skip and leave unresolved
+  d/diff   - Show full JSON diff
 
 The --full flag provides the legacy full sync behavior for backwards compatibility.`,
 	Run: func(cmd *cobra.Command, _ []string) {
@@ -58,6 +71,7 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		resolve, _ := cmd.Flags().GetBool("resolve")
 		resolveOurs, _ := cmd.Flags().GetBool("ours")
 		resolveTheirs, _ := cmd.Flags().GetBool("theirs")
+		resolveManual, _ := cmd.Flags().GetBool("manual")
 		forceFlag, _ := cmd.Flags().GetBool("force")
 
 		// --import is shorthand for --import-only
@@ -120,6 +134,8 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 				strategy = config.ConflictStrategyOurs
 			} else if resolveTheirs {
 				strategy = config.ConflictStrategyTheirs
+			} else if resolveManual {
+				strategy = config.ConflictStrategyManual
 			}
 			if err := resolveSyncConflicts(ctx, jsonlPath, strategy, dryRun); err != nil {
 				FatalError("%v", err)
@@ -831,6 +847,7 @@ func ClearSyncConflictState(beadsDir string) error {
 //   - "newest": Keep whichever version has the newer updated_at timestamp (default)
 //   - "ours": Keep local version
 //   - "theirs": Keep remote version
+//   - "manual": Interactive resolution with user prompts
 func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy string, dryRun bool) error {
 	beadsDir := filepath.Dir(jsonlPath)
 
@@ -875,6 +892,10 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy string
 	}
 
 	// Build maps for quick lookup
+	baseMap := make(map[string]*beads.Issue)
+	for _, issue := range baseIssues {
+		baseMap[issue.ID] = issue
+	}
 	localMap := make(map[string]*beads.Issue)
 	for _, issue := range localIssues {
 		localMap[issue.ID] = issue
@@ -882,6 +903,11 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy string
 	remoteMap := make(map[string]*beads.Issue)
 	for _, issue := range remoteIssues {
 		remoteMap[issue.ID] = issue
+	}
+
+	// Handle manual strategy with interactive resolution
+	if strategy == config.ConflictStrategyManual {
+		return resolveSyncConflictsManually(ctx, jsonlPath, beadsDir, conflictState, baseMap, localMap, remoteMap, baseIssues, localIssues, remoteIssues)
 	}
 
 	resolved := 0
@@ -895,10 +921,6 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy string
 			winner = "local"
 		case config.ConflictStrategyTheirs:
 			winner = "remote"
-		case config.ConflictStrategyManual:
-			// Manual mode should not reach here - conflicts are handled interactively
-			fmt.Printf("⚠ %s: requires manual resolution\n", conflict.IssueID)
-			continue
 		case config.ConflictStrategyNewest:
 			fallthrough
 		default:
@@ -961,6 +983,148 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy string
 	return nil
 }
 
+// resolveSyncConflictsManually handles manual conflict resolution with interactive prompts.
+func resolveSyncConflictsManually(ctx context.Context, jsonlPath, beadsDir string, conflictState *SyncConflictState,
+	baseMap, localMap, remoteMap map[string]*beads.Issue,
+	baseIssues, localIssues, remoteIssues []*beads.Issue) error {
+
+	// Build interactive conflicts list
+	var interactiveConflicts []InteractiveConflict
+	for _, c := range conflictState.Conflicts {
+		interactiveConflicts = append(interactiveConflicts, InteractiveConflict{
+			IssueID: c.IssueID,
+			Local:   localMap[c.IssueID],
+			Remote:  remoteMap[c.IssueID],
+			Base:    baseMap[c.IssueID],
+		})
+	}
+
+	// Run interactive resolution
+	resolvedIssues, skipped, err := resolveConflictsInteractively(interactiveConflicts)
+	if err != nil {
+		return fmt.Errorf("interactive resolution: %w", err)
+	}
+
+	if skipped > 0 {
+		fmt.Printf("\n⚠ %d conflict(s) skipped - will remain unresolved\n", skipped)
+	}
+
+	if len(resolvedIssues) == 0 && skipped == len(conflictState.Conflicts) {
+		fmt.Println("No conflicts were resolved")
+		return nil
+	}
+
+	// Build the merged issue list:
+	// 1. Start with issues that weren't in conflict
+	// 2. Add the resolved issues
+	conflictIDSet := make(map[string]bool)
+	for _, c := range conflictState.Conflicts {
+		conflictIDSet[c.IssueID] = true
+	}
+
+	// Build resolved issue map for quick lookup
+	resolvedMap := make(map[string]*beads.Issue)
+	for _, issue := range resolvedIssues {
+		if issue != nil {
+			resolvedMap[issue.ID] = issue
+		}
+	}
+
+	// Collect all unique IDs from base, local, remote
+	allIDSet := make(map[string]bool)
+	for id := range baseMap {
+		allIDSet[id] = true
+	}
+	for id := range localMap {
+		allIDSet[id] = true
+	}
+	for id := range remoteMap {
+		allIDSet[id] = true
+	}
+
+	// Build final merged list
+	var mergedIssues []*beads.Issue
+	for id := range allIDSet {
+		if conflictIDSet[id] {
+			// This was a conflict - use the resolved version if available
+			if resolved, ok := resolvedMap[id]; ok {
+				mergedIssues = append(mergedIssues, resolved)
+			}
+			// If not in resolvedMap, it was skipped - use the automatic merge result
+			if _, ok := resolvedMap[id]; !ok {
+				// Fall back to field-level merge for skipped conflicts
+				local := localMap[id]
+				remote := remoteMap[id]
+				base := baseMap[id]
+				if local != nil && remote != nil {
+					mergedIssues = append(mergedIssues, mergeFieldLevel(base, local, remote))
+				} else if local != nil {
+					mergedIssues = append(mergedIssues, local)
+				} else if remote != nil {
+					mergedIssues = append(mergedIssues, remote)
+				}
+			}
+		} else {
+			// Not a conflict - use standard 3-way merge logic
+			local := localMap[id]
+			remote := remoteMap[id]
+			base := baseMap[id]
+			merged, _ := MergeIssue(base, local, remote)
+			if merged != nil {
+				mergedIssues = append(mergedIssues, merged)
+			}
+		}
+	}
+
+	// Clear resolved conflicts (keep skipped ones)
+	if skipped == 0 {
+		if err := ClearSyncConflictState(beadsDir); err != nil {
+			return fmt.Errorf("clearing conflict state: %w", err)
+		}
+	} else {
+		// Update conflict state to only keep skipped conflicts
+		var remaining []SyncConflictRecord
+		for _, c := range conflictState.Conflicts {
+			if _, resolved := resolvedMap[c.IssueID]; !resolved {
+				remaining = append(remaining, c)
+			}
+		}
+		conflictState.Conflicts = remaining
+		if err := SaveSyncConflictState(beadsDir, conflictState); err != nil {
+			return fmt.Errorf("saving updated conflict state: %w", err)
+		}
+	}
+
+	// Write merged state
+	if err := writeMergedStateToJSONL(jsonlPath, mergedIssues); err != nil {
+		return fmt.Errorf("writing merged state: %w", err)
+	}
+
+	// Import to database
+	if err := importFromJSONLInline(ctx, jsonlPath, false, false); err != nil {
+		return fmt.Errorf("importing merged state: %w", err)
+	}
+
+	// Export to ensure consistency
+	if err := exportToJSONL(ctx, jsonlPath); err != nil {
+		return fmt.Errorf("exporting: %w", err)
+	}
+
+	// Update base state
+	finalIssues, err := loadIssuesFromJSONL(jsonlPath)
+	if err != nil {
+		return fmt.Errorf("reloading final state: %w", err)
+	}
+	if err := saveBaseState(beadsDir, finalIssues); err != nil {
+		return fmt.Errorf("saving base state: %w", err)
+	}
+
+	resolvedCount := len(resolvedIssues)
+	fmt.Printf("\n✓ Manual resolution complete (%d resolved, %d skipped)\n", resolvedCount, skipped)
+
+	return nil
+}
+
 func init() {
 	syncCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	syncCmd.Flags().Bool("dry-run", false, "Preview sync without making changes")
@@ -982,6 +1146,7 @@ func init() {
 	syncCmd.Flags().Bool("resolve", false, "Resolve pending sync conflicts")
 	syncCmd.Flags().Bool("ours", false, "Use 'ours' strategy for conflict resolution (with --resolve)")
 	syncCmd.Flags().Bool("theirs", false, "Use 'theirs' strategy for conflict resolution (with --resolve)")
+	syncCmd.Flags().Bool("manual", false, "Use interactive manual resolution for conflicts (with --resolve)")
 	syncCmd.Flags().Bool("force", false, "Force full export/import (skip incremental optimization)")
 	rootCmd.AddCommand(syncCmd)
 }
