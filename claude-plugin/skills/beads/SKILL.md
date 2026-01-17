@@ -41,7 +41,7 @@ Graph-based issue tracker that survives conversation compaction. Provides persis
 ## Prerequisites
 
 ```bash
-bd --version  # Requires v0.43.0+
+bd --version  # Requires v0.47.0+
 ```
 
 - **bd CLI** installed and in PATH
