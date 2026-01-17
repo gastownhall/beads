@@ -746,64 +746,9 @@ func CheckSyncBranchHealth(path string) DoctorCheck {
 		}
 	}
 
-	// Check 2: Is sync branch far behind main on source files?
-	// Get the main branch name
-	mainBranch := "main"
-	cmd = exec.Command("git", "rev-parse", "--verify", "main")
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		// Try "master" as fallback
-		cmd = exec.Command("git", "rev-parse", "--verify", "master")
-		cmd.Dir = path
-		if err := cmd.Run(); err != nil {
-			// Can't determine main branch
-			return DoctorCheck{
-				Name:    "Sync Branch Health",
-				Status:  StatusOK,
-				Message: "OK",
-			}
-		}
-		mainBranch = "master"
-	}
-
-	// Count commits main is ahead of sync branch
-	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", syncBranch, mainBranch)) // #nosec G204 - branches from config/hardcoded
-	cmd.Dir = path
-	aheadOutput, err := cmd.Output()
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: "OK",
-		}
-	}
-	aheadCount := strings.TrimSpace(string(aheadOutput))
-
-	// Check if there are non-.beads/ file differences (stale source code)
-	cmd = exec.Command("git", "diff", "--name-only", fmt.Sprintf("%s..%s", syncBranch, mainBranch), "--", ":(exclude).beads/") // #nosec G204 - branches from config/hardcoded
-	cmd.Dir = path
-	diffOutput, _ := cmd.Output()
-	diffFiles := strings.TrimSpace(string(diffOutput))
-
-	if diffFiles != "" && aheadCount != "0" {
-		// Count the number of different files
-		fileCount := len(strings.Split(diffFiles, "\n"))
-		// Parse ahead count as int for comparison
-		aheadCountInt := 0
-		_, _ = fmt.Sscanf(aheadCount, "%d", &aheadCountInt)
-
-		// Only warn if significantly behind (20+ commits AND 50+ source files)
-		// Small drift is normal between bd sync operations
-		if fileCount > 50 && aheadCountInt > 20 {
-			return DoctorCheck{
-				Name:    "Sync Branch Health",
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("Sync branch %s commits behind %s on source files", aheadCount, mainBranch),
-				Detail:  fmt.Sprintf("%d source files differ between %s and %s. The sync branch has stale code.", fileCount, syncBranch, mainBranch),
-				Fix:     "Run 'bd doctor --fix' to reset sync branch to main",
-			}
-		}
-	}
+	// Note: We intentionally do NOT check if sync branch differs from main on source files.
+	// The sync branch only tracks .beads/ data - source file differences are expected behavior.
+	// See GH#1062 for why the previous check was removed (it caused destructive --fix behavior).
 
 	return DoctorCheck{
 		Name:    "Sync Branch Health",
