@@ -48,8 +48,9 @@ Examples:
 		branchName := args[0]
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		force, _ := cmd.Flags().GetBool("force")
+		orphan, _ := cmd.Flags().GetBool("orphan")
 
-		if err := runMigrateSync(ctx, branchName, dryRun, force); err != nil {
+		if err := runMigrateSync(ctx, branchName, dryRun, force, orphan); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -59,6 +60,7 @@ Examples:
 func init() {
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Preview migration without making changes")
 	migrateSyncCmd.Flags().Bool("force", false, "Force migration even if already configured")
+	migrateSyncCmd.Flags().Bool("orphan", false, "Migrate existing sync branch to orphan (deletes and recreates)")
 	migrateCmd.AddCommand(migrateSyncCmd)
 
 	// Backwards compatibility alias at root level (hidden)
@@ -69,7 +71,7 @@ func init() {
 	rootCmd.AddCommand(&migrateSyncAliasCmd)
 }
 
-func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) error {
+func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orphan bool) error {
 	// Validate branch name
 	if err := syncbranch.ValidateBranchName(branchName); err != nil {
 		return fmt.Errorf("invalid branch name: %w", err)
@@ -152,11 +154,19 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 		}
 
 		if branchExistsLocally {
-			fmt.Printf("→ Branch '%s' exists locally\n", branchName)
+			if orphan {
+				fmt.Printf("→ Would migrate existing branch '%s' to orphan (delete and recreate)\n", branchName)
+			} else {
+				fmt.Printf("→ Branch '%s' exists locally (will use as-is)\n", branchName)
+			}
 		} else if branchExistsRemotely {
-			fmt.Printf("→ Would create local branch '%s' from remote\n", branchName)
+			if orphan {
+				fmt.Printf("→ Would create new orphan branch '%s' (ignoring remote non-orphan)\n", branchName)
+			} else {
+				fmt.Printf("→ Would create local branch '%s' from remote\n", branchName)
+			}
 		} else {
-			fmt.Printf("→ Would create new branch '%s'\n", branchName)
+			fmt.Printf("→ Would create new orphan branch '%s' (no shared history)\n", branchName)
 		}
 
 		// Use git-common-dir for worktree path to support bare repos and worktrees (GH#639)
@@ -171,18 +181,119 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 		return nil
 	}
 
-	// Step 1: Create the sync branch if it doesn't exist
+	// Track preserved JSONL for orphan migration (set in migration block, used in sync)
+	var preservedJSONLPath string
+	var backupJSONLPath string // Backup file, deleted only on success
+
+	// Step 1: Create or migrate the sync branch
 	fmt.Printf("→ Setting up sync branch '%s'...\n", branchName)
 
-	if !branchExistsLocally && !branchExistsRemotely {
-		// Create new branch from current HEAD
-		fmt.Printf("  Creating new branch '%s'...\n", branchName)
-		createCmd := rc.GitCmd(ctx, "branch", branchName)
-		if output, err := createCmd.CombinedOutput(); err != nil {
+	// Helper function to create orphan branch using commit-tree (doesn't change HEAD)
+	createOrphanBranch := func() error {
+		fmt.Printf("  Creating orphan branch '%s' (no shared history)...\n", branchName)
+
+		// Create an empty tree object
+		emptyTreeCmd := rc.GitCmd(ctx, "hash-object", "-t", "tree", "/dev/null")
+		emptyTreeOutput, err := emptyTreeCmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to create empty tree: %w", err)
+		}
+		emptyTree := strings.TrimSpace(string(emptyTreeOutput))
+
+		// Create an orphan commit (no parents) with the empty tree
+		commitTreeCmd := rc.GitCmd(ctx, "commit-tree", emptyTree, "-m", "Initialize beads sync branch")
+		commitOutput, err := commitTreeCmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to create orphan commit: %w", err)
+		}
+		orphanCommit := strings.TrimSpace(string(commitOutput))
+
+		// Create branch pointing to the orphan commit
+		branchCmd := rc.GitCmd(ctx, "branch", branchName, orphanCommit)
+		if output, err := branchCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create branch: %w\n%s", err, output)
 		}
+
+		return nil
+	}
+
+	if !branchExistsLocally && !branchExistsRemotely {
+		// New branch: create as orphan (default behavior)
+		if err := createOrphanBranch(); err != nil {
+			return err
+		}
+	} else if branchExistsLocally && orphan {
+		// Migration: delete existing local branch and recreate as orphan
+		// Safety check: warn if branch has unpushed commits
+		if !force {
+			hasUnpushed, err := branchHasUnpushedCommits(ctx, rc, branchName)
+			if err != nil {
+				// If we can't check (no remote tracking), warn but continue
+				fmt.Printf("  Warning: Could not check for unpushed commits: %v\n", err)
+			} else if hasUnpushed {
+				return fmt.Errorf("branch '%s' has unpushed commits that would be lost.\n"+
+					"  Run 'bd sync' first to export database to JSONL and push, or\n"+
+					"  Use --force to proceed anyway (unpushed commits will be lost)", branchName)
+			}
+		}
+		fmt.Printf("  Migrating existing branch '%s' to orphan...\n", branchName)
+
+		// Check if branch is used by a worktree and preserve JSONL before removing
+		gitCommonDir, err := git.GetGitCommonDir()
+		if err != nil {
+			return fmt.Errorf("not a git repository: %w", err)
+		}
+		existingWorktreePath := filepath.Join(gitCommonDir, "beads-worktrees", branchName)
+
+		// Create backup of JSONL before any destructive operations
+		worktreeJSONL := filepath.Join(existingWorktreePath, ".beads", "issues.jsonl")
+		if _, err := os.Stat(worktreeJSONL); err == nil {
+			// Create backup file (kept until migration succeeds)
+			backupFile, err := os.CreateTemp("", "beads-backup-*.jsonl")
+			if err != nil {
+				return fmt.Errorf("failed to create backup file: %w", err)
+			}
+			backupFile.Close()
+			backupJSONLPath = backupFile.Name()
+
+			// Copy JSONL to backup
+			input, err := os.ReadFile(worktreeJSONL)
+			if err != nil {
+				return fmt.Errorf("failed to read JSONL for backup: %w", err)
+			}
+			if err := os.WriteFile(backupJSONLPath, input, 0644); err != nil {
+				return fmt.Errorf("failed to create backup: %w", err)
+			}
+			fmt.Printf("  Backed up JSONL (%d bytes) to %s\n", len(input), backupJSONLPath)
+
+			// Also set as preserved path for restoration
+			preservedJSONLPath = backupJSONLPath
+		}
+
+		if _, err := os.Stat(existingWorktreePath); err == nil {
+			fmt.Printf("  Removing existing worktree at %s...\n", existingWorktreePath)
+			removeCmd := rc.GitCmd(ctx, "worktree", "remove", "--force", existingWorktreePath)
+			if output, err := removeCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to remove existing worktree: %w\n%s", err, output)
+			}
+		}
+
+		fmt.Printf("  Deleting existing local branch...\n")
+		deleteCmd := rc.GitCmd(ctx, "branch", "-D", branchName)
+		if output, err := deleteCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to delete existing branch: %w\n%s", err, output)
+		}
+		if err := createOrphanBranch(); err != nil {
+			return err
+		}
+	} else if !branchExistsLocally && branchExistsRemotely && orphan {
+		// Remote exists but user wants orphan: create local orphan (ignore remote)
+		fmt.Printf("  Creating local orphan branch (ignoring remote non-orphan)...\n")
+		if err := createOrphanBranch(); err != nil {
+			return err
+		}
 	} else if !branchExistsLocally && branchExistsRemotely {
-		// Fetch and create local tracking branch
+		// Fetch and create local tracking branch (preserve existing remote)
 		fmt.Printf("  Fetching remote branch '%s'...\n", branchName)
 		fetchCmd := rc.GitCmd(ctx, "fetch", "origin", branchName)
 		if output, err := fetchCmd.CombinedOutput(); err != nil {
@@ -195,7 +306,8 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 			return fmt.Errorf("failed to create local tracking branch: %w\n%s", err, output)
 		}
 	} else {
-		fmt.Printf("  Branch '%s' already exists locally\n", branchName)
+		// Branch exists locally, no --orphan flag: use as-is
+		fmt.Printf("  Branch '%s' already exists locally (using as-is)\n", branchName)
 	}
 
 	// Step 2: Create the worktree
@@ -220,8 +332,44 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 		return fmt.Errorf("failed to get relative JSONL path: %w", err)
 	}
 
-	if err := wtMgr.SyncJSONLToWorktree(worktreePath, jsonlRelPath); err != nil {
-		return fmt.Errorf("failed to sync JSONL to worktree: %w", err)
+	// If we preserved JSONL during orphan migration, restore it directly
+	destPath := filepath.Join(worktreePath, ".beads", "issues.jsonl")
+	if preservedJSONLPath != "" {
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("failed to create .beads directory: %w", err)
+		}
+		input, err := os.ReadFile(preservedJSONLPath)
+		if err != nil {
+			return fmt.Errorf("failed to read preserved JSONL: %w", err)
+		}
+		if err := os.WriteFile(destPath, input, 0644); err != nil {
+			return fmt.Errorf("failed to restore JSONL to worktree: %w", err)
+		}
+		fmt.Printf("  Restored JSONL (%d bytes) to worktree\n", len(input))
+		// Note: backup cleanup happens at end of successful migration
+	} else {
+		// Try normal sync first, fall back to main .beads/ if it fails
+		syncErr := wtMgr.SyncJSONLToWorktree(worktreePath, jsonlRelPath)
+		if syncErr != nil {
+			// Fallback: try copying from main .beads/ directory
+			mainJSONL := filepath.Join(repoRoot, ".beads", "issues.jsonl")
+			if _, err := os.Stat(mainJSONL); err == nil {
+				fmt.Printf("  Falling back to main .beads/issues.jsonl...\n")
+				if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+					return fmt.Errorf("failed to create .beads directory: %w", err)
+				}
+				input, err := os.ReadFile(mainJSONL)
+				if err != nil {
+					return fmt.Errorf("failed to read main JSONL: %w", err)
+				}
+				if err := os.WriteFile(destPath, input, 0644); err != nil {
+					return fmt.Errorf("failed to copy JSONL to worktree: %w", err)
+				}
+				fmt.Printf("  Copied JSONL (%d bytes) from main .beads/\n", len(input))
+			} else {
+				return fmt.Errorf("failed to sync JSONL to worktree: %w", syncErr)
+			}
+		}
 	}
 
 	// Also sync other beads files
@@ -287,6 +435,11 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 	}
 
 	fmt.Println()
+	// Clean up backup file on success
+	if backupJSONLPath != "" {
+		os.Remove(backupJSONLPath)
+	}
+
 	fmt.Println("✓ Migration complete!")
 	fmt.Println()
 	fmt.Printf("  sync.branch: %s\n", branchName)
@@ -322,6 +475,28 @@ func branchExistsRemote(ctx context.Context, branch string) bool {
 
 	cmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
 	return cmd.Run() == nil
+}
+
+// branchHasUnpushedCommits checks if a local branch has commits not pushed to remote
+func branchHasUnpushedCommits(ctx context.Context, rc *beads.RepoContext, branch string) (bool, error) {
+	// Check if remote tracking branch exists
+	remoteRef := "refs/remotes/origin/" + branch
+	checkCmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", remoteRef)
+	if err := checkCmd.Run(); err != nil {
+		// No remote tracking branch - can't determine if unpushed
+		return false, fmt.Errorf("no remote tracking branch for '%s'", branch)
+	}
+
+	// Count commits ahead of remote
+	// git rev-list --count origin/branch..branch
+	countCmd := rc.GitCmd(ctx, "rev-list", "--count", "origin/"+branch+".."+branch)
+	output, err := countCmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to count commits: %w", err)
+	}
+
+	count := strings.TrimSpace(string(output))
+	return count != "0", nil
 }
 
 // hasChangesInWorktreeDir checks if there are any uncommitted changes in the worktree
