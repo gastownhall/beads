@@ -37,6 +37,10 @@ func ParseIssueID(input string, prefix string) string {
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
 func ResolvePartialID(ctx context.Context, store storage.Storage, input string) (string, error) {
+	if store == nil {
+		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
+	}
+
 	// Fast path: Use SearchIssues with exact ID filter (GH#942).
 	// This uses the same query path as "bd list --id", ensuring consistency.
 	// Previously we used GetIssue which could fail in cases where SearchIssues
