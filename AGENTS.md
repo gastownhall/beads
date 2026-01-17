@@ -4,7 +4,7 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full instructions.
 
 This file exists for compatibility with tools that look for AGENTS.md.
 
-## Key Sections in CLAUDE.md
+## Key Sections
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
@@ -18,7 +18,7 @@ This file exists for compatibility with tools that look for AGENTS.md.
 - Status: `○ ◐ ● ✓ ❄`
 - Priority: `● P0` (filled circle with color)
 
-See CLAUDE.md "Visual Design System" section for full guidance.
+See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelines.
 
 ## Landing the Plane (Session Completion)
 
