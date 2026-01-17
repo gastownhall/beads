@@ -436,11 +436,11 @@ func (s *DoltStore) Status(ctx context.Context) (*DoltStatus, error) {
 	for rows.Next() {
 		var tableName string
 		var staged bool
-		var statusInt int
-		if err := rows.Scan(&tableName, &staged, &statusInt); err != nil {
+		var statusStr string
+		if err := rows.Scan(&tableName, &staged, &statusStr); err != nil {
 			return nil, fmt.Errorf("failed to scan status: %w", err)
 		}
-		entry := StatusEntry{Table: tableName, Status: statusInt}
+		entry := StatusEntry{Table: tableName, Status: statusStr}
 		if staged {
 			status.Staged = append(status.Staged, entry)
 		} else {
@@ -459,5 +459,5 @@ type DoltStatus struct {
 // StatusEntry represents a changed table
 type StatusEntry struct {
 	Table  string
-	Status int // 1=new, 2=modified, 3=deleted
+	Status string // "new", "modified", "deleted"
 }
