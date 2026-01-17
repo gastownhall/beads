@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
@@ -30,6 +33,7 @@ var (
 	compactActor           string
 	compactLimit           int
 	compactOlderThan       int
+	compactDolt            bool
 )
 
 var compactCmd = &cobra.Command{
@@ -45,6 +49,7 @@ Modes:
   - Analyze: Export candidates for agent review (no API key needed)
   - Apply: Accept agent-provided summary (no API key needed)
   - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY, legacy)
+  - Dolt: Run Dolt garbage collection (for Dolt-backend repositories)
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
@@ -60,6 +65,13 @@ Tombstone Cleanup:
            removes any tombstone that no open issues depend on, regardless of age.
            Also cleans stale deps from closed issues to tombstones.
 
+Dolt Garbage Collection:
+  With auto-commit per mutation, Dolt commit history grows over time. Use
+  --dolt to run Dolt garbage collection and reclaim disk space.
+
+  --dolt: Run Dolt GC on .beads/dolt directory to free disk space.
+          This removes unreachable commits and compacts storage.
+
 Examples:
   # Age-based pruning
   bd compact --prune                       # Remove tombstones older than 30 days
@@ -69,6 +81,10 @@ Examples:
   # Dependency-aware purging (more aggressive)
   bd compact --purge-tombstones --dry-run  # Preview what would be purged
   bd compact --purge-tombstones            # Remove tombstones with no open deps
+
+  # Dolt garbage collection
+  bd compact --dolt                        # Run Dolt GC
+  bd compact --dolt --dry-run              # Preview without running GC
 
   # Agent-driven workflow (recommended)
   bd compact --analyze --json              # Get candidates with full content
@@ -84,8 +100,8 @@ Examples:
   bd compact --stats                       # Show statistics
 `,
 	Run: func(_ *cobra.Command, _ []string) {
-		// Compact modifies data unless --stats or --analyze or --dry-run
-		if !compactStats && !compactAnalyze && !compactDryRun {
+		// Compact modifies data unless --stats or --analyze or --dry-run or --dolt with --dry-run
+		if !compactStats && !compactAnalyze && !compactDryRun && !(compactDolt && compactDryRun) {
 			CheckReadonly("compact")
 		}
 		ctx := rootCtx
@@ -102,6 +118,12 @@ Examples:
 				}
 				runCompactStats(ctx, sqliteStore)
 			}
+			return
+		}
+
+		// Handle dolt GC mode
+		if compactDolt {
+			runCompactDolt()
 			return
 		}
 
@@ -766,6 +788,134 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	markDirtyAndScheduleFlush()
 }
 
+// runCompactDolt runs Dolt garbage collection on the .beads/dolt directory
+func runCompactDolt() {
+	start := time.Now()
+
+	// Find beads directory
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		fmt.Fprintf(os.Stderr, "Error: could not find .beads directory\n")
+		os.Exit(1)
+	}
+
+	// Check for dolt directory
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: Dolt directory not found at %s\n", doltPath)
+		fmt.Fprintf(os.Stderr, "Hint: --dolt flag is only for repositories using the Dolt backend\n")
+		os.Exit(1)
+	}
+
+	// Check if dolt command is available
+	if _, err := exec.LookPath("dolt"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: dolt command not found in PATH\n")
+		fmt.Fprintf(os.Stderr, "Hint: install Dolt from https://github.com/dolthub/dolt\n")
+		os.Exit(1)
+	}
+
+	// Get size before GC
+	sizeBefore, err := getDirSize(doltPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not calculate directory size: %v\n", err)
+		sizeBefore = 0
+	}
+
+	if compactDryRun {
+		if jsonOutput {
+			output := map[string]interface{}{
+				"dry_run":      true,
+				"dolt_path":    doltPath,
+				"size_before":  sizeBefore,
+				"size_display": formatBytes(sizeBefore),
+			}
+			outputJSON(output)
+			return
+		}
+		fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
+		fmt.Printf("Dolt directory: %s\n", doltPath)
+		fmt.Printf("Current size: %s\n", formatBytes(sizeBefore))
+		fmt.Printf("\nRun without --dry-run to perform garbage collection.\n")
+		return
+	}
+
+	if !jsonOutput {
+		fmt.Printf("Running Dolt garbage collection...\n")
+	}
+
+	// Run dolt gc
+	cmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command, no user input
+	cmd.Dir = doltPath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: dolt gc failed: %v\n", err)
+		if len(output) > 0 {
+			fmt.Fprintf(os.Stderr, "Output: %s\n", string(output))
+		}
+		os.Exit(1)
+	}
+
+	// Get size after GC
+	sizeAfter, err := getDirSize(doltPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not calculate directory size after GC: %v\n", err)
+		sizeAfter = 0
+	}
+
+	elapsed := time.Since(start)
+	freed := sizeBefore - sizeAfter
+	if freed < 0 {
+		freed = 0 // GC may not always reduce size
+	}
+
+	if jsonOutput {
+		result := map[string]interface{}{
+			"success":          true,
+			"dolt_path":        doltPath,
+			"size_before":      sizeBefore,
+			"size_after":       sizeAfter,
+			"freed_bytes":      freed,
+			"freed_display":    formatBytes(freed),
+			"elapsed_ms":       elapsed.Milliseconds(),
+		}
+		outputJSON(result)
+		return
+	}
+
+	fmt.Printf("✓ Dolt garbage collection complete\n")
+	fmt.Printf("  %s → %s (freed %s)\n", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
+	fmt.Printf("  Time: %v\n", elapsed)
+}
+
+// getDirSize calculates the total size of a directory recursively
+func getDirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
+// formatBytes formats a byte count as a human-readable string
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 func init() {
 	compactCmd.Flags().BoolVar(&compactDryRun, "dry-run", false, "Preview without compacting")
 	compactCmd.Flags().IntVar(&compactTier, "tier", 1, "Compaction tier (1 or 2)")
@@ -787,6 +937,7 @@ func init() {
 	compactCmd.Flags().StringVar(&compactSummary, "summary", "", "Path to summary file (use '-' for stdin)")
 	compactCmd.Flags().StringVar(&compactActor, "actor", "agent", "Actor name for audit trail")
 	compactCmd.Flags().IntVar(&compactLimit, "limit", 0, "Limit number of candidates (0 = no limit)")
+	compactCmd.Flags().BoolVar(&compactDolt, "dolt", false, "Dolt mode: run Dolt garbage collection on .beads/dolt")
 
 	// Note: compactCmd is added to adminCmd in admin.go
 }
