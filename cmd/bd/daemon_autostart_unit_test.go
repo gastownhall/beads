@@ -148,7 +148,6 @@ func TestDaemonAutostart_AcquireStartLock_CreatesMissingDir(t *testing.T) {
 func TestDaemonAutostart_AcquireStartLock_FailsWhenRemoveFails(t *testing.T) {
 	// This test verifies that acquireStartLock returns false (instead of
 	// recursing infinitely) when os.Remove fails on a stale lock file.
-	// See: https://github.com/steveyegge/beads/issues/XXX
 
 	oldRemove := removeFileFn
 	defer func() { removeFileFn = oldRemove }()
