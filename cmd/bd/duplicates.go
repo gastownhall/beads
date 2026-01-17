@@ -128,16 +128,16 @@ Example:
 				fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
 				for _, issue := range group {
 					refs := refCounts[issue.ID]
-					depCount := 0
+					weight := 0
 					if score, ok := structuralScores[issue.ID]; ok {
-						depCount = score.dependentCount
+						weight = score.dependentCount + score.dependsOnCount
 					}
 					marker := "  "
 					if issue.ID == target.ID {
 						marker = ui.RenderPass("→ ")
 					}
-					fmt.Printf("%s%s (%s, P%d, %d dependents, %d refs)\n",
-						marker, issue.ID, issue.Status, issue.Priority, depCount, refs)
+					fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
+						marker, issue.ID, issue.Status, issue.Priority, weight, refs)
 				}
 				sources := make([]string, 0, len(group)-1)
 				for _, issue := range group {
@@ -259,7 +259,7 @@ func countStructuralRelationships(groups [][]*types.Issue) map[string]*issueScor
 }
 // chooseMergeTarget selects the best issue to merge into
 // Priority order:
-// 1. Highest dependent count (children, blocked-by relationships) - most connected issue wins
+// 1. Highest structural weight (dependents + dependencies) - most connected issue wins
 // 2. Highest text reference count (mentions in descriptions/notes)
 // 3. Lexicographically smallest ID (stable tiebreaker)
 func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore) *types.Issue {
@@ -268,34 +268,36 @@ func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structura
 	}
 
 	getScore := func(id string) (int, int) {
-		depCount := 0
+		weight := 0
 		if score, ok := structuralScores[id]; ok {
-			depCount = score.dependentCount
+			// Weight = children/dependents + dependencies
+			// An issue with ANY structural connections should be preferred over an empty shell
+			weight = score.dependentCount + score.dependsOnCount
 		}
 		textRefs := refCounts[id]
-		return depCount, textRefs
+		return weight, textRefs
 	}
 
 	target := group[0]
-	targetDeps, targetRefs := getScore(target.ID)
+	targetWeight, targetRefs := getScore(target.ID)
 
 	for _, issue := range group[1:] {
-		issueDeps, issueRefs := getScore(issue.ID)
+		issueWeight, issueRefs := getScore(issue.ID)
 
-		// Compare by dependent count first (children/blocked-by)
-		if issueDeps > targetDeps {
+		// Compare by structural weight first (dependents + dependencies)
+		if issueWeight > targetWeight {
 			target = issue
-			targetDeps, targetRefs = issueDeps, issueRefs
+			targetWeight, targetRefs = issueWeight, issueRefs
 			continue
 		}
-		if issueDeps < targetDeps {
+		if issueWeight < targetWeight {
 			continue
 		}
 
-		// Equal dependent count - compare by text references
+		// Equal weight - compare by text references
 		if issueRefs > targetRefs {
 			target = issue
-			targetDeps, targetRefs = issueDeps, issueRefs
+			targetWeight, targetRefs = issueWeight, issueRefs
 			continue
 		}
 		if issueRefs < targetRefs {
@@ -305,7 +307,7 @@ func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structura
 		// Equal on both - use lexicographically smallest ID as tiebreaker
 		if issue.ID < target.ID {
 			target = issue
-			targetDeps, targetRefs = issueDeps, issueRefs
+			targetWeight, targetRefs = issueWeight, issueRefs
 		}
 	}
 	return target
@@ -317,9 +319,11 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 		target := chooseMergeTarget(group, refCounts, structuralScores)
 		issues := make([]map[string]interface{}, len(group))
 		for i, issue := range group {
-			depCount := 0
+			dependents := 0
+			dependencies := 0
 			if score, ok := structuralScores[issue.ID]; ok {
-				depCount = score.dependentCount
+				dependents = score.dependentCount
+				dependencies = score.dependsOnCount
 			}
 			issues[i] = map[string]interface{}{
 				"id":              issue.ID,
@@ -327,7 +331,9 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 				"status":          issue.Status,
 				"priority":        issue.Priority,
 				"references":      refCounts[issue.ID],
-				"dependents":      depCount,
+				"dependents":      dependents,
+				"dependencies":    dependencies,
+				"weight":          dependents + dependencies,
 				"is_merge_target": issue.ID == target.ID,
 			}
 		}
