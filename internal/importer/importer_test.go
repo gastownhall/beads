@@ -5,6 +5,8 @@ package importer
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1705,6 +1707,95 @@ func TestMultiRepoPrefixValidation(t *testing.T) {
 		}
 		if result != nil && result.PrefixMismatch {
 			t.Error("Multi-repo mode should not report prefix mismatch")
+		}
+	})
+}
+
+func TestBuildAllowedPrefixSet(t *testing.T) {
+	t.Run("includes primary prefix", func(t *testing.T) {
+		allowed := buildAllowedPrefixSet("gt", "", "")
+		if allowed == nil {
+			t.Fatal("Expected non-nil allowed set")
+		}
+		if !allowed["gt"] {
+			t.Error("Primary prefix 'gt' should be allowed")
+		}
+	})
+
+	t.Run("includes allowed_prefixes config", func(t *testing.T) {
+		allowed := buildAllowedPrefixSet("gt", "hq,mol-,other", "")
+		if allowed == nil {
+			t.Fatal("Expected non-nil allowed set")
+		}
+		if !allowed["gt"] {
+			t.Error("Primary prefix 'gt' should be allowed")
+		}
+		if !allowed["hq"] {
+			t.Error("Config prefix 'hq' should be allowed")
+		}
+		if !allowed["mol"] {
+			t.Error("Config prefix 'mol' (normalized from 'mol-') should be allowed")
+		}
+		if !allowed["other"] {
+			t.Error("Config prefix 'other' should be allowed")
+		}
+	})
+
+	t.Run("includes prefixes from routes.jsonl", func(t *testing.T) {
+		// Create a temp directory with routes.jsonl
+		tmpDir := t.TempDir()
+		routesPath := filepath.Join(tmpDir, "routes.jsonl")
+		routesContent := `{"prefix": "hq-", "path": "."}
+{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "bd-", "path": "beads/mayor/rig"}
+`
+		if err := os.WriteFile(routesPath, []byte(routesContent), 0644); err != nil {
+			t.Fatalf("Failed to write routes.jsonl: %v", err)
+		}
+
+		// buildAllowedPrefixSet uses LoadTownRoutes which tries to find town root
+		// For this unit test, LoadRoutes will work since routes.jsonl is in tmpDir
+		allowed := buildAllowedPrefixSet("gt", "", tmpDir)
+		if allowed == nil {
+			t.Fatal("Expected non-nil allowed set")
+		}
+
+		// Primary prefix should always be included
+		if !allowed["gt"] {
+			t.Error("Primary prefix 'gt' should be allowed")
+		}
+
+		// Routed prefixes should be included (normalized without trailing -)
+		if !allowed["hq"] {
+			t.Error("Routed prefix 'hq' (from routes.jsonl) should be allowed")
+		}
+		if !allowed["bd"] {
+			t.Error("Routed prefix 'bd' (from routes.jsonl) should be allowed")
+		}
+	})
+
+	t.Run("handles missing routes.jsonl gracefully", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		// No routes.jsonl file in tmpDir
+		// Note: LoadTownRoutes may still find routes at town level if running in Gas Town
+
+		allowed := buildAllowedPrefixSet("gt", "", tmpDir)
+		if allowed == nil {
+			t.Fatal("Expected non-nil allowed set")
+		}
+		if !allowed["gt"] {
+			t.Error("Primary prefix 'gt' should be allowed even without local routes.jsonl")
+		}
+		// Don't check exact count - town-level routes may be found
+	})
+
+	t.Run("handles empty beadsDir", func(t *testing.T) {
+		allowed := buildAllowedPrefixSet("gt", "", "")
+		if allowed == nil {
+			t.Fatal("Expected non-nil allowed set")
+		}
+		if !allowed["gt"] {
+			t.Error("Primary prefix 'gt' should be allowed")
 		}
 	})
 }

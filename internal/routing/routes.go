@@ -55,6 +55,16 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 	return routes, scanner.Err()
 }
 
+// LoadTownRoutes loads routes from the town-level routes.jsonl.
+// It first checks the given beadsDir, then walks up to find the town root
+// and loads routes from there. This is useful for multi-rig setups (Gas Town)
+// where routes.jsonl lives at ~/gt/.beads/ rather than in individual rig directories.
+// Returns routes and nil error on success, or nil routes if not in a town or no routes found.
+func LoadTownRoutes(beadsDir string) ([]Route, error) {
+	routes, _ := findTownRoutes(beadsDir)
+	return routes, nil
+}
+
 // ExtractPrefix extracts the prefix from an issue ID.
 // For "gt-abc123", returns "gt-".
 // For "bd-abc123", returns "bd-".

@@ -1058,15 +1058,14 @@ func buildAllowedPrefixSet(primaryPrefix string, allowedPrefixesConfig string, b
 
 	// Load prefixes from routes.jsonl for multi-rig setups (Gas Town)
 	// This allows issues from other rigs to coexist in the same JSONL
+	// Use LoadTownRoutes to find routes at town level (~/gt/.beads/routes.jsonl)
 	if beadsDir != "" {
-		routes, err := routing.LoadRoutes(beadsDir)
-		if err == nil && len(routes) > 0 {
-			for _, route := range routes {
-				// Normalize: remove trailing - if present
-				prefix := strings.TrimSuffix(route.Prefix, "-")
-				if prefix != "" {
-					allowed[prefix] = true
-				}
+		routes, _ := routing.LoadTownRoutes(beadsDir)
+		for _, route := range routes {
+			// Normalize: remove trailing - if present
+			prefix := strings.TrimSuffix(route.Prefix, "-")
+			if prefix != "" {
+				allowed[prefix] = true
 			}
 		}
 	}
