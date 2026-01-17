@@ -24,8 +24,8 @@ pkg/
 *.swo
 *~
 
-# Claude Code
-.claude/settings.local.json
+# Claude Code local state (skills, settings, etc.)
+.claude/
 
 # OS
 .DS_Store
