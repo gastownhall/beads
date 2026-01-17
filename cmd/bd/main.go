@@ -233,9 +233,6 @@ var rootCmd = &cobra.Command{
 		// Set up signal-aware context for graceful cancellation
 		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-		// Signal orchestrator daemon about bd activity (best-effort, for exponential backoff)
-		defer signalOrchestratorActivity()
-
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
@@ -332,27 +329,9 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Protect forks from accidentally committing upstream issue database
-		ensureForkProtection()
-
-		// Performance profiling setup
-		// When --profile is enabled, force direct mode to capture actual database operations
-		// rather than just RPC serialization/network overhead. This gives accurate profiles
-		// of the storage layer, query performance, and business logic.
-		if profileEnabled {
-			noDaemon = true
-			timestamp := time.Now().Format("20060102-150405")
-			if f, _ := os.Create(fmt.Sprintf("bd-profile-%s-%s.prof", cmd.Name(), timestamp)); f != nil {
-				profileFile = f
-				_ = pprof.StartCPUProfile(f)
-			}
-			if f, _ := os.Create(fmt.Sprintf("bd-trace-%s-%s.out", cmd.Name(), timestamp)); f != nil {
-				traceFile = f
-				_ = trace.Start(f)
-			}
-		}
-
-		// Skip database initialization for commands that don't need a database
+		// GH#1093: Check noDbCommands BEFORE expensive operations (ensureForkProtection,
+		// signalOrchestratorActivity) to avoid spawning git subprocesses for simple commands
+		// like "bd version" that don't need database access.
 		noDbCommands := []string{
 			cmdDaemon,
 			"__complete",       // Cobra's internal completion command (shell completions work without db)
@@ -396,6 +375,30 @@ var rootCmd = &cobra.Command{
 		// Also skip for --version flag on root command (cmdName would be "bd")
 		if v, _ := cmd.Flags().GetBool("version"); v {
 			return
+		}
+
+		// Signal orchestrator daemon about bd activity (best-effort, for exponential backoff)
+		// GH#1093: Moved after noDbCommands check to avoid git subprocesses for simple commands
+		defer signalOrchestratorActivity()
+
+		// Protect forks from accidentally committing upstream issue database
+		ensureForkProtection()
+
+		// Performance profiling setup
+		// When --profile is enabled, force direct mode to capture actual database operations
+		// rather than just RPC serialization/network overhead. This gives accurate profiles
+		// of the storage layer, query performance, and business logic.
+		if profileEnabled {
+			noDaemon = true
+			timestamp := time.Now().Format("20060102-150405")
+			if f, _ := os.Create(fmt.Sprintf("bd-profile-%s-%s.prof", cmd.Name(), timestamp)); f != nil {
+				profileFile = f
+				_ = pprof.StartCPUProfile(f)
+			}
+			if f, _ := os.Create(fmt.Sprintf("bd-trace-%s-%s.out", cmd.Name(), timestamp)); f != nil {
+				traceFile = f
+				_ = trace.Start(f)
+			}
 		}
 
 		// Auto-detect sandboxed environment (Phase 2 for GH #353)
