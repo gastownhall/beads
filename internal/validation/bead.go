@@ -170,6 +170,22 @@ func isNamedRole(s string) bool {
 	return false
 }
 
+// ExtractAgentPrefix extracts the prefix from an agent ID.
+// Agent IDs have the format: prefix-rig-role-name or prefix-role
+// The prefix is always the part before the first hyphen.
+// Examples:
+//   - "gt-gastown-polecat-nux" -> "gt"
+//   - "nx-nexus-polecat-nux" -> "nx"
+//   - "gt-mayor" -> "gt"
+//   - "bd-beads-witness" -> "bd"
+func ExtractAgentPrefix(id string) string {
+	hyphenIdx := strings.Index(id, "-")
+	if hyphenIdx <= 0 {
+		return ""
+	}
+	return id[:hyphenIdx]
+}
+
 // ValidateAgentID validates that an agent ID follows the expected pattern.
 // Canonical format: prefix-rig-role-name
 // Patterns:

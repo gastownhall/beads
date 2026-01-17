@@ -400,9 +400,23 @@ var createCmd = &cobra.Command{
 
 		// Validate explicit ID format if provided
 		if explicitID != "" {
-			requestedPrefix, err := validation.ValidateIDFormat(explicitID)
-			if err != nil {
-				FatalError("%v", err)
+			var requestedPrefix string
+			var err error
+
+			// For agent types, use agent-aware prefix extraction.
+			// This fixes the bug where 3-char polecat names like "nux" in
+			// "nx-nexus-polecat-nux" were incorrectly treated as hash suffixes,
+			// causing prefix to be extracted as "nx-nexus-polecat" instead of "nx".
+			if issueType == "agent" {
+				if err := validation.ValidateAgentID(explicitID); err != nil {
+					FatalError("invalid agent ID: %v", err)
+				}
+				requestedPrefix = validation.ExtractAgentPrefix(explicitID)
+			} else {
+				requestedPrefix, err = validation.ValidateIDFormat(explicitID)
+				if err != nil {
+					FatalError("%v", err)
+				}
 			}
 
 			// Validate prefix matches database prefix
@@ -430,13 +444,6 @@ var createCmd = &cobra.Command{
 
 			if err := validation.ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				FatalError("%v", err)
-			}
-
-			// Validate agent ID pattern if type is agent
-			if issueType == "agent" {
-				if err := validation.ValidateAgentID(explicitID); err != nil {
-					FatalError("invalid agent ID: %v", err)
-				}
 			}
 		}
 
