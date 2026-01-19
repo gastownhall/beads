@@ -542,11 +542,11 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 			fixMsg = "Run 'bd doctor --fix' to fix automatically, or manually run 'bd sync --import-only' or 'bd export' depending on which has newer data"
 		}
 		if strings.Contains(strings.Join(issues, " "), "Prefix mismatch") {
-			fixMsg = "Run 'bd import -i " + filepath.Base(jsonlPath) + " --rename-on-import' to fix prefixes"
+			fixMsg = "Run 'bd import -i .beads/issues.jsonl --rename-on-import' to fix prefixes"
 		}
 		// GH#885: For status mismatches, provide specific guidance and include detail
 		if strings.Contains(strings.Join(issues, " "), "Status mismatch") {
-			fixMsg = "Run 'bd export -o " + filepath.Base(jsonlPath) + "' to update JSONL from DB (DB is usually source of truth)"
+			fixMsg = "Run 'bd export -o .beads/issues.jsonl' to update JSONL from DB (DB is usually source of truth)"
 			detail = statusMismatchDetail
 		}
 

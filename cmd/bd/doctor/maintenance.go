@@ -93,7 +93,7 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d closed issue(s) older than %d days", cleanable, DefaultCleanupAgeDays),
 		Detail:   "These issues can be cleaned up to reduce database size",
-		Fix:      "Run 'bd doctor --fix' to cleanup, or 'bd cleanup --force' for more options",
+		Fix:      "Run 'bd doctor --fix' to cleanup, or 'bd admin cleanup --force' for more options",
 		Category: CategoryMaintenance,
 	}
 }
@@ -155,7 +155,7 @@ func CheckExpiredTombstones(path string) DoctorCheck {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d tombstone(s) older than %d days", expiredCount, ttlDays),
 		Detail:   "Expired tombstones can be pruned to reduce JSONL file size",
-		Fix:      "Run 'bd doctor --fix' to prune, or 'bd cleanup --force' for more options",
+		Fix:      "Run 'bd doctor --fix' to prune, or 'bd admin cleanup --force' for more options",
 		Category: CategoryMaintenance,
 	}
 }

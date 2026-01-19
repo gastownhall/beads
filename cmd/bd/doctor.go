@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -774,7 +775,15 @@ func printDiagnostics(result doctorResult) {
 				fmt.Printf("  %s  %s %s\n", ui.RenderWarnIcon(), ui.RenderWarn(fmt.Sprintf("%d.", i+1)), line)
 			}
 			if check.Fix != "" {
-				fmt.Printf("        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.Fix)
+				// Handle multiline Fix messages with proper indentation
+				lines := strings.Split(check.Fix, "\n")
+				for i, line := range lines {
+					if i == 0 {
+						fmt.Printf("        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), line)
+					} else {
+						fmt.Printf("          %s\n", line)
+					}
+				}
 			}
 		}
 	} else {
