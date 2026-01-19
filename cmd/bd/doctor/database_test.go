@@ -28,7 +28,8 @@ func setupTestDatabase(t *testing.T, dir string) string {
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS issues (
 		id TEXT PRIMARY KEY,
 		title TEXT,
-		status TEXT
+		status TEXT,
+		ephemeral INTEGER DEFAULT 0
 	)`)
 	if err != nil {
 		t.Fatalf("failed to create table: %v", err)
@@ -160,6 +161,34 @@ func TestCheckDatabaseJSONLSync(t *testing.T) {
 				}
 			},
 			expectedStatus: "warning",
+		},
+		{
+			name: "ephemeral wisps excluded from count",
+			setup: func(t *testing.T, dir string) {
+				// Create database with 3 issues: 2 regular + 1 ephemeral wisp
+				dbPath := setupTestDatabase(t, dir)
+				db, _ := sql.Open("sqlite3", dbPath)
+				defer db.Close()
+				// Add config table for prefix check
+				_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)`)
+				_, _ = db.Exec(`INSERT INTO config (key, value) VALUES ('issue_prefix', 'test')`)
+				// Insert 2 regular issues
+				_, _ = db.Exec(`INSERT INTO issues (id, title, status, ephemeral) VALUES ('test-1', 'Regular Issue 1', 'open', 0)`)
+				_, _ = db.Exec(`INSERT INTO issues (id, title, status, ephemeral) VALUES ('test-2', 'Regular Issue 2', 'open', 0)`)
+				// Insert 1 ephemeral wisp (should be ignored in count)
+				_, _ = db.Exec(`INSERT INTO issues (id, title, status, ephemeral) VALUES ('test-wisp-1', 'Wisp Issue', 'open', 1)`)
+
+				// Create JSONL with only 2 issues (wisps are never exported)
+				jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+				content := `{"id":"test-1","title":"Regular Issue 1","status":"open"}
+{"id":"test-2","title":"Regular Issue 2","status":"open"}
+`
+				if err := os.WriteFile(jsonlPath, []byte(content), 0600); err != nil {
+					t.Fatalf("failed to create JSONL: %v", err)
+				}
+			},
+			expectedStatus: "ok",
+			expectMessage:  "Database and JSONL are in sync",
 		},
 		{
 			// GH#885: Status mismatch detection
@@ -975,7 +1004,7 @@ func TestCheckDatabaseJSONLSync_MoleculePrefix(t *testing.T) {
 			}
 
 			// Create issues table
-			_, err = db.Exec(`CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT, status TEXT)`)
+			_, err = db.Exec(`CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT, status TEXT, ephemeral INTEGER DEFAULT 0)`)
 			if err != nil {
 				db.Close()
 				t.Fatalf("failed to create issues table: %v", err)

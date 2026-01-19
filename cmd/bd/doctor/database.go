@@ -412,9 +412,9 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 	}
 	defer db.Close()
 
-	// Get database count
+	// Get database count (exclude ephemeral/wisp issues - they're never exported to JSONL)
 	var dbCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&dbCount)
+	err = db.QueryRow("SELECT COUNT(*) FROM issues WHERE ephemeral = 0 OR ephemeral IS NULL").Scan(&dbCount)
 	if err != nil {
 		// Database opened but can't query. If JSONL has issues, suggest recovery.
 		if jsonlErr == nil && jsonlCount > 0 {
