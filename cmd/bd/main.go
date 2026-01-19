@@ -76,8 +76,9 @@ var (
 	sandboxMode    bool
 	allowStale     bool          // Use --allow-stale: skip staleness check (emergency escape hatch)
 	noDb           bool          // Use --no-db mode: load from JSONL, write back after each command
-	readonlyMode   bool          // Read-only mode: block write operations (for worker sandboxes)
-	lockTimeout    time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
+	readonlyMode    bool          // Read-only mode: block write operations (for worker sandboxes)
+	storeIsReadOnly bool          // Track if store was opened read-only (for staleness checks)
+	lockTimeout     time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
@@ -786,6 +787,10 @@ var rootCmd = &cobra.Command{
 				needsBootstrap = true // New DB needs auto-import (GH#b09)
 			}
 		}
+
+		// Track final read-only state for staleness checks (GH#1089)
+		// opts.ReadOnly may have changed if read-only open failed and fell back
+		storeIsReadOnly = opts.ReadOnly
 
 		if err != nil {
 			// Check for fresh clone scenario
