@@ -29,7 +29,7 @@ const (
 // Detection strategy:
 // 1. Check if user has push access to origin (git remote -v shows write URL)
 // 2. Check git config for beads.role setting (explicit override)
-// 3. Fall back to contributor if uncertain
+// 3. Fall back to maintainer for local projects (no remote configured)
 func DetectUserRole(repoPath string) (UserRole, error) {
 	// First check for explicit role in git config
 	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
@@ -49,8 +49,8 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 		// Fallback to standard fetch URL if push URL fails (some git versions/configs)
 		output, err = gitCommandRunner(repoPath, "remote", "get-url", "origin")
 		if err != nil {
-			// No remote or error - default to contributor
-			return Contributor, nil
+			// No remote means local project - default to maintainer
+			return Maintainer, nil
 		}
 	}
 
