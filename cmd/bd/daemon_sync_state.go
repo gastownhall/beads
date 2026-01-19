@@ -45,7 +45,12 @@ var (
 func LoadSyncState(beadsDir string) SyncState {
 	syncStateMu.Lock()
 	defer syncStateMu.Unlock()
+	return loadSyncStateUnlocked(beadsDir)
+}
 
+// loadSyncStateUnlocked loads sync state without acquiring lock.
+// Caller must hold syncStateMu.
+func loadSyncStateUnlocked(beadsDir string) SyncState {
 	statePath := filepath.Join(beadsDir, syncStateFile)
 	data, err := os.ReadFile(statePath) // #nosec G304 - path constructed from beadsDir
 	if err != nil {
@@ -70,7 +75,12 @@ func LoadSyncState(beadsDir string) SyncState {
 func SaveSyncState(beadsDir string, state SyncState) error {
 	syncStateMu.Lock()
 	defer syncStateMu.Unlock()
+	return saveSyncStateUnlocked(beadsDir, state)
+}
 
+// saveSyncStateUnlocked saves sync state without acquiring lock.
+// Caller must hold syncStateMu.
+func saveSyncStateUnlocked(beadsDir string, state SyncState) error {
 	statePath := filepath.Join(beadsDir, syncStateFile)
 
 	// If state is empty/reset, remove the file
@@ -102,8 +112,12 @@ func ClearSyncState(beadsDir string) error {
 
 // RecordSyncFailure updates the sync state after a failure.
 // Returns the duration until next retry.
+// Thread-safe: holds lock for entire load-modify-save operation to prevent races.
 func RecordSyncFailure(beadsDir string, reason string) time.Duration {
-	state := LoadSyncState(beadsDir)
+	syncStateMu.Lock()
+	defer syncStateMu.Unlock()
+
+	state := loadSyncStateUnlocked(beadsDir)
 
 	state.LastFailure = time.Now()
 	state.FailureCount++
@@ -123,7 +137,7 @@ func RecordSyncFailure(beadsDir string, reason string) time.Duration {
 		state.NeedsManualSync = true
 	}
 
-	_ = SaveSyncState(beadsDir, state)
+	_ = saveSyncStateUnlocked(beadsDir, state)
 	return backoff
 }
 
@@ -144,8 +158,12 @@ func ShouldSkipSync(beadsDir string) bool {
 // ResetBackoffOnDaemonStart resets backoff counters when daemon starts,
 // but preserves NeedsManualSync flag so hints still show.
 // This allows a fresh start while keeping user informed of conflicts.
+// Thread-safe: holds lock for entire load-modify-save operation to prevent races.
 func ResetBackoffOnDaemonStart(beadsDir string) {
-	state := LoadSyncState(beadsDir)
+	syncStateMu.Lock()
+	defer syncStateMu.Unlock()
+
+	state := loadSyncStateUnlocked(beadsDir)
 
 	// Nothing to reset
 	if state.FailureCount == 0 && !state.NeedsManualSync {
@@ -161,5 +179,5 @@ func ResetBackoffOnDaemonStart(beadsDir string) {
 		FailureReason:   reason,
 	}
 
-	_ = SaveSyncState(beadsDir, state)
+	_ = saveSyncStateUnlocked(beadsDir, state)
 }
