@@ -253,8 +253,14 @@ func autoImportIfNewer() {
 	if store != nil {
 		prefix, prefixErr := store.GetConfig(ctx, "issue_prefix")
 		if prefixErr != nil || prefix == "" {
-			// Database needs initialization - detect prefix from JSONL or directory
-			detectedPrefix := detectPrefixFromJSONL(jsonlData)
+			// GH#1145: Check config.yaml for issue-prefix before auto-detecting
+			detectedPrefix := config.GetString("issue-prefix")
+
+			// If config.yaml doesn't have it, try to detect from JSONL
+			if detectedPrefix == "" {
+				detectedPrefix = detectPrefixFromJSONL(jsonlData)
+			}
+
 			if detectedPrefix == "" {
 				// Fallback: detect from directory name
 				beadsDir := filepath.Dir(jsonlPath)
@@ -338,7 +344,7 @@ func autoImportIfNewer() {
 	if err := store.ClearAllExportHashes(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
 	}
-	
+
 	// Use shared import logic
 	opts := ImportOptions{
 		DryRun:               false,
@@ -418,8 +424,6 @@ func autoImportIfNewer() {
 	}
 }
 
-
-
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a flush
 // markDirtyAndScheduleFlush marks the database as dirty and schedules a debounced
 // export to JSONL. Uses FlushManager's event-driven architecture.
@@ -485,12 +489,12 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("failed to get stored JSONL hash: %w", err)
 	}
-	
+
 	// If no hash stored, this is first export - skip validation
 	if storedHash == "" {
 		return false, nil
 	}
-	
+
 	// Read current JSONL file
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err != nil {
@@ -508,12 +512,12 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 		}
 		return false, fmt.Errorf("failed to read JSONL file: %w", err)
 	}
-	
+
 	// Compute current JSONL hash
 	hasher := sha256.New()
 	hasher.Write(jsonlData)
 	currentHash := hex.EncodeToString(hasher.Sum(nil))
-	
+
 	// Compare hashes
 	if currentHash != storedHash {
 		fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file hash mismatch detected\n")
@@ -530,7 +534,7 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 		}
 		return true, nil // Signal full export needed
 	}
-	
+
 	return false, nil
 }
 
@@ -559,15 +563,15 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 	encoder := json.NewEncoder(f)
 	skippedCount := 0
 	exportedIDs := make([]string, 0, len(issues))
-	
+
 	for _, issue := range issues {
 		if err := encoder.Encode(issue); err != nil {
-		 return nil, fmt.Errorf("failed to encode issue %s: %w", issue.ID, err)
+			return nil, fmt.Errorf("failed to encode issue %s: %w", issue.ID, err)
 		}
-		
+
 		exportedIDs = append(exportedIDs, issue.ID)
 	}
-	
+
 	// Report skipped issues if any (helps debugging)
 	if skippedCount > 0 {
 		debug.Logf("auto-flush skipped %d issue(s) with timestamp-only changes", skippedCount)
@@ -726,10 +730,13 @@ func filterByMultiRepoPrefix(ctx context.Context, s storage.Storage, issues []*t
 		return issues
 	}
 
-	// Get our configured prefix
+	// Get our configured prefix (GH#1145: fallback to config.yaml)
 	prefix, prefixErr := s.GetConfig(ctx, "issue_prefix")
 	if prefixErr != nil || prefix == "" {
-		return issues
+		prefix = config.GetString("issue-prefix")
+		if prefix == "" {
+			return issues
+		}
 	}
 
 	// Determine if we're the primary repo
