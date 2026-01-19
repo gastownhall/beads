@@ -517,3 +517,385 @@ func resolveSymlinks(path string) string {
 	}
 	return resolved
 }
+
+// TestRole_ExplicitConfig tests Role() when beads.role is set in git config.
+func TestRole_ExplicitConfig(t *testing.T) {
+	tests := map[string]struct {
+		configValue  string
+		expectedRole UserRole
+	}{
+		"contributor role": {configValue: "contributor", expectedRole: Contributor},
+		"maintainer role":  {configValue: "maintainer", expectedRole: Maintainer},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			if err := initGitRepo(tmpDir); err != nil {
+				t.Fatalf("failed to init git repo: %v", err)
+			}
+
+			// Create .beads directory with required files
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0750); err != nil {
+				t.Fatalf("failed to create .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+				t.Fatalf("failed to create beads.db: %v", err)
+			}
+
+			// Set beads.role in git config
+			cmd := exec.Command("git", "config", "beads.role", tt.configValue)
+			cmd.Dir = tmpDir
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("failed to set git config: %v", err)
+			}
+
+			t.Cleanup(func() {
+				ResetCaches()
+				git.ResetCaches()
+			})
+
+			rc, err := GetRepoContextForWorkspace(tmpDir)
+			if err != nil {
+				t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+			}
+
+			role, ok := rc.Role()
+			if !ok {
+				t.Error("Role() returned ok=false, expected ok=true")
+			}
+			if role != tt.expectedRole {
+				t.Errorf("Role() = %q, want %q", role, tt.expectedRole)
+			}
+		})
+	}
+}
+
+// TestRole_NoConfig tests Role() when beads.role is not set.
+func TestRole_NoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create .beads directory with required files (no git config set)
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	role, ok := rc.Role()
+	if ok {
+		t.Errorf("Role() returned ok=true with role=%q, expected ok=false", role)
+	}
+	if role != "" {
+		t.Errorf("Role() = %q, want empty string", role)
+	}
+}
+
+// TestRole_BEADS_DIR_ImpliesContributor tests that BEADS_DIR redirect
+// implicitly returns Contributor role without requiring git config.
+func TestRole_BEADS_DIR_ImpliesContributor(t *testing.T) {
+	// Save original env var
+	originalBeadsDir := os.Getenv("BEADS_DIR")
+	t.Cleanup(func() {
+		if originalBeadsDir != "" {
+			os.Setenv("BEADS_DIR", originalBeadsDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	// Create two repos: source repo and target repo for redirect
+	tmpDir := t.TempDir()
+	sourceRepo := filepath.Join(tmpDir, "source")
+	targetRepo := filepath.Join(tmpDir, "target")
+
+	for _, repo := range []string{sourceRepo, targetRepo} {
+		if err := os.MkdirAll(repo, 0750); err != nil {
+			t.Fatalf("failed to create repo dir: %v", err)
+		}
+		if err := initGitRepo(repo); err != nil {
+			t.Fatalf("failed to init git repo: %v", err)
+		}
+	}
+
+	// Create .beads with files in target repo
+	targetBeadsDir := filepath.Join(targetRepo, ".beads")
+	if err := os.MkdirAll(targetBeadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads in target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetBeadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Create .beads in source repo with redirect to target
+	sourceBeadsDir := filepath.Join(sourceRepo, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads in source: %v", err)
+	}
+	redirectFile := filepath.Join(sourceBeadsDir, "redirect")
+	if err := os.WriteFile(redirectFile, []byte(targetBeadsDir+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write redirect file: %v", err)
+	}
+
+	// Set BEADS_DIR to the target (simulating direnv setup)
+	os.Setenv("BEADS_DIR", targetBeadsDir)
+
+	// Change to source repo to trigger redirect detection
+	originalWd, _ := os.Getwd()
+	if err := os.Chdir(sourceRepo); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Chdir(originalWd)
+	})
+
+	// Get context - should detect redirect via GetRedirectInfo
+	rc, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+
+	// IsRedirected should be true
+	if !rc.IsRedirected {
+		t.Error("IsRedirected should be true when BEADS_DIR points elsewhere")
+	}
+
+	// Role should implicitly return Contributor
+	role, ok := rc.Role()
+	if !ok {
+		t.Error("Role() returned ok=false, expected ok=true for redirected context")
+	}
+	if role != Contributor {
+		t.Errorf("Role() = %q, want %q (implicit contributor for BEADS_DIR)", role, Contributor)
+	}
+
+	// IsContributor should return true
+	if !rc.IsContributor() {
+		t.Error("IsContributor() = false, want true for redirected context")
+	}
+
+	// IsMaintainer should return false
+	if rc.IsMaintainer() {
+		t.Error("IsMaintainer() = true, want false for redirected context")
+	}
+}
+
+// TestIsContributor tests the IsContributor convenience method.
+func TestIsContributor(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Set role to contributor
+	cmd := exec.Command("git", "config", "beads.role", "contributor")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set git config: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	if !rc.IsContributor() {
+		t.Error("IsContributor() = false, want true")
+	}
+	if rc.IsMaintainer() {
+		t.Error("IsMaintainer() = true, want false")
+	}
+}
+
+// TestIsMaintainer tests the IsMaintainer convenience method.
+func TestIsMaintainer(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Set role to maintainer
+	cmd := exec.Command("git", "config", "beads.role", "maintainer")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set git config: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	if rc.IsContributor() {
+		t.Error("IsContributor() = true, want false")
+	}
+	if !rc.IsMaintainer() {
+		t.Error("IsMaintainer() = false, want true")
+	}
+}
+
+// TestRequireRole_Configured tests RequireRole when role is set.
+func TestRequireRole_Configured(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Set role
+	cmd := exec.Command("git", "config", "beads.role", "contributor")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set git config: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	if err := rc.RequireRole(); err != nil {
+		t.Errorf("RequireRole() returned error: %v, want nil", err)
+	}
+}
+
+// TestRequireRole_NotConfigured tests RequireRole when role is not set.
+func TestRequireRole_NotConfigured(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Don't set any role config
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	err = rc.RequireRole()
+	if err == nil {
+		t.Error("RequireRole() returned nil, want ErrRoleNotConfigured")
+	}
+	if err != ErrRoleNotConfigured {
+		t.Errorf("RequireRole() returned %v, want ErrRoleNotConfigured", err)
+	}
+}
+
+// TestGitOutput tests the GitOutput helper method.
+func TestGitOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := initGitRepo(tmpDir); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Set a test config value
+	cmd := exec.Command("git", "config", "test.value", "hello-world")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set git config: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContextForWorkspace(tmpDir)
+	if err != nil {
+		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
+	}
+
+	// Test successful output
+	output, err := rc.GitOutput(t.Context(), "config", "--get", "test.value")
+	if err != nil {
+		t.Errorf("GitOutput() returned error: %v", err)
+	}
+	expected := "hello-world\n"
+	if output != expected {
+		t.Errorf("GitOutput() = %q, want %q", output, expected)
+	}
+
+	// Test error case (non-existent config)
+	_, err = rc.GitOutput(t.Context(), "config", "--get", "nonexistent.key")
+	if err == nil {
+		t.Error("GitOutput() returned nil error for non-existent key, want error")
+	}
+}
