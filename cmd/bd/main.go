@@ -532,7 +532,16 @@ var rootCmd = &cobra.Command{
 				// Invariant: dbPath must always be absolute for filepath.Rel() compatibility
 				// in daemon sync-branch code path. Use CanonicalizePath for OS-agnostic
 				// handling (symlinks, case normalization on macOS).
-				dbPath = utils.CanonicalizePath(filepath.Join(".beads", beads.CanonicalDatabaseName))
+				//
+				// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
+				// which follows redirect files. Without this, a redirected .beads
+				// would create a local database instead of using the redirect target.
+				// (GH#bd-0qel)
+				targetBeadsDir := beads.FindBeadsDir()
+				if targetBeadsDir == "" {
+					targetBeadsDir = ".beads"
+				}
+				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
 		}
 

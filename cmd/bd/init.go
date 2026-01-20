@@ -139,11 +139,15 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		//
 		// Use global dbPath if set via --db flag or BEADS_DB env var (SQLite-only),
 		// otherwise default to `.beads/beads.db` for SQLite.
+		// If there's a redirect file, use the redirect target (GH#bd-0qel)
 		initDBPath := dbPath
 		if backend == configfile.BackendDolt {
 			initDBPath = filepath.Join(".beads", "dolt")
 		} else if initDBPath == "" {
-			initDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
+			// Check for redirect in local .beads
+			localBeadsDir := filepath.Join(".", ".beads")
+			targetBeadsDir := beads.FollowRedirect(localBeadsDir)
+			initDBPath = filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName)
 		}
 
 		// Migrate old SQLite database files if they exist (SQLite backend only).
@@ -192,7 +196,9 @@ With --stealth: configures per-repository git settings for invisible beads usage
 
 		var beadsDir string
 		// For regular repos, use current directory
-		beadsDir = filepath.Join(cwd, ".beads")
+		// But first check if there's a redirect file - if so, use the redirect target (GH#bd-0qel)
+		localBeadsDir := filepath.Join(cwd, ".beads")
+		beadsDir = beads.FollowRedirect(localBeadsDir)
 
 		// Prevent nested .beads directories
 		// Check if current working directory is inside a .beads directory
