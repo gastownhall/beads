@@ -23,9 +23,27 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          bd = pkgs.callPackage ./default.nix { inherit pkgs self; };
         in
         {
-          packages.default = pkgs.callPackage ./default.nix { inherit pkgs self; };
+          packages = {
+            default = bd;
+
+            fish-completions = pkgs.runCommand "bd-fish-completions" { } ''
+              mkdir -p $out/share/fish/vendor_completions.d
+              ${bd}/bin/bd completion fish > $out/share/fish/vendor_completions.d/bd.fish
+            '';
+
+            bash-completions = pkgs.runCommand "bd-bash-completions" { } ''
+              mkdir -p $out/share/bash-completion/completions
+              ${bd}/bin/bd completion bash > $out/share/bash-completion/completions/bd
+            '';
+
+            zsh-completions = pkgs.runCommand "bd-zsh-completions" { } ''
+              mkdir -p $out/share/zsh/site-functions
+              ${bd}/bin/bd completion zsh > $out/share/zsh/site-functions/_bd
+            '';
+          };
 
           apps.default = {
             type = "app";
