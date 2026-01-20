@@ -209,7 +209,9 @@ func doPullFromLinear(ctx context.Context, dryRun bool, state string, skipLinear
 }
 
 // doPushToLinear exports issues to Linear using the GraphQL API.
-func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRefs bool, forceUpdateIDs map[string]bool, skipUpdateIDs map[string]bool) (*linear.PushStats, error) {
+// typeFilters includes only issues matching these types (empty means all).
+// excludeTypes excludes issues matching these types.
+func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRefs bool, forceUpdateIDs map[string]bool, skipUpdateIDs map[string]bool, typeFilters []string, excludeTypes []string) (*linear.PushStats, error) {
 	stats := &linear.PushStats{}
 
 	client, err := getLinearClient(ctx)
@@ -220,6 +222,34 @@ func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRef
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return stats, fmt.Errorf("failed to get local issues: %w", err)
+	}
+
+	// Apply type filters
+	if len(typeFilters) > 0 || len(excludeTypes) > 0 {
+		typeSet := make(map[string]bool, len(typeFilters))
+		for _, t := range typeFilters {
+			typeSet[strings.ToLower(t)] = true
+		}
+		excludeSet := make(map[string]bool, len(excludeTypes))
+		for _, t := range excludeTypes {
+			excludeSet[strings.ToLower(t)] = true
+		}
+
+		var filtered []*types.Issue
+		for _, issue := range allIssues {
+			issueType := strings.ToLower(string(issue.IssueType))
+
+			// If type filters specified, issue must match one
+			if len(typeFilters) > 0 && !typeSet[issueType] {
+				continue
+			}
+			// If exclude types specified, issue must not match any
+			if excludeSet[issueType] {
+				continue
+			}
+			filtered = append(filtered, issue)
+		}
+		allIssues = filtered
 	}
 
 	var toCreate []*types.Issue

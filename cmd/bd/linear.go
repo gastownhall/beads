@@ -82,16 +82,22 @@ Modes:
   --push         Export issues from beads to Linear
   (no flags)     Bidirectional sync: pull then push, with conflict resolution
 
+Type Filtering (--push only):
+  --type task,feature    Only sync issues of these types
+  --exclude-type wisp    Exclude issues of these types
+
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local    Always prefer local beads version
   --prefer-linear   Always prefer Linear version
 
 Examples:
-  bd linear sync --pull                # Import from Linear
-  bd linear sync --push --create-only  # Push new issues only
-  bd linear sync --dry-run             # Preview without changes
-  bd linear sync --prefer-local        # Bidirectional, local wins`,
+  bd linear sync --pull                         # Import from Linear
+  bd linear sync --push --create-only           # Push new issues only
+  bd linear sync --push --type=task,feature     # Push only tasks and features
+  bd linear sync --push --exclude-type=wisp     # Push all except wisps
+  bd linear sync --dry-run                      # Preview without changes
+  bd linear sync --prefer-local                 # Bidirectional, local wins`,
 	Run: runLinearSync,
 }
 
@@ -130,6 +136,8 @@ func init() {
 	linearSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
 	linearSyncCmd.Flags().Bool("update-refs", true, "Update external_ref after creating Linear issues")
 	linearSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
+	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
+	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -146,6 +154,8 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	createOnly, _ := cmd.Flags().GetBool("create-only")
 	updateRefs, _ := cmd.Flags().GetBool("update-refs")
 	state, _ := cmd.Flags().GetString("state")
+	typeFilters, _ := cmd.Flags().GetStringSlice("type")
+	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -314,7 +324,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 			fmt.Println("→ Pushing issues to Linear...")
 		}
 
-		pushStats, err := doPushToLinear(ctx, dryRun, createOnly, updateRefs, forceUpdateIDs, skipUpdateIDs)
+		pushStats, err := doPushToLinear(ctx, dryRun, createOnly, updateRefs, forceUpdateIDs, skipUpdateIDs, typeFilters, excludeTypes)
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
