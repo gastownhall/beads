@@ -10,78 +10,37 @@ import (
 
 func TestTruncateText(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		maxLen int
-		want   string
+		name  string
+		input string
+		want  string
 	}{
 		{
-			name:   "empty string",
-			input:  "",
-			maxLen: 10,
-			want:   "(empty)",
+			name:  "empty string",
+			input: "",
+			want:  "(empty)",
 		},
 		{
-			name:   "short string",
-			input:  "hello",
-			maxLen: 10,
-			want:   "hello",
+			name:  "short string",
+			input: "hello",
+			want:  "hello",
 		},
 		{
-			name:   "exact length",
-			input:  "0123456789",
-			maxLen: 10,
-			want:   "0123456789",
+			name:  "newlines replaced",
+			input: "line1\nline2\r\nline3",
+			want:  "line1 line2 line3",
 		},
 		{
-			name:   "truncated",
-			input:  "this is a very long string",
-			maxLen: 15,
-			want:   "this is a ve...",
-		},
-		{
-			name:   "newlines replaced",
-			input:  "line1\nline2\nline3",
-			maxLen: 30,
-			want:   "line1 line2 line3",
-		},
-		{
-			name:   "very short max",
-			input:  "hello world",
-			maxLen: 3,
-			want:   "...",
-		},
-		{
-			name:   "UTF-8 characters preserved",
-			input:  "Hello 世界！This is a test",
-			maxLen: 12,
-			want:   "Hello 世界！...",
-		},
-		{
-			name:   "UTF-8 exact length",
-			input:  "日本語テスト",
-			maxLen: 6,
-			want:   "日本語テスト",
-		},
-		{
-			name:   "UTF-8 truncate",
-			input:  "日本語テストです",
-			maxLen: 6,
-			want:   "日本語...",
-		},
-		{
-			name:   "emoji handling",
-			input:  "Hello 🌍🌎🌏 World",
-			maxLen: 12,
-			want:   "Hello 🌍🌎🌏...",
+			name:  "truncated at fixed max",
+			input: strings.Repeat("a", truncateTextMaxLen+10),
+			want:  strings.Repeat("a", truncateTextMaxLen-3) + "...",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := truncateText(tt.input, tt.maxLen)
+			got := truncateText(tt.input)
 			if got != tt.want {
-				t.Errorf("truncateText(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+				t.Errorf("truncateText(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

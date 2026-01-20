@@ -913,6 +913,7 @@ type SyncConflictRecord struct {
 // LoadSyncConflictState loads the sync conflict state from disk.
 func LoadSyncConflictState(beadsDir string) (*SyncConflictState, error) {
 	path := filepath.Join(beadsDir, "sync_conflicts.json")
+	// #nosec G304 -- path is derived from the workspace .beads directory
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1012,7 +1013,7 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 
 	// Handle manual strategy with interactive resolution
 	if strategy == config.ConflictStrategyManual {
-		return resolveSyncConflictsManually(ctx, jsonlPath, beadsDir, conflictState, baseMap, localMap, remoteMap, baseIssues, localIssues, remoteIssues)
+		return resolveSyncConflictsManually(ctx, jsonlPath, beadsDir, conflictState, baseMap, localMap, remoteMap)
 	}
 
 	resolved := 0
@@ -1090,8 +1091,7 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 
 // resolveSyncConflictsManually handles manual conflict resolution with interactive prompts.
 func resolveSyncConflictsManually(ctx context.Context, jsonlPath, beadsDir string, conflictState *SyncConflictState,
-	baseMap, localMap, remoteMap map[string]*beads.Issue,
-	baseIssues, localIssues, remoteIssues []*beads.Issue) error {
+	baseMap, localMap, remoteMap map[string]*beads.Issue) error {
 
 	// Build interactive conflicts list
 	var interactiveConflicts []InteractiveConflict

@@ -21,7 +21,7 @@ var ConfigWarningWriter io.Writer = os.Stderr
 // logConfigWarning logs a warning message if ConfigWarnings is enabled.
 func logConfigWarning(format string, args ...interface{}) {
 	if ConfigWarnings && ConfigWarningWriter != nil {
-		fmt.Fprintf(ConfigWarningWriter, format, args...)
+		_, _ = fmt.Fprintf(ConfigWarningWriter, format, args...)
 	}
 }
 

@@ -160,15 +160,15 @@ func displayConflictDiff(conflict InteractiveConflict) {
 	// Description (show truncated if different)
 	if local.Description != remote.Description {
 		fmt.Printf("  %s\n", ui.RenderAccent("description:"))
-		fmt.Printf("    %s %s\n", ui.RenderMuted("local:"), truncateText(local.Description, 60))
-		fmt.Printf("    %s %s\n", ui.RenderAccent("remote:"), truncateText(remote.Description, 60))
+		fmt.Printf("    %s %s\n", ui.RenderMuted("local:"), truncateText(local.Description))
+		fmt.Printf("    %s %s\n", ui.RenderAccent("remote:"), truncateText(remote.Description))
 	}
 
 	// Notes (show truncated if different)
 	if local.Notes != remote.Notes {
 		fmt.Printf("  %s\n", ui.RenderAccent("notes:"))
-		fmt.Printf("    %s %s\n", ui.RenderMuted("local:"), truncateText(local.Notes, 60))
-		fmt.Printf("    %s %s\n", ui.RenderAccent("remote:"), truncateText(remote.Notes, 60))
+		fmt.Printf("    %s %s\n", ui.RenderMuted("local:"), truncateText(local.Notes))
+		fmt.Printf("    %s %s\n", ui.RenderAccent("remote:"), truncateText(remote.Notes))
 	}
 
 	// Labels
@@ -371,9 +371,11 @@ func valueOrNone(s string) string {
 	return s
 }
 
-// truncateText truncates a string to maxLen runes (not bytes) for proper UTF-8 handling.
+const truncateTextMaxLen = 60
+
+// truncateText truncates a string to a fixed max length (runes, not bytes) for proper UTF-8 handling.
 // Replaces newlines with spaces for single-line display.
-func truncateText(s string, maxLen int) string {
+func truncateText(s string) string {
 	if s == "" {
 		return "(empty)"
 	}
@@ -383,14 +385,14 @@ func truncateText(s string, maxLen int) string {
 
 	// Count runes, not bytes, for proper UTF-8 handling
 	runeCount := utf8.RuneCountInString(s)
-	if runeCount <= maxLen {
+	if runeCount <= truncateTextMaxLen {
 		return s
 	}
 
 	// Truncate by runes
 	runes := []rune(s)
-	if maxLen <= 3 {
+	if truncateTextMaxLen <= 3 {
 		return "..."
 	}
-	return string(runes[:maxLen-3]) + "..."
+	return string(runes[:truncateTextMaxLen-3]) + "..."
 }
