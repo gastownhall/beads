@@ -366,9 +366,28 @@ func startDaemonProcess(socketPath string) bool {
 		binPath = os.Args[0]
 	}
 
-	args := []string{"daemon", "start"}
+	// IMPORTANT: Use --foreground for auto-start.
+	//
+	// Rationale:
+	// - `bd daemon start` (without --foreground) spawns an additional child process
+	//   (`bd daemon --start` with BD_DAEMON_FOREGROUND=1). For Dolt, that extra
+	//   daemonization layer can introduce startup races/lock contention (Dolt's
+	//   LOCK acquisition timeout is 100ms). If the daemon isn't ready quickly,
+	//   the parent falls back to direct mode and may fail to open Dolt because the
+	//   daemon holds the write lock.
+	// - Here we already daemonize via SysProcAttr + stdio redirection, so a second
+	//   layer is unnecessary.
+	args := []string{"daemon", "start", "--foreground"}
 
 	cmd := execCommandFn(binPath, args...)
+	// Mark this as a daemon-foreground child so we don't track/kill based on the
+	// short-lived launcher process PID (see computeDaemonParentPID()).
+	// Also force the daemon to bind the same socket we're probing for readiness,
+	// avoiding any mismatch between workspace-derived paths.
+	cmd.Env = append(os.Environ(),
+		"BD_DAEMON_FOREGROUND=1",
+		"BD_SOCKET="+socketPath,
+	)
 	setupDaemonIO(cmd)
 
 	if dbPath != "" {

@@ -40,8 +40,18 @@ Examples:
 		logLevel, _ := cmd.Flags().GetString("log-level")
 		logJSON, _ := cmd.Flags().GetBool("log-json")
 
-		// Load auto-commit/push/pull defaults from env vars, config, or sync-branch
-		autoCommit, autoPush, autoPull = loadDaemonAutoSettings(cmd, autoCommit, autoPush, autoPull)
+		// NOTE: Only load daemon auto-settings from the database in foreground mode.
+		//
+		// In background mode, `bd daemon start` spawns a child process to run the
+		// daemon loop. Opening the database here in the parent process can briefly
+		// hold Dolt's LOCK file long enough for the child to time out and fall back
+		// to read-only mode (100ms lock timeout), which can break startup.
+		//
+		// In background mode, auto-settings are loaded in the actual daemon process
+		// (the BD_DAEMON_FOREGROUND=1 child spawned by startDaemon).
+		if foreground {
+			autoCommit, autoPush, autoPull = loadDaemonAutoSettings(cmd, autoCommit, autoPush, autoPull)
+		}
 
 		if interval <= 0 {
 			fmt.Fprintf(os.Stderr, "Error: interval must be positive (got %v)\n", interval)

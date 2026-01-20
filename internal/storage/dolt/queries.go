@@ -439,31 +439,50 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 
-	// Count by status
+	// Get counts (mirror SQLite semantics: exclude tombstones from TotalIssues, report separately).
+	// Important: COALESCE to avoid NULL scans when the table is empty.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			COUNT(*) as total,
-			SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_count,
-			SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-			SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed,
-			SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
-			SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END) as deferred,
-			SUM(CASE WHEN status = 'tombstone' THEN 1 ELSE 0 END) as tombstone,
-			SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned
+			COALESCE(SUM(CASE WHEN status != 'tombstone' THEN 1 ELSE 0 END), 0) as total,
+			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) as open_count,
+			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress,
+			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed,
+			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0) as deferred,
+			COALESCE(SUM(CASE WHEN status = 'tombstone' THEN 1 ELSE 0 END), 0) as tombstone,
+			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) as pinned
 		FROM issues
-		WHERE status != 'tombstone'
 	`).Scan(
 		&stats.TotalIssues,
 		&stats.OpenIssues,
 		&stats.InProgressIssues,
 		&stats.ClosedIssues,
-		&stats.BlockedIssues,
 		&stats.DeferredIssues,
 		&stats.TombstoneIssues,
 		&stats.PinnedIssues,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
+	}
+
+	// Blocked count (same semantics as SQLite: blocked by open deps).
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT i.id)
+		FROM issues i
+		JOIN dependencies d ON i.id = d.issue_id
+		JOIN issues blocker ON d.depends_on_id = blocker.id
+		WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
+		  AND d.type = 'blocks'
+		  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
+	`).Scan(&stats.BlockedIssues)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blocked count: %w", err)
+	}
+
+	// Ready count (use the ready_issues view).
+	// Note: view already excludes ephemeral issues and blocked transitive deps.
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ready_issues`).Scan(&stats.ReadyIssues)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ready count: %w", err)
 	}
 
 	return stats, nil

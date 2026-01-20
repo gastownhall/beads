@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/factory"
@@ -283,6 +284,17 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	logF, log := setupDaemonLogger(logPath, logJSON, level)
 	defer func() { _ = logF.Close() }()
 
+	writeDaemonError := func(beadsDir string, msg string) {
+		if beadsDir == "" || msg == "" {
+			return
+		}
+		errFile := filepath.Join(beadsDir, "daemon-error")
+		// nolint:gosec // G306: Error file needs to be readable for debugging
+		if err := os.WriteFile(errFile, []byte(msg), 0644); err != nil {
+			log.Warn("could not write daemon-error file", "error", err)
+		}
+	}
+
 	// Set up signal-aware context for graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -307,13 +319,9 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			}
 
 			if beadsDir != "" {
-				errFile := filepath.Join(beadsDir, "daemon-error")
 				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
 					time.Now().Format(time.RFC3339), r, stackTrace)
-				// nolint:gosec // G306: Error file needs to be readable for debugging
-				if err := os.WriteFile(errFile, []byte(crashReport), 0644); err != nil {
-					log.Warn("could not write crash report", "error", err)
-				}
+				writeDaemonError(beadsDir, crashReport)
 			}
 
 			// Clean up PID file
@@ -331,12 +339,17 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		} else {
 			log.Error("no beads database found")
 			log.Info("hint: run 'bd init' to create a database or set BEADS_DB environment variable")
+			if dbPath != "" {
+				writeDaemonError(filepath.Dir(dbPath),
+					"Error: no beads database found\n\nHint: run 'bd init' to create a database or set BEADS_DB environment variable\n")
+			}
 			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
 
 	lock, err := setupDaemonLock(pidFile, daemonDBPath, log)
 	if err != nil {
+		writeDaemonError(filepath.Dir(daemonDBPath), fmt.Sprintf("Error: failed to acquire daemon lock\n\n%v\n", err))
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = lock.Close() }()
@@ -350,50 +363,65 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 
 	// Check for multiple .db files (ambiguity error)
 	beadsDir := filepath.Dir(daemonDBPath)
+	backend := factory.GetBackendFromConfig(beadsDir)
+	if backend == "" {
+		backend = configfile.BackendSQLite
+	}
 
 	// Reset backoff on daemon start (fresh start, but preserve NeedsManualSync hint)
 	if !localMode {
 		ResetBackoffOnDaemonStart(beadsDir)
 	}
-	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
-	if err == nil && len(matches) > 1 {
-		// Filter out backup files (*.backup-*.db, *.backup.db)
-		var validDBs []string
-		for _, match := range matches {
-			baseName := filepath.Base(match)
-			// Skip if it's a backup file (contains ".backup" in name)
-			if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
-				validDBs = append(validDBs, match)
-			}
-		}
-		if len(validDBs) > 1 {
-			errMsg := fmt.Sprintf("Error: Multiple database files found in %s:\n", beadsDir)
-			for _, db := range validDBs {
-				errMsg += fmt.Sprintf("  - %s\n", filepath.Base(db))
-			}
-			errMsg += fmt.Sprintf("\nBeads requires a single canonical database: %s\n", beads.CanonicalDatabaseName)
-			errMsg += "Run 'bd init' to migrate legacy databases or manually remove old databases\n"
-			errMsg += "Or run 'bd doctor' for more diagnostics"
 
-			log.log(errMsg)
-
-			// Write error to file so user can see it without checking logs
-			errFile := filepath.Join(beadsDir, "daemon-error")
-			// nolint:gosec // G306: Error file needs to be readable for debugging
-			if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
-				log.Warn("could not write daemon-error file", "error", err)
+	// Check for multiple .db files (ambiguity error) - SQLite only.
+	// Dolt is directory-backed so this check is irrelevant and can be misleading.
+	if backend == configfile.BackendSQLite {
+		matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+		if err == nil && len(matches) > 1 {
+			// Filter out backup files (*.backup-*.db, *.backup.db)
+			var validDBs []string
+			for _, match := range matches {
+				baseName := filepath.Base(match)
+				// Skip if it's a backup file (contains ".backup" in name)
+				if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
+					validDBs = append(validDBs, match)
+				}
 			}
+			if len(validDBs) > 1 {
+				errMsg := fmt.Sprintf("Error: Multiple database files found in %s:\n", beadsDir)
+				for _, db := range validDBs {
+					errMsg += fmt.Sprintf("  - %s\n", filepath.Base(db))
+				}
+				errMsg += fmt.Sprintf("\nBeads requires a single canonical database: %s\n", beads.CanonicalDatabaseName)
+				errMsg += "Run 'bd init' to migrate legacy databases or manually remove old databases\n"
+				errMsg += "Or run 'bd doctor' for more diagnostics"
 
-			return // Use return instead of os.Exit to allow defers to run
+				log.log(errMsg)
+
+				// Write error to file so user can see it without checking logs
+				errFile := filepath.Join(beadsDir, "daemon-error")
+				// nolint:gosec // G306: Error file needs to be readable for debugging
+				if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
+					log.Warn("could not write daemon-error file", "error", err)
+				}
+
+				return // Use return instead of os.Exit to allow defers to run
+			}
 		}
 	}
 
-	// Validate using canonical name
-	dbBaseName := filepath.Base(daemonDBPath)
-	if dbBaseName != beads.CanonicalDatabaseName {
-		log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
-		log.Info("run 'bd init' to migrate to canonical name")
-		return // Use return instead of os.Exit to allow defers to run
+	// Validate using canonical name (SQLite only).
+	// Dolt uses a directory-backed store (typically .beads/dolt), so the "beads.db"
+	// basename invariant does not apply.
+	if backend == configfile.BackendSQLite {
+		dbBaseName := filepath.Base(daemonDBPath)
+		if dbBaseName != beads.CanonicalDatabaseName {
+			log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
+			log.Info("run 'bd init' to migrate to canonical name")
+			writeDaemonError(beadsDir, fmt.Sprintf("Error: non-canonical database name: %s (expected %s)\n\nRun 'bd init' to migrate to canonical name.\n",
+				dbBaseName, beads.CanonicalDatabaseName))
+			return // Use return instead of os.Exit to allow defers to run
+		}
 	}
 
 	log.Info("using database", "path", daemonDBPath)
@@ -407,6 +435,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	store, err := factory.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		log.Error("cannot open database", "error", err)
+		writeDaemonError(beadsDir, fmt.Sprintf("Error: cannot open database\n\n%v\n", err))
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
@@ -621,6 +650,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 //   - If either BEADS_AUTO_COMMIT/daemon.auto_commit or BEADS_AUTO_PUSH/daemon.auto_push
 //     is enabled, treat as auto-sync=true (full read/write)
 //   - Otherwise check auto-pull for read-only mode
+//
 // 4. Fallback: all default to true when sync-branch configured
 //
 // Note: The individual auto-commit/auto-push settings are deprecated.
