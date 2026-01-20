@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -53,6 +54,13 @@ Examples:
   bd types --json       # Output as JSON
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Ensure direct mode for database access (types command needs to read config).
+		// In daemon mode, store is nil so custom types would never be fetched.
+		if err := ensureDirectMode("types command requires direct database access"); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return
+		}
+
 		// Get custom types from config
 		var customTypes []string
 		ctx := context.Background()
