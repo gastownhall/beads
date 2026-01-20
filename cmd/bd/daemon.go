@@ -284,17 +284,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	logF, log := setupDaemonLogger(logPath, logJSON, level)
 	defer func() { _ = logF.Close() }()
 
-	writeDaemonError := func(beadsDir string, msg string) {
-		if beadsDir == "" || msg == "" {
-			return
-		}
-		errFile := filepath.Join(beadsDir, "daemon-error")
-		// nolint:gosec // G306: Error file needs to be readable for debugging
-		if err := os.WriteFile(errFile, []byte(msg), 0644); err != nil {
-			log.Warn("could not write daemon-error file", "error", err)
-		}
-	}
-
 	// Set up signal-aware context for graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -310,7 +299,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			stackTrace := string(stackBuf[:stackSize])
 			log.Error("stack trace", "trace", stackTrace)
 
-			// Write crash report to daemon-error file for user visibility
 			var beadsDir string
 			if dbPath != "" {
 				beadsDir = filepath.Dir(dbPath)
@@ -321,7 +309,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			if beadsDir != "" {
 				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
 					time.Now().Format(time.RFC3339), r, stackTrace)
-				writeDaemonError(beadsDir, crashReport)
+				log.Error("crash report", "report", crashReport)
 			}
 
 			// Clean up PID file
@@ -339,17 +327,12 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		} else {
 			log.Error("no beads database found")
 			log.Info("hint: run 'bd init' to create a database or set BEADS_DB environment variable")
-			if dbPath != "" {
-				writeDaemonError(filepath.Dir(dbPath),
-					"Error: no beads database found\n\nHint: run 'bd init' to create a database or set BEADS_DB environment variable\n")
-			}
 			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
 
 	lock, err := setupDaemonLock(pidFile, daemonDBPath, log)
 	if err != nil {
-		writeDaemonError(filepath.Dir(daemonDBPath), fmt.Sprintf("Error: failed to acquire daemon lock\n\n%v\n", err))
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = lock.Close() }()
@@ -418,8 +401,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		if dbBaseName != beads.CanonicalDatabaseName {
 			log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
 			log.Info("run 'bd init' to migrate to canonical name")
-			writeDaemonError(beadsDir, fmt.Sprintf("Error: non-canonical database name: %s (expected %s)\n\nRun 'bd init' to migrate to canonical name.\n",
-				dbBaseName, beads.CanonicalDatabaseName))
 			return // Use return instead of os.Exit to allow defers to run
 		}
 	}
@@ -435,7 +416,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	store, err := factory.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		log.Error("cannot open database", "error", err)
-		writeDaemonError(beadsDir, fmt.Sprintf("Error: cannot open database\n\n%v\n", err))
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
