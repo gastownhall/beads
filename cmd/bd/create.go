@@ -361,11 +361,14 @@ var createCmd = &cobra.Command{
 			if err != nil {
 				FatalError("failed to open target store: %v", err)
 			}
-			defer func() {
-				if err := targetStore.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to close target store: %v\n", err)
-				}
-			}()
+
+			// Close the original store before replacing it (it won't be used anymore)
+			// Note: We don't defer-close targetStore here because PersistentPostRun
+			// will close whatever store is assigned to the global `store` variable.
+			// This fixes the "database is closed" error during auto-flush (GH#routing-close-bug).
+			if store != nil {
+				_ = store.Close()
+			}
 
 			// Replace store for remainder of create operation
 			// This also bypasses daemon mode since daemon owns the current repo's store
