@@ -547,11 +547,14 @@ Examples:
 			// Only do this when exporting to default JSONL path (not arbitrary outputs)
 			// This prevents validatePreExport from incorrectly blocking on next export
 			if output == "" || output == findJSONLPath() {
-				beadsDir := filepath.Dir(finalPath)
-				dbPath := filepath.Join(beadsDir, "beads.db")
-				if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
-					// Log warning but don't fail export
-					fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+				// Dolt backend does not have a SQLite DB file, so only touch mtime for SQLite.
+				if _, ok := store.(*sqlite.SQLiteStorage); ok {
+					beadsDir := filepath.Dir(finalPath)
+					dbPath := filepath.Join(beadsDir, "beads.db")
+					if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
+						// Log warning but don't fail export
+						fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+					}
 				}
 			}
 		}

@@ -216,8 +216,9 @@ func findLocalBeadsDir() string {
 // findDatabaseInBeadsDir searches for a database file within a .beads directory.
 // It implements the standard search order:
 // 1. Check metadata.json first (single source of truth)
-//    - For SQLite backend: returns path to .db file
-//    - For Dolt backend: returns path to dolt/ directory
+//   - For SQLite backend: returns path to .db file
+//   - For Dolt backend: returns path to dolt/ directory
+//
 // 2. Fall back to canonical beads.db
 // 3. Search for *.db files, filtering out backups and vc.db
 //
@@ -231,8 +232,8 @@ func findDatabaseInBeadsDir(beadsDir string, warnOnIssues bool) string {
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		backend := cfg.GetBackend()
 		if backend == configfile.BackendDolt {
-			// For Dolt, check if the dolt directory exists
-			doltPath := filepath.Join(beadsDir, "dolt")
+			// For Dolt, check if the configured database directory exists
+			doltPath := cfg.DatabasePath(beadsDir)
 			if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 				return doltPath
 			}
@@ -575,9 +576,9 @@ func FindJSONLPath(dbPath string) string {
 
 // DatabaseInfo contains information about a discovered beads database
 type DatabaseInfo struct {
-	Path      string // Full path to the .db file
-	BeadsDir  string // Parent .beads directory
-	IssueCount int   // Number of issues (-1 if unknown)
+	Path       string // Full path to the .db file
+	BeadsDir   string // Parent .beads directory
+	IssueCount int    // Number of issues (-1 if unknown)
 }
 
 // findGitRoot returns the root directory of the current git repository,

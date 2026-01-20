@@ -18,6 +18,9 @@ First time in a repository:
 # Basic setup
 bd init
 
+# Dolt backend (version-controlled SQL database)
+bd init --backend dolt
+
 # OSS contributor (fork workflow with separate planning repo)
 bd init --contributor
 
@@ -34,6 +37,10 @@ The wizard will:
 - Prompt to install git hooks (recommended)
 - Prompt to configure git merge driver (recommended)
 - Auto-start daemon for sync
+
+Notes:
+- SQLite backend stores data in `.beads/beads.db`.
+- Dolt backend stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
 
 ## Your First Issues
 

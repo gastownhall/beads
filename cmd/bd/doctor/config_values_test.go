@@ -182,6 +182,22 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 		}
 	})
 
+	t.Run("valid dolt metadata", func(t *testing.T) {
+		metadataContent := `{
+  "database": "dolt",
+  "jsonl_export": "issues.jsonl",
+  "backend": "dolt"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		if len(issues) > 0 {
+			t.Errorf("expected no issues, got: %v", issues)
+		}
+	})
+
 	// Test with path in database field
 	t.Run("path in database field", func(t *testing.T) {
 		metadataContent := `{

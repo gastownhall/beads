@@ -368,8 +368,7 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 // CheckFreshClone detects if this is a fresh clone that needs 'bd init'.
 // A fresh clone has JSONL with issues but no database file.
 func CheckFreshClone(repoPath string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(repoPath)
 
 	// Check if .beads/ exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -401,21 +400,32 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Check if database exists
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// If database exists, not a fresh clone
-	if _, err := os.Stat(dbPath); err == nil {
-		return DoctorCheck{
-			Name:    "Fresh Clone",
-			Status:  "ok",
-			Message: "Database exists",
+	// Check if database exists (backend-aware)
+	switch backend {
+	case configfile.BackendDolt:
+		// Dolt is directory-backed: treat .beads/dolt as the DB existence signal.
+		if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
+			return DoctorCheck{
+				Name:    "Fresh Clone",
+				Status:  "ok",
+				Message: "Database exists",
+			}
+		}
+	default:
+		// SQLite (default): check configured .db file path.
+		var dbPath string
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+			dbPath = cfg.DatabasePath(beadsDir)
+		} else {
+			// Fall back to canonical database name
+			dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+		}
+		if _, err := os.Stat(dbPath); err == nil {
+			return DoctorCheck{
+				Name:    "Fresh Clone",
+				Status:  "ok",
+				Message: "Database exists",
+			}
 		}
 	}
 
@@ -433,6 +443,12 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	fixCmd := "bd init"
 	if prefix != "" {
 		fixCmd = fmt.Sprintf("bd init --prefix %s", prefix)
+	}
+	if backend == configfile.BackendDolt {
+		fixCmd = "bd init --backend dolt"
+		if prefix != "" {
+			fixCmd = fmt.Sprintf("bd init --backend dolt --prefix %s", prefix)
+		}
 	}
 
 	return DoctorCheck{

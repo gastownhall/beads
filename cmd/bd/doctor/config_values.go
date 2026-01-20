@@ -309,8 +309,19 @@ func checkMetadataConfigValues(repoPath string) []string {
 		if strings.Contains(cfg.Database, string(os.PathSeparator)) || strings.Contains(cfg.Database, "/") {
 			issues = append(issues, fmt.Sprintf("metadata.json database: %q should be a filename, not a path", cfg.Database))
 		}
-		if !strings.HasSuffix(cfg.Database, ".db") && !strings.HasSuffix(cfg.Database, ".sqlite") && !strings.HasSuffix(cfg.Database, ".sqlite3") {
-			issues = append(issues, fmt.Sprintf("metadata.json database: %q has unusual extension (expected .db, .sqlite, or .sqlite3)", cfg.Database))
+		backend := cfg.GetBackend()
+		if backend == configfile.BackendSQLite {
+			if !strings.HasSuffix(cfg.Database, ".db") && !strings.HasSuffix(cfg.Database, ".sqlite") && !strings.HasSuffix(cfg.Database, ".sqlite3") {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q has unusual extension (expected .db, .sqlite, or .sqlite3)", cfg.Database))
+			}
+		} else if backend == configfile.BackendDolt {
+			// Dolt is directory-backed; `database` should point to a directory (typically "dolt").
+			if strings.HasSuffix(cfg.Database, ".db") || strings.HasSuffix(cfg.Database, ".sqlite") || strings.HasSuffix(cfg.Database, ".sqlite3") {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q looks like a SQLite file, but backend is dolt (expected a directory like %q)", cfg.Database, "dolt"))
+			}
+			if cfg.Database == beads.CanonicalDatabaseName {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q is misleading for dolt backend (expected %q)", cfg.Database, "dolt"))
+			}
 		}
 	}
 
@@ -345,11 +356,16 @@ func checkDatabaseConfigValues(repoPath string) []string {
 		return issues // No .beads directory, nothing to check
 	}
 
-	// Get database path
+	// Get database path (backend-aware)
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	// Check metadata.json for custom database name
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		// For Dolt, cfg.DatabasePath() is a directory and sqlite checks are not applicable.
+		if cfg.GetBackend() == configfile.BackendDolt {
+			return issues
+		}
+		if cfg.Database != "" {
+			dbPath = cfg.DatabasePath(beadsDir)
+		}
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {

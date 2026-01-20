@@ -4,7 +4,6 @@ package factory
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -84,9 +83,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, opts Options
 	case configfile.BackendSQLite:
 		return NewWithOptions(ctx, backend, cfg.DatabasePath(beadsDir), opts)
 	case configfile.BackendDolt:
-		// For Dolt, use a subdirectory to store the Dolt database
-		doltPath := filepath.Join(beadsDir, "dolt")
-		return NewWithOptions(ctx, backend, doltPath, opts)
+		return NewWithOptions(ctx, backend, cfg.DatabasePath(beadsDir), opts)
 	default:
 		return nil, fmt.Errorf("unknown storage backend in config: %s", backend)
 	}

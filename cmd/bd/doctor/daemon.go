@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/rpc"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
@@ -167,7 +167,7 @@ func CheckGitSyncSetup(path string) DoctorCheck {
 // CheckDaemonAutoSync checks if daemon has auto-commit/auto-push enabled when
 // sync-branch is configured. Missing auto-sync slows down agent workflows.
 func CheckDaemonAutoSync(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	_, beadsDir := getBackendAndBeadsDir(path)
 	socketPath := filepath.Join(beadsDir, "bd.sock")
 
 	// Check if daemon is running
@@ -181,8 +181,7 @@ func CheckDaemonAutoSync(path string) DoctorCheck {
 
 	// Check if sync-branch is configured
 	ctx := context.Background()
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Daemon Auto-Sync",
@@ -249,11 +248,10 @@ func CheckDaemonAutoSync(path string) DoctorCheck {
 // CheckLegacyDaemonConfig checks for deprecated daemon config options and
 // encourages migration to the unified daemon.auto-sync setting.
 func CheckLegacyDaemonConfig(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, "beads.db")
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	ctx := context.Background()
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Daemon Config",

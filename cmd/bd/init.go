@@ -131,17 +131,27 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		// The hyphen is added automatically during ID generation
 		prefix = strings.TrimRight(prefix, "-")
 
-		// Create database
-		// Use global dbPath if set via --db flag or BEADS_DB env var, otherwise default to .beads/beads.db
+		// Determine storage path.
+		//
+		// IMPORTANT: In Dolt mode, we must NOT create a SQLite database file.
+		// `initDBPath` is used for SQLite-specific tasks (migration, import helpers, etc),
+		// so in Dolt mode it should point to the Dolt directory instead.
+		//
+		// Use global dbPath if set via --db flag or BEADS_DB env var (SQLite-only),
+		// otherwise default to `.beads/beads.db` for SQLite.
 		initDBPath := dbPath
-		if initDBPath == "" {
+		if backend == configfile.BackendDolt {
+			initDBPath = filepath.Join(".beads", "dolt")
+		} else if initDBPath == "" {
 			initDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 		}
 
-		// Migrate old database files if they exist
-		if err := migrateOldDatabases(initDBPath, quiet); err != nil {
-			fmt.Fprintf(os.Stderr, "Error during database migration: %v\n", err)
-			os.Exit(1)
+		// Migrate old SQLite database files if they exist (SQLite backend only).
+		if backend == configfile.BackendSQLite {
+			if err := migrateOldDatabases(initDBPath, quiet); err != nil {
+				fmt.Fprintf(os.Stderr, "Error during database migration: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		// Determine if we should create .beads/ directory in CWD or main repo root
@@ -285,9 +295,10 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			}
 		}
 
-		// Ensure parent directory exists for the database
+		// Ensure parent directory exists for the storage backend.
+		// For SQLite: parent of .beads/beads.db. For Dolt: parent of .beads/dolt.
 		if err := os.MkdirAll(initDBDir, 0750); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to create database directory %s: %v\n", initDBDir, err)
+			fmt.Fprintf(os.Stderr, "Error: failed to create storage directory %s: %v\n", initDBDir, err)
 			os.Exit(1)
 		}
 
@@ -389,6 +400,14 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			if backend != configfile.BackendSQLite {
 				cfg.Backend = backend
 			}
+			// In Dolt mode, metadata.json.database should point to the Dolt directory (not beads.db).
+			// Backward-compat: older dolt setups left this as "beads.db", which is misleading and
+			// can trigger SQLite-only code paths.
+			if backend == configfile.BackendDolt {
+				if cfg.Database == "" || cfg.Database == beads.CanonicalDatabaseName {
+					cfg.Database = "dolt"
+				}
+			}
 
 			if err := cfg.Save(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
@@ -429,40 +448,46 @@ With --stealth: configures per-repository git settings for invisible beads usage
 			}
 		}
 
-		// Check if git has existing issues to import (fresh clone scenario)
-		// With --from-jsonl: import from local file instead of git history
-		if fromJSONL {
-			// Import from current working tree's JSONL file
-			localJSONLPath := filepath.Join(beadsDir, "issues.jsonl")
-			if _, err := os.Stat(localJSONLPath); err == nil {
-				issueCount, err := importFromLocalJSONL(ctx, initDBPath, store, localJSONLPath)
-				if err != nil {
-					if !quiet {
-						fmt.Fprintf(os.Stderr, "Warning: import from local JSONL failed: %v\n", err)
+		// Import issues on init:
+		// - SQLite backend: import from git history or local JSONL (existing behavior).
+		// - Dolt backend: do NOT run SQLite import code. Dolt bootstraps itself from
+		//   `.beads/issues.jsonl` on first open (factory_dolt.go) when present.
+		if backend == configfile.BackendSQLite {
+			// Check if git has existing issues to import (fresh clone scenario)
+			// With --from-jsonl: import from local file instead of git history
+			if fromJSONL {
+				// Import from current working tree's JSONL file
+				localJSONLPath := filepath.Join(beadsDir, "issues.jsonl")
+				if _, err := os.Stat(localJSONLPath); err == nil {
+					issueCount, err := importFromLocalJSONL(ctx, initDBPath, store, localJSONLPath)
+					if err != nil {
+						if !quiet {
+							fmt.Fprintf(os.Stderr, "Warning: import from local JSONL failed: %v\n", err)
+						}
+						// Non-fatal - continue with empty database
+					} else if !quiet && issueCount > 0 {
+						fmt.Fprintf(os.Stderr, "✓ Imported %d issues from local %s\n\n", issueCount, localJSONLPath)
 					}
-					// Non-fatal - continue with empty database
-				} else if !quiet && issueCount > 0 {
-					fmt.Fprintf(os.Stderr, "✓ Imported %d issues from local %s\n\n", issueCount, localJSONLPath)
-				}
-			} else if !quiet {
-				fmt.Fprintf(os.Stderr, "Warning: --from-jsonl specified but %s not found\n", localJSONLPath)
-			}
-		} else {
-			// Default: import from git history
-			issueCount, jsonlPath, gitRef := checkGitForIssues()
-			if issueCount > 0 {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
-				}
-
-				if err := importFromGit(ctx, initDBPath, store, jsonlPath, gitRef); err != nil {
-					if !quiet {
-						fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
-						fmt.Fprintf(os.Stderr, "Try manually: git show %s:%s | bd import -i /dev/stdin\n", gitRef, jsonlPath)
-					}
-					// Non-fatal - continue with empty database
 				} else if !quiet {
-					fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+					fmt.Fprintf(os.Stderr, "Warning: --from-jsonl specified but %s not found\n", localJSONLPath)
+				}
+			} else {
+				// Default: import from git history
+				issueCount, jsonlPath, gitRef := checkGitForIssues()
+				if issueCount > 0 {
+					if !quiet {
+						fmt.Fprintf(os.Stderr, "\n✓ Database initialized. Found %d issues in git, importing...\n", issueCount)
+					}
+
+					if err := importFromGit(ctx, initDBPath, store, jsonlPath, gitRef); err != nil {
+						if !quiet {
+							fmt.Fprintf(os.Stderr, "Warning: auto-import failed: %v\n", err)
+							fmt.Fprintf(os.Stderr, "Try manually: git show %s:%s | bd import -i /dev/stdin\n", gitRef, jsonlPath)
+						}
+						// Non-fatal - continue with empty database
+					} else if !quiet {
+						fmt.Fprintf(os.Stderr, "✓ Successfully imported %d issues from git.\n\n", issueCount)
+					}
 				}
 			}
 		}
@@ -676,7 +701,6 @@ func migrateOldDatabases(targetPath string, quiet bool) error {
 	return nil
 }
 
-
 // readFirstIssueFromJSONL reads the first issue from a JSONL file
 func readFirstIssueFromJSONL(path string) (*types.Issue, error) {
 	// #nosec G304 -- helper reads JSONL file chosen by current bd command
@@ -744,7 +768,6 @@ func readFirstIssueFromGit(jsonlPath, gitRef string) (*types.Issue, error) {
 	return nil, nil
 }
 
-
 // checkExistingBeadsData checks for existing database files
 // and returns an error if found (safety guard for bd-emg)
 //
@@ -781,7 +804,29 @@ func checkExistingBeadsData(prefix string) error {
 		return nil // No .beads directory, safe to init
 	}
 
-	// Check for existing database file
+	// Check for existing database (SQLite or Dolt)
+	//
+	// NOTE: For Dolt backend, the "database" is a directory at `.beads/dolt/`.
+	// We prefer metadata.json as the single source of truth, but we also keep a
+	// conservative fallback for legacy SQLite setups.
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		doltPath := filepath.Join(beadsDir, "dolt")
+		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+			return fmt.Errorf(`
+%s Found existing Dolt database: %s
+
+This workspace is already initialized.
+
+To use the existing database:
+  Just run bd commands normally (e.g., %s)
+
+To completely reinitialize (data loss warning):
+  rm -rf .beads && bd init --backend dolt --prefix %s
+
+Aborting.`, ui.RenderWarn("⚠"), doltPath, ui.RenderAccent("bd list"), prefix)
+		}
+	}
+
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
 		return fmt.Errorf(`
