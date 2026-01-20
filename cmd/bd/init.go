@@ -805,6 +805,9 @@ func readFirstIssueFromGit(jsonlPath, gitRef string) (*types.Issue, error) {
 //
 // For worktrees, checks the main repository root instead of current directory
 // since worktrees should share the database with the main repository.
+//
+// For redirects, checks the redirect target and errors if it already has a database.
+// This prevents accidentally overwriting an existing canonical database (GH#bd-0qel).
 func checkExistingBeadsData(prefix string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -855,6 +858,34 @@ Aborting.`, ui.RenderWarn("⚠"), doltPath, ui.RenderAccent("bd list"), prefix)
 		}
 	}
 
+	// Check for redirect file - if present, we need to check the redirect target (GH#bd-0qel)
+	redirectTarget := beads.FollowRedirect(beadsDir)
+	if redirectTarget != beadsDir {
+		// There's a redirect - check if the target already has a database
+		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
+		if _, err := os.Stat(targetDBPath); err == nil {
+			return fmt.Errorf(`
+%s Cannot init: redirect target already has database
+
+Local .beads redirects to: %s
+That location already has: %s
+
+The redirect target is already initialized. Running init here would overwrite it.
+
+To use the existing database:
+  Just run bd commands normally (e.g., %s)
+  The redirect will route to the canonical database.
+
+To reinitialize the canonical location (data loss warning):
+  rm %s && bd init --prefix %s
+
+Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), targetDBPath, prefix)
+		}
+		// Redirect target has no database - safe to init there
+		return nil
+	}
+
+	// Check for existing database file (no redirect case)
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
 		return fmt.Errorf(`
