@@ -28,6 +28,98 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
+// storageExecutor handles operations that need to work with both direct store and daemon mode
+type storageExecutor func(store storage.Storage) error
+
+// withStorage executes an operation with either the direct store or a read-only store in daemon mode
+func withStorage(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, fn storageExecutor) error {
+	if store != nil {
+		return fn(store)
+	} else if dbPath != "" {
+		// Daemon mode: open read-only connection
+		roStore, err := sqlite.NewReadOnlyWithTimeout(ctx, dbPath, lockTimeout)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = roStore.Close() }()
+		return fn(roStore)
+	}
+	return fmt.Errorf("no storage available")
+}
+
+// getHierarchicalChildren handles the --tree --parent combination logic
+func getHierarchicalChildren(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, parentID string) ([]*types.Issue, error) {
+	// First verify that the parent issue exists
+	var parentIssue *types.Issue
+	err := withStorage(ctx, store, dbPath, lockTimeout, func(s storage.Storage) error {
+		var err error
+		parentIssue, err = s.GetIssue(ctx, parentID)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error checking parent issue: %v", err)
+	}
+	if parentIssue == nil {
+		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
+	}
+
+	// Use recursive search to find all descendants using the same logic as --parent filter
+	// This works around issues with GetDependencyTree not finding all dependents properly
+	allDescendants := make(map[string]*types.Issue)
+
+	// Always include the parent
+	allDescendants[parentID] = parentIssue
+
+	// Recursively find all descendants
+	err = findAllDescendants(ctx, store, dbPath, lockTimeout, parentID, allDescendants, 0, 10) // max depth 10
+	if err != nil {
+		return nil, fmt.Errorf("error finding descendants: %v", err)
+	}
+
+	// Convert map to slice for display
+	treeIssues := make([]*types.Issue, 0, len(allDescendants))
+	for _, issue := range allDescendants {
+		treeIssues = append(treeIssues, issue)
+	}
+
+	return treeIssues, nil
+}
+
+// findAllDescendants recursively finds all descendants using parent filtering
+func findAllDescendants(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, parentID string, result map[string]*types.Issue, currentDepth, maxDepth int) error {
+	if currentDepth >= maxDepth {
+		return nil // Prevent infinite recursion
+	}
+
+	// Get direct children using the same filter logic as regular --parent
+	var children []*types.Issue
+	err := withStorage(ctx, store, dbPath, lockTimeout, func(s storage.Storage) error {
+		filter := types.IssueFilter{
+			ParentID: &parentID,
+		}
+		var err error
+		children, err = s.SearchIssues(ctx, "", filter)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	// Add children and recursively find their descendants
+	for _, child := range children {
+		if _, exists := result[child.ID]; !exists {
+			result[child.ID] = child
+			// Recursively find this child's descendants
+			err = findAllDescendants(ctx, store, dbPath, lockTimeout, child.ID, result, currentDepth+1, maxDepth)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // parseTimeFlag parses time strings using the layered time parsing architecture.
 // Supports compact durations (+6h, -1d), natural language (tomorrow, next monday),
 // and absolute formats (2006-01-02, RFC3339).
@@ -916,6 +1008,35 @@ var listCmd = &cobra.Command{
 
 			// Handle pretty/tree format (GH#654)
 			if prettyFormat {
+				// Special handling for --tree --parent combination (hierarchical descendants)
+				if parentID != "" {
+					treeIssues, err := getHierarchicalChildren(ctx, store, dbPath, lockTimeout, parentID)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						os.Exit(1)
+					}
+
+					if len(treeIssues) == 0 {
+						fmt.Printf("Issue '%s' has no children\n", parentID)
+						return
+					}
+
+					// Load all dependencies for tree building
+					var allDeps map[string][]*types.Dependency
+					err = withStorage(ctx, store, dbPath, lockTimeout, func(s storage.Storage) error {
+						allDeps, err = s.GetAllDependencyRecords(ctx)
+						return err
+					})
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error getting dependencies for display: %v\n", err)
+						os.Exit(1)
+					}
+
+					displayPrettyListWithDeps(treeIssues, false, allDeps)
+					return
+				}
+
+				// Regular tree display (no parent filter)
 				// Load dependencies for tree structure
 				// In daemon mode, open a read-only store to get dependencies
 				var allDeps map[string][]*types.Dependency
@@ -1002,6 +1123,26 @@ var listCmd = &cobra.Command{
 
 		// Handle pretty format (GH#654)
 		if prettyFormat {
+			// Special handling for --tree --parent combination (hierarchical descendants)
+			if parentID != "" {
+				treeIssues, err := getHierarchicalChildren(ctx, store, "", 0, parentID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+
+				if len(treeIssues) == 0 {
+					fmt.Printf("Issue '%s' has no children\n", parentID)
+					return
+				}
+
+				// Load dependencies for tree structure
+				allDeps, _ := store.GetAllDependencyRecords(ctx)
+				displayPrettyListWithDeps(treeIssues, false, allDeps)
+				return
+			}
+
+			// Regular tree display (no parent filter)
 			// Load dependencies for tree structure
 			allDeps, _ := store.GetAllDependencyRecords(ctx)
 			displayPrettyListWithDeps(issues, false, allDeps)
