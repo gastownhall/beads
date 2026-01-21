@@ -41,6 +41,12 @@ func init() {
 			fmt.Fprintf(os.Stderr, "\n  Dolt database ready\n")
 		}
 
-		return dolt.New(ctx, &dolt.Config{Path: path, ReadOnly: opts.ReadOnly})
+		return dolt.New(ctx, &dolt.Config{
+			Path:       path,
+			ReadOnly:   opts.ReadOnly,
+			ServerMode: opts.ServerMode,
+			ServerHost: opts.ServerHost,
+			ServerPort: opts.ServerPort,
+		})
 	})
 }

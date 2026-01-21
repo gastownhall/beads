@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -238,7 +239,8 @@ Run 'bd daemon --help' to see all subcommands.`,
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON)
+		federation, _ := cmd.Flags().GetBool("federation")
+		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation)
 	},
 }
 
@@ -264,6 +266,7 @@ func init() {
 	daemonCmd.Flags().Bool("foreground", false, "Run in foreground (don't daemonize)")
 	daemonCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonCmd.Flags().Bool("log-json", false, "Output logs in JSON format (structured logging)")
+	daemonCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server with remotesapi)")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -280,7 +283,7 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON bool) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON, federation bool) {
 	level := parseLogLevel(logLevel)
 	logF, log := setupDaemonLogger(logPath, logJSON, level)
 	defer func() { _ = logF.Close() }()
@@ -414,7 +417,49 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		log.Warn("could not remove daemon-error file", "error", err)
 	}
 
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	// Start dolt sql-server if federation mode is enabled and backend is dolt
+	var doltServer *dolt.Server
+	factoryOpts := factory.Options{}
+	if federation && backend != configfile.BackendDolt {
+		log.Warn("federation mode requires dolt backend, ignoring --federation flag")
+		federation = false
+	}
+	if federation && backend == configfile.BackendDolt {
+		log.Info("starting dolt sql-server for federation mode")
+
+		doltPath := filepath.Join(beadsDir, "dolt")
+		serverLogFile := filepath.Join(beadsDir, "dolt-server.log")
+
+		doltServer = dolt.NewServer(dolt.ServerConfig{
+			DataDir:        doltPath,
+			SQLPort:        dolt.DefaultSQLPort,
+			RemotesAPIPort: dolt.DefaultRemotesAPIPort,
+			Host:           "127.0.0.1",
+			LogFile:        serverLogFile,
+		})
+
+		if err := doltServer.Start(ctx); err != nil {
+			log.Error("failed to start dolt sql-server", "error", err)
+			return
+		}
+		defer func() {
+			log.Info("stopping dolt sql-server")
+			if err := doltServer.Stop(); err != nil {
+				log.Warn("error stopping dolt sql-server", "error", err)
+			}
+		}()
+
+		log.Info("dolt sql-server started",
+			"sql_port", doltServer.SQLPort(),
+			"remotesapi_port", doltServer.RemotesAPIPort())
+
+		// Configure factory to use server mode
+		factoryOpts.ServerMode = true
+		factoryOpts.ServerHost = doltServer.Host()
+		factoryOpts.ServerPort = doltServer.SQLPort()
+	}
+
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factoryOpts)
 	if err != nil {
 		log.Error("cannot open database", "error", err)
 		return // Use return instead of os.Exit to allow defers to run
@@ -427,8 +472,10 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
 		sqliteStore.EnableFreshnessChecking()
 		log.Info("database opened", "path", store.Path(), "backend", "sqlite", "freshness_checking", true)
+	} else if federation {
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "federation/server")
 	} else {
-		log.Info("database opened", "path", store.Path(), "backend", "dolt")
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "embedded")
 	}
 
 	// Auto-upgrade .beads/.gitignore if outdated

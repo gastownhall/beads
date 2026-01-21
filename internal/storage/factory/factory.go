@@ -26,6 +26,11 @@ func RegisterBackend(name string, factory BackendFactory) {
 type Options struct {
 	ReadOnly    bool
 	LockTimeout time.Duration
+
+	// Dolt server mode options (federation)
+	ServerMode bool   // Connect to dolt sql-server instead of embedded
+	ServerHost string // Server host (default: 127.0.0.1)
+	ServerPort int    // Server port (default: 3306)
 }
 
 // New creates a storage backend based on the backend type.
