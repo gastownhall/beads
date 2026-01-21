@@ -535,31 +535,53 @@ With --stealth: configures per-repository git settings for invisible beads usage
 		// Check if we're in a git repo and hooks aren't installed
 		// Install by default unless --skip-hooks is passed
 		// For Dolt backend, install hooks to .beads/hooks/ (uses git config core.hooksPath)
-		if !skipHooks && isGitRepo() && !hooksInstalled() {
-			if backend == configfile.BackendDolt {
-				// Dolt backend: install hooks to .beads/hooks/
-				embeddedHooks, err := getEmbeddedHooks()
-				if err == nil {
-					if err := installHooksWithOptions(embeddedHooks, false, false, false, true); err != nil && !quiet {
-						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
-						fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
-					} else if !quiet {
-						fmt.Printf("  Hooks installed to: .beads/hooks/\n")
-					}
-				} else if !quiet {
-					fmt.Fprintf(os.Stderr, "\n%s Failed to load embedded hooks: %v\n", ui.RenderWarn("⚠"), err)
+		// For jujutsu colocated repos, use simplified hooks (no staging needed)
+		if !skipHooks && !hooksInstalled() {
+			isJJ := git.IsJujutsuRepo()
+			isColocated := git.IsColocatedJJGit()
+
+			if isJJ && !isColocated {
+				// Pure jujutsu repo (no git) - print alias instructions
+				if !quiet {
+					printJJAliasInstructions()
 				}
-			} else {
-				// SQLite backend: use traditional hook installation
-				if err := installGitHooks(); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", ui.RenderWarn("⚠"), err)
+			} else if isColocated {
+				// Colocated jj+git repo - use simplified hooks
+				if err := installJJHooks(); err != nil && !quiet {
+					fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
 					fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
+				} else if !quiet {
+					fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+				}
+			} else if isGitRepo() {
+				// Regular git repo
+				if backend == configfile.BackendDolt {
+					// Dolt backend: install hooks to .beads/hooks/
+					embeddedHooks, err := getEmbeddedHooks()
+					if err == nil {
+						if err := installHooksWithOptions(embeddedHooks, false, false, false, true); err != nil && !quiet {
+							fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
+							fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
+						} else if !quiet {
+							fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+						}
+					} else if !quiet {
+						fmt.Fprintf(os.Stderr, "\n%s Failed to load embedded hooks: %v\n", ui.RenderWarn("⚠"), err)
+					}
+				} else {
+					// SQLite backend: use traditional hook installation
+					if err := installGitHooks(); err != nil && !quiet {
+						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", ui.RenderWarn("⚠"), err)
+						fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
+					}
 				}
 			}
 		}
 
 		// Check if we're in a git repo and merge driver isn't configured
 		// Install by default unless --skip-merge-driver is passed
+		// For colocated jj+git repos, merge driver is still useful
+		// For pure jj repos, skip merge driver (no git)
 		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
 			if err := installMergeDriver(); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "\n%s Failed to install merge driver: %v\n", ui.RenderWarn("⚠"), err)
