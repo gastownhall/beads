@@ -30,7 +30,7 @@ type ActivityWatcher struct {
 // Watches the dolt noms directory for commits, falling back to polling if fsnotify fails.
 // The beadsDir should be the .beads directory path.
 // The pollInterval is used for polling fallback mode.
-func NewActivityWatcher(beadsDir string, pollInterval time.Duration) (*ActivityWatcher, error) {
+func NewActivityWatcher(beadsDir string, pollInterval time.Duration) *ActivityWatcher {
 	aw := &ActivityWatcher{
 		pollInterval: pollInterval,
 		events:       make(chan struct{}, 1), // Buffered to avoid blocking
@@ -74,7 +74,7 @@ func NewActivityWatcher(beadsDir string, pollInterval time.Duration) (*ActivityW
 	if err != nil {
 		// Fall back to polling mode
 		aw.pollingMode = true
-		return aw, nil
+		return aw
 	}
 
 	// Add watches for each path
@@ -91,11 +91,11 @@ func NewActivityWatcher(beadsDir string, pollInterval time.Duration) (*ActivityW
 		// No paths could be watched, fall back to polling
 		_ = watcher.Close()
 		aw.pollingMode = true
-		return aw, nil
+		return aw
 	}
 
 	aw.watcher = watcher
-	return aw, nil
+	return aw
 }
 
 // Events returns the channel that receives wake-up signals when changes are detected.

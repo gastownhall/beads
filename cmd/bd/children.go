@@ -23,8 +23,8 @@ Examples:
 		parentID := args[0]
 
 		// Set the parent flag on listCmd, run it, then reset
-		listCmd.Flags().Set("parent", parentID)
-		defer listCmd.Flags().Set("parent", "")
+		_ = listCmd.Flags().Set("parent", parentID)
+		defer func() { _ = listCmd.Flags().Set("parent", "") }()
 		listCmd.Run(listCmd, []string{})
 	},
 }
