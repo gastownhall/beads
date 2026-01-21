@@ -510,7 +510,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 func CheckDatabaseJSONLSync(path string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(path)
 
-	// Dolt backend: JSONL is a derived compatibility artifact (export-only today).
+	// Dolt backend: JSONL is an optional compatibility artifact.
 	// The SQLite-style import/export divergence checks don't apply.
 	if backend == configfile.BackendDolt {
 		// Find JSONL file (respects metadata.json override when set).
@@ -545,7 +545,7 @@ func CheckDatabaseJSONLSync(path string) DoctorCheck {
 			Name:    "DB-JSONL Sync",
 			Status:  StatusOK,
 			Message: "N/A (dolt backend)",
-			Detail:  "JSONL is derived from Dolt (export-only); import-only sync checks do not apply",
+			Detail:  "Dolt sync is database-native; JSONL divergence checks do not apply (manual JSONL import/export is supported).",
 		}
 	}
 

@@ -68,7 +68,7 @@ func CheckSyncDivergence(path string) DoctorCheck {
 	}
 
 	// Check 2: SQLite last_import_time vs JSONL mtime (SQLite only).
-	// Dolt backend does not maintain SQLite metadata and does not support import-only sync.
+	// Dolt backend does not maintain SQLite metadata; this SQLite-only check doesn't apply.
 	if backend == configfile.BackendSQLite {
 		mtimeIssue := checkSQLiteMtimeDivergence(path, beadsDir)
 		if mtimeIssue != nil {

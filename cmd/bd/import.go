@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/term"
@@ -74,10 +74,12 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			daemonClient = nil
 
 			var err error
-			store, err = sqlite.New(rootCtx, dbPath)
+			beadsDir := filepath.Dir(dbPath)
+			store, err = factory.NewFromConfigWithOptions(rootCtx, beadsDir, factory.Options{
+				LockTimeout: lockTimeout,
+			})
 			if err != nil {
 				// Check for fresh clone scenario
-				beadsDir := filepath.Dir(dbPath)
 				if handleFreshCloneError(err, beadsDir) {
 					os.Exit(1)
 				}

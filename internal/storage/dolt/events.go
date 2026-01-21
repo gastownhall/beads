@@ -65,10 +65,26 @@ func (s *DoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([
 
 // AddIssueComment adds a comment to an issue (structured comment)
 func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
+	return s.ImportIssueComment(ctx, issueID, author, text, time.Now().UTC())
+}
+
+// ImportIssueComment adds a comment during import, preserving the original timestamp.
+// This prevents comment timestamp drift across JSONL sync cycles.
+func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	// Verify issue exists
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("failed to check issue existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	createdAt = createdAt.UTC()
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO comments (issue_id, author, text, created_at)
 		VALUES (?, ?, ?, ?)
-	`, issueID, author, text, time.Now().UTC())
+	`, issueID, author, text, createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
@@ -78,12 +94,21 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 		return nil, fmt.Errorf("failed to get comment id: %w", err)
 	}
 
+	// Mark issue dirty for incremental JSONL export
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO dirty_issues (issue_id, marked_at)
+		VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE marked_at = VALUES(marked_at)
+	`, issueID, time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
+	}
+
 	return &types.Comment{
 		ID:        id,
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: createdAt,
 	}, nil
 }
 

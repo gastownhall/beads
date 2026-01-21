@@ -263,14 +263,17 @@ func (s *DoltStore) UpdatePeerLastSync(ctx context.Context, name string) error {
 // The caller must hold federationEnvMutex.
 func setFederationCredentials(username, password string) func() {
 	if username != "" {
-		os.Setenv("DOLT_REMOTE_USER", username)
+		// Best-effort: failures here should not crash the caller.
+		_ = os.Setenv("DOLT_REMOTE_USER", username)
 	}
 	if password != "" {
-		os.Setenv("DOLT_REMOTE_PASSWORD", password)
+		// Best-effort: failures here should not crash the caller.
+		_ = os.Setenv("DOLT_REMOTE_PASSWORD", password)
 	}
 	return func() {
-		os.Unsetenv("DOLT_REMOTE_USER")
-		os.Unsetenv("DOLT_REMOTE_PASSWORD")
+		// Best-effort cleanup.
+		_ = os.Unsetenv("DOLT_REMOTE_USER")
+		_ = os.Unsetenv("DOLT_REMOTE_PASSWORD")
 	}
 }
 

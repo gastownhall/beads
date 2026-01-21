@@ -282,10 +282,10 @@ func runFederationStatus(cmd *cobra.Command, args []string) {
 
 	// Collect status for each peer
 	type peerStatus struct {
-		Status      *storage.SyncStatus
-		URL         string
-		Reachable   bool
-		ReachError  string
+		Status     *storage.SyncStatus
+		URL        string
+		Reachable  bool
+		ReachError string
 	}
 	var peerStatuses []peerStatus
 
@@ -374,7 +374,7 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) {
 	password := federationPassword
 	if federationUser != "" && password == "" {
 		fmt.Fprint(os.Stderr, "Password: ")
-		pwBytes, err := term.ReadPassword(int(syscall.Stdin))
+		pwBytes, err := term.ReadPassword(syscall.Stdin)
 		fmt.Fprintln(os.Stderr) // newline after password
 		if err != nil {
 			FatalErrorRespectJSON("failed to read password: %v", err)

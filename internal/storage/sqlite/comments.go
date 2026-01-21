@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -56,7 +57,7 @@ func (s *SQLiteStorage) AddIssueComment(ctx context.Context, issueID, author, te
 // Unlike AddIssueComment which uses CURRENT_TIMESTAMP, this method uses the provided
 // createdAt time from the JSONL file. This prevents timestamp drift during sync cycles.
 // GH#735: Comment created_at timestamps were being overwritten with current time during import.
-func (s *SQLiteStorage) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt string) (*types.Comment, error) {
+func (s *SQLiteStorage) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	// Verify issue exists
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists)
@@ -68,10 +69,11 @@ func (s *SQLiteStorage) ImportIssueComment(ctx context.Context, issueID, author,
 	}
 
 	// Insert comment with provided timestamp
+	createdAtStr := createdAt.UTC().Format(time.RFC3339Nano)
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO comments (issue_id, author, text, created_at)
 		VALUES (?, ?, ?, ?)
-	`, issueID, author, text, createdAt)
+	`, issueID, author, text, createdAtStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert comment: %w", err)
 	}

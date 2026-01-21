@@ -638,7 +638,7 @@ func hookPostMergeDolt(beadsDir string) int {
 	doltStore, ok := store.(interface {
 		Branch(ctx context.Context, name string) error
 		Checkout(ctx context.Context, branch string) error
-		Merge(ctx context.Context, branch string) error
+		Merge(ctx context.Context, branch string) ([]storage.Conflict, error)
 		Commit(ctx context.Context, message string) error
 		CurrentBranch(ctx context.Context) (string, error)
 		DeleteBranch(ctx context.Context, branch string) error
@@ -691,9 +691,14 @@ func hookPostMergeDolt(beadsDir string) int {
 	}
 
 	// Merge import branch (Dolt provides cell-level merge)
-	if err := doltStore.Merge(ctx, importBranch); err != nil {
+	conflicts, err := doltStore.Merge(ctx, importBranch)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not merge import branch: %v\n", err)
 		return 0
+	}
+	if len(conflicts) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %d conflict(s) detected during Dolt merge; resolve with 'bd federation conflicts' or Dolt conflict tooling\n", len(conflicts))
+		// Best-effort: still return 0 to avoid blocking git merge, consistent with other hook warnings.
 	}
 
 	// Commit the merge
@@ -839,7 +844,6 @@ func hookPostCheckout(args []string) int {
 // =============================================================================
 
 // importFromJSONLToStore imports issues from JSONL to a store.
-// This is a placeholder - the actual implementation should use the store's methods.
 func importFromJSONLToStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
 	// Parse JSONL into issues
 	// #nosec G304 - jsonlPath is derived from beadsDir (trusted workspace path)

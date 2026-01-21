@@ -1,7 +1,9 @@
 package importer
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,29 +20,30 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// OrphanHandling is an alias to sqlite.OrphanHandling for convenience
-type OrphanHandling = sqlite.OrphanHandling
+// OrphanHandling defines how to handle hierarchical child issues whose parents are missing.
+// This mirrors the string values historically used by the SQLite backend config.
+type OrphanHandling string
 
 const (
 	// OrphanStrict fails import on missing parent (safest)
-	OrphanStrict = sqlite.OrphanStrict
+	OrphanStrict OrphanHandling = "strict"
 	// OrphanResurrect auto-resurrects missing parents from JSONL history
-	OrphanResurrect = sqlite.OrphanResurrect
+	OrphanResurrect OrphanHandling = "resurrect"
 	// OrphanSkip skips orphaned issues with warning
-	OrphanSkip = sqlite.OrphanSkip
+	OrphanSkip OrphanHandling = "skip"
 	// OrphanAllow imports orphans without validation (default, works around bugs)
-	OrphanAllow = sqlite.OrphanAllow
+	OrphanAllow OrphanHandling = "allow"
 )
 
 // Options contains import configuration
 type Options struct {
-	DryRun                     bool            // Preview changes without applying them
-	SkipUpdate                 bool            // Skip updating existing issues (create-only mode)
-	Strict                     bool            // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport             bool            // Rename imported issues to match database prefix
-	SkipPrefixValidation       bool            // Skip prefix validation (for auto-import)
-	OrphanHandling             OrphanHandling  // How to handle missing parent issues (default: allow)
-	ClearDuplicateExternalRefs bool            // Clear duplicate external_ref values instead of erroring
+	DryRun                     bool                 // Preview changes without applying them
+	SkipUpdate                 bool                 // Skip updating existing issues (create-only mode)
+	Strict                     bool                 // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool                 // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool                 // Skip prefix validation (for auto-import)
+	OrphanHandling             OrphanHandling       // How to handle missing parent issues (default: allow)
+	ClearDuplicateExternalRefs bool                 // Clear duplicate external_ref values instead of erroring
 	ProtectLocalExportIDs      map[string]time.Time // IDs from left snapshot with timestamps for timestamp-aware protection (GH#865)
 }
 
@@ -83,6 +86,10 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		MismatchPrefixes: make(map[string]int),
 	}
 
+	if store == nil {
+		return nil, fmt.Errorf("import requires an initialized storage backend")
+	}
+
 	// Normalize Linear external_refs to canonical form to avoid slug-based duplicates.
 	for _, issue := range issues {
 		if issue.ExternalRef == nil || *issue.ExternalRef == "" {
@@ -110,15 +117,6 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		}
 	}
 
-	// Get or create SQLite store
-	sqliteStore, needCloseStore, err := getOrCreateStore(ctx, dbPath, store)
-	if err != nil {
-		return nil, err
-	}
-	if needCloseStore {
-		defer func() { _ = sqliteStore.Close() }()
-	}
-
 	// GH#686: In multi-repo mode, skip prefix validation for all issues.
 	// Issues from additional repos have their own prefixes which are expected and correct.
 	if config.GetMultiRepoConfig() != nil && !opts.SkipPrefixValidation {
@@ -128,18 +126,29 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	// Clear export_hashes before import to prevent staleness
 	// Import operations may add/update issues, so export_hashes entries become invalid
 	if !opts.DryRun {
-		if err := sqliteStore.ClearAllExportHashes(ctx); err != nil {
+		if err := store.ClearAllExportHashes(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
 		}
 	}
 
 	// Read orphan handling from config if not explicitly set
 	if opts.OrphanHandling == "" {
-		opts.OrphanHandling = sqliteStore.GetOrphanHandling(ctx)
+		value, err := store.GetConfig(ctx, "import.orphan_handling")
+		if err == nil && value != "" {
+			switch OrphanHandling(value) {
+			case OrphanStrict, OrphanResurrect, OrphanSkip, OrphanAllow:
+				opts.OrphanHandling = OrphanHandling(value)
+			default:
+				opts.OrphanHandling = OrphanAllow
+			}
+		} else {
+			opts.OrphanHandling = OrphanAllow
+		}
 	}
 
 	// Check and handle prefix mismatches
-	issues, err = handlePrefixMismatch(ctx, sqliteStore, issues, opts, result)
+	var err error
+	issues, err = handlePrefixMismatch(ctx, store, issues, opts, result)
 	if err != nil {
 		return result, err
 	}
@@ -150,7 +159,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	}
 
 	// Detect and resolve collisions
-	issues, err = detectUpdates(ctx, sqliteStore, issues, opts, result)
+	issues, err = detectUpdates(ctx, store, issues, opts, result)
 	if err != nil {
 		return result, err
 	}
@@ -158,61 +167,53 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		return result, nil
 	}
 
-	// Upsert issues (create new or update existing)
-	if err := upsertIssues(ctx, sqliteStore, issues, opts, result); err != nil {
-		return nil, err
-	}
-
-	// Import dependencies
-	if err := importDependencies(ctx, sqliteStore, issues, opts, result); err != nil {
-		return nil, err
-	}
-
-	// Import labels
-	if err := importLabels(ctx, sqliteStore, issues, opts); err != nil {
-		return nil, err
-	}
-
-	// Import comments
-	if err := importComments(ctx, sqliteStore, issues, opts); err != nil {
-		return nil, err
-	}
-
-	// Checkpoint WAL to ensure data persistence and reduce WAL file size
-	if err := sqliteStore.CheckpointWAL(ctx); err != nil {
-		// Non-fatal - just log warning
-		fmt.Fprintf(os.Stderr, "Warning: failed to checkpoint WAL: %v\n", err)
+	// Apply changes atomically when transactions are supported.
+	if err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		// Upsert issues (create new or update existing)
+		if err := upsertIssuesTx(ctx, tx, store, issues, opts, result); err != nil {
+			return err
+		}
+		// Import dependencies
+		if err := importDependenciesTx(ctx, tx, issues, opts, result); err != nil {
+			return err
+		}
+		// Import labels
+		if err := importLabelsTx(ctx, tx, issues, opts); err != nil {
+			return err
+		}
+		// Import comments (timestamp-preserving)
+		if err := importCommentsTx(ctx, tx, issues, opts); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		// Some backends (e.g., --no-db) don't support transactions.
+		// Fall back to non-transactional behavior in that case.
+		if strings.Contains(err.Error(), "not supported") {
+			if err := upsertIssues(ctx, store, issues, opts, result); err != nil {
+				return nil, err
+			}
+			if err := importDependencies(ctx, store, issues, opts, result); err != nil {
+				return nil, err
+			}
+			if err := importLabels(ctx, store, issues, opts); err != nil {
+				return nil, err
+			}
+			if err := importComments(ctx, store, issues, opts); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	return result, nil
 }
 
-// getOrCreateStore returns an existing storage or creates a new one
-func getOrCreateStore(ctx context.Context, dbPath string, store storage.Storage) (*sqlite.SQLiteStorage, bool, error) {
-	if store != nil {
-		sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-		if !ok {
-			return nil, false, fmt.Errorf("import requires SQLite storage backend")
-		}
-		return sqliteStore, false, nil
-	}
-
-	// Open direct connection for daemon mode
-	if dbPath == "" {
-		return nil, false, fmt.Errorf("database path not set")
-	}
-	sqliteStore, err := sqlite.New(ctx, dbPath)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	return sqliteStore, true, nil
-}
-
 // handlePrefixMismatch checks and handles prefix mismatches.
 // Returns a filtered issues slice with tombstoned issues having wrong prefixes removed.
-func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
-	configuredPrefix, err := sqliteStore.GetConfig(ctx, "issue_prefix")
+func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
+	configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configured prefix: %w", err)
 	}
@@ -228,10 +229,10 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 	result.ExpectedPrefix = configuredPrefix
 
 	// Read allowed_prefixes config for additional valid prefixes (e.g., mol-*)
-	allowedPrefixesConfig, _ := sqliteStore.GetConfig(ctx, "allowed_prefixes")
+	allowedPrefixesConfig, _ := store.GetConfig(ctx, "allowed_prefixes")
 
 	// Get beads directory from database path for route lookup
-	beadsDir := filepath.Dir(sqliteStore.Path())
+	beadsDir := filepath.Dir(store.Path())
 
 	// GH#686: In multi-repo mode, allow all prefixes (nil = allow all)
 	// Also include prefixes from routes.jsonl for multi-rig setups (Gas Town)
@@ -321,33 +322,39 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 }
 
 // detectUpdates detects same-ID scenarios (which are updates with hash IDs, not collisions)
-func detectUpdates(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
-	// Phase 1: Detect (read-only)
-	collisionResult, err := sqlite.DetectCollisions(ctx, sqliteStore, issues)
+func detectUpdates(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
+	// Backend-agnostic collision detection:
+	// "collision" here means: same ID exists but content hash differs.
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
 		return nil, fmt.Errorf("collision detection failed: %w", err)
 	}
+	dbByID := buildIDMap(dbIssues)
 
-	result.Collisions = len(collisionResult.Collisions)
-	for _, collision := range collisionResult.Collisions {
-		result.CollisionIDs = append(result.CollisionIDs, collision.ID)
+	newCount := 0
+	exactCount := 0
+	collisionCount := 0
+	for _, incoming := range issues {
+		existing, ok := dbByID[incoming.ID]
+		if !ok || existing == nil {
+			newCount++
+			continue
+		}
+		// Exact content match is idempotent.
+		if existing.ContentHash != "" && incoming.ContentHash != "" && existing.ContentHash == incoming.ContentHash {
+			exactCount++
+			continue
+		}
+		// Treat same ID + different content as an update candidate.
+		collisionCount++
+		result.CollisionIDs = append(result.CollisionIDs, incoming.ID)
 	}
 
-	// With hash IDs, "collisions" (same ID, different content) are actually UPDATES
-	// Hash IDs are based on creation content and remain stable across updates
-	// So same ID + different fields = normal update operation, not a collision
-	// The collisionResult.Collisions list represents issues that *may* be updated
-	// Note: We don't pre-count updates here - upsertIssues will count them after
-	// checking timestamps to ensure we only update when incoming is newer
-
-	// Phase 4: Renames removed - obsolete with hash IDs
-	// Hash-based IDs are content-addressed, so renames don't occur
-
+	result.Collisions = collisionCount
 	if opts.DryRun {
-		result.Created = len(collisionResult.NewIssues) + len(collisionResult.Renames)
-		result.Unchanged = len(collisionResult.ExactMatches)
+		result.Created = newCount
+		result.Unchanged = exactCount
 	}
-
 	return issues, nil
 }
 
@@ -373,7 +380,7 @@ func buildIDMap(issues []*types.Issue) map[string]*types.Issue {
 
 // handleRename handles content match with different IDs (rename detected)
 // Returns the old ID that was deleted (if any), or empty string if no deletion occurred
-func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.Issue, incoming *types.Issue) (string, error) {
+func handleRename(ctx context.Context, s storage.Storage, existing *types.Issue, incoming *types.Issue) (string, error) {
 	// Check if target ID already exists with the same content (race condition)
 	// This can happen when multiple clones import the same rename simultaneously
 	targetIssue, err := s.GetIssue(ctx, incoming.ID)
@@ -493,14 +500,11 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 
 	// Create with new ID
 	if err := s.CreateIssue(ctx, incoming, "import-rename"); err != nil {
-		// If UNIQUE constraint error, it's likely another clone created it concurrently
-		if sqlite.IsUniqueConstraintError(err) {
-			// Check if target exists with same content
-			targetIssue, getErr := s.GetIssue(ctx, incoming.ID)
-			if getErr == nil && targetIssue != nil && targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
-				// Same content - rename already complete, this is OK
-				return oldID, nil
-			}
+		// Another writer may have created the target concurrently. If the target now exists
+		// with the same content, treat the rename as already complete.
+		targetIssue, getErr := s.GetIssue(ctx, incoming.ID)
+		if getErr == nil && targetIssue != nil && targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
+			return oldID, nil
 		}
 		return "", fmt.Errorf("failed to create renamed issue %s: %w", incoming.ID, err)
 	}
@@ -512,10 +516,10 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 }
 
 // upsertIssues creates new issues or updates existing ones using content-first matching
-func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
+func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
 	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
 	// when trying to create issues that were previously deleted
-	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
@@ -625,7 +629,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 					// Only update if data actually changed
 					if IssueDataChanged(existing, updates) {
-						if err := sqliteStore.UpdateIssue(ctx, existing.ID, updates, "import"); err != nil {
+						if err := store.UpdateIssue(ctx, existing.ID, updates, "import"); err != nil {
 							return fmt.Errorf("error updating issue %s (matched by external_ref): %w", existing.ID, err)
 						}
 						result.Updated++
@@ -658,7 +662,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					result.Skipped++
 				} else if !opts.SkipUpdate {
 					// Same prefix, different ID suffix - this is a true rename
-					deletedID, err := handleRename(ctx, sqliteStore, existing, incoming)
+					deletedID, err := handleRename(ctx, store, existing, incoming)
 					if err != nil {
 						return fmt.Errorf("failed to handle rename %s -> %s: %w", existing.ID, incoming.ID, err)
 					}
@@ -730,7 +734,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 				// Only update if data actually changed
 				if IssueDataChanged(existingWithID, updates) {
-					if err := sqliteStore.UpdateIssue(ctx, incoming.ID, updates, "import"); err != nil {
+					if err := store.UpdateIssue(ctx, incoming.ID, updates, "import"); err != nil {
 						return fmt.Errorf("error updating issue %s: %w", incoming.ID, err)
 					}
 					result.Updated++
@@ -748,13 +752,11 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 	// Filter out orphaned issues if orphan_handling is set to skip
 	// Pre-filter before batch creation to prevent orphans from being created then ID-cleared
-	if opts.OrphanHandling == sqlite.OrphanSkip {
+	if opts.OrphanHandling == OrphanSkip {
 		var filteredNewIssues []*types.Issue
 		for _, issue := range newIssues {
 			// Check if this is a hierarchical child whose parent doesn't exist
-			if strings.Contains(issue.ID, ".") {
-				lastDot := strings.LastIndex(issue.ID, ".")
-				parentID := issue.ID[:lastDot]
+			if isHierarchical, parentID := isHierarchicalID(issue.ID); isHierarchical {
 
 				// Check if parent exists in either existing DB issues or in newIssues batch
 				var parentExists bool
@@ -784,12 +786,35 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		newIssues = filteredNewIssues
 	}
 
+	// OrphanStrict: fail-fast if any new hierarchical child has no parent in DB or import batch.
+	if opts.OrphanHandling == OrphanStrict {
+		newIDSet := make(map[string]bool, len(newIssues))
+		for _, issue := range newIssues {
+			newIDSet[issue.ID] = true
+		}
+		for _, issue := range newIssues {
+			if isHierarchical, parentID := isHierarchicalID(issue.ID); isHierarchical {
+				if dbByID[parentID] == nil && !newIDSet[parentID] {
+					return fmt.Errorf("parent issue %s does not exist (strict mode)", parentID)
+				}
+			}
+		}
+	}
+
+	// OrphanResurrect: if any hierarchical parents are missing, attempt to resurrect them
+	// from local JSONL history by creating tombstone parents (status=closed).
+	if opts.OrphanHandling == OrphanResurrect {
+		if err := addResurrectedParents(store, dbByID, issues, &newIssues); err != nil {
+			return err
+		}
+	}
+
 	// Batch create all new issues
 	// Sort by hierarchy depth to ensure parents are created before children
 	if len(newIssues) > 0 {
 		sort.Slice(newIssues, func(i, j int) bool {
-			depthI := strings.Count(newIssues[i].ID, ".")
-			depthJ := strings.Count(newIssues[j].ID, ".")
+			depthI := hierarchyDepth(newIssues[i].ID)
+			depthJ := hierarchyDepth(newIssues[j].ID)
 			if depthI != depthJ {
 				return depthI < depthJ // Shallower first
 			}
@@ -800,17 +825,30 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		for depth := 0; depth <= 3; depth++ {
 			var batchForDepth []*types.Issue
 			for _, issue := range newIssues {
-				if strings.Count(issue.ID, ".") == depth {
+				if hierarchyDepth(issue.ID) == depth {
 					batchForDepth = append(batchForDepth, issue)
 				}
 			}
 			if len(batchForDepth) > 0 {
-				batchOpts := sqlite.BatchCreateOptions{
-					OrphanHandling:       opts.OrphanHandling,
-					SkipPrefixValidation: opts.SkipPrefixValidation,
+				// Prefer a backend-specific import/batch API when available, so we can honor
+				// options like SkipPrefixValidation (multi-repo mode) without requiring the
+				// entire importer to be SQLite-specific.
+				type importBatchCreator interface {
+					CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts sqlite.BatchCreateOptions) error
 				}
-				if err := sqliteStore.CreateIssuesWithFullOptions(ctx, batchForDepth, "import", batchOpts); err != nil {
-					return fmt.Errorf("error creating depth-%d issues: %w", depth, err)
+				if bc, ok := store.(importBatchCreator); ok {
+					batchOpts := sqlite.BatchCreateOptions{
+						OrphanHandling:       sqlite.OrphanHandling(opts.OrphanHandling),
+						SkipPrefixValidation: opts.SkipPrefixValidation,
+					}
+					if err := bc.CreateIssuesWithFullOptions(ctx, batchForDepth, "import", batchOpts); err != nil {
+						return fmt.Errorf("error creating depth-%d issues: %w", depth, err)
+					}
+				} else {
+					// Generic fallback. OrphanSkip and OrphanStrict are enforced above.
+					if err := store.CreateIssues(ctx, batchForDepth, "import"); err != nil {
+						return fmt.Errorf("error creating depth-%d issues: %w", depth, err)
+					}
 				}
 				result.Created += len(batchForDepth)
 			}
@@ -822,15 +860,502 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 	return nil
 }
 
+// upsertIssuesTx performs upsert using a transaction for atomicity.
+func upsertIssuesTx(ctx context.Context, tx storage.Transaction, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
+	// Use transaction-scoped reads for consistency.
+	dbIssues, err := tx.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	if err != nil {
+		return fmt.Errorf("failed to get DB issues: %w", err)
+	}
+
+	dbByHash := buildHashMap(dbIssues)
+	dbByID := buildIDMap(dbIssues)
+
+	// Build external_ref map for O(1) lookup
+	dbByExternalRef := make(map[string]*types.Issue)
+	for _, issue := range dbIssues {
+		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
+			dbByExternalRef[*issue.ExternalRef] = issue
+			if linear.IsLinearExternalRef(*issue.ExternalRef) {
+				if canonical, ok := linear.CanonicalizeLinearExternalRef(*issue.ExternalRef); ok {
+					dbByExternalRef[canonical] = issue
+				}
+			}
+		}
+	}
+
+	// Track what we need to create
+	var newIssues []*types.Issue
+	seenHashes := make(map[string]bool)
+	seenIDs := make(map[string]bool)
+
+	for _, incoming := range issues {
+		hash := incoming.ContentHash
+		if hash == "" {
+			hash = incoming.ComputeContentHash()
+			incoming.ContentHash = hash
+		}
+
+		if seenHashes[hash] {
+			result.Skipped++
+			continue
+		}
+		seenHashes[hash] = true
+
+		if seenIDs[incoming.ID] {
+			result.Skipped++
+			continue
+		}
+		seenIDs[incoming.ID] = true
+
+		// Never resurrect over tombstones.
+		if existingByID, found := dbByID[incoming.ID]; found && existingByID != nil && existingByID.Status == types.StatusTombstone {
+			result.Skipped++
+			continue
+		}
+
+		// Phase 0: external_ref
+		if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+			if existing, found := dbByExternalRef[*incoming.ExternalRef]; found && existing != nil {
+				if !opts.SkipUpdate {
+					if shouldProtectFromUpdate(existing.ID, incoming.UpdatedAt, opts.ProtectLocalExportIDs) {
+						debugLogProtection(existing.ID, opts.ProtectLocalExportIDs[existing.ID], incoming.UpdatedAt)
+						result.Skipped++
+						continue
+					}
+					if !incoming.UpdatedAt.After(existing.UpdatedAt) {
+						result.Unchanged++
+						continue
+					}
+					updates := map[string]interface{}{
+						"title":               incoming.Title,
+						"description":         incoming.Description,
+						"status":              incoming.Status,
+						"priority":            incoming.Priority,
+						"issue_type":          incoming.IssueType,
+						"design":              incoming.Design,
+						"acceptance_criteria": incoming.AcceptanceCriteria,
+						"notes":               incoming.Notes,
+						"closed_at":           incoming.ClosedAt,
+					}
+					if incoming.Pinned {
+						updates["pinned"] = incoming.Pinned
+					}
+					if incoming.Assignee != "" {
+						updates["assignee"] = incoming.Assignee
+					} else {
+						updates["assignee"] = nil
+					}
+					if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+						updates["external_ref"] = *incoming.ExternalRef
+					} else {
+						updates["external_ref"] = nil
+					}
+					if IssueDataChanged(existing, updates) {
+						if err := tx.UpdateIssue(ctx, existing.ID, updates, "import"); err != nil {
+							return fmt.Errorf("error updating issue %s (matched by external_ref): %w", existing.ID, err)
+						}
+						result.Updated++
+					} else {
+						result.Unchanged++
+					}
+				} else {
+					result.Skipped++
+				}
+				continue
+			}
+		}
+
+		// Phase 1: content hash
+		if existing, found := dbByHash[hash]; found && existing != nil {
+			if existing.ID == incoming.ID {
+				result.Unchanged++
+			} else {
+				existingPrefix := utils.ExtractIssuePrefix(existing.ID)
+				incomingPrefix := utils.ExtractIssuePrefix(incoming.ID)
+				if existingPrefix != incomingPrefix {
+					result.Skipped++
+				} else if !opts.SkipUpdate {
+					deletedID, err := handleRename(ctx, store, existing, incoming)
+					if err != nil {
+						return fmt.Errorf("failed to handle rename %s -> %s: %w", existing.ID, incoming.ID, err)
+					}
+					if deletedID != "" {
+						delete(dbByID, deletedID)
+					}
+					result.Updated++
+				} else {
+					result.Skipped++
+				}
+			}
+			continue
+		}
+
+		// Phase 2: same ID exists -> update candidate
+		if existingWithID, found := dbByID[incoming.ID]; found && existingWithID != nil {
+			if existingWithID.Status == types.StatusTombstone {
+				result.Skipped++
+				continue
+			}
+			if !opts.SkipUpdate {
+				if shouldProtectFromUpdate(incoming.ID, incoming.UpdatedAt, opts.ProtectLocalExportIDs) {
+					debugLogProtection(incoming.ID, opts.ProtectLocalExportIDs[incoming.ID], incoming.UpdatedAt)
+					result.Skipped++
+					continue
+				}
+				if !incoming.UpdatedAt.After(existingWithID.UpdatedAt) {
+					result.Unchanged++
+					continue
+				}
+				updates := map[string]interface{}{
+					"title":               incoming.Title,
+					"description":         incoming.Description,
+					"status":              incoming.Status,
+					"priority":            incoming.Priority,
+					"issue_type":          incoming.IssueType,
+					"design":              incoming.Design,
+					"acceptance_criteria": incoming.AcceptanceCriteria,
+					"notes":               incoming.Notes,
+					"closed_at":           incoming.ClosedAt,
+				}
+				if incoming.Pinned {
+					updates["pinned"] = incoming.Pinned
+				}
+				if incoming.Assignee != "" {
+					updates["assignee"] = incoming.Assignee
+				} else {
+					updates["assignee"] = nil
+				}
+				if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+					updates["external_ref"] = *incoming.ExternalRef
+				} else {
+					updates["external_ref"] = nil
+				}
+				if IssueDataChanged(existingWithID, updates) {
+					if err := tx.UpdateIssue(ctx, incoming.ID, updates, "import"); err != nil {
+						return fmt.Errorf("error updating issue %s: %w", incoming.ID, err)
+					}
+					result.Updated++
+				} else {
+					result.Unchanged++
+				}
+			} else {
+				result.Skipped++
+			}
+		} else {
+			newIssues = append(newIssues, incoming)
+		}
+	}
+
+	// OrphanSkip/Strict/Resurrect handled using the same helpers as non-tx path
+	if opts.OrphanHandling == OrphanSkip {
+		var filtered []*types.Issue
+		for _, issue := range newIssues {
+			if isHier, parentID := isHierarchicalID(issue.ID); isHier {
+				if dbByID[parentID] == nil {
+					// parent might be created in this batch; check newIssues
+					found := false
+					for _, ni := range newIssues {
+						if ni.ID == parentID {
+							found = true
+							break
+						}
+					}
+					if !found {
+						result.Skipped++
+						continue
+					}
+				}
+			}
+			filtered = append(filtered, issue)
+		}
+		newIssues = filtered
+	}
+	if opts.OrphanHandling == OrphanStrict {
+		newIDSet := make(map[string]bool, len(newIssues))
+		for _, issue := range newIssues {
+			newIDSet[issue.ID] = true
+		}
+		for _, issue := range newIssues {
+			if isHier, parentID := isHierarchicalID(issue.ID); isHier {
+				if dbByID[parentID] == nil && !newIDSet[parentID] {
+					return fmt.Errorf("parent issue %s does not exist (strict mode)", parentID)
+				}
+			}
+		}
+	}
+	if opts.OrphanHandling == OrphanResurrect {
+		if err := addResurrectedParents(store, dbByID, issues, &newIssues); err != nil {
+			return err
+		}
+	}
+
+	// Create new issues in deterministic depth order using tx.
+	if len(newIssues) > 0 {
+		sort.Slice(newIssues, func(i, j int) bool {
+			di := hierarchyDepth(newIssues[i].ID)
+			dj := hierarchyDepth(newIssues[j].ID)
+			if di != dj {
+				return di < dj
+			}
+			return newIssues[i].ID < newIssues[j].ID
+		})
+
+		type importCreator interface {
+			CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error
+		}
+		for _, iss := range newIssues {
+			if ic, ok := tx.(importCreator); ok {
+				if err := ic.CreateIssueImport(ctx, iss, "import", opts.SkipPrefixValidation); err != nil {
+					return err
+				}
+			} else {
+				if err := tx.CreateIssue(ctx, iss, "import"); err != nil {
+					return err
+				}
+			}
+			result.Created++
+		}
+	}
+
+	return nil
+}
+
+func importDependenciesTx(ctx context.Context, tx storage.Transaction, issues []*types.Issue, opts Options, result *Result) error {
+	for _, issue := range issues {
+		if len(issue.Dependencies) == 0 {
+			continue
+		}
+
+		existingDeps, err := tx.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			return fmt.Errorf("error checking dependencies for %s: %w", issue.ID, err)
+		}
+		existingSet := make(map[string]bool)
+		for _, existing := range existingDeps {
+			key := fmt.Sprintf("%s|%s", existing.DependsOnID, existing.Type)
+			existingSet[key] = true
+		}
+
+		for _, dep := range issue.Dependencies {
+			key := fmt.Sprintf("%s|%s", dep.DependsOnID, dep.Type)
+			if existingSet[key] {
+				continue
+			}
+			if err := tx.AddDependency(ctx, dep, "import"); err != nil {
+				if opts.Strict {
+					return fmt.Errorf("error adding dependency %s → %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+				depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
+				fmt.Fprintf(os.Stderr, "Warning: Skipping dependency due to error: %s (%v)\n", depDesc, err)
+				if result != nil {
+					result.SkippedDependencies = append(result.SkippedDependencies, depDesc)
+				}
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func importLabelsTx(ctx context.Context, tx storage.Transaction, issues []*types.Issue, opts Options) error {
+	for _, issue := range issues {
+		if len(issue.Labels) == 0 {
+			continue
+		}
+		currentLabels, err := tx.GetLabels(ctx, issue.ID)
+		if err != nil {
+			return fmt.Errorf("error getting labels for %s: %w", issue.ID, err)
+		}
+		set := make(map[string]bool, len(currentLabels))
+		for _, l := range currentLabels {
+			set[l] = true
+		}
+		for _, label := range issue.Labels {
+			if set[label] {
+				continue
+			}
+			if err := tx.AddLabel(ctx, issue.ID, label, "import"); err != nil {
+				if opts.Strict {
+					return fmt.Errorf("error adding label %s to %s: %w", label, issue.ID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func importCommentsTx(ctx context.Context, tx storage.Transaction, issues []*types.Issue, opts Options) error {
+	for _, issue := range issues {
+		if len(issue.Comments) == 0 {
+			continue
+		}
+		currentComments, err := tx.GetIssueComments(ctx, issue.ID)
+		if err != nil {
+			return fmt.Errorf("error getting comments for %s: %w", issue.ID, err)
+		}
+		existing := make(map[string]bool)
+		for _, c := range currentComments {
+			key := fmt.Sprintf("%s:%s", c.Author, strings.TrimSpace(c.Text))
+			existing[key] = true
+		}
+		for _, comment := range issue.Comments {
+			key := fmt.Sprintf("%s:%s", comment.Author, strings.TrimSpace(comment.Text))
+			if existing[key] {
+				continue
+			}
+			if _, err := tx.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, comment.CreatedAt); err != nil {
+				if opts.Strict {
+					return fmt.Errorf("error adding comment to %s: %w", issue.ID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// addResurrectedParents ensures missing hierarchical parents exist by adding "tombstone parent"
+// issues to newIssues (if needed). Parents are sourced from the local JSONL file when possible.
+func addResurrectedParents(store storage.Storage, dbByID map[string]*types.Issue, allIncoming []*types.Issue, newIssues *[]*types.Issue) error {
+	// Track which IDs will exist after creation
+	willExist := make(map[string]bool, len(dbByID)+len(*newIssues))
+	for id, iss := range dbByID {
+		if iss != nil {
+			willExist[id] = true
+		}
+	}
+	for _, iss := range *newIssues {
+		willExist[iss.ID] = true
+	}
+
+	// Helper to ensure a single parent exists (and its ancestors).
+	var ensureParent func(parentID string) error
+	ensureParent = func(parentID string) error {
+		if willExist[parentID] {
+			return nil
+		}
+		// Ensure ancestors first (root-to-leaf)
+		if isHier, grandParent := isHierarchicalID(parentID); isHier {
+			if err := ensureParent(grandParent); err != nil {
+				return err
+			}
+		}
+
+		// Try to find the issue in the incoming batch first (already being imported)
+		for _, iss := range allIncoming {
+			if iss.ID == parentID {
+				willExist[parentID] = true
+				return nil
+			}
+		}
+
+		// Try local JSONL history
+		beadsDir := filepath.Dir(store.Path())
+		found, err := findIssueInLocalJSONL(filepath.Join(beadsDir, "issues.jsonl"), parentID)
+		if err != nil {
+			return fmt.Errorf("parent issue %s does not exist and could not be resurrected: %w", parentID, err)
+		}
+		if found == nil {
+			return fmt.Errorf("parent issue %s does not exist and cannot be resurrected from local JSONL history", parentID)
+		}
+
+		now := time.Now().UTC()
+		closedAt := now
+		tombstone := &types.Issue{
+			ID:        found.ID,
+			Title:     found.Title,
+			IssueType: found.IssueType,
+			Status:    types.StatusClosed,
+			Priority:  4,
+			CreatedAt: found.CreatedAt,
+			UpdatedAt: now,
+			ClosedAt:  &closedAt,
+			// Keep content deterministic-ish but signal it's resurrected.
+			Description: "[RESURRECTED] Recreated as closed to preserve hierarchical structure.",
+		}
+		// Compute hash (ImportIssues computed hashes for original slice only)
+		tombstone.ContentHash = tombstone.ComputeContentHash()
+
+		*newIssues = append(*newIssues, tombstone)
+		willExist[parentID] = true
+		return nil
+	}
+
+	// Walk newIssues and ensure parents exist
+	for _, iss := range *newIssues {
+		if isHier, parentID := isHierarchicalID(iss.ID); isHier {
+			if err := ensureParent(parentID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func findIssueInLocalJSONL(jsonlPath, issueID string) (*types.Issue, error) {
+	if jsonlPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(jsonlPath); err != nil {
+		return nil, nil // No JSONL file available
+	}
+
+	f, err := os.Open(jsonlPath) // #nosec G304 -- jsonlPath derived from beadsDir
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var last *types.Issue
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, `"`+issueID+`"`) {
+			continue
+		}
+		var iss types.Issue
+		if err := json.Unmarshal([]byte(line), &iss); err != nil {
+			// Skip malformed lines (best-effort resurrection)
+			continue
+		}
+		if iss.ID == issueID {
+			iss.SetDefaults()
+			copy := iss
+			last = &copy
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return last, nil
+}
+
 // importDependencies imports dependency relationships
-func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
+func importDependencies(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
+	// Backend-agnostic existence check map to avoid relying on backend-specific FK errors.
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	if err != nil {
+		return fmt.Errorf("failed to load issues for dependency validation: %w", err)
+	}
+	exists := make(map[string]bool, len(dbIssues))
+	for _, iss := range dbIssues {
+		if iss != nil {
+			exists[iss.ID] = true
+		}
+	}
+
 	for _, issue := range issues {
 		if len(issue.Dependencies) == 0 {
 			continue
 		}
 
 		// Fetch existing dependencies once per issue
-		existingDeps, err := sqliteStore.GetDependencyRecords(ctx, issue.ID)
+		existingDeps, err := store.GetDependencyRecords(ctx, issue.ID)
 		if err != nil {
 			return fmt.Errorf("error checking dependencies for %s: %w", issue.ID, err)
 		}
@@ -843,6 +1368,19 @@ func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 		}
 
 		for _, dep := range issue.Dependencies {
+			// Validate referenced issues exist (after upsert). Tombstones count as existing.
+			if !exists[dep.IssueID] || !exists[dep.DependsOnID] {
+				depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
+				if opts.Strict {
+					return fmt.Errorf("missing reference for dependency: %s", depDesc)
+				}
+				fmt.Fprintf(os.Stderr, "Warning: Skipping dependency due to missing reference: %s\n", depDesc)
+				if result != nil {
+					result.SkippedDependencies = append(result.SkippedDependencies, depDesc)
+				}
+				continue
+			}
+
 			// Check for duplicate using set
 			key := fmt.Sprintf("%s|%s", dep.DependsOnID, dep.Type)
 			if existingSet[key] {
@@ -850,21 +1388,15 @@ func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 			}
 
 			// Add dependency
-			if err := sqliteStore.AddDependency(ctx, dep, "import"); err != nil {
-				// Check for FOREIGN KEY constraint violation
-				if sqlite.IsForeignKeyConstraintError(err) {
-					// Log warning and track skipped dependency
-					depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
-					fmt.Fprintf(os.Stderr, "Warning: Skipping dependency due to missing reference: %s\n", depDesc)
-					if result != nil {
-						result.SkippedDependencies = append(result.SkippedDependencies, depDesc)
-					}
-					continue
-				}
-
-				// For non-FK errors, respect strict mode
+			if err := store.AddDependency(ctx, dep, "import"); err != nil {
+				// Backend-agnostic: treat dependency insert errors as non-fatal unless strict mode is enabled.
 				if opts.Strict {
 					return fmt.Errorf("error adding dependency %s → %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+				depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
+				fmt.Fprintf(os.Stderr, "Warning: Skipping dependency due to error: %s (%v)\n", depDesc, err)
+				if result != nil {
+					result.SkippedDependencies = append(result.SkippedDependencies, depDesc)
 				}
 				continue
 			}
@@ -875,14 +1407,14 @@ func importDependencies(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, 
 }
 
 // importLabels imports labels for issues
-func importLabels(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options) error {
+func importLabels(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options) error {
 	for _, issue := range issues {
 		if len(issue.Labels) == 0 {
 			continue
 		}
 
 		// Get current labels
-		currentLabels, err := sqliteStore.GetLabels(ctx, issue.ID)
+		currentLabels, err := store.GetLabels(ctx, issue.ID)
 		if err != nil {
 			return fmt.Errorf("error getting labels for %s: %w", issue.ID, err)
 		}
@@ -895,7 +1427,7 @@ func importLabels(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		// Add missing labels
 		for _, label := range issue.Labels {
 			if !currentLabelSet[label] {
-				if err := sqliteStore.AddLabel(ctx, issue.ID, label, "import"); err != nil {
+				if err := store.AddLabel(ctx, issue.ID, label, "import"); err != nil {
 					if opts.Strict {
 						return fmt.Errorf("error adding label %s to %s: %w", label, issue.ID, err)
 					}
@@ -909,14 +1441,14 @@ func importLabels(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 }
 
 // importComments imports comments for issues
-func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options) error {
+func importComments(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options) error {
 	for _, issue := range issues {
 		if len(issue.Comments) == 0 {
 			continue
 		}
 
 		// Get current comments to avoid duplicates
-		currentComments, err := sqliteStore.GetIssueComments(ctx, issue.ID)
+		currentComments, err := store.GetIssueComments(ctx, issue.ID)
 		if err != nil {
 			return fmt.Errorf("error getting comments for %s: %w", issue.ID, err)
 		}
@@ -932,10 +1464,7 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 		for _, comment := range issue.Comments {
 			key := fmt.Sprintf("%s:%s", comment.Author, strings.TrimSpace(comment.Text))
 			if !existingComments[key] {
-				// Use ImportIssueComment to preserve original timestamp (GH#735)
-				// Format timestamp as RFC3339 for SQLite compatibility
-				createdAt := comment.CreatedAt.UTC().Format(time.RFC3339)
-				if _, err := sqliteStore.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, createdAt); err != nil {
+				if _, err := store.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, comment.CreatedAt); err != nil {
 					if opts.Strict {
 						return fmt.Errorf("error adding comment to %s: %w", issue.ID, err)
 					}
@@ -1030,6 +1559,40 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool
 	}
 
 	return nil
+}
+
+// isHierarchicalID returns true if id is a hierarchical child ID of the form "<parent>.<n>" (n is digits).
+// This intentionally avoids treating prefixes that contain dots (e.g., "my.project-abc") as hierarchical.
+func isHierarchicalID(id string) (bool, string) {
+	lastDot := strings.LastIndex(id, ".")
+	if lastDot <= 0 || lastDot == len(id)-1 {
+		return false, ""
+	}
+	suffix := id[lastDot+1:]
+	for i := 0; i < len(suffix); i++ {
+		if suffix[i] < '0' || suffix[i] > '9' {
+			return false, ""
+		}
+	}
+	return true, id[:lastDot]
+}
+
+// hierarchyDepth returns the number of hierarchical segments in an ID.
+// Examples:
+// - "bd-abc" -> 0
+// - "bd-abc.1" -> 1
+// - "bd-abc.1.2" -> 2
+func hierarchyDepth(id string) int {
+	depth := 0
+	cur := id
+	for {
+		isHier, parent := isHierarchicalID(cur)
+		if !isHier {
+			return depth
+		}
+		depth++
+		cur = parent
+	}
 }
 
 // buildAllowedPrefixSet returns allowed prefixes, or nil to allow all (GH#686).

@@ -812,60 +812,22 @@ func TestImportIssues_Labels(t *testing.T) {
 }
 
 func TestGetOrCreateStore_ExistingStore(t *testing.T) {
-	ctx := context.Background()
-	
-	tmpDB := t.TempDir() + "/test.db"
-	store, err := sqlite.New(context.Background(), tmpDB)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-	defer store.Close()
-	
-	result, needClose, err := getOrCreateStore(ctx, tmpDB, store)
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
-	if needClose {
-		t.Error("Expected needClose=false for existing store")
-	}
-	if result != store {
-		t.Error("Expected same store instance")
-	}
+	t.Skip("getOrCreateStore removed: importer now requires a store")
 }
 
 func TestGetOrCreateStore_NewStore(t *testing.T) {
-	ctx := context.Background()
-	
-	tmpDB := t.TempDir() + "/test.db"
-	
-	// Create initial database
-	initStore, err := sqlite.New(context.Background(), tmpDB)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-	initStore.Close()
-	
-	// Test creating new connection
-	result, needClose, err := getOrCreateStore(ctx, tmpDB, nil)
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
-	defer result.Close()
-	
-	if !needClose {
-		t.Error("Expected needClose=true for new store")
-	}
-	if result == nil {
-		t.Error("Expected non-nil store")
-	}
+	t.Skip("getOrCreateStore removed: importer now requires a store")
 }
 
 func TestGetOrCreateStore_EmptyPath(t *testing.T) {
+	t.Skip("getOrCreateStore removed: importer now requires a store")
+}
+
+func TestImportIssues_RequiresStore(t *testing.T) {
 	ctx := context.Background()
-	
-	_, _, err := getOrCreateStore(ctx, "", nil)
+	_, err := ImportIssues(ctx, "", nil, []*types.Issue{}, Options{})
 	if err == nil {
-		t.Error("Expected error for empty database path")
+		t.Fatal("expected error when store is nil")
 	}
 }
 
@@ -1203,7 +1165,7 @@ func TestImportOrphanSkip_CountMismatch(t *testing.T) {
 
 	// Import with OrphanSkip mode - parent doesn't exist
 	result, err := ImportIssues(ctx, "", store, issues, Options{
-		OrphanHandling:       sqlite.OrphanSkip,
+		OrphanHandling:       OrphanSkip,
 		SkipPrefixValidation: true, // Allow explicit IDs during import
 	})
 	if err != nil {

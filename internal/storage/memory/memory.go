@@ -1457,6 +1457,24 @@ func (m *MemoryStorage) AddIssueComment(ctx context.Context, issueID, author, te
 	return comment, nil
 }
 
+func (m *MemoryStorage) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	comment := &types.Comment{
+		ID:        int64(len(m.comments[issueID]) + 1),
+		IssueID:   issueID,
+		Author:    author,
+		Text:      text,
+		CreatedAt: createdAt,
+	}
+
+	m.comments[issueID] = append(m.comments[issueID], comment)
+	m.dirty[issueID] = true
+
+	return comment, nil
+}
+
 func (m *MemoryStorage) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

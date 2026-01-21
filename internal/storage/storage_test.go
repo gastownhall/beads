@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -117,6 +118,9 @@ func (m *mockStorage) GetEvents(ctx context.Context, issueID string, limit int) 
 	return nil, nil
 }
 func (m *mockStorage) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
+	return nil, nil
+}
+func (m *mockStorage) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	return nil, nil
 }
 func (m *mockStorage) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
@@ -237,11 +241,17 @@ func (m *mockTransaction) AddDependency(ctx context.Context, dep *types.Dependen
 func (m *mockTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	return nil
 }
+func (m *mockTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
+	return nil, nil
+}
 func (m *mockTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	return nil
 }
 func (m *mockTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	return nil
+}
+func (m *mockTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
+	return nil, nil
 }
 func (m *mockTransaction) SetConfig(ctx context.Context, key, value string) error {
 	return nil
@@ -257,6 +267,12 @@ func (m *mockTransaction) GetMetadata(ctx context.Context, key string) (string, 
 }
 func (m *mockTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return nil
+}
+func (m *mockTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return nil, nil
+}
+func (m *mockTransaction) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
+	return nil, nil
 }
 
 // TestConfig verifies the Config struct has expected fields.
