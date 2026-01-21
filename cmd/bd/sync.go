@@ -344,11 +344,11 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		// GH#1166: Block sync if currently on the sync branch
 		// This must happen BEFORE worktree operations - after entering a worktree,
 		// GetCurrentBranch() would return the worktree's branch, not the original.
-		if hasSyncBranchConfig {
-			if syncbranch.IsSyncBranchSameAsCurrent(ctx, syncBranchName) {
+		if sbc.IsConfigured() {
+			if syncbranch.IsSyncBranchSameAsCurrent(ctx, sbc.Branch) {
 				FatalError("Cannot sync to '%s': it's your current branch. "+
 					"Checkout a different branch first, or use a dedicated sync branch like 'beads-sync'.",
-					syncBranchName)
+					sbc.Branch)
 			}
 		}
 
