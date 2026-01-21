@@ -22,6 +22,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// jsonlFilePaths lists all JSONL files that should be staged/tracked.
+// Includes beads.jsonl for backwards compatibility with older installations.
+var jsonlFilePaths = []string{
+	".beads/issues.jsonl",
+	".beads/deletions.jsonl",
+	".beads/interactions.jsonl",
+	".beads/beads.jsonl", // Legacy filename, kept for backwards compatibility
+}
+
 // hookCmd is the main "bd hook" command that git hooks call into.
 // This is distinct from "bd hooks" (plural) which manages hook installation.
 var hookCmd = &cobra.Command{
@@ -370,17 +379,16 @@ func hookPreCommit() int {
 	}
 
 	// Stage JSONL files
-	jsonlFiles := []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"}
 	if os.Getenv("BEADS_NO_AUTO_STAGE") == "" {
 		rc, rcErr := beads.GetRepoContext()
 		ctx := context.Background()
-		for _, f := range jsonlFiles {
+		for _, f := range jsonlFilePaths {
 			if _, err := os.Stat(f); err == nil {
 				var gitAdd *exec.Cmd
 				if rcErr == nil {
 					gitAdd = rc.GitCmdCWD(ctx, "add", f)
 				} else {
-					// #nosec G204 -- f comes from jsonlFiles (controlled, hardcoded paths)
+					// #nosec G204 -- f comes from jsonlFilePaths (controlled, hardcoded paths)
 					gitAdd = exec.Command("git", "add", f)
 				}
 				_ = gitAdd.Run()
@@ -534,14 +542,13 @@ func stageJSONLFiles(ctx context.Context) {
 	}
 
 	rc, rcErr := beads.GetRepoContext()
-	jsonlFiles := []string{".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"}
-	for _, f := range jsonlFiles {
+	for _, f := range jsonlFilePaths {
 		if _, err := os.Stat(f); err == nil {
 			var gitAdd *exec.Cmd
 			if rcErr == nil {
 				gitAdd = rc.GitCmdCWD(ctx, "add", f)
 			} else {
-				// #nosec G204 -- f comes from jsonlFiles (hardcoded)
+				// #nosec G204 -- f comes from jsonlFilePaths (controlled, hardcoded paths)
 				gitAdd = exec.Command("git", "add", f)
 			}
 			_ = gitAdd.Run()
@@ -665,7 +672,7 @@ func hookPostMergeDolt(beadsDir string) int {
 
 	// Import JSONL to the import branch
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if err := importFromJSONLToStore(ctx, store, jsonlPath); err != nil {
+	if err := importFromJSONLToStore(ctx, store, jsonlPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not import JSONL: %v\n", err)
 		// Checkout back to original branch
 		_ = doltStore.Checkout(ctx, currentBranch)

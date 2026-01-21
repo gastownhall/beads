@@ -181,7 +181,9 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 }
 
 // CheckDuplicateIssues detects issues with identical content.
-func CheckDuplicateIssues(path string) DoctorCheck {
+// When gastownMode is true, the threshold parameter defines how many duplicates
+// are acceptable before warning (default 1000 for gastown's ephemeral wisps).
+func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) DoctorCheck {
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
@@ -236,7 +238,13 @@ func CheckDuplicateIssues(path string) DoctorCheck {
 		}
 	}
 
-	if duplicateGroups == 0 {
+	// Apply threshold based on mode
+	threshold := 0 // Default: any duplicates are warnings
+	if gastownMode {
+		threshold = gastownThreshold // Gastown: configurable threshold (default 1000)
+	}
+
+	if totalDuplicates == 0 {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
 			Status:  "ok",
@@ -244,12 +252,26 @@ func CheckDuplicateIssues(path string) DoctorCheck {
 		}
 	}
 
+	// Only warn if duplicate count exceeds threshold
+	if totalDuplicates > threshold {
+		return DoctorCheck{
+			Name:    "Duplicate Issues",
+			Status:  "warning",
+			Message: fmt.Sprintf("%d duplicate issue(s) in %d group(s)", totalDuplicates, duplicateGroups),
+			Detail:  "Duplicates cannot be auto-fixed",
+			Fix:     "Run 'bd duplicates' to review and merge duplicates",
+		}
+	}
+
+	// Under threshold - OK
+	message := "No duplicate issues"
+	if gastownMode && totalDuplicates > 0 {
+		message = fmt.Sprintf("%d duplicate(s) detected (within gastown threshold of %d)", totalDuplicates, threshold)
+	}
 	return DoctorCheck{
 		Name:    "Duplicate Issues",
-		Status:  "warning",
-		Message: fmt.Sprintf("%d duplicate issue(s) in %d group(s)", totalDuplicates, duplicateGroups),
-		Detail:  "Duplicates cannot be auto-fixed",
-		Fix:     "Run 'bd duplicates' to review and merge duplicates",
+		Status:  "ok",
+		Message: message,
 	}
 }
 

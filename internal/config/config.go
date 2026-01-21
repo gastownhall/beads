@@ -112,7 +112,7 @@ func Initialize() error {
 	v.SetDefault("remote-sync-interval", "30s")
 
 	// Routing configuration defaults
-	v.SetDefault("routing.mode", "auto")
+	v.SetDefault("routing.mode", "")
 	v.SetDefault("routing.default", ".")
 	v.SetDefault("routing.maintainer", ".")
 	v.SetDefault("routing.contributor", "~/.beads-planning")

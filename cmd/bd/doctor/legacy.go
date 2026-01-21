@@ -121,7 +121,8 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 
 // CheckLegacyJSONLFilename detects if there are multiple JSONL files,
 // which can cause sync/merge issues. Ignores merge artifacts and backups.
-func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
+// When gastownMode is true, routes.jsonl is treated as a valid system file.
+func CheckLegacyJSONLFilename(repoPath string, gastownMode bool) DoctorCheck {
 	beadsDir := filepath.Join(repoPath, ".beads")
 
 	// Find all .jsonl files
@@ -160,7 +161,9 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 			// Git merge conflict artifacts (e.g., issues.base.jsonl, issues.left.jsonl)
 			strings.Contains(lowerName, ".base.jsonl") ||
 			strings.Contains(lowerName, ".left.jsonl") ||
-			strings.Contains(lowerName, ".right.jsonl") {
+			strings.Contains(lowerName, ".right.jsonl") ||
+			// Skip routes.jsonl in gastown mode (valid system file)
+			(gastownMode && name == "routes.jsonl") {
 			continue
 		}
 

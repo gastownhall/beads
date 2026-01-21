@@ -76,6 +76,12 @@ func TestAutoFlushOnExit(t *testing.T) {
 	// Mark dirty (simulating CRUD operation)
 	markDirtyAndScheduleFlush()
 
+	// Allow time for the FlushManager's background goroutine to process the markDirty event.
+	// Without this, there's a race condition: if Shutdown() is processed before the markDirty
+	// event, isDirty remains false and no flush occurs. This mimics real-world behavior where
+	// there's always some time between CRUD operations and process exit.
+	time.Sleep(10 * time.Millisecond)
+
 	// Simulate PersistentPostRun exit behavior - shutdown FlushManager
 	// This performs the final flush before exit
 	if err := flushManager.Shutdown(); err != nil {

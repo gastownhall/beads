@@ -207,7 +207,10 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	// Ensure mainBeadsDir is absolute for correct filepath.Rel() computation (GH#1098)
 	// beads.FindBeadsDir() may return a relative path in some contexts
 	absMainBeadsDir := utils.CanonicalizeIfRelative(mainBeadsDir)
-	relPath, err := filepath.Rel(worktreeBeadsDir, absMainBeadsDir)
+	// Compute relative path from worktree root (not .beads dir) because
+	// FollowRedirect resolves paths relative to the parent of .beads
+	worktreeRoot := filepath.Dir(worktreeBeadsDir)
+	relPath, err := filepath.Rel(worktreeRoot, absMainBeadsDir)
 	if err != nil {
 		// Fall back to absolute path
 		relPath = absMainBeadsDir

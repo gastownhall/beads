@@ -45,7 +45,10 @@ bd create "Fix bug" -p 1
 Routing is configured via the database config:
 
 ```bash
-# Set routing mode (auto = detect role, explicit = always use default)
+# Auto-routing is disabled by default (routing.mode="")
+# Enable with:
+bd init --contributor
+# OR manually:
 bd config set routing.mode auto
 
 # Set default planning repo

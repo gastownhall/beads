@@ -18,6 +18,81 @@ import (
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
+// SyncBranchContext holds sync-branch configuration detected from the store.
+// This consolidates the repeated pattern of checking for sync-branch config.
+type SyncBranchContext struct {
+	Branch   string // Sync branch name, empty if not configured
+	RepoRoot string // Git repository root path
+}
+
+// IsConfigured returns true if a sync branch is configured.
+func (s *SyncBranchContext) IsConfigured() bool {
+	return s.Branch != ""
+}
+
+// getSyncBranchContext detects sync-branch configuration from the store.
+// Returns a context with empty Branch if not configured or on error.
+func getSyncBranchContext(ctx context.Context) *SyncBranchContext {
+	sbc := &SyncBranchContext{}
+	if err := ensureStoreActive(); err != nil || store == nil {
+		return sbc
+	}
+	if sb, _ := syncbranch.Get(ctx, store); sb != "" {
+		sbc.Branch = sb
+		if rc, err := beads.GetRepoContext(); err == nil {
+			sbc.RepoRoot = rc.RepoRoot
+		}
+	}
+	return sbc
+}
+
+// commitAndPushBeads commits and pushes .beads changes using the appropriate method.
+// When sync-branch is configured, uses worktree-based commit/push.
+// Otherwise, uses standard git commit/push on the current branch.
+func commitAndPushBeads(ctx context.Context, sbc *SyncBranchContext, jsonlPath string, noPush bool, message string) error {
+	if sbc.IsConfigured() {
+		fmt.Printf("→ Committing to sync branch '%s'...\n", sbc.Branch)
+		commitResult, err := syncbranch.CommitToSyncBranch(ctx, sbc.RepoRoot, sbc.Branch, jsonlPath, !noPush)
+		if err != nil {
+			return fmt.Errorf("committing to sync branch: %w", err)
+		}
+		if commitResult.Committed {
+			fmt.Printf("  Committed: %s\n", commitResult.Message)
+			if commitResult.Pushed {
+				fmt.Println("  Pushed to remote")
+			}
+		} else {
+			fmt.Println("→ No changes to commit")
+		}
+		return nil
+	}
+
+	// Standard git workflow
+	hasChanges, err := gitHasBeadsChanges(ctx)
+	if err != nil {
+		return fmt.Errorf("checking git status: %w", err)
+	}
+
+	if hasChanges {
+		fmt.Println("→ Committing changes...")
+		if err := gitCommitBeadsDir(ctx, message); err != nil {
+			return fmt.Errorf("committing: %w", err)
+		}
+	} else {
+		fmt.Println("→ No changes to commit")
+	}
+
+	// Push to remote
+	if !noPush && hasChanges {
+		fmt.Println("→ Pushing to remote...")
+		if err := gitPush(ctx, ""); err != nil {
+			return fmt.Errorf("pushing: %w", err)
+		}
+	}
+
+	return nil
+}
+
 var syncCmd = &cobra.Command{
 	Use:     "sync",
 	GroupID: "sync",
@@ -264,25 +339,16 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		// GH#638: Check sync.branch BEFORE upstream check
 		// When sync.branch is configured, we should use worktree-based sync even if
 		// the current branch has no upstream (e.g., detached HEAD in jj, git worktrees)
-		var syncBranchName, syncBranchRepoRoot string
-		if err := ensureStoreActive(); err == nil && store != nil {
-			if sb, _ := syncbranch.Get(ctx, store); sb != "" {
-				syncBranchName = sb
-				if rc, err := beads.GetRepoContext(); err == nil {
-					syncBranchRepoRoot = rc.RepoRoot
-				}
-			}
-		}
-		hasSyncBranchConfig := syncBranchName != ""
+		sbc := getSyncBranchContext(ctx)
 
 		// GH#1166: Block sync if currently on the sync branch
 		// This must happen BEFORE worktree operations - after entering a worktree,
 		// GetCurrentBranch() would return the worktree's branch, not the original.
-		if hasSyncBranchConfig {
-			if syncbranch.IsSyncBranchSameAsCurrent(ctx, syncBranchName) {
+		if sbc.IsConfigured() {
+			if syncbranch.IsSyncBranchSameAsCurrent(ctx, sbc.Branch) {
 				FatalError("Cannot sync to '%s': it's your current branch. "+
 					"Checkout a different branch first, or use a dedicated sync branch like 'beads-sync'.",
-					syncBranchName)
+					sbc.Branch)
 			}
 		}
 
@@ -294,7 +360,7 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		// the beads files are in a different git repo than the current working directory.
 		redirectInfo := beads.GetRedirectInfo()
 		if redirectInfo.IsRedirected {
-			if hasSyncBranchConfig {
+			if sbc.IsConfigured() {
 				fmt.Printf("⚠️  Redirect active (-> %s), skipping sync-branch operations\n", redirectInfo.TargetDir)
 				fmt.Println("   Hint: Redirected clones should not have sync-branch configured")
 				fmt.Println("   The owner of the target .beads directory handles sync-branch")
@@ -319,7 +385,7 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		// Preflight: check for upstream tracking
 		// If no upstream, automatically switch to --from-main mode (gt-ick9: ephemeral branch support)
 		// GH#638: Skip this fallback if sync.branch is explicitly configured
-		if !noPull && !gitHasUpstream() && !hasSyncBranchConfig {
+		if !noPull && !gitHasUpstream() && !sbc.IsConfigured() {
 			if hasGitRemote(ctx) {
 				// Remote exists but no upstream - use from-main mode
 				fmt.Println("→ No upstream configured, using --from-main mode")
@@ -335,7 +401,7 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 		// Pull-first sync: Pull → Merge → Export → Commit → Push
 		// This eliminates the export-before-pull data loss pattern (#911) by
 		// seeing remote changes before exporting local state.
-		if err := doPullFirstSync(ctx, jsonlPath, renameOnImport, noGitHistory, dryRun, noPush, noPull, message, acceptRebase, syncBranchName, syncBranchRepoRoot); err != nil {
+		if err := doPullFirstSync(ctx, jsonlPath, renameOnImport, noGitHistory, dryRun, noPush, noPull, message, acceptRebase, sbc); err != nil {
 			FatalError("%v", err)
 		}
 	},
@@ -354,7 +420,7 @@ The --full flag provides the legacy full sync behavior for backwards compatibili
 //
 // When noPull is true, skips the pull/merge steps and just does:
 // Export → Commit → Push
-func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGitHistory, dryRun, noPush, noPull bool, message string, acceptRebase bool, syncBranch, syncBranchRepoRoot string) error {
+func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGitHistory, dryRun, noPush, noPull bool, message string, acceptRebase bool, sbc *SyncBranchContext) error {
 	beadsDir := filepath.Dir(jsonlPath)
 	_ = acceptRebase // Reserved for future sync branch force-push detection
 
@@ -387,9 +453,6 @@ func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGi
 	if err := ensureStoreActive(); err != nil {
 		return fmt.Errorf("activating store: %w", err)
 	}
-
-	// Derive sync-branch config from parameters (detected at caller)
-	hasSyncBranchConfig := syncBranch != ""
 
 	localIssues, err := store.SearchIssues(ctx, "", beads.IssueFilter{IncludeTombstones: true})
 	if err != nil {
@@ -452,9 +515,9 @@ func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGi
 
 	// Git-based pull (for git-portable, belt-and-suspenders, or when Dolt not available)
 	if ShouldExportJSONL(ctx, store) {
-		if hasSyncBranchConfig {
-			fmt.Printf("→ Pulling from sync branch '%s'...\n", syncBranch)
-			pullResult, err := syncbranch.PullFromSyncBranch(ctx, syncBranchRepoRoot, syncBranch, jsonlPath, false)
+		if sbc.IsConfigured() {
+			fmt.Printf("→ Pulling from sync branch '%s'...\n", sbc.Branch)
+			pullResult, err := syncbranch.PullFromSyncBranch(ctx, sbc.RepoRoot, sbc.Branch, jsonlPath, false)
 			if err != nil {
 				return fmt.Errorf("pulling from sync branch: %w", err)
 			}
@@ -527,46 +590,9 @@ func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGi
 		return fmt.Errorf("exporting: %w", err)
 	}
 
-	// Step 8: Check for changes and commit
-	// Step 9: Push to remote
-	// When sync.branch is configured, use worktree-based commit/push to sync branch
-	// Otherwise, use normal git commit/push on the current branch
-	if hasSyncBranchConfig {
-		fmt.Printf("→ Committing to sync branch '%s'...\n", syncBranch)
-		commitResult, err := syncbranch.CommitToSyncBranch(ctx, syncBranchRepoRoot, syncBranch, jsonlPath, !noPush)
-		if err != nil {
-			return fmt.Errorf("committing to sync branch: %w", err)
-		}
-		if commitResult.Committed {
-			fmt.Printf("  Committed: %s\n", commitResult.Message)
-			if commitResult.Pushed {
-				fmt.Println("  Pushed to remote")
-			}
-		} else {
-			fmt.Println("→ No changes to commit")
-		}
-	} else {
-		hasChanges, err := gitHasBeadsChanges(ctx)
-		if err != nil {
-			return fmt.Errorf("checking git status: %w", err)
-		}
-
-		if hasChanges {
-			fmt.Println("→ Committing changes...")
-			if err := gitCommitBeadsDir(ctx, message); err != nil {
-				return fmt.Errorf("committing: %w", err)
-			}
-		} else {
-			fmt.Println("→ No changes to commit")
-		}
-
-		// Push to remote
-		if !noPush && hasChanges {
-			fmt.Println("→ Pushing to remote...")
-			if err := gitPush(ctx, ""); err != nil {
-				return fmt.Errorf("pushing: %w", err)
-			}
-		}
+	// Step 8 & 9: Commit and push changes
+	if err := commitAndPushBeads(ctx, sbc, jsonlPath, noPush, message); err != nil {
+		return err
 	}
 
 	// Step 10: Update base state for next sync (after successful push)
@@ -627,32 +653,17 @@ func doExportOnlySync(ctx context.Context, jsonlPath string, noPush bool, messag
 		return err
 	}
 
+	// GH#1173: Detect sync-branch configuration and use appropriate commit method
+	sbc := getSyncBranchContext(ctx)
+
 	fmt.Println("→ Exporting pending changes to JSONL...")
 	if err := exportToJSONL(ctx, jsonlPath); err != nil {
 		return fmt.Errorf("exporting: %w", err)
 	}
 
-	// Check for changes and commit
-	hasChanges, err := gitHasBeadsChanges(ctx)
-	if err != nil {
-		return fmt.Errorf("checking git status: %w", err)
-	}
-
-	if hasChanges {
-		fmt.Println("→ Committing changes...")
-		if err := gitCommitBeadsDir(ctx, message); err != nil {
-			return fmt.Errorf("committing: %w", err)
-		}
-	} else {
-		fmt.Println("→ No changes to commit")
-	}
-
-	// Push to remote
-	if !noPush && hasChanges {
-		fmt.Println("→ Pushing to remote...")
-		if err := gitPush(ctx, ""); err != nil {
-			return fmt.Errorf("pushing: %w", err)
-		}
+	// Commit and push using the appropriate method (sync-branch worktree or regular git)
+	if err := commitAndPushBeads(ctx, sbc, jsonlPath, noPush, message); err != nil {
+		return err
 	}
 
 	// Clear sync state on successful sync

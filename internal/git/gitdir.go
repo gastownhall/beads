@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -270,4 +271,46 @@ func NormalizePath(path string) string {
 func ResetCaches() {
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
+}
+
+// IsJujutsuRepo returns true if the current directory is in a jujutsu (jj) repository.
+// Jujutsu stores its data in a .jj directory at the repository root.
+func IsJujutsuRepo() bool {
+	_, err := GetJujutsuRoot()
+	return err == nil
+}
+
+// IsColocatedJJGit returns true if this is a colocated jujutsu+git repository.
+// Colocated repos have both .jj and .git directories, created via `jj git init --colocate`.
+// In colocated repos, git hooks work normally since jj manages the git repo.
+func IsColocatedJJGit() bool {
+	if !IsJujutsuRepo() {
+		return false
+	}
+	// If we're also in a git repo, it's colocated
+	_, err := getGitContext()
+	return err == nil
+}
+
+// GetJujutsuRoot returns the root directory of the jujutsu repository.
+// Returns empty string and error if not in a jujutsu repository.
+func GetJujutsuRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	dir := cwd
+	for {
+		jjPath := filepath.Join(dir, ".jj")
+		if info, err := os.Stat(jjPath); err == nil && info.IsDir() {
+			return dir, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("not a jujutsu repository (no .jj directory found)")
+		}
+		dir = parent
+	}
 }

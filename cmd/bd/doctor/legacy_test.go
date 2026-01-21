@@ -209,96 +209,126 @@ func TestCheckLegacyJSONLFilename(t *testing.T) {
 	tests := []struct {
 		name           string
 		files          []string
+		gastownMode    bool
 		expectedStatus string
 		expectWarning  bool
 	}{
 		{
 			name:           "no JSONL files",
 			files:          []string{},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "single issues.jsonl",
 			files:          []string{"issues.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "single beads.jsonl is ok",
 			files:          []string{"beads.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "custom name is ok",
 			files:          []string{"my-issues.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "multiple JSONL files warning",
 			files:          []string{"beads.jsonl", "issues.jsonl"},
+			gastownMode:    false,
+			expectedStatus: "warning",
+			expectWarning:  true,
+		},
+		{
+			name:           "routes.jsonl with gastown flag",
+			files:          []string{"issues.jsonl", "routes.jsonl"},
+			gastownMode:    true,
+			expectedStatus: "ok",
+			expectWarning:  false,
+		},
+		{
+			name:           "routes.jsonl without gastown flag",
+			files:          []string{"issues.jsonl", "routes.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "warning",
 			expectWarning:  true,
 		},
 		{
 			name:           "backup files ignored",
 			files:          []string{"issues.jsonl", "issues.jsonl.backup", "BACKUP_issues.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "multiple real files with backups",
 			files:          []string{"issues.jsonl", "beads.jsonl", "issues.jsonl.backup"},
+			gastownMode:    false,
 			expectedStatus: "warning",
 			expectWarning:  true,
 		},
 		{
 			name:           "deletions.jsonl ignored as system file",
 			files:          []string{"beads.jsonl", "deletions.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "merge artifacts ignored",
 			files:          []string{"issues.jsonl", "issues.base.jsonl", "issues.left.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "merge artifacts with right variant ignored",
 			files:          []string{"issues.jsonl", "issues.right.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "beads merge artifacts ignored (bd-ov1)",
 			files:          []string{"issues.jsonl", "beads.base.jsonl", "beads.left.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "interactions.jsonl ignored as system file (GH#709)",
 			files:          []string{"issues.jsonl", "interactions.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "molecules.jsonl ignored as system file",
 			files:          []string{"issues.jsonl", "molecules.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "sync_base.jsonl ignored as system file (GH#1021)",
 			files:          []string{"issues.jsonl", "sync_base.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
 		{
 			name:           "all system files ignored together",
 			files:          []string{"issues.jsonl", "deletions.jsonl", "interactions.jsonl", "molecules.jsonl", "sync_base.jsonl"},
+			gastownMode:    false,
 			expectedStatus: "ok",
 			expectWarning:  false,
 		},
@@ -320,7 +350,7 @@ func TestCheckLegacyJSONLFilename(t *testing.T) {
 				}
 			}
 
-			check := CheckLegacyJSONLFilename(tmpDir)
+			check := CheckLegacyJSONLFilename(tmpDir, tt.gastownMode)
 
 			if check.Status != tt.expectedStatus {
 				t.Errorf("Expected status %s, got %s", tt.expectedStatus, check.Status)

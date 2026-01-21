@@ -420,6 +420,14 @@ func startDaemonProcess(socketPath string) bool {
 	args := []string{"daemon", "start"}
 
 	cmd := execCommandFn(binPath, args...)
+	// Mark this as a daemon-foreground child so we don't track/kill based on the
+	// short-lived launcher process PID (see computeDaemonParentPID()).
+	// Also force the daemon to bind the same socket we're probing for readiness,
+	// avoiding any mismatch between workspace-derived paths.
+	cmd.Env = append(os.Environ(),
+		"BD_DAEMON_FOREGROUND=1",
+		"BD_SOCKET="+socketPath,
+	)
 	setupDaemonIO(cmd)
 
 	if dbPath != "" {

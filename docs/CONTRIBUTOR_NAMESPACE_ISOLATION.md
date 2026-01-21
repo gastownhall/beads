@@ -126,7 +126,7 @@ accordingly:
 
 2. **Routing Configuration** (`internal/config/config.go`):
    ```go
-   v.SetDefault("routing.mode", "auto")
+   v.SetDefault("routing.mode", "")  // Empty = disabled by default
    v.SetDefault("routing.default", ".")
    v.SetDefault("routing.contributor", "~/.beads-planning")
    ```

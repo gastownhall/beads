@@ -801,3 +801,94 @@ func TestListTimeBasedFilters(t *testing.T) {
 		}
 	})
 }
+
+// TestHierarchicalChildren tests the --tree --parent functionality for showing all descendants
+func TestHierarchicalChildren(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Helper to create issue
+	createIssue := func(title string, issueType types.IssueType) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: issueType,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue %s: %v", title, err)
+		}
+		return issue
+	}
+
+	// Helper to add dependency
+	addDep := func(child, parent *types.Issue) {
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        types.DepParentChild,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency %s -> %s: %v", child.ID, parent.ID, err)
+		}
+	}
+
+	// Create test hierarchy: Parent -> Child1 (-> Grandchild1.1, Grandchild1.2) + Child2 (-> Grandchild2.1)
+	parent := createIssue("Parent Epic", types.TypeEpic)
+	child1 := createIssue("Child 1", types.TypeTask)
+	child2 := createIssue("Child 2", types.TypeTask)
+	grandchild11 := createIssue("Grandchild 1.1", types.TypeTask)
+	grandchild12 := createIssue("Grandchild 1.2", types.TypeTask)
+	grandchild21 := createIssue("Grandchild 2.1", types.TypeTask)
+
+	addDep(child1, parent)
+	addDep(child2, parent)
+	addDep(grandchild11, child1)
+	addDep(grandchild12, child1)
+	addDep(grandchild21, child2)
+
+	// Test full hierarchy (should return all 6 issues)
+	t.Run("full_hierarchy", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, parent.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren failed: %v", err)
+		}
+		if len(issues) != 6 {
+			t.Errorf("Expected 6 issues in hierarchy, got %d", len(issues))
+		}
+	})
+
+	// Test child subset (should return child1 + its 2 grandchildren = 3 total)
+	t.Run("child_subset", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, child1.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren for child1 failed: %v", err)
+		}
+		if len(issues) != 3 {
+			t.Errorf("Expected 3 issues in child1 hierarchy, got %d", len(issues))
+		}
+	})
+
+	// Test leaf node (should return only itself)
+	t.Run("leaf_node", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, grandchild11.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren for leaf failed: %v", err)
+		}
+		if len(issues) != 1 || issues[0].ID != grandchild11.ID {
+			t.Errorf("Expected 1 issue (leaf), got %d", len(issues))
+		}
+	})
+
+	// Test error case - non-existent parent
+	t.Run("nonexistent_parent", func(t *testing.T) {
+		_, err := getHierarchicalChildren(ctx, store, "", 0, "nonexistent-id")
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Error("Expected 'not found' error for nonexistent parent")
+		}
+	})
+}

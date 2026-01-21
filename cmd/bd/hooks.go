@@ -575,12 +575,10 @@ func runPreCommitHook() int {
 	// By default, we auto-stage for convenience. Users with conflicting git hooks
 	// (e.g., hooks that read the staging area) can set BEADS_NO_AUTO_STAGE=1 to
 	// disable this and stage manually. See: https://github.com/steveyegge/beads/issues/826
-	jsonlFiles := []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"}
-
 	if os.Getenv("BEADS_NO_AUTO_STAGE") != "" {
 		// Safe mode: check for unstaged changes and block if found
 		var unstaged []string
-		for _, f := range jsonlFiles {
+		for _, f := range jsonlFilePaths {
 			if _, err := os.Stat(f); err == nil {
 				if hasUnstagedChanges(f) {
 					unstaged = append(unstaged, f)
@@ -601,14 +599,14 @@ func runPreCommitHook() int {
 		// Default: auto-stage JSONL files
 		rc, rcErr := beads.GetRepoContext()
 		ctx := context.Background()
-		for _, f := range jsonlFiles {
+		for _, f := range jsonlFilePaths {
 			if _, err := os.Stat(f); err == nil {
 				var gitAdd *exec.Cmd
 				if rcErr == nil {
 					gitAdd = rc.GitCmdCWD(ctx, "add", f)
 				} else {
 					// Fallback if RepoContext unavailable
-					// #nosec G204 -- f comes from jsonlFiles (controlled, hardcoded paths)
+					// #nosec G204 -- f comes from jsonlFilePaths (controlled, hardcoded paths)
 					gitAdd = exec.Command("git", "add", f)
 				}
 				_ = gitAdd.Run() // Ignore errors - file may not exist
@@ -697,7 +695,7 @@ func runPrePushHook(args []string) int {
 
 	// Check for uncommitted JSONL changes
 	files := []string{}
-	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"} {
+	for _, f := range jsonlFilePaths {
 		// Check if file exists or is tracked
 		if _, err := os.Stat(f); err == nil {
 			files = append(files, f)
@@ -707,7 +705,7 @@ func runPrePushHook(args []string) int {
 			if rcErr == nil {
 				checkCmd = rc.GitCmdCWD(ctx, "ls-files", "--error-unmatch", f)
 			} else {
-				// #nosec G204 - f is from hardcoded list above, not user input
+				// #nosec G204 - f is from jsonlFilePaths (controlled, hardcoded paths)
 				checkCmd = exec.Command("git", "ls-files", "--error-unmatch", f)
 			}
 			if checkCmd.Run() == nil {
@@ -1127,7 +1125,7 @@ func isRebaseInProgress() bool {
 
 // hasBeadsJSONL checks if any JSONL file exists in .beads/.
 func hasBeadsJSONL() bool {
-	for _, f := range []string{".beads/beads.jsonl", ".beads/issues.jsonl", ".beads/deletions.jsonl", ".beads/interactions.jsonl"} {
+	for _, f := range jsonlFilePaths {
 		if _, err := os.Stat(f); err == nil {
 			return true
 		}

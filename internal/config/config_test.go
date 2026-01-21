@@ -941,6 +941,35 @@ external_projects:
 	})
 }
 
+func TestRoutingModeDefaultIsEmpty(t *testing.T) {
+	// GH#1165: routing.mode must default to empty (disabled)
+	// to prevent unexpected auto-routing to ~/.beads-planning
+	// Isolate from environment variables
+	restore := envSnapshot(t)
+	defer restore()
+
+	// Initialize config
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	// Verify routing.mode defaults to empty string (disabled)
+	if got := GetString("routing.mode"); got != "" {
+		t.Errorf("GetString(routing.mode) = %q, want \"\" (empty = disabled by default)", got)
+	}
+
+	// Verify other routing defaults are still set correctly
+	if got := GetString("routing.default"); got != "." {
+		t.Errorf("GetString(routing.default) = %q, want \".\"", got)
+	}
+	if got := GetString("routing.maintainer"); got != "." {
+		t.Errorf("GetString(routing.maintainer) = %q, want \".\"", got)
+	}
+	if got := GetString("routing.contributor"); got != "~/.beads-planning" {
+		t.Errorf("GetString(routing.contributor) = %q, want \"~/.beads-planning\"", got)
+	}
+}
+
 func TestValidationConfigDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

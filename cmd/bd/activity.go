@@ -152,7 +152,8 @@ func runActivityOnce(sinceTime time.Time) {
 	}
 }
 
-// runActivityFollow streams events in real-time
+// runActivityFollow streams events in real-time using filesystem watching.
+// Falls back to polling if fsnotify is not available.
 func runActivityFollow(sinceTime time.Time) {
 	// Start from now if no --since specified
 	lastPoll := time.Now().Add(-1 * time.Second)
@@ -181,9 +182,19 @@ func runActivityFollow(sinceTime time.Time) {
 		}
 	}
 
-	// Poll for new events
-	ticker := time.NewTicker(activityInterval)
-	defer ticker.Stop()
+	// Create filesystem watcher for near-instant wake-up
+	// Falls back to polling internally if fsnotify fails
+	beadsDir := filepath.Dir(dbPath)
+	watcher, err := NewActivityWatcher(beadsDir, activityInterval)
+	if err != nil {
+		// Watcher creation failed entirely - fall back to legacy polling
+		runActivityFollowPolling(sinceTime, lastPoll)
+		return
+	}
+	defer watcher.Close()
+
+	// Start watching
+	watcher.Start(rootCtx)
 
 	// Track consecutive failures for error reporting
 	consecutiveFailures := 0
@@ -194,7 +205,11 @@ func runActivityFollow(sinceTime time.Time) {
 		select {
 		case <-rootCtx.Done():
 			return
-		case <-ticker.C:
+		case _, ok := <-watcher.Events():
+			if !ok {
+				return // Watcher closed
+			}
+
 			newEvents, err := fetchMutations(lastPoll)
 			if err != nil {
 				consecutiveFailures++
@@ -222,6 +237,69 @@ func runActivityFollow(sinceTime time.Time) {
 			}
 
 			// Reset failure counter on success
+			if consecutiveFailures > 0 {
+				if consecutiveFailures >= failureWarningThreshold && !jsonOutput {
+					timestamp := time.Now().Format("15:04:05")
+					fmt.Fprintf(os.Stderr, "[%s] %s daemon reconnected\n", timestamp, ui.RenderPass("✓"))
+				}
+				consecutiveFailures = 0
+			}
+
+			newEvents = filterEvents(newEvents)
+			for _, e := range newEvents {
+				if jsonOutput {
+					data, _ := json.Marshal(formatEvent(e))
+					fmt.Println(string(data))
+				} else {
+					printEvent(e)
+				}
+				if e.Timestamp.After(lastPoll) {
+					lastPoll = e.Timestamp
+				}
+			}
+		}
+	}
+}
+
+// runActivityFollowPolling is the legacy polling-based follow mode.
+// Used as fallback when ActivityWatcher cannot be created.
+func runActivityFollowPolling(sinceTime time.Time, lastPoll time.Time) {
+	ticker := time.NewTicker(activityInterval)
+	defer ticker.Stop()
+
+	consecutiveFailures := 0
+	const failureWarningThreshold = 5
+	lastWarningTime := time.Time{}
+
+	for {
+		select {
+		case <-rootCtx.Done():
+			return
+		case <-ticker.C:
+			newEvents, err := fetchMutations(lastPoll)
+			if err != nil {
+				consecutiveFailures++
+				if consecutiveFailures >= failureWarningThreshold {
+					if time.Since(lastWarningTime) >= 30*time.Second {
+						if jsonOutput {
+							errorEvent := map[string]interface{}{
+								"type":      "error",
+								"message":   fmt.Sprintf("daemon unreachable (%d failures)", consecutiveFailures),
+								"timestamp": time.Now().Format(time.RFC3339),
+							}
+							data, _ := json.Marshal(errorEvent)
+							fmt.Fprintln(os.Stderr, string(data))
+						} else {
+							timestamp := time.Now().Format("15:04:05")
+							fmt.Fprintf(os.Stderr, "[%s] %s daemon unreachable (%d consecutive failures)\n",
+								timestamp, ui.RenderWarn("!"), consecutiveFailures)
+						}
+						lastWarningTime = time.Now()
+					}
+				}
+				continue
+			}
+
 			if consecutiveFailures > 0 {
 				if consecutiveFailures >= failureWarningThreshold && !jsonOutput {
 					timestamp := time.Now().Format("15:04:05")
