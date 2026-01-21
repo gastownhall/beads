@@ -147,3 +147,55 @@ func AsRemote(s Storage) (RemoteStorage, bool) {
 	rs, ok := s.(RemoteStorage)
 	return rs, ok
 }
+
+// FederatedStorage extends RemoteStorage with peer-to-peer federation capabilities.
+// This interface supports synchronizing with multiple named peers (towns).
+type FederatedStorage interface {
+	RemoteStorage
+
+	// PushTo pushes commits to a specific peer remote.
+	PushTo(ctx context.Context, peer string) error
+
+	// PullFrom pulls changes from a specific peer remote.
+	// Returns any merge conflicts if present.
+	PullFrom(ctx context.Context, peer string) ([]Conflict, error)
+
+	// Fetch fetches refs from a peer without merging.
+	Fetch(ctx context.Context, peer string) error
+
+	// ListRemotes returns configured remote names and URLs.
+	ListRemotes(ctx context.Context) ([]RemoteInfo, error)
+
+	// RemoveRemote removes a configured remote.
+	RemoveRemote(ctx context.Context, name string) error
+
+	// SyncStatus returns the sync status with a peer.
+	SyncStatus(ctx context.Context, peer string) (*SyncStatus, error)
+}
+
+// RemoteInfo describes a configured remote.
+type RemoteInfo struct {
+	Name string // Remote name (e.g., "town-beta")
+	URL  string // Remote URL (e.g., "dolthub://org/repo")
+}
+
+// SyncStatus describes the synchronization state with a peer.
+type SyncStatus struct {
+	Peer         string    // Peer name
+	LastSync     time.Time // When last synced
+	LocalAhead   int       // Commits ahead of peer
+	LocalBehind  int       // Commits behind peer
+	HasConflicts bool      // Whether there are unresolved conflicts
+}
+
+// IsFederated checks if a storage instance supports federation.
+func IsFederated(s Storage) bool {
+	_, ok := s.(FederatedStorage)
+	return ok
+}
+
+// AsFederated attempts to cast a Storage to FederatedStorage.
+func AsFederated(s Storage) (FederatedStorage, bool) {
+	fs, ok := s.(FederatedStorage)
+	return fs, ok
+}

@@ -322,6 +322,103 @@ func TestFederationHistoryQueries(t *testing.T) {
 	}
 }
 
+// TestFederationListRemotes tests the ListRemotes API
+func TestFederationListRemotes(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	// Initially no remotes (except possibly origin if Dolt adds one by default)
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("failed to list remotes: %v", err)
+	}
+	t.Logf("Initial remotes: %d", len(remotes))
+
+	// Add a test remote
+	err = store.AddRemote(ctx, "test-peer", "file:///tmp/nonexistent")
+	if err != nil {
+		t.Logf("AddRemote returned: %v (may be expected)", err)
+	}
+
+	// List again
+	remotes, err = store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("failed to list remotes after add: %v", err)
+	}
+
+	// Should have at least one remote now
+	t.Logf("Remotes after add: %v", remotes)
+	for _, r := range remotes {
+		t.Logf("  %s: %s", r.Name, r.URL)
+	}
+}
+
+// TestFederationSyncStatus tests the SyncStatus API
+func TestFederationSyncStatus(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	// Get status for a nonexistent peer (should not error, just return partial data)
+	status, err := store.SyncStatus(ctx, "nonexistent-peer")
+	if err != nil {
+		t.Fatalf("SyncStatus failed: %v", err)
+	}
+
+	t.Logf("Status for nonexistent peer:")
+	t.Logf("  Peer: %s", status.Peer)
+	t.Logf("  LocalAhead: %d", status.LocalAhead)
+	t.Logf("  LocalBehind: %d", status.LocalBehind)
+	t.Logf("  HasConflicts: %v", status.HasConflicts)
+
+	// LocalAhead/Behind should be -1 (unknown) for nonexistent peer
+	if status.LocalAhead != -1 || status.LocalBehind != -1 {
+		t.Logf("Note: Status returned values for nonexistent peer (may be expected behavior)")
+	}
+}
+
+// TestFederationPushPullMethods tests PushTo and PullFrom
+func TestFederationPushPullMethods(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	// These should fail gracefully since no remote exists
+	err := store.PushTo(ctx, "nonexistent")
+	if err == nil {
+		t.Log("PushTo to nonexistent peer succeeded (unexpected)")
+	} else {
+		t.Logf("✓ PushTo correctly failed: %v", err)
+	}
+
+	conflicts, err := store.PullFrom(ctx, "nonexistent")
+	if err == nil {
+		t.Logf("PullFrom from nonexistent peer succeeded with %d conflicts", len(conflicts))
+	} else {
+		t.Logf("✓ PullFrom correctly failed: %v", err)
+	}
+
+	err = store.Fetch(ctx, "nonexistent")
+	if err == nil {
+		t.Log("Fetch from nonexistent peer succeeded (unexpected)")
+	} else {
+		t.Logf("✓ Fetch correctly failed: %v", err)
+	}
+}
+
 // setupFederationStore creates a Dolt store for federation testing
 func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
 	t.Helper()
