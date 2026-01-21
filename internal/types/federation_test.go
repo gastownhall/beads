@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -294,7 +295,7 @@ func TestFederatedMessageValidation(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("FederatedMessage.Validate() expected error containing %q, got nil", tt.errMsg)
-				} else if tt.errMsg != "" && !containsString(err.Error(), tt.errMsg) {
+				} else if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
 					t.Errorf("FederatedMessage.Validate() error = %q, want error containing %q", err.Error(), tt.errMsg)
 				}
 			} else {
@@ -350,17 +351,3 @@ func TestRejectCodeString(t *testing.T) {
 	}
 }
 
-// containsString checks if s contains substr
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
