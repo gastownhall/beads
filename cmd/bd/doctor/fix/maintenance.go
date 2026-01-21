@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -171,5 +172,102 @@ func ExpiredTombstones(path string) error {
 
 	ttlDays := int(ttl.Hours() / 24)
 	fmt.Printf("  Pruned %d expired tombstone(s) (older than %d days)\n", prunedCount, ttlDays)
+	return nil
+}
+
+// PatrolPollution deletes patrol digest and session ended beads that pollute the database.
+// This is the fix handler for the "Patrol Pollution" doctor check.
+//
+// It removes beads matching:
+// - Patrol digests: titles matching "Digest: mol-*-patrol"
+// - Session ended beads: titles matching "Session ended: *"
+//
+// After deletion, runs compact --purge-tombstones equivalent to clean up.
+func PatrolPollution(path string) error {
+	if err := validateBeadsWorkspace(path); err != nil {
+		return err
+	}
+
+	beadsDir := filepath.Join(path, ".beads")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+		fmt.Println("  No JSONL file found, nothing to clean up")
+		return nil
+	}
+
+	// Get database path
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	ctx := context.Background()
+	store, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Get all issues and identify pollution
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return fmt.Errorf("failed to query issues: %w", err)
+	}
+
+	var patrolDigestCount, sessionBeadCount int
+	var toDelete []string
+
+	for _, issue := range issues {
+		// Skip tombstones
+		if issue.DeletedAt != nil {
+			continue
+		}
+
+		title := issue.Title
+
+		// Check for patrol digest pattern: "Digest: mol-*-patrol"
+		if strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol") {
+			patrolDigestCount++
+			toDelete = append(toDelete, issue.ID)
+			continue
+		}
+
+		// Check for session ended pattern: "Session ended: *"
+		if strings.HasPrefix(title, "Session ended:") {
+			sessionBeadCount++
+			toDelete = append(toDelete, issue.ID)
+		}
+	}
+
+	if len(toDelete) == 0 {
+		fmt.Println("  No patrol pollution beads to delete")
+		return nil
+	}
+
+	// Delete all pollution beads
+	var deleted int
+	for _, id := range toDelete {
+		if err := store.DeleteIssue(ctx, id); err != nil {
+			fmt.Printf("  Warning: failed to delete %s: %v\n", id, err)
+			continue
+		}
+		deleted++
+	}
+
+	// Report results
+	if patrolDigestCount > 0 {
+		fmt.Printf("  Deleted %d patrol digest bead(s)\n", patrolDigestCount)
+	}
+	if sessionBeadCount > 0 {
+		fmt.Printf("  Deleted %d session ended bead(s)\n", sessionBeadCount)
+	}
+	fmt.Printf("  Total: %d pollution bead(s) removed\n", deleted)
+
+	// Suggest running compact to purge tombstones
+	fmt.Println("  💡 Run 'bd compact --purge-tombstones' to reclaim space")
+
 	return nil
 }

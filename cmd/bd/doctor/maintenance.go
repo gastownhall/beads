@@ -520,3 +520,172 @@ func CheckMisclassifiedWisps(path string) DoctorCheck {
 		Category: CategoryMaintenance,
 	}
 }
+
+// PatrolPollutionThresholds defines when to warn about patrol pollution
+const (
+	PatrolDigestThreshold = 10 // Warn if patrol digests > 10
+	SessionBeadThreshold  = 50 // Warn if session beads > 50
+)
+
+// PatrolPollutionResult contains counts of detected pollution beads
+type PatrolPollutionResult struct {
+	PatrolDigestCount int      // Count of "Digest: mol-*-patrol" beads
+	SessionBeadCount  int      // Count of "Session ended: *" beads
+	PatrolDigestIDs   []string // Sample IDs for display
+	SessionBeadIDs    []string // Sample IDs for display
+}
+
+// CheckPatrolPollution detects patrol digest and session ended beads that pollute the database.
+// These beads are created during patrol operations and should not persist in the database.
+//
+// Patterns detected:
+// - Patrol digests: titles matching "Digest: mol-*-patrol"
+// - Session ended beads: titles matching "Session ended: *"
+func CheckPatrolPollution(path string) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Patrol Pollution",
+			Status:   StatusOK,
+			Message:  "N/A (no JSONL file)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	// Read JSONL and count pollution beads
+	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Patrol Pollution",
+			Status:   StatusOK,
+			Message:  "N/A (unable to read JSONL)",
+			Category: CategoryMaintenance,
+		}
+	}
+	defer file.Close()
+
+	result := detectPatrolPollution(file)
+
+	// Check thresholds
+	hasPatrolPollution := result.PatrolDigestCount > PatrolDigestThreshold
+	hasSessionPollution := result.SessionBeadCount > SessionBeadThreshold
+
+	if !hasPatrolPollution && !hasSessionPollution {
+		return DoctorCheck{
+			Name:     "Patrol Pollution",
+			Status:   StatusOK,
+			Message:  "No patrol pollution detected",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	// Build warning message
+	var warnings []string
+	if hasPatrolPollution {
+		warnings = append(warnings, fmt.Sprintf("%d patrol digest beads (should be 0)", result.PatrolDigestCount))
+	}
+	if hasSessionPollution {
+		warnings = append(warnings, fmt.Sprintf("%d session ended beads (should be wisps)", result.SessionBeadCount))
+	}
+
+	// Build detail with sample IDs
+	var details []string
+	if len(result.PatrolDigestIDs) > 0 {
+		details = append(details, fmt.Sprintf("Patrol digests: %v", result.PatrolDigestIDs))
+	}
+	if len(result.SessionBeadIDs) > 0 {
+		details = append(details, fmt.Sprintf("Session beads: %v", result.SessionBeadIDs))
+	}
+
+	return DoctorCheck{
+		Name:     "Patrol Pollution",
+		Status:   StatusWarning,
+		Message:  strings.Join(warnings, ", "),
+		Detail:   strings.Join(details, "; "),
+		Fix:      "Run 'bd doctor --fix' to clean up patrol pollution",
+		Category: CategoryMaintenance,
+	}
+}
+
+// detectPatrolPollution scans a JSONL file for patrol pollution patterns
+func detectPatrolPollution(file *os.File) PatrolPollutionResult {
+	var result PatrolPollutionResult
+	decoder := json.NewDecoder(file)
+
+	for {
+		var issue types.Issue
+		if err := decoder.Decode(&issue); err != nil {
+			break
+		}
+
+		// Skip tombstones
+		if issue.DeletedAt != nil {
+			continue
+		}
+
+		title := issue.Title
+
+		// Check for patrol digest pattern: "Digest: mol-*-patrol"
+		if strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol") {
+			result.PatrolDigestCount++
+			if len(result.PatrolDigestIDs) < 3 {
+				result.PatrolDigestIDs = append(result.PatrolDigestIDs, issue.ID)
+			}
+			continue
+		}
+
+		// Check for session ended pattern: "Session ended: *"
+		if strings.HasPrefix(title, "Session ended:") {
+			result.SessionBeadCount++
+			if len(result.SessionBeadIDs) < 3 {
+				result.SessionBeadIDs = append(result.SessionBeadIDs, issue.ID)
+			}
+		}
+	}
+
+	return result
+}
+
+// GetPatrolPollutionIDs returns all IDs of patrol pollution beads for deletion
+func GetPatrolPollutionIDs(path string) ([]string, error) {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	if err != nil {
+		return nil, fmt.Errorf("failed to open issues.jsonl: %w", err)
+	}
+	defer file.Close()
+
+	var ids []string
+	decoder := json.NewDecoder(file)
+
+	for {
+		var issue types.Issue
+		if err := decoder.Decode(&issue); err != nil {
+			break
+		}
+
+		// Skip tombstones
+		if issue.DeletedAt != nil {
+			continue
+		}
+
+		title := issue.Title
+
+		// Check for patrol digest pattern
+		if strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol") {
+			ids = append(ids, issue.ID)
+			continue
+		}
+
+		// Check for session ended pattern
+		if strings.HasPrefix(title, "Session ended:") {
+			ids = append(ids, issue.ID)
+		}
+	}
+
+	return ids, nil
+}
