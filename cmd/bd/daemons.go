@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -77,6 +79,7 @@ Subcommands:
   logs    - View daemon logs
   killall - Stop all running daemons
   restart - Restart a specific daemon (not yet implemented)`,
+	PersistentPreRunE: guardDaemonUnsupportedForDolt,
 }
 var daemonsListCmd = &cobra.Command{
 	Use:   "list",
@@ -251,6 +254,22 @@ Stops the daemon gracefully, then starts a new one.`,
 			os.Exit(1)
 		}
 		workspace := targetDaemon.WorkspacePath
+
+		// Guardrail: don't (re)start daemons for single-process backends (e.g., Dolt).
+		// This command may be run from a different workspace, so check the target workspace.
+		targetBeadsDir := beads.FollowRedirect(filepath.Join(workspace, ".beads"))
+		if cfg, err := configfile.Load(targetBeadsDir); err == nil && cfg != nil {
+			if configfile.CapabilitiesForBackend(cfg.GetBackend()).SingleProcessOnly {
+				if jsonOutput {
+					outputJSON(map[string]string{"error": fmt.Sprintf("daemon mode is not supported for backend %q (single-process only)", cfg.GetBackend())})
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: cannot restart daemon for workspace %s: backend %q is single-process-only\n", workspace, cfg.GetBackend())
+					fmt.Fprintf(os.Stderr, "Hint: initialize the workspace with sqlite backend for daemon mode (e.g. `bd init --backend sqlite`)\n")
+				}
+				os.Exit(1)
+			}
+		}
+
 		// Stop the daemon
 		if !jsonOutput {
 			fmt.Printf("Stopping daemon for workspace: %s (PID %d)\n", workspace, targetDaemon.PID)

@@ -376,6 +376,13 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 		os.Exit(1)
 	}
 
+	// Guardrail: single-process backends (e.g., Dolt) must never spawn a daemon process.
+	// This should already be blocked by command guards, but keep it defensive.
+	if singleProcessOnlyBackend() {
+		fmt.Fprintf(os.Stderr, "Error: daemon mode is not supported for single-process backends (e.g., dolt). Hint: use sqlite backend for daemon mode, or run commands in direct mode\n")
+		os.Exit(1)
+	}
+
 	// Run in foreground if --foreground flag set or if we're the forked child process
 	if foreground || os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
 		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON)

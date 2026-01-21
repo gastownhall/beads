@@ -57,6 +57,10 @@ Tool-level settings you can configure:
 | `daemon-log-max-age` | - | `BEADS_DAEMON_LOG_MAX_AGE` | `30` | Max days to keep old log files |
 | `daemon-log-compress` | - | `BEADS_DAEMON_LOG_COMPRESS` | `true` | Compress rotated log files |
 
+**Backend note (SQLite vs Dolt):**
+- **SQLite** supports daemon mode and auto-start.
+- **Dolt (embedded)** is treated as **single-process-only**. Daemon mode and auto-start are disabled; `auto-start-daemon` has no effect. If you need daemon mode, use the SQLite backend (`bd init --backend sqlite`).
+
 ### Actor Identity Resolution
 
 The actor name (used for `created_by` in issues and audit trails) is resolved in this order:
