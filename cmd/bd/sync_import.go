@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -31,6 +32,12 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 	}
 	if len(opts) > 1 {
 		protectLeftSnapshot = opts[1]
+	}
+
+	// Guardrail: single-process backends (e.g., Dolt) must not spawn a helper `bd import`
+	// process while the parent holds an open store. Use inline import instead.
+	if singleProcessOnlyBackend() {
+		return importFromJSONLInline(ctx, jsonlPath, renameOnImport, noGitHistory, protectLeftSnapshot)
 	}
 
 	// Build args for import command
@@ -66,7 +73,7 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 // This avoids path resolution issues when running from directories with .beads/redirect.
 // The parent process's store and dbPath are used, ensuring consistent path resolution.
 // (bd-ysal fix)
-func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, _ /* noGitHistory */ bool) error {
+func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, _ /* noGitHistory */ bool, protectLeftSnapshot bool) error {
 	// Verify we have an active store
 	if store == nil {
 		return fmt.Errorf("no database store available for inline import")
@@ -106,6 +113,23 @@ func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport
 	// Import using shared logic
 	opts := ImportOptions{
 		RenameOnImport: renameOnImport,
+	}
+
+	// GH#865: timestamp-aware protection for post-pull imports (bd-sync-deletion fix).
+	// Match `bd import --protect-left-snapshot` behavior.
+	if protectLeftSnapshot {
+		beadsDir := filepath.Dir(jsonlPath)
+		leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
+		if _, err := os.Stat(leftSnapshotPath); err == nil {
+			sm := NewSnapshotManager(jsonlPath)
+			leftTimestamps, err := sm.BuildIDToTimestampMap(leftSnapshotPath)
+			if err != nil {
+				debug.Logf("Warning: failed to read left snapshot: %v", err)
+			} else if len(leftTimestamps) > 0 {
+				opts.ProtectLocalExportIDs = leftTimestamps
+				fmt.Fprintf(os.Stderr, "Protecting %d issue(s) from left snapshot (timestamp-aware)\n", len(leftTimestamps))
+			}
+		}
 	}
 	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
 	if err != nil {

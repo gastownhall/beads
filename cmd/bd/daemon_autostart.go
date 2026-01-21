@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -45,8 +47,38 @@ var (
 	sendStopSignalFn         = sendStopSignal
 )
 
+// singleProcessOnlyBackend returns true if the current workspace backend is configured
+// as single-process-only (currently Dolt embedded).
+//
+// Best-effort: if we can't determine the backend, we return false and defer to other logic.
+func singleProcessOnlyBackend() bool {
+	// Prefer dbPath if set; it points to either .beads/<db>.db (sqlite) or .beads/dolt (dolt dir).
+	beadsDir := ""
+	if dbPath != "" {
+		beadsDir = filepath.Dir(dbPath)
+	} else if found := beads.FindDatabasePath(); found != "" {
+		beadsDir = filepath.Dir(found)
+	} else {
+		beadsDir = beads.FindBeadsDir()
+	}
+	if beadsDir == "" {
+		return false
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return configfile.CapabilitiesForBackend(cfg.GetBackend()).SingleProcessOnly
+}
+
 // shouldAutoStartDaemon checks if daemon auto-start is enabled
 func shouldAutoStartDaemon() bool {
+	// Dolt backend is single-process-only; do not auto-start daemon.
+	if singleProcessOnlyBackend() {
+		return false
+	}
+
 	// Check BEADS_NO_DAEMON first (escape hatch for single-user workflows)
 	noDaemon := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_NO_DAEMON")))
 	if noDaemon == "1" || noDaemon == "true" || noDaemon == "yes" || noDaemon == "on" {
@@ -70,6 +102,12 @@ func shouldAutoStartDaemon() bool {
 // restartDaemonForVersionMismatch stops the old daemon and starts a new one
 // Returns true if restart was successful
 func restartDaemonForVersionMismatch() bool {
+	// Dolt backend is single-process-only; do not restart/spawn daemon.
+	if singleProcessOnlyBackend() {
+		debugLog("single-process backend: skipping daemon restart for version mismatch")
+		return false
+	}
+
 	pidFile, err := getPIDFilePath()
 	if err != nil {
 		debug.Logf("failed to get PID file path: %v", err)
@@ -173,6 +211,11 @@ func isDaemonRunningQuiet(pidFile string) bool {
 // tryAutoStartDaemon attempts to start the daemon in the background
 // Returns true if daemon was started successfully and socket is ready
 func tryAutoStartDaemon(socketPath string) bool {
+	// Dolt backend is single-process-only; do not auto-start daemon.
+	if singleProcessOnlyBackend() {
+		return false
+	}
+
 	if !canRetryDaemonStart() {
 		debugLog("skipping auto-start due to recent failures")
 		return false
@@ -351,6 +394,12 @@ func ensureLockDirectory(lockPath string) error {
 }
 
 func startDaemonProcess(socketPath string) bool {
+	// Dolt backend is single-process-only; do not spawn a daemon.
+	if singleProcessOnlyBackend() {
+		debugLog("single-process backend: skipping daemon start")
+		return false
+	}
+
 	// Early check: daemon requires a git repository (unless --local mode)
 	// Skip attempting to start and avoid the 5-second wait if not in git repo
 	if !isGitRepo() {
@@ -366,18 +415,9 @@ func startDaemonProcess(socketPath string) bool {
 		binPath = os.Args[0]
 	}
 
-	// IMPORTANT: Use --foreground for auto-start.
-	//
-	// Rationale:
-	// - `bd daemon start` (without --foreground) spawns an additional child process
-	//   (`bd daemon --start` with BD_DAEMON_FOREGROUND=1). For Dolt, that extra
-	//   daemonization layer can introduce startup races/lock contention (Dolt's
-	//   LOCK acquisition timeout is 100ms). If the daemon isn't ready quickly,
-	//   the parent falls back to direct mode and may fail to open Dolt because the
-	//   daemon holds the write lock.
-	// - Here we already daemonize via SysProcAttr + stdio redirection, so a second
-	//   layer is unnecessary.
-	args := []string{"daemon", "start", "--foreground"}
+	// Keep sqlite auto-start behavior unchanged: start the daemon via the public
+	// `bd daemon start` entrypoint (it will daemonize itself as needed).
+	args := []string{"daemon", "start"}
 
 	cmd := execCommandFn(binPath, args...)
 	// Mark this as a daemon-foreground child so we don't track/kill based on the
@@ -548,6 +588,9 @@ func emitVerboseWarning() {
 		fmt.Fprintf(os.Stderr, "Warning: Daemon does not support this command yet. Running in direct mode. Hint: update daemon or use local mode.\n")
 	case FallbackWorktreeSafety:
 		// Don't warn - this is expected behavior. User can configure sync-branch to enable daemon.
+		return
+	case FallbackSingleProcessOnly:
+		// Don't warn - daemon is intentionally disabled for single-process backends (e.g., Dolt).
 		return
 	case FallbackFlagNoDaemon:
 		// Don't warn when user explicitly requested --no-daemon

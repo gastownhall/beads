@@ -149,6 +149,35 @@ const (
 	BackendDolt   = "dolt"
 )
 
+// BackendCapabilities describes behavioral constraints for a storage backend.
+//
+// This is intentionally small and stable: callers should use these flags to decide
+// whether to enable features like daemon/RPC/autostart and process spawning.
+//
+// NOTE: The embedded Dolt driver is effectively single-writer at the OS-process level.
+// Even if multiple goroutines are safe within one process, multiple processes opening
+// the same Dolt directory concurrently can cause lock contention and transient
+// "read-only" failures. Therefore, Dolt is treated as single-process-only.
+type BackendCapabilities struct {
+	// SingleProcessOnly indicates the backend must not be accessed from multiple
+	// Beads OS processes concurrently (no daemon mode, no RPC client/server split,
+	// no helper-process spawning).
+	SingleProcessOnly bool
+}
+
+// CapabilitiesForBackend returns capabilities for a backend string.
+// Unknown backends are treated conservatively as single-process-only.
+func CapabilitiesForBackend(backend string) BackendCapabilities {
+	switch strings.TrimSpace(strings.ToLower(backend)) {
+	case "", BackendSQLite:
+		return BackendCapabilities{SingleProcessOnly: false}
+	case BackendDolt:
+		return BackendCapabilities{SingleProcessOnly: true}
+	default:
+		return BackendCapabilities{SingleProcessOnly: true}
+	}
+}
+
 // GetBackend returns the configured backend type, defaulting to SQLite.
 func (c *Config) GetBackend() string {
 	if c.Backend == "" {
