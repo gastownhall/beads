@@ -459,13 +459,13 @@ func TestBranchPerAgentMergeRace(t *testing.T) {
 	}
 
 	// First merge should succeed
-	_, err1 := store.Merge(ctx, "agent-1")
+	conflicts1, err1 := store.Merge(ctx, "agent-1")
 
 	// Second merge may conflict (both modified same row)
-	_, err2 := store.Merge(ctx, "agent-2")
+	conflicts2, err2 := store.Merge(ctx, "agent-2")
 
-	t.Logf("Merge agent-1 result: %v", err1)
-	t.Logf("Merge agent-2 result: %v", err2)
+	t.Logf("Merge agent-1 result: err=%v conflicts=%d", err1, len(conflicts1))
+	t.Logf("Merge agent-2 result: err=%v conflicts=%d", err2, len(conflicts2))
 
 	// At least one should succeed
 	if err1 != nil && err2 != nil {
