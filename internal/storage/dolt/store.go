@@ -60,10 +60,11 @@ type Config struct {
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 
 	// Server mode options (federation)
-	ServerMode bool   // Connect to dolt sql-server instead of embedded
-	ServerHost string // Server host (default: 127.0.0.1)
-	ServerPort int    // Server port (default: 3306)
-	ServerUser string // MySQL user (default: root)
+	ServerMode     bool   // Connect to dolt sql-server instead of embedded
+	ServerHost     string // Server host (default: 127.0.0.1)
+	ServerPort     int    // Server port (default: 3306)
+	ServerUser     string // MySQL user (default: root)
+	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 }
 
 // New creates a new Dolt storage backend
@@ -102,6 +103,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 		if cfg.ServerUser == "" {
 			cfg.ServerUser = "root"
+		}
+		// Check environment variable for password (more secure than command-line)
+		if cfg.ServerPassword == "" {
+			cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
 		}
 	}
 
@@ -199,10 +204,16 @@ func openEmbeddedConnection(ctx context.Context, cfg *Config) (*sql.DB, string, 
 
 // openServerConnection opens a connection to a dolt sql-server via MySQL protocol
 func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, error) {
-	// DSN format: user@tcp(host:port)/database?parseTime=true
+	// DSN format: user:password@tcp(host:port)/database?parseTime=true
 	// parseTime=true tells the MySQL driver to parse DATETIME/TIMESTAMP to time.Time
-	connStr := fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true",
-		cfg.ServerUser, cfg.ServerHost, cfg.ServerPort, cfg.Database)
+	var connStr string
+	if cfg.ServerPassword != "" {
+		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
+			cfg.ServerUser, cfg.ServerPassword, cfg.ServerHost, cfg.ServerPort, cfg.Database)
+	} else {
+		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true",
+			cfg.ServerUser, cfg.ServerHost, cfg.ServerPort, cfg.Database)
+	}
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
@@ -216,8 +227,14 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
-	initConnStr := fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true",
-		cfg.ServerUser, cfg.ServerHost, cfg.ServerPort)
+	var initConnStr string
+	if cfg.ServerPassword != "" {
+		initConnStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/?parseTime=true",
+			cfg.ServerUser, cfg.ServerPassword, cfg.ServerHost, cfg.ServerPort)
+	} else {
+		initConnStr = fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true",
+			cfg.ServerUser, cfg.ServerHost, cfg.ServerPort)
+	}
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {
 		_ = db.Close()

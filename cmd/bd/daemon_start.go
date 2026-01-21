@@ -46,6 +46,8 @@ Examples:
 		logLevel, _ := cmd.Flags().GetString("log-level")
 		logJSON, _ := cmd.Flags().GetBool("log-json")
 		federation, _ := cmd.Flags().GetBool("federation")
+		federationPort, _ := cmd.Flags().GetInt("federation-port")
+		remotesapiPort, _ := cmd.Flags().GetInt("remotesapi-port")
 
 		// NOTE: Only load daemon auto-settings from the database in foreground mode.
 		//
@@ -153,7 +155,7 @@ Examples:
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation)
+		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
 	},
 }
 
@@ -167,5 +169,7 @@ func init() {
 	daemonStartCmd.Flags().Bool("foreground", false, "Run in foreground (don't daemonize)")
 	daemonStartCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonStartCmd.Flags().Bool("log-json", false, "Output logs in JSON format")
-	daemonStartCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server with remotesapi on port 8080)")
+	daemonStartCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server)")
+	daemonStartCmd.Flags().Int("federation-port", 3306, "MySQL port for federation mode dolt sql-server")
+	daemonStartCmd.Flags().Int("remotesapi-port", 8080, "remotesapi port for peer-to-peer sync in federation mode")
 }

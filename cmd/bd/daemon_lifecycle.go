@@ -369,7 +369,7 @@ func stopAllDaemons() {
 }
 
 // startDaemon starts the daemon (in foreground if requested, otherwise background)
-func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile, logLevel string, logJSON, federation bool) {
+func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile, logLevel string, logJSON, federation bool, federationPort, remotesapiPort int) {
 	logPath, err := getLogFilePath(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -386,7 +386,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 
 	// Run in foreground if --foreground flag set or if we're the forked child process
 	if foreground || os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON, federation)
+		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
 		return
 	}
 
@@ -422,6 +422,12 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 	}
 	if federation {
 		args = append(args, "--federation")
+		if federationPort != 0 && federationPort != 3306 {
+			args = append(args, "--federation-port", strconv.Itoa(federationPort))
+		}
+		if remotesapiPort != 0 && remotesapiPort != 8080 {
+			args = append(args, "--remotesapi-port", strconv.Itoa(remotesapiPort))
+		}
 	}
 
 	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary

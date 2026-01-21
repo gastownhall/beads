@@ -240,7 +240,9 @@ Run 'bd daemon --help' to see all subcommands.`,
 		}
 
 		federation, _ := cmd.Flags().GetBool("federation")
-		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation)
+		federationPort, _ := cmd.Flags().GetInt("federation-port")
+		remotesapiPort, _ := cmd.Flags().GetInt("remotesapi-port")
+		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
 	},
 }
 
@@ -267,6 +269,8 @@ func init() {
 	daemonCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonCmd.Flags().Bool("log-json", false, "Output logs in JSON format (structured logging)")
 	daemonCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server with remotesapi)")
+	daemonCmd.Flags().Int("federation-port", 3306, "MySQL port for federation mode dolt sql-server")
+	daemonCmd.Flags().Int("remotesapi-port", 8080, "remotesapi port for peer-to-peer sync in federation mode")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -283,7 +287,7 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON, federation bool) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON, federation bool, federationPort, remotesapiPort int) {
 	level := parseLogLevel(logLevel)
 	logF, log := setupDaemonLogger(logPath, logJSON, level)
 	defer func() { _ = logF.Close() }()
@@ -430,10 +434,20 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		doltPath := filepath.Join(beadsDir, "dolt")
 		serverLogFile := filepath.Join(beadsDir, "dolt-server.log")
 
+		// Use provided ports or defaults
+		sqlPort := federationPort
+		if sqlPort == 0 {
+			sqlPort = dolt.DefaultSQLPort
+		}
+		remotePort := remotesapiPort
+		if remotePort == 0 {
+			remotePort = dolt.DefaultRemotesAPIPort
+		}
+
 		doltServer = dolt.NewServer(dolt.ServerConfig{
 			DataDir:        doltPath,
-			SQLPort:        dolt.DefaultSQLPort,
-			RemotesAPIPort: dolt.DefaultRemotesAPIPort,
+			SQLPort:        sqlPort,
+			RemotesAPIPort: remotePort,
 			Host:           "127.0.0.1",
 			LogFile:        serverLogFile,
 		})

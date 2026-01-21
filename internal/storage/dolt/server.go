@@ -48,6 +48,7 @@ type Server struct {
 	mu      sync.Mutex
 	running bool
 	pidFile string
+	logFile *os.File // Track log file for cleanup
 }
 
 // NewServer creates a new dolt sql-server manager
@@ -116,6 +117,7 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %w", err)
 		}
+		s.logFile = logFile // Track for cleanup on Stop()
 		s.cmd.Stdout = logFile
 		s.cmd.Stderr = logFile
 	} else {
@@ -140,6 +142,10 @@ func (s *Server) Start(ctx context.Context) error {
 		// Server failed to start, clean up
 		_ = s.cmd.Process.Kill()
 		_ = os.Remove(s.pidFile)
+		if s.logFile != nil {
+			_ = s.logFile.Close()
+			s.logFile = nil
+		}
 		return fmt.Errorf("server failed to become ready: %w", err)
 	}
 
@@ -180,8 +186,12 @@ func (s *Server) Stop() error {
 		<-done // Wait for process to be reaped
 	}
 
-	// Clean up PID file
+	// Clean up PID file and log file
 	_ = os.Remove(s.pidFile)
+	if s.logFile != nil {
+		_ = s.logFile.Close()
+		s.logFile = nil
+	}
 	s.running = false
 	s.cmd = nil
 

@@ -102,7 +102,7 @@ func TestDoltSingleProcess_StartDaemonGuardrailExitsNonZero(t *testing.T) {
 		dbPath = ""
 
 		pidFile := filepath.Join(ws, ".beads", "daemon.pid")
-		startDaemon(5*time.Second, false, false, false, false, false, "", pidFile, "info", false, false)
+		startDaemon(5*time.Second, false, false, false, false, false, "", pidFile, "info", false, false, 0, 0)
 		return
 	}
 
