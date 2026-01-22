@@ -74,6 +74,7 @@ func (s *DoltStore) GetIssueHistory(ctx context.Context, issueID string) ([]*Iss
 	for rows.Next() {
 		var h IssueHistory
 		var issue types.Issue
+		var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 		var closedAt sql.NullTime
 		var assignee, owner, createdBy, closeReason, molType sql.NullString
 		var estimatedMinutes sql.NullInt64
@@ -82,11 +83,19 @@ func (s *DoltStore) GetIssueHistory(ctx context.Context, issueID string) ([]*Iss
 		if err := rows.Scan(
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design, &issue.AcceptanceCriteria, &issue.Notes,
 			&issue.Status, &issue.Priority, &issue.IssueType, &assignee, &owner, &createdBy,
-			&estimatedMinutes, &issue.CreatedAt, &issue.UpdatedAt, &closedAt, &closeReason,
+			&estimatedMinutes, &createdAtStr, &updatedAtStr, &closedAt, &closeReason,
 			&pinned, &molType,
 			&h.CommitHash, &h.Committer, &h.CommitDate,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan history: %w", err)
+		}
+
+		// Parse timestamp strings (TEXT columns require manual parsing)
+		if createdAtStr.Valid {
+			issue.CreatedAt = parseTimeString(createdAtStr.String)
+		}
+		if updatedAtStr.Valid {
+			issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 		}
 
 		if closedAt.Valid {
@@ -130,6 +139,7 @@ func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string
 	}
 
 	var issue types.Issue
+	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 	var closedAt sql.NullTime
 	var assignee, owner, contentHash sql.NullString
 	var estimatedMinutes sql.NullInt64
@@ -144,7 +154,7 @@ func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string
 
 	err := s.db.QueryRowContext(ctx, query, issueID).Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt,
+		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -152,6 +162,14 @@ func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue as of %s: %w", ref, err)
+	}
+
+	// Parse timestamp strings (TEXT columns require manual parsing)
+	if createdAtStr.Valid {
+		issue.CreatedAt = parseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 	}
 
 	if contentHash.Valid {

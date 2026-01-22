@@ -376,6 +376,7 @@ func insertIssueTx(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 
 func scanIssueTx(ctx context.Context, tx *sql.Tx, id string) (*types.Issue, error) {
 	var issue types.Issue
+	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
 	var assignee, owner, contentHash sql.NullString
@@ -392,7 +393,7 @@ func scanIssueTx(ctx context.Context, tx *sql.Tx, id string) (*types.Issue, erro
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt,
+		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt,
 		&ephemeral, &pinned, &isTemplate, &crystallizes,
 	)
 
@@ -401,6 +402,14 @@ func scanIssueTx(ctx context.Context, tx *sql.Tx, id string) (*types.Issue, erro
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Parse timestamp strings (TEXT columns require manual parsing)
+	if createdAtStr.Valid {
+		issue.CreatedAt = parseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 	}
 
 	if contentHash.Valid {
