@@ -17,6 +17,7 @@ import (
 
 var showCmd = &cobra.Command{
 	Use:     "show [id...]",
+	Aliases: []string{"view"},
 	GroupID: "issues",
 	Short:   "Show issue details",
 	Args:    cobra.MinimumNArgs(1),
