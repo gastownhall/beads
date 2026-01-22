@@ -84,6 +84,12 @@ var BuiltinRecipes = map[string]Recipe{
 		Type:        TypeSection,
 		Description: "Factory Droid AGENTS.md section",
 	},
+	"codex": {
+		Name:        "Codex CLI",
+		Path:        "AGENTS.md",
+		Type:        TypeSection,
+		Description: "Codex CLI AGENTS.md section",
+	},
 	"aider": {
 		Name:        "Aider",
 		Type:        TypeMultiFile,

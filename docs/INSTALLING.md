@@ -189,6 +189,7 @@ bd init --quiet
 bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
+bd setup codex    # Codex CLI - creates/updates AGENTS.md
 ```
 
 **How it works:**
@@ -208,6 +209,7 @@ bd setup aider    # Aider - creates .aider.conf.yml
 bd setup claude --check   # Check Claude Code integration
 bd setup cursor --check   # Check Cursor integration
 bd setup aider --check    # Check Aider integration
+bd setup codex --check    # Check Codex integration
 ```
 
 ### Claude Code Plugin (Optional)

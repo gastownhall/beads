@@ -766,18 +766,21 @@ bd sync  # Force immediate sync, bypass debounce
 ```bash
 # Setup editor integration (choose based on your editor)
 bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
+bd setup codex    # Codex CLI - creates/updates AGENTS.md
 bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 
 # Check if integration is installed
 bd setup factory --check
+bd setup codex --check
 bd setup claude --check
 bd setup cursor --check
 bd setup aider --check
 
 # Remove integration
 bd setup factory --remove
+bd setup codex --remove
 bd setup claude --remove
 bd setup cursor --remove
 bd setup aider --remove
@@ -792,6 +795,7 @@ bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
 
 **What each setup does:**
 - **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (works with multiple AI tools using the AGENTS.md standard)
+- **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex
 - **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events
 - **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
 - **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions
