@@ -151,10 +151,16 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
-	// Use IDPrefix override if set, combined with config prefix
-	// e.g., configPrefix="bd" + IDPrefix="wisp" → "bd-wisp"
+	// Determine prefix for ID generation and validation:
+	// 1. PrefixOverride completely replaces config prefix (for cross-rig creation)
+	// 2. IDPrefix appends to config prefix (e.g., "bd" + "wisp" → "bd-wisp")
+	// 3. Otherwise use config prefix as-is
 	prefix := configPrefix
-	if issue.IDPrefix != "" {
+	skipPrefixValidation := false
+	if issue.PrefixOverride != "" {
+		prefix = issue.PrefixOverride
+		skipPrefixValidation = true // Caller explicitly specified prefix, skip validation
+	} else if issue.IDPrefix != "" {
 		prefix = configPrefix + "-" + issue.IDPrefix
 	}
 
@@ -168,8 +174,11 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		issue.ID = generatedID
 	} else {
 		// Validate that explicitly provided ID matches the configured prefix
-		if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
-			return fmt.Errorf("failed to validate issue ID prefix: %w", err)
+		// Skip validation when PrefixOverride is set (cross-rig creation)
+		if !skipPrefixValidation {
+			if err := ValidateIssueIDPrefix(issue.ID, prefix); err != nil {
+				return fmt.Errorf("failed to validate issue ID prefix: %w", err)
+			}
 		}
 
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
