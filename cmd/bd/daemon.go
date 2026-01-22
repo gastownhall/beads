@@ -48,7 +48,6 @@ Common operations:
   bd daemon killall              Stop all running daemons
 
 Run 'bd daemon --help' to see all subcommands.`,
-	PersistentPreRunE: guardDaemonUnsupportedForDolt,
 	Run: func(cmd *cobra.Command, args []string) {
 		start, _ := cmd.Flags().GetBool("start")
 		stop, _ := cmd.Flags().GetBool("stop")

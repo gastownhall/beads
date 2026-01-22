@@ -69,7 +69,7 @@ func TestDoltSingleProcess_TryAutoStartDoesNotCreateStartlock(t *testing.T) {
 	}
 }
 
-func TestDoltSingleProcess_DaemonGuardBlocksCommands(t *testing.T) {
+func TestDoltSingleProcess_DaemonGuardBlocksStartCommand(t *testing.T) {
 	oldDBPath := dbPath
 	t.Cleanup(func() { dbPath = oldDBPath })
 	dbPath = ""
@@ -78,12 +78,14 @@ func TestDoltSingleProcess_DaemonGuardBlocksCommands(t *testing.T) {
 	beadsDir, _ := writeDoltWorkspace(t, ws)
 	t.Setenv("BEADS_DIR", beadsDir)
 
-	// Ensure help flag exists (cobra adds it during execution; for unit testing we add it explicitly).
-	cmd := daemonCmd
+	// Use daemonStartCmd which has the guard attached.
+	// Ensure help and federation flags exist (cobra adds them during execution).
+	cmd := daemonStartCmd
 	cmd.Flags().Bool("help", false, "help")
-	err := guardDaemonUnsupportedForDolt(cmd, nil)
+	// Note: federation flag is already registered in init()
+	err := guardDaemonStartForDolt(cmd, nil)
 	if err == nil {
-		t.Fatalf("expected daemon guard error for dolt backend")
+		t.Fatalf("expected daemon guard error for dolt backend without --federation")
 	}
 	if !strings.Contains(err.Error(), "single-process") {
 		t.Fatalf("expected error to mention single-process, got: %v", err)

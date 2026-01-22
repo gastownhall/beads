@@ -19,8 +19,8 @@ func singleProcessBackendHelp(backend string) string {
 	return fmt.Sprintf("daemon mode is not supported with the %q backend (single-process only). To use daemon mode, initialize with %q (e.g. `bd init --backend sqlite`). Otherwise run commands in direct mode (default for dolt)", b, configfile.BackendSQLite)
 }
 
-// guardDaemonUnsupportedForDolt blocks all daemon-related commands when the current
-// workspace backend is Dolt.
+// guardDaemonStartForDolt blocks daemon start/restart commands when the current
+// workspace backend is Dolt, unless --federation is specified.
 //
 // Rationale: embedded Dolt is effectively single-writer at the OS-process level. The
 // daemon architecture relies on multiple processes (CLI + daemon + helper spawns),
@@ -28,8 +28,12 @@ func singleProcessBackendHelp(backend string) string {
 //
 // Exception: --federation flag enables dolt sql-server mode which is multi-writer.
 //
+// Note: This guard should only be attached to commands that START a daemon process
+// (start, restart). Read-only commands (status, stop, logs, health, list) are allowed
+// even with Dolt backend.
+//
 // We still allow help output so users can discover the command surface.
-func guardDaemonUnsupportedForDolt(cmd *cobra.Command, _ []string) error {
+func guardDaemonStartForDolt(cmd *cobra.Command, _ []string) error {
 	// Allow `--help` for any daemon subcommand.
 	if helpFlag := cmd.Flags().Lookup("help"); helpFlag != nil {
 		if help, _ := cmd.Flags().GetBool("help"); help {

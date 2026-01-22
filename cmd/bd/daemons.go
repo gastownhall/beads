@@ -79,7 +79,6 @@ Subcommands:
   logs    - View daemon logs
   killall - Stop all running daemons
   restart - Restart a specific daemon (not yet implemented)`,
-	PersistentPreRunE: guardDaemonUnsupportedForDolt,
 }
 var daemonsListCmd = &cobra.Command{
 	Use:   "list",
@@ -225,7 +224,8 @@ var daemonsRestartCmd = &cobra.Command{
 	Short: "Restart a specific bd daemon",
 	Long: `Restart a specific bd daemon by workspace path or PID.
 Stops the daemon gracefully, then starts a new one.`,
-	Args: cobra.ExactArgs(1),
+	Args:    cobra.ExactArgs(1),
+	PreRunE: guardDaemonStartForDolt,
 	Run: func(cmd *cobra.Command, args []string) {
 		target := args[0]
 		searchRoots, _ := cmd.Flags().GetStringSlice("search")
