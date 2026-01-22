@@ -92,7 +92,7 @@ func updatesFromArgs(a UpdateArgs) (map[string]interface{}, error) {
 		u["sender"] = *a.Sender
 	}
 	if a.Ephemeral != nil {
-		u["ephemeral"] = *a.Ephemeral
+		u["wisp"] = *a.Ephemeral // Storage API uses "wisp", maps to "ephemeral" column
 	}
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo

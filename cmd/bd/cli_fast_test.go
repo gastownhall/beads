@@ -312,6 +312,94 @@ func TestCLI_UpdateLabels(t *testing.T) {
 	}
 }
 
+func TestCLI_UpdateEphemeral(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	out := runBDInProcess(t, tmpDir, "create", "Issue for ephemeral testing", "-p", "2", "--json")
+
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &issue); err != nil {
+		t.Fatalf("Failed to parse create output: %v", err)
+	}
+	id := issue["id"].(string)
+
+	// Mark as ephemeral
+	runBDInProcess(t, tmpDir, "update", id, "--ephemeral")
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &updated); err != nil {
+		t.Fatalf("Failed to parse show output: %v", err)
+	}
+	if updated[0]["ephemeral"] != true {
+		t.Errorf("Expected ephemeral to be true after --ephemeral, got: %v", updated[0]["ephemeral"])
+	}
+}
+
+func TestCLI_UpdatePersistent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+
+	// Create ephemeral issue directly
+	out := runBDInProcess(t, tmpDir, "create", "Ephemeral issue", "-p", "2", "--ephemeral", "--json")
+
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &issue); err != nil {
+		t.Fatalf("Failed to parse create output: %v", err)
+	}
+	id := issue["id"].(string)
+
+	// Verify it's ephemeral
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var initial []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &initial); err != nil {
+		t.Fatalf("Failed to parse show output: %v", err)
+	}
+	if initial[0]["ephemeral"] != true {
+		t.Fatalf("Expected issue to be ephemeral initially, got: %v", initial[0]["ephemeral"])
+	}
+
+	// Promote to persistent
+	runBDInProcess(t, tmpDir, "update", id, "--persistent")
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &updated); err != nil {
+		t.Fatalf("Failed to parse show output after persistent: %v", err)
+	}
+	if updated[0]["ephemeral"] == true {
+		t.Errorf("Expected ephemeral to be false after --persistent, got: %v", updated[0]["ephemeral"])
+	}
+}
+
+func TestCLI_UpdateEphemeralMutualExclusion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	out := runBDInProcess(t, tmpDir, "create", "Issue for mutual exclusion test", "-p", "2", "--json")
+
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(out), &issue)
+	id := issue["id"].(string)
+
+	// Both flags should error
+	_, stderr, err := runBDInProcessAllowError(t, tmpDir, "update", id, "--ephemeral", "--persistent")
+	if err == nil {
+		t.Errorf("Expected error when both flags specified, got none")
+	}
+	if !strings.Contains(stderr, "cannot specify both") {
+		t.Errorf("Expected mutual exclusion error message, got: %v", stderr)
+	}
+}
+
 func TestCLI_Close(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
