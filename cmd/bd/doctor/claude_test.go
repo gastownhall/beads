@@ -313,11 +313,18 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 		}
 	}`
 
+	setTempHome := func(t *testing.T, dir string) {
+		t.Helper()
+		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
+	}
+
 	// Test that hooks are detected in each project-level settings file
 	for _, filename := range []string{"settings.json", "settings.local.json"} {
 		t.Run(filename, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			t.Chdir(tmpDir)
+			setTempHome(t, t.TempDir())
 
 			if err := os.MkdirAll(".claude", 0o755); err != nil {
 				t.Fatal(err)
@@ -336,6 +343,7 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 	t.Run("no hooks section", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
+		setTempHome(t, t.TempDir())
 
 		if err := os.MkdirAll(".claude", 0o755); err != nil {
 			t.Fatal(err)
@@ -353,6 +361,7 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 	t.Run("hooks but not bd prime", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
+		setTempHome(t, t.TempDir())
 
 		if err := os.MkdirAll(".claude", 0o755); err != nil {
 			t.Fatal(err)

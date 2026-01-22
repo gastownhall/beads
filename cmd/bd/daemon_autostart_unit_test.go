@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -37,6 +39,10 @@ func tempSockDir(t *testing.T) string {
 func startTestRPCServer(t *testing.T) (socketPath string, cleanup func()) {
 	t.Helper()
 
+	if isSandboxed() {
+		t.Skip("sandboxed environment blocks unix socket operations")
+	}
+
 	tmpDir := tempSockDir(t)
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
@@ -52,6 +58,10 @@ func startTestRPCServer(t *testing.T) (socketPath string, cleanup func()) {
 
 	server, _, err := startRPCServer(ctx, socketPath, store, tmpDir, db, log)
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || os.IsPermission(err) {
+			cancel()
+			t.Skipf("unix sockets not permitted in this environment: %v", err)
+		}
 		cancel()
 		t.Fatalf("startRPCServer: %v", err)
 	}
