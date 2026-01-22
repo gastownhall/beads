@@ -1,0 +1,12 @@
+{
+  "hourly_tokens_used": 84530,
+  "hourly_cost_used": 0.39143399999999995,
+  "window_start_time": "2025-11-21T22:59:34.058436-08:00",
+  "issue_tokens_used": {
+    "SYSTEM": 50702,
+    "bd-9f86-baseline-test": 33055
+  },
+  "total_tokens_used": 84530,
+  "total_cost_used": 0.39143399999999995,
+  "last_updated": "2025-11-21T23:28:18.766601-08:00"
+}

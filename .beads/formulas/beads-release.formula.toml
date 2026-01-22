@@ -1,0 +1,770 @@
+# Beads Release Formula v2 (Gate-Aware)
+#
+# This formula uses gates for async waits during CI, enabling clean phase handoffs.
+# Instead of polling, the polecat completes Phase 1, and a gate blocks Phase 2
+# until GitHub Actions finishes.
+#
+# Phases:
+#   1. Prep & Push: preflight → push-tag (polecat work)
+#   2. Gate: await-ci (async wait for release.yml)
+#   3. Verify: verify-github, verify-npm, verify-pypi (parallel)
+#   4. Install: local-install → release-complete (fan-in)
+
+formula = "beads-release"
+description = """
+Beads release workflow v2 - gate-aware async release.
+
+This formula orchestrates a complete release cycle with async gates:
+
+Phase 1 (Polecat Work):
+  1. Preflight checks (clean git, up to date)
+  2. Documentation updates (CHANGELOG, info.go)
+  3. Version bump (all components)
+  4. Git operations (commit, tag, push)
+
+Gate (Async Wait):
+  5. await-ci: Gate on GitHub Actions release.yml completion
+
+Phase 2 (Parallel Verification):
+  6. Verify GitHub release, npm package, PyPI package (concurrent)
+
+Phase 3 (Installation):
+  7. Local installation update
+  8. Daemon restart
+
+## Usage
+
+```bash
+bd mol wisp create beads-release --var version=0.44.0
+```
+
+Or assign to a polecat:
+```bash
+gt sling beads/polecats/p1 --formula beads-release --var version=0.44.0
+```
+
+The polecat will complete Phase 1, then signal phase-complete. The gate blocks
+until release.yml finishes. A new polecat (or the same one) resumes for Phases 2-3.
+"""
+type = "workflow"
+phase = "vapor"  # Ensures this runs as a wisp - bd pour will warn, gt sling --formula creates wisp
+version = 1
+
+[vars.version]
+description = "The semantic version to release (e.g., 0.44.0)"
+required = true
+
+# =============================================================================
+# Phase 1: Prep & Push
+# =============================================================================
+
+[[steps]]
+id = "preflight-worktree"
+title = "Preflight: Verify git context"
+description = """
+Ensure we're in the correct git directory, especially for worktree setups.
+
+```bash
+# Check current repo root and remote
+git rev-parse --show-toplevel
+git remote get-url origin
+
+# Verify this is the main worktree (not a linked worktree)
+git worktree list
+```
+
+For worktree setups, releases should be done from the **main worktree** to ensure:
+- Correct file paths in commits
+- Proper tag association
+- Clean branch history
+
+If you're in a linked worktree:
+1. Note the path to the main worktree (first line of `git worktree list`)
+2. Switch to that directory before proceeding
+3. Or use: `cd $(git worktree list | head -1 | cut -d' ' -f1)`
+
+**Red flags:**
+- Remote URL doesn't match expected repository
+- You're in a linked worktree (not the main one)
+- `git status` shows different files than expected
+"""
+
+[[steps]]
+id = "preflight-git"
+title = "Preflight: Check git status & auto-stash"
+needs = ["preflight-worktree"]
+description = """
+Ensure working tree is clean before starting release.
+
+```bash
+git status --short
+```
+
+**Handling uncommitted changes:**
+
+If changes are in release-related files (CHANGELOG, version files), you may want to:
+- Include them in the release commit
+- Or stash and apply after version bump
+
+If changes are in **non-release files** (e.g., .beads/config.yaml, .claude/settings.json, local configs):
+```bash
+# Auto-stash non-release files
+git stash push -m "pre-release: non-release changes" -- .beads/ .claude/ *.local* .env*
+
+# Verify working tree is now clean (or only has release files)
+git status --short
+```
+
+**Important:** The bump script may fail if non-release files are modified. Always stash:
+- `.beads/` directory (local config)
+- `.claude/` directory (agent settings)
+- Any `.local`, `.env`, or personal config files
+
+After release completes, restore with:
+```bash
+git stash pop
+```
+"""
+
+[[steps]]
+id = "preflight-pull"
+title = "Preflight: Pull latest & verify sync"
+needs = ["preflight-git"]
+description = """
+Ensure we're up to date with origin and branch is properly synced.
+
+```bash
+# Fetch latest from origin
+git fetch origin
+
+# Check branch status BEFORE pulling
+git status -sb
+```
+
+**Branch sync verification:**
+- "Your branch is behind" → Pull needed, proceed with `git pull --rebase`
+- "Your branch is ahead" → You have unpushed commits - review before release!
+- "Your branch has diverged" → **STOP** - resolve divergence first
+
+```bash
+# If branch is behind or even, pull latest
+git pull --rebase
+```
+
+**Recovering from divergence:**
+If your branch has diverged from origin (e.g., after a botched commit):
+```bash
+# Option 1: Reset to origin (loses local commits)
+git reset --hard origin/main
+
+# Option 2: Rebase local commits on top of origin
+git rebase origin/main
+
+# Option 3: Create a backup branch first
+git branch backup-before-release
+git reset --hard origin/main
+```
+
+**After pulling, verify sync:**
+```bash
+git status -sb
+# Should show: "## main...origin/main" (no ahead/behind)
+```
+"""
+
+[[steps]]
+id = "detect-half-done-release"
+title = "Detect half-done release"
+needs = ["preflight-pull"]
+description = """
+Check if a previous release was started but not completed (version mismatch).
+
+**Compare versions across all sources:**
+```bash
+# Last git tag
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+echo "Last tag: $LAST_TAG"
+
+# Version in code
+CODE_VERSION=$(grep 'Version = ' cmd/bd/version.go | cut -d'"' -f2)
+echo "Code version: $CODE_VERSION"
+
+# Version in CHANGELOG (most recent versioned section)
+CHANGELOG_VERSION=$(grep -E '## \\[[0-9]+\\.[0-9]+\\.[0-9]+\\]' CHANGELOG.md | head -1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+')
+echo "CHANGELOG version: $CHANGELOG_VERSION"
+
+# Version in npm package
+NPM_VERSION=$(jq -r '.version' npm-package/package.json)
+echo "npm version: $NPM_VERSION"
+```
+
+**Healthy state (ready for new release):**
+- All versions match (e.g., all show 0.46.0)
+- Last tag matches code version
+
+**Half-done release detected if:**
+- CHANGELOG shows {{version}} but code shows previous version
+- Code version doesn't match last tag
+- npm/PyPI versions are out of sync
+
+**Recovery from half-done release:**
+```bash
+# If CHANGELOG was updated but code wasn't bumped:
+# Either complete the release or revert CHANGELOG changes
+
+# Check what state we're in
+git diff $LAST_TAG -- CHANGELOG.md | head -50
+```
+
+If mismatch detected, either:
+1. Complete the partial release (bump remaining files)
+2. Revert partial changes and start fresh
+3. Carefully verify what's already pushed vs local-only
+"""
+
+[[steps]]
+id = "review-changes"
+title = "Review changes since last release"
+needs = ["detect-half-done-release"]
+description = """
+Understand what's being released.
+
+```bash
+git log $(git describe --tags --abbrev=0)..HEAD --oneline
+```
+
+Categorize changes:
+- Features (feat:)
+- Fixes (fix:)
+- Breaking changes
+- Documentation
+"""
+
+[[steps]]
+id = "verify-changelog-complete"
+title = "Verify CHANGELOG completeness"
+needs = ["review-changes"]
+description = """
+Ensure CHANGELOG captures ALL commits since the last release.
+
+**Step 1: Count commits since last tag**
+```bash
+LAST_TAG=$(git describe --tags --abbrev=0)
+COMMIT_COUNT=$(git rev-list $LAST_TAG..HEAD --count)
+echo "Commits since $LAST_TAG: $COMMIT_COUNT"
+```
+
+**Step 2: List all commits with their messages**
+```bash
+git log $LAST_TAG..HEAD --oneline --no-merges
+```
+
+**Step 3: Cross-reference with CHANGELOG**
+Open CHANGELOG.md and verify every significant commit is documented in [Unreleased].
+
+**Red flags for stale CHANGELOG:**
+- If CHANGELOG was last modified days ago but there are recent commits
+- If commit count seems high but [Unreleased] section is sparse
+- If PR titles in commits don't match CHANGELOG entries
+
+```bash
+# Check when CHANGELOG was last modified
+git log -1 --format="%ar" -- CHANGELOG.md
+
+# Compare to latest commit date
+git log -1 --format="%ar"
+```
+
+**If CHANGELOG is stale:**
+1. Review all commits since last tag
+2. Add missing entries to appropriate sections (Added/Changed/Fixed)
+3. Group related changes
+4. Focus on user-facing changes and breaking changes
+
+Don't proceed until CHANGELOG is complete - it's the release notes!
+"""
+
+[[steps]]
+id = "update-changelog"
+title = "Update CHANGELOG.md"
+needs = ["verify-changelog-complete"]
+description = """
+Write the [Unreleased] section with all changes for {{version}}.
+
+Format: Keep a Changelog (https://keepachangelog.com)
+
+Sections:
+- ### Added
+- ### Changed
+- ### Fixed
+- ### Documentation
+
+The bump script will stamp the date automatically.
+"""
+
+[[steps]]
+id = "update-info-go"
+title = "Update info.go versionChanges"
+needs = ["update-changelog"]
+description = """
+Add entry to versionChanges in cmd/bd/info.go.
+
+This powers `bd info --whats-new` for agents.
+
+```go
+"{{version}}": {
+    "summary": "Brief description",
+    "changes": []string{
+        "Key change 1",
+        "Key change 2",
+    },
+},
+```
+
+Focus on workflow-impacting changes agents need to know.
+"""
+
+[[steps]]
+id = "bump-version-go"
+title = "Bump version in version.go"
+needs = ["update-info-go"]
+description = """
+Update the Go version constant.
+
+```bash
+# macOS
+sed -i '' 's/Version = "[^"]*"/Version = "{{version}}"/' cmd/bd/version.go
+
+# Linux
+sed -i 's/Version = "[^"]*"/Version = "{{version}}"/' cmd/bd/version.go
+```
+
+Verify:
+```bash
+grep 'Version = ' cmd/bd/version.go
+```
+"""
+
+[[steps]]
+id = "bump-plugin-json"
+title = "Bump version in plugin JSON files"
+needs = ["bump-version-go"]
+description = """
+Update Claude plugin manifest versions.
+
+```bash
+# macOS/Linux with jq
+jq '.version = "{{version}}"' .claude-plugin/plugin.json > tmp && mv tmp .claude-plugin/plugin.json
+jq '.plugins[0].version = "{{version}}"' .claude-plugin/marketplace.json > tmp && mv tmp .claude-plugin/marketplace.json
+```
+
+Verify:
+```bash
+jq -r '.version' .claude-plugin/plugin.json
+jq -r '.plugins[0].version' .claude-plugin/marketplace.json
+```
+"""
+
+[[steps]]
+id = "bump-mcp-python"
+title = "Bump version in MCP Python package"
+needs = ["bump-plugin-json"]
+description = """
+Update the beads-mcp Python package version.
+
+```bash
+# macOS
+sed -i '' 's/version = "[^"]*"/version = "{{version}}"/' integrations/beads-mcp/pyproject.toml
+sed -i '' 's/__version__ = "[^"]*"/__version__ = "{{version}}"/' integrations/beads-mcp/src/beads_mcp/__init__.py
+
+# Linux
+sed -i 's/version = "[^"]*"/version = "{{version}}"/' integrations/beads-mcp/pyproject.toml
+sed -i 's/__version__ = "[^"]*"/__version__ = "{{version}}"/' integrations/beads-mcp/src/beads_mcp/__init__.py
+```
+
+Verify:
+```bash
+grep 'version = ' integrations/beads-mcp/pyproject.toml | head -1
+grep '__version__ = ' integrations/beads-mcp/src/beads_mcp/__init__.py
+```
+"""
+
+[[steps]]
+id = "bump-npm-package"
+title = "Bump version in npm package"
+needs = ["bump-mcp-python"]
+description = """
+Update the npm package version.
+
+```bash
+# macOS/Linux with jq
+jq '.version = "{{version}}"' npm-package/package.json > tmp && mv tmp npm-package/package.json
+```
+
+Verify:
+```bash
+jq -r '.version' npm-package/package.json
+```
+"""
+
+[[steps]]
+id = "bump-hook-templates"
+title = "Bump version in hook templates"
+needs = ["bump-npm-package"]
+description = """
+Update version comment in git hook templates.
+
+```bash
+# macOS
+for f in cmd/bd/templates/hooks/pre-commit cmd/bd/templates/hooks/post-merge cmd/bd/templates/hooks/pre-push cmd/bd/templates/hooks/post-checkout; do
+  sed -i '' 's/# bd-hooks-version: .*/# bd-hooks-version: {{version}}/' "$f"
+done
+
+# Linux
+for f in cmd/bd/templates/hooks/pre-commit cmd/bd/templates/hooks/post-merge cmd/bd/templates/hooks/pre-push cmd/bd/templates/hooks/post-checkout; do
+  sed -i 's/# bd-hooks-version: .*/# bd-hooks-version: {{version}}/' "$f"
+done
+```
+
+Verify:
+```bash
+grep '# bd-hooks-version:' cmd/bd/templates/hooks/pre-commit
+```
+"""
+
+[[steps]]
+id = "bump-readme"
+title = "Bump version in README badge"
+needs = ["bump-hook-templates"]
+description = """
+Update the Alpha version badge in README.md.
+
+```bash
+# macOS
+sed -i '' 's/Alpha (v[^)]*)/Alpha (v{{version}})/' README.md
+
+# Linux
+sed -i 's/Alpha (v[^)]*)/Alpha (v{{version}})/' README.md
+```
+
+Verify:
+```bash
+grep 'Alpha (v' README.md
+```
+"""
+
+[[steps]]
+id = "bump-default-nix"
+title = "Bump version in default.nix"
+needs = ["bump-readme"]
+description = """
+Update the Nix package version.
+
+```bash
+# macOS
+sed -i '' 's/version = "[^"]*";/version = "{{version}}";/' default.nix
+
+# Linux
+sed -i 's/version = "[^"]*";/version = "{{version}}";/' default.nix
+```
+
+Verify:
+```bash
+grep 'version = ' default.nix
+```
+"""
+
+[[steps]]
+id = "update-vendorhash"
+title = "Update Nix vendorHash if needed"
+needs = ["bump-default-nix"]
+description = """
+Update vendorHash if go.mod/go.sum changed since last release.
+
+Check if update is needed:
+```bash
+# Compare go.mod/go.sum against last tag
+LAST_TAG=$(git describe --tags --abbrev=0)
+git diff $LAST_TAG -- go.mod go.sum
+```
+
+If there are changes, run the update script:
+```bash
+./scripts/update-nix-vendorhash.sh
+```
+
+The script auto-detects nix or Docker and updates the hash automatically.
+
+Verify:
+```bash
+grep 'vendorHash = ' default.nix
+```
+"""
+
+[[steps]]
+id = "stamp-changelog"
+title = "Stamp changelog with release date"
+needs = ["update-vendorhash"]
+description = """
+Add the release date to the [Unreleased] section header.
+
+```bash
+DATE=$(date +%Y-%m-%d)
+
+# macOS
+sed -i '' "s/## \\[Unreleased\\]/## [Unreleased]\\
+\\
+## [{{version}}] - $DATE/" CHANGELOG.md
+
+# Linux
+sed -i "s/## \\[Unreleased\\]/## [Unreleased]\\n\\n## [{{version}}] - $DATE/" CHANGELOG.md
+```
+
+Note: The update-changelog step handles the content; this step just adds the date stamp.
+
+Verify:
+```bash
+grep -A2 '\\[Unreleased\\]' CHANGELOG.md
+```
+"""
+
+[[steps]]
+id = "verify-versions"
+title = "Verify version consistency"
+needs = ["stamp-changelog"]
+description = """
+Confirm all versions match {{version}}.
+
+```bash
+grep 'Version = ' cmd/bd/version.go
+jq -r '.version' .claude-plugin/plugin.json
+jq -r '.version' npm-package/package.json
+grep 'version = ' integrations/beads-mcp/pyproject.toml
+grep 'version = ' default.nix
+```
+
+All should show {{version}}.
+"""
+
+[[steps]]
+id = "commit-release"
+title = "Commit release"
+needs = ["verify-versions"]
+description = """
+Stage and commit all version changes.
+
+```bash
+git add -A
+git commit -m "chore: Bump version to {{version}}"
+```
+
+Review the commit to ensure all expected files are included.
+"""
+
+[[steps]]
+id = "create-tag"
+title = "Create release tag"
+needs = ["commit-release"]
+description = """
+Create annotated git tag.
+
+```bash
+git tag -a v{{version}} -m "Release v{{version}}"
+```
+
+Verify: `git tag -l | tail -5`
+"""
+
+[[steps]]
+id = "push-main"
+title = "Push to main"
+needs = ["create-tag"]
+description = """
+Push the release commit to origin.
+
+```bash
+git push origin main
+```
+
+If rejected, someone else pushed. Pull, rebase, try again.
+"""
+
+[[steps]]
+id = "push-tag"
+title = "Push release tag"
+needs = ["push-main"]
+description = """
+Push the version tag to trigger CI release.
+
+```bash
+git push origin v{{version}}
+```
+
+This triggers GitHub Actions to build artifacts and publish.
+
+**Phase 1 Complete**: After this step, signal phase-complete:
+```bash
+gt done --phase-complete
+```
+
+The gate will block until CI finishes. A new session will resume at Phase 2.
+"""
+
+# =============================================================================
+# Gate: CI Completion
+# =============================================================================
+
+[[steps]]
+id = "await-ci"
+title = "Await CI: release.yml completion"
+needs = ["push-tag"]
+description = """
+Gate step: Wait for GitHub Actions release workflow to complete.
+
+This gate blocks until the release.yml workflow run succeeds.
+The Refinery auto-discovers the workflow run triggered by v{{version}}
+and closes this gate when it completes.
+
+Expected time: 5-10 minutes
+
+The gate monitors:
+- Build artifacts (all platforms)
+- Test suite pass
+- npm publish
+- PyPI publish
+
+If the workflow fails, this gate remains open and requires manual intervention.
+"""
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+timeout = "30m"
+
+# =============================================================================
+# Phase 2: Verification (Parallel)
+# =============================================================================
+
+[[steps]]
+id = "verify-github"
+title = "Verify GitHub release"
+needs = ["await-ci"]
+description = """
+Check the GitHub releases page.
+
+https://github.com/steveyegge/beads/releases/tag/v{{version}}
+
+Verify:
+- Release created
+- Binaries attached (linux, darwin, windows)
+- Checksums present
+
+```bash
+gh release view v{{version}} --json assets --jq '.assets[].name'
+```
+"""
+
+[[steps]]
+id = "verify-npm"
+title = "Verify npm package"
+needs = ["await-ci"]
+description = """
+Confirm npm package published.
+
+```bash
+npm show @beads/bd version
+```
+
+Should show {{version}}.
+
+Also check: https://www.npmjs.com/package/@beads/bd
+
+Note: npm registry may have a small propagation delay (1-2 min).
+"""
+
+[[steps]]
+id = "verify-pypi"
+title = "Verify PyPI package"
+needs = ["await-ci"]
+description = """
+Confirm PyPI package published.
+
+```bash
+pip index versions beads-mcp 2>/dev/null | head -3
+```
+
+Or check: https://pypi.org/project/beads-mcp/
+
+Should show {{version}}.
+
+Note: PyPI may have a small propagation delay (1-2 min).
+"""
+
+# =============================================================================
+# Phase 3: Installation (Fan-in)
+# =============================================================================
+
+[[steps]]
+id = "local-install"
+title = "Update local installation"
+needs = ["verify-github", "verify-npm", "verify-pypi"]
+description = """
+Update local bd to the new version.
+
+Option 1 - Homebrew:
+```bash
+brew upgrade bd
+```
+
+Option 2 - Install script:
+```bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+Verify:
+```bash
+bd --version
+```
+
+Should show {{version}}.
+"""
+
+[[steps]]
+id = "restart-daemons"
+title = "Restart daemons"
+needs = ["local-install"]
+description = """
+Restart bd daemons to pick up new version.
+
+```bash
+bd daemons killall
+```
+
+Daemons will auto-restart with new version on next bd command.
+
+Verify:
+```bash
+bd daemons list
+```
+"""
+
+[[steps]]
+id = "release-complete"
+title = "Release complete"
+needs = ["restart-daemons"]
+description = """
+Release v{{version}} is complete!
+
+Summary:
+- All version files updated
+- Git tag pushed
+- CI artifacts built (via gate)
+- npm and PyPI packages verified
+- Local installation updated
+- Daemons restarted
+
+Optional next steps:
+- Announce on social media
+- Update documentation site
+- Close related milestone
+"""
