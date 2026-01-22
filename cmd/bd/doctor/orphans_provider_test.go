@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -443,7 +444,7 @@ func TestFindOrphanedIssues_IntegrationCrossRepo(t *testing.T) {
 	_ = cmd.Run()
 
 	// Create a real LocalProvider from the planning database
-	provider, err := NewLocalProvider(planningDBPath)
+	provider, err := storage.NewLocalProvider(planningDBPath)
 	if err != nil {
 		t.Fatalf("failed to create LocalProvider: %v", err)
 	}
@@ -490,9 +491,9 @@ func TestLocalProvider_Methods(t *testing.T) {
 	db.Close()
 
 	// Create provider
-	provider, err := NewLocalProvider(dbPath)
+	provider, err := storage.NewLocalProvider(dbPath)
 	if err != nil {
-		t.Fatalf("NewLocalProvider failed: %v", err)
+		t.Fatalf("storage.NewLocalProvider failed: %v", err)
 	}
 	defer provider.Close()
 
@@ -550,9 +551,9 @@ func TestLocalProvider_DefaultPrefix(t *testing.T) {
 	}
 	db.Close()
 
-	provider, err := NewLocalProvider(dbPath)
+	provider, err := storage.NewLocalProvider(dbPath)
 	if err != nil {
-		t.Fatalf("NewLocalProvider failed: %v", err)
+		t.Fatalf("storage.NewLocalProvider failed: %v", err)
 	}
 	defer provider.Close()
 

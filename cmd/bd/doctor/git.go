@@ -14,6 +14,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -888,7 +889,7 @@ func FindOrphanedIssuesFromPath(path string) ([]OrphanIssue, error) {
 	}
 
 	// Create a local provider from the database
-	provider, err := NewLocalProvider(dbPath)
+	provider, err := storage.NewLocalProvider(dbPath)
 	if err != nil {
 		return []OrphanIssue{}, nil
 	}
@@ -896,75 +897,6 @@ func FindOrphanedIssuesFromPath(path string) ([]OrphanIssue, error) {
 
 	return FindOrphanedIssues(path, provider)
 }
-
-// LocalProvider implements types.IssueProvider using a read-only SQLite connection.
-// This is used by CheckOrphanedIssues and other internal callers that need a provider
-// from a local .beads/ directory.
-type LocalProvider struct {
-	db     *sql.DB
-	prefix string
-}
-
-// NewLocalProvider creates a provider backed by a SQLite database.
-func NewLocalProvider(dbPath string) (*LocalProvider, error) {
-	db, err := openDBReadOnly(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get issue prefix from config
-	var prefix string
-	err = db.QueryRow("SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&prefix)
-	if err != nil || prefix == "" {
-		prefix = "bd" // default
-	}
-
-	return &LocalProvider{db: db, prefix: prefix}, nil
-}
-
-// GetOpenIssues returns issues that are open or in_progress.
-func (p *LocalProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, error) {
-	// Get all open/in_progress issues with their titles (title is optional for compatibility)
-	rows, err := p.db.QueryContext(ctx, "SELECT id, title, status FROM issues WHERE status IN ('open', 'in_progress')")
-	// If the query fails (e.g., no title column), fall back to simpler query
-	if err != nil {
-		rows, err = p.db.QueryContext(ctx, "SELECT id, '', status FROM issues WHERE status IN ('open', 'in_progress')")
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer rows.Close()
-
-	var issues []*types.Issue
-	for rows.Next() {
-		var id, title, status string
-		if err := rows.Scan(&id, &title, &status); err == nil {
-			issues = append(issues, &types.Issue{
-				ID:     id,
-				Title:  title,
-				Status: types.Status(status),
-			})
-		}
-	}
-
-	return issues, nil
-}
-
-// GetIssuePrefix returns the configured issue prefix.
-func (p *LocalProvider) GetIssuePrefix() string {
-	return p.prefix
-}
-
-// Close closes the underlying database connection.
-func (p *LocalProvider) Close() error {
-	if p.db != nil {
-		return p.db.Close()
-	}
-	return nil
-}
-
-// Ensure LocalProvider implements types.IssueProvider
-var _ types.IssueProvider = (*LocalProvider)(nil)
 
 // CheckOrphanedIssues detects issues referenced in git commits but still open.
 // This catches cases where someone implemented a fix with "(bd-xxx)" in the commit

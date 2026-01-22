@@ -113,7 +113,7 @@ type orphanIssueOutput struct {
 func getIssueProvider() (types.IssueProvider, func(), error) {
 	// If --db flag is set and we have a dbPath, create a provider from that path
 	if dbPath != "" {
-		provider, err := doctor.NewLocalProvider(dbPath)
+		provider, err := storage.NewLocalProvider(dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to open database at %s: %w", dbPath, err)
 		}
