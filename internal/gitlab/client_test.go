@@ -707,3 +707,142 @@ func TestFetchIssuesSince_Error(t *testing.T) {
 		t.Fatal("FetchIssuesSince() error = nil, want error for 500")
 	}
 }
+
+// TestFetchIssues_PaginationLimit verifies that FetchIssues stops after MaxPages to prevent infinite loops.
+func TestFetchIssues_PaginationLimit(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		// Always return X-Next-Page to simulate infinite pagination (malformed response)
+		w.Header().Set("X-Next-Page", "999")
+		json.NewEncoder(w).Encode([]Issue{{ID: requestCount, IID: requestCount, Title: "Issue"}})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.FetchIssues(ctx, "all")
+
+	// Should error due to pagination limit exceeded
+	if err == nil {
+		t.Fatal("FetchIssues() error = nil, want pagination limit error")
+	}
+	if !strings.Contains(err.Error(), "pagination limit exceeded") {
+		t.Errorf("error = %v, want to contain 'pagination limit exceeded'", err)
+	}
+	// Should have stopped at MaxPages (1000) rather than looping forever
+	if requestCount > MaxPages+1 {
+		t.Errorf("requestCount = %d, want <= %d (MaxPages+1)", requestCount, MaxPages+1)
+	}
+}
+
+// TestFetchIssuesSince_PaginationLimit verifies that FetchIssuesSince stops after MaxPages.
+func TestFetchIssuesSince_PaginationLimit(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		// Always return X-Next-Page to simulate infinite pagination
+		w.Header().Set("X-Next-Page", "999")
+		json.NewEncoder(w).Encode([]Issue{{ID: requestCount, IID: requestCount, Title: "Issue"}})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+
+	// Should error due to pagination limit exceeded
+	if err == nil {
+		t.Fatal("FetchIssuesSince() error = nil, want pagination limit error")
+	}
+	if !strings.Contains(err.Error(), "pagination limit exceeded") {
+		t.Errorf("error = %v, want to contain 'pagination limit exceeded'", err)
+	}
+	if requestCount > MaxPages+1 {
+		t.Errorf("requestCount = %d, want <= %d (MaxPages+1)", requestCount, MaxPages+1)
+	}
+}
+
+// TestFetchIssues_ContextCancellation verifies that FetchIssues respects context cancellation.
+func TestFetchIssues_ContextCancellation(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		// Always return X-Next-Page to continue pagination
+		w.Header().Set("X-Next-Page", "2")
+		json.NewEncoder(w).Encode([]Issue{{ID: requestCount, IID: requestCount, Title: "Issue"}})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel context after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	issues, err := client.FetchIssues(ctx, "all")
+
+	// Should return context.Canceled error (either directly or wrapped)
+	if err == nil {
+		t.Fatal("FetchIssues() error = nil, want context cancellation error")
+	}
+	// Context cancellation can be returned directly from our loop check or wrapped by doRequest
+	if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("error = %v, want context.Canceled or error containing 'context canceled'", err)
+	}
+	// Verify the loop was stopped (not infinite) - requestCount should be reasonable
+	if requestCount > 1000 {
+		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount)
+	}
+	// Note: partial results may or may not be returned depending on whether cancellation
+	// was caught by our loop check (returns partial) or by doRequest (returns nil)
+	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount, len(issues))
+}
+
+// TestFetchIssuesSince_ContextCancellation verifies that FetchIssuesSince respects context cancellation.
+func TestFetchIssuesSince_ContextCancellation(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		// Always return X-Next-Page to continue pagination
+		w.Header().Set("X-Next-Page", "2")
+		json.NewEncoder(w).Encode([]Issue{{ID: requestCount, IID: requestCount, Title: "Issue"}})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel context after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	issues, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+
+	// Should return context.Canceled error (either directly or wrapped)
+	if err == nil {
+		t.Fatal("FetchIssuesSince() error = nil, want context cancellation error")
+	}
+	// Context cancellation can be returned directly from our loop check or wrapped by doRequest
+	if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("error = %v, want context.Canceled or error containing 'context canceled'", err)
+	}
+	// Verify the loop was stopped (not infinite) - requestCount should be reasonable
+	if requestCount > 1000 {
+		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount)
+	}
+	// Note: partial results may or may not be returned depending on whether cancellation
+	// was caught by our loop check (returns partial) or by doRequest (returns nil)
+	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount, len(issues))
+}

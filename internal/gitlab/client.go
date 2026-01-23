@@ -135,6 +135,13 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 	page := 1
 
 	for {
+		// Check for context cancellation at start of each iteration
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
 		params := map[string]string{
 			"per_page": strconv.Itoa(MaxPageSize),
 			"page":     strconv.Itoa(page),
@@ -162,6 +169,11 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 			break
 		}
 		page++
+
+		// Guard against infinite pagination loops from malformed responses
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
 	}
 
 	return allIssues, nil
@@ -176,6 +188,13 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 	sinceStr := since.UTC().Format(time.RFC3339)
 
 	for {
+		// Check for context cancellation at start of each iteration
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
 		params := map[string]string{
 			"per_page":      strconv.Itoa(MaxPageSize),
 			"page":          strconv.Itoa(page),
@@ -204,6 +223,11 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 			break
 		}
 		page++
+
+		// Guard against infinite pagination loops from malformed responses
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
 	}
 
 	return allIssues, nil

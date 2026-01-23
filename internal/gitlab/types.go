@@ -27,6 +27,10 @@ const (
 
 	// MaxPageSize is the maximum number of issues to fetch per page.
 	MaxPageSize = 100
+
+	// MaxPages is the maximum number of pages to fetch before stopping.
+	// This prevents infinite loops from malformed X-Next-Page headers.
+	MaxPages = 1000
 )
 
 // Client provides methods to interact with the GitLab REST API.
