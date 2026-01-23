@@ -474,3 +474,104 @@ func TestFilterNonScopedLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestPriorityToLabel verifies conversion from beads priority to GitLab label value.
+func TestPriorityToLabel(t *testing.T) {
+	tests := []struct {
+		priority int
+		want     string
+	}{
+		{0, "critical"},
+		{1, "high"},
+		{2, "medium"},
+		{3, "low"},
+		{4, "none"},
+		{-1, "medium"},  // Default for invalid
+		{5, "medium"},   // Default for out of range
+		{100, "medium"}, // Default for very large
+	}
+
+	for _, tt := range tests {
+		got := priorityToLabel(tt.priority)
+		if got != tt.want {
+			t.Errorf("priorityToLabel(%d) = %q, want %q", tt.priority, got, tt.want)
+		}
+	}
+}
+
+// TestIssueLinksToDependencies_AsTarget verifies conversion when we are the target issue.
+func TestIssueLinksToDependencies_AsTarget(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	// Issue 42 is the target (blocked by 43)
+	links := []IssueLink{
+		{
+			SourceIssue: &Issue{IID: 43, ProjectID: 789},
+			TargetIssue: &Issue{IID: 42, ProjectID: 789},
+			LinkType:    "blocks",
+		},
+	}
+
+	deps := IssueLinksToDependencies(42, links, config)
+
+	if len(deps) != 1 {
+		t.Fatalf("IssueLinksToDependencies returned %d dependencies, want 1", len(deps))
+	}
+
+	// When we are target, source becomes the dependency
+	if deps[0].ToGitLabIID != 43 {
+		t.Errorf("deps[0].ToGitLabIID = %d, want 43 (source issue)", deps[0].ToGitLabIID)
+	}
+	if deps[0].FromGitLabIID != 42 {
+		t.Errorf("deps[0].FromGitLabIID = %d, want 42", deps[0].FromGitLabIID)
+	}
+}
+
+// TestIssueLinksToDependencies_UnknownLinkType verifies unknown link types default to "related".
+func TestIssueLinksToDependencies_UnknownLinkType(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	links := []IssueLink{
+		{
+			SourceIssue: &Issue{IID: 42, ProjectID: 789},
+			TargetIssue: &Issue{IID: 43, ProjectID: 789},
+			LinkType:    "unknown_type",
+		},
+	}
+
+	deps := IssueLinksToDependencies(42, links, config)
+
+	if len(deps) != 1 {
+		t.Fatalf("IssueLinksToDependencies returned %d dependencies, want 1", len(deps))
+	}
+
+	// Unknown link types should default to "related"
+	if deps[0].Type != "related" {
+		t.Errorf("deps[0].Type = %q, want \"related\" for unknown link type", deps[0].Type)
+	}
+}
+
+// TestIssueLinksToDependencies_NilIssues verifies handling of nil source/target issues.
+func TestIssueLinksToDependencies_NilIssues(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	// Link with nil target
+	links := []IssueLink{
+		{
+			SourceIssue: &Issue{IID: 42, ProjectID: 789},
+			TargetIssue: nil,
+			LinkType:    "blocks",
+		},
+	}
+
+	deps := IssueLinksToDependencies(42, links, config)
+
+	// Should still create a dependency but with ToGitLabIID = 0
+	if len(deps) != 1 {
+		t.Fatalf("IssueLinksToDependencies returned %d dependencies, want 1", len(deps))
+	}
+
+	if deps[0].ToGitLabIID != 0 {
+		t.Errorf("deps[0].ToGitLabIID = %d, want 0 (nil target)", deps[0].ToGitLabIID)
+	}
+}

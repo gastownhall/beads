@@ -508,3 +508,202 @@ func TestCreateIssueLink(t *testing.T) {
 		t.Errorf("link.LinkType = %q, want %q", link.LinkType, "blocks")
 	}
 }
+
+// TestUpdateIssue_Error verifies error handling for UpdateIssue.
+func TestUpdateIssue_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message": "Issue not found"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.UpdateIssue(ctx, 999, map[string]interface{}{"title": "Updated"})
+	if err == nil {
+		t.Fatal("UpdateIssue() error = nil, want error for 404")
+	}
+	if !strings.Contains(err.Error(), "failed to update issue") {
+		t.Errorf("error = %v, want to contain 'failed to update issue'", err)
+	}
+}
+
+// TestUpdateIssue_InvalidJSON verifies JSON parse error handling.
+func TestUpdateIssue_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{invalid json`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.UpdateIssue(ctx, 42, map[string]interface{}{"title": "Updated"})
+	if err == nil {
+		t.Fatal("UpdateIssue() error = nil, want error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse update response") {
+		t.Errorf("error = %v, want to contain 'failed to parse update response'", err)
+	}
+}
+
+// TestGetIssueLinks_Error verifies error handling for GetIssueLinks.
+func TestGetIssueLinks_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message": "Access denied"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.GetIssueLinks(ctx, 42)
+	if err == nil {
+		t.Fatal("GetIssueLinks() error = nil, want error for 403")
+	}
+	if !strings.Contains(err.Error(), "failed to get issue links") {
+		t.Errorf("error = %v, want to contain 'failed to get issue links'", err)
+	}
+}
+
+// TestGetIssueLinks_InvalidJSON verifies JSON parse error handling.
+func TestGetIssueLinks_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`not valid json`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.GetIssueLinks(ctx, 42)
+	if err == nil {
+		t.Fatal("GetIssueLinks() error = nil, want error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse issue links response") {
+		t.Errorf("error = %v, want to contain 'failed to parse issue links response'", err)
+	}
+}
+
+// TestFetchIssueByIID_Error verifies error handling for FetchIssueByIID.
+func TestFetchIssueByIID_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message": "Issue not found"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.FetchIssueByIID(ctx, 999)
+	if err == nil {
+		t.Fatal("FetchIssueByIID() error = nil, want error for 404")
+	}
+	if !strings.Contains(err.Error(), "failed to fetch issue 999") {
+		t.Errorf("error = %v, want to contain 'failed to fetch issue 999'", err)
+	}
+}
+
+// TestFetchIssueByIID_InvalidJSON verifies JSON parse error handling.
+func TestFetchIssueByIID_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{malformed`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.FetchIssueByIID(ctx, 42)
+	if err == nil {
+		t.Fatal("FetchIssueByIID() error = nil, want error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse issue response") {
+		t.Errorf("error = %v, want to contain 'failed to parse issue response'", err)
+	}
+}
+
+// TestCreateIssueLink_Error verifies error handling for CreateIssueLink.
+func TestCreateIssueLink_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"message": "Target issue not found"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.CreateIssueLink(ctx, 42, 999, "blocks")
+	if err == nil {
+		t.Fatal("CreateIssueLink() error = nil, want error for 400")
+	}
+	if !strings.Contains(err.Error(), "failed to create issue link") {
+		t.Errorf("error = %v, want to contain 'failed to create issue link'", err)
+	}
+}
+
+// TestCreateIssueLink_InvalidJSON verifies JSON parse error handling.
+func TestCreateIssueLink_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{broken json`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.CreateIssueLink(ctx, 42, 43, "blocks")
+	if err == nil {
+		t.Fatal("CreateIssueLink() error = nil, want error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse issue link response") {
+		t.Errorf("error = %v, want to contain 'failed to parse issue link response'", err)
+	}
+}
+
+// TestCreateIssue_InvalidJSON verifies JSON parse error handling.
+func TestCreateIssue_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{not valid json`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.CreateIssue(ctx, "Test", "Description", []string{})
+	if err == nil {
+		t.Fatal("CreateIssue() error = nil, want error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse create response") {
+		t.Errorf("error = %v, want to contain 'failed to parse create response'", err)
+	}
+}
+
+// TestFetchIssuesSince_Error verifies error handling for FetchIssuesSince.
+func TestFetchIssuesSince_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message": "Server error"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+	if err == nil {
+		t.Fatal("FetchIssuesSince() error = nil, want error for 500")
+	}
+}

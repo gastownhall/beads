@@ -265,3 +265,82 @@ func TestLabelParsing(t *testing.T) {
 		}
 	}
 }
+
+// TestGetPriorityFromLabel verifies priority label value to beads priority mapping.
+func TestGetPriorityFromLabel(t *testing.T) {
+	tests := []struct {
+		value string
+		want  int
+	}{
+		{"critical", 0},
+		{"CRITICAL", 0}, // Case insensitive
+		{"high", 1},
+		{"High", 1},
+		{"medium", 2},
+		{"low", 3},
+		{"none", 4},
+		{"invalid", -1},
+		{"", -1},
+		{"unknown", -1},
+	}
+
+	for _, tt := range tests {
+		got := GetPriorityFromLabel(tt.value)
+		if got != tt.want {
+			t.Errorf("GetPriorityFromLabel(%q) = %d, want %d", tt.value, got, tt.want)
+		}
+	}
+}
+
+// TestGetStatusFromLabel verifies status label value to beads status mapping.
+func TestGetStatusFromLabel(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"open", "open"},
+		{"OPEN", "open"}, // Case insensitive
+		{"in_progress", "in_progress"},
+		{"In_Progress", "in_progress"},
+		{"blocked", "blocked"},
+		{"deferred", "deferred"},
+		{"closed", "closed"},
+		{"invalid", ""},
+		{"", ""},
+		{"unknown", ""},
+	}
+
+	for _, tt := range tests {
+		got := GetStatusFromLabel(tt.value)
+		if got != tt.want {
+			t.Errorf("GetStatusFromLabel(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
+// TestGetTypeFromLabel verifies type label value to beads issue type mapping.
+func TestGetTypeFromLabel(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"bug", "bug"},
+		{"BUG", "bug"}, // Case insensitive
+		{"feature", "feature"},
+		{"task", "task"},
+		{"epic", "epic"},
+		{"chore", "chore"},
+		{"enhancement", "feature"}, // Maps to feature
+		{"Enhancement", "feature"},
+		{"invalid", ""},
+		{"", ""},
+		{"unknown", ""},
+	}
+
+	for _, tt := range tests {
+		got := GetTypeFromLabel(tt.value)
+		if got != tt.want {
+			t.Errorf("GetTypeFromLabel(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
