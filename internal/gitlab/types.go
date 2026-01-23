@@ -191,8 +191,9 @@ type Conflict struct {
 
 // IssueConversion holds the result of converting a GitLab issue to Beads.
 // It includes the issue and any dependencies that should be created.
+// Note: This type is defined in types.go but populated by mapping.go which imports internal/types.
 type IssueConversion struct {
-	Issue        interface{} // *types.Issue - avoiding circular import
+	Issue        interface{} // *types.Issue when populated by mapping.go
 	Dependencies []DependencyInfo
 }
 
