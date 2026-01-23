@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -24,6 +25,9 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// tempFileCounter provides unique IDs for concurrent temp file creation
+var tempFileCounter atomic.Uint64
 
 // outputJSON outputs data as pretty-printed JSON
 func outputJSON(v interface{}) {
@@ -585,8 +589,10 @@ func writeJSONLAtomic(jsonlPath string, issues []*types.Issue) ([]string, error)
 		return cmp.Compare(a.ID, b.ID)
 	})
 
-	// Create temp file with PID suffix to avoid collisions
-	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
+	// Create temp file with unique suffix to avoid collisions between concurrent writers
+	// Uses PID + atomic counter to ensure uniqueness within and across processes
+	tempID := tempFileCounter.Add(1)
+	tempPath := fmt.Sprintf("%s.tmp.%d.%d", jsonlPath, os.Getpid(), tempID)
 	f, err := os.Create(tempPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
