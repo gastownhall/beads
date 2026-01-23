@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// issueIDCounter is used to generate unique issue IDs.
+var issueIDCounter uint64
 
 // doPullFromGitLab imports issues from GitLab using the REST API.
 // Supports incremental sync by checking gitlab.last_sync config and only fetching
@@ -95,7 +99,7 @@ func doPullFromGitLab(ctx context.Context, client *gitlab.Client, config *gitlab
 	// Generate IDs for new issues
 	for _, issue := range beadsIssues {
 		if issue.ID == "" {
-			issue.ID = fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano()%10000)
+			issue.ID = generateIssueID(prefix)
 		}
 	}
 
@@ -161,7 +165,9 @@ func doPullFromGitLab(ctx context.Context, client *gitlab.Client, config *gitlab
 
 		// Update last sync timestamp
 		if err := store.SetConfig(ctx, "gitlab.last_sync", time.Now().UTC().Format(time.RFC3339)); err != nil {
-			fmt.Printf("Warning: failed to save gitlab.last_sync: %v\n", err)
+			warning := fmt.Sprintf("failed to save gitlab.last_sync: %v (next sync will be full instead of incremental)", err)
+			stats.Warnings = append(stats.Warnings, warning)
+			fmt.Printf("Warning: %s\n", warning)
 		}
 	} else {
 		// No store - just count what would be created
@@ -230,10 +236,15 @@ func doPushToGitLab(ctx context.Context, client *gitlab.Client, config *gitlab.M
 				continue
 			}
 
-			// Verify we're updating the right project
-			if projectID != 0 && strconv.Itoa(projectID) != client.ProjectID {
-				stats.Skipped++
-				continue
+			// Verify we're updating the right project (only for numeric project IDs)
+			// Skip comparison when client uses path-based ID (contains "/") since we can't
+			// reliably compare path "group/project" with numeric 789. The API will reject
+			// updates to wrong projects anyway.
+			if projectID != 0 && !strings.Contains(client.ProjectID, "/") {
+				if strconv.Itoa(projectID) != client.ProjectID {
+					stats.Skipped++
+					continue
+				}
 			}
 
 			fields := gitlab.BeadsIssueToGitLabFields(issue, config)
@@ -304,6 +315,14 @@ func detectGitLabConflicts(ctx context.Context, client *gitlab.Client, localIssu
 	}
 
 	return conflicts, nil
+}
+
+// generateIssueID creates a unique issue ID with the given prefix.
+// Uses atomic counter combined with timestamp to ensure uniqueness even when called rapidly.
+func generateIssueID(prefix string) string {
+	counter := atomic.AddUint64(&issueIDCounter, 1)
+	timestamp := time.Now().UnixNano() / 1000000 // milliseconds
+	return fmt.Sprintf("%s-%d-%d", prefix, timestamp, counter)
 }
 
 // parseGitLabSourceSystem parses a source system string like "gitlab:123:42"

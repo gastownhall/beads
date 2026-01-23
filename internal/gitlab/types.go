@@ -165,8 +165,9 @@ type PullStats struct {
 	Created     int
 	Updated     int
 	Skipped     int
-	Incremental bool   // Whether this was an incremental sync
-	SyncedSince string // Timestamp we synced since (if incremental)
+	Incremental bool     // Whether this was an incremental sync
+	SyncedSince string   // Timestamp we synced since (if incremental)
+	Warnings    []string // Non-fatal warnings encountered during pull
 }
 
 // PushStats tracks push operation statistics.

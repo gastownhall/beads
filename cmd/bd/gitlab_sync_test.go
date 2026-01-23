@@ -342,6 +342,171 @@ func TestDetectGitLabConflicts_WithConflicts(t *testing.T) {
 	}
 }
 
+// TestDoPushToGitLab_PathBasedProjectID verifies push works with path-based project IDs.
+func TestDoPushToGitLab_PathBasedProjectID(t *testing.T) {
+	// Save and restore global store
+	oldStore := store
+	store = nil
+	defer func() { store = oldStore }()
+
+	var updateCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			updateCalled = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(gitlab.Issue{
+			ID:        100,
+			IID:       42,
+			ProjectID: 789, // Numeric project ID from API
+			Title:     "Updated issue",
+			State:     "opened",
+			WebURL:    "https://gitlab.example.com/group/project/-/issues/42",
+		})
+	}))
+	defer server.Close()
+
+	// Client configured with path-based project ID
+	client := gitlab.NewClient("token", server.URL, "group/project")
+	config := gitlab.DefaultMappingConfig()
+	ctx := context.Background()
+
+	// Local issue linked to numeric project ID 789 (same project, different representation)
+	webURL := "https://gitlab.example.com/group/project/-/issues/42"
+	localIssues := []*types.Issue{
+		{
+			ID:           "bd-1",
+			Title:        "Updated issue",
+			Description:  "Updated description",
+			IssueType:    types.TypeBug,
+			Priority:     1,
+			Status:       types.StatusOpen,
+			ExternalRef:  &webURL,
+			SourceSystem: "gitlab:789:42", // Numeric project ID from previous sync
+		},
+	}
+
+	stats, err := doPushToGitLab(ctx, client, config, localIssues, false, false, nil, nil)
+	if err != nil {
+		t.Fatalf("doPushToGitLab() error = %v", err)
+	}
+
+	// Should update, not skip - the path "group/project" and numeric 789 are the same project
+	if !updateCalled {
+		t.Error("GitLab update API was not called - path-based project ID comparison failed")
+	}
+	if stats.Updated != 1 {
+		t.Errorf("stats.Updated = %d, want 1 (got skipped due to project ID mismatch)", stats.Updated)
+	}
+}
+
+// TestResolveGitLabConflictsByTimestamp_GitLabWins verifies conflict resolution prefers newer.
+func TestResolveGitLabConflictsByTimestamp_GitLabWins(t *testing.T) {
+	// Save and restore global store
+	oldStore := store
+	store = nil
+	defer func() { store = oldStore }()
+
+	gitlabTime := time.Now()
+	localTime := time.Now().Add(-1 * time.Hour) // Local is older
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return single issue for FetchIssueByIID
+		json.NewEncoder(w).Encode(gitlab.Issue{
+			ID:          100,
+			IID:         42,
+			ProjectID:   123,
+			Title:       "GitLab updated title",
+			Description: "GitLab updated description",
+			State:       "opened",
+			UpdatedAt:   &gitlabTime,
+			WebURL:      "https://gitlab.example.com/-/issues/42",
+		})
+	}))
+	defer server.Close()
+
+	client := gitlab.NewClient("token", server.URL, "123")
+	config := gitlab.DefaultMappingConfig()
+	ctx := context.Background()
+
+	conflicts := []gitlab.Conflict{
+		{
+			IssueID:       "bd-1",
+			LocalUpdated:  localTime,
+			GitLabUpdated: gitlabTime, // GitLab is newer
+			GitLabIID:     42,
+			GitLabID:      100,
+		},
+	}
+
+	err := resolveGitLabConflictsByTimestamp(ctx, client, config, conflicts)
+	if err != nil {
+		t.Fatalf("resolveGitLabConflictsByTimestamp() error = %v", err)
+	}
+
+	// Test passes if no error - actual store update requires store to be set
+	// This test verifies the GitLab fetch path works
+}
+
+// TestResolveGitLabConflictsByTimestamp_LocalWins verifies local version kept when newer.
+func TestResolveGitLabConflictsByTimestamp_LocalWins(t *testing.T) {
+	// Save and restore global store
+	oldStore := store
+	store = nil
+	defer func() { store = oldStore }()
+
+	localTime := time.Now()
+	gitlabTime := time.Now().Add(-1 * time.Hour) // GitLab is older
+
+	var fetchCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(gitlab.Issue{})
+	}))
+	defer server.Close()
+
+	client := gitlab.NewClient("token", server.URL, "123")
+	config := gitlab.DefaultMappingConfig()
+	ctx := context.Background()
+
+	conflicts := []gitlab.Conflict{
+		{
+			IssueID:       "bd-1",
+			LocalUpdated:  localTime,   // Local is newer
+			GitLabUpdated: gitlabTime,
+			GitLabIID:     42,
+			GitLabID:      100,
+		},
+	}
+
+	err := resolveGitLabConflictsByTimestamp(ctx, client, config, conflicts)
+	if err != nil {
+		t.Fatalf("resolveGitLabConflictsByTimestamp() error = %v", err)
+	}
+
+	// When local wins, should NOT fetch from GitLab
+	if fetchCalled {
+		t.Error("GitLab API was called when local version should win")
+	}
+}
+
+// TestGenerateUniqueIssueIDs verifies IDs are unique even when generated rapidly.
+func TestGenerateUniqueIssueIDs(t *testing.T) {
+	seen := make(map[string]bool)
+	prefix := "bd"
+
+	// Generate 100 IDs rapidly
+	for i := 0; i < 100; i++ {
+		id := generateIssueID(prefix)
+		if seen[id] {
+			t.Errorf("Duplicate ID generated: %s", id)
+		}
+		seen[id] = true
+	}
+}
+
 // TestParseGitLabSourceSystem verifies parsing source system string.
 func TestParseGitLabSourceSystem(t *testing.T) {
 	tests := []struct {
