@@ -202,6 +202,10 @@ func detectPrefixFromJSONL(jsonlData []byte) string {
 // Hash-based comparison is git-proof (mtime comparison fails after git pull).
 // Uses collision detection to prevent silently overwriting local changes.
 // Defense-in-depth check to respect --no-auto-import flag.
+//
+// Thread-safety: Acquires a shared JSONL lock to prevent reading while another
+// process is writing. This fixes the race condition where auto-import could read
+// a partially-written JSONL file during export (SECURITY_AUDIT.md Issue #3).
 func autoImportIfNewer() {
 	// Defense-in-depth: always check noAutoImport flag directly
 	// This ensures auto-import is disabled even if caller forgot to check autoImportEnabled
@@ -220,6 +224,27 @@ func autoImportIfNewer() {
 
 	// Find JSONL path
 	jsonlPath := findJSONLPath()
+	if jsonlPath == "" {
+		debug.Logf("auto-import skipped, JSONL path not found")
+		return
+	}
+
+	beadsDir := filepath.Dir(jsonlPath)
+
+	// Acquire shared lock before reading JSONL to prevent reading during write
+	// This fixes the race condition where auto-import could read partially-written JSONL
+	lock := newJSONLLock(beadsDir)
+	locked, err := lock.TryAcquireShared()
+	if err != nil {
+		debug.Logf("auto-import skipped, failed to acquire shared lock: %v", err)
+		return
+	}
+	if !locked {
+		// Another process is writing - skip auto-import, will retry on next command
+		debug.Logf("auto-import skipped, JSONL lock held by another process (export in progress)")
+		return
+	}
+	defer func() { _ = lock.Release() }()
 
 	// Read JSONL file
 	jsonlData, err := os.ReadFile(jsonlPath)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -47,6 +48,10 @@ type ExportResult struct {
 	// IssueContentHashes maps issue IDs to their content hashes (GH#1278)
 	// Used to populate export_hashes table after successful export
 	IssueContentHashes map[string]string
+
+	// lock holds the JSONL lock that must be released after finalization
+	// This ensures the lock is held for the entire export+commit+finalize sequence
+	lock *JSONLLock
 }
 
 // finalizeExport updates SQLite metadata after a successful git commit.
@@ -54,9 +59,21 @@ type ExportResult struct {
 // only after the git commit succeeds. If git commit fails, the metadata
 // remains unchanged so the system knows the sync is incomplete.
 // See GH#885 for the atomicity gap this fixes.
+//
+// IMPORTANT: This also releases the JSONL lock that was acquired during export.
 func finalizeExport(ctx context.Context, result *ExportResult) {
 	if result == nil {
 		return
+	}
+
+	// Release the JSONL lock at the end of finalization
+	// This ensures lock is held for entire export+commit+finalize sequence
+	if result.lock != nil {
+		defer func() {
+			if err := result.lock.Release(); err != nil {
+				debug.Logf("warning: failed to release JSONL lock: %v", err)
+			}
+		}()
 	}
 
 	// Ensure store is initialized
@@ -129,6 +146,17 @@ func finalizeExport(ctx context.Context, result *ExportResult) {
 	}
 }
 
+// releaseExportLock releases the JSONL lock if the export result has one.
+// Call this if you need to abort an export without finalizing (e.g., git commit failed).
+func releaseExportLock(result *ExportResult) {
+	if result != nil && result.lock != nil {
+		if err := result.lock.Release(); err != nil {
+			debug.Logf("warning: failed to release JSONL lock: %v", err)
+		}
+		result.lock = nil
+	}
+}
+
 // exportToJSONL exports the database to JSONL format.
 // This is a convenience wrapper that exports and immediately finalizes.
 // For atomic sync operations, use exportToJSONLDeferred + finalizeExport.
@@ -153,6 +181,11 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 // SQLite metadata. The caller must call finalizeExport() after git commit succeeds.
 // This enables atomic sync where metadata is only updated after git commit.
 // See GH#885 for the atomicity gap this fixes.
+//
+// Thread-safety: Acquires an exclusive JSONL lock to prevent concurrent writes.
+// The lock is stored in the ExportResult and released by finalizeExport() or
+// releaseExportLock(). This fixes the critical race condition where sync export
+// and daemon auto-flush could write simultaneously (SECURITY_AUDIT.md Issue #1).
 //
 // In dolt-native mode, returns nil result - all sync happens via Dolt remotes.
 func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult, error) {
@@ -183,6 +216,22 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 	if err := ensureStoreActive(); err != nil {
 		return nil, fmt.Errorf("failed to initialize store: %w", err)
 	}
+
+	// Acquire exclusive JSONL lock before writing
+	// This prevents race condition with daemon auto-flush (SECURITY_AUDIT.md Issue #1)
+	beadsDir := filepath.Dir(jsonlPath)
+	lock := newJSONLLock(beadsDir)
+	if err := lock.AcquireExclusive(ctx); err != nil {
+		return nil, fmt.Errorf("failed to acquire JSONL lock for export: %w", err)
+	}
+
+	// If we fail after this point, ensure the lock is released
+	success := false
+	defer func() {
+		if !success {
+			_ = lock.Release()
+		}
+	}()
 
 	// Get all issues including tombstones for sync propagation (bd-rp4o fix)
 	// Tombstones must be exported so they propagate to other clones and prevent resurrection
@@ -297,12 +346,16 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 	contentHash, _ := computeJSONLHash(jsonlPath)
 	exportTime := time.Now().Format(time.RFC3339Nano)
 
+	// Mark success so lock is transferred to result instead of released
+	success = true
+
 	return &ExportResult{
 		JSONLPath:          jsonlPath,
 		ExportedIDs:        exportedIDs,
 		ContentHash:        contentHash,
 		ExportTime:         exportTime,
 		IssueContentHashes: issueContentHashes,
+		lock:               lock, // Transfer lock ownership to result
 	}, nil
 }
 
