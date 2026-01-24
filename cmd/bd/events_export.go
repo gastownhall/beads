@@ -36,6 +36,7 @@ func exportEventsToJSONL(ctx context.Context, store storage.Storage, eventsPath 
 
 	// Open file for appending (create if it doesn't exist)
 	// #nosec G304 - controlled path from config
+	// nolint:gosec // G302: JSONL needs to be readable by other tools
 	f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open events file: %w", err)
