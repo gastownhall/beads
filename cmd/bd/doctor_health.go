@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // runCheckHealth runs lightweight health checks for git hooks.
@@ -128,31 +129,34 @@ func runServerHealth(path string) {
 // printServerHealthResult prints the server health check results
 func printServerHealthResult(result doctor.ServerHealthResult) {
 	var passCount, warnCount, failCount int
+	var warnings []doctor.DoctorCheck
 
 	for _, check := range result.Checks {
 		var statusIcon string
 		switch check.Status {
 		case statusOK:
-			statusIcon = "✓"
+			statusIcon = ui.RenderPassIcon()
 			passCount++
 		case statusWarning:
-			statusIcon = "⚠"
+			statusIcon = ui.RenderWarnIcon()
 			warnCount++
+			warnings = append(warnings, check)
 		case statusError:
-			statusIcon = "✗"
+			statusIcon = ui.RenderFailIcon()
 			failCount++
+			warnings = append(warnings, check)
 		}
 
 		fmt.Printf("  %s  %s", statusIcon, check.Name)
 		if check.Message != "" {
-			fmt.Printf(" %s", check.Message)
+			fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
 		}
 		fmt.Println()
 
 		if check.Detail != "" {
 			// Indent detail lines
 			for _, line := range strings.Split(check.Detail, "\n") {
-				fmt.Printf("     └─ %s\n", line)
+				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(line))
 			}
 		}
 	}
@@ -160,27 +164,33 @@ func printServerHealthResult(result doctor.ServerHealthResult) {
 	fmt.Println()
 
 	// Summary line
-	fmt.Printf("─────────────────────────────────────────\n")
-	fmt.Printf("✓ %d passed  ⚠ %d warnings  ✗ %d failed\n", passCount, warnCount, failCount)
+	fmt.Println(ui.RenderSeparator())
+	summary := fmt.Sprintf("%s %d passed  %s %d warnings  %s %d failed",
+		ui.RenderPassIcon(), passCount,
+		ui.RenderWarnIcon(), warnCount,
+		ui.RenderFailIcon(), failCount,
+	)
+	fmt.Println(summary)
 
 	// Print fixes for any errors/warnings
-	var fixes []doctor.DoctorCheck
-	for _, check := range result.Checks {
-		if check.Fix != "" && (check.Status == statusError || check.Status == statusWarning) {
-			fixes = append(fixes, check)
-		}
-	}
-
-	if len(fixes) > 0 {
+	if len(warnings) > 0 {
 		fmt.Println()
-		fmt.Println("⚠  FIXES NEEDED")
-		for i, check := range fixes {
-			fmt.Printf("  %d. %s: %s\n", i+1, check.Name, check.Message)
-			fmt.Printf("     └─ %s\n", check.Fix)
+		fmt.Println(ui.RenderWarn(ui.IconWarn + "  FIXES NEEDED"))
+		for i, check := range warnings {
+			if check.Fix == "" {
+				continue
+			}
+			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+			if check.Status == statusError {
+				fmt.Printf("  %s  %s %s\n", ui.RenderFailIcon(), ui.RenderFail(fmt.Sprintf("%d.", i+1)), ui.RenderFail(line))
+			} else {
+				fmt.Printf("  %s  %s %s\n", ui.RenderWarnIcon(), ui.RenderWarn(fmt.Sprintf("%d.", i+1)), line)
+			}
+			fmt.Printf("        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.Fix)
 		}
 	} else if result.OverallOK {
 		fmt.Println()
-		fmt.Println("✓ All server health checks passed")
+		fmt.Printf("%s\n", ui.RenderPass("✓ All server health checks passed"))
 	}
 }
 
