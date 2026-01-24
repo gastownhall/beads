@@ -17,11 +17,6 @@ import (
 
 // TestDoPullFromGitLab_Success verifies pulling issues from GitLab creates beads issues.
 func TestDoPullFromGitLab_Success(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	// Mock GitLab API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -44,10 +39,11 @@ func TestDoPullFromGitLab_Success(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext() // Use SyncContext instead of globals
 
-	stats, err := doPullFromGitLab(ctx, client, config, false, "all", nil)
+	stats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, config, false, "all", nil)
 	if err != nil {
-		t.Fatalf("doPullFromGitLab() error = %v", err)
+		t.Fatalf("doPullFromGitLabWithContext() error = %v", err)
 	}
 
 	if stats.Created != 1 {
@@ -57,11 +53,6 @@ func TestDoPullFromGitLab_Success(t *testing.T) {
 
 // TestDoPullFromGitLab_DryRun verifies dry run mode doesn't create issues.
 func TestDoPullFromGitLab_DryRun(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		issues := []gitlab.Issue{
@@ -81,10 +72,11 @@ func TestDoPullFromGitLab_DryRun(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
-	stats, err := doPullFromGitLab(ctx, client, config, true, "all", nil)
+	stats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, config, true, "all", nil)
 	if err != nil {
-		t.Fatalf("doPullFromGitLab() error = %v", err)
+		t.Fatalf("doPullFromGitLabWithContext() error = %v", err)
 	}
 
 	// Dry run should report what would be created but not actually create
@@ -95,11 +87,6 @@ func TestDoPullFromGitLab_DryRun(t *testing.T) {
 
 // TestDoPullFromGitLab_SkipIssues verifies skipGitLabIIDs filters issues.
 func TestDoPullFromGitLab_SkipIssues(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		issues := []gitlab.Issue{
@@ -114,13 +101,14 @@ func TestDoPullFromGitLab_SkipIssues(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Skip issue IID 2
 	skipIIDs := map[int]bool{2: true}
 
-	stats, err := doPullFromGitLab(ctx, client, config, false, "all", skipIIDs)
+	stats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, config, false, "all", skipIIDs)
 	if err != nil {
-		t.Fatalf("doPullFromGitLab() error = %v", err)
+		t.Fatalf("doPullFromGitLabWithContext() error = %v", err)
 	}
 
 	if stats.Skipped != 1 {
@@ -130,11 +118,6 @@ func TestDoPullFromGitLab_SkipIssues(t *testing.T) {
 
 // TestDoPushToGitLab_CreateNew verifies pushing new issues to GitLab.
 func TestDoPushToGitLab_CreateNew(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	var createCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -159,6 +142,7 @@ func TestDoPushToGitLab_CreateNew(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Create a local issue without external ref (new issue)
 	localIssues := []*types.Issue{
@@ -172,9 +156,9 @@ func TestDoPushToGitLab_CreateNew(t *testing.T) {
 		},
 	}
 
-	stats, err := doPushToGitLab(ctx, client, config, localIssues, false, false, nil, nil)
+	stats, err := doPushToGitLabWithContext(ctx, syncCtx, client, config, localIssues, false, false, nil, nil)
 	if err != nil {
-		t.Fatalf("doPushToGitLab() error = %v", err)
+		t.Fatalf("doPushToGitLabWithContext() error = %v", err)
 	}
 
 	if !createCalled {
@@ -187,11 +171,6 @@ func TestDoPushToGitLab_CreateNew(t *testing.T) {
 
 // TestDoPushToGitLab_UpdateExisting verifies updating existing GitLab issues.
 func TestDoPushToGitLab_UpdateExisting(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	var updateCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
@@ -211,6 +190,7 @@ func TestDoPushToGitLab_UpdateExisting(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Create a local issue with external ref (existing issue)
 	webURL := "https://gitlab.example.com/-/issues/42"
@@ -227,9 +207,9 @@ func TestDoPushToGitLab_UpdateExisting(t *testing.T) {
 		},
 	}
 
-	stats, err := doPushToGitLab(ctx, client, config, localIssues, false, false, nil, nil)
+	stats, err := doPushToGitLabWithContext(ctx, syncCtx, client, config, localIssues, false, false, nil, nil)
 	if err != nil {
-		t.Fatalf("doPushToGitLab() error = %v", err)
+		t.Fatalf("doPushToGitLabWithContext() error = %v", err)
 	}
 
 	if !updateCalled {
@@ -242,11 +222,6 @@ func TestDoPushToGitLab_UpdateExisting(t *testing.T) {
 
 // TestDetectGitLabConflicts_NoConflicts verifies no conflicts detected when timestamps match.
 func TestDetectGitLabConflicts_NoConflicts(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	now := time.Now()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -266,6 +241,7 @@ func TestDetectGitLabConflicts_NoConflicts(t *testing.T) {
 
 	client := gitlab.NewClient("token", server.URL, "123")
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Local issue with same updated_at timestamp
 	webURL := "https://gitlab.example.com/-/issues/42"
@@ -279,23 +255,18 @@ func TestDetectGitLabConflicts_NoConflicts(t *testing.T) {
 		},
 	}
 
-	conflicts, err := detectGitLabConflicts(ctx, client, localIssues)
+	conflicts, err := detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
 	if err != nil {
-		t.Fatalf("detectGitLabConflicts() error = %v", err)
+		t.Fatalf("detectGitLabConflictsWithContext() error = %v", err)
 	}
 
 	if len(conflicts) != 0 {
-		t.Errorf("detectGitLabConflicts() returned %d conflicts, want 0", len(conflicts))
+		t.Errorf("detectGitLabConflictsWithContext() returned %d conflicts, want 0", len(conflicts))
 	}
 }
 
 // TestDetectGitLabConflicts_WithConflicts verifies conflicts detected when both sides updated.
 func TestDetectGitLabConflicts_WithConflicts(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	baseTime := time.Now().Add(-1 * time.Hour)
 	gitlabTime := time.Now().Add(-30 * time.Minute)
 	localTime := time.Now().Add(-15 * time.Minute)
@@ -318,6 +289,7 @@ func TestDetectGitLabConflicts_WithConflicts(t *testing.T) {
 
 	client := gitlab.NewClient("token", server.URL, "123")
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Local issue updated more recently than base but GitLab also updated
 	webURL := "https://gitlab.example.com/-/issues/42"
@@ -334,23 +306,18 @@ func TestDetectGitLabConflicts_WithConflicts(t *testing.T) {
 	// Set base time (simulating last sync)
 	_ = baseTime // Used for understanding, actual comparison is local vs gitlab
 
-	conflicts, err := detectGitLabConflicts(ctx, client, localIssues)
+	conflicts, err := detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
 	if err != nil {
-		t.Fatalf("detectGitLabConflicts() error = %v", err)
+		t.Fatalf("detectGitLabConflictsWithContext() error = %v", err)
 	}
 
 	if len(conflicts) != 1 {
-		t.Errorf("detectGitLabConflicts() returned %d conflicts, want 1", len(conflicts))
+		t.Errorf("detectGitLabConflictsWithContext() returned %d conflicts, want 1", len(conflicts))
 	}
 }
 
 // TestDoPushToGitLab_PathBasedProjectID verifies push works with path-based project IDs.
 func TestDoPushToGitLab_PathBasedProjectID(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	var updateCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
@@ -372,6 +339,7 @@ func TestDoPushToGitLab_PathBasedProjectID(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "group/project")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Local issue linked to numeric project ID 789 (same project, different representation)
 	webURL := "https://gitlab.example.com/group/project/-/issues/42"
@@ -388,9 +356,9 @@ func TestDoPushToGitLab_PathBasedProjectID(t *testing.T) {
 		},
 	}
 
-	stats, err := doPushToGitLab(ctx, client, config, localIssues, false, false, nil, nil)
+	stats, err := doPushToGitLabWithContext(ctx, syncCtx, client, config, localIssues, false, false, nil, nil)
 	if err != nil {
-		t.Fatalf("doPushToGitLab() error = %v", err)
+		t.Fatalf("doPushToGitLabWithContext() error = %v", err)
 	}
 
 	// Should update, not skip - the path "group/project" and numeric 789 are the same project
@@ -507,11 +475,6 @@ func TestGetConflictStrategy(t *testing.T) {
 
 // TestResolveConflicts_PreferLocal verifies --prefer-local always uses local version.
 func TestResolveConflicts_PreferLocal(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	localTime := time.Now().Add(-1 * time.Hour) // Local is OLDER
 	gitlabTime := time.Now()                     // GitLab is newer
 
@@ -525,6 +488,7 @@ func TestResolveConflicts_PreferLocal(t *testing.T) {
 
 	client := gitlab.NewClient("token", server.URL, "123")
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	conflicts := []gitlab.Conflict{
 		{
@@ -537,9 +501,9 @@ func TestResolveConflicts_PreferLocal(t *testing.T) {
 	}
 
 	// Should NOT fetch from GitLab when preferring local
-	err := resolveGitLabConflicts(ctx, client, nil, conflicts, ConflictStrategyPreferLocal)
+	err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, nil, conflicts, ConflictStrategyPreferLocal)
 	if err != nil {
-		t.Fatalf("resolveGitLabConflicts() error = %v", err)
+		t.Fatalf("resolveGitLabConflictsWithContext() error = %v", err)
 	}
 
 	if fetchCalled {
@@ -549,11 +513,6 @@ func TestResolveConflicts_PreferLocal(t *testing.T) {
 
 // TestResolveConflicts_PreferGitLab verifies --prefer-gitlab always fetches from GitLab.
 func TestResolveConflicts_PreferGitLab(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	localTime := time.Now()                       // Local is newer
 	gitlabTime := time.Now().Add(-1 * time.Hour) // GitLab is OLDER
 
@@ -577,6 +536,7 @@ func TestResolveConflicts_PreferGitLab(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	conflicts := []gitlab.Conflict{
 		{
@@ -589,9 +549,9 @@ func TestResolveConflicts_PreferGitLab(t *testing.T) {
 	}
 
 	// Should fetch from GitLab even though local is newer
-	err := resolveGitLabConflicts(ctx, client, config, conflicts, ConflictStrategyPreferGitLab)
+	err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, config, conflicts, ConflictStrategyPreferGitLab)
 	if err != nil {
-		t.Fatalf("resolveGitLabConflicts() error = %v", err)
+		t.Fatalf("resolveGitLabConflictsWithContext() error = %v", err)
 	}
 
 	if !fetchCalled {
@@ -601,11 +561,6 @@ func TestResolveConflicts_PreferGitLab(t *testing.T) {
 
 // TestResolveConflicts_PreferNewer verifies default behavior uses timestamps.
 func TestResolveConflicts_PreferNewer(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	localTime := time.Now().Add(-1 * time.Hour) // Local is older
 	gitlabTime := time.Now()                     // GitLab is newer
 
@@ -628,6 +583,7 @@ func TestResolveConflicts_PreferNewer(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	conflicts := []gitlab.Conflict{
 		{
@@ -640,9 +596,9 @@ func TestResolveConflicts_PreferNewer(t *testing.T) {
 	}
 
 	// GitLab is newer, so should fetch from GitLab
-	err := resolveGitLabConflicts(ctx, client, config, conflicts, ConflictStrategyPreferNewer)
+	err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, config, conflicts, ConflictStrategyPreferNewer)
 	if err != nil {
-		t.Fatalf("resolveGitLabConflicts() error = %v", err)
+		t.Fatalf("resolveGitLabConflictsWithContext() error = %v", err)
 	}
 
 	if !fetchCalled {
@@ -662,11 +618,6 @@ func TestResolveConflicts_PreferNewer(t *testing.T) {
 // BUG: The current implementation does: Pull -> Push -> Detect conflicts (WRONG)
 // FIX: Should be: Pull -> Detect conflicts -> Push (skip conflicting issues)
 func TestP0_ConflictDetectionBeforePush(t *testing.T) {
-	// Save and restore global store
-	oldStore := store
-	store = nil
-	defer func() { store = oldStore }()
-
 	localTime := time.Now()
 	gitlabTime := time.Now().Add(-30 * time.Minute)
 
@@ -718,6 +669,7 @@ func TestP0_ConflictDetectionBeforePush(t *testing.T) {
 	client := gitlab.NewClient("token", server.URL, "123")
 	config := gitlab.DefaultMappingConfig()
 	ctx := context.Background()
+	syncCtx := NewSyncContext()
 
 	// Local issues - issue 42 is in conflict (local modified), issue 43 is safe
 	webURL42 := "https://gitlab.example.com/-/issues/42"
@@ -740,9 +692,9 @@ func TestP0_ConflictDetectionBeforePush(t *testing.T) {
 	}
 
 	// Detect conflicts BEFORE push
-	conflicts, err := detectGitLabConflicts(ctx, client, localIssues)
+	conflicts, err := detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
 	if err != nil {
-		t.Fatalf("detectGitLabConflicts() error = %v", err)
+		t.Fatalf("detectGitLabConflictsWithContext() error = %v", err)
 	}
 
 	// Should detect conflict for issue 42 (timestamps differ)
@@ -760,9 +712,9 @@ func TestP0_ConflictDetectionBeforePush(t *testing.T) {
 	}
 
 	// Push should skip conflicting issues
-	stats, err := doPushToGitLab(ctx, client, config, localIssues, false, false, nil, skipUpdateIDs)
+	stats, err := doPushToGitLabWithContext(ctx, syncCtx, client, config, localIssues, false, false, nil, skipUpdateIDs)
 	if err != nil {
-		t.Fatalf("doPushToGitLab() error = %v", err)
+		t.Fatalf("doPushToGitLabWithContext() error = %v", err)
 	}
 
 	// Issue 42 should be skipped, only issue 43 should be pushed

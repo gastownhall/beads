@@ -259,6 +259,7 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 }
 
 // runGitLabSync implements the gitlab sync command.
+// Uses SyncContext for thread-safe operations instead of global variables.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
 	config := getGitLabConfig()
 	if err := validateGitLabConfig(config); err != nil {
@@ -288,6 +289,12 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	mappingConfig := gitlab.DefaultMappingConfig()
 
+	// Create SyncContext from globals for thread-safe operations
+	syncCtx := NewSyncContext()
+	syncCtx.SetStore(store)
+	syncCtx.SetActor(actor)
+	syncCtx.SetDBPath(dbPath)
+
 	if gitlabSyncDryRun {
 		fmt.Fprintln(out, "Dry run mode - no changes will be made")
 		fmt.Fprintln(out)
@@ -307,7 +314,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(out, "→ Pulling issues from GitLab...")
 		}
 
-		pullStats, err := doPullFromGitLab(ctx, client, mappingConfig, gitlabSyncDryRun, "all", nil)
+		pullStats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, mappingConfig, gitlabSyncDryRun, "all", nil)
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
@@ -326,36 +333,54 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// P0 FIX: Detect conflicts BEFORE push to prevent data loss.
-	// If we push first and then detect conflicts, conflicting local changes
-	// overwrite GitLab changes before we even know there's a conflict.
-	// Correct order: Pull -> Detect conflicts -> Push (skip conflicting issues)
+	// Detect conflicts BEFORE push to prevent data loss.
+	// Conflict handling depends on strategy:
+	// - prefer-local: force push conflicting issues (local wins)
+	// - prefer-gitlab: skip conflicting issues, then update local from GitLab
+	// - prefer-newer: compare timestamps, force push if local newer, else skip
 	var conflicts []gitlab.Conflict
 	skipUpdateIDs := make(map[string]bool)
+	forceUpdateIDs := make(map[string]bool)
 
 	if pull && push && !gitlabSyncDryRun {
 		var localIssues []*types.Issue
-		if store != nil {
+		if syncCtx.Store() != nil {
 			var err error
-			localIssues, err = store.SearchIssues(ctx, "", types.IssueFilter{})
+			localIssues, err = syncCtx.Store().SearchIssues(ctx, "", types.IssueFilter{})
 			if err != nil {
 				fmt.Fprintf(out, "Warning: failed to get local issues for conflict detection: %v\n", err)
 			} else {
-				conflicts, err = detectGitLabConflicts(ctx, client, localIssues)
+				conflicts, err = detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
 				if err != nil {
 					fmt.Fprintf(out, "Warning: failed to detect conflicts: %v\n", err)
 				} else if len(conflicts) > 0 {
-					// Build skipUpdateIDs from conflicts to prevent pushing conflicting issues
+					// Handle conflicts based on strategy
 					for _, c := range conflicts {
-						skipUpdateIDs[c.IssueID] = true
+						switch conflictStrategy {
+						case ConflictStrategyPreferLocal:
+							// Local wins: force push to GitLab
+							forceUpdateIDs[c.IssueID] = true
+						case ConflictStrategyPreferGitLab:
+							// GitLab wins: skip push, will update local in resolution
+							skipUpdateIDs[c.IssueID] = true
+						case ConflictStrategyPreferNewer:
+							// Use newer version
+							if c.LocalUpdated.After(c.GitLabUpdated) {
+								// Local is newer: force push
+								forceUpdateIDs[c.IssueID] = true
+							} else {
+								// GitLab is newer: skip push, will update local
+								skipUpdateIDs[c.IssueID] = true
+							}
+						}
 					}
-					fmt.Fprintf(out, "→ Detected %d conflicts (will skip pushing conflicting issues)\n", len(conflicts))
+					fmt.Fprintf(out, "→ Detected %d conflicts (strategy: %s)\n", len(conflicts), conflictStrategy)
 				}
 			}
 		}
 	}
 
-	// Push to GitLab (now with skipUpdateIDs for conflicts)
+	// Push to GitLab
 	if push {
 		if gitlabSyncDryRun {
 			fmt.Fprintln(out, "→ [DRY RUN] Would push issues to GitLab")
@@ -365,16 +390,16 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 
 		// Get local issues to push
 		var localIssues []*types.Issue
-		if store != nil {
+		if syncCtx.Store() != nil {
 			var err error
-			localIssues, err = store.SearchIssues(ctx, "", types.IssueFilter{})
+			localIssues, err = syncCtx.Store().SearchIssues(ctx, "", types.IssueFilter{})
 			if err != nil {
 				return fmt.Errorf("failed to get local issues: %w", err)
 			}
 		}
 
-		// Pass skipUpdateIDs to avoid pushing conflicting issues
-		pushStats, err := doPushToGitLab(ctx, client, mappingConfig, localIssues, gitlabSyncDryRun, false, nil, skipUpdateIDs)
+		// Pass both forceUpdateIDs (for prefer-local) and skipUpdateIDs (for prefer-gitlab)
+		pushStats, err := doPushToGitLabWithContext(ctx, syncCtx, client, mappingConfig, localIssues, gitlabSyncDryRun, false, forceUpdateIDs, skipUpdateIDs)
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
@@ -393,13 +418,22 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve conflicts after push (conflicts were detected before push)
-	if len(conflicts) > 0 && !gitlabSyncDryRun {
-		fmt.Fprintf(out, "→ Resolving %d conflicts (strategy: %s)...\n", len(conflicts), conflictStrategy)
-		if err := resolveGitLabConflicts(ctx, client, mappingConfig, conflicts, conflictStrategy); err != nil {
+	// Resolve conflicts: update local from GitLab for issues where GitLab won
+	// (prefer-gitlab always, prefer-newer when GitLab was newer)
+	// For prefer-local, conflicts were force-pushed so no local update needed.
+	if len(skipUpdateIDs) > 0 && !gitlabSyncDryRun {
+		fmt.Fprintf(out, "→ Updating %d local issues from GitLab...\n", len(skipUpdateIDs))
+		// Filter conflicts to only those where GitLab version should be applied locally
+		var conflictsToResolve []gitlab.Conflict
+		for _, c := range conflicts {
+			if skipUpdateIDs[c.IssueID] {
+				conflictsToResolve = append(conflictsToResolve, c)
+			}
+		}
+		if err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, mappingConfig, conflictsToResolve, conflictStrategy); err != nil {
 			fmt.Fprintf(out, "Warning: failed to resolve some conflicts: %v\n", err)
 		} else {
-			fmt.Fprintf(out, "✓ Resolved %d conflicts\n", len(conflicts))
+			fmt.Fprintf(out, "✓ Updated %d local issues\n", len(conflictsToResolve))
 		}
 		result.Stats.Conflicts = len(conflicts)
 	}
