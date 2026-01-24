@@ -1440,6 +1440,7 @@ func (m *MemoryStorage) GetEvents(ctx context.Context, issueID string, limit int
 	return events, nil
 }
 
+// GetAllEventsSince returns all events with ID greater than sinceID, ordered by ID ascending.
 func (m *MemoryStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
