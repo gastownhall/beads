@@ -1189,10 +1189,12 @@ var listCmd = &cobra.Command{
 			}
 			labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 			depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+			allDeps, _ := store.GetAllDependencyRecords(ctx)
 
-			// Populate labels for JSON output
+			// Populate labels and dependencies for JSON output
 			for _, issue := range issues {
 				issue.Labels = labelsMap[issue.ID]
+				issue.Dependencies = allDeps[issue.ID]
 			}
 
 			// Build response with counts
