@@ -63,6 +63,7 @@ Run 'bd daemon --help' to see all subcommands.`,
 		foreground, _ := cmd.Flags().GetBool("foreground")
 		logLevel, _ := cmd.Flags().GetString("log-level")
 		logJSON, _ := cmd.Flags().GetBool("log-json")
+		federation, _ := cmd.Flags().GetBool("federation")
 
 		// If no operation flags provided, show help
 		if !start && !stop && !stopAll && !status && !health && !metrics {
@@ -139,6 +140,15 @@ Run 'bd daemon --help' to see all subcommands.`,
 			fmt.Fprintf(os.Stderr, "Error: --start flag is required to start the daemon\n")
 			fmt.Fprintf(os.Stderr, "Run 'bd daemon --help' to see available options\n")
 			os.Exit(1)
+		}
+
+		// Guard: refuse to start daemon with Dolt backend (unless --federation)
+		// This matches guardDaemonStartForDolt which guards the 'bd daemon start' subcommand.
+		if !federation {
+			if err := guardDaemonStartForDolt(cmd, args); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		// Skip daemon-running check if we're the forked child (BD_DAEMON_FOREGROUND=1)
@@ -237,7 +247,6 @@ Run 'bd daemon --help' to see all subcommands.`,
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		federation, _ := cmd.Flags().GetBool("federation")
 		federationPort, _ := cmd.Flags().GetInt("federation-port")
 		remotesapiPort, _ := cmd.Flags().GetInt("remotesapi-port")
 		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
