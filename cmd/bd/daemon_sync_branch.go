@@ -31,7 +31,12 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 	if !hasGitRemote(ctx) {
 		return true, nil // Skip sync branch commit/push in local-only mode
 	}
-	
+
+	// Guard: Skip if sync-branch == current-branch (GH#1258)
+	if shouldSkipDueToSameBranch(ctx, store, "sync-branch commit", log) {
+		return false, nil
+	}
+
 	// Get sync branch configuration (supports BEADS_SYNC_BRANCH override)
 	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {
@@ -252,7 +257,12 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	if !hasGitRemote(ctx) {
 		return true, nil // Skip sync branch pull in local-only mode
 	}
-	
+
+	// Guard: Skip if sync-branch == current-branch (GH#1258)
+	if shouldSkipDueToSameBranch(ctx, store, "sync-branch pull", log) {
+		return false, nil
+	}
+
 	// Get sync branch configuration (supports BEADS_SYNC_BRANCH override)
 	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {

@@ -529,6 +529,13 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		log.Warn("repository mismatch ignored (BEADS_IGNORE_REPO_MISMATCH=1)")
 	}
 
+	// GH#1258: Warn at startup if sync-branch == current-branch (misconfiguration)
+	// This is a one-time warning - per-operation skipping is handled by shouldSkipDueToSameBranch()
+	// Skip check in local mode (no sync-branch is used)
+	if !localMode {
+		warnIfSyncBranchMisconfigured(ctx, store, log)
+	}
+
 	// Validate schema version matches daemon version
 	versionCtx := context.Background()
 	dbVersion, err := store.GetMetadata(versionCtx, "bd_version")
