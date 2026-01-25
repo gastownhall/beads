@@ -91,7 +91,7 @@ NEXT: Implement rate limiting"
 
 ## Requirements
 
-- [bd CLI](https://github.com/steveyegge/beads) installed (`brew install steveyegge/beads/bd`)
+- [bd CLI](https://github.com/steveyegge/beads) installed (`brew install beads`)
 - A git repository (bd requires git for sync)
 - Initialized database (`bd init` in project root)
 

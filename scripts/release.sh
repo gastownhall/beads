@@ -24,11 +24,10 @@ This script performs the complete release workflow:
   1. Kill running daemons
   2. Run tests and linting
   3. Bump version in all files
-  4. Commit and push version bump
-  5. Create and push git tag
-  6. Update Homebrew formula
+  4. Rebuild local binary
+  5. Push version bump to GitHub
+  6. Create and push git tag
   7. Upgrade local brew installation
-  8. Verify everything is working
 
 Examples:
   $0 0.9.3          # Full release
@@ -75,7 +74,7 @@ echo -e "${BLUE}╔════════════════════�
 echo ""
 
 # Step 1: Kill daemons
-echo -e "${YELLOW}Step 1/8: Killing running daemons...${NC}"
+echo -e "${YELLOW}Step 1/7: Killing running daemons...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: pkill -f 'bd.*daemon'"
 else
@@ -90,7 +89,7 @@ fi
 echo -e "${GREEN}✓ All daemons stopped${NC}\n"
 
 # Step 2: Run tests
-echo -e "${YELLOW}Step 2/8: Running tests and linting...${NC}"
+echo -e "${YELLOW}Step 2/7: Running tests and linting...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: TMPDIR=/tmp go test ./..."
     echo "[DRY RUN] Would run: golangci-lint run ./..."
@@ -106,7 +105,7 @@ fi
 echo -e "${GREEN}✓ Tests passed${NC}\n"
 
 # Step 3: Bump version
-echo -e "${YELLOW}Step 3/8: Bumping version to ${VERSION}...${NC}"
+echo -e "${YELLOW}Step 3/7: Bumping version to ${VERSION}...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: $SCRIPT_DIR/bump-version.sh $VERSION --commit"
     $SCRIPT_DIR/bump-version.sh "$VERSION" 2>/dev/null || true
@@ -119,7 +118,7 @@ fi
 echo -e "${GREEN}✓ Version bumped and committed${NC}\n"
 
 # Step 4: Rebuild local binary
-echo -e "${YELLOW}Step 4/8: Rebuilding local binary...${NC}"
+echo -e "${YELLOW}Step 4/7: Rebuilding local binary...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: go build -o bd ./cmd/bd"
 else
@@ -133,7 +132,7 @@ fi
 echo -e "${GREEN}✓ Binary rebuilt${NC}\n"
 
 # Step 5: Push version bump
-echo -e "${YELLOW}Step 5/8: Pushing version bump to GitHub...${NC}"
+echo -e "${YELLOW}Step 5/7: Pushing version bump to GitHub...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: git push origin main"
 else
@@ -145,7 +144,7 @@ fi
 echo -e "${GREEN}✓ Version bump pushed${NC}\n"
 
 # Step 6: Create and push tag
-echo -e "${YELLOW}Step 6/8: Creating and pushing git tag v${VERSION}...${NC}"
+echo -e "${YELLOW}Step 6/7: Creating and pushing git tag v${VERSION}...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: git tag v${VERSION}"
     echo "[DRY RUN] Would run: git push origin v${VERSION}"
@@ -155,7 +154,7 @@ else
     else
         git tag "v${VERSION}"
     fi
-    
+
     if ! git push origin "v${VERSION}"; then
         echo -e "${RED}✗ Tag push failed${NC}"
         exit 1
@@ -163,35 +162,20 @@ else
 fi
 echo -e "${GREEN}✓ Tag v${VERSION} pushed${NC}\n"
 
-# Note: update-homebrew.sh now handles waiting for GitHub Actions (~5 minutes)
-# No need to wait here anymore
-
-# Step 7: Update Homebrew formula
-echo -e "${YELLOW}Step 7/8: Updating Homebrew formula...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo "[DRY RUN] Would run: $SCRIPT_DIR/update-homebrew.sh ${VERSION}"
-else
-    if ! $SCRIPT_DIR/update-homebrew.sh "$VERSION"; then
-        echo -e "${RED}✗ Homebrew update failed${NC}"
-        exit 1
-    fi
-fi
-echo -e "${GREEN}✓ Homebrew formula updated${NC}\n"
-
-# Step 8: Upgrade local installation
-echo -e "${YELLOW}Step 8/8: Upgrading local Homebrew installation...${NC}"
+# Step 7: Upgrade local installation
+echo -e "${YELLOW}Step 7/7: Upgrading local Homebrew installation...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would run: brew update"
-    echo "[DRY RUN] Would run: brew upgrade bd"
+    echo "[DRY RUN] Would run: brew upgrade beads"
 else
     brew update
-    
-    # Check if bd is installed via brew
-    if brew list bd >/dev/null 2>&1; then
-        brew upgrade bd || brew reinstall bd
+
+    # Check if beads is installed via brew
+    if brew list beads >/dev/null 2>&1; then
+        brew upgrade beads || brew reinstall beads
     else
         echo -e "${YELLOW}⚠ bd not installed via Homebrew, skipping upgrade${NC}"
-        echo "To install: brew install steveyegge/beads/bd"
+        echo "To install: brew install beads"
     fi
 fi
 echo -e "${GREEN}✓ Local installation upgraded${NC}\n"

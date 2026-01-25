@@ -33,8 +33,7 @@ Beads has several components - here's what they are and when you need them:
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Why Homebrew?**
@@ -75,8 +74,7 @@ The installer will:
 
 **Via Homebrew** (recommended):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Via go install**:
@@ -96,8 +94,7 @@ sudo mv bd /usr/local/bin/
 
 **Via Homebrew** (works on Linux too):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Arch Linux** (AUR):
@@ -179,7 +176,7 @@ bd version
 
 ```bash
 # 1. Install bd CLI (see Quick Install above)
-brew install bd
+brew install beads
 
 # 2. Initialize in your project
 cd your-project

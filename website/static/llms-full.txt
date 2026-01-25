@@ -27,8 +27,7 @@ Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents.
 
 ```bash
 # Install via Homebrew (macOS/Linux)
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 
 # Or quick install (macOS/Linux/FreeBSD)
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
@@ -263,8 +262,7 @@ Complete installation guide for all platforms.
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Why Homebrew?**
@@ -291,8 +289,7 @@ The installer will:
 
 **Via Homebrew** (recommended):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Via go install**:
@@ -312,8 +309,7 @@ sudo mv bd /usr/local/bin/
 
 **Via Homebrew** (works on Linux too):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Arch Linux** (AUR):

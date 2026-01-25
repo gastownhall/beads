@@ -173,23 +173,3 @@ jobs:
           end
           EOF
 
-      - name: Push to homebrew-beads
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping Homebrew update"
-            echo "To enable automatic Homebrew updates:"
-            echo "1. Create a Personal Access Token with 'repo' scope"
-            echo "2. Add it as HOMEBREW_TAP_TOKEN in repository secrets"
-            exit 0
-          fi
-
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/steveyegge/homebrew-beads.git" tap
-          cp Formula/bd.rb tap/Formula/bd.rb
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/bd.rb
-          git commit -m "Update bd to ${{ steps.release.outputs.version }}"
-          git push

@@ -7,7 +7,7 @@
 
 Install:
 ```bash
-brew tap steveyegge/beads && brew install bd
+brew install beads
 ```
 
 Initialize:

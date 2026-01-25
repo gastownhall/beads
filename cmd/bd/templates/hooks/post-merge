@@ -16,7 +16,7 @@
 # Check if bd is available
 if ! command -v bd >/dev/null 2>&1; then
     echo "Warning: bd command not found in PATH, skipping post-merge hook" >&2
-    echo "  Install bd: brew install steveyegge/tap/bd" >&2
+    echo "  Install bd: brew install beads" >&2
     echo "  Or add bd to your PATH" >&2
     exit 0
 fi

@@ -324,7 +324,7 @@ func CheckBdInPath() DoctorCheck {
 			Message: "'bd' command not found in PATH",
 			Detail:  "Claude hooks execute 'bd prime' and won't work without bd in PATH",
 			Fix: "Install bd globally:\n" +
-				"  • Homebrew: brew install steveyegge/tap/bd\n" +
+				"  • Homebrew: brew install beads\n" +
 				"  • Script: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash\n" +
 				"  • Or add bd to your PATH",
 		}

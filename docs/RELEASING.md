@@ -131,77 +131,17 @@ TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-... uv tool run twine upload dist/*
 
 See [integrations/beads-mcp/PYPI.md](../integrations/beads-mcp/PYPI.md) for detailed PyPI instructions.
 
-### 3. Update Homebrew Formula
+### 3. Verify Homebrew Update
 
-**CRITICAL**: This step must be done AFTER GitHub Actions completes the release build (~5 minutes after pushing the tag).
+The Homebrew formula is now in homebrew-core and updates automatically via GitHub Release artifacts.
 
-**Why the wait?** The Homebrew formula uses GoReleaser artifacts (platform-specific binaries), not the source tarball. These are built by GitHub Actions.
-
-**Step 1: Wait for GitHub Actions to complete**
-
-Monitor the release workflow at: https://github.com/steveyegge/beads/actions
-
-Once complete, the release appears at: https://github.com/steveyegge/beads/releases/tag/v0.9.X
-
-**Step 2: Get SHA256s from release artifacts**
-
-GoReleaser creates a `checksums.txt` file with all artifact hashes:
-
-```bash
-# Download checksums file
-curl -sL https://github.com/steveyegge/beads/releases/download/v0.9.X/checksums.txt
-
-# Extract the SHA256s you need:
-# - beads_0.9.X_darwin_arm64.tar.gz (macOS Apple Silicon)
-# - beads_0.9.X_darwin_amd64.tar.gz (macOS Intel)
-# - beads_0.9.X_linux_amd64.tar.gz (Linux x86_64)
-# - beads_0.9.X_linux_arm64.tar.gz (Linux ARM64)
-```
-
-**Step 3: Update the formula**
-
-```bash
-# Navigate to tap repo (if already cloned) or clone it
-cd /tmp/homebrew-beads || git clone https://github.com/steveyegge/homebrew-beads /tmp/homebrew-beads
-
-# Pull latest changes
-cd /tmp/homebrew-beads
-git pull
-
-# Edit Formula/bd.rb - update:
-# 1. version "0.9.X" (line 4)
-# 2. SHA256 for darwin_arm64 (line 10)
-# 3. SHA256 for darwin_amd64 (line 13)
-# 4. SHA256 for linux_amd64 (line 23)
-# 5. SHA256 for linux_arm64 (line 20) - optional, often empty
-
-# Example:
-# version "0.23.0"
-# on_macos do
-#   if Hardware::CPU.arm?
-#     url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_arm64.tar.gz"
-#     sha256 "abc123..."
-#   else
-#     url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_amd64.tar.gz"
-#     sha256 "def456..."
-
-# Commit and push
-git add Formula/bd.rb
-git commit -m "Update bd formula to v0.9.X"
-git push origin main
-```
-
-**Step 4: CRITICAL - Verify the installation works**
+**Verify the installation works:**
 
 ```bash
 brew update
-brew upgrade bd  # Or: brew reinstall bd
-bd version  # MUST show v0.9.X - if not, the release is incomplete!
+brew upgrade beads  # Or: brew install beads
+bd version  # Should show v0.9.X
 ```
-
-**⚠️ DO NOT SKIP THE VERIFICATION STEP ABOVE** - This ensures users can actually install the new version.
-
-**Note**: Until this step is complete, users with Homebrew-installed bd will still have the old version.
 
 **Note:** If you have an old bd binary from `go install` in your PATH, remove it to avoid conflicts:
 ```bash

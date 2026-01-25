@@ -13,8 +13,7 @@ Complete installation guide for all platforms.
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Why Homebrew?**
@@ -41,8 +40,7 @@ The installer will:
 
 **Via Homebrew** (recommended):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Via go install**:
@@ -62,8 +60,7 @@ sudo mv bd /usr/local/bin/
 
 **Via Homebrew** (works on Linux too):
 ```bash
-brew tap steveyegge/beads
-brew install bd
+brew install beads
 ```
 
 **Arch Linux** (AUR):
@@ -117,7 +114,7 @@ The recommended approach for Claude Code, Cursor, Windsurf, and other editors wi
 
 ```bash
 # 1. Install bd CLI (see Quick Install above)
-brew install bd
+brew install beads
 
 # 2. Initialize in your project
 cd your-project

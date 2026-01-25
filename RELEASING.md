@@ -38,7 +38,6 @@ A beads release involves multiple distribution channels:
 ### Required Access
 
 - GitHub: Write access to repository and ability to create releases
-- Homebrew: Write access to steveyegge/homebrew-beads
 - PyPI: Maintainer access to `beads-mcp` package
 - npm: Member of `@beads` organization
 
@@ -231,46 +230,18 @@ gh release create v0.22.0 \
 
 ## 3. Homebrew Update
 
-Homebrew formula is in a separate tap repository.
-
-### Automatic Update (If Configured)
-
-If you have goreleaser configured with Homebrew:
-
-```bash
-# Already done by goreleaser
-# Check Formula/bd.rb was updated automatically
-```
-
-### Manual Update
-
-```bash
-# Clone tap repository
-git clone https://github.com/steveyegge/homebrew-beads.git
-cd homebrew-beads
-
-# Update formula
-# 1. Update version number
-# 2. Update SHA256 checksums for macOS binaries
-
-# Test formula
-brew install --build-from-source ./Formula/bd.rb
-bd version  # Should show 0.22.0
-
-# Commit and push
-git add Formula/bd.rb
-git commit -m "Update bd to 0.22.0"
-git push
-```
+Homebrew formula is now in homebrew-core. Updates are handled automatically via GitHub Release artifacts.
 
 ### Verify Homebrew
 
+After the GitHub Release is published, verify the Homebrew package:
+
 ```bash
-# Update tap
+# Update Homebrew
 brew update
 
-# Install new version
-brew upgrade bd
+# Install/upgrade
+brew upgrade beads  # or: brew install beads
 
 # Verify
 bd version  # Should show 0.22.0
@@ -519,21 +490,13 @@ gh release edit v0.22.0 --prerelease
 
 Follow hotfix procedure above to release 0.22.1.
 
-### 3. Revert Homebrew (If Needed)
-
-```bash
-cd homebrew-beads
-git revert HEAD
-git push
-```
-
-### 4. Deprecate npm Package (If Needed)
+### 3. Deprecate npm Package (If Needed)
 
 ```bash
 npm deprecate @beads/bd@0.22.0 "Critical bug, please upgrade to 0.22.1"
 ```
 
-### 5. Yank PyPI Release (If Needed)
+### 4. Yank PyPI Release (If Needed)
 
 ```bash
 # Can't delete, but can yank (hide from pip install)
