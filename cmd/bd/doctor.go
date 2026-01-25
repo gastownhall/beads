@@ -281,6 +281,13 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
+	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, doltHooksCheck)
+	if doltHooksCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// If no .beads/, skip remaining checks
 	if installCheck.Status != statusOK {
 		return result

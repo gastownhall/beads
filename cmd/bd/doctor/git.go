@@ -13,6 +13,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -757,6 +758,74 @@ func CheckSyncBranchHealth(path string) DoctorCheck {
 		Name:    "Sync Branch Health",
 		Status:  StatusOK,
 		Message: "OK",
+	}
+}
+
+// CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.
+// Hooks installed before Dolt support was added don't have the backend check and will
+// fail with confusing errors on git pull/commit.
+func CheckGitHooksDoltCompatibility(path string) DoctorCheck {
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Only relevant for Dolt backend
+	if backend != configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Git Hooks Dolt Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (not using Dolt backend)",
+		}
+	}
+
+	// Check if we're in a git repository
+	hooksDir, err := git.GetGitHooksDir()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Git Hooks Dolt Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	// Check post-merge hook (most likely to cause issues with Dolt)
+	postMergePath := filepath.Join(hooksDir, "post-merge")
+	content, err := os.ReadFile(postMergePath)
+	if err != nil {
+		// No hook installed - that's fine
+		return DoctorCheck{
+			Name:    "Git Hooks Dolt Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (no post-merge hook installed)",
+		}
+	}
+
+	contentStr := string(content)
+
+	// Check if it's a bd hook
+	if !strings.Contains(contentStr, bdInlineHookMarker) && !strings.Contains(contentStr, "bd") {
+		return DoctorCheck{
+			Name:    "Git Hooks Dolt Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (not a bd hook)",
+		}
+	}
+
+	// Check if it has the Dolt backend skip logic
+	if strings.Contains(contentStr, `"backend"`) && strings.Contains(contentStr, `"dolt"`) {
+		return DoctorCheck{
+			Name:    "Git Hooks Dolt Compatibility",
+			Status:  StatusOK,
+			Message: "Hooks have Dolt backend check",
+		}
+	}
+
+	// Hook exists but lacks Dolt check - this will cause errors
+	_ = beadsDir // silence unused warning
+	return DoctorCheck{
+		Name:    "Git Hooks Dolt Compatibility",
+		Status:  StatusError,
+		Message: "Git hooks incompatible with Dolt backend",
+		Detail:  "Installed hooks attempt JSONL sync which fails with Dolt. This causes errors on git pull/commit.",
+		Fix:     "Run 'bd hooks install --force' to update hooks for Dolt compatibility",
 	}
 }
 

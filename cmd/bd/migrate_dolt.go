@@ -146,8 +146,42 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 
 	printSuccess("Updated metadata.json to use Dolt backend")
 
+	// Check if git hooks need updating for Dolt compatibility
+	if hooksNeedDoltUpdate(beadsDir) {
+		printWarning("Git hooks need updating for Dolt backend")
+		if !jsonOutput {
+			fmt.Println("  The pre-commit and post-merge hooks use JSONL sync which doesn't apply to Dolt.")
+			fmt.Println("  Run 'bd hooks install --force' to update them.")
+		}
+	}
+
 	// Final status
 	printFinalStatus("dolt", imported, skipped, backupPath, doltPath, sqlitePath, true)
+}
+
+// hooksNeedDoltUpdate checks if installed git hooks lack the Dolt backend skip logic.
+func hooksNeedDoltUpdate(beadsDir string) bool {
+	// Find git hooks directory
+	repoRoot := filepath.Dir(beadsDir)
+	hooksDir := filepath.Join(repoRoot, ".git", "hooks")
+
+	// Check post-merge hook (most likely to cause issues)
+	postMergePath := filepath.Join(hooksDir, "post-merge")
+	content, err := os.ReadFile(postMergePath)
+	if err != nil {
+		return false // No hook installed
+	}
+
+	// Check if it's a bd hook and lacks the Dolt skip logic
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "bd") {
+		return false // Not a bd hook
+	}
+	if strings.Contains(contentStr, `"backend"`) && strings.Contains(contentStr, `"dolt"`) {
+		return false // Already has Dolt check
+	}
+
+	return true // bd hook without Dolt check
 }
 
 // handleToSQLiteMigration migrates from Dolt to SQLite backend (escape hatch).
