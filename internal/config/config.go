@@ -721,3 +721,30 @@ func GetCustomTypesFromYAML() []string {
 	}
 	return result
 }
+
+// GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
+// This is used as a fallback when the database doesn't have status.custom set yet
+// or when the database connection is temporarily unavailable.
+// Returns nil if no custom statuses are configured in config.yaml.
+func GetCustomStatusesFromYAML() []string {
+	if v == nil {
+		return nil
+	}
+
+	// Try to get status.custom from viper (config.yaml or env var)
+	value := v.GetString("status.custom")
+	if value == "" {
+		return nil
+	}
+
+	// Parse comma-separated list
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
