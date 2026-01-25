@@ -316,6 +316,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		errLower := strings.ToLower(err.Error())
 		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
 			_ = db.Close()
+			// Check for connection refused - server likely not running
+			if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
+				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  dolt sql-server  # Manual start in database directory",
+					cfg.ServerHost, cfg.ServerPort, err)
+			}
 			return nil, "", fmt.Errorf("failed to create database: %w", err)
 		}
 		// Database already exists - that's fine, continue
