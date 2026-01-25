@@ -137,6 +137,12 @@ Use --limit or --range to view specific steps:
 		} else {
 			// Infer from in_progress issues
 			molecules = findInProgressMolecules(ctx, store, agent)
+
+			// Fallback: check for hooked issues with bonded molecules
+			if len(molecules) == 0 {
+				molecules = findHookedMolecules(ctx, store, agent)
+			}
+
 			if len(molecules) == 0 {
 				if jsonOutput {
 					outputJSON([]interface{}{})
@@ -290,6 +296,76 @@ func findInProgressMolecules(ctx context.Context, s storage.Storage, agent strin
 			progress, err := getMoleculeProgress(ctx, s, moleculeID)
 			if err == nil {
 				moleculeMap[moleculeID] = progress
+			}
+		}
+	}
+
+	// Convert to slice
+	var molecules []*MoleculeProgress
+	for _, mol := range moleculeMap {
+		molecules = append(molecules, mol)
+	}
+
+	// Sort by molecule ID for consistent output
+	sort.Slice(molecules, func(i, j int) bool {
+		return molecules[i].MoleculeID < molecules[j].MoleculeID
+	})
+
+	return molecules
+}
+
+// findHookedMolecules finds molecules bonded to hooked issues for an agent.
+// This is a fallback when no in_progress steps exist but a molecule is attached
+// to the agent's hooked work via a "blocks" dependency.
+func findHookedMolecules(ctx context.Context, s storage.Storage, agent string) []*MoleculeProgress {
+	// Query for hooked issues assigned to the agent
+	status := types.StatusHooked
+	filter := types.IssueFilter{Status: &status}
+	if agent != "" {
+		filter.Assignee = &agent
+	}
+	hookedIssues, err := s.SearchIssues(ctx, "", filter)
+	if err != nil || len(hookedIssues) == 0 {
+		return nil
+	}
+
+	// For each hooked issue, check for blocks dependencies on molecules
+	moleculeMap := make(map[string]*MoleculeProgress)
+	for _, issue := range hookedIssues {
+		deps, err := s.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+
+		// Look for a blocks dependency pointing to a molecule (epic or template)
+		for _, dep := range deps {
+			if dep.Type != types.DepBlocks {
+				continue
+			}
+			// The issue depends on (is blocked by) dep.DependsOnID
+			candidate, err := s.GetIssue(ctx, dep.DependsOnID)
+			if err != nil || candidate == nil {
+				continue
+			}
+
+			// Check if candidate is a molecule (epic or has template label)
+			isMolecule := candidate.IssueType == types.TypeEpic
+			if !isMolecule {
+				for _, label := range candidate.Labels {
+					if label == BeadsTemplateLabel {
+						isMolecule = true
+						break
+					}
+				}
+			}
+
+			if isMolecule {
+				if _, exists := moleculeMap[candidate.ID]; !exists {
+					progress, err := getMoleculeProgress(ctx, s, candidate.ID)
+					if err == nil {
+						moleculeMap[candidate.ID] = progress
+					}
+				}
 			}
 		}
 	}

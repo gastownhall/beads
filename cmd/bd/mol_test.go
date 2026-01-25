@@ -1550,6 +1550,89 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 }
 
+// TestFindHookedMolecules tests finding molecules bonded to hooked issues
+func TestFindHookedMolecules(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule root (epic)
+	molecule := &types.Issue{
+		Title:     "Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	if err := s.CreateIssue(ctx, molecule, "test"); err != nil {
+		t.Fatalf("Failed to create molecule: %v", err)
+	}
+
+	// Create step as child of molecule
+	step := &types.Issue{
+		Title:     "Step 1",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, step, "test"); err != nil {
+		t.Fatalf("Failed to create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step.ID,
+		DependsOnID: molecule.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child: %v", err)
+	}
+
+	// Create hooked issue with blocks dependency on molecule
+	hookedIssue := &types.Issue{
+		Title:     "Hooked Work",
+		Status:    types.StatusHooked,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "test-agent",
+	}
+	if err := s.CreateIssue(ctx, hookedIssue, "test"); err != nil {
+		t.Fatalf("Failed to create hooked issue: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     hookedIssue.ID,
+		DependsOnID: molecule.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocks dependency: %v", err)
+	}
+
+	// Test: findHookedMolecules should find the molecule for this agent
+	molecules := findHookedMolecules(ctx, s, "test-agent")
+	if len(molecules) != 1 {
+		t.Fatalf("findHookedMolecules() got %d molecules, want 1", len(molecules))
+	}
+	if molecules[0].MoleculeID != molecule.ID {
+		t.Errorf("findHookedMolecules() got molecule %q, want %q", molecules[0].MoleculeID, molecule.ID)
+	}
+
+	// Test: different agent should not find the molecule
+	molecules = findHookedMolecules(ctx, s, "other-agent")
+	if len(molecules) != 0 {
+		t.Errorf("findHookedMolecules(other-agent) got %d molecules, want 0", len(molecules))
+	}
+
+	// Test: no agent filter should find the molecule
+	molecules = findHookedMolecules(ctx, s, "")
+	if len(molecules) != 1 {
+		t.Errorf("findHookedMolecules('') got %d molecules, want 1", len(molecules))
+	}
+}
+
 // TestAdvanceToNextStep tests auto-advancing to next step
 func TestAdvanceToNextStep(t *testing.T) {
 	ctx := context.Background()
