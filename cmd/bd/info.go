@@ -297,6 +297,27 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.49.1",
+		Date:    "2026-01-25",
+		Changes: []string{
+			"NEW: Dolt backend fully supported - Extensively tested and ready for community evaluation",
+			"NOTE: Dolt is not enabled by default - We encourage users to try it and report feedback!",
+			"NEW: bd activity --details/-d - Full issue information in activity feed (#1317)",
+			"NEW: bd export --id/--parent - Targeted exports with filters (#1292)",
+			"NEW: bd update --append-notes - Append to existing notes (#1304)",
+			"NEW: bd show --id - For IDs that look like flags",
+			"NEW: bd doctor --server - Dolt server mode health checks",
+			"NEW: Dolt server mode - Multi-client access for shared Dolt databases",
+			"NEW: Dolt auto-commit on writes with explicit commit authors (#1267)",
+			"FIX: Daemon stack overflow on empty database path (#1288, #1313)",
+			"FIX: bd list --json optimization - Fetch only needed dependencies (#1316)",
+			"FIX: Import custom issue types (#1322)",
+			"FIX: SQLite transaction improvements (#1272, #1276)",
+			"FIX: Multiple Dolt backend fixes for hooks, routing, and daemon compatibility",
+			"DOCS: Comprehensive docs/DOLT.md guide (#1310)",
+		},
+	},
+	{
 		Version: "0.49.0",
 		Date:    "2026-01-21",
 		Changes: []string{

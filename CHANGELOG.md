@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.1] - 2026-01-25
+
+### Added
+
+- **Dolt backend now fully supported** - The Dolt storage backend has been extensively tested and is ready for community evaluation
+  - **Note:** Dolt is not enabled by default. We encourage users to try it out and report feedback!
+  - Auto-commit on write commands with explicit commit authors (#1267)
+  - Server mode for multi-client access - enables multiple processes to share a Dolt database
+  - `bd doctor --server` flag for Dolt server mode health checks
+  - Server mode configuration in metadata.json schema
+  - Comprehensive test suite for Dolt storage backend (#1299)
+  - Lock retry and stale lock cleanup for operational reliability (#1260)
+  - Adaptive ID length instead of hardcoded 6 chars
+  - See docs/DOLT.md for setup guide
+
+- **New command flags**
+  - `bd activity --details/-d` for full issue information in activity feed (#1317)
+  - `bd export --id` and `--parent` filters for targeted exports (#1292)
+  - `bd update --append-notes` flag to append to existing notes (#1304)
+  - `bd update --ephemeral` and `--persistent` flags (#1263)
+  - `bd show --id` flag for IDs that look like flags
+
+- **Doctor improvements**
+  - `--server` flag for Dolt server mode health checks
+  - Stale closed issues check is now configurable (#1291)
+
+- **Community tools** - Added beads-kanban-ui, beads-orchestration (#1255), and abacus (#1262)
+
+- **Newsletter generator** - Automated narrative summaries of releases
+
+### Changed
+
+- **Homebrew installation** - Now uses core tap for beads installation (#1261)
+- **GitHub Actions** - Upgraded for Node 24 compatibility (#1307, #1308)
+
+### Fixed
+
+- **Dolt backend fixes**
+  - Skip JSONL checks in pre-push hook for dolt-native mode
+  - Add ID generation to transaction CreateIssue
+  - Use capabilities check instead of blanket Dolt block in daemon
+  - Recognize shim hooks as Dolt-compatible
+  - Add hook compatibility check and migration warning
+  - Skip JSONL sync for Dolt backend
+  - Refuse daemon startup with deprecated --start flag for Dolt backend
+  - Add YAML fallback for custom types/statuses
+  - Prevent daemon startup and fix routing same-dir check
+  - Proper server mode support for routing and storage
+  - Skip daemon auto-start for all Dolt backends
+
+- **Daemon fixes**
+  - Prevent stack overflow on empty database path (#1288, #1313)
+  - Add sync-branch guard to daemon code paths (#1271)
+
+- **List command fixes**
+  - Optimize `bd list --json` to fetch only needed dependencies (#1316)
+  - Prevent nil pointer panic in watch mode with daemon (#1324)
+  - Populate dependencies field in JSON output (#1296, #1300)
+
+- **Import/export fixes**
+  - Support custom issue types during import (#1322)
+  - Populate export_hashes after successful export (#1278, #1286)
+  - Use transaction for handleRename in upsertIssuesTx (#1287)
+
+- **SQLite fixes**
+  - Use BEGIN IMMEDIATE without retry loop (#1272)
+  - Add retry logic to transaction entry points (#1272)
+  - Use withTx helper for remaining transaction entry points (#1276)
+
+- **Other fixes**
+  - `bd gate add-waiter` now functions correctly (#1265)
+  - Respect BEADS_DIR environment variable in init (#1273)
+  - Find molecules attached to hooked issues (#1302)
+  - Separate parent-child deps from blocking deps in `bd show` (#1293)
+  - PrefixOverride now respected in transaction storage layer (#1257)
+  - Prime command defaults to beads, avoids TodoWrite/TaskCreate (#1289)
+  - Build: `make install` now properly builds, signs, and installs to ~/.local/bin
+
+### Documentation
+
+- **Dolt backend guide** - Comprehensive docs/DOLT.md guide (#1310)
+  - Federation section with quick start and topologies
+- **Articles collection** - Created ARTICLES.md for articles and tutorials about Beads (#1306)
+
 ## [0.49.0] - 2026-01-21
 
 ### Added
