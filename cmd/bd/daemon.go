@@ -366,14 +366,16 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		backend = configfile.BackendSQLite
 	}
 
-	// Daemon is not supported with dolt backend - refuse to start
-	if backend == configfile.BackendDolt {
-		errMsg := `DAEMON NOT SUPPORTED WITH DOLT BACKEND
+	// Daemon is not supported with single-process backends (e.g., embedded Dolt)
+	// Note: Dolt server mode supports multi-process, so check capabilities not backend type
+	cfg, cfgErr := configfile.Load(beadsDir)
+	if cfgErr == nil && cfg != nil && cfg.GetCapabilities().SingleProcessOnly {
+		errMsg := fmt.Sprintf(`DAEMON NOT SUPPORTED WITH %s BACKEND
 
-The bd daemon is designed for SQLite backend only.
-With dolt backend, connect directly to the dolt sql-server.
+The bd daemon is designed for multi-process backends only.
+With single-process backends, run commands in direct mode.
 
-The daemon will now exit.`
+The daemon will now exit.`, strings.ToUpper(backend))
 		log.Error(errMsg)
 
 		// Write error to file so user can see it without checking logs
