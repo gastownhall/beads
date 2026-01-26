@@ -209,10 +209,10 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 	defer db.Close()
 
-	// Collect all known types (built-in + parent custom + all child custom)
+	// Collect all known types (core work types + parent custom + all child custom)
+	// Only core work types are built-in; Gas Town types require types.custom config.
 	knownTypes := map[string]bool{
 		"bug": true, "feature": true, "task": true, "epic": true, "chore": true,
-		"message": true, "merge-request": true, "molecule": true, "gate": true, "event": true,
 	}
 
 	// Add parent's custom types

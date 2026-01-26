@@ -24,8 +24,8 @@ pkg/
 *.swo
 *~
 
-# Claude Code
-.claude/settings.local.json
+# Claude Code local state (skills, settings, etc.)
+.claude/
 
 # OS
 .DS_Store
@@ -70,6 +70,7 @@ Thumbs.db
 result
 
 # direnv (machine-specific environment)
+.direnv
 .envrc
 
 # GoReleaser build artifacts
@@ -125,3 +126,4 @@ state.json
 .augment/
 .agents/
 output
+bd_test

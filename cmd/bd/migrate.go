@@ -33,6 +33,10 @@ Without subcommand, detects and migrates database schema to current version:
 - Updates schema version metadata
 - Removes stale databases (with confirmation)
 
+Backend migration flags:
+  --to-dolt     Migrate from SQLite to Dolt backend
+  --to-sqlite   Migrate from Dolt to SQLite backend (escape hatch)
+
 Subcommands:
   hash-ids    Migrate sequential IDs to hash-based IDs (legacy)
   issues      Move issues between repositories
@@ -59,6 +63,20 @@ Subcommands:
 		// Handle --inspect flag (show migration plan for AI agents)
 		if inspect {
 			handleInspect()
+			return
+		}
+
+		// Handle --to-dolt flag (SQLite to Dolt migration)
+		toDolt, _ := cmd.Flags().GetBool("to-dolt")
+		if toDolt {
+			handleToDoltMigration(dryRun, autoYes)
+			return
+		}
+
+		// Handle --to-sqlite flag (Dolt to SQLite migration, escape hatch)
+		toSQLite, _ := cmd.Flags().GetBool("to-sqlite")
+		if toSQLite {
+			handleToSQLiteMigration(dryRun, autoYes)
 			return
 		}
 
@@ -974,6 +992,8 @@ func init() {
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
+	migrateCmd.Flags().Bool("to-dolt", false, "Migrate from SQLite to Dolt backend")
+	migrateCmd.Flags().Bool("to-sqlite", false, "Migrate from Dolt to SQLite backend (escape hatch)")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	rootCmd.AddCommand(migrateCmd)
 }

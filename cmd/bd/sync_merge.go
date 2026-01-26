@@ -10,13 +10,27 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // MergeResult contains the outcome of a 3-way merge
 type MergeResult struct {
-	Merged    []*beads.Issue    // Final merged state
-	Conflicts int               // Number of true conflicts resolved
-	Strategy  map[string]string // Per-issue: "local", "remote", "merged", "same"
+	Merged          []*beads.Issue      // Final merged state
+	Conflicts       int                 // Number of true conflicts resolved
+	Strategy        map[string]string   // Per-issue: "local", "remote", "merged", "same"
+	ManualConflicts []ManualConflict    // Fields requiring manual resolution
+}
+
+// ManualConflict represents a field conflict that requires manual user resolution.
+// When a field's strategy is "manual", the conflict is flagged here instead of
+// being auto-resolved.
+type ManualConflict struct {
+	IssueID     string      // Issue ID with conflict
+	Field       string      // Field name (e.g., "estimated_minutes")
+	LocalValue  interface{} // Local (ours) value
+	RemoteValue interface{} // Remote (theirs) value
+	LocalTime   time.Time   // When local value was set
+	RemoteTime  time.Time   // When remote value was set
 }
 
 // MergeStrategy constants for describing how each issue was merged
@@ -27,43 +41,19 @@ const (
 	StrategySame   = "same"   // Both made identical change (or no change)
 )
 
-// FieldMergeRule defines how a specific field is merged in conflicts
-type FieldMergeRule string
-
-const (
-	RuleLWW    FieldMergeRule = "lww"    // Last-Write-Wins by updated_at
-	RuleUnion  FieldMergeRule = "union"  // Set union (OR-Set)
-	RuleAppend FieldMergeRule = "append" // Append-only merge
-)
-
-// FieldRules maps field names to merge rules
-// Scalar fields use LWW, collection fields use union/append
-var FieldRules = map[string]FieldMergeRule{
-	// Scalar fields - LWW by updated_at
-	"status":      RuleLWW,
-	"priority":    RuleLWW,
-	"assignee":    RuleLWW,
-	"title":       RuleLWW,
-	"description": RuleLWW,
-	"design":      RuleLWW,
-	"issue_type":  RuleLWW,
-	"notes":       RuleLWW,
-
-	// Set fields - union (no data loss)
-	"labels":       RuleUnion,
-	"dependencies": RuleUnion,
-
-	// Append-only fields
-	"comments": RuleAppend,
-}
-
 // mergeFieldLevel performs field-by-field merge for true conflicts.
 // Returns a new issue with:
 // - Scalar fields: from the newer issue (LWW by updated_at, remote wins on tie)
 // - Labels: union of both
 // - Dependencies: union of both (by DependsOnID+Type)
 // - Comments: append from both (deduplicated by ID or content)
-func mergeFieldLevel(_base, local, remote *beads.Issue) *beads.Issue {
+// - compaction_level: max strategy (highest value wins)
+// - estimated_minutes: manual strategy if configured (flags for user resolution)
+//
+// Also returns any manual conflicts that require user resolution.
+func mergeFieldLevel(_base, local, remote *beads.Issue) (*beads.Issue, []ManualConflict) {
+	var manualConflicts []ManualConflict
+
 	// Determine which is newer for LWW scalars
 	localNewer := local.UpdatedAt.After(remote.UpdatedAt)
 
@@ -85,8 +75,66 @@ func mergeFieldLevel(_base, local, remote *beads.Issue) *beads.Issue {
 		merged = *remote
 	}
 
-	// Union merge: Labels
-	merged.Labels = mergeLabels(local.Labels, remote.Labels)
+	// Get per-field strategies from config
+	fieldStrategies := config.GetFieldStrategies()
+
+	// Handle compaction_level with configurable strategy (default: max)
+	compactionStrategy := fieldStrategies["compaction_level"]
+	if compactionStrategy == "" {
+		compactionStrategy = config.FieldStrategyMax // Default for compaction_level
+	}
+	switch compactionStrategy {
+	case config.FieldStrategyMax:
+		merged.CompactionLevel = maxInt(local.CompactionLevel, remote.CompactionLevel)
+	case config.FieldStrategyNewest:
+		// Already handled by default LWW merge above
+	case config.FieldStrategyManual:
+		if local.CompactionLevel != remote.CompactionLevel {
+			manualConflicts = append(manualConflicts, ManualConflict{
+				IssueID:     local.ID,
+				Field:       "compaction_level",
+				LocalValue:  local.CompactionLevel,
+				RemoteValue: remote.CompactionLevel,
+				LocalTime:   local.UpdatedAt,
+				RemoteTime:  remote.UpdatedAt,
+			})
+			// Keep local value as tentative (can be overridden by resolve command)
+			merged.CompactionLevel = local.CompactionLevel
+		}
+	}
+
+	// Handle estimated_minutes with configurable strategy (default: manual per spec)
+	estimatedStrategy := fieldStrategies["estimated_minutes"]
+	if estimatedStrategy == "" {
+		estimatedStrategy = config.FieldStrategyManual // Default for estimated_minutes (human judgment needed)
+	}
+	switch estimatedStrategy {
+	case config.FieldStrategyMax:
+		merged.EstimatedMinutes = maxIntPtr(local.EstimatedMinutes, remote.EstimatedMinutes)
+	case config.FieldStrategyNewest:
+		// Already handled by default LWW merge above
+	case config.FieldStrategyManual:
+		if !intPtrEqual(local.EstimatedMinutes, remote.EstimatedMinutes) {
+			manualConflicts = append(manualConflicts, ManualConflict{
+				IssueID:     local.ID,
+				Field:       "estimated_minutes",
+				LocalValue:  derefIntPtr(local.EstimatedMinutes),
+				RemoteValue: derefIntPtr(remote.EstimatedMinutes),
+				LocalTime:   local.UpdatedAt,
+				RemoteTime:  remote.UpdatedAt,
+			})
+			// Keep local value as tentative
+			merged.EstimatedMinutes = local.EstimatedMinutes
+		}
+	}
+
+	// Union merge: Labels (always union unless configured otherwise)
+	labelsStrategy := fieldStrategies["labels"]
+	if labelsStrategy == "" || labelsStrategy == config.FieldStrategyUnion {
+		merged.Labels = mergeLabels(local.Labels, remote.Labels)
+	} else if labelsStrategy == config.FieldStrategyNewest {
+		// Use LWW for labels (already set from initial merge)
+	}
 
 	// Union merge: Dependencies (by DependsOnID+Type key)
 	merged.Dependencies = mergeDependencies(local.Dependencies, remote.Dependencies)
@@ -94,7 +142,65 @@ func mergeFieldLevel(_base, local, remote *beads.Issue) *beads.Issue {
 	// Append merge: Comments (deduplicated)
 	merged.Comments = mergeComments(local.Comments, remote.Comments)
 
-	return &merged
+	return &merged, manualConflicts
+}
+
+// maxInt returns the larger of two integers
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// maxIntPtr returns a pointer to the larger of two *int values
+// Treats nil as 0 for comparison purposes
+func maxIntPtr(a, b *int) *int {
+	aVal := 0
+	bVal := 0
+	if a != nil {
+		aVal = *a
+	}
+	if b != nil {
+		bVal = *b
+	}
+	if aVal >= bVal {
+		return a
+	}
+	return b
+}
+
+// derefIntPtr safely dereferences an int pointer, returning nil representation for display
+func derefIntPtr(p *int) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// displayManualConflicts prints manual conflicts that need user resolution.
+// These are fields where the configured strategy is "manual" and values differ.
+func displayManualConflicts(conflicts []ManualConflict) {
+	fmt.Fprintf(os.Stderr, "\n⚠ %d field conflict(s) require manual resolution:\n", len(conflicts))
+
+	for _, c := range conflicts {
+		fmt.Fprintf(os.Stderr, "\n  %s.%s:\n", c.IssueID, c.Field)
+		fmt.Fprintf(os.Stderr, "    Local:  %v (set %s)\n", formatConflictValue(c.LocalValue), c.LocalTime.Format("2006-01-02"))
+		fmt.Fprintf(os.Stderr, "    Remote: %v (set %s)\n", formatConflictValue(c.RemoteValue), c.RemoteTime.Format("2006-01-02"))
+	}
+
+	fmt.Fprintf(os.Stderr, "\n  To resolve, use one of:\n")
+	fmt.Fprintf(os.Stderr, "    bd sync --ours      # Keep all local values\n")
+	fmt.Fprintf(os.Stderr, "    bd sync --theirs    # Keep all remote values\n")
+	fmt.Fprintf(os.Stderr, "    bd resolve <issue-id> <field> <value>  # Set specific value\n\n")
+}
+
+// formatConflictValue formats a conflict value for display
+func formatConflictValue(v interface{}) string {
+	if v == nil {
+		return "(not set)"
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // mergeLabels performs set union on labels
@@ -244,8 +350,9 @@ func MergeIssues(base, local, remote []*beads.Issue) *MergeResult {
 	allIDs := collectUniqueIDs(baseMap, localMap, remoteMap)
 
 	result := &MergeResult{
-		Merged:   make([]*beads.Issue, 0, len(allIDs)),
-		Strategy: make(map[string]string),
+		Merged:          make([]*beads.Issue, 0, len(allIDs)),
+		Strategy:        make(map[string]string),
+		ManualConflicts: make([]ManualConflict, 0),
 	}
 
 	for _, id := range allIDs {
@@ -253,10 +360,15 @@ func MergeIssues(base, local, remote []*beads.Issue) *MergeResult {
 		localIssue := localMap[id]
 		remoteIssue := remoteMap[id]
 
-		merged, strategy := MergeIssue(baseIssue, localIssue, remoteIssue)
+		merged, strategy, manualConflicts := MergeIssue(baseIssue, localIssue, remoteIssue)
 
 		// Always record strategy (even for deletions, for logging/debugging)
 		result.Strategy[id] = strategy
+
+		// Collect manual conflicts for fields that need user resolution
+		if len(manualConflicts) > 0 {
+			result.ManualConflicts = append(result.ManualConflicts, manualConflicts...)
+		}
 
 		if merged != nil {
 			result.Merged = append(result.Merged, merged)
@@ -289,63 +401,64 @@ func MergeIssues(base, local, remote []*beads.Issue) *MergeResult {
 // - Deletion handling:
 //   - local=nil (deleted locally): if remote unchanged from base, delete; else keep remote
 //   - remote=nil (deleted remotely): if local unchanged from base, delete; else keep local
-func MergeIssue(base, local, remote *beads.Issue) (*beads.Issue, string) {
+func MergeIssue(base, local, remote *beads.Issue) (*beads.Issue, string, []ManualConflict) {
 	// Case: no base state (first sync)
 	if base == nil {
 		if local == nil && remote == nil {
 			// Should not happen (would not be in allIDs)
-			return nil, StrategySame
+			return nil, StrategySame, nil
 		}
 		if local == nil {
-			return remote, StrategyRemote
+			return remote, StrategyRemote, nil
 		}
 		if remote == nil {
-			return local, StrategyLocal
+			return local, StrategyLocal, nil
 		}
 		// Both exist with no base: treat as conflict, use field-level merge
 		// This allows labels/comments to be union-merged even in first sync
-		return mergeFieldLevel(nil, local, remote), StrategyMerged
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+		return merged, StrategyMerged, manualConflicts
 	}
 
 	// Case: local deleted
 	if local == nil {
 		// If remote unchanged from base, honor the local deletion
 		if issueEqual(base, remote) {
-			return nil, StrategyLocal
+			return nil, StrategyLocal, nil
 		}
 		// Remote changed after local deleted: keep remote (remote wins conflict)
-		return remote, StrategyMerged
+		return remote, StrategyMerged, nil
 	}
 
 	// Case: remote deleted
 	if remote == nil {
 		// If local unchanged from base, honor the remote deletion
 		if issueEqual(base, local) {
-			return nil, StrategyRemote
+			return nil, StrategyRemote, nil
 		}
 		// Local changed after remote deleted: keep local (local wins conflict)
-		return local, StrategyMerged
+		return local, StrategyMerged, nil
 	}
 
 	// Standard 3-way cases (all three exist)
 	if issueEqual(base, local) && issueEqual(base, remote) {
 		// No changes anywhere
-		return local, StrategySame
+		return local, StrategySame, nil
 	}
 
 	if issueEqual(base, local) {
 		// Only remote changed
-		return remote, StrategyRemote
+		return remote, StrategyRemote, nil
 	}
 
 	if issueEqual(base, remote) {
 		// Only local changed
-		return local, StrategyLocal
+		return local, StrategyLocal, nil
 	}
 
 	if issueEqual(local, remote) {
 		// Both made identical change
-		return local, StrategySame
+		return local, StrategySame, nil
 	}
 
 	// True conflict: use field-level merge
@@ -353,7 +466,10 @@ func MergeIssue(base, local, remote *beads.Issue) (*beads.Issue, string) {
 	// - Labels use union (no data loss)
 	// - Dependencies use union (no data loss)
 	// - Comments use append (deduplicated)
-	return mergeFieldLevel(base, local, remote), StrategyMerged
+	// - compaction_level uses max (or configured strategy)
+	// - estimated_minutes uses configured strategy (may flag for manual resolution)
+	merged, manualConflicts := mergeFieldLevel(base, local, remote)
+	return merged, StrategyMerged, manualConflicts
 }
 
 // issueEqual compares two issues for equality (content-level, not pointer)

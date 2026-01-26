@@ -44,8 +44,8 @@ func runReset(cmd *cobra.Command, args []string) {
 
 	force, _ := cmd.Flags().GetBool("force")
 
-	// Check if we're in a git repo
-	gitDir, err := git.GetGitDir()
+	// Get common git directory (for hooks and beads-worktrees, which are shared across worktrees)
+	gitCommonDir, err := git.GetGitCommonDir()
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -73,7 +73,7 @@ func runReset(cmd *cobra.Command, args []string) {
 	}
 
 	// Collect what would be deleted
-	items := collectResetItems(gitDir, beadsDir)
+	items := collectResetItems(gitCommonDir, beadsDir)
 
 	if !force {
 		// Dry-run mode: show what would be deleted
@@ -82,7 +82,7 @@ func runReset(cmd *cobra.Command, args []string) {
 	}
 
 	// Actually perform the reset
-	performReset(items, gitDir, beadsDir)
+	performReset(items, gitCommonDir, beadsDir)
 }
 
 type resetItem struct {
@@ -91,7 +91,7 @@ type resetItem struct {
 	Description string `json:"description"`
 }
 
-func collectResetItems(gitDir, beadsDir string) []resetItem {
+func collectResetItems(gitCommonDir, beadsDir string) []resetItem {
 	var items []resetItem
 
 	// Check for running daemon
@@ -106,9 +106,9 @@ func collectResetItems(gitDir, beadsDir string) []resetItem {
 		}
 	}
 
-	// Check for git hooks
+	// Check for git hooks (hooks are in common git dir, shared across worktrees)
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
-	hooksDir := filepath.Join(gitDir, "hooks")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
 		if _, err := os.Stat(hookPath); err == nil {
@@ -141,8 +141,8 @@ func collectResetItems(gitDir, beadsDir string) []resetItem {
 		})
 	}
 
-	// Check for sync branch worktrees
-	worktreesDir := filepath.Join(gitDir, "beads-worktrees")
+	// Check for sync branch worktrees (in common git dir, shared across worktrees)
+	worktreesDir := filepath.Join(gitCommonDir, "beads-worktrees")
 	if info, err := os.Stat(worktreesDir); err == nil && info.IsDir() {
 		items = append(items, resetItem{
 			Type:        "worktrees",
@@ -344,10 +344,30 @@ func removeGitattributesEntry() error {
 
 	lines := strings.Split(string(content), "\n")
 	var newLines []string
+	skipNextEmpty := false
+	
 	for _, line := range lines {
-		if !strings.Contains(line, "merge=beads") {
-			newLines = append(newLines, line)
+		// Skip lines containing beads merge configuration
+		if strings.Contains(line, "merge=beads") {
+			skipNextEmpty = true
+			continue
 		}
+		
+		// Skip beads-related comment lines
+		if strings.Contains(line, "Use bd merge for beads JSONL files") {
+			skipNextEmpty = true
+			continue
+		}
+		
+		// Skip empty lines that follow removed beads entries
+		if skipNextEmpty && strings.TrimSpace(line) == "" {
+			continue
+		}
+		
+		skipNextEmpty = false
+		
+		// Keep the line
+		newLines = append(newLines, line)
 	}
 
 	newContent := strings.Join(newLines, "\n")

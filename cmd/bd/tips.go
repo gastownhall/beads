@@ -153,9 +153,36 @@ func getLastShown(store storage.Storage, tipID string) time.Time {
 
 // recordTipShown records the timestamp when a tip was shown
 func recordTipShown(store storage.Storage, tipID string) {
+	if store == nil || tipID == "" {
+		return
+	}
+
+	// If we're on a versioned store (Dolt) and dolt auto-commit is enabled, defer the
+	// metadata write so it can be committed as a separate Dolt commit in PostRun.
+	// This avoids tip metadata getting bundled into the main command commit.
+	if _, ok := storage.AsVersioned(store); ok {
+		if mode, err := getDoltAutoCommitMode(); err == nil && mode == doltAutoCommitOn {
+			commandDidWriteTipMetadata = true
+			if commandTipIDsShown == nil {
+				commandTipIDsShown = make(map[string]struct{})
+			}
+			commandTipIDsShown[tipID] = struct{}{}
+			return
+		}
+	}
+
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)
 	value := time.Now().Format(time.RFC3339)
-	_ = store.SetMetadata(context.Background(), key, value) // Non-critical metadata, ok to fail silently
+
+	// Non-critical metadata, ok to fail silently.
+	// If it succeeds, track the write for tip auto-commit behavior.
+	if err := store.SetMetadata(context.Background(), key, value); err == nil {
+		commandDidWriteTipMetadata = true
+		if commandTipIDsShown == nil {
+			commandTipIDsShown = make(map[string]struct{})
+		}
+		commandTipIDsShown[tipID] = struct{}{}
+	}
 }
 
 // InjectTip adds a dynamic tip to the registry at runtime.
@@ -347,9 +374,9 @@ func initDefaultTips() {
 	InjectTip(
 		"claude_setup",
 		"Install the beads plugin for automatic workflow context, or run 'bd setup claude' for CLI-only mode",
-		100,              // Highest priority - this is important for Claude users
-		24*time.Hour,     // Daily minimum gap
-		0.6,              // 60% chance when eligible (~4 times per week)
+		100,          // Highest priority - this is important for Claude users
+		24*time.Hour, // Daily minimum gap
+		0.6,          // 60% chance when eligible (~4 times per week)
 		func() bool {
 			return isClaudeDetected() && !isClaudeSetupComplete()
 		},
@@ -360,9 +387,9 @@ func initDefaultTips() {
 	InjectTip(
 		"sync_conflict",
 		"Run 'bd sync' to resolve sync conflict",
-		200,         // Higher than Claude setup - sync issues are urgent
-		0,           // No frequency limit - always show when applicable
-		1.0,         // 100% probability - always show when condition is true
+		200, // Higher than Claude setup - sync issues are urgent
+		0,   // No frequency limit - always show when applicable
+		1.0, // 100% probability - always show when condition is true
 		syncConflictCondition,
 	)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -104,8 +105,8 @@ func TestExecInTransaction(t *testing.T) {
 	defer store.Close()
 
 	t.Run("successful transaction", func(t *testing.T) {
-		err := store.ExecInTransaction(ctx, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO config (key, value) VALUES (?, ?)", "test_key", "test_value")
+		err := store.ExecInTransaction(ctx, func(conn *sql.Conn) error {
+			_, err := conn.ExecContext(ctx, "INSERT INTO config (key, value) VALUES (?, ?)", "test_key", "test_value")
 			return err
 		})
 		if err != nil {
@@ -125,8 +126,8 @@ func TestExecInTransaction(t *testing.T) {
 
 	t.Run("failed transaction rolls back", func(t *testing.T) {
 		expectedErr := errors.New("intentional error")
-		err := store.ExecInTransaction(ctx, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO config (key, value) VALUES (?, ?)", "rollback_key", "rollback_value")
+		err := store.ExecInTransaction(ctx, func(conn *sql.Conn) error {
+			_, err := conn.ExecContext(ctx, "INSERT INTO config (key, value) VALUES (?, ?)", "rollback_key", "rollback_value")
 			if err != nil {
 				return err
 			}
@@ -257,21 +258,24 @@ func TestIsBusyError(t *testing.T) {
 	}
 }
 
-func TestBeginImmediateWithRetry(t *testing.T) {
+// TestBeginImmediate tests that BEGIN IMMEDIATE transactions work correctly.
+// Note: The retry logic was removed because SQLite's busy_timeout pragma (30s)
+// already handles retries internally. See GH#1272 for details.
+func TestBeginImmediate(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, t.TempDir()+"/test.db")
 	defer store.Close()
 
-	t.Run("successful on first try", func(t *testing.T) {
+	t.Run("successful BEGIN IMMEDIATE", func(t *testing.T) {
 		conn, err := store.db.Conn(ctx)
 		if err != nil {
 			t.Fatalf("Failed to acquire connection: %v", err)
 		}
 		defer conn.Close()
 
-		err = beginImmediateWithRetry(ctx, conn, 5, 10)
+		_, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE")
 		if err != nil {
-			t.Errorf("beginImmediateWithRetry failed: %v", err)
+			t.Errorf("BEGIN IMMEDIATE failed: %v", err)
 		}
 
 		// Rollback to clean up
@@ -288,30 +292,14 @@ func TestBeginImmediateWithRetry(t *testing.T) {
 		cancelCtx, cancel := context.WithCancel(ctx)
 		cancel() // Cancel immediately
 
-		err = beginImmediateWithRetry(cancelCtx, conn, 5, 10)
+		_, err = conn.ExecContext(cancelCtx, "BEGIN IMMEDIATE")
 		if err == nil {
-			t.Error("Expected context cancellation error, got nil")
+			t.Error("Expected error due to canceled context, got nil")
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Expected context.Canceled, got %v", err)
+		// sqlite3 driver returns "interrupted" error rather than wrapping context.Canceled
+		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "interrupt") {
+			t.Errorf("Expected context cancellation or interrupt error, got %v", err)
 		}
-	})
-
-	t.Run("defaults for invalid parameters", func(t *testing.T) {
-		conn, err := store.db.Conn(ctx)
-		if err != nil {
-			t.Fatalf("Failed to acquire connection: %v", err)
-		}
-		defer conn.Close()
-
-		// Should use defaults (5 retries, 10ms delay) when passed invalid values
-		err = beginImmediateWithRetry(ctx, conn, 0, 0)
-		if err != nil {
-			t.Errorf("beginImmediateWithRetry with invalid params failed: %v", err)
-		}
-
-		// Rollback to clean up
-		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 	})
 }

@@ -587,6 +587,16 @@ func TestDetectActiveHookManager(t *testing.T) {
 			expected:    "pre-commit",
 		},
 		{
+			name:        "prek run signature",
+			hookContent: "#!/bin/sh\nprek run pre-commit\n",
+			expected:    "prek",
+		},
+		{
+			name:        "prek hook-impl signature",
+			hookContent: "#!/usr/bin/env bash\nexec prek hook-impl --hook-type=pre-commit\n",
+			expected:    "prek",
+		},
+		{
 			name:        "simple-git-hooks signature",
 			hookContent: "#!/bin/sh\n# simple-git-hooks\nnpm run lint\n",
 			expected:    "simple-git-hooks",

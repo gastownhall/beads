@@ -246,10 +246,10 @@ Event-driven mode is the **default** as of v0.21.0. No configuration needed.
 
 ```bash
 # Event-driven mode starts automatically
-bd daemon --start
+bd daemon start
 
 # Explicitly enable (same as default)
-BEADS_DAEMON_MODE=events bd daemon --start
+BEADS_DAEMON_MODE=events bd daemon start
 ```
 
 **Available modes:**
@@ -308,10 +308,10 @@ For edge cases (NFS, containers, WSL) where fsnotify is unreliable:
 
 ```bash
 # Explicitly use polling mode
-BEADS_DAEMON_MODE=poll bd daemon --start
+BEADS_DAEMON_MODE=poll bd daemon start
 
 # With custom interval
-bd daemon --start --interval 10s
+bd daemon start --interval 10s
 ```
 
 ### Troubleshooting Event-Driven Mode
@@ -380,7 +380,7 @@ bd info --json | grep daemon_running
 export BEADS_AUTO_START_DAEMON=false
 
 # Start manually
-bd daemon --start
+bd daemon start
 ```
 
 **Auto-start with exponential backoff:**
@@ -553,6 +553,65 @@ bd daemons logs . -n 200 | grep -i "memory\|leak\|oom"
 - Baseline: ~30MB
 - With watcher: ~35MB
 - Per issue: ~500 bytes (10K issues = ~5MB)
+
+## Troubleshooting: "sql: database is closed" Errors
+
+If you see repeated "sql: database is closed" errors in daemon logs:
+
+### Symptoms
+
+- Health checks fail with "sql: database is closed"
+- Daemon appears running (`bd info` shows PID) but commands fail
+- Error persists for extended periods (30+ minutes)
+
+### Cause
+
+Database file was replaced externally (e.g., by `git pull`, `git merge`, or manual operation), and automatic reconnection failed or wasn't triggered.
+
+### Diagnosis
+
+```bash
+# 1. Check if database file was replaced
+ls -li .beads/beads.db
+
+# 2. Enable debug logging
+BD_DEBUG_FRESHNESS=1 bd daemon restart
+
+# 3. Check if daemon has file descriptors to deleted files
+lsof -p $(pgrep -f "bd.*daemon") | grep beads.db
+```
+
+### Solutions
+
+**Immediate fix:**
+```bash
+# Restart daemon
+bd daemon restart
+```
+
+**Enable debug logging** (for investigation):
+```bash
+# Start daemon with freshness debugging
+BD_DEBUG_FRESHNESS=1 bd daemon start --foreground
+
+# Check daemon logs
+bd daemons logs . -n 100 | grep freshness
+```
+
+**Prevention:**
+- Daemon automatically detects file replacement and reconnects (v0.48+)
+- If issue persists, check `.beads/daemon.log` for reconnection errors
+- Report persistent issues with debug logs
+
+### Common Causes
+
+1. **Git operations** (pull, merge, rebase) that replace the database file
+2. **Manual database file replacement** during development
+3. **File system issues** (network file systems, WSL2)
+
+### Technical Details
+
+The daemon monitors database file metadata (inode, mtime) and automatically reconnects when the file is replaced. Health checks call `GetMetadata()` which triggers freshness checking. If reconnection fails, the old connection remains usable until a valid database is restored.
 
 ## Multi-Workspace Best Practices
 

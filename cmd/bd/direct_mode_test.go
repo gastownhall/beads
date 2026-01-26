@@ -242,7 +242,7 @@ func TestImportFromJSONLInlineAfterDaemonDisconnect(t *testing.T) {
 	daemonClient = nil
 
 	// BUG: Without ensureStoreActive(), importFromJSONLInline fails
-	err = importFromJSONLInline(ctx, jsonlPath, false, false)
+	err = importFromJSONLInline(ctx, jsonlPath, false, false, false)
 	if err == nil {
 		t.Fatal("expected importFromJSONLInline to fail when store is nil")
 	}
@@ -256,7 +256,7 @@ func TestImportFromJSONLInlineAfterDaemonDisconnect(t *testing.T) {
 	}
 
 	// Now importFromJSONLInline should work
-	err = importFromJSONLInline(ctx, jsonlPath, false, false)
+	err = importFromJSONLInline(ctx, jsonlPath, false, false, false)
 	if err != nil {
 		t.Fatalf("importFromJSONLInline failed after ensureStoreActive: %v", err)
 	}

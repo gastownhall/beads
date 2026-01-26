@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/util"
@@ -181,7 +182,10 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error: no database path found\n")
 				os.Exit(1)
 			}
-			store, err = sqlite.NewWithTimeout(rootCtx, dbPath, lockTimeout)
+			beadsDir := filepath.Dir(dbPath)
+			store, err = factory.NewFromConfigWithOptions(rootCtx, beadsDir, factory.Options{
+				LockTimeout: lockTimeout,
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -396,14 +400,26 @@ Examples:
 			issue.Dependencies = allDeps[issue.ID]
 		}
 
-		// Populate labels for all issues
+		// Populate labels and comments for all issues (batch APIs)
+		ids := make([]string, 0, len(issues))
 		for _, issue := range issues {
-			labels, err := store.GetLabels(ctx, issue.ID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", issue.ID, err)
-				os.Exit(1)
-			}
-			issue.Labels = labels
+			ids = append(ids, issue.ID)
+		}
+
+		labelsMap, err := store.GetLabelsForIssues(ctx, ids)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting labels: %v\n", err)
+			os.Exit(1)
+		}
+		commentsMap, err := store.GetCommentsForIssues(ctx, ids)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
+			os.Exit(1)
+		}
+
+		for _, issue := range issues {
+			issue.Labels = labelsMap[issue.ID]
+			issue.Comments = commentsMap[issue.ID]
 		}
 
 		// Open output
@@ -547,11 +563,14 @@ Examples:
 			// Only do this when exporting to default JSONL path (not arbitrary outputs)
 			// This prevents validatePreExport from incorrectly blocking on next export
 			if output == "" || output == findJSONLPath() {
-				beadsDir := filepath.Dir(finalPath)
-				dbPath := filepath.Join(beadsDir, "beads.db")
-				if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
-					// Log warning but don't fail export
-					fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+				// Dolt backend does not have a SQLite DB file, so only touch mtime for SQLite.
+				if _, ok := store.(*sqlite.SQLiteStorage); ok {
+					beadsDir := filepath.Dir(finalPath)
+					dbPath := filepath.Join(beadsDir, "beads.db")
+					if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
+						// Log warning but don't fail export
+						fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
+					}
 				}
 			}
 		}

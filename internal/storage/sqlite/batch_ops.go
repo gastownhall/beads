@@ -87,9 +87,10 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	return nil
 }
 
-// bulkInsertIssues delegates to insertIssues helper
+// bulkInsertIssues delegates to insertIssuesStrict helper for fresh issue creation.
+// GH#956: Using strict insert prevents FK constraint errors from silent INSERT OR IGNORE failures.
 func bulkInsertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
-	return insertIssues(ctx, conn, issues)
+	return insertIssuesStrict(ctx, conn, issues)
 }
 
 // bulkRecordEvents delegates to recordCreatedEvents helper
@@ -272,8 +273,9 @@ func (s *SQLiteStorage) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Use retry logic with exponential backoff to handle SQLITE_BUSY under concurrent load
-	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
+	// Start IMMEDIATE transaction to acquire write lock early.
+	// The connection's busy_timeout pragma (30s) handles retries if locked.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
 	}
 

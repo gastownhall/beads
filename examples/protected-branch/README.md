@@ -52,7 +52,7 @@ bd update bd-XXXXX --status in_progress
 
 ```bash
 # Start daemon with auto-commit
-bd daemon --start --auto-commit
+bd daemon start --auto-commit
 
 # All issue changes are now automatically committed to beads-metadata branch
 ```
@@ -221,14 +221,14 @@ JSONL is append-only and line-based, so conflicts are rare. If they occur:
 The daemon creates it automatically on first commit. To create manually:
 ```bash
 bd config get sync.branch  # Verify it's set
-bd daemon --stop && bd daemon --start          # Daemon will create worktree
+bd daemon stop && bd daemon start          # Daemon will create worktree
 ```
 
 **"Changes not syncing"**
 
 Make sure:
 - `bd config get sync.branch` returns the same value on all clones
-- Daemon is running: `bd daemon --status`
+- Daemon is running: `bd daemon status`
 - Both clones have fetched: `git fetch origin beads-metadata`
 
 ## Advanced: GitHub Actions Integration

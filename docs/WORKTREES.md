@@ -77,7 +77,7 @@ bd config set sync.branch ""
 
 # Stop and restart daemon
 bd daemon stop
-bd daemon --start
+bd daemon start
 
 # Clean up existing worktrees
 rm -rf .git/beads-worktrees
@@ -358,8 +358,9 @@ export BEADS_DB=/path/to/specific/.beads/beads.db
 ```bash
 # Configure sync behavior
 bd config set sync.branch beads-sync  # Use separate sync branch
-bd config set sync.auto_commit true       # Auto-commit changes
-bd config set sync.auto_push true         # Auto-push changes
+
+# For git-portable workflows, enable daemon auto-commit/push (SQLite backend only):
+bd daemon start --auto-commit --auto-push
 ```
 
 ## Performance Considerations
@@ -521,6 +522,7 @@ No daemon conflicts, no branch confusion - all worktrees see the same issues bec
 
 ## See Also
 
+- [REPO_CONTEXT.md](REPO_CONTEXT.md) - RepoContext API for contributors
 - [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - General git integration guide
 - [AGENTS.md](../AGENTS.md) - Agent usage instructions
 - [README.md](../README.md) - Main project documentation

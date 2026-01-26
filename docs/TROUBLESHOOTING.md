@@ -4,6 +4,7 @@ Common issues and solutions for bd users.
 
 ## Table of Contents
 
+- [Debug Environment Variables](#debug-environment-variables)
 - [Installation Issues](#installation-issues)
 - [Antivirus False Positives](#antivirus-false-positives)
 - [Database Issues](#database-issues)
@@ -12,6 +13,118 @@ Common issues and solutions for bd users.
 - [Performance Issues](#performance-issues)
 - [Agent-Specific Issues](#agent-specific-issues)
 - [Platform-Specific Issues](#platform-specific-issues)
+
+## Debug Environment Variables
+
+bd supports several environment variables for debugging specific subsystems. Enable these when troubleshooting issues or when requested by maintainers.
+
+### Available Debug Variables
+
+| Variable | Purpose | Output Location | Usage |
+|----------|---------|----------------|-------|
+| `BD_DEBUG` | General debug logging | stderr | Set to any value to enable |
+| `BD_DEBUG_RPC` | RPC communication between CLI and daemon | stderr | Set to `1` or `true` |
+| `BD_DEBUG_SYNC` | Sync and import timestamp protection | stderr | Set to any value to enable |
+| `BD_DEBUG_ROUTING` | Issue routing and multi-repo resolution | stderr | Set to any value to enable |
+| `BD_DEBUG_FRESHNESS` | Database file replacement detection | daemon logs | Set to any value to enable |
+
+### Usage Examples
+
+**General debugging:**
+```bash
+# Enable all general debug logging
+export BD_DEBUG=1
+bd ready
+```
+
+**RPC communication issues:**
+```bash
+# Debug daemon communication
+export BD_DEBUG_RPC=1
+bd list
+
+# Example output:
+# [RPC DEBUG] Connecting to daemon at .beads/bd.sock
+# [RPC DEBUG] Sent request: list (correlation_id=abc123)
+# [RPC DEBUG] Received response: 200 OK
+```
+
+**Sync conflicts:**
+```bash
+# Debug timestamp protection during sync
+export BD_DEBUG_SYNC=1
+bd sync
+
+# Example output:
+# [debug] Protected bd-123: local=2024-01-20T10:00:00Z >= incoming=2024-01-20T09:55:00Z
+```
+
+**Routing issues:**
+```bash
+# Debug issue routing in multi-repo setups
+export BD_DEBUG_ROUTING=1
+bd create "Test issue" --rig=planning
+
+# Example output:
+# [routing] Rig "planning" -> prefix plan, path /path/to/planning-repo (townRoot=/path/to/town)
+# [routing] ID plan-123 matched prefix plan -> /path/to/planning-repo/beads
+```
+
+**Database reconnection issues:**
+```bash
+# Debug database file replacement detection
+export BD_DEBUG_FRESHNESS=1
+bd daemon start --foreground
+
+# Example output:
+# [freshness] FreshnessChecker: inode changed 27548143 -> 7945906
+# [freshness] FreshnessChecker: triggering reconnection
+# [freshness] Database file replaced, reconnection triggered
+
+# Or check daemon logs
+BD_DEBUG_FRESHNESS=1 bd daemon restart
+bd daemons logs . -n 100 | grep freshness
+```
+
+**Multiple debug flags:**
+```bash
+# Enable multiple subsystems
+export BD_DEBUG=1
+export BD_DEBUG_RPC=1
+export BD_DEBUG_FRESHNESS=1
+bd daemon start --foreground
+```
+
+### Tips
+
+- **Disable after debugging**: Debug logging can be verbose. Disable by unsetting the variable:
+  ```bash
+  unset BD_DEBUG
+  unset BD_DEBUG_RPC
+  # etc.
+  ```
+
+- **Capture debug output**: Redirect stderr to a file for analysis:
+  ```bash
+  BD_DEBUG=1 bd sync 2> debug.log
+  ```
+
+- **Daemon logs**: `BD_DEBUG_FRESHNESS` output goes to daemon logs, not stderr:
+  ```bash
+  # View daemon logs
+  bd daemons logs . -n 200
+
+  # Or directly:
+  tail -f .beads/daemon.log
+  ```
+
+- **When filing bug reports**: Include relevant debug output to help maintainers diagnose issues faster.
+
+### Related Documentation
+
+- [DAEMON.md](DAEMON.md) - Daemon management and troubleshooting
+- [SYNC.md](SYNC.md) - Git sync behavior and conflict resolution
+- [ROUTING.md](ROUTING.md) - Multi-repo routing configuration
 
 ## Installation Issues
 
@@ -629,7 +742,7 @@ See [integrations/beads-mcp/README.md](../integrations/beads-mcp/README.md) for 
 
 **Common symptoms:**
 - "Database out of sync with JSONL" errors that persist after running `bd import`
-- `bd daemon --stop` fails with "operation not permitted"
+- `bd daemon stop` fails with "operation not permitted"
 - Cannot kill daemon process with `kill <pid>`
 - JSONL hash mismatch warnings (bd-160)
 - Commands intermittently fail with staleness errors

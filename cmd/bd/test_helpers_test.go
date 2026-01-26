@@ -84,26 +84,32 @@ func failIfProductionDatabase(t *testing.T, dbPath string) {
 // This prevents "database not initialized" errors in tests
 func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 	t.Helper()
-	
+
 	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
 	failIfProductionDatabase(t, dbPath)
-	
+
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatalf("Failed to create database directory: %v", err)
 	}
-	
+
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
-	
+
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
 	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
-	
+
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set types.custom: %v", err)
+	}
+
 	t.Cleanup(func() { store.Close() })
 	return store
 }
@@ -130,7 +136,13 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
-	
+
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set types.custom: %v", err)
+	}
+
 	t.Cleanup(func() { store.Close() })
 	return store
 }

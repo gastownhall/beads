@@ -2,6 +2,8 @@ package routing
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -81,13 +83,13 @@ func TestDetermineTargetRepo(t *testing.T) {
 }
 
 func TestDetectUserRole_Fallback(t *testing.T) {
-	// Test fallback behavior when git is not available
+	// Test fallback behavior when git is not available - local projects default to maintainer
 	role, err := DetectUserRole("/nonexistent/path/that/does/not/exist")
 	if err != nil {
 		t.Fatalf("DetectUserRole() error = %v, want nil", err)
 	}
-	if role != Contributor {
-		t.Errorf("DetectUserRole() = %v, want %v (fallback)", role, Contributor)
+	if role != Maintainer {
+		t.Errorf("DetectUserRole() = %v, want %v (local project fallback)", role, Maintainer)
 	}
 }
 
@@ -265,7 +267,7 @@ func TestDetectUserRole_HTTPSCredentialsMaintainer(t *testing.T) {
 	}
 }
 
-func TestDetectUserRole_DefaultContributor(t *testing.T) {
+func TestDetectUserRole_HTTPSNoCredentialsContributor(t *testing.T) {
 	orig := gitCommandRunner
 	stub := &gitStub{t: t, responses: []gitResponse{
 		{expect: gitCall{"", []string{"config", "--get", "beads.role"}}, err: errors.New("missing")},
@@ -284,5 +286,131 @@ func TestDetectUserRole_DefaultContributor(t *testing.T) {
 	}
 	if role != Contributor {
 		t.Fatalf("expected %s, got %s", Contributor, role)
+	}
+}
+
+func TestDetectUserRole_NoRemoteMaintainer(t *testing.T) {
+	// When no git remote is configured, default to maintainer (local project)
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{"/local", []string{"config", "--get", "beads.role"}}, err: errors.New("missing")},
+		{expect: gitCall{"/local", []string{"remote", "get-url", "--push", "origin"}}, err: errors.New("no remote")},
+		{expect: gitCall{"/local", []string{"remote", "get-url", "origin"}}, err: errors.New("no remote")},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	role, err := DetectUserRole("/local")
+	if err != nil {
+		t.Fatalf("DetectUserRole error = %v", err)
+	}
+	if role != Maintainer {
+		t.Fatalf("expected %s for local project with no remote, got %s", Maintainer, role)
+	}
+}
+
+// TestFindTownRoutes_SymlinkedBeadsDir verifies that findTownRoutes correctly
+// handles symlinked .beads directories by using findTownRootFromCWD() instead of
+// walking up from the beadsDir path.
+//
+// Scenario: ~/gt/.beads is a symlink to ~/gt/olympus/.beads
+// Before fix: walking up from ~/gt/olympus/.beads finds ~/gt/olympus (WRONG)
+// After fix: findTownRootFromCWD() walks up from CWD to find mayor/town.json at ~/gt
+func TestFindTownRoutes_SymlinkedBeadsDir(t *testing.T) {
+	// Create temporary directory structure simulating Gas Town:
+	// tmpDir/
+	//   mayor/
+	//     town.json    <- town root marker
+	//   olympus/       <- actual beads storage
+	//     .beads/
+	//       routes.jsonl
+	//   .beads -> olympus/.beads  <- symlink
+	//   daedalus/
+	//     mayor/
+	//       rig/
+	//         .beads/  <- target rig
+	tmpDir, err := os.MkdirTemp("", "routing-symlink-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Resolve symlinks in tmpDir (macOS /var -> /private/var)
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create mayor/town.json to mark town root
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := filepath.Join(mayorDir, "town.json")
+	if err := os.WriteFile(townJSON, []byte(`{"name": "test-town"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create olympus/.beads with routes.jsonl
+	olympusBeadsDir := filepath.Join(tmpDir, "olympus", ".beads")
+	if err := os.MkdirAll(olympusBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix": "gt-", "path": "daedalus/mayor/rig"}
+`
+	routesPath := filepath.Join(olympusBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte(routesContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create daedalus/mayor/rig/.beads as target rig
+	daedalusBeadsDir := filepath.Join(tmpDir, "daedalus", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(daedalusBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	// Create metadata.json so the rig is recognized as valid
+	if err := os.WriteFile(filepath.Join(daedalusBeadsDir, "metadata.json"), []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create symlink: tmpDir/.beads -> olympus/.beads
+	symlinkPath := filepath.Join(tmpDir, ".beads")
+	if err := os.Symlink(olympusBeadsDir, symlinkPath); err != nil {
+		t.Skip("Cannot create symlinks on this system (may require admin on Windows)")
+	}
+
+	// Change to the town root directory - this simulates the user running bd from ~/gt
+	// The fix uses findTownRootFromCWD() which needs CWD to be inside the town
+	t.Chdir(tmpDir)
+
+	// Simulate what happens when FindBeadsDir() returns the resolved symlink path
+	// (this is what CanonicalizePath does)
+	resolvedBeadsDir := olympusBeadsDir // This is what would be passed to findTownRoutes
+
+	// Call findTownRoutes with the resolved symlink path
+	routes, townRoot := findTownRoutes(resolvedBeadsDir)
+
+	// Verify we got the routes
+	if len(routes) == 0 {
+		t.Fatal("findTownRoutes returned no routes")
+	}
+
+	// Verify the town root is correct (should be tmpDir, NOT tmpDir/olympus)
+	if townRoot != tmpDir {
+		t.Errorf("findTownRoutes returned wrong townRoot:\n  got:  %s\n  want: %s", townRoot, tmpDir)
+	}
+
+	// Verify route resolution works - the route should resolve to the correct path
+	expectedRigPath := filepath.Join(tmpDir, "daedalus", "mayor", "rig", ".beads")
+	for _, route := range routes {
+		if route.Prefix == "gt-" {
+			actualPath := filepath.Join(townRoot, route.Path, ".beads")
+			if actualPath != expectedRigPath {
+				t.Errorf("Route resolution failed:\n  got:  %s\n  want: %s", actualPath, expectedRigPath)
+			}
+		}
 	}
 }

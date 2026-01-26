@@ -69,68 +69,126 @@ func CheckConfigValues(repoPath string) DoctorCheck {
 	}
 }
 
-// checkYAMLConfigValues validates values in config.yaml
-func checkYAMLConfigValues(repoPath string) []string {
-	var issues []string
-
-	// Load config.yaml if it exists
-	v := viper.New()
-	v.SetConfigType("yaml")
-
+// findConfigPath locates config.yaml in standard locations.
+func findConfigPath(repoPath string) string {
 	configPath := filepath.Join(repoPath, ".beads", "config.yaml")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// No config.yaml, check user config dirs
-		configPath = ""
-		if configDir, err := os.UserConfigDir(); err == nil {
-			userConfigPath := filepath.Join(configDir, "bd", "config.yaml")
-			if _, err := os.Stat(userConfigPath); err == nil {
-				configPath = userConfigPath
+	if _, err := os.Stat(configPath); err == nil {
+		return configPath
+	}
+	if configDir, err := os.UserConfigDir(); err == nil {
+		userConfigPath := filepath.Join(configDir, "bd", "config.yaml")
+		if _, err := os.Stat(userConfigPath); err == nil {
+			return userConfigPath
+		}
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		homeConfigPath := filepath.Join(homeDir, ".beads", "config.yaml")
+		if _, err := os.Stat(homeConfigPath); err == nil {
+			return homeConfigPath
+		}
+	}
+	return ""
+}
+
+// validateDurationConfig validates a duration config value.
+func validateDurationConfig(v *viper.Viper, key string, minDuration time.Duration) []string {
+	if !v.IsSet(key) {
+		return nil
+	}
+	durStr := v.GetString(key)
+	if durStr == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(durStr)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: invalid duration %q (expected format like \"30s\", \"1m\", \"500ms\")", key, durStr)}
+	}
+	if minDuration > 0 && d > 0 && d < minDuration {
+		return []string{fmt.Sprintf("%s: %q is too low (minimum %s)", key, durStr, minDuration)}
+	}
+	return nil
+}
+
+// validateBooleanConfigs validates boolean config values.
+func validateBooleanConfigs(v *viper.Viper, keys []string) []string {
+	var issues []string
+	for _, key := range keys {
+		if v.IsSet(key) {
+			strVal := v.GetString(key)
+			if strVal != "" && !isValidBoolString(strVal) {
+				issues = append(issues, fmt.Sprintf("%s: %q is not a valid boolean value (expected true/false, yes/no, 1/0, on/off)", key, strVal))
 			}
 		}
-		if configPath == "" {
-			if homeDir, err := os.UserHomeDir(); err == nil {
-				homeConfigPath := filepath.Join(homeDir, ".beads", "config.yaml")
-				if _, err := os.Stat(homeConfigPath); err == nil {
-					configPath = homeConfigPath
+	}
+	return issues
+}
+
+// validateRoutingPaths validates routing path config values.
+func validateRoutingPaths(v *viper.Viper) []string {
+	var issues []string
+	for _, key := range []string{"routing.default", "routing.maintainer", "routing.contributor"} {
+		if v.IsSet(key) {
+			path := v.GetString(key)
+			if path != "" && path != "." {
+				expandedPath := expandPath(path)
+				if _, err := os.Stat(expandedPath); os.IsNotExist(err) {
+					issues = append(issues, fmt.Sprintf("%s: path %q does not exist", key, path))
 				}
 			}
 		}
 	}
+	return issues
+}
 
+// validateRepoPaths validates repos.primary and repos.additional paths.
+func validateRepoPaths(v *viper.Viper) []string {
+	var issues []string
+	if v.IsSet("repos.primary") {
+		primary := v.GetString("repos.primary")
+		if primary != "" {
+			expandedPath := expandPath(primary)
+			if info, err := os.Stat(expandedPath); err == nil {
+				if !info.IsDir() {
+					issues = append(issues, fmt.Sprintf("repos.primary: %q is not a directory", primary))
+				}
+			} else if !os.IsNotExist(err) {
+				issues = append(issues, fmt.Sprintf("repos.primary: cannot access %q: %v", primary, err))
+			}
+		}
+	}
+	if v.IsSet("repos.additional") {
+		for _, path := range v.GetStringSlice("repos.additional") {
+			if path != "" {
+				expandedPath := expandPath(path)
+				if info, err := os.Stat(expandedPath); err == nil && !info.IsDir() {
+					issues = append(issues, fmt.Sprintf("repos.additional: %q is not a directory", path))
+				}
+			}
+		}
+	}
+	return issues
+}
+
+// checkYAMLConfigValues validates values in config.yaml
+func checkYAMLConfigValues(repoPath string) []string {
+	var issues []string
+
+	configPath := findConfigPath(repoPath)
 	if configPath == "" {
-		// No config.yaml found anywhere
 		return issues
 	}
 
+	v := viper.New()
+	v.SetConfigType("yaml")
 	v.SetConfigFile(configPath)
 	if err := v.ReadInConfig(); err != nil {
 		issues = append(issues, fmt.Sprintf("config.yaml: failed to parse: %v", err))
 		return issues
 	}
 
-	// Validate flush-debounce (should be a valid duration)
-	if v.IsSet("flush-debounce") {
-		debounceStr := v.GetString("flush-debounce")
-		if debounceStr != "" {
-			_, err := time.ParseDuration(debounceStr)
-			if err != nil {
-				issues = append(issues, fmt.Sprintf("flush-debounce: invalid duration %q (expected format like \"30s\", \"1m\", \"500ms\")", debounceStr))
-			}
-		}
-	}
-
-	// Validate remote-sync-interval (should be a valid duration, min 5s)
-	if v.IsSet("remote-sync-interval") {
-		intervalStr := v.GetString("remote-sync-interval")
-		if intervalStr != "" {
-			d, err := time.ParseDuration(intervalStr)
-			if err != nil {
-				issues = append(issues, fmt.Sprintf("remote-sync-interval: invalid duration %q (expected format like \"30s\", \"1m\", \"5m\")", intervalStr))
-			} else if d > 0 && d < 5*time.Second {
-				issues = append(issues, fmt.Sprintf("remote-sync-interval: %q is too low (minimum 5s to prevent excessive load)", intervalStr))
-			}
-		}
-	}
+	// Validate duration configs
+	issues = append(issues, validateDurationConfig(v, "flush-debounce", 0)...)
+	issues = append(issues, validateDurationConfig(v, "remote-sync-interval", 5*time.Second)...)
 
 	// Validate issue-prefix (should be alphanumeric with dashes/underscores, reasonably short)
 	if v.IsSet("issue-prefix") {
@@ -155,6 +213,56 @@ func checkYAMLConfigValues(repoPath string) []string {
 			}
 			issues = append(issues, fmt.Sprintf("routing.mode: %q is invalid (valid values: %s)", mode, strings.Join(validModes, ", ")))
 		}
+
+		// Validate routing + hydration consistency (bd-fix-routing)
+		// When routing.mode=auto with routing targets, those targets should be in repos.additional
+		// so routed issues are visible in bd list via multi-repo hydration
+		if mode == "auto" {
+			contributorRepo := v.GetString("routing.contributor")
+			maintainerRepo := v.GetString("routing.maintainer")
+
+			// Check if routing targets are configured (exclude "." which means current repo)
+			hasRoutingTargets := (contributorRepo != "" && contributorRepo != ".") || (maintainerRepo != "" && maintainerRepo != ".")
+
+			if hasRoutingTargets {
+				// Check if hydration is configured
+				additional := v.GetStringSlice("repos.additional")
+				hasHydration := len(additional) > 0
+
+				if !hasHydration {
+					issues = append(issues,
+						"routing.mode=auto with routing targets but repos.additional not configured. "+
+							"Issues created via routing will not be visible in bd list. "+
+							"Run 'bd repo add <routing-target>' to enable hydration.")
+				} else {
+					// Check if routing targets are in hydration list
+					additionalSet := make(map[string]bool)
+					for _, path := range additional {
+						additionalSet[expandPath(path)] = true
+					}
+
+					if contributorRepo != "" {
+						expandedContributor := expandPath(contributorRepo)
+						if !additionalSet[expandedContributor] {
+							issues = append(issues, fmt.Sprintf(
+								"routing.contributor=%q is not in repos.additional. "+
+									"Run 'bd repo add %s' to make routed issues visible.",
+								contributorRepo, contributorRepo))
+						}
+					}
+
+					if maintainerRepo != "" && maintainerRepo != "." {
+						expandedMaintainer := expandPath(maintainerRepo)
+						if !additionalSet[expandedMaintainer] {
+							issues = append(issues, fmt.Sprintf(
+								"routing.maintainer=%q is not in repos.additional. "+
+									"Run 'bd repo add %s' to make routed issues visible.",
+								maintainerRepo, maintainerRepo))
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Validate sync-branch (should be a valid git branch name if set)
@@ -168,23 +276,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 	}
 
 	// Validate routing paths exist if set
-	for _, key := range []string{"routing.default", "routing.maintainer", "routing.contributor"} {
-		if v.IsSet(key) {
-			path := v.GetString(key)
-			if path != "" && path != "." {
-				// Expand ~ to home directory
-				if strings.HasPrefix(path, "~") {
-					if home, err := os.UserHomeDir(); err == nil {
-						path = filepath.Join(home, path[1:])
-					}
-				}
-				// Check if path exists (only warn, don't error - it might be created later)
-				if _, err := os.Stat(path); os.IsNotExist(err) {
-					issues = append(issues, fmt.Sprintf("%s: path %q does not exist", key, v.GetString(key)))
-				}
-			}
-		}
-	}
+	issues = append(issues, validateRoutingPaths(v)...)
 
 	// Validate actor (should be alphanumeric with common special chars if set)
 	if v.IsSet("actor") {
@@ -209,59 +301,12 @@ func checkYAMLConfigValues(repoPath string) []string {
 		}
 	}
 
-	// Validate boolean config values are actually booleans
-	for _, key := range []string{"json", "no-daemon", "no-auto-flush", "no-auto-import", "no-db", "auto-start-daemon"} {
-		if v.IsSet(key) {
-			// Try to get as string first to check if it's a valid boolean representation
-			strVal := v.GetString(key)
-			if strVal != "" {
-				// Valid boolean strings: true, false, 1, 0, yes, no, on, off (case insensitive)
-				if !isValidBoolString(strVal) {
-					issues = append(issues, fmt.Sprintf("%s: %q is not a valid boolean value (expected true/false, yes/no, 1/0, on/off)", key, strVal))
-				}
-			}
-		}
-	}
+	// Validate boolean config values
+	boolKeys := []string{"json", "no-daemon", "no-auto-flush", "no-auto-import", "no-db", "auto-start-daemon", "sync.require_confirmation_on_mass_delete"}
+	issues = append(issues, validateBooleanConfigs(v, boolKeys)...)
 
-	// Validate sync.require_confirmation_on_mass_delete (should be boolean)
-	if v.IsSet("sync.require_confirmation_on_mass_delete") {
-		strVal := v.GetString("sync.require_confirmation_on_mass_delete")
-		if strVal != "" && !isValidBoolString(strVal) {
-			issues = append(issues, fmt.Sprintf("sync.require_confirmation_on_mass_delete: %q is not a valid boolean value", strVal))
-		}
-	}
-
-	// Validate repos.primary (should be a directory path if set)
-	if v.IsSet("repos.primary") {
-		primary := v.GetString("repos.primary")
-		if primary != "" {
-			expandedPath := expandPath(primary)
-			if info, err := os.Stat(expandedPath); err == nil {
-				if !info.IsDir() {
-					issues = append(issues, fmt.Sprintf("repos.primary: %q is not a directory", primary))
-				}
-			} else if !os.IsNotExist(err) {
-				issues = append(issues, fmt.Sprintf("repos.primary: cannot access %q: %v", primary, err))
-			}
-			// Note: path not existing is OK - might be created later
-		}
-	}
-
-	// Validate repos.additional (should be directory paths if set)
-	if v.IsSet("repos.additional") {
-		additional := v.GetStringSlice("repos.additional")
-		for _, path := range additional {
-			if path != "" {
-				expandedPath := expandPath(path)
-				if info, err := os.Stat(expandedPath); err == nil {
-					if !info.IsDir() {
-						issues = append(issues, fmt.Sprintf("repos.additional: %q is not a directory", path))
-					}
-				}
-				// Note: path not existing is OK - might be created later
-			}
-		}
-	}
+	// Validate repos paths
+	issues = append(issues, validateRepoPaths(v)...)
 
 	return issues
 }
@@ -309,8 +354,19 @@ func checkMetadataConfigValues(repoPath string) []string {
 		if strings.Contains(cfg.Database, string(os.PathSeparator)) || strings.Contains(cfg.Database, "/") {
 			issues = append(issues, fmt.Sprintf("metadata.json database: %q should be a filename, not a path", cfg.Database))
 		}
-		if !strings.HasSuffix(cfg.Database, ".db") && !strings.HasSuffix(cfg.Database, ".sqlite") && !strings.HasSuffix(cfg.Database, ".sqlite3") {
-			issues = append(issues, fmt.Sprintf("metadata.json database: %q has unusual extension (expected .db, .sqlite, or .sqlite3)", cfg.Database))
+		backend := cfg.GetBackend()
+		if backend == configfile.BackendSQLite {
+			if !strings.HasSuffix(cfg.Database, ".db") && !strings.HasSuffix(cfg.Database, ".sqlite") && !strings.HasSuffix(cfg.Database, ".sqlite3") {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q has unusual extension (expected .db, .sqlite, or .sqlite3)", cfg.Database))
+			}
+		} else if backend == configfile.BackendDolt {
+			// Dolt is directory-backed; `database` should point to a directory (typically "dolt").
+			if strings.HasSuffix(cfg.Database, ".db") || strings.HasSuffix(cfg.Database, ".sqlite") || strings.HasSuffix(cfg.Database, ".sqlite3") {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q looks like a SQLite file, but backend is dolt (expected a directory like %q)", cfg.Database, "dolt"))
+			}
+			if cfg.Database == beads.CanonicalDatabaseName {
+				issues = append(issues, fmt.Sprintf("metadata.json database: %q is misleading for dolt backend (expected %q)", cfg.Database, "dolt"))
+			}
 		}
 	}
 
@@ -345,11 +401,16 @@ func checkDatabaseConfigValues(repoPath string) []string {
 		return issues // No .beads directory, nothing to check
 	}
 
-	// Get database path
+	// Get database path (backend-aware)
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	// Check metadata.json for custom database name
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		// For Dolt, cfg.DatabasePath() is a directory and sqlite checks are not applicable.
+		if cfg.GetBackend() == configfile.BackendDolt {
+			return issues
+		}
+		if cfg.Database != "" {
+			dbPath = cfg.DatabasePath(beadsDir)
+		}
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {

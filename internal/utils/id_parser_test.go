@@ -316,6 +316,21 @@ func TestResolvePartialID_NoConfig(t *testing.T) {
 	}
 }
 
+func TestResolvePartialID_NilStorage(t *testing.T) {
+	ctx := context.Background()
+
+	// Test that nil storage returns an error instead of panicking
+	_, err := ResolvePartialID(ctx, nil, "bd-123")
+	if err == nil {
+		t.Fatal("ResolvePartialID with nil storage should return error, got nil")
+	}
+
+	expectedMsg := "storage is nil"
+	if !contains(err.Error(), expectedMsg) {
+		t.Errorf("ResolvePartialID error = %q; want error containing %q", err.Error(), expectedMsg)
+	}
+}
+
 func TestExtractIssuePrefix(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -92,7 +92,7 @@ func updatesFromArgs(a UpdateArgs) (map[string]interface{}, error) {
 		u["sender"] = *a.Sender
 	}
 	if a.Ephemeral != nil {
-		u["ephemeral"] = *a.Ephemeral
+		u["wisp"] = *a.Ephemeral // Storage API uses "wisp", maps to "ephemeral" column
 	}
 	if a.RepliesTo != nil {
 		u["replies_to"] = *a.RepliesTo
@@ -2053,7 +2053,7 @@ func (s *Server) handleGateCreate(req *Request) Response {
 	// Create gate issue
 	gate := &types.Issue{
 		Title:     args.Title,
-		IssueType: types.TypeGate,
+		IssueType: "gate",
 		Status:    types.StatusOpen,
 		Priority:  1, // Gates are typically high priority
 		Assignee:  "deacon/",
@@ -2104,13 +2104,13 @@ func (s *Server) handleGateList(req *Request) Response {
 	ctx := s.reqCtx(req)
 
 	// Build filter for gates
-	gateType := types.TypeGate
+	gateType := types.IssueType("gate")
 	filter := types.IssueFilter{
 		IssueType: &gateType,
 	}
+	// By default, exclude closed gates (consistent with CLI behavior)
 	if !args.All {
-		openStatus := types.StatusOpen
-		filter.Status = &openStatus
+		filter.ExcludeStatus = []types.Status{types.StatusClosed}
 	}
 
 	gates, err := store.SearchIssues(ctx, "", filter)
@@ -2169,7 +2169,7 @@ func (s *Server) handleGateShow(req *Request) Response {
 			Error:   fmt.Sprintf("gate %s not found", gateID),
 		}
 	}
-	if gate.IssueType != types.TypeGate {
+	if gate.IssueType != "gate" {
 		return Response{
 			Success: false,
 			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),
@@ -2225,7 +2225,7 @@ func (s *Server) handleGateClose(req *Request) Response {
 			Error:   fmt.Sprintf("gate %s not found", gateID),
 		}
 	}
-	if gate.IssueType != types.TypeGate {
+	if gate.IssueType != "gate" {
 		return Response{
 			Success: false,
 			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),
@@ -2304,7 +2304,7 @@ func (s *Server) handleGateWait(req *Request) Response {
 			Error:   fmt.Sprintf("gate %s not found", gateID),
 		}
 	}
-	if gate.IssueType != types.TypeGate {
+	if gate.IssueType != "gate" {
 		return Response{
 			Success: false,
 			Error:   fmt.Sprintf("%s is not a gate (type: %s)", gateID, gate.IssueType),

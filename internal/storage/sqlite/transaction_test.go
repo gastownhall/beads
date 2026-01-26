@@ -524,14 +524,14 @@ func TestTransactionAddDependency_RepliesTo(t *testing.T) {
 		Title:     "Original Message",
 		Status:    types.StatusOpen,
 		Priority:  2,
-		IssueType: types.TypeMessage,
+		IssueType: "message",
 		Sender:    "alice",
 	}
 	reply := &types.Issue{
 		Title:     "Re: Original Message",
 		Status:    types.StatusOpen,
 		Priority:  2,
-		IssueType: types.TypeMessage,
+		IssueType: "message",
 		Sender:    "bob",
 	}
 	if err := store.CreateIssue(ctx, original, "test-actor"); err != nil {

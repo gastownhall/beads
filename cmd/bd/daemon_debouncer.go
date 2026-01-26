@@ -41,15 +41,18 @@ func (d *Debouncer) Trigger() {
 
 	d.timer = time.AfterFunc(d.duration, func() {
 		d.mu.Lock()
-		defer d.mu.Unlock()
-
 		// Only fire if this is still the latest trigger
-		if d.seq == currentSeq {
-			d.timer = nil
-			d.mu.Unlock() // Unlock before calling action to avoid holding lock during callback
-			d.action()
-			d.mu.Lock() // Re-lock for defer
+		if d.seq != currentSeq {
+			d.mu.Unlock()
+			return
 		}
+		d.timer = nil
+		d.mu.Unlock() // Unlock before calling action to avoid holding lock during callback
+
+		// Action runs without lock held. If action panics, the lock is already
+		// released, avoiding a double-unlock that would occur with the previous
+		// defer-based pattern.
+		d.action()
 	})
 }
 

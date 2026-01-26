@@ -1,5 +1,16 @@
 # Extending bd with Custom Tables
 
+> **⚠️ DEPRECATED**: This document describes extending bd via custom SQLite tables.
+> This approach is being deprecated as bd migrates from SQLite to Dolt as the
+> storage backend. Dolt does not support hosting custom tables in the same database.
+>
+> **For external integrations** (syncing with Jira, Shortcut, Linear, etc.), build
+> a standalone sync tool following the pattern of [jira-beads-sync](https://github.com/conallob/jira-beads-sync).
+> These tools use bd's CLI with `--json` flags or read/write the `.beads/` JSONL files directly.
+>
+> **For orchestration layers**, consider using a separate database that references
+> bd issue IDs, or wait for the forthcoming plugin architecture.
+
 bd is designed to be extended by applications that need more than basic issue tracking. The recommended pattern is to add your own tables to the same SQLite database that bd uses.
 
 ## Philosophy

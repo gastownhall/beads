@@ -32,8 +32,9 @@ func TestShow_ExternalRef(t *testing.T) {
 	}
 
 	// Create issue with external ref
+	// Use --repo . to override auto-routing and create in the test directory
 	createCmd := exec.Command(tmpBin, "--no-daemon", "create", "External ref test", "-p", "1",
-		"--external-ref", "https://example.com/spec.md", "--json")
+		"--external-ref", "https://example.com/spec.md", "--json", "--repo", ".")
 	createCmd.Dir = tmpDir
 	createOut, err := createCmd.CombinedOutput()
 	if err != nil {
@@ -86,7 +87,8 @@ func TestShow_NoExternalRef(t *testing.T) {
 	}
 
 	// Create issue WITHOUT external ref
-	createCmd := exec.Command(tmpBin, "--no-daemon", "create", "No ref test", "-p", "1", "--json")
+	// Use --repo . to override auto-routing and create in the test directory
+	createCmd := exec.Command(tmpBin, "--no-daemon", "create", "No ref test", "-p", "1", "--json", "--repo", ".")
 	createCmd.Dir = tmpDir
 	createOut, err := createCmd.CombinedOutput()
 	if err != nil {

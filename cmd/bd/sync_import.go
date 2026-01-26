@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -30,6 +32,12 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 	}
 	if len(opts) > 1 {
 		protectLeftSnapshot = opts[1]
+	}
+
+	// Guardrail: single-process backends (e.g., Dolt) must not spawn a helper `bd import`
+	// process while the parent holds an open store. Use inline import instead.
+	if singleProcessOnlyBackend() {
+		return importFromJSONLInline(ctx, jsonlPath, renameOnImport, noGitHistory, protectLeftSnapshot)
 	}
 
 	// Build args for import command
@@ -65,7 +73,7 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 // This avoids path resolution issues when running from directories with .beads/redirect.
 // The parent process's store and dbPath are used, ensuring consistent path resolution.
 // (bd-ysal fix)
-func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, _ /* noGitHistory */ bool) error {
+func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport bool, _ /* noGitHistory */ bool, protectLeftSnapshot bool) error {
 	// Verify we have an active store
 	if store == nil {
 		return fmt.Errorf("no database store available for inline import")
@@ -106,9 +114,38 @@ func importFromJSONLInline(ctx context.Context, jsonlPath string, renameOnImport
 	opts := ImportOptions{
 		RenameOnImport: renameOnImport,
 	}
+
+	// GH#865: timestamp-aware protection for post-pull imports (bd-sync-deletion fix).
+	// Match `bd import --protect-left-snapshot` behavior.
+	if protectLeftSnapshot {
+		beadsDir := filepath.Dir(jsonlPath)
+		leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
+		if _, err := os.Stat(leftSnapshotPath); err == nil {
+			sm := NewSnapshotManager(jsonlPath)
+			leftTimestamps, err := sm.BuildIDToTimestampMap(leftSnapshotPath)
+			if err != nil {
+				debug.Logf("Warning: failed to read left snapshot: %v", err)
+			} else if len(leftTimestamps) > 0 {
+				opts.ProtectLocalExportIDs = leftTimestamps
+				fmt.Fprintf(os.Stderr, "Protecting %d issue(s) from left snapshot (timestamp-aware)\n", len(leftTimestamps))
+			}
+		}
+	}
 	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
 	if err != nil {
 		return fmt.Errorf("import failed: %w", err)
+	}
+
+	// Mark command as having performed a write when the import changed anything.
+	// This enables Dolt auto-commit in PersistentPostRun.
+	if result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 {
+		commandDidWrite.Store(true)
+	}
+
+	// Mark command as having performed a write when the import changed anything.
+	// This enables Dolt auto-commit in PersistentPostRun for single-process backends.
+	if result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 {
+		commandDidWrite.Store(true)
 	}
 
 	// Update staleness metadata (same as import.go lines 386-411)
@@ -162,6 +199,7 @@ func resolveNoGitHistoryForFromMain(fromMain, noGitHistory bool) bool {
 // This fetches beads from main and imports them, discarding local beads changes.
 // If sync.remote is configured (e.g., "upstream" for fork workflows), uses that remote
 // instead of "origin".
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, dryRun bool, noGitHistory bool) error {
 	// Determine which remote to use (default: origin, but can be configured via sync.remote)
 	remote := "origin"
@@ -190,8 +228,14 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 		return fmt.Errorf("no git remote configured")
 	}
 
+	// Get RepoContext for beads repo
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return fmt.Errorf("failed to get repo context: %w", err)
+	}
+
 	// Verify the configured remote exists
-	checkRemoteCmd := exec.CommandContext(ctx, "git", "remote", "get-url", remote)
+	checkRemoteCmd := rc.GitCmd(ctx, "remote", "get-url", remote)
 	if err := checkRemoteCmd.Run(); err != nil {
 		return fmt.Errorf("configured sync.remote '%s' does not exist (run 'git remote add %s <url>')", remote, remote)
 	}
@@ -200,14 +244,14 @@ func doSyncFromMain(ctx context.Context, jsonlPath string, renameOnImport bool, 
 
 	// Step 1: Fetch from main
 	fmt.Printf("→ Fetching from %s/%s...\n", remote, defaultBranch)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, defaultBranch) //nolint:gosec // remote and defaultBranch from config
+	fetchCmd := rc.GitCmd(ctx, "fetch", remote, defaultBranch)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s %s failed: %w\n%s", remote, defaultBranch, err, output)
 	}
 
 	// Step 2: Checkout .beads/ directory from main
 	fmt.Printf("→ Checking out beads from %s/%s...\n", remote, defaultBranch)
-	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/") //nolint:gosec // remote and defaultBranch from config
+	checkoutCmd := rc.GitCmd(ctx, "checkout", fmt.Sprintf("%s/%s", remote, defaultBranch), "--", ".beads/")
 	if output, err := checkoutCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout .beads/ from %s/%s failed: %w\n%s", remote, defaultBranch, err, output)
 	}

@@ -120,35 +120,41 @@ func TestCheckParentProcessAlive_InvalidPID(t *testing.T) {
 	}
 }
 
-// TestGetPIDFileForSocket tests socket to PID file path conversion
+// TestGetPIDFileForSocket tests PID file path derivation from dbPath
+// Note: The socketPath parameter is ignored; PID file is always in .beads directory
 func TestGetPIDFileForSocket(t *testing.T) {
 	tests := []struct {
-		name       string
-		socketPath string
-		expected   string
+		name     string
+		dbPath   string
+		expected string
 	}{
 		{
-			name:       "typical beads socket",
-			socketPath: "/home/user/.beads/bd.sock",
-			expected:   "/home/user/.beads/daemon.pid",
+			name:     "typical beads directory",
+			dbPath:   "/home/user/.beads/issues.db",
+			expected: "/home/user/.beads/daemon.pid",
 		},
 		{
-			name:       "root .beads directory",
-			socketPath: "/root/.beads/bd.sock",
-			expected:   "/root/.beads/daemon.pid",
+			name:     "root beads directory",
+			dbPath:   "/root/.beads/issues.db",
+			expected: "/root/.beads/daemon.pid",
 		},
 		{
-			name:       "temporary directory",
-			socketPath: "/tmp/test.sock",
-			expected:   "/tmp/daemon.pid",
+			name:     "nested project beads",
+			dbPath:   "/home/user/projects/myapp/.beads/issues.db",
+			expected: "/home/user/projects/myapp/.beads/daemon.pid",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getPIDFileForSocket(tt.socketPath)
+			// Save and restore global dbPath
+			oldDbPath := dbPath
+			defer func() { dbPath = oldDbPath }()
+
+			dbPath = tt.dbPath
+			result := getPIDFileForSocket("ignored")
 			if result != tt.expected {
-				t.Errorf("getPIDFileForSocket(%q) = %q, want %q", tt.socketPath, result, tt.expected)
+				t.Errorf("getPIDFileForSocket() with dbPath=%q = %q, want %q", tt.dbPath, result, tt.expected)
 			}
 		})
 	}

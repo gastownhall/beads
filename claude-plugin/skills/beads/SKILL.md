@@ -5,7 +5,7 @@ description: >
   memory across conversation compaction. Use when work spans sessions, has blockers,
   or needs context recovery after compaction.
 allowed-tools: "Read,Bash(bd:*)"
-version: "0.43.0"
+version: "0.47.1"
 author: "Steve Yegge <https://github.com/steveyegge>"
 license: "MIT"
 ---
@@ -41,7 +41,7 @@ Graph-based issue tracker that survives conversation compaction. Provides persis
 ## Prerequisites
 
 ```bash
-bd --version  # Requires v0.34.0+
+bd --version  # Requires v0.47.0+
 ```
 
 - **bd CLI** installed and in PATH

@@ -41,8 +41,9 @@ func setupStealthMode(verbose bool) error {
 // This is the correct approach for per-repository user-specific ignores (GitHub #704).
 // Unlike global gitignore, patterns here are relative to the repo root.
 func setupGitExclude(verbose bool) error {
-	// Find the .git directory (handles both regular repos and worktrees)
-	gitDir, err := exec.Command("git", "rev-parse", "--git-dir").Output()
+	// Find the common .git directory (handles worktrees correctly - GH#1053)
+	// Use --git-common-dir to get the main repo's .git, not the worktree's .git/worktrees/<name>
+	gitDir, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
 	if err != nil {
 		return fmt.Errorf("not a git repository")
 	}
@@ -113,7 +114,8 @@ func setupGitExclude(verbose bool) error {
 // This is separate from stealth mode - fork protection is specifically about
 // preventing beads/Claude files from appearing in upstream PRs.
 func setupForkExclude(verbose bool) error {
-	gitDir, err := exec.Command("git", "rev-parse", "--git-dir").Output()
+	// Use --git-common-dir to get main repo's .git, not worktree's (GH#1053)
+	gitDir, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
 	if err != nil {
 		return fmt.Errorf("not a git repository")
 	}

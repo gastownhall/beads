@@ -24,12 +24,12 @@ func TestDetectExistingHooks(t *testing.T) {
 		hooksDir := filepath.Join(gitDirPath, "hooks")
 
 		tests := []struct {
-			name            string
-			setupHook       string
-			hookContent     string
-			wantExists      bool
-			wantIsBdHook    bool
-			wantIsPreCommit bool
+			name                     string
+			setupHook                string
+			hookContent              string
+			wantExists               bool
+			wantIsBdHook             bool
+			wantIsPreCommitFramework bool
 		}{
 			{
 				name:       "no hook",
@@ -44,11 +44,11 @@ func TestDetectExistingHooks(t *testing.T) {
 				wantIsBdHook: true,
 			},
 			{
-				name:            "pre-commit framework hook",
-				setupHook:       "pre-commit",
-				hookContent:     "#!/bin/sh\n# pre-commit framework\npre-commit run",
-				wantExists:      true,
-				wantIsPreCommit: true,
+				name:                     "pre-commit framework hook",
+				setupHook:                "pre-commit",
+				hookContent:              "#!/bin/sh\n# pre-commit framework\npre-commit run",
+				wantExists:               true,
+				wantIsPreCommitFramework: true,
 			},
 			{
 				name:        "custom hook",
@@ -90,8 +90,8 @@ func TestDetectExistingHooks(t *testing.T) {
 				if found.isBdHook != tt.wantIsBdHook {
 					t.Errorf("isBdHook = %v, want %v", found.isBdHook, tt.wantIsBdHook)
 				}
-				if found.isPreCommit != tt.wantIsPreCommit {
-					t.Errorf("isPreCommit = %v, want %v", found.isPreCommit, tt.wantIsPreCommit)
+				if found.isPreCommitFramework != tt.wantIsPreCommitFramework {
+					t.Errorf("isPreCommitFramework = %v, want %v", found.isPreCommitFramework, tt.wantIsPreCommitFramework)
 				}
 			})
 		}

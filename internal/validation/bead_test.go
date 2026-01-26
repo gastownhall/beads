@@ -211,19 +211,18 @@ func TestParseIssueType(t *testing.T) {
 		wantError    bool
 		errorContains string
 	}{
-		// Valid issue types
+		// Core work types (always valid)
 		{"bug type", "bug", types.TypeBug, false, ""},
 		{"feature type", "feature", types.TypeFeature, false, ""},
 		{"task type", "task", types.TypeTask, false, ""},
 		{"epic type", "epic", types.TypeEpic, false, ""},
 		{"chore type", "chore", types.TypeChore, false, ""},
-		{"merge-request type", "merge-request", types.TypeMergeRequest, false, ""},
-		{"molecule type", "molecule", types.TypeMolecule, false, ""},
-		{"gate type", "gate", types.TypeGate, false, ""},
-		{"event type", "event", types.TypeEvent, false, ""},
-		{"message type", "message", types.TypeMessage, false, ""},
-		// Gas Town types (agent, role, rig, convoy, slot) have been removed
-		// They now require custom type configuration,
+		// Gas Town types require types.custom configuration (invalid without config)
+		{"merge-request type", "merge-request", types.TypeTask, true, "invalid issue type"},
+		{"molecule type", "molecule", types.TypeTask, true, "invalid issue type"},
+		{"gate type", "gate", types.TypeTask, true, "invalid issue type"},
+		{"event type", "event", types.TypeTask, true, "invalid issue type"},
+		{"message type", "message", types.TypeTask, true, "invalid issue type"},
 
 		// Case sensitivity (function is case-sensitive)
 		{"uppercase bug", "BUG", types.TypeTask, true, "invalid issue type"},
@@ -315,6 +314,14 @@ func TestValidatePrefixWithAllowed(t *testing.T) {
 		{"allowed with spaces", "gt", "hq", "gt, hmc, foo", false, false},
 		{"empty allowed list", "gt", "hq", "", false, true},
 		{"single allowed prefix", "gt", "hq", "gt", false, false},
+
+		// GH#1135: prefix-of-allowed cases
+		// When ExtractIssuePrefix returns "hq" from "hq-cv-test", but "hq-cv" is allowed
+		{"GH#1135 prefix-of-allowed hq->hq-cv", "hq", "djdefi-ops", "djdefi-ops,hq-cv", false, false},
+		{"GH#1135 prefix-of-allowed with multiple", "hq", "djdefi-ops", "hq-cv,hq-other,foo", false, false},
+		{"GH#1135 exact match still works", "hq-cv", "djdefi-ops", "hq-cv", false, false},
+		{"GH#1135 no false positive for unrelated prefix", "bar", "djdefi-ops", "hq-cv", false, true},
+		{"GH#1135 no false positive for partial overlap", "hq", "djdefi-ops", "hqx-cv", false, true},
 	}
 
 	for _, tt := range tests {
@@ -322,6 +329,56 @@ func TestValidatePrefixWithAllowed(t *testing.T) {
 			err := ValidatePrefixWithAllowed(tt.requestedPrefix, tt.dbPrefix, tt.allowedPrefixes, tt.force)
 			if (err != nil) != tt.wantError {
 				t.Errorf("ValidatePrefixWithAllowed() error = %v, wantError %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
+// TestValidateIDPrefixAllowed tests the new function that validates IDs using
+// "starts with" matching to handle multi-hyphen prefixes correctly (GH#1135).
+func TestValidateIDPrefixAllowed(t *testing.T) {
+	tests := []struct {
+		name            string
+		id              string
+		dbPrefix        string
+		allowedPrefixes string
+		force           bool
+		wantError       bool
+	}{
+		// Basic cases
+		{"matching prefix", "bd-abc123", "bd", "", false, false},
+		{"empty db prefix", "bd-abc123", "", "", false, false},
+		{"mismatched with force", "foo-abc123", "bd", "", true, false},
+		{"mismatched without force", "foo-abc123", "bd", "", false, true},
+
+		// Multi-hyphen prefix cases (GH#1135 - the main bug)
+		{"hq-cv prefix with word suffix", "hq-cv-test", "djdefi-ops", "hq,hq-cv", false, false},
+		{"hq-cv prefix with hash suffix", "hq-cv-abc123", "djdefi-ops", "hq,hq-cv", false, false},
+		{"djdefi-ops with word suffix", "djdefi-ops-test", "djdefi-ops", "", false, false},
+
+		// Allowed prefixes list
+		{"allowed prefix gt", "gt-abc123", "hq", "gt,hmc", false, false},
+		{"allowed prefix hmc", "hmc-abc123", "hq", "gt,hmc", false, false},
+		{"primary prefix still works", "hq-abc123", "hq", "gt,hmc", false, false},
+		{"prefix not in allowed list", "foo-abc123", "hq", "gt,hmc", false, true},
+
+		// Edge cases
+		{"allowed with spaces", "gt-abc123", "hq", "gt, hmc, foo", false, false},
+		{"allowed with trailing dash", "gt-abc123", "hq", "gt-, hmc-", false, false},
+		{"empty allowed list", "gt-abc123", "hq", "", false, true},
+		{"single allowed prefix", "gt-abc123", "hq", "gt", false, false},
+
+		// Multi-hyphen allowed prefixes
+		{"multi-hyphen in allowed list", "my-cool-prefix-abc123", "hq", "my-cool-prefix,other", false, false},
+		{"partial match should fail", "hq-cv-extra-test", "hq", "hq-cv-extra", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateIDPrefixAllowed(tt.id, tt.dbPrefix, tt.allowedPrefixes, tt.force)
+			if (err != nil) != tt.wantError {
+				t.Errorf("ValidateIDPrefixAllowed(%q, %q, %q) error = %v, wantError %v",
+					tt.id, tt.dbPrefix, tt.allowedPrefixes, err, tt.wantError)
 			}
 		})
 	}
@@ -400,6 +457,46 @@ func TestValidateAgentID(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.errorContains) {
 					t.Errorf("ValidateAgentID(%q) error = %q, should contain %q", tt.id, err.Error(), tt.errorContains)
 				}
+			}
+		})
+	}
+}
+
+func TestExtractAgentPrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		wantPrefix string
+	}{
+		// Town-level agents
+		{"mayor", "gt-mayor", "gt"},
+		{"deacon", "gt-deacon", "gt"},
+		{"bd mayor", "bd-mayor", "bd"},
+
+		// Per-rig agents
+		{"witness", "gt-gastown-witness", "gt"},
+		{"refinery", "bd-beads-refinery", "bd"},
+
+		// Named agents - the bug case
+		{"polecat 3-char name", "nx-nexus-polecat-nux", "nx"},
+		{"polecat regular", "gt-gastown-polecat-phoenix", "gt"},
+		{"crew", "gt-beads-crew-dave", "gt"},
+
+		// Hyphenated rig names
+		{"hyphenated rig", "gt-my-project-witness", "gt"},
+		{"multi-hyphen rig polecat", "bd-my-cool-app-polecat-bob", "bd"},
+
+		// Edge cases
+		{"no hyphen", "nohyphen", ""},
+		{"empty", "", ""},
+		{"just prefix", "gt-", "gt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractAgentPrefix(tt.id)
+			if got != tt.wantPrefix {
+				t.Errorf("ExtractAgentPrefix(%q) = %q, want %q", tt.id, got, tt.wantPrefix)
 			}
 		})
 	}

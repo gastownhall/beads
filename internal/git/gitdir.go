@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -118,13 +119,37 @@ func GetGitCommonDir() (string, error) {
 }
 
 // GetGitHooksDir returns the path to the Git hooks directory.
-// This function is worktree-aware and handles both regular repos and worktrees.
+// This function is worktree-aware: hooks are shared across all worktrees
+// and live in the common git directory (e.g., /repo/.git/hooks), not in
+// the worktree-specific directory (e.g., /repo/.git/worktrees/feature/hooks).
 func GetGitHooksDir() (string, error) {
-	gitDir, err := GetGitDir()
+	ctx, err := getGitContext()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(gitDir, "hooks"), nil
+
+	// Respect core.hooksPath if configured.
+	// This is used by beads' Dolt backend (hooks installed to .beads/hooks/).
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = ctx.repoRoot
+	if out, err := cmd.Output(); err == nil {
+		hooksPath := strings.TrimSpace(string(out))
+		if hooksPath != "" {
+			if filepath.IsAbs(hooksPath) {
+				return hooksPath, nil
+			}
+			// Git treats relative core.hooksPath as relative to the repo root in common usage.
+			// (e.g., ".beads/hooks", ".githooks").
+			p := filepath.Join(ctx.repoRoot, hooksPath)
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs, nil
+			}
+			return p, nil
+		}
+	}
+
+	// Default: hooks are stored in the common git directory.
+	return filepath.Join(ctx.commonDir, "hooks"), nil
 }
 
 // GetGitRefsDir returns the path to the Git refs directory.
@@ -246,4 +271,46 @@ func NormalizePath(path string) string {
 func ResetCaches() {
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
+}
+
+// IsJujutsuRepo returns true if the current directory is in a jujutsu (jj) repository.
+// Jujutsu stores its data in a .jj directory at the repository root.
+func IsJujutsuRepo() bool {
+	_, err := GetJujutsuRoot()
+	return err == nil
+}
+
+// IsColocatedJJGit returns true if this is a colocated jujutsu+git repository.
+// Colocated repos have both .jj and .git directories, created via `jj git init --colocate`.
+// In colocated repos, git hooks work normally since jj manages the git repo.
+func IsColocatedJJGit() bool {
+	if !IsJujutsuRepo() {
+		return false
+	}
+	// If we're also in a git repo, it's colocated
+	_, err := getGitContext()
+	return err == nil
+}
+
+// GetJujutsuRoot returns the root directory of the jujutsu repository.
+// Returns empty string and error if not in a jujutsu repository.
+func GetJujutsuRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	dir := cwd
+	for {
+		jjPath := filepath.Join(dir, ".jj")
+		if info, err := os.Stat(jjPath); err == nil && info.IsDir() {
+			return dir, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("not a jujutsu repository (no .jj directory found)")
+		}
+		dir = parent
+	}
 }

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -16,23 +17,20 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
 )
 
 // CheckIDFormat checks whether issues use hash-based or sequential IDs
 func CheckIDFormat(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
 
-	// Check metadata.json first for custom database name
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+	// Determine the on-disk location (file for SQLite, directory for Dolt).
+	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	}
 
-	// Check if using JSONL-only mode
+	// Check if using JSONL-only mode (or uninitialized DB).
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Check if JSONL exists (--no-db mode)
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
@@ -51,24 +49,29 @@ func CheckIDFormat(path string) DoctorCheck {
 		}
 	}
 
-	// Open database
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	// Open the configured backend in read-only mode.
+	// This must work for both SQLite and Dolt.
+	ctx := context.Background()
+	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusError,
 			Message: "Unable to open database",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = db.Close() }() // Intentionally ignore close error
+	defer func() { _ = store.Close() }() // Intentionally ignore close error
+	db := store.UnderlyingDB()
 
 	// Get sample of issues to check ID format (up to 10 for pattern analysis)
-	rows, err := db.Query("SELECT id FROM issues ORDER BY created_at LIMIT 10")
+	rows, err := db.QueryContext(ctx, "SELECT id FROM issues ORDER BY created_at LIMIT 10")
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusError,
 			Message: "Unable to query issues",
+			Detail:  err.Error(),
 		}
 	}
 	defer rows.Close()
@@ -99,6 +102,13 @@ func CheckIDFormat(path string) DoctorCheck {
 	}
 
 	// Sequential IDs - recommend migration
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Issue IDs",
+			Status:  StatusOK,
+			Message: "hash-based ✓",
+		}
+	}
 	return DoctorCheck{
 		Name:    "Issue IDs",
 		Status:  StatusWarning,
@@ -404,9 +414,98 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 // This detects when a .beads directory was copied from another repo or when
 // the git remote URL changed. A mismatch can cause data loss during sync.
 func CheckRepoFingerprint(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
 
+	// Backend-aware existence check
+	switch backend {
+	case configfile.BackendDolt:
+		if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err != nil || !info.IsDir() {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusOK,
+				Message: "N/A (no database)",
+			}
+		}
+	default:
+		// SQLite backend: needs a .db file
+		var dbPath string
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+			dbPath = cfg.DatabasePath(beadsDir)
+		} else {
+			dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusOK,
+				Message: "N/A (no database)",
+			}
+		}
+	}
+
+	// For Dolt, read fingerprint from storage metadata (no sqlite assumptions).
+	if backend == configfile.BackendDolt {
+		ctx := context.Background()
+		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		if err != nil {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Unable to open database",
+				Detail:  err.Error(),
+			}
+		}
+		defer func() { _ = store.Close() }()
+
+		storedRepoID, err := store.GetMetadata(ctx, "repo_id")
+		if err != nil {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Unable to read repo fingerprint",
+				Detail:  err.Error(),
+			}
+		}
+
+		// If missing, warn (not the legacy sqlite messaging).
+		if storedRepoID == "" {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Missing repo fingerprint metadata",
+				Detail:  "Storage: Dolt",
+				Fix:     "Run 'bd migrate --update-repo-id' to add fingerprint metadata",
+			}
+		}
+
+		currentRepoID, err := beads.ComputeRepoID()
+		if err != nil {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Unable to compute current repo ID",
+				Detail:  err.Error(),
+			}
+		}
+
+		if storedRepoID != currentRepoID {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusError,
+				Message: "Database belongs to different repository",
+				Detail:  fmt.Sprintf("stored: %s, current: %s", storedRepoID[:8], currentRepoID[:8]),
+				Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init --backend dolt' if wrong database",
+			}
+		}
+
+		return DoctorCheck{
+			Name:    "Repo Fingerprint",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Verified (%s)", currentRepoID[:8]),
+		}
+	}
+
+	// SQLite path (existing behavior)
 	// Get database path
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {

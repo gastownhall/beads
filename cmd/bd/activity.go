@@ -152,7 +152,8 @@ func runActivityOnce(sinceTime time.Time) {
 	}
 }
 
-// runActivityFollow streams events in real-time
+// runActivityFollow streams events in real-time using filesystem watching.
+// Falls back to polling if fsnotify is not available.
 func runActivityFollow(sinceTime time.Time) {
 	// Start from now if no --since specified
 	lastPoll := time.Now().Add(-1 * time.Second)
@@ -181,9 +182,14 @@ func runActivityFollow(sinceTime time.Time) {
 		}
 	}
 
-	// Poll for new events
-	ticker := time.NewTicker(activityInterval)
-	defer ticker.Stop()
+	// Create filesystem watcher for near-instant wake-up
+	// Falls back to polling internally if fsnotify fails
+	beadsDir := filepath.Dir(dbPath)
+	watcher := NewActivityWatcher(beadsDir, activityInterval)
+	defer func() { _ = watcher.Close() }()
+
+	// Start watching
+	watcher.Start(rootCtx)
 
 	// Track consecutive failures for error reporting
 	consecutiveFailures := 0
@@ -194,7 +200,11 @@ func runActivityFollow(sinceTime time.Time) {
 		select {
 		case <-rootCtx.Done():
 			return
-		case <-ticker.C:
+		case _, ok := <-watcher.Events():
+			if !ok {
+				return // Watcher closed
+			}
+
 			newEvents, err := fetchMutations(lastPoll)
 			if err != nil {
 				consecutiveFailures++

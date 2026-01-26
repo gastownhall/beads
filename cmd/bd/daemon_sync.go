@@ -187,6 +187,30 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 		}
 		issue.SetDefaults() // Apply defaults for omitted fields
 
+		// Migrate old JSONL format: auto-correct deleted status to tombstone
+		// This handles JSONL files from versions that used "deleted" instead of "tombstone"
+		// (GH#1223: Stuck in sync diversion loop)
+		if issue.Status == types.Status("deleted") && issue.DeletedAt != nil {
+			issue.Status = types.StatusTombstone
+		}
+
+		// Fix: Any non-tombstone issue with deleted_at set is malformed and should be tombstone
+		// This catches issues that may have been corrupted or migrated incorrectly
+		if issue.Status != types.StatusTombstone && issue.DeletedAt != nil {
+			issue.Status = types.StatusTombstone
+		}
+
+		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+			now := time.Now()
+			issue.ClosedAt = &now
+		}
+
+		// Ensure tombstones have deleted_at set (fix for malformed data)
+		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+			now := time.Now()
+			issue.DeletedAt = &now
+		}
+
 		issues = append(issues, &issue)
 	}
 
@@ -267,9 +291,10 @@ func sanitizeMetadataKey(key string) string {
 // This function does NOT provide atomicity between JSONL write, metadata updates, and DB mtime.
 // If a crash occurs between these operations, metadata may be inconsistent. However, this is
 // acceptable because:
-//   1. The worst case is "JSONL content has changed" error on next export
-//   2. User can fix by running 'bd import' (safe, no data loss)
-//   3. Current approach is simple and doesn't require complex WAL or format changes
+//  1. The worst case is "JSONL content has changed" error on next export
+//  2. User can fix by running 'bd import' (safe, no data loss)
+//  3. Current approach is simple and doesn't require complex WAL or format changes
+//
 // Future: Consider defensive checks on startup if this becomes a common issue.
 func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath string, log daemonLogger, keySuffix string) {
 	// Sanitize keySuffix to handle Windows paths with colons
@@ -456,9 +481,12 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 			// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
 			// This prevents validatePreExport from incorrectly blocking on next export
 			// with "JSONL is newer than database" after daemon auto-export
-			dbPath := filepath.Join(beadsDir, "beads.db")
-			if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
-				log.log("Warning: failed to update database mtime: %v", err)
+			// Dolt backend does not have a SQLite DB file; mtime touch is SQLite-only.
+			if _, ok := store.(*sqlite.SQLiteStorage); ok {
+				dbPath := filepath.Join(beadsDir, "beads.db")
+				if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+					log.log("Warning: failed to update database mtime: %v", err)
+				}
 			}
 		}
 
@@ -755,8 +783,11 @@ func performSync(ctx context.Context, store storage.Storage, autoCommit, autoPus
 
 			// Update database mtime to be >= JSONL mtime
 			// This prevents validatePreExport from incorrectly blocking on next export
-			if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
-				log.log("Warning: failed to update database mtime: %v", err)
+			// Dolt backend does not have a SQLite DB file; mtime touch is SQLite-only.
+			if _, ok := store.(*sqlite.SQLiteStorage); ok {
+				if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+					log.log("Warning: failed to update database mtime: %v", err)
+				}
 			}
 		}
 
@@ -872,8 +903,11 @@ func performSync(ctx context.Context, store storage.Storage, autoCommit, autoPus
 
 		// Update database mtime after import (fixes #278, #301, #321)
 		// Sync branch import can update JSONL timestamp, so ensure DB >= JSONL
-		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
-			log.log("Warning: failed to update database mtime: %v", err)
+		// Dolt backend does not have a SQLite DB file; mtime touch is SQLite-only.
+		if _, ok := store.(*sqlite.SQLiteStorage); ok {
+			if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
+				log.log("Warning: failed to update database mtime: %v", err)
+			}
 		}
 
 		// Validate import didn't cause data loss

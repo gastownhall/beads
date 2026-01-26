@@ -520,6 +520,80 @@ func CheckNoVestigialSyncWorktrees() DoctorCheck {
 	}
 }
 
+// CheckLastTouchedNotTracked verifies that .beads/last-touched is NOT tracked by git.
+// The last-touched file is local runtime state that should never be committed.
+// If committed, it causes spurious diffs in other clones.
+func CheckLastTouchedNotTracked() DoctorCheck {
+	lastTouchedPath := filepath.Join(".beads", "last-touched")
+
+	// First check if the file exists
+	if _, err := os.Stat(lastTouchedPath); os.IsNotExist(err) {
+		// File doesn't exist - nothing to check
+		return DoctorCheck{
+			Name:    "Last-Touched Tracking",
+			Status:  StatusOK,
+			Message: "No last-touched file present",
+		}
+	}
+
+	// Check if git considers this file tracked
+	// git ls-files exits 0 and outputs the filename if tracked, empty if untracked
+	cmd := exec.Command("git", "ls-files", lastTouchedPath) // #nosec G204 - args are hardcoded paths
+	output, err := cmd.Output()
+	if err != nil {
+		// Not in a git repo or git error - skip check
+		return DoctorCheck{
+			Name:    "Last-Touched Tracking",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	trackedPath := strings.TrimSpace(string(output))
+	if trackedPath == "" {
+		// File exists but is not tracked - this is correct
+		return DoctorCheck{
+			Name:    "Last-Touched Tracking",
+			Status:  StatusOK,
+			Message: "last-touched file not tracked (correct)",
+		}
+	}
+
+	// File is tracked - this is a problem
+	return DoctorCheck{
+		Name:    "Last-Touched Tracking",
+		Status:  StatusWarning,
+		Message: "last-touched file is tracked by git",
+		Detail:  "The .beads/last-touched file is local runtime state that should never be committed.",
+		Fix:     "Run 'bd doctor --fix' to untrack, or manually: git rm --cached .beads/last-touched",
+	}
+}
+
+// FixLastTouchedTracking untracks the .beads/last-touched file from git
+func FixLastTouchedTracking() error {
+	lastTouchedPath := filepath.Join(".beads", "last-touched")
+
+	// Check if file is actually tracked first
+	cmd := exec.Command("git", "ls-files", lastTouchedPath) // #nosec G204 - args are hardcoded paths
+	output, err := cmd.Output()
+	if err != nil {
+		return nil // Not a git repo, nothing to do
+	}
+
+	trackedPath := strings.TrimSpace(string(output))
+	if trackedPath == "" {
+		return nil // Not tracked, nothing to do
+	}
+
+	// Untrack the file (keeps the local copy)
+	cmd = exec.Command("git", "rm", "--cached", lastTouchedPath) // #nosec G204 - args are hardcoded paths
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to untrack last-touched file: %w", err)
+	}
+
+	return nil
+}
+
 // CheckSyncBranchGitignore checks if git index flags are set on issues.jsonl when sync.branch is configured.
 // Without these flags, the file appears modified in git status even though changes go to the sync branch.
 // GH#797, GH#801, GH#870.
@@ -608,4 +682,11 @@ func FixSyncBranchGitignore() error {
 	}
 
 	return fix.SyncBranchGitignore(cwd)
+}
+
+// SetSyncBranchGitignoreFlags sets git index flags on .beads/*.jsonl files.
+// This is called directly by init when --branch is specified, bypassing the
+// GetFromYAML() check since the in-memory config may not be updated yet.
+func SetSyncBranchGitignoreFlags(path string) error {
+	return fix.SyncBranchGitignore(path)
 }

@@ -184,8 +184,9 @@ func getMoleculeProgress(ctx context.Context, s storage.Storage, moleculeID stri
 	}
 
 	// Get ready issues for this molecule
+	// IncludeMolSteps: true because we specifically need to see molecule steps here
 	readyIDs := make(map[string]bool)
-	readyIssues, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	readyIssues, err := s.GetReadyWork(ctx, types.WorkFilter{IncludeMolSteps: true})
 	if err == nil {
 		for _, issue := range readyIssues {
 			readyIDs[issue.ID] = true

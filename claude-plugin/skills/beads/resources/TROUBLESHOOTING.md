@@ -6,7 +6,7 @@ Common issues encountered when using bd and how to resolve them.
 
 **MCP tools (local environment):**
 - MCP tools require bd daemon running
-- Check daemon status: `bd daemon --status` (CLI)
+- Check daemon status: `bd daemon status` (CLI)
 - If MCP tools fail, verify daemon is running and restart if needed
 - MCP tools automatically use daemon mode (no --no-daemon option)
 
@@ -64,7 +64,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 **3. Restart daemon after upgrade:**
 ```bash
 pkill -f "bd daemon"  # Kill old daemon
-bd daemon             # Start new daemon with fix
+bd daemon start       # Start new daemon with fix
 ```
 
 **4. Test dependency creation:**
@@ -172,7 +172,7 @@ bd show issue-1
 
 ### Symptom
 ```bash
-bd daemon
+bd daemon start
 # Error: not in a git repository
 # Hint: run 'git init' to initialize a repository
 ```
@@ -189,19 +189,19 @@ bd daemon requires a **git repository** because it uses git for:
 ```bash
 # In your project directory
 git init
-bd daemon
+bd daemon start
 # ✓ Daemon should start now
 ```
 
-**Prevent git remote operations:**
+**Run in local-only mode (no git required):**
 ```bash
-# If you don't want daemon to pull from remote
-bd daemon --global=false
+# If you don't want daemon to use git at all
+bd daemon start --local
 ```
 
 **Flags:**
-- `--global=false`: Don't sync with git remote
-- `--interval=10m`: Custom sync interval (default: 5m)
+- `--local`: Run in local-only mode (no git required, no sync)
+- `--interval=10m`: Custom sync interval (default: 5s)
 - `--auto-commit=true`: Auto-commit JSONL changes
 
 ---
@@ -295,7 +295,7 @@ ls .beads/
 
 **Start daemon once to initialize JSONL:**
 ```bash
-bd daemon --global=false &
+bd daemon start --local &
 # Wait for initialization
 sleep 2
 
@@ -320,7 +320,7 @@ cat .beads/issues.jsonl
 # Batch import script
 
 bd init myproject
-bd daemon --global=false &  # Start daemon
+bd daemon start --local &   # Start daemon
 sleep 3                     # Wait for initialization
 
 # Now safe to use --no-daemon for performance
@@ -476,7 +476,7 @@ If the **bd-issue-tracking skill** provides incorrect guidance:
 | Status updates lag | Use daemon mode (not `--no-daemon`) |
 | Daemon won't start | Run `git init` first |
 | Database errors on Google Drive | Move to local filesystem |
-| JSONL file missing | Start daemon once: `bd daemon &` |
+| JSONL file missing | Start daemon once: `bd daemon start &` |
 | Dependencies backwards (MCP) | Update to v0.15.0+, use `issue_id/depends_on_id` correctly |
 
 ---

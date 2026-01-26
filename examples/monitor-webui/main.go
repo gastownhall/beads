@@ -158,7 +158,7 @@ func connectToDaemon(socketPath, dbPath string) error {
 		if health.Error != "" {
 			errMsg += fmt.Sprintf("\nError: %s", health.Error)
 		}
-		return fmt.Errorf("%s\n\nTry restarting the daemon:\n  bd daemon --stop\n  bd daemon", errMsg)
+		return fmt.Errorf("%s\n\nTry restarting the daemon:\n  bd daemon stop\n  bd daemon start", errMsg)
 	}
 
 	// Set database path

@@ -39,6 +39,14 @@ func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
 		t.Fatalf("failed to set issue_prefix: %v", err)
 	}
 
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	// These types are no longer built-in but many tests use them
+	if err := store.SetConfig(ctx, "types.custom", "message,merge-request,molecule,gate,agent,role,rig,convoy,event,slot"); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("failed to set types.custom: %v", err)
+	}
+
 	cleanup := func() {
 		store.Close()
 		os.RemoveAll(tmpDir)

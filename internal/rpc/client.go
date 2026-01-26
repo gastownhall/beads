@@ -13,13 +13,13 @@ import (
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
-// rpcDebugEnabled returns true if BD_RPC_DEBUG environment variable is set
+// rpcDebugEnabled returns true if BD_DEBUG_RPC environment variable is set
 func rpcDebugEnabled() bool {
-	val := os.Getenv("BD_RPC_DEBUG")
+	val := os.Getenv("BD_DEBUG_RPC")
 	return val == "1" || val == "true"
 }
 
-// rpcDebugLog logs to stderr if BD_RPC_DEBUG is enabled
+// rpcDebugLog logs to stderr if BD_DEBUG_RPC is enabled
 func rpcDebugLog(format string, args ...interface{}) {
 	if rpcDebugEnabled() {
 		fmt.Fprintf(os.Stderr, "[RPC DEBUG] "+format+"\n", args...)

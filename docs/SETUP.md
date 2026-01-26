@@ -18,6 +18,7 @@ The `bd setup` command uses a **recipe-based architecture** to configure beads i
 | `claude` | `~/.claude/settings.json` | SessionStart/PreCompact hooks |
 | `gemini` | `~/.gemini/settings.json` | SessionStart/PreCompress hooks |
 | `factory` | `AGENTS.md` | Marked section |
+| `codex` | `AGENTS.md` | Marked section |
 | `aider` | `.aider.conf.yml` + `.aider/` | Multi-file config |
 
 ## Quick Start
@@ -33,6 +34,7 @@ bd setup kilocode   # Kilo Code
 bd setup claude     # Claude Code
 bd setup gemini     # Gemini CLI
 bd setup factory    # Factory.ai Droid
+bd setup codex      # Codex CLI
 bd setup aider      # Aider
 
 # Verify installation
@@ -138,6 +140,24 @@ If you already have an AGENTS.md file with other project instructions:
 - ✅ You need tool-specific features (like Claude's stealth mode)
 
 You can use multiple integrations simultaneously - they complement each other!
+
+## Codex CLI
+
+Codex reads `AGENTS.md` instructions at the start of each run/session. Adding the beads section is enough to get Codex and beads working together.
+
+### Installation
+
+```bash
+bd setup codex
+```
+
+### What Gets Installed
+
+Creates or updates `AGENTS.md` with the beads integration section (same markers as Factory.ai).
+
+### Notes
+
+- Restart Codex if it's already running to pick up the new instructions.
 
 ## Claude Code
 

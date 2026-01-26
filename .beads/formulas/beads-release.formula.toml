@@ -454,9 +454,57 @@ grep 'Alpha (v' README.md
 """
 
 [[steps]]
+id = "bump-default-nix"
+title = "Bump version in default.nix"
+needs = ["bump-readme"]
+description = """
+Update the Nix package version.
+
+```bash
+# macOS
+sed -i '' 's/version = "[^"]*";/version = "{{version}}";/' default.nix
+
+# Linux
+sed -i 's/version = "[^"]*";/version = "{{version}}";/' default.nix
+```
+
+Verify:
+```bash
+grep 'version = ' default.nix
+```
+"""
+
+[[steps]]
+id = "update-vendorhash"
+title = "Update Nix vendorHash if needed"
+needs = ["bump-default-nix"]
+description = """
+Update vendorHash if go.mod/go.sum changed since last release.
+
+Check if update is needed:
+```bash
+# Compare go.mod/go.sum against last tag
+LAST_TAG=$(git describe --tags --abbrev=0)
+git diff $LAST_TAG -- go.mod go.sum
+```
+
+If there are changes, run the update script:
+```bash
+./scripts/update-nix-vendorhash.sh
+```
+
+The script auto-detects nix or Docker and updates the hash automatically.
+
+Verify:
+```bash
+grep 'vendorHash = ' default.nix
+```
+"""
+
+[[steps]]
 id = "stamp-changelog"
 title = "Stamp changelog with release date"
-needs = ["bump-readme"]
+needs = ["update-vendorhash"]
 description = """
 Add the release date to the [Unreleased] section header.
 
@@ -492,6 +540,7 @@ grep 'Version = ' cmd/bd/version.go
 jq -r '.version' .claude-plugin/plugin.json
 jq -r '.version' npm-package/package.json
 grep 'version = ' integrations/beads-mcp/pyproject.toml
+grep 'version = ' default.nix
 ```
 
 All should show {{version}}.

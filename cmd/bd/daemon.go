@@ -14,9 +14,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 var daemonCmd = &cobra.Command{
@@ -152,7 +155,7 @@ Run 'bd daemon --help' to see all subcommands.`,
 					// If we can check version and it's compatible, exit
 					if healthErr == nil && health.Compatible {
 						fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d, version %s)\n", pid, health.Version)
-						fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
+						fmt.Fprintf(os.Stderr, "Use 'bd daemon stop' to stop it first\n")
 						os.Exit(1)
 					}
 
@@ -166,7 +169,7 @@ Run 'bd daemon --help' to see all subcommands.`,
 				} else {
 					// Can't check version - assume incompatible
 					fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d)\n", pid)
-					fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
+					fmt.Fprintf(os.Stderr, "Use 'bd daemon stop' to stop it first\n")
 					os.Exit(1)
 				}
 			}
@@ -194,10 +197,22 @@ Run 'bd daemon --help' to see all subcommands.`,
 		}
 
 		// Check for upstream if auto-push enabled
-		if autoPush && !gitHasUpstream() {
-			fmt.Fprintf(os.Stderr, "Error: no upstream configured (required for --auto-push)\n")
-			fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name>\n")
-			os.Exit(1)
+		// When sync-branch is configured, check that branch's upstream instead of current HEAD.
+		// This fixes compatibility with jj/jujutsu which always operates in detached HEAD mode.
+		if autoPush {
+			hasUpstream := false
+			if syncBranch := syncbranch.GetFromYAML(); syncBranch != "" {
+				// sync-branch configured: check that branch's upstream
+				hasUpstream = gitBranchHasUpstream(syncBranch)
+			} else {
+				// No sync-branch: check current HEAD's upstream (original behavior)
+				hasUpstream = gitHasUpstream()
+			}
+			if !hasUpstream {
+				fmt.Fprintf(os.Stderr, "Error: no upstream configured (required for --auto-push)\n")
+				fmt.Fprintf(os.Stderr, "Hint: git push -u origin <branch-name>\n")
+				os.Exit(1)
+			}
 		}
 
 		// Warn if starting daemon in a git worktree
@@ -222,7 +237,10 @@ Run 'bd daemon --help' to see all subcommands.`,
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON)
+		federation, _ := cmd.Flags().GetBool("federation")
+		federationPort, _ := cmd.Flags().GetInt("federation-port")
+		remotesapiPort, _ := cmd.Flags().GetInt("remotesapi-port")
+		startDaemon(interval, autoCommit, autoPush, autoPull, localMode, foreground, logFile, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
 	},
 }
 
@@ -248,6 +266,9 @@ func init() {
 	daemonCmd.Flags().Bool("foreground", false, "Run in foreground (don't daemonize)")
 	daemonCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonCmd.Flags().Bool("log-json", false, "Output logs in JSON format (structured logging)")
+	daemonCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server with remotesapi)")
+	daemonCmd.Flags().Int("federation-port", 3306, "MySQL port for federation mode dolt sql-server")
+	daemonCmd.Flags().Int("remotesapi-port", 8080, "remotesapi port for peer-to-peer sync in federation mode")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -264,7 +285,7 @@ func computeDaemonParentPID() int {
 	}
 	return os.Getppid()
 }
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON bool) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, localMode bool, logPath, pidFile, logLevel string, logJSON, federation bool, federationPort, remotesapiPort int) {
 	level := parseLogLevel(logLevel)
 	logF, log := setupDaemonLogger(logPath, logJSON, level)
 	defer func() { _ = logF.Close() }()
@@ -284,7 +305,6 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			stackTrace := string(stackBuf[:stackSize])
 			log.Error("stack trace", "trace", stackTrace)
 
-			// Write crash report to daemon-error file for user visibility
 			var beadsDir string
 			if dbPath != "" {
 				beadsDir = filepath.Dir(dbPath)
@@ -293,13 +313,9 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 			}
 
 			if beadsDir != "" {
-				errFile := filepath.Join(beadsDir, "daemon-error")
 				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
 					time.Now().Format(time.RFC3339), r, stackTrace)
-				// nolint:gosec // G306: Error file needs to be readable for debugging
-				if err := os.WriteFile(errFile, []byte(crashReport), 0644); err != nil {
-					log.Warn("could not write crash report", "error", err)
-				}
+				log.Error("crash report", "report", crashReport)
 			}
 
 			// Clean up PID file
@@ -336,50 +352,63 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 
 	// Check for multiple .db files (ambiguity error)
 	beadsDir := filepath.Dir(daemonDBPath)
+	backend := factory.GetBackendFromConfig(beadsDir)
+	if backend == "" {
+		backend = configfile.BackendSQLite
+	}
 
 	// Reset backoff on daemon start (fresh start, but preserve NeedsManualSync hint)
 	if !localMode {
 		ResetBackoffOnDaemonStart(beadsDir)
 	}
-	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
-	if err == nil && len(matches) > 1 {
-		// Filter out backup files (*.backup-*.db, *.backup.db)
-		var validDBs []string
-		for _, match := range matches {
-			baseName := filepath.Base(match)
-			// Skip if it's a backup file (contains ".backup" in name)
-			if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
-				validDBs = append(validDBs, match)
-			}
-		}
-		if len(validDBs) > 1 {
-			errMsg := fmt.Sprintf("Error: Multiple database files found in %s:\n", beadsDir)
-			for _, db := range validDBs {
-				errMsg += fmt.Sprintf("  - %s\n", filepath.Base(db))
-			}
-			errMsg += fmt.Sprintf("\nBeads requires a single canonical database: %s\n", beads.CanonicalDatabaseName)
-			errMsg += "Run 'bd init' to migrate legacy databases or manually remove old databases\n"
-			errMsg += "Or run 'bd doctor' for more diagnostics"
 
-			log.log(errMsg)
-
-			// Write error to file so user can see it without checking logs
-			errFile := filepath.Join(beadsDir, "daemon-error")
-			// nolint:gosec // G306: Error file needs to be readable for debugging
-			if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
-				log.Warn("could not write daemon-error file", "error", err)
+	// Check for multiple .db files (ambiguity error) - SQLite only.
+	// Dolt is directory-backed so this check is irrelevant and can be misleading.
+	if backend == configfile.BackendSQLite {
+		matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+		if err == nil && len(matches) > 1 {
+			// Filter out backup files (*.backup-*.db, *.backup.db)
+			var validDBs []string
+			for _, match := range matches {
+				baseName := filepath.Base(match)
+				// Skip if it's a backup file (contains ".backup" in name)
+				if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
+					validDBs = append(validDBs, match)
+				}
 			}
+			if len(validDBs) > 1 {
+				errMsg := fmt.Sprintf("Error: Multiple database files found in %s:\n", beadsDir)
+				for _, db := range validDBs {
+					errMsg += fmt.Sprintf("  - %s\n", filepath.Base(db))
+				}
+				errMsg += fmt.Sprintf("\nBeads requires a single canonical database: %s\n", beads.CanonicalDatabaseName)
+				errMsg += "Run 'bd init' to migrate legacy databases or manually remove old databases\n"
+				errMsg += "Or run 'bd doctor' for more diagnostics"
 
-			return // Use return instead of os.Exit to allow defers to run
+				log.log(errMsg)
+
+				// Write error to file so user can see it without checking logs
+				errFile := filepath.Join(beadsDir, "daemon-error")
+				// nolint:gosec // G306: Error file needs to be readable for debugging
+				if err := os.WriteFile(errFile, []byte(errMsg), 0644); err != nil {
+					log.Warn("could not write daemon-error file", "error", err)
+				}
+
+				return // Use return instead of os.Exit to allow defers to run
+			}
 		}
 	}
 
-	// Validate using canonical name
-	dbBaseName := filepath.Base(daemonDBPath)
-	if dbBaseName != beads.CanonicalDatabaseName {
-		log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
-		log.Info("run 'bd init' to migrate to canonical name")
-		return // Use return instead of os.Exit to allow defers to run
+	// Validate using canonical name (SQLite only).
+	// Dolt uses a directory-backed store (typically .beads/dolt), so the "beads.db"
+	// basename invariant does not apply.
+	if backend == configfile.BackendSQLite {
+		dbBaseName := filepath.Base(daemonDBPath)
+		if dbBaseName != beads.CanonicalDatabaseName {
+			log.Error("non-canonical database name", "name", dbBaseName, "expected", beads.CanonicalDatabaseName)
+			log.Info("run 'bd init' to migrate to canonical name")
+			return // Use return instead of os.Exit to allow defers to run
+		}
 	}
 
 	log.Info("using database", "path", daemonDBPath)
@@ -390,17 +419,74 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		log.Warn("could not remove daemon-error file", "error", err)
 	}
 
-	store, err := sqlite.New(ctx, daemonDBPath)
+	// Start dolt sql-server if federation mode is enabled and backend is dolt
+	var doltServer *DoltServerHandle
+	factoryOpts := factory.Options{}
+	if federation && backend != configfile.BackendDolt {
+		log.Warn("federation mode requires dolt backend, ignoring --federation flag")
+		federation = false
+	}
+	if federation && backend == configfile.BackendDolt {
+		if !DoltServerAvailable() {
+			log.Error("federation mode requires CGO; use pre-built binaries from GitHub releases")
+			return
+		}
+		log.Info("starting dolt sql-server for federation mode")
+
+		doltPath := filepath.Join(beadsDir, "dolt")
+		serverLogFile := filepath.Join(beadsDir, "dolt-server.log")
+
+		// Use provided ports or defaults
+		sqlPort := federationPort
+		if sqlPort == 0 {
+			sqlPort = DoltDefaultSQLPort
+		}
+		remotePort := remotesapiPort
+		if remotePort == 0 {
+			remotePort = DoltDefaultRemotesAPIPort
+		}
+
+		var err error
+		doltServer, err = StartDoltServer(ctx, doltPath, serverLogFile, sqlPort, remotePort)
+		if err != nil {
+			log.Error("failed to start dolt sql-server", "error", err)
+			return
+		}
+		defer func() {
+			log.Info("stopping dolt sql-server")
+			if err := doltServer.Stop(); err != nil {
+				log.Warn("error stopping dolt sql-server", "error", err)
+			}
+		}()
+
+		log.Info("dolt sql-server started",
+			"sql_port", doltServer.SQLPort(),
+			"remotesapi_port", doltServer.RemotesAPIPort())
+
+		// Configure factory to use server mode
+		factoryOpts.ServerMode = true
+		factoryOpts.ServerHost = doltServer.Host()
+		factoryOpts.ServerPort = doltServer.SQLPort()
+	}
+
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factoryOpts)
 	if err != nil {
 		log.Error("cannot open database", "error", err)
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
 
-	// Enable freshness checking to detect external database file modifications
+	// Enable freshness checking for SQLite backend to detect external database file modifications
 	// (e.g., when git merge replaces the database file)
-	store.EnableFreshnessChecking()
-	log.Info("database opened", "path", daemonDBPath, "freshness_checking", true)
+	// Dolt doesn't need this since it handles versioning natively.
+	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+		sqliteStore.EnableFreshnessChecking()
+		log.Info("database opened", "path", store.Path(), "backend", "sqlite", "freshness_checking", true)
+	} else if federation {
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "federation/server")
+	} else {
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "embedded")
+	}
 
 	// Auto-upgrade .beads/.gitignore if outdated
 	gitignoreCheck := doctor.CheckGitignore()
@@ -413,14 +499,16 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		}
 	}
 
-	// Hydrate from multi-repo if configured
-	if results, err := store.HydrateFromMultiRepo(ctx); err != nil {
-		log.Error("multi-repo hydration failed", "error", err)
-		return // Use return instead of os.Exit to allow defers to run
-	} else if results != nil {
-		log.Info("multi-repo hydration complete")
-		for repo, count := range results {
-			log.Info("hydrated issues", "repo", repo, "count", count)
+	// Hydrate from multi-repo if configured (SQLite only)
+	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+		if results, err := sqliteStore.HydrateFromMultiRepo(ctx); err != nil {
+			log.Error("multi-repo hydration failed", "error", err)
+			return // Use return instead of os.Exit to allow defers to run
+		} else if results != nil {
+			log.Info("multi-repo hydration complete")
+			for repo, count := range results {
+				log.Info("hydrated issues", "repo", repo, "count", count)
+			}
 		}
 	}
 
@@ -600,18 +688,19 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 //   - If either BEADS_AUTO_COMMIT/daemon.auto_commit or BEADS_AUTO_PUSH/daemon.auto_push
 //     is enabled, treat as auto-sync=true (full read/write)
 //   - Otherwise check auto-pull for read-only mode
+//
 // 4. Fallback: all default to true when sync-branch configured
 //
 // Note: The individual auto-commit/auto-push settings are deprecated.
 // Use auto-sync for read/write mode, auto-pull for read-only mode.
 func loadDaemonAutoSettings(cmd *cobra.Command, autoCommit, autoPush, autoPull bool) (bool, bool, bool) {
-	dbPath := beads.FindDatabasePath()
-	if dbPath == "" {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
 		return autoCommit, autoPush, autoPull
 	}
 
 	ctx := context.Background()
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := factory.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		return autoCommit, autoPush, autoPull
 	}

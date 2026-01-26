@@ -21,6 +21,12 @@ func setupTestMemory(t *testing.T) *MemoryStorage {
 		t.Fatalf("failed to set issue_prefix: %v", err)
 	}
 
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	// These types are no longer built-in but many tests use them
+	if err := store.SetConfig(ctx, "types.custom", "message,merge-request,molecule,gate,agent,role,rig,convoy,event,slot"); err != nil {
+		t.Fatalf("failed to set types.custom: %v", err)
+	}
+
 	return store
 }
 

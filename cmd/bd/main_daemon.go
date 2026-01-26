@@ -29,6 +29,7 @@ const (
 	FallbackConnectFailed     = "connect_failed"
 	FallbackHealthFailed      = "health_failed"
 	FallbackWorktreeSafety    = "worktree_safety"
+	FallbackSingleProcessOnly = "single_process_only"
 	cmdDaemon                 = "daemon"
 	cmdImport                 = "import"
 	statusHealthy             = "healthy"

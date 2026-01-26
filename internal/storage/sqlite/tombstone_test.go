@@ -409,6 +409,74 @@ func TestDeleteIssuesCreatesTombstones(t *testing.T) {
 		}
 	})
 
+	t.Run("create issue with explicit ID replaces tombstone (bd-0gm4r)", func(t *testing.T) {
+		// Regression test: bd delete --hard --force creates tombstones that blocked
+		// bd create --id=<same-id> with UNIQUE constraint error.
+		// Fix: CreateIssue now deletes tombstones when explicit ID matches.
+		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
+
+		// Create an issue
+		issue := &types.Issue{
+			ID:        "bd-respawn-1",
+			Title:     "Original Issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create initial issue: %v", err)
+		}
+
+		// Delete it (creates tombstone)
+		result, err := store.DeleteIssues(ctx, []string{"bd-respawn-1"}, false, true, false)
+		if err != nil {
+			t.Fatalf("DeleteIssues failed: %v", err)
+		}
+		if result.DeletedCount != 1 {
+			t.Fatalf("Expected 1 deletion, got %d", result.DeletedCount)
+		}
+
+		// Verify tombstone exists
+		tombstone, err := store.GetIssue(ctx, "bd-respawn-1")
+		if err != nil {
+			t.Fatalf("Failed to get tombstone: %v", err)
+		}
+		if tombstone == nil || tombstone.Status != types.StatusTombstone {
+			t.Fatalf("Expected tombstone, got %v", tombstone)
+		}
+
+		// Now create a NEW issue with the SAME explicit ID
+		// This should succeed (tombstone is deleted first)
+		newIssue := &types.Issue{
+			ID:        "bd-respawn-1", // Same ID as tombstone
+			Title:     "Respawned Issue",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeBug,
+		}
+		if err := store.CreateIssue(ctx, newIssue, "test"); err != nil {
+			t.Fatalf("CreateIssue with explicit ID should succeed after tombstone: %v", err)
+		}
+
+		// Verify new issue replaced tombstone
+		created, err := store.GetIssue(ctx, "bd-respawn-1")
+		if err != nil {
+			t.Fatalf("Failed to get created issue: %v", err)
+		}
+		if created == nil {
+			t.Fatal("Issue should exist")
+		}
+		if created.Status != types.StatusOpen {
+			t.Errorf("Expected status open, got %s", created.Status)
+		}
+		if created.Title != "Respawned Issue" {
+			t.Errorf("Expected title 'Respawned Issue', got %s", created.Title)
+		}
+		if created.IssueType != types.TypeBug {
+			t.Errorf("Expected type bug, got %s", created.IssueType)
+		}
+	})
+
 	t.Run("dependencies removed from tombstones", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
 

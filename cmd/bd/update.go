@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/util"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -103,7 +104,8 @@ create, update, show, or close operation).`,
 		}
 		if cmd.Flags().Changed("type") {
 			issueType, _ := cmd.Flags().GetString("type")
-			// Validate issue type
+			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
+			issueType = util.NormalizeIssueType(issueType)
 			if !types.IssueType(issueType).IsValid() {
 				FatalErrorRespectJSON("invalid issue type %q. Valid types: bug, feature, task, epic, chore, merge-request, molecule, gate, agent, role, rig, convoy, event, slot", issueType)
 			}
@@ -124,14 +126,6 @@ create, update, show, or close operation).`,
 		if cmd.Flags().Changed("parent") {
 			parent, _ := cmd.Flags().GetString("parent")
 			updates["parent"] = parent
-		}
-		if cmd.Flags().Changed("type") {
-			issueType, _ := cmd.Flags().GetString("type")
-			// Validate issue type
-			if _, err := validation.ParseIssueType(issueType); err != nil {
-				FatalErrorRespectJSON("%v", err)
-			}
-			updates["issue_type"] = issueType
 		}
 		// Gate fields (bd-z6kw)
 		if cmd.Flags().Changed("await-id") {
@@ -170,6 +164,19 @@ create, update, show, or close operation).`,
 				}
 				updates["defer_until"] = t
 			}
+		}
+		// Ephemeral/persistent flags
+		// Note: storage layer uses "wisp" field name, maps to "ephemeral" column
+		ephemeralChanged := cmd.Flags().Changed("ephemeral")
+		persistentChanged := cmd.Flags().Changed("persistent")
+		if ephemeralChanged && persistentChanged {
+			FatalErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
+		}
+		if ephemeralChanged {
+			updates["wisp"] = true
+		}
+		if persistentChanged {
+			updates["wisp"] = false
 		}
 
 		// Get claim flag
@@ -283,6 +290,10 @@ create, update, show, or close operation).`,
 					// Explicit clear
 					empty := ""
 					updateArgs.DeferUntil = &empty
+				}
+				// Ephemeral/persistent
+				if wisp, ok := updates["wisp"].(bool); ok {
+					updateArgs.Ephemeral = &wisp
 				}
 
 				// Set claim flag for atomic claim operation
@@ -619,6 +630,9 @@ func init() {
 	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then")
 	// Gate fields (bd-z6kw)
 	updateCmd.Flags().String("await-id", "", "Set gate await_id (e.g., GitHub run ID for gh:run gates)")
+	// Ephemeral/persistent flags
+	updateCmd.Flags().Bool("ephemeral", false, "Mark issue as ephemeral (wisp) - not exported to JSONL")
+	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
 	updateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(updateCmd)
 }

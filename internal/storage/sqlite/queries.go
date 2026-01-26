@@ -33,6 +33,22 @@ func parseNullableTimeString(ns sql.NullString) *time.Time {
 	return nil // Unparseable - shouldn't happen with valid data
 }
 
+// parseTimeString parses a time string from database TEXT columns (non-nullable).
+// Similar to parseNullableTimeString but for required timestamp fields like created_at/updated_at.
+// Returns zero time if parsing fails, which maintains backwards compatibility.
+func parseTimeString(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	// Try RFC3339Nano first (more precise), then RFC3339, then SQLite format
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{} // Unparseable - shouldn't happen with valid data
+}
+
 // parseJSONStringArray parses a JSON string array from database TEXT column.
 // Returns empty slice if the string is empty or invalid JSON.
 func parseJSONStringArray(s string) []string {
@@ -142,8 +158,8 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	// We use raw Exec instead of BeginTx because database/sql doesn't support transaction
 	// modes in BeginTx, and modernc.org/sqlite's BeginTx always uses DEFERRED mode.
 	//
-	// Use retry logic with exponential backoff to handle SQLITE_BUSY under concurrent load
-	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
+	// The connection's busy_timeout pragma (30s) handles retries if locked.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("failed to begin immediate transaction: %w", err)
 	}
 
@@ -216,6 +232,40 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 	}
 
+	// bd-0gm4r: Handle tombstone collision for explicit IDs
+	// If the user explicitly specifies an ID that matches an existing tombstone,
+	// delete the tombstone first so the new issue can be created.
+	// This enables re-creating issues after hard deletion (e.g., polecat respawn).
+	if issue.ID != "" {
+		var existingStatus string
+		err := conn.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&existingStatus)
+		if err == nil && existingStatus == string(types.StatusTombstone) {
+			// Delete the tombstone record to allow re-creation
+			// Also clean up related tables (events, labels, dependencies, comments, dirty_issues)
+			if _, err := conn.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone events: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone labels: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, issue.ID, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone dependencies: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone comments: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone dirty marker: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, issue.ID); err != nil {
+				return fmt.Errorf("failed to delete tombstone: %w", err)
+			}
+			// Note: Tombstone is now gone, proceed with normal creation
+		} else if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("failed to check for existing tombstone: %w", err)
+		}
+	}
+
 	// Insert issue using strict mode (fails on duplicates)
 	// GH#956: Use insertIssueStrict instead of insertIssue to prevent FK constraint errors
 	// from silent INSERT OR IGNORE failures under concurrent load.
@@ -258,6 +308,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	defer s.reconnectMu.RUnlock()
 
 	var issue types.Issue
+	var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+	var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
 	var assignee sql.NullString
@@ -322,7 +374,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef,
+		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate, &crystallizes,
@@ -337,6 +389,14 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue: %w", err)
+	}
+
+	// Parse timestamp strings (TEXT columns require manual parsing)
+	if createdAtStr.Valid {
+		issue.CreatedAt = parseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 	}
 
 	if contentHash.Valid {
@@ -547,6 +607,8 @@ func (s *SQLiteStorage) GetCloseReasonsForIssues(ctx context.Context, issueIDs [
 // GetIssueByExternalRef retrieves an issue by external reference
 func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
 	var issue types.Issue
+	var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+	var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
 	var assignee sql.NullString
@@ -591,7 +653,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRefCol,
+		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRefCol,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate, &crystallizes,
@@ -603,6 +665,14 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue by external_ref: %w", err)
+	}
+
+	// Parse timestamp strings (TEXT columns require manual parsing)
+	if createdAtStr.Valid {
+		issue.CreatedAt = parseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 	}
 
 	if contentHash.Valid {
@@ -1337,56 +1407,73 @@ func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor st
 
 // DeleteIssue permanently removes an issue from the database
 func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTx(ctx, func(conn *sql.Conn) error {
+		// Mark issues that depend on this one as dirty so they get re-exported
+		// without the stale dependency reference (fixes orphan deps in JSONL)
+		rows, err := conn.QueryContext(ctx, `SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("failed to query dependent issues: %w", err)
+		}
+		var dependentIDs []string
+		for rows.Next() {
+			var depID string
+			if err := rows.Scan(&depID); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("failed to scan dependent issue ID: %w", err)
+			}
+			dependentIDs = append(dependentIDs, depID)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate dependent issues: %w", err)
+		}
 
-	// Delete dependencies (both directions)
-	_, err = tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete dependencies: %w", err)
-	}
+		if len(dependentIDs) > 0 {
+			if err := markIssuesDirtyTx(ctx, conn, dependentIDs); err != nil {
+				return fmt.Errorf("failed to mark dependent issues dirty: %w", err)
+			}
+		}
 
-	// Delete events
-	_, err = tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete events: %w", err)
-	}
+		// Delete dependencies (both directions)
+		_, err = conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete dependencies: %w", err)
+		}
 
-	// Delete comments (no FK cascade on this table)
-	_, err = tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete comments: %w", err)
-	}
+		// Delete events
+		_, err = conn.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete events: %w", err)
+		}
 
-	// Delete from dirty_issues
-	_, err = tx.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete dirty marker: %w", err)
-	}
+		// Delete comments (no FK cascade on this table)
+		_, err = conn.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete comments: %w", err)
+		}
 
-	// Delete the issue itself
-	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete issue: %w", err)
-	}
+		// Delete from dirty_issues
+		_, err = conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete dirty marker: %w", err)
+		}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("issue not found: %s", id)
-	}
+		// Delete the issue itself
+		result, err := conn.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete issue: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return wrapDBError("commit delete transaction", err)
-	}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to check rows affected: %w", err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("issue not found: %s", id)
+		}
 
-	// REMOVED: Counter sync after deletion - no longer needed with hash IDs
-	return nil
+		return nil
+	})
 }
 
 // DeleteIssuesResult contains statistics about a batch deletion operation
@@ -1961,7 +2048,9 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       created_at, created_by, owner, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template, crystallizes,
-		       await_type, await_id, timeout_ns, waiters
+		       await_type, await_id, timeout_ns, waiters,
+		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
+		       due_at, defer_until
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

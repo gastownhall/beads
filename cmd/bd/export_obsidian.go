@@ -32,20 +32,14 @@ var obsidianPriority = []string{
 	"⏬", // 4 = backlog/lowest
 }
 
-// obsidianTypeTag maps bd issue type to Obsidian tag
-// Note: Gas Town-specific types (agent, role, rig, convoy, slot) are now labels.
-// The labels will be converted to tags automatically via the label->tag logic.
+// obsidianTypeTag maps bd issue type to Obsidian tag (core types only)
+// Gas Town types are custom types and will use their issue_type value as a tag.
 var obsidianTypeTag = map[types.IssueType]string{
-	types.TypeBug:          "#Bug",
-	types.TypeFeature:      "#Feature",
-	types.TypeTask:         "#Task",
-	types.TypeEpic:         "#Epic",
-	types.TypeChore:        "#Chore",
-	types.TypeMessage:      "#Message",
-	types.TypeMergeRequest: "#MergeRequest",
-	types.TypeMolecule:     "#Molecule",
-	types.TypeGate:         "#Gate",
-	types.TypeEvent:        "#Event",
+	types.TypeBug:     "#Bug",
+	types.TypeFeature: "#Feature",
+	types.TypeTask:    "#Task",
+	types.TypeEpic:    "#Epic",
+	types.TypeChore:   "#Chore",
 }
 
 // formatObsidianTask converts a single issue to Obsidian Tasks format

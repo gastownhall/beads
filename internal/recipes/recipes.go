@@ -84,11 +84,23 @@ var BuiltinRecipes = map[string]Recipe{
 		Type:        TypeSection,
 		Description: "Factory Droid AGENTS.md section",
 	},
+	"codex": {
+		Name:        "Codex CLI",
+		Path:        "AGENTS.md",
+		Type:        TypeSection,
+		Description: "Codex CLI AGENTS.md section",
+	},
 	"aider": {
 		Name:        "Aider",
 		Type:        TypeMultiFile,
 		Description: "Aider config and instruction files",
 		Paths:       []string{".aider.conf.yml", ".aider/BEADS.md", ".aider/README.md"},
+	},
+	"junie": {
+		Name:        "Junie",
+		Type:        TypeMultiFile,
+		Description: "Junie guidelines and MCP configuration",
+		Paths:       []string{".junie/guidelines.md", ".junie/mcp/mcp.json"},
 	},
 }
 

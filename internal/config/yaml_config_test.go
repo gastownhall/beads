@@ -382,3 +382,53 @@ func TestValidateYamlConfigValue_OtherKeys(t *testing.T) {
 		t.Errorf("unexpected error for routing.mode: %v", err)
 	}
 }
+
+// TestValidateYamlConfigValue_SyncBranch_RejectsMain tests that main/master are rejected as sync branch (GH#1166)
+func TestValidateYamlConfigValue_SyncBranch_RejectsMain(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"sync-branch main", "sync-branch", "main"},
+		{"sync-branch master", "sync-branch", "master"},
+		{"sync.branch main", "sync.branch", "main"},
+		{"sync.branch master", "sync.branch", "master"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue(tt.key, tt.value)
+			if err == nil {
+				t.Errorf("expected error for %s=%s, got nil", tt.key, tt.value)
+			}
+			if err != nil && !strings.Contains(err.Error(), "cannot use") {
+				t.Errorf("expected 'cannot use' error, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateYamlConfigValue_SyncBranch_AcceptsValid tests that valid branch names are accepted (GH#1166)
+func TestValidateYamlConfigValue_SyncBranch_AcceptsValid(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"sync-branch beads-sync", "sync-branch", "beads-sync"},
+		{"sync-branch feature/test", "sync-branch", "feature/test"},
+		{"sync.branch beads-sync", "sync.branch", "beads-sync"},
+		{"sync.branch develop", "sync.branch", "develop"},
+		{"sync-branch empty", "sync-branch", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue(tt.key, tt.value)
+			if err != nil {
+				t.Errorf("unexpected error for %s=%s: %v", tt.key, tt.value, err)
+			}
+		})
+	}
+}

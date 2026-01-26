@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
@@ -79,6 +80,12 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 		return fmt.Errorf("not in a git repository")
 	}
 
+	// Get RepoContext for git operations
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return fmt.Errorf("failed to get repository context: %w", err)
+	}
+
 	// Ensure store is initialized for config operations
 	if err := ensureDirectMode("migrate-sync requires direct database access"); err != nil {
 		return err
@@ -116,11 +123,8 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 		fmt.Println("⚠ Warning: No git remote configured. Sync branch will only exist locally.")
 	}
 
-	// Get repo root
-	repoRoot, err := syncbranch.GetRepoRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get repository root: %w", err)
-	}
+	// Get repo root (rc already initialized above)
+	repoRoot := rc.RepoRoot
 
 	// Find JSONL path
 	jsonlPath := findJSONLPath()
@@ -173,20 +177,20 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 	if !branchExistsLocally && !branchExistsRemotely {
 		// Create new branch from current HEAD
 		fmt.Printf("  Creating new branch '%s'...\n", branchName)
-		createCmd := exec.CommandContext(ctx, "git", "branch", branchName)
+		createCmd := rc.GitCmd(ctx, "branch", branchName)
 		if output, err := createCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create branch: %w\n%s", err, output)
 		}
 	} else if !branchExistsLocally && branchExistsRemotely {
 		// Fetch and create local tracking branch
 		fmt.Printf("  Fetching remote branch '%s'...\n", branchName)
-		fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", branchName)
+		fetchCmd := rc.GitCmd(ctx, "fetch", "origin", branchName)
 		if output, err := fetchCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to fetch remote branch: %w\n%s", err, output)
 		}
 
 		// Create local branch tracking remote
-		createCmd := exec.CommandContext(ctx, "git", "branch", branchName, "origin/"+branchName)
+		createCmd := rc.GitCmd(ctx, "branch", branchName, "origin/"+branchName)
 		if output, err := createCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create local tracking branch: %w\n%s", err, output)
 		}
@@ -298,17 +302,25 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force bool) 
 
 // branchExistsLocal checks if a branch exists locally
 func branchExistsLocal(ctx context.Context, branch string) bool {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return false
+	}
+	cmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
 }
 
 // branchExistsRemote checks if a branch exists on origin remote
 func branchExistsRemote(ctx context.Context, branch string) bool {
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return false
+	}
 	// First fetch to ensure we have latest remote refs
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", "--prune")
+	fetchCmd := rc.GitCmd(ctx, "fetch", "origin", "--prune")
 	_ = fetchCmd.Run() // Best effort
 
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+	cmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
 	return cmd.Run() == nil
 }
 
@@ -327,7 +339,8 @@ func commitInitialSyncState(ctx context.Context, worktreePath, jsonlRelPath stri
 	beadsRelDir := filepath.Dir(jsonlRelPath)
 
 	// Stage all beads files
-	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", beadsRelDir)
+	// Use --sparse to work correctly with sparse-checkout enabled worktrees (fixes #1076)
+	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "--sparse", beadsRelDir)
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}

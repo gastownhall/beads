@@ -35,6 +35,13 @@ func setupGatedTestDB(t *testing.T) (*sqlite.SQLiteStorage, func()) {
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to set types.custom: %v", err)
+	}
+
 	cleanup := func() {
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -120,7 +127,7 @@ func TestFindGateReadyMolecules_ClosedGate(t *testing.T) {
 	gate := &types.Issue{
 		ID:        "test-mol-002.gate-await-ci",
 		Title:     "Gate: gh:run ci-workflow",
-		IssueType: types.TypeGate,
+		IssueType: "gate",
 		Status:    types.StatusClosed, // Gate has closed
 		AwaitType: "gh:run",
 		AwaitID:   "ci-workflow",
@@ -215,7 +222,7 @@ func TestFindGateReadyMolecules_OpenGate(t *testing.T) {
 	gate := &types.Issue{
 		ID:        "test-mol-003.gate-await-ci",
 		Title:     "Gate: gh:run ci-workflow",
-		IssueType: types.TypeGate,
+		IssueType: "gate",
 		Status:    types.StatusOpen, // Gate is still open
 		AwaitType: "gh:run",
 		AwaitID:   "ci-workflow",
@@ -295,7 +302,7 @@ func TestFindGateReadyMolecules_HookedMolecule(t *testing.T) {
 	gate := &types.Issue{
 		ID:        "test-mol-004.gate-await-ci",
 		Title:     "Gate: gh:run ci-workflow",
-		IssueType: types.TypeGate,
+		IssueType: "gate",
 		Status:    types.StatusClosed,
 		AwaitType: "gh:run",
 		AwaitID:   "ci-workflow",
@@ -377,7 +384,7 @@ func TestFindGateReadyMolecules_MultipleGates(t *testing.T) {
 		gate := &types.Issue{
 			ID:        fmt.Sprintf("%s.gate", molID),
 			Title:     "Gate: gh:run",
-			IssueType: types.TypeGate,
+			IssueType: "gate",
 			Status:    types.StatusClosed,
 			AwaitType: "gh:run",
 			CreatedAt: time.Now(),

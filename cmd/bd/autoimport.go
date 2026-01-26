@@ -21,13 +21,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// readFromGitRef reads file content from a git ref (branch or commit).
+// readFromGitRef reads file content from a git ref (branch or commit) in the beads repo.
 // Returns the raw bytes from git show <ref>:<path>.
 // The filePath is automatically converted to forward slashes for Windows compatibility.
 // Returns nil, err if the git command fails (e.g., file not found in ref).
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func readFromGitRef(filePath, gitRef string) ([]byte, error) {
 	gitPath := filepath.ToSlash(filePath)
-	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", gitRef, gitPath)) // #nosec G204 - git command with safe args
+	var cmd *exec.Cmd
+	if rc, err := beads.GetRepoContext(); err == nil {
+		cmd = rc.GitCmd(context.Background(), "show", fmt.Sprintf("%s:%s", gitRef, gitPath))
+	} else {
+		// Fallback to CWD for tests or repos without beads
+		cmd = exec.Command("git", "show", fmt.Sprintf("%s:%s", gitRef, gitPath)) // #nosec G204 - git command with safe args
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read from git: %w", err)
@@ -135,8 +142,14 @@ func checkGitForIssues() (int, string, string) {
 		// Check if the sync branch exists (locally or on remote)
 		// Try origin/<branch> first (more likely to exist in fresh clones),
 		// then local <branch>
+		// GH#1110: Use RepoContext to ensure we check the beads repo
 		for _, ref := range []string{"origin/" + syncBranch, syncBranch} {
-			cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref) // #nosec G204
+			var cmd *exec.Cmd
+			if rc, err := beads.GetRepoContext(); err == nil {
+				cmd = rc.GitCmd(context.Background(), "rev-parse", "--verify", "--quiet", ref)
+			} else {
+				cmd = exec.Command("git", "rev-parse", "--verify", "--quiet", ref) // #nosec G204
+			}
 			if err := cmd.Run(); err == nil {
 				gitRef = ref
 				break

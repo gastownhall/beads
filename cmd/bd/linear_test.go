@@ -1220,7 +1220,7 @@ func TestDoPushToLinearPreferLocalForcesUpdate(t *testing.T) {
 	})
 
 	forceUpdateIDs := map[string]bool{issue.ID: true}
-	stats, err := doPushToLinear(ctx, false, false, true, forceUpdateIDs, nil)
+	stats, err := doPushToLinear(ctx, false, false, true, forceUpdateIDs, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("doPushToLinear failed: %v", err)
 	}

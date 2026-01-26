@@ -2,6 +2,7 @@
 package sqlite
 
 import (
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -112,10 +113,11 @@ func (fc *FreshnessChecker) Check() bool {
 	return false
 }
 
-// debugPrintf is a no-op in production but can be enabled for debugging
+// debugPrintf conditionally logs debug messages when BD_DEBUG_FRESHNESS is set
 var debugPrintf = func(format string, args ...interface{}) {
-	// Uncomment for debugging:
-	// fmt.Printf(format, args...)
+	if os.Getenv("BD_DEBUG_FRESHNESS") != "" {
+		log.Printf("[freshness] "+format, args...)
+	}
 }
 
 // DebugState returns the current tracked state for testing/debugging.

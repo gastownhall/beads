@@ -594,7 +594,7 @@ func TestMemoryStorage_UpdateIssue_SearchIssues_ReadyWork_BlockedIssues(t *testi
 	child := &types.Issue{ID: "bd-2", Title: "Child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Assignee: assignee}
 	blocker := &types.Issue{ID: "bd-3", Title: "Blocker", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask}
 	pinned := &types.Issue{ID: "bd-4", Title: "Pinned", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Pinned: true}
-	workflow := &types.Issue{ID: "bd-5", Title: "Workflow", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeMergeRequest}
+	workflow := &types.Issue{ID: "bd-5", Title: "Workflow", Status: types.StatusOpen, Priority: 1, IssueType: "merge-request"}
 	for _, iss := range []*types.Issue{parent, child, blocker, pinned, workflow} {
 		if err := store.CreateIssue(ctx, iss, "actor"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
@@ -720,7 +720,7 @@ func TestMemoryStorage_UpdateIssue_SearchIssues_ReadyWork_BlockedIssues(t *testi
 	}
 
 	// Filter by workflow type explicitly.
-	ready, err = store.GetReadyWork(ctx, types.WorkFilter{Type: string(types.TypeMergeRequest)})
+	ready, err = store.GetReadyWork(ctx, types.WorkFilter{Type: "merge-request"})
 	if err != nil {
 		t.Fatalf("GetReadyWork type: %v", err)
 	}

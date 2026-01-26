@@ -69,7 +69,7 @@ The sync branch (beads-sync) will contain:
 **2. Start the daemon with auto-commit:**
 
 ```bash
-bd daemon --start --auto-commit
+bd daemon start --auto-commit
 ```
 
 The daemon will automatically commit issue changes to the `beads-sync` branch.
@@ -165,7 +165,7 @@ If you already have beads set up and want to switch to a separate branch:
 bd config set sync.branch beads-sync
 
 # Start the daemon (it will create the worktree automatically)
-bd daemon --start --auto-commit
+bd daemon start --auto-commit
 ```
 
 ### Daemon Configuration
@@ -174,10 +174,10 @@ For automatic commits to the sync branch:
 
 ```bash
 # Start daemon with auto-commit
-bd daemon --start --auto-commit
+bd daemon start --auto-commit
 
 # Or with auto-commit and auto-push
-bd daemon --start --auto-commit --auto-push
+bd daemon start --auto-commit --auto-push
 ```
 
 **Daemon modes:**
@@ -193,7 +193,7 @@ You can also configure the sync branch via environment variable:
 
 ```bash
 export BEADS_SYNC_BRANCH=beads-sync
-bd daemon --start --auto-commit
+bd daemon start --auto-commit
 ```
 
 This is useful for CI/CD or temporary overrides.
@@ -361,7 +361,7 @@ rm -rf .git/beads-worktrees/beads-sync
 git worktree prune
 
 # Restart daemon (it will recreate the worktree)
-bd daemon --stop && bd daemon --start
+bd daemon stop && bd daemon start
 ```
 
 ### "branch 'beads-sync' not found"
@@ -389,13 +389,13 @@ Check daemon status and logs:
 
 ```bash
 # Check status
-bd daemon --status
+bd daemon status
 
 # View logs
 tail -f ~/.beads/daemon.log
 
 # Restart daemon
-bd daemon --stop && bd daemon --start
+bd daemon stop && bd daemon start
 ```
 
 Common issues:
@@ -415,7 +415,7 @@ bd config get sync.branch  # Should be the same (e.g., beads-sync)
 bd sync --no-push
 
 # Check daemon is running
-bd daemon --status
+bd daemon status
 ```
 
 ## FAQ
@@ -426,7 +426,7 @@ No! This is a pure git solution that works on any platform. Just protect your `m
 
 ### Can I use a different branch name?
 
-Yes! Use any branch name you want:
+Yes! Use any branch name except `main` or `master` (git worktrees cannot checkout the same branch in multiple locations):
 
 ```bash
 bd init --branch my-custom-branch
@@ -440,7 +440,7 @@ Yes:
 
 ```bash
 bd config set sync.branch new-branch-name
-bd daemon --stop && bd daemon --start
+bd daemon stop && bd daemon start
 ```
 
 The old worktree will remain (no harm), and a new worktree will be created for the new branch.
@@ -451,7 +451,7 @@ Unset the sync branch config:
 
 ```bash
 bd config set sync.branch ""
-bd daemon --stop && bd daemon --start
+bd daemon stop && bd daemon start
 ```
 
 Beads will go back to committing directly to your current branch.
@@ -501,7 +501,7 @@ Yes, but the daemon will recreate it. If you want to clean up permanently:
 
 ```bash
 # Stop daemon
-bd daemon --stop
+bd daemon stop
 
 # Remove worktree
 git worktree remove .git/beads-worktrees/beads-sync
@@ -526,7 +526,7 @@ However, if you want fully automated sync:
 
 ```bash
 # WARNING: This bypasses branch protection!
-bd daemon --start --auto-commit --auto-push
+bd daemon start --auto-commit --auto-push
 bd sync --merge  # Run periodically (e.g., via cron)
 ```
 
@@ -672,7 +672,7 @@ If you have an existing beads setup committing to `main`:
 
 2. **Restart daemon:**
    ```bash
-   bd daemon --stop && bd daemon --start
+   bd daemon stop && bd daemon start
    ```
 
 3. **Verify:**
@@ -693,7 +693,7 @@ If you want to stop using a sync branch:
 
 2. **Restart daemon:**
    ```bash
-   bd daemon --stop && bd daemon --start
+   bd daemon stop && bd daemon start
    ```
 
 Future commits will go to your current branch (e.g., `main`).

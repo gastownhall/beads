@@ -11,6 +11,11 @@ import (
 // MarkIssueDirty marks an issue as dirty (needs to be exported to JSONL)
 // This should be called whenever an issue is created, updated, or has dependencies changed
 func (s *SQLiteStorage) MarkIssueDirty(ctx context.Context, issueID string) error {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO dirty_issues (issue_id, marked_at)
 		VALUES (?, ?)
@@ -26,9 +31,9 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 		return nil
 	}
 
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	return s.withTx(ctx, func(conn *sql.Conn) error {
 		now := time.Now()
-		stmt, err := tx.PrepareContext(ctx, `
+		stmt, err := conn.PrepareContext(ctx, `
 			INSERT INTO dirty_issues (issue_id, marked_at)
 			VALUES (?, ?)
 			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
@@ -50,6 +55,11 @@ func (s *SQLiteStorage) MarkIssuesDirty(ctx context.Context, issueIDs []string) 
 
 // GetDirtyIssues returns the list of issue IDs that need to be exported
 func (s *SQLiteStorage) GetDirtyIssues(ctx context.Context) ([]string, error) {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT issue_id FROM dirty_issues
 		ORDER BY marked_at ASC
@@ -76,6 +86,11 @@ func (s *SQLiteStorage) GetDirtyIssues(ctx context.Context) ([]string, error) {
 
 // GetDirtyIssueHash returns the stored content hash for a dirty issue, if it exists
 func (s *SQLiteStorage) GetDirtyIssueHash(ctx context.Context, issueID string) (string, error) {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	var hash sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT content_hash FROM dirty_issues WHERE issue_id = ?
@@ -102,8 +117,8 @@ func (s *SQLiteStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 		return nil
 	}
 
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		stmt, err := tx.PrepareContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`)
+	return s.withTx(ctx, func(conn *sql.Conn) error {
+		stmt, err := conn.PrepareContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`)
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
@@ -121,6 +136,11 @@ func (s *SQLiteStorage) ClearDirtyIssuesByID(ctx context.Context, issueIDs []str
 
 // GetDirtyIssueCount returns the count of dirty issues (for monitoring/debugging)
 func (s *SQLiteStorage) GetDirtyIssueCount(ctx context.Context) (int, error) {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dirty_issues`).Scan(&count)
 	if IsNotFound(wrapDBError("count dirty issues", err)) {
@@ -132,15 +152,16 @@ func (s *SQLiteStorage) GetDirtyIssueCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// markIssuesDirtyTx marks multiple issues as dirty within an existing transaction
-// This is a helper for operations that need to mark issues dirty as part of a larger transaction
-func markIssuesDirtyTx(ctx context.Context, tx *sql.Tx, issueIDs []string) error {
+// markIssuesDirtyTx marks multiple issues as dirty within an existing transaction.
+// This is a helper for operations that need to mark issues dirty as part of a larger transaction.
+// The exec parameter can be either *sql.Tx or *sql.Conn.
+func markIssuesDirtyTx(ctx context.Context, exec dbExecutor, issueIDs []string) error {
 	if len(issueIDs) == 0 {
 		return nil
 	}
 
 	now := time.Now()
-	stmt, err := tx.PrepareContext(ctx, `
+	stmt, err := exec.PrepareContext(ctx, `
 		INSERT INTO dirty_issues (issue_id, marked_at)
 		VALUES (?, ?)
 		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at

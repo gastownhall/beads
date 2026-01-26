@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -13,7 +14,9 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 const (
@@ -24,13 +27,17 @@ const (
 // bdShimMarker identifies bd shim hooks (GH#946)
 const bdShimMarker = "# bd-shim"
 
+// bdInlineHookMarker identifies inline hooks created by bd init (GH#1120)
+// These hooks have the logic embedded directly rather than calling bd hooks run
+const bdInlineHookMarker = "# bd (beads)"
+
 // bdHooksRunPattern matches hooks that call bd hooks run
 var bdHooksRunPattern = regexp.MustCompile(`\bbd\s+hooks\s+run\b`)
 
 // CheckGitHooks verifies that recommended git hooks are installed.
 func CheckGitHooks() DoctorCheck {
 	// Check if we're in a git repository using worktree-aware detection
-	gitDir, err := git.GetGitDir()
+	hooksDir, err := git.GetGitHooksDir()
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Git Hooks",
@@ -45,8 +52,6 @@ func CheckGitHooks() DoctorCheck {
 		"post-merge": "Imports updated JSONL after git pull/merge",
 		"pre-push":   "Exports database to JSONL before push",
 	}
-
-	hooksDir := filepath.Join(gitDir, "hooks")
 	var missingHooks []string
 	var installedHooks []string
 
@@ -60,13 +65,7 @@ func CheckGitHooks() DoctorCheck {
 	}
 
 	// Get repo root for external manager detection
-	repoRoot := filepath.Dir(gitDir)
-	if filepath.Base(gitDir) != ".git" {
-		// Worktree case - gitDir might be .git file content
-		if cwd, err := os.Getwd(); err == nil {
-			repoRoot = cwd
-		}
-	}
+	repoRoot := git.GetRepoRoot()
 
 	// Check for external hook managers (lefthook, husky, etc.)
 	externalManagers := fix.DetectExternalHookManagers(repoRoot)
@@ -158,10 +157,11 @@ func CheckGitHooks() DoctorCheck {
 	}
 }
 
-// areBdShimsInstalled checks if the installed hooks are bd shims or call bd hooks run.
+// areBdShimsInstalled checks if the installed hooks are bd shims, call bd hooks run,
+// or are inline bd hooks created by bd init.
 // This helps detect when bd hooks are installed directly but an external manager config exists.
-// Returns (true, installedHooks) if bd shims are detected, (false, nil) otherwise.
-// (GH#946)
+// Returns (true, installedHooks) if bd hooks are detected, (false, nil) otherwise.
+// (GH#946, GH#1120)
 func areBdShimsInstalled(hooksDir string) (bool, []string) {
 	hooks := []string{"pre-commit", "post-merge", "pre-push"}
 	var bdHooks []string
@@ -173,8 +173,10 @@ func areBdShimsInstalled(hooksDir string) (bool, []string) {
 			continue
 		}
 		contentStr := string(content)
-		// Check for bd-shim marker or bd hooks run call
-		if strings.Contains(contentStr, bdShimMarker) || bdHooksRunPattern.MatchString(contentStr) {
+		// Check for bd-shim marker, bd hooks run call, or inline bd hook marker (from bd init)
+		if strings.Contains(contentStr, bdShimMarker) ||
+			strings.Contains(contentStr, bdInlineHookMarker) ||
+			bdHooksRunPattern.MatchString(contentStr) {
 			bdHooks = append(bdHooks, hookName)
 		}
 	}
@@ -364,8 +366,8 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 	}
 
 	// sync-branch is configured - check pre-push hook version
-	// Get actual git directory (handles worktrees where .git is a file)
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	// Get common git directory for hooks (shared across worktrees)
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
 	cmd.Dir = path
 	output, err := cmd.Output()
 	if err != nil {
@@ -375,14 +377,13 @@ func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
 			Message: "N/A (not a git repository)",
 		}
 	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(path, gitDir)
+	gitCommonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(path, gitCommonDir)
 	}
 
-	// Use standard .git/hooks location for consistency with CheckGitHooks (issue #799)
-	// Note: core.hooksPath is intentionally NOT checked here to match CheckGitHooks behavior.
-	hookPath := filepath.Join(gitDir, "hooks", "pre-push")
+	// Hooks are shared across worktrees and live in the common git directory
+	hookPath := filepath.Join(gitCommonDir, "hooks", "pre-push")
 
 	hookContent, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
 	if err != nil {
@@ -748,64 +749,9 @@ func CheckSyncBranchHealth(path string) DoctorCheck {
 		}
 	}
 
-	// Check 2: Is sync branch far behind main on source files?
-	// Get the main branch name
-	mainBranch := "main"
-	cmd = exec.Command("git", "rev-parse", "--verify", "main")
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		// Try "master" as fallback
-		cmd = exec.Command("git", "rev-parse", "--verify", "master")
-		cmd.Dir = path
-		if err := cmd.Run(); err != nil {
-			// Can't determine main branch
-			return DoctorCheck{
-				Name:    "Sync Branch Health",
-				Status:  StatusOK,
-				Message: "OK",
-			}
-		}
-		mainBranch = "master"
-	}
-
-	// Count commits main is ahead of sync branch
-	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", syncBranch, mainBranch)) // #nosec G204 - branches from config/hardcoded
-	cmd.Dir = path
-	aheadOutput, err := cmd.Output()
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: "OK",
-		}
-	}
-	aheadCount := strings.TrimSpace(string(aheadOutput))
-
-	// Check if there are non-.beads/ file differences (stale source code)
-	cmd = exec.Command("git", "diff", "--name-only", fmt.Sprintf("%s..%s", syncBranch, mainBranch), "--", ":(exclude).beads/") // #nosec G204 - branches from config/hardcoded
-	cmd.Dir = path
-	diffOutput, _ := cmd.Output()
-	diffFiles := strings.TrimSpace(string(diffOutput))
-
-	if diffFiles != "" && aheadCount != "0" {
-		// Count the number of different files
-		fileCount := len(strings.Split(diffFiles, "\n"))
-		// Parse ahead count as int for comparison
-		aheadCountInt := 0
-		_, _ = fmt.Sscanf(aheadCount, "%d", &aheadCountInt)
-
-		// Only warn if significantly behind (20+ commits AND 50+ source files)
-		// Small drift is normal between bd sync operations
-		if fileCount > 50 && aheadCountInt > 20 {
-			return DoctorCheck{
-				Name:    "Sync Branch Health",
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("Sync branch %s commits behind %s on source files", aheadCount, mainBranch),
-				Detail:  fmt.Sprintf("%d source files differ between %s and %s. The sync branch has stale code.", fileCount, syncBranch, mainBranch),
-				Fix:     "Run 'bd doctor --fix' to reset sync branch to main",
-			}
-		}
-	}
+	// Note: We intentionally do NOT check if sync branch differs from main on source files.
+	// The sync branch only tracks .beads/ data - source file differences are expected behavior.
+	// See GH#1062 for why the previous check was removed (it caused destructive --fix behavior).
 
 	return DoctorCheck{
 		Name:    "Sync Branch Health",
@@ -831,64 +777,35 @@ func FixSyncBranchHealth(path string) error {
 
 // FindOrphanedIssues identifies issues referenced in git commits but still open in the database.
 // This is the shared core logic used by both 'bd orphans' and 'bd doctor' commands.
-// Returns empty slice if not a git repo, no database, or no orphans found (no error).
-func FindOrphanedIssues(path string) ([]OrphanIssue, error) {
+// Returns empty slice if not a git repo, no issues from provider, or no orphans found (no error).
+//
+// Parameters:
+//   - gitPath: The directory to scan for git commits
+//   - provider: The issue provider to get open issues and prefix from
+func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanIssue, error) {
 	// Skip if not in a git repo
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = path
+	cmd.Dir = gitPath
 	if err := cmd.Run(); err != nil {
 		return []OrphanIssue{}, nil // Not a git repo, return empty list
 	}
 
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	// Get issue prefix from provider
+	issuePrefix := provider.GetIssuePrefix()
 
-	// Skip if no .beads directory
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return []OrphanIssue{}, nil
-	}
-
-	// Get database path
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return []OrphanIssue{}, nil
-	}
-
-	// Open database read-only
-	db, err := openDBReadOnly(dbPath)
+	// Get all open/in_progress issues from provider
+	ctx := context.Background()
+	issues, err := provider.GetOpenIssues(ctx)
 	if err != nil {
 		return []OrphanIssue{}, nil
 	}
-	defer db.Close()
-
-	// Get issue prefix from config
-	var issuePrefix string
-	err = db.QueryRow("SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&issuePrefix)
-	if err != nil || issuePrefix == "" {
-		issuePrefix = "bd" // default
-	}
-
-	// Get all open/in_progress issues with their titles (title is optional for compatibility)
-	var rows *sql.Rows
-	rows, err = db.Query("SELECT id, title, status FROM issues WHERE status IN ('open', 'in_progress')")
-	// If the query fails (e.g., no title column), fall back to simpler query
-	if err != nil {
-		rows, err = db.Query("SELECT id, '', status FROM issues WHERE status IN ('open', 'in_progress')")
-		if err != nil {
-			return []OrphanIssue{}, nil
-		}
-	}
-	defer rows.Close()
 
 	openIssues := make(map[string]*OrphanIssue)
-	for rows.Next() {
-		var id, title, status string
-		if err := rows.Scan(&id, &title, &status); err == nil {
-			openIssues[id] = &OrphanIssue{
-				IssueID: id,
-				Title:   title,
-				Status:  status,
-			}
+	for _, issue := range issues {
+		openIssues[issue.ID] = &OrphanIssue{
+			IssueID: issue.ID,
+			Title:   issue.Title,
+			Status:  string(issue.Status),
 		}
 	}
 
@@ -898,7 +815,7 @@ func FindOrphanedIssues(path string) ([]OrphanIssue, error) {
 
 	// Get git log
 	cmd = exec.Command("git", "log", "--oneline", "--all")
-	cmd.Dir = path
+	cmd.Dir = gitPath
 	output, err := cmd.Output()
 	if err != nil {
 		return []OrphanIssue{}, nil
@@ -953,6 +870,34 @@ func FindOrphanedIssues(path string) ([]OrphanIssue, error) {
 	return orphanedIssues, nil
 }
 
+// FindOrphanedIssuesFromPath is a convenience function for callers that don't have a provider.
+// It creates a local provider from the given path's .beads/ directory.
+// This preserves backward compatibility for CheckOrphanedIssues and similar callers.
+func FindOrphanedIssuesFromPath(path string) ([]OrphanIssue, error) {
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	// Skip if no .beads directory
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return []OrphanIssue{}, nil
+	}
+
+	// Get database path
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return []OrphanIssue{}, nil
+	}
+
+	// Create a local provider from the database
+	provider, err := storage.NewLocalProvider(dbPath)
+	if err != nil {
+		return []OrphanIssue{}, nil
+	}
+	defer func() { _ = provider.Close() }()
+
+	return FindOrphanedIssues(path, provider)
+}
+
 // CheckOrphanedIssues detects issues referenced in git commits but still open.
 // This catches cases where someone implemented a fix with "(bd-xxx)" in the commit
 // message but forgot to run "bd close".
@@ -993,8 +938,8 @@ func CheckOrphanedIssues(path string) DoctorCheck {
 		}
 	}
 
-	// Use the shared FindOrphanedIssues function
-	orphans, err := FindOrphanedIssues(path)
+	// Use the shared FindOrphanedIssuesFromPath function (creates its own provider)
+	orphans, err := FindOrphanedIssuesFromPath(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Orphaned Issues",

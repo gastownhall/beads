@@ -442,12 +442,12 @@ func TestValidateForImport(t *testing.T) {
 			wantErr: false, // Should pass - federation trust model
 		},
 		{
-			name: "built-in type agent passes",
+			name: "custom type passes (federation trust)",
 			issue: Issue{
 				Title:     "Test Issue",
 				Status:    StatusOpen,
 				Priority:  1,
-				IssueType: TypeAgent, // Gas Town built-in type
+				IssueType: IssueType("agent"), // Custom type (no longer built-in)
 			},
 			wantErr: false,
 		},
@@ -539,20 +539,24 @@ func TestIssueTypeIsValid(t *testing.T) {
 		issueType IssueType
 		valid     bool
 	}{
+		// Core work types are always valid
 		{TypeBug, true},
 		{TypeFeature, true},
 		{TypeTask, true},
 		{TypeEpic, true},
 		{TypeChore, true},
-		{TypeMessage, true},
-		{TypeMergeRequest, true},
-		{TypeMolecule, true},
-		{TypeGate, true},
-		{TypeAgent, true},
-		{TypeRole, true},
-		{TypeConvoy, true},
-		{TypeEvent, true},
-		{TypeSlot, true},
+		// Gas Town types are now custom types (not built-in)
+		{IssueType("message"), false},
+		{IssueType("merge-request"), false},
+		{IssueType("molecule"), false},
+		{IssueType("gate"), false},
+		{IssueType("agent"), false},
+		{IssueType("role"), false},
+		{IssueType("convoy"), false},
+		{IssueType("event"), false},
+		{IssueType("slot"), false},
+		{IssueType("rig"), false},
+		// Invalid types
 		{IssueType("invalid"), false},
 		{IssueType(""), false},
 	}
@@ -577,12 +581,12 @@ func TestIssueTypeRequiredSections(t *testing.T) {
 		{TypeTask, 1, "## Acceptance Criteria"},
 		{TypeEpic, 1, "## Success Criteria"},
 		{TypeChore, 0, ""},
-		{TypeMessage, 0, ""},
-		{TypeMolecule, 0, ""},
-		{TypeGate, 0, ""},
-		{TypeEvent, 0, ""},
-		{TypeMergeRequest, 0, ""},
-		// Gas Town types (agent, role, rig, convoy, slot) have been removed
+		// Gas Town types are now custom and have no required sections
+		{IssueType("message"), 0, ""},
+		{IssueType("molecule"), 0, ""},
+		{IssueType("gate"), 0, ""},
+		{IssueType("event"), 0, ""},
+		{IssueType("merge-request"), 0, ""},
 	}
 
 	for _, tt := range tests {

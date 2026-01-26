@@ -27,7 +27,7 @@ cd my-project
 bd init
 
 # Start daemon for auto-sync (optional for teams)
-bd daemon --start --auto-commit --auto-push
+bd daemon start --auto-commit --auto-push
 ```
 
 ## Persona: Architect

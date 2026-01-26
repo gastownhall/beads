@@ -12,6 +12,18 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 )
 
+// Sync trigger constants define when sync operations occur.
+const (
+	// SyncTriggerPush triggers sync on git push operations.
+	SyncTriggerPush = "push"
+
+	// SyncTriggerChange triggers sync on every database change.
+	SyncTriggerChange = "change"
+
+	// SyncTriggerPull triggers import on git pull operations.
+	SyncTriggerPull = "pull"
+)
+
 var v *viper.Viper
 
 // Initialize sets up the viper configuration singleton
@@ -99,14 +111,32 @@ func Initialize() error {
 	v.SetDefault("identity", "")
 	v.SetDefault("remote-sync-interval", "30s")
 
+	// Dolt configuration defaults
+	// Controls whether beads should automatically create Dolt commits after write commands.
+	// Values: off | on
+	v.SetDefault("dolt.auto-commit", "on")
+
 	// Routing configuration defaults
-	v.SetDefault("routing.mode", "auto")
+	v.SetDefault("routing.mode", "")
 	v.SetDefault("routing.default", ".")
 	v.SetDefault("routing.maintainer", ".")
 	v.SetDefault("routing.contributor", "~/.beads-planning")
 
 	// Sync configuration defaults (bd-4u8)
 	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
+
+	// Sync mode configuration (hq-ew1mbr.3)
+	// See docs/CONFIG.md for detailed documentation
+	v.SetDefault("sync.mode", SyncModeGitPortable)  // git-portable | realtime | dolt-native | belt-and-suspenders
+	v.SetDefault("sync.export_on", SyncTriggerPush) // push | change
+	v.SetDefault("sync.import_on", SyncTriggerPull) // pull | change
+
+	// Conflict resolution configuration
+	v.SetDefault("conflict.strategy", ConflictStrategyNewest) // newest | ours | theirs | manual
+
+	// Federation configuration (optional Dolt remote)
+	v.SetDefault("federation.remote", "")      // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
+	v.SetDefault("federation.sovereignty", "") // T1 | T2 | T3 | T4 (empty = no restriction)
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
@@ -151,6 +181,13 @@ func Initialize() error {
 	}
 
 	return nil
+}
+
+// ResetForTesting clears the config state, allowing Initialize() to be called again.
+// This is intended for tests that need to change config.yaml between test steps.
+// WARNING: Not thread-safe. Only call from single-threaded test contexts.
+func ResetForTesting() {
+	v = nil
 }
 
 // ConfigSource represents where a configuration value came from
@@ -361,6 +398,16 @@ func AllSettings() map[string]interface{} {
 	return v.AllSettings()
 }
 
+// ConfigFileUsed returns the path to the config file that was loaded.
+// Returns empty string if no config file was found or viper is not initialized.
+// This is useful for resolving relative paths from the config file's directory.
+func ConfigFileUsed() string {
+	if v == nil {
+		return ""
+	}
+	return v.ConfigFileUsed()
+}
+
 // GetStringSlice retrieves a string slice configuration value
 func GetStringSlice(key string) []string {
 	if v == nil {
@@ -452,13 +499,23 @@ func ResolveExternalProjectPath(projectName string) string {
 		return ""
 	}
 
-	// Expand relative paths from config file location or cwd
+	// Resolve relative paths from repo root (parent of .beads/), NOT CWD.
+	// This ensures paths like "../beads" in config resolve correctly
+	// when running from different directories or in daemon context.
 	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return ""
+		// Config is at .beads/config.yaml, so go up twice to get repo root
+		configFile := ConfigFileUsed()
+		if configFile != "" {
+			repoRoot := filepath.Dir(filepath.Dir(configFile)) // .beads/config.yaml -> repo/
+			path = filepath.Join(repoRoot, path)
+		} else {
+			// Fallback: resolve from CWD (legacy behavior)
+			cwd, err := os.Getwd()
+			if err != nil {
+				return ""
+			}
+			path = filepath.Join(cwd, path)
 		}
-		path = filepath.Join(cwd, path)
 	}
 
 	// Verify path exists
@@ -502,4 +559,165 @@ func GetIdentity(flagValue string) string {
 	}
 
 	return "unknown"
+}
+
+// SyncConfig holds the sync mode configuration.
+type SyncConfig struct {
+	Mode     SyncMode // git-portable, realtime, dolt-native, belt-and-suspenders
+	ExportOn string   // push, change
+	ImportOn string   // pull, change
+}
+
+// GetSyncConfig returns the current sync configuration.
+func GetSyncConfig() SyncConfig {
+	return SyncConfig{
+		Mode:     GetSyncMode(),
+		ExportOn: GetString("sync.export_on"),
+		ImportOn: GetString("sync.import_on"),
+	}
+}
+
+// ConflictConfig holds the conflict resolution configuration.
+type ConflictConfig struct {
+	Strategy ConflictStrategy          // newest, ours, theirs, manual (default for all fields)
+	Fields   map[string]FieldStrategy  // Per-field strategy overrides
+}
+
+// GetConflictConfig returns the current conflict resolution configuration.
+func GetConflictConfig() ConflictConfig {
+	return ConflictConfig{
+		Strategy: GetConflictStrategy(),
+		Fields:   GetFieldStrategies(),
+	}
+}
+
+// GetFieldStrategies retrieves per-field conflict resolution strategies from config.
+// Returns a map of field name to strategy (e.g., {"labels": "union", "compaction_level": "max"}).
+// Invalid strategies are logged and skipped.
+//
+// Config key: conflict.fields
+// Example:
+//
+//	conflict:
+//	  strategy: newest
+//	  fields:
+//	    compaction_level: max
+//	    labels: union
+//	    waiters: union
+//	    estimated_minutes: manual
+func GetFieldStrategies() map[string]FieldStrategy {
+	result := make(map[string]FieldStrategy)
+	if v == nil {
+		return result
+	}
+
+	// Get the raw map from config
+	fieldsMap := v.GetStringMapString("conflict.fields")
+	if fieldsMap == nil {
+		return result
+	}
+
+	for field, strategyStr := range fieldsMap {
+		strategy := FieldStrategy(strings.ToLower(strings.TrimSpace(strategyStr)))
+		if !validFieldStrategies[strategy] {
+			logConfigWarning("Warning: invalid conflict.fields.%s strategy %q (valid: %s), skipping\n",
+				field, strategyStr, strings.Join(ValidFieldStrategies(), ", "))
+			continue
+		}
+		result[field] = strategy
+	}
+
+	return result
+}
+
+// GetFieldStrategy returns the merge strategy for a specific field.
+// Returns the per-field strategy if configured, otherwise returns "newest" (default).
+func GetFieldStrategy(field string) FieldStrategy {
+	fields := GetFieldStrategies()
+	if strategy, ok := fields[field]; ok {
+		return strategy
+	}
+	return FieldStrategyNewest // Default
+}
+
+// FederationConfig holds the federation (Dolt remote) configuration.
+type FederationConfig struct {
+	Remote      string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
+	Sovereignty Sovereignty // T1, T2, T3, T4
+}
+
+// GetFederationConfig returns the current federation configuration.
+func GetFederationConfig() FederationConfig {
+	return FederationConfig{
+		Remote:      GetString("federation.remote"),
+		Sovereignty: GetSovereignty(),
+	}
+}
+
+// IsSyncModeValid checks if the given sync mode string is valid.
+func IsSyncModeValid(mode string) bool {
+	return validSyncModes[SyncMode(mode)]
+}
+
+// IsConflictStrategyValid checks if the given conflict strategy string is valid.
+func IsConflictStrategyValid(strategy string) bool {
+	return validConflictStrategies[ConflictStrategy(strategy)]
+}
+
+// IsSovereigntyValid checks if the given sovereignty tier string is valid.
+// Note: empty string is valid (means no restriction).
+func IsSovereigntyValid(sovereignty string) bool {
+	if sovereignty == "" {
+		return true
+	}
+	return validSovereigntyTiers[Sovereignty(sovereignty)]
+}
+
+// ShouldExportOnChange returns true if sync.export_on is set to "change".
+func ShouldExportOnChange() bool {
+	return GetString("sync.export_on") == SyncTriggerChange
+}
+
+// ShouldImportOnChange returns true if sync.import_on is set to "change".
+func ShouldImportOnChange() bool {
+	return GetString("sync.import_on") == SyncTriggerChange
+}
+
+// NeedsDoltRemote returns true if the sync mode requires a Dolt remote.
+func NeedsDoltRemote() bool {
+	mode := GetSyncMode()
+	return mode == SyncModeDoltNative || mode == SyncModeBeltAndSuspenders
+}
+
+// NeedsJSONL returns true if the sync mode requires JSONL export.
+func NeedsJSONL() bool {
+	mode := GetSyncMode()
+	return mode == SyncModeGitPortable || mode == SyncModeRealtime || mode == SyncModeBeltAndSuspenders
+}
+
+// GetCustomTypesFromYAML retrieves custom issue types from config.yaml.
+// This is used as a fallback when the database doesn't have types.custom set yet
+// (e.g., during bd init auto-import before the database is fully configured).
+// Returns nil if no custom types are configured in config.yaml.
+func GetCustomTypesFromYAML() []string {
+	if v == nil {
+		return nil
+	}
+
+	// Try to get types.custom from viper (config.yaml or env var)
+	value := v.GetString("types.custom")
+	if value == "" {
+		return nil
+	}
+
+	// Parse comma-separated list
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

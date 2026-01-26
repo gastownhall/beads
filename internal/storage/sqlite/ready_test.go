@@ -1905,3 +1905,128 @@ func TestIsBlocked(t *testing.T) {
 		t.Errorf("Expected issue3 to NOT be blocked (blocker is closed), got blocked=true with blockers=%v", blockers)
 	}
 }
+
+// TestGetReadyWorkExcludesMolSteps tests that molecule steps (IDs containing -mol-) are
+// excluded from bd ready by default, but included when filtering by explicit type.
+func TestGetReadyWorkExcludesMolSteps(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Create regular tasks
+	regularTask := env.CreateIssue("Regular task")
+
+	// Create molecule steps (IDs contain -mol-)
+	molStep1 := env.CreateIssueWithID("bd-mol-abc", "Mol step 1")
+	molStep2 := env.CreateIssueWithID("bd-mol-xyz", "Mol step 2")
+
+	// Default query should exclude mol steps
+	ready := env.GetReadyWork(types.WorkFilter{})
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	// Regular task should be included
+	if !readyIDs[regularTask.ID] {
+		t.Errorf("Expected regular task %s to be in ready work", regularTask.ID)
+	}
+
+	// Mol steps should be excluded
+	if readyIDs[molStep1.ID] {
+		t.Errorf("Expected mol step %s to be EXCLUDED from ready work by default", molStep1.ID)
+	}
+	if readyIDs[molStep2.ID] {
+		t.Errorf("Expected mol step %s to be EXCLUDED from ready work by default", molStep2.ID)
+	}
+
+	// Explicit type=task filter should include mol steps
+	readyWithType := env.GetReadyWork(types.WorkFilter{Type: "task"})
+	readyWithTypeIDs := make(map[string]bool)
+	for _, issue := range readyWithType {
+		readyWithTypeIDs[issue.ID] = true
+	}
+
+	// All tasks should be included when filtering by type
+	if !readyWithTypeIDs[regularTask.ID] {
+		t.Errorf("Expected regular task %s to be in ready work with --type=task", regularTask.ID)
+	}
+	if !readyWithTypeIDs[molStep1.ID] {
+		t.Errorf("Expected mol step %s to be INCLUDED with --type=task filter", molStep1.ID)
+	}
+	if !readyWithTypeIDs[molStep2.ID] {
+		t.Errorf("Expected mol step %s to be INCLUDED with --type=task filter", molStep2.ID)
+	}
+}
+
+// TestGetReadyWorkExcludeIDPatternsConfig tests custom exclusion patterns via config.
+func TestGetReadyWorkExcludeIDPatternsConfig(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := env.Ctx
+
+	// Create issues with various ID patterns
+	regularTask := env.CreateIssue("Regular task")
+	molStep := env.CreateIssueWithID("bd-mol-abc", "Mol step")
+	roleStep := env.CreateIssueWithID("bd-role-xyz", "Role step")
+	wispStep := env.CreateIssueWithID("bd-wisp-123", "Wisp step")
+
+	// Default config excludes -mol- and -wisp-
+	ready := env.GetReadyWork(types.WorkFilter{})
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	if !readyIDs[regularTask.ID] {
+		t.Errorf("Expected regular task to be included")
+	}
+	if readyIDs[molStep.ID] {
+		t.Errorf("Expected mol step to be excluded by default")
+	}
+	if readyIDs[wispStep.ID] {
+		t.Errorf("Expected wisp step to be excluded by default")
+	}
+	if !readyIDs[roleStep.ID] {
+		t.Errorf("Expected role step to be included (not in default patterns)")
+	}
+
+	// Configure custom patterns to also exclude -role-
+	if err := env.Store.SetConfig(ctx, ExcludeIDPatternsConfigKey, "-mol-,-wisp-,-role-"); err != nil {
+		t.Fatalf("SetConfig failed: %v", err)
+	}
+
+	ready2 := env.GetReadyWork(types.WorkFilter{})
+	readyIDs2 := make(map[string]bool)
+	for _, issue := range ready2 {
+		readyIDs2[issue.ID] = true
+	}
+
+	if !readyIDs2[regularTask.ID] {
+		t.Errorf("Expected regular task to be included with custom config")
+	}
+	if readyIDs2[molStep.ID] {
+		t.Errorf("Expected mol step to be excluded with custom config")
+	}
+	if readyIDs2[wispStep.ID] {
+		t.Errorf("Expected wisp step to be excluded with custom config")
+	}
+	if readyIDs2[roleStep.ID] {
+		t.Errorf("Expected role step to be excluded with custom config")
+	}
+
+	// IncludeMolSteps should bypass all pattern exclusions
+	ready3 := env.GetReadyWork(types.WorkFilter{IncludeMolSteps: true})
+	readyIDs3 := make(map[string]bool)
+	for _, issue := range ready3 {
+		readyIDs3[issue.ID] = true
+	}
+
+	if !readyIDs3[regularTask.ID] {
+		t.Errorf("Expected regular task with IncludeMolSteps")
+	}
+	if !readyIDs3[molStep.ID] {
+		t.Errorf("Expected mol step with IncludeMolSteps: true")
+	}
+	if !readyIDs3[roleStep.ID] {
+		t.Errorf("Expected role step with IncludeMolSteps: true")
+	}
+	// Note: wisp step is excluded by ephemeral flag, not pattern, so it stays excluded
+}

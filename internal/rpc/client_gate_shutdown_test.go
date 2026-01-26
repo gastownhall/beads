@@ -51,7 +51,7 @@ func TestClient_GateLifecycleAndShutdown(t *testing.T) {
 	if err := json.Unmarshal(showResp.Data, &gate); err != nil {
 		t.Fatalf("unmarshal GateShow: %v", err)
 	}
-	if gate.ID != created.ID || gate.IssueType != types.TypeGate {
+	if gate.ID != created.ID || gate.IssueType != "gate" {
 		t.Fatalf("unexpected gate: %+v", gate)
 	}
 

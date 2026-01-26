@@ -135,9 +135,10 @@ bd close bd-abc --reason "PR merged"
 The wizard configures these settings in `.beads/beads.db`:
 
 ```yaml
-contributor:
-  planning_repo: ~/.beads-planning
-  auto_route: true
+routing:
+  mode: auto
+  contributor: ~/.beads-planning
+  maintainer: .
 ```
 
 ### Manual Configuration
@@ -148,9 +149,24 @@ If you prefer manual setup:
 # Initialize beads normally
 bd init
 
-# Configure planning repo
+# Configure routing
+bd config set routing.mode auto
+bd config set routing.contributor ~/.beads-planning
+bd config set routing.maintainer .
+```
+
+### Legacy Configuration (Deprecated)
+
+Older versions used `contributor.*` keys. These still work for backward compatibility:
+
+```bash
+# Old keys (deprecated but functional)
 bd config set contributor.planning_repo ~/.beads-planning
 bd config set contributor.auto_route true
+
+# New keys (preferred)
+bd config set routing.mode auto
+bd config set routing.contributor ~/.beads-planning
 ```
 
 ## Multi-Repository View
@@ -178,10 +194,10 @@ bd list --source-repo ~/.beads-planning    # Planning repo only
 
 ### Q: What if I want some issues in the upstream repo?
 
-A: Override auto-routing with `--source-repo` flag:
+A: Override auto-routing with `--repo` flag:
 
 ```bash
-bd create "Document new API" -p 2 --source-repo .
+bd create "Document new API" -p 2 --repo .
 ```
 
 ### Q: Can I change the planning repo location?
@@ -189,7 +205,7 @@ bd create "Document new API" -p 2 --source-repo .
 A: Yes, configure it:
 
 ```bash
-bd config set contributor.planning_repo /path/to/my-planning
+bd config set routing.contributor /path/to/my-planning
 ```
 
 ### Q: What if I have push access to upstream?
@@ -198,10 +214,11 @@ A: The wizard will ask if you want a planning repo anyway. You can say "no" to s
 
 ### Q: How do I disable auto-routing?
 
-A: Turn it off:
+A: Change routing mode to explicit:
 
 ```bash
-bd config set contributor.auto_route false
+bd config set routing.mode explicit
+bd config set routing.default .  # Default to current repo
 ```
 
 ## See Also

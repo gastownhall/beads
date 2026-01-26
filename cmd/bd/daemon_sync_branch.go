@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -158,21 +159,37 @@ func gitCommitInWorktree(ctx context.Context, worktreePath, filePath, message st
 	if err != nil {
 		return fmt.Errorf("failed to make path relative: %w", err)
 	}
-	
+
 	// Stage the file
-	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", relPath) // #nosec G204 - worktreePath and relPath are derived from trusted git operations
+	// Use --sparse to work correctly with sparse-checkout enabled worktrees (fixes #1076)
+	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "--sparse", relPath) // #nosec G204 - worktreePath and relPath are derived from trusted git operations
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed in worktree: %w", err)
 	}
-	
-	// Commit with --no-verify to skip hooks (pre-commit hook would fail in worktree context)
+
+	// Build commit args with config-based author and signing options (GH#1051)
+	// Also use --no-verify to skip hooks (pre-commit hook would fail in worktree context)
 	// The worktree is internal to bd sync, so we don't need to run bd's pre-commit hook
-	commitCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "commit", "--no-verify", "-m", message)
+	args := []string{"-C", worktreePath, "commit", "--no-verify"}
+
+	// Add --author if configured (GH#1051: apply git.author config to daemon commits)
+	if author := config.GetString("git.author"); author != "" {
+		args = append(args, "--author", author)
+	}
+
+	// Add --no-gpg-sign if configured
+	if config.GetBool("git.no-gpg-sign") {
+		args = append(args, "--no-gpg-sign")
+	}
+
+	args = append(args, "-m", message)
+
+	commitCmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 - args built from trusted config values
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit failed in worktree: %w\n%s", err, output)
 	}
-	
+
 	return nil
 }
 

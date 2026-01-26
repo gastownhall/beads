@@ -99,6 +99,7 @@ NEXT: Implement rate limiting"
 
 | Version | Features |
 |---------|----------|
+| v0.47.0+ | Pull-first sync, resolve-conflicts, dry-run create, gate auto-discovery |
 | v0.43.0+ | Full support: agents, gates, worktrees, chemistry patterns |
 | v0.40.0+ | Agent beads, async gates, worktree management |
 | v0.34.0+ | Molecules, wisps, cross-project dependencies |

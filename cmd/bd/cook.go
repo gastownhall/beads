@@ -521,7 +521,7 @@ func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 		Description: fmt.Sprintf("Async gate for step %s", step.ID),
 		Status:      types.StatusOpen,
 		Priority:    2,
-		IssueType:   types.TypeGate,
+		IssueType:   "gate",
 		AwaitType:   step.Gate.Type,
 		AwaitID:     step.Gate.ID,
 		Timeout:     timeout,

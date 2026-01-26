@@ -14,6 +14,8 @@ func registerCommonIssueFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("description", "d", "", "Issue description")
 	cmd.Flags().String("body", "", "Alias for --description (GitHub CLI convention)")
 	_ = cmd.Flags().MarkHidden("body") // Hidden alias for agent/CLI ergonomics
+	cmd.Flags().StringP("message", "m", "", "Alias for --description (git commit convention)")
+	_ = cmd.Flags().MarkHidden("message") // Hidden alias for muscle memory from git commit -m
 	cmd.Flags().String("body-file", "", "Read description from file (use - for stdin)")
 	cmd.Flags().String("description-file", "", "Alias for --body-file")
 	_ = cmd.Flags().MarkHidden("description-file") // Hidden alias
@@ -33,6 +35,7 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 	descFileChanged := cmd.Flags().Changed("description-file")
 	descChanged := cmd.Flags().Changed("description")
 	bodyChanged := cmd.Flags().Changed("body")
+	messageChanged := cmd.Flags().Changed("message")
 
 	// Check for conflicting file flags
 	if bodyFileChanged && descFileChanged {
@@ -54,8 +57,8 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 		}
 
 		// Error if both file and string flags are specified
-		if descChanged || bodyChanged {
-			fmt.Fprintf(os.Stderr, "Error: cannot specify both --body-file and --description/--body\n")
+		if descChanged || bodyChanged || messageChanged {
+			fmt.Fprintf(os.Stderr, "Error: cannot specify both --body-file and --description/--body/--message\n")
 			os.Exit(1)
 		}
 
@@ -67,18 +70,37 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 		return content, true
 	}
 
-	// Check if description or body is "-" (read from stdin)
+	// Check if description, body, or message is "-" (read from stdin)
 	// This provides a convenient shorthand: --description=- instead of --body-file=-
 	desc, _ := cmd.Flags().GetString("description")
 	body, _ := cmd.Flags().GetString("body")
+	message, _ := cmd.Flags().GetString("message")
 
-	if desc == "-" || body == "-" {
-		// Error if both are set to different values
-		if descChanged && bodyChanged && desc != body {
-			fmt.Fprintf(os.Stderr, "Error: cannot specify both --description and --body with different values\n")
-			fmt.Fprintf(os.Stderr, "  --description: %q\n", desc)
-			fmt.Fprintf(os.Stderr, "  --body:        %q\n", body)
-			os.Exit(1)
+	if desc == "-" || body == "-" || message == "-" {
+		// Error if multiple are set to different values
+		values := make(map[string]string)
+		if descChanged {
+			values["--description"] = desc
+		}
+		if bodyChanged {
+			values["--body"] = body
+		}
+		if messageChanged {
+			values["--message"] = message
+		}
+		if len(values) > 1 {
+			var firstVal string
+			for _, v := range values {
+				if firstVal == "" {
+					firstVal = v
+				} else if v != firstVal {
+					fmt.Fprintf(os.Stderr, "Error: cannot specify multiple description flags with different values\n")
+					for flag, val := range values {
+						fmt.Fprintf(os.Stderr, "  %s: %q\n", flag, val)
+					}
+					os.Exit(1)
+				}
+			}
 		}
 		content, err := readBodyFile("-")
 		if err != nil {
@@ -88,19 +110,49 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 		return content, true
 	}
 
-	// Error if both description and body are specified with different values
-	if descChanged && bodyChanged {
-		if desc != body {
-			fmt.Fprintf(os.Stderr, "Error: cannot specify both --description and --body with different values\n")
-			fmt.Fprintf(os.Stderr, "  --description: %q\n", desc)
+	// Error if multiple description flags are specified with different values
+	changedCount := 0
+	var firstVal string
+	var firstFlag string
+	if descChanged {
+		changedCount++
+		firstVal = desc
+		firstFlag = "--description"
+	}
+	if bodyChanged {
+		changedCount++
+		if firstVal == "" {
+			firstVal = body
+			firstFlag = "--body"
+		} else if body != firstVal {
+			fmt.Fprintf(os.Stderr, "Error: cannot specify both %s and --body with different values\n", firstFlag)
+			fmt.Fprintf(os.Stderr, "  %s: %q\n", firstFlag, firstVal)
 			fmt.Fprintf(os.Stderr, "  --body:        %q\n", body)
 			os.Exit(1)
 		}
 	}
+	if messageChanged {
+		changedCount++
+		if firstVal == "" {
+			firstVal = message
+			firstFlag = "--message"
+		} else if message != firstVal {
+			fmt.Fprintf(os.Stderr, "Error: cannot specify both %s and --message with different values\n", firstFlag)
+			fmt.Fprintf(os.Stderr, "  %s: %q\n", firstFlag, firstVal)
+			fmt.Fprintf(os.Stderr, "  --message:     %q\n", message)
+			os.Exit(1)
+		}
+	}
 
-	// Return whichever was set (or description's value if neither)
+	// Return whichever was set (priority: description > body > message)
+	if descChanged {
+		return desc, true
+	}
 	if bodyChanged {
 		return body, true
+	}
+	if messageChanged {
+		return message, true
 	}
 
 	return desc, descChanged

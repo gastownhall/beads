@@ -11,6 +11,7 @@ import (
 
 // getNextChildNumber atomically increments and returns the next child counter for a parent issue.
 // Uses INSERT...ON CONFLICT to ensure atomicity without explicit locking.
+// Note: Caller must hold reconnectMu.RLock() - this is an internal method.
 func (s *SQLiteStorage) getNextChildNumber(ctx context.Context, parentID string) (int, error) {
 	var nextChild int
 	err := s.db.QueryRowContext(ctx, `
@@ -30,6 +31,11 @@ func (s *SQLiteStorage) getNextChildNumber(ctx context.Context, parentID string)
 // Returns formatted ID as parentID.{counter} (e.g., bd-a3f8e9.1 or bd-a3f8e9.1.5)
 // Works at any depth (max 3 levels)
 func (s *SQLiteStorage) GetNextChildID(ctx context.Context, parentID string) (string, error) {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	// Validate parent exists
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&count)
@@ -72,6 +78,11 @@ func (s *SQLiteStorage) GetNextChildID(ctx context.Context, parentID string) (st
 // with explicit IDs (via --id flag or import) rather than GetNextChildID.
 // (GH#728 fix)
 func (s *SQLiteStorage) ensureChildCounterUpdated(ctx context.Context, parentID string, childNum int) error {
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO child_counters (parent_id, last_child)
 		VALUES (?, ?)

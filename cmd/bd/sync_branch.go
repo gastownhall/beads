@@ -8,18 +8,39 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
-// getCurrentBranch returns the name of the current git branch
+// getCurrentBranch returns the name of the current git branch in the beads repo.
 // Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
+// GH#1110: Now uses RepoContext to ensure we query the beads repo, not CWD.
+// Falls back to CWD-based query if no beads context found (for tests/standalone git).
 func getCurrentBranch(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
+	var cmd *exec.Cmd
+	if rc, err := beads.GetRepoContext(); err == nil {
+		cmd = rc.GitCmd(ctx, "symbolic-ref", "--short", "HEAD")
+	} else {
+		// Fallback to CWD for tests or repos without beads
+		cmd = exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// getCurrentBranchOrHEAD returns the current branch name, or "HEAD" if in detached HEAD state.
+// This is useful for jj/jujutsu compatibility where HEAD is always detached but we still
+// need a reference for git operations like log and diff.
+func getCurrentBranchOrHEAD(ctx context.Context) string {
+	branch, err := getCurrentBranch(ctx)
+	if err != nil {
+		// Detached HEAD - return "HEAD" as the reference
+		return "HEAD"
+	}
+	return branch
 }
 
 // getSyncBranch returns the configured sync branch name
@@ -41,16 +62,19 @@ func getSyncBranch(ctx context.Context) (string, error) {
 	return syncBranch, nil
 }
 
-// showSyncStatus shows the diff between sync branch and main branch
+// showSyncStatus shows the diff between sync branch and main branch.
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func showSyncStatus(ctx context.Context) error {
 	if !isGitRepo() {
 		return fmt.Errorf("not in a git repository")
 	}
 
-	currentBranch, err := getCurrentBranch(ctx)
+	rc, err := beads.GetRepoContext()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get repo context: %w", err)
 	}
+
+	currentBranch := getCurrentBranchOrHEAD(ctx)
 
 	syncBranch, err := getSyncBranch(ctx)
 	if err != nil {
@@ -58,7 +82,7 @@ func showSyncStatus(ctx context.Context) error {
 	}
 
 	// Check if sync branch exists
-	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
+	checkCmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
 	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
 	}
@@ -68,7 +92,7 @@ func showSyncStatus(ctx context.Context) error {
 
 	// Show commit diff
 	fmt.Println("Commits in sync branch not in main:")
-	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch) //nolint:gosec // branch names from git
+	logCmd := rc.GitCmd(ctx, "log", "--oneline", currentBranch+".."+syncBranch)
 	logOutput, err := logCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
@@ -81,7 +105,7 @@ func showSyncStatus(ctx context.Context) error {
 	}
 
 	fmt.Println("\nCommits in main not in sync branch:")
-	logCmd = exec.CommandContext(ctx, "git", "log", "--oneline", syncBranch+".."+currentBranch) //nolint:gosec // branch names from git
+	logCmd = rc.GitCmd(ctx, "log", "--oneline", syncBranch+".."+currentBranch)
 	logOutput, err = logCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get commit log: %w\n%s", err, logOutput)
@@ -95,7 +119,7 @@ func showSyncStatus(ctx context.Context) error {
 
 	// Show file diff for .beads/issues.jsonl
 	fmt.Println("\nFile differences in .beads/issues.jsonl:")
-	diffCmd := exec.CommandContext(ctx, "git", "diff", currentBranch+"..."+syncBranch, "--", ".beads/issues.jsonl") //nolint:gosec // branch names from git
+	diffCmd := rc.GitCmd(ctx, "diff", currentBranch+"..."+syncBranch, "--", ".beads/issues.jsonl")
 	diffOutput, err := diffCmd.CombinedOutput()
 	if err != nil {
 		// diff returns non-zero when there are differences, which is fine
@@ -113,10 +137,16 @@ func showSyncStatus(ctx context.Context) error {
 	return nil
 }
 
-// mergeSyncBranch merges the sync branch back to the main branch
+// mergeSyncBranch merges the sync branch back to the main branch.
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	if !isGitRepo() {
 		return fmt.Errorf("not in a git repository")
+	}
+
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return fmt.Errorf("failed to get repo context: %w", err)
 	}
 
 	currentBranch, err := getCurrentBranch(ctx)
@@ -130,13 +160,13 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	}
 
 	// Check if sync branch exists
-	checkCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
+	checkCmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
 	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("sync branch '%s' does not exist", syncBranch)
 	}
 
 	// Check if there are uncommitted changes
-	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	statusCmd := rc.GitCmd(ctx, "status", "--porcelain")
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to check git status: %w", err)
@@ -145,12 +175,17 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 		return fmt.Errorf("uncommitted changes detected - commit or stash them first")
 	}
 
+	// GH#1103: Skip-worktree conflict handling removed.
+	// The architectural fix ensures daemon/bd writes ONLY to the worktree JSONL
+	// when sync-branch is configured, so main's JSONL never has uncommitted changes
+	// that would conflict with merge. See autoflush.go:findJSONLPath()
+
 	fmt.Printf("Merging sync branch '%s' into '%s'...\n", syncBranch, currentBranch)
 
 	if dryRun {
 		fmt.Println("→ [DRY RUN] Would merge sync branch")
 		// Show what would be merged
-		logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", currentBranch+".."+syncBranch) //nolint:gosec // branch names from git
+		logCmd := rc.GitCmd(ctx, "log", "--oneline", currentBranch+".."+syncBranch)
 		logOutput, _ := logCmd.CombinedOutput()
 		if len(strings.TrimSpace(string(logOutput))) > 0 {
 			fmt.Println("\nCommits that would be merged:")
@@ -162,7 +197,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	}
 
 	// Perform the merge
-	mergeCmd := exec.CommandContext(ctx, "git", "merge", syncBranch, "-m", fmt.Sprintf("Merge sync branch '%s'", syncBranch)) //nolint:gosec // syncBranch from config
+	mergeCmd := rc.GitCmd(ctx, "merge", syncBranch, "-m", fmt.Sprintf("Merge sync branch '%s'", syncBranch))
 	mergeOutput, err := mergeCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("merge failed: %w\n%s", err, mergeOutput)
@@ -248,6 +283,11 @@ func getRepoRootFromPath(ctx context.Context, path string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// detectAndClearSkipWorktree and restoreSkipWorktree were removed in GH#1103.
+// The architectural fix ensures daemon/bd writes ONLY to the worktree JSONL
+// when sync-branch is configured, eliminating the need for skip-worktree manipulation.
+// See autoflush.go:findJSONLPath() for the implementation.
+
 // commitToExternalBeadsRepo commits changes directly to an external beads repo.
 // Used when BEADS_DIR points to a different git repository than cwd.
 // This bypasses the worktree-based sync which fails when beads dir is external.
@@ -264,7 +304,8 @@ func commitToExternalBeadsRepo(ctx context.Context, beadsDir, message string, pu
 		relBeadsDir = beadsDir // Fallback to absolute path
 	}
 
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", relBeadsDir) //nolint:gosec // paths from trusted sources
+	// Use --sparse to work correctly with sparse-checkout enabled worktrees (fixes #1076)
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "add", "--sparse", relBeadsDir) //nolint:gosec // paths from trusted sources
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("git add failed: %w\n%s", err, output)
 	}

@@ -29,12 +29,17 @@ func TestGateFieldsPreservedAcrossConnections(t *testing.T) {
 		t.Fatalf("failed to set issue_prefix: %v", err)
 	}
 
+	// Configure custom types for Gas Town types (gate is not a core type)
+	if err := store1.SetConfig(ctx, "types.custom", "gate"); err != nil {
+		t.Fatalf("failed to set types.custom: %v", err)
+	}
+
 	gate := &types.Issue{
 		ID:        "beads-test1",
 		Title:     "Test Gate",
 		Status:    types.StatusOpen,
 		Priority:  1,
-		IssueType: types.TypeGate,
+		IssueType: "gate",
 		Ephemeral: true,
 		AwaitType: "timer",
 		AwaitID:   "5s",

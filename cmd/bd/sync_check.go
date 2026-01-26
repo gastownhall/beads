@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -112,10 +113,18 @@ func showSyncIntegrityCheck(ctx context.Context, jsonlPath string) {
 
 // checkForcedPush detects if the sync branch has diverged from remote.
 // This can happen when someone force-pushes to the sync branch.
+// GH#1110: Now uses RepoContext to ensure git commands run in beads repo.
 func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	result := &ForcedPushCheck{
 		Detected: false,
 		Message:  "No sync branch configured or no remote",
+	}
+
+	// Get RepoContext for beads repo
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to get repo context: %v", err)
+		return result
 	}
 
 	// Get sync branch name
@@ -129,14 +138,14 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Check if sync branch exists locally
-	checkLocalCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch) //nolint:gosec // syncBranch from config
+	checkLocalCmd := rc.GitCmd(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+syncBranch)
 	if checkLocalCmd.Run() != nil {
 		result.Message = fmt.Sprintf("Sync branch '%s' does not exist locally", syncBranch)
 		return result
 	}
 
 	// Get local ref
-	localRefCmd := exec.CommandContext(ctx, "git", "rev-parse", syncBranch) //nolint:gosec // syncBranch from config
+	localRefCmd := rc.GitCmd(ctx, "rev-parse", syncBranch)
 	localRefOutput, err := localRefCmd.Output()
 	if err != nil {
 		result.Message = "Failed to get local sync branch ref"
@@ -152,7 +161,7 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Get remote ref
-	remoteRefCmd := exec.CommandContext(ctx, "git", "rev-parse", remote+"/"+syncBranch) //nolint:gosec // remote and syncBranch from config
+	remoteRefCmd := rc.GitCmd(ctx, "rev-parse", remote+"/"+syncBranch)
 	remoteRefOutput, err := remoteRefCmd.Output()
 	if err != nil {
 		result.Message = fmt.Sprintf("Remote tracking branch '%s/%s' does not exist", remote, syncBranch)
@@ -168,14 +177,14 @@ func checkForcedPush(ctx context.Context) *ForcedPushCheck {
 	}
 
 	// Check if local is ahead of remote (normal case)
-	aheadCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", remoteRef, localRef) //nolint:gosec // refs from git rev-parse
+	aheadCmd := rc.GitCmd(ctx, "merge-base", "--is-ancestor", remoteRef, localRef)
 	if aheadCmd.Run() == nil {
 		result.Message = "Local sync branch is ahead of remote (normal)"
 		return result
 	}
 
 	// Check if remote is ahead of local (behind, needs pull)
-	behindCmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", localRef, remoteRef) //nolint:gosec // refs from git rev-parse
+	behindCmd := rc.GitCmd(ctx, "merge-base", "--is-ancestor", localRef, remoteRef)
 	if behindCmd.Run() == nil {
 		result.Message = "Local sync branch is behind remote (needs pull)"
 		return result

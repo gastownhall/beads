@@ -2682,7 +2682,7 @@ func TestPourRootTitleDescSubstitution(t *testing.T) {
 		"desc":  "My description",
 	}
 
-	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, "mol")
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
 	if err != nil {
 		t.Fatalf("spawnMolecule failed: %v", err)
 	}
@@ -2755,7 +2755,7 @@ func TestPourRootTitleOnly(t *testing.T) {
 	}
 
 	vars := map[string]string{"title": "Custom Title"}
-	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, "mol")
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
 	if err != nil {
 		t.Fatalf("spawnMolecule failed: %v", err)
 	}
@@ -2811,7 +2811,7 @@ func TestPourRootNoVars(t *testing.T) {
 	}
 
 	vars := map[string]string{"version": "1.2.3"}
-	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, "mol")
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
 	if err != nil {
 		t.Fatalf("spawnMolecule failed: %v", err)
 	}

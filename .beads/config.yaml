@@ -42,7 +42,7 @@ issue-prefix: "bd"
 # instead of the current branch. This allows multiple clones to sync
 # beads data without polluting main branch commits.
 # Can also be set via BEADS_SYNC_BRANCH environment variable.
-sync-branch: "beads-sync"
+sync-branch: "beads-metadata"
 
 # Integration settings (access with 'bd config get/set')
 # These are stored in the database, not in this file:

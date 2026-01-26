@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestFindJSONLPath_RelativeDbPath tests that findJSONLPath() returns an absolute
@@ -150,5 +154,130 @@ func TestFindJSONLPath_EmptyDbPath(t *testing.T) {
 		t.Errorf("findJSONLPath() with empty dbPath returned relative path: %q\n"+
 			"Expected: absolute path or empty string",
 			result)
+	}
+}
+
+// TestFetchAndMergeIssues_IncludesComments verifies that fetchAndMergeIssues
+// populates comments on issues fetched from the database.
+// Bug: fetchAndMergeIssues was only fetching dependencies, not comments or labels.
+// This caused comments to be lost during autoflush full-export triggered by hash mismatch.
+func TestFetchAndMergeIssues_IncludesComments(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	// Create storage
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix to prevent "database not initialized" errors
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create test issue
+	issue := &types.Issue{
+		ID:        "test-1",
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add a comment to the issue (use AddIssueComment which writes to comments table)
+	if _, err := store.AddIssueComment(ctx, "test-1", "tester", "This is a test comment"); err != nil {
+		t.Fatalf("failed to add comment: %v", err)
+	}
+
+	// Call fetchAndMergeIssues
+	issueMap := make(map[string]*types.Issue)
+	dirtyIDs := []string{"test-1"}
+	if err := fetchAndMergeIssues(ctx, store, dirtyIDs, issueMap); err != nil {
+		t.Fatalf("fetchAndMergeIssues failed: %v", err)
+	}
+
+	// Verify issue was fetched
+	fetchedIssue, ok := issueMap["test-1"]
+	if !ok {
+		t.Fatal("issue test-1 not found in issueMap")
+	}
+
+	// Verify comments were populated
+	if len(fetchedIssue.Comments) == 0 {
+		t.Errorf("fetchAndMergeIssues did not populate comments: expected 1 comment, got 0")
+	} else if len(fetchedIssue.Comments) != 1 {
+		t.Errorf("fetchAndMergeIssues: expected 1 comment, got %d", len(fetchedIssue.Comments))
+	} else if fetchedIssue.Comments[0].Text != "This is a test comment" {
+		t.Errorf("comment text mismatch: expected 'This is a test comment', got %q", fetchedIssue.Comments[0].Text)
+	}
+}
+
+// TestFetchAndMergeIssues_IncludesMultipleComments verifies that fetchAndMergeIssues
+// populates all comments on issues, not just one.
+func TestFetchAndMergeIssues_IncludesMultipleComments(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	// Create storage
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create test issue
+	issue := &types.Issue{
+		ID:        "test-1",
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add multiple comments (use AddIssueComment which writes to comments table)
+	if _, err := store.AddIssueComment(ctx, "test-1", "alice", "First comment"); err != nil {
+		t.Fatalf("failed to add first comment: %v", err)
+	}
+	if _, err := store.AddIssueComment(ctx, "test-1", "bob", "Second comment"); err != nil {
+		t.Fatalf("failed to add second comment: %v", err)
+	}
+
+	// Call fetchAndMergeIssues
+	issueMap := make(map[string]*types.Issue)
+	dirtyIDs := []string{"test-1"}
+	if err := fetchAndMergeIssues(ctx, store, dirtyIDs, issueMap); err != nil {
+		t.Fatalf("fetchAndMergeIssues failed: %v", err)
+	}
+
+	// Verify issue was fetched
+	fetchedIssue, ok := issueMap["test-1"]
+	if !ok {
+		t.Fatal("issue test-1 not found in issueMap")
+	}
+
+	// Verify all comments were populated
+	if len(fetchedIssue.Comments) != 2 {
+		t.Errorf("fetchAndMergeIssues: expected 2 comments, got %d", len(fetchedIssue.Comments))
 	}
 }

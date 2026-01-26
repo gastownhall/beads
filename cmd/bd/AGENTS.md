@@ -12,6 +12,19 @@ bd close <id>         # Complete work
 bd sync               # Sync with git
 ```
 
+## Agent Warning: Interactive Commands
+
+**DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use.
+
+Use `bd update` with flags instead:
+```bash
+bd update <id> --description "new description"
+bd update <id> --title "new title"
+bd update <id> --design "design notes"
+bd update <id> --notes "additional notes"
+bd update <id> --acceptance "acceptance criteria"
+```
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.

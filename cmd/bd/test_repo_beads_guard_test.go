@@ -120,14 +120,11 @@ func diffSnapshots(before, after map[string]fileSnap) string {
 		if !b.exists {
 			continue
 		}
-		if b.size != a.size || b.modUnix != a.modUnix {
-			out += fmt.Sprintf("- %s: size %d → %d, mtime %s → %s\n",
-				name,
-				b.size,
-				a.size,
-				time.Unix(0, b.modUnix).UTC().Format(time.RFC3339Nano),
-				time.Unix(0, a.modUnix).UTC().Format(time.RFC3339Nano),
-			)
+		// Only report size changes (actual content modification).
+		// Ignore mtime-only changes - SQLite shm/wal files can have mtime updated
+		// from read-only operations (config loading, etc.) which is not pollution.
+		if b.size != a.size {
+			out += fmt.Sprintf("- %s: size %d → %d\n", name, b.size, a.size)
 		}
 	}
 	return out
@@ -163,9 +160,9 @@ func stopRepoDaemon(repoRoot string) {
 		return // no daemon running
 	}
 
-	// Shell out to bd daemon --stop. We can't call the daemon functions directly
+	// Shell out to bd daemon stop. We can't call the daemon functions directly
 	// from TestMain because they have complex dependencies. Using exec is cleaner.
-	cmd := exec.Command("bd", "daemon", "--stop")
+	cmd := exec.Command("bd", "daemon", "stop")
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
 

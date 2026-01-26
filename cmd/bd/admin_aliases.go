@@ -71,6 +71,7 @@ func init() {
 	compactAliasCmd.Flags().StringVar(&compactSummary, "summary", "", "Path to summary file (use '-' for stdin)")
 	compactAliasCmd.Flags().StringVar(&compactActor, "actor", "agent", "Actor name for audit trail")
 	compactAliasCmd.Flags().IntVar(&compactLimit, "limit", 0, "Limit number of candidates (0 = no limit)")
+	compactAliasCmd.Flags().BoolVar(&compactDolt, "dolt", false, "Dolt mode: run Dolt garbage collection on .beads/dolt")
 
 	// Reset alias flags - these read from cmd.Flags() in the Run function
 	resetAliasCmd.Flags().Bool("force", false, "Actually perform the reset (required)")

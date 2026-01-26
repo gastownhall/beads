@@ -5,9 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -187,8 +187,14 @@ func runTeamWizard(ctx context.Context, store storage.Storage) error {
 
 // getGitBranch returns the current git branch name
 // Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
+// Uses CWD repo context since this is for user's project configuration
 func getGitBranch() (string, error) {
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return "", err
+	}
+
+	cmd := rc.GitCmdCWD(context.Background(), "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -198,16 +204,24 @@ func getGitBranch() (string, error) {
 }
 
 // createSyncBranch creates a new branch for beads sync
+// Uses CWD repo context since this is for user's project configuration
 func createSyncBranch(branchName string) error {
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+
 	// Check if branch already exists
-	cmd := exec.Command("git", "rev-parse", "--verify", branchName)
+	cmd := rc.GitCmdCWD(ctx, "rev-parse", "--verify", branchName)
 	if err := cmd.Run(); err == nil {
 		// Branch exists, nothing to do
 		return nil
 	}
 
 	// Create new branch from current HEAD
-	cmd = exec.Command("git", "checkout", "-b", branchName)
+	cmd = rc.GitCmdCWD(ctx, "checkout", "-b", branchName)
 	if err := cmd.Run(); err != nil {
 		return err
 	}
@@ -215,7 +229,7 @@ func createSyncBranch(branchName string) error {
 	// Switch back to original branch
 	currentBranch, err := getGitBranch()
 	if err == nil && currentBranch != branchName {
-		cmd = exec.Command("git", "checkout", "-")
+		cmd = rc.GitCmdCWD(ctx, "checkout", "-")
 		_ = cmd.Run() // Ignore error, branch creation succeeded
 	}
 

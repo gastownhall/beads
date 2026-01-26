@@ -40,7 +40,8 @@ func validateStatusWithCustom(value interface{}, customStatuses []string) error 
 // validateIssueType validates an issue type value
 func validateIssueType(value interface{}) error {
 	if issueType, ok := value.(string); ok {
-		if !types.IssueType(issueType).IsValid() {
+		// Normalize first to support aliases like "enhancement" -> "feature"
+		if !types.IssueType(issueType).Normalize().IsValid() {
 			return fmt.Errorf("invalid issue type: %s", issueType)
 		}
 	}

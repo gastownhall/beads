@@ -91,6 +91,7 @@ const sidebars: SidebarsConfig = {
         'integrations/claude-code',
         'integrations/mcp-server',
         'integrations/aider',
+        'integrations/junie',
       ],
     },
     {

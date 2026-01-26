@@ -1,16 +1,72 @@
 # CLI Command Reference
 
 **For:** AI agents and developers using bd command-line interface
-**Version:** 0.21.0+
+**Version:** 0.47.1+
 
 ## Quick Navigation
 
+- [Health & Status](#health--status)
 - [Basic Operations](#basic-operations)
 - [Issue Management](#issue-management)
 - [Dependencies & Labels](#dependencies--labels)
 - [Filtering & Search](#filtering--search)
+- [Visualization](#visualization)
 - [Advanced Operations](#advanced-operations)
 - [Database Management](#database-management)
+
+## Health & Status
+
+### Doctor (Start Here for Problems)
+
+```bash
+# Basic health check
+bd doctor                      # Check installation health
+bd doctor --json               # Machine-readable output
+
+# Fix issues
+bd doctor --fix                # Auto-fix with confirmation
+bd doctor --fix --yes          # Auto-fix without confirmation
+bd doctor --dry-run            # Preview what --fix would do
+
+# Deep validation
+bd doctor --deep               # Full graph integrity validation
+
+# Performance diagnostics
+bd doctor --perf               # Run performance diagnostics
+bd doctor --output diag.json   # Export diagnostics to file
+
+# Specific checks
+bd doctor --check=pollution              # Detect test issues
+bd doctor --check=pollution --clean      # Delete test issues
+
+# Recovery modes
+bd doctor --fix --source=jsonl           # Rebuild DB from JSONL
+bd doctor --fix --force                  # Force repair on corrupted DB
+```
+
+### Status Overview
+
+```bash
+# Quick database snapshot (like git status for issues)
+bd status                      # Summary with activity
+bd status --json               # JSON format
+bd status --no-activity        # Skip git activity (faster)
+bd status --assigned           # Show issues assigned to you
+bd stats                       # Alias for bd status
+```
+
+### Prime (AI Context)
+
+```bash
+# Output AI-optimized workflow context
+bd prime                       # Auto-detects MCP vs CLI mode
+bd prime --full                # Force full CLI output
+bd prime --mcp                 # Force minimal MCP output
+bd prime --stealth             # No git operations mode
+bd prime --export              # Dump default content for customization
+```
+
+**Customization:** Place `.beads/PRIME.md` to override default output.
 
 ## Basic Operations
 
@@ -33,6 +89,14 @@ bd info --json
 ```bash
 # Find ready work (no blockers)
 bd ready --json
+bd list --ready --json                        # Same, integrated into list (v0.47.1+)
+
+# Find blocked work
+bd blocked --json                             # Show all blocked issues
+bd blocked --parent bd-epic --json            # Blocked descendants of epic
+
+# Find molecules waiting on gates for resume (v0.47.0+)
+bd ready --gated --json                       # Gate-resume discovery
 
 # Find stale issues (not updated recently)
 bd stale --days 30 --json                    # Default: 30 days
@@ -71,6 +135,22 @@ bd create "Tests" -p 1 --json                        # Auto-assigned: bd-a3f8e9.
 
 # Create and link discovered work (one command)
 bd create "Found bug" -t bug -p 1 --deps discovered-from:<parent-id> --json
+
+# Preview creation without side effects (v0.47.0+)
+bd create "Issue title" -t task -p 1 --dry-run --json  # Shows what would be created
+```
+
+### Quick Capture (q)
+
+```bash
+# Create issue and output only the ID (for scripting)
+bd q "Fix login bug"                          # Outputs: bd-a1b2
+bd q "Task" -t task -p 1                      # With type and priority
+bd q "Bug" -t bug -l critical                 # With labels
+
+# Scripting examples
+ISSUE=$(bd q "New feature")                   # Capture ID in variable
+bd q "Task" | xargs bd show                   # Pipe to other commands
 ```
 
 ### Update Issues
@@ -108,6 +188,18 @@ bd dep tree <id>
 
 # Get issue details (supports multiple IDs)
 bd show <id> [<id>...] --json
+```
+
+### Comments
+
+```bash
+# List comments on an issue
+bd comments bd-123                            # Human-readable
+bd comments bd-123 --json                     # JSON format
+
+# Add a comment
+bd comments add bd-123 "This is a comment"
+bd comments add bd-123 -f notes.txt           # From file
 ```
 
 ## Dependencies & Labels
@@ -154,7 +246,27 @@ bd list --label bug,critical --json
 bd list --label-any frontend,backend --json
 ```
 
-### Text Search
+### Search Command
+
+```bash
+# Full-text search across title, description, and ID
+bd search "authentication bug"                          # Basic search
+bd search "login" --status open --json                  # With status filter
+bd search "database" --label backend --limit 10         # With label and limit
+bd search "bd-5q"                                       # Search by partial ID
+
+# Filtered search
+bd search "security" --priority-min 0 --priority-max 2  # Priority range
+bd search "bug" --created-after 2025-01-01              # Date filter
+bd search --query "refactor" --assignee alice           # By assignee
+
+# Sorted results
+bd search "bug" --sort priority                         # Sort by priority
+bd search "task" --sort created --reverse               # Reverse chronological
+bd search "feature" --long                              # Detailed multi-line output
+```
+
+### Text Search (via list)
 
 ```bash
 # Title search (substring)
@@ -201,6 +313,33 @@ bd list --priority-min 2 --json                         # P2 and below
 # Combine multiple filters
 bd list --status open --priority 1 --label-any urgent,critical --no-assignee --json
 ```
+
+## Visualization
+
+### Graph (Dependency Visualization)
+
+```bash
+# Show dependency graph for an issue
+bd graph bd-123                               # ASCII box format (default)
+bd graph bd-123 --compact                     # Tree format, one line per issue
+
+# Show graph for epic (includes all children)
+bd graph bd-epic
+
+# Show all open issues grouped by component
+bd graph --all
+```
+
+**Display formats:**
+- `--box` (default): ASCII boxes showing layers, more detailed
+- `--compact`: Tree format, one line per issue, more scannable
+
+**Graph interpretation:**
+- Layer 0 / leftmost = no dependencies (can start immediately)
+- Higher layers depend on lower layers
+- Nodes in the same layer can run in parallel
+
+**Status icons:** ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 
 ## Global Flags
 
@@ -431,6 +570,11 @@ bd sync
 # 3. Pull from remote
 # 4. Import any updates
 # 5. Push to remote
+
+# Resolve JSONL merge conflict markers (v0.47.0+)
+bd resolve-conflicts                          # Resolve in mechanical mode
+bd resolve-conflicts --dry-run --json         # Preview resolution
+# Mechanical mode rules: updated_at wins, closed beats open, higher priority wins
 ```
 
 ## Issue Types

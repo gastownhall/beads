@@ -216,7 +216,7 @@ bd close bd-abc --reason "PR #123 merged"
 Daemon commits and pushes automatically:
 
 ```bash
-bd daemon --start --auto-commit --auto-push
+bd daemon start --auto-commit --auto-push
 ```
 
 Benefits:
@@ -349,7 +349,7 @@ A: Add to your CI pipeline:
 Check daemon status:
 
 ```bash
-bd daemon --status
+bd daemon status
 bd daemons list
 ```
 
@@ -363,8 +363,8 @@ bd config get daemon.auto_push
 Restart daemon:
 
 ```bash
-bd daemon --stop
-bd daemon --start --auto-commit --auto-push
+bd daemon stop
+bd daemon start --auto-commit --auto-push
 ```
 
 ### Issue: Merge conflicts in JSONL

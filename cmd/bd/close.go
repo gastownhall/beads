@@ -39,6 +39,10 @@ create, update, show, or close operation).`,
 			reason, _ = cmd.Flags().GetString("resolution")
 		}
 		if reason == "" {
+			// Check -m alias (git commit convention)
+			reason, _ = cmd.Flags().GetString("message")
+		}
+		if reason == "" {
 			reason = "Closed"
 		}
 		force, _ := cmd.Flags().GetBool("force")
@@ -403,6 +407,8 @@ func init() {
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
 	closeCmd.Flags().String("resolution", "", "Alias for --reason (Jira CLI convention)")
 	_ = closeCmd.Flags().MarkHidden("resolution") // Hidden alias for agent/CLI ergonomics
+	closeCmd.Flags().StringP("message", "m", "", "Alias for --reason (git commit convention)")
+	_ = closeCmd.Flags().MarkHidden("message") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")

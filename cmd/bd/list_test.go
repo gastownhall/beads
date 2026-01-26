@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,55 +101,55 @@ func TestListCommandSuite(t *testing.T) {
 		h.createTestIssues()
 		h.addLabel(h.issues[0].ID, "critical")
 
-	t.Run("list all issues", func(t *testing.T) {
+		t.Run("list all issues", func(t *testing.T) {
 			results := h.search(types.IssueFilter{})
 			h.assertCount(len(results), 3, "issues")
 		})
 
-	t.Run("filter by status", func(t *testing.T) {
+		t.Run("filter by status", func(t *testing.T) {
 			status := types.StatusOpen
 			results := h.search(types.IssueFilter{Status: &status})
 			h.assertCount(len(results), 1, "open issues")
 			h.assertEqual(types.StatusOpen, results[0].Status, "status")
 		})
 
-	t.Run("filter by priority", func(t *testing.T) {
+		t.Run("filter by priority", func(t *testing.T) {
 			priority := 0
 			results := h.search(types.IssueFilter{Priority: &priority})
 			h.assertCount(len(results), 1, "P0 issues")
 			h.assertEqual(0, results[0].Priority, "priority")
 		})
 
-	t.Run("filter by assignee", func(t *testing.T) {
+		t.Run("filter by assignee", func(t *testing.T) {
 			assignee := testUserAlice
 			results := h.search(types.IssueFilter{Assignee: &assignee})
 			h.assertCount(len(results), 1, "issues for alice")
 			h.assertEqual(testUserAlice, results[0].Assignee, "assignee")
 		})
 
-	t.Run("filter by issue type", func(t *testing.T) {
+		t.Run("filter by issue type", func(t *testing.T) {
 			issueType := types.TypeBug
 			results := h.search(types.IssueFilter{IssueType: &issueType})
 			h.assertCount(len(results), 1, "bug issues")
 			h.assertEqual(types.TypeBug, results[0].IssueType, "type")
 		})
 
-	t.Run("filter by label", func(t *testing.T) {
+		t.Run("filter by label", func(t *testing.T) {
 			results := h.search(types.IssueFilter{Labels: []string{"critical"}})
 			h.assertCount(len(results), 1, "issues with critical label")
 		})
 
-	t.Run("filter by title search", func(t *testing.T) {
+		t.Run("filter by title search", func(t *testing.T) {
 			results := h.search(types.IssueFilter{TitleSearch: "Bug"})
 			h.assertCount(len(results), 1, "issues matching 'Bug'")
 		})
 
-	t.Run("limit results", func(t *testing.T) {
+		t.Run("limit results", func(t *testing.T) {
 			results := h.search(types.IssueFilter{Limit: 2})
 			h.assertAtMost(len(results), 2, "issues")
 		})
 
-	t.Run("normalize labels", func(t *testing.T) {
+		t.Run("normalize labels", func(t *testing.T) {
 			labels := []string{" bug ", "critical", "", "bug", "  feature  "}
 			normalized := util.NormalizeLabels(labels)
 			expected := []string{"bug", "critical", "feature"}
@@ -170,7 +171,7 @@ func TestListCommandSuite(t *testing.T) {
 			}
 		})
 
-	t.Run("output dot format", func(t *testing.T) {
+		t.Run("output dot format", func(t *testing.T) {
 			// Add a dependency to make the graph more interesting
 			dep := &types.Dependency{
 				IssueID:     h.issues[0].ID,
@@ -187,14 +188,14 @@ func TestListCommandSuite(t *testing.T) {
 			}
 		})
 
-	t.Run("output formatted list dot", func(t *testing.T) {
+		t.Run("output formatted list dot", func(t *testing.T) {
 			err := outputFormattedList(h.ctx, h.store, h.issues, "dot")
 			if err != nil {
 				t.Errorf("outputFormattedList with dot format failed: %v", err)
 			}
 		})
 
-	t.Run("output formatted list digraph preset", func(t *testing.T) {
+		t.Run("output formatted list digraph preset", func(t *testing.T) {
 			// Dependency already added in previous test, just use it
 			err := outputFormattedList(h.ctx, h.store, h.issues, "digraph")
 			if err != nil {
@@ -202,14 +203,14 @@ func TestListCommandSuite(t *testing.T) {
 			}
 		})
 
-	t.Run("output formatted list custom template", func(t *testing.T) {
+		t.Run("output formatted list custom template", func(t *testing.T) {
 			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID}} {{.Title}}")
 			if err != nil {
 				t.Errorf("outputFormattedList with custom template failed: %v", err)
 			}
 		})
 
-	t.Run("output formatted list invalid template", func(t *testing.T) {
+		t.Run("output formatted list invalid template", func(t *testing.T) {
 			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID")
 			if err == nil {
 				t.Error("Expected error for invalid template")
@@ -300,160 +301,327 @@ func TestListQueryCapabilitiesSuite(t *testing.T) {
 	})
 
 	t.Run("pattern matching - notes contains", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				NotesContains: "OAuth",
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 result, got %d", len(results))
-			}
-			if len(results) > 0 && results[0].ID != issue3.ID {
-				t.Errorf("Expected issue3, got %s", results[0].ID)
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			NotesContains: "OAuth",
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 result, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue3.ID {
+			t.Errorf("Expected issue3, got %s", results[0].ID)
+		}
+	})
 
 	t.Run("empty description check", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				EmptyDescription: true,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 issue with empty description, got %d", len(results))
-			}
-			if len(results) > 0 && results[0].ID != issue2.ID {
-				t.Errorf("Expected issue2, got %s", results[0].ID)
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			EmptyDescription: true,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with empty description, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
 
 	t.Run("no assignee check", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				NoAssignee: true,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 issue with no assignee, got %d", len(results))
-			}
-			if len(results) > 0 && results[0].ID != issue2.ID {
-				t.Errorf("Expected issue2, got %s", results[0].ID)
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			NoAssignee: true,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with no assignee, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
 
 	t.Run("no labels check", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				NoLabels: true,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 issue with no labels, got %d", len(results))
-			}
-			if len(results) > 0 && results[0].ID != issue2.ID {
-				t.Errorf("Expected issue2, got %s", results[0].ID)
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			NoLabels: true,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with no labels, got %d", len(results))
+		}
+		if len(results) > 0 && results[0].ID != issue2.ID {
+			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
 
 	t.Run("priority range - min", func(t *testing.T) {
-			minPrio := 2
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				PriorityMin: &minPrio,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 2 {
-				t.Errorf("Expected 2 issues with priority >= 2, got %d", len(results))
-			}
+		minPrio := 2
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMin: &minPrio,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Expected 2 issues with priority >= 2, got %d", len(results))
+		}
+	})
 
 	t.Run("priority range - max", func(t *testing.T) {
-			maxPrio := 1
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				PriorityMax: &maxPrio,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 issue with priority <= 1, got %d", len(results))
-			}
+		maxPrio := 1
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMax: &maxPrio,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with priority <= 1, got %d", len(results))
+		}
+	})
 
 	t.Run("priority range - min and max", func(t *testing.T) {
-			minPrio := 1
-			maxPrio := 2
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				PriorityMin: &minPrio,
-				PriorityMax: &maxPrio,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 issue with priority between 1-2, got %d", len(results))
-			}
+		minPrio := 1
+		maxPrio := 2
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			PriorityMin: &minPrio,
+			PriorityMax: &maxPrio,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 issue with priority between 1-2, got %d", len(results))
+		}
+	})
 
 	t.Run("date range - created after", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				CreatedAfter: &twoDaysAgo,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			// All issues created recently
-			if len(results) != 3 {
-				t.Errorf("Expected 3 issues created after two days ago, got %d", len(results))
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			CreatedAfter: &twoDaysAgo,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		// All issues created recently
+		if len(results) != 3 {
+			t.Errorf("Expected 3 issues created after two days ago, got %d", len(results))
+		}
+	})
 
 	t.Run("date range - updated before", func(t *testing.T) {
-			futureTime := now.Add(24 * time.Hour)
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				UpdatedBefore: &futureTime,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			// All issues updated before tomorrow
-			if len(results) != 3 {
-				t.Errorf("Expected 3 issues, got %d", len(results))
-			}
+		futureTime := now.Add(24 * time.Hour)
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			UpdatedBefore: &futureTime,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		// All issues updated before tomorrow
+		if len(results) != 3 {
+			t.Errorf("Expected 3 issues, got %d", len(results))
+		}
+	})
 
 	t.Run("date range - closed after", func(t *testing.T) {
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				ClosedAfter: &yesterday,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 1 {
-				t.Errorf("Expected 1 closed issue, got %d", len(results))
-			}
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			ClosedAfter: &yesterday,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Expected 1 closed issue, got %d", len(results))
+		}
+	})
 
 	t.Run("combined filters", func(t *testing.T) {
-			minPrio := 0
-			maxPrio := 2
-			results, err := s.SearchIssues(ctx, "", types.IssueFilter{
-				TitleContains: "Auth",
-				PriorityMin:   &minPrio,
-				PriorityMax:   &maxPrio,
-			})
-			if err != nil {
-				t.Fatalf("Search failed: %v", err)
-			}
-			if len(results) != 2 {
-				t.Errorf("Expected 2 results matching combined filters, got %d", len(results))
-			}
+		minPrio := 0
+		maxPrio := 2
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			TitleContains: "Auth",
+			PriorityMin:   &minPrio,
+			PriorityMax:   &maxPrio,
 		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Expected 2 results matching combined filters, got %d", len(results))
+		}
+	})
+}
+
+// TestStableTreeOrdering tests that tree display order is stable across multiple invocations
+// This test specifically addresses the bug where --tree output was non-deterministic due to
+// unstable ordering of root issues and children within the same priority level
+func TestStableTreeOrdering(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Helper to create issue with specific priority for testing sort stability
+	createIssue := func(title string, priority int) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  priority,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue %s: %v", title, err)
+		}
+		return issue
+	}
+
+	// Helper to add parent-child dependency
+	addParentChild := func(child, parent *types.Issue) {
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        types.DepParentChild,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency %s -> %s: %v", child.ID, parent.ID, err)
+		}
+	}
+
+	// Create a hierarchy with mixed priorities to test both primary and secondary sort:
+	// - Multiple root issues with same priority (tests secondary sort by ID)
+	// - Multiple children with same priority (tests children sorting stability)
+	// - Mixed priorities (tests primary sort by priority)
+
+	// Root issues with different priorities
+	rootP1A := createIssue("Root P1 A", 1) // Should be first (lowest priority number)
+	rootP1B := createIssue("Root P1 B", 1) // Should be second (same priority, sorted by ID)
+	rootP2 := createIssue("Root P2", 2)    // Should be third
+	rootP3 := createIssue("Root P3", 3)    // Should be last
+
+	// Children with mixed priorities under rootP1A
+	childP1 := createIssue("Child P1", 1)    // Should be first child
+	childP2A := createIssue("Child P2 A", 2) // Should be second child
+	childP2B := createIssue("Child P2 B", 2) // Should be third child (same priority, sorted by ID)
+	childP3 := createIssue("Child P3", 3)    // Should be last child
+
+	// Add parent-child relationships
+	addParentChild(childP1, rootP1A)
+	addParentChild(childP2A, rootP1A)
+	addParentChild(childP2B, rootP1A)
+	addParentChild(childP3, rootP1A)
+
+	// Test that buildIssueTree produces stable ordering
+	t.Run("stable_root_ordering", func(t *testing.T) {
+		// Get only the test issues we created (filter by title pattern)
+		testIssues := []*types.Issue{rootP1A, rootP1B, rootP2, rootP3}
+
+		// Build tree multiple times and verify identical ordering
+		var rootOrderings [][]string
+		for i := 0; i < 5; i++ {
+			roots, _ := buildIssueTree(testIssues)
+
+			// Extract root IDs in order
+			var rootIDs []string
+			for _, root := range roots {
+				rootIDs = append(rootIDs, root.ID)
+			}
+			rootOrderings = append(rootOrderings, rootIDs)
+		}
+
+		// Verify all runs produce identical root ordering
+		expectedRootOrder := rootOrderings[0]
+		for i := 1; i < len(rootOrderings); i++ {
+			if !slicesEqual(expectedRootOrder, rootOrderings[i]) {
+				t.Errorf("Root ordering differs between runs:\nRun 1: %v\nRun %d: %v",
+					expectedRootOrder, i+1, rootOrderings[i])
+			}
+		}
+
+		// Verify expected sort order (priority first, then ID)
+		// Since IDs are auto-generated, we'll verify by comparing with sorted slice
+		expectedRoots := []*types.Issue{rootP1A, rootP1B, rootP2, rootP3}
+		slices.SortFunc(expectedRoots, compareIssuesByPriority)
+		var expectedOrder []string
+		for _, issue := range expectedRoots {
+			expectedOrder = append(expectedOrder, issue.ID)
+		}
+
+		if !slicesEqual(expectedOrder, expectedRootOrder) {
+			t.Errorf("Root ordering incorrect:\nExpected: %v\nActual: %v",
+				expectedOrder, expectedRootOrder)
+		}
+	})
+
+	t.Run("stable_children_ordering", func(t *testing.T) {
+		// Get test issues including dependencies
+		allTestIssues := []*types.Issue{rootP1A, rootP1B, rootP2, rootP3, childP1, childP2A, childP2B, childP3}
+
+		// Load dependencies for tree building
+		allDeps, err := store.GetAllDependencyRecords(ctx)
+		if err != nil {
+			t.Fatalf("Failed to get dependencies: %v", err)
+		}
+
+		// Build tree multiple times and verify identical children ordering
+		var childOrderings [][]string
+		for i := 0; i < 5; i++ {
+			_, childrenMap := buildIssueTreeWithDeps(allTestIssues, allDeps)
+
+			// Extract children IDs of rootP1A in order
+			children := childrenMap[rootP1A.ID]
+			var childIDs []string
+			for _, child := range children {
+				childIDs = append(childIDs, child.ID)
+			}
+			childOrderings = append(childOrderings, childIDs)
+		}
+
+		// Verify all runs produce identical children ordering
+		if len(childOrderings) == 0 || len(childOrderings[0]) == 0 {
+			t.Fatal("No children found for rootP1A")
+		}
+
+		expectedChildOrder := childOrderings[0]
+		for i := 1; i < len(childOrderings); i++ {
+			if !slicesEqual(expectedChildOrder, childOrderings[i]) {
+				t.Errorf("Children ordering differs between runs:\nRun 1: %v\nRun %d: %v",
+					expectedChildOrder, i+1, childOrderings[i])
+			}
+		}
+
+		// Verify expected sort order by sorting the expected children and comparing
+		expectedChildren := []*types.Issue{childP1, childP2A, childP2B, childP3}
+		slices.SortFunc(expectedChildren, compareIssuesByPriority)
+		var expectedOrder []string
+		for _, child := range expectedChildren {
+			expectedOrder = append(expectedOrder, child.ID)
+		}
+
+		if !slicesEqual(expectedOrder, expectedChildOrder) {
+			t.Errorf("Children ordering incorrect:\nExpected: %v\nActual: %v",
+				expectedOrder, expectedChildOrder)
+		}
+	})
+}
+
+// Helper function to compare string slices for equality
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestFormatIssueLong(t *testing.T) {
@@ -798,6 +966,97 @@ func TestListTimeBasedFilters(t *testing.T) {
 		// Should find the issue with both defer_until set and due_at > now
 		if len(results) != 1 {
 			t.Errorf("Expected 1 issue with both filters, got %d", len(results))
+		}
+	})
+}
+
+// TestHierarchicalChildren tests the --tree --parent functionality for showing all descendants
+func TestHierarchicalChildren(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Helper to create issue
+	createIssue := func(title string, issueType types.IssueType) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: issueType,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue %s: %v", title, err)
+		}
+		return issue
+	}
+
+	// Helper to add dependency
+	addDep := func(child, parent *types.Issue) {
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        types.DepParentChild,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency %s -> %s: %v", child.ID, parent.ID, err)
+		}
+	}
+
+	// Create test hierarchy: Parent -> Child1 (-> Grandchild1.1, Grandchild1.2) + Child2 (-> Grandchild2.1)
+	parent := createIssue("Parent Epic", types.TypeEpic)
+	child1 := createIssue("Child 1", types.TypeTask)
+	child2 := createIssue("Child 2", types.TypeTask)
+	grandchild11 := createIssue("Grandchild 1.1", types.TypeTask)
+	grandchild12 := createIssue("Grandchild 1.2", types.TypeTask)
+	grandchild21 := createIssue("Grandchild 2.1", types.TypeTask)
+
+	addDep(child1, parent)
+	addDep(child2, parent)
+	addDep(grandchild11, child1)
+	addDep(grandchild12, child1)
+	addDep(grandchild21, child2)
+
+	// Test full hierarchy (should return all 6 issues)
+	t.Run("full_hierarchy", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, parent.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren failed: %v", err)
+		}
+		if len(issues) != 6 {
+			t.Errorf("Expected 6 issues in hierarchy, got %d", len(issues))
+		}
+	})
+
+	// Test child subset (should return child1 + its 2 grandchildren = 3 total)
+	t.Run("child_subset", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, child1.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren for child1 failed: %v", err)
+		}
+		if len(issues) != 3 {
+			t.Errorf("Expected 3 issues in child1 hierarchy, got %d", len(issues))
+		}
+	})
+
+	// Test leaf node (should return only itself)
+	t.Run("leaf_node", func(t *testing.T) {
+		issues, err := getHierarchicalChildren(ctx, store, "", 0, grandchild11.ID)
+		if err != nil {
+			t.Fatalf("getHierarchicalChildren for leaf failed: %v", err)
+		}
+		if len(issues) != 1 || issues[0].ID != grandchild11.ID {
+			t.Errorf("Expected 1 issue (leaf), got %d", len(issues))
+		}
+	})
+
+	// Test error case - non-existent parent
+	t.Run("nonexistent_parent", func(t *testing.T) {
+		_, err := getHierarchicalChildren(ctx, store, "", 0, "nonexistent-id")
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Error("Expected 'not found' error for nonexistent parent")
 		}
 	})
 }

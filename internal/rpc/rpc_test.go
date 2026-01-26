@@ -51,6 +51,13 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
+	// Configure Gas Town custom types for test compatibility (bd-find4)
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to set types.custom: %v", err)
+	}
+
 	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	ctx, cancel := context.WithCancel(context.Background())

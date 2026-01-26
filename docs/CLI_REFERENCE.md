@@ -334,6 +334,24 @@ bd admin cleanup --dry-run --json                                 # Preview what
 bd admin cleanup --older-than 90 --cascade --force --json         # Delete old + dependents
 ```
 
+### Orphan Detection
+
+Find issues referenced in git commits that were never closed:
+
+```bash
+# Basic usage - scan current repo
+bd orphans
+
+# Cross-repo: scan CODE repo's commits against external BEADS database
+cd ~/my-code-repo
+bd orphans --db ~/my-beads-repo/.beads/beads.db
+
+# JSON output
+bd orphans --json
+```
+
+**Use case**: When your beads database lives in a separate repository from your code, run `bd orphans` from the code repo and point `--db` to the external database. This scans commits in your current directory while checking issue status from the specified database.
+
 ### Duplicate Detection & Merging
 
 ```bash
@@ -748,18 +766,21 @@ bd sync  # Force immediate sync, bypass debounce
 ```bash
 # Setup editor integration (choose based on your editor)
 bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
+bd setup codex    # Codex CLI - creates/updates AGENTS.md
 bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 
 # Check if integration is installed
 bd setup factory --check
+bd setup codex --check
 bd setup claude --check
 bd setup cursor --check
 bd setup aider --check
 
 # Remove integration
 bd setup factory --remove
+bd setup codex --remove
 bd setup claude --remove
 bd setup cursor --remove
 bd setup aider --remove
@@ -774,6 +795,7 @@ bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
 
 **What each setup does:**
 - **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (works with multiple AI tools using the AGENTS.md standard)
+- **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex
 - **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events
 - **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
 - **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions

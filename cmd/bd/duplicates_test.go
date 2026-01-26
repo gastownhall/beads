@@ -163,6 +163,38 @@ func TestChooseMergeTarget(t *testing.T) {
 			},
 			wantID: "bd-2", // Dependents take priority
 		},
+		{
+			name: "dependsOnCount included in weight calculation (GH#1022)",
+			group: []*types.Issue{
+				{ID: "bd-1", Title: "Task"}, // Has dependencies (depends on others)
+				{ID: "bd-2", Title: "Task"}, // Empty shell
+			},
+			refCounts: map[string]int{
+				"bd-1": 0,
+				"bd-2": 0,
+			},
+			structuralScores: map[string]*issueScore{
+				"bd-1": {dependentCount: 0, dependsOnCount: 3, textRefs: 0}, // Depends on 3 other issues
+				"bd-2": {dependentCount: 0, dependsOnCount: 0, textRefs: 0}, // Empty shell
+			},
+			wantID: "bd-1", // Issue with dependencies should be kept over empty shell
+		},
+		{
+			name: "weight combines dependents and dependencies (GH#1022)",
+			group: []*types.Issue{
+				{ID: "bd-1", Title: "Task"}, // Has only dependents (children)
+				{ID: "bd-2", Title: "Task"}, // Has both dependents and dependencies
+			},
+			refCounts: map[string]int{
+				"bd-1": 0,
+				"bd-2": 0,
+			},
+			structuralScores: map[string]*issueScore{
+				"bd-1": {dependentCount: 5, dependsOnCount: 0, textRefs: 0}, // Weight = 5
+				"bd-2": {dependentCount: 3, dependsOnCount: 4, textRefs: 0}, // Weight = 7
+			},
+			wantID: "bd-2", // Higher combined weight wins
+		},
 	}
 
 	for _, tt := range tests {

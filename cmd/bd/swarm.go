@@ -77,7 +77,7 @@ func findExistingSwarm(ctx context.Context, s SwarmStorage, epicID string) (*typ
 	// Find a swarm molecule with relates-to dependency to this epic
 	for _, dep := range dependents {
 		// Only consider molecules (GetDependents doesn't populate mol_type, so we fetch full issue)
-		if dep.IssueType != types.TypeMolecule {
+		if dep.IssueType != "molecule" {
 			continue
 		}
 
@@ -187,7 +187,7 @@ Examples:
 		}
 
 		// Verify it's an epic
-		if epic.IssueType != types.TypeEpic && epic.IssueType != types.TypeMolecule {
+		if epic.IssueType != types.TypeEpic && epic.IssueType != "molecule" {
 			FatalErrorRespectJSON("'%s' is not an epic or molecule (type: %s)", epicID, epic.IssueType)
 		}
 
@@ -655,7 +655,7 @@ Examples:
 		var epic *types.Issue
 
 		// Check if it's a swarm molecule - if so, follow the link to the epic
-		if issue.IssueType == types.TypeMolecule && issue.MolType == types.MolTypeSwarm {
+		if issue.IssueType == "molecule" && issue.MolType == types.MolTypeSwarm {
 			// Find linked epic via relates-to dependency
 			deps, err := store.GetDependencyRecords(ctx, issue.ID)
 			if err != nil {
@@ -673,7 +673,7 @@ Examples:
 			if epic == nil {
 				FatalErrorRespectJSON("swarm molecule '%s' has no linked epic", issueID)
 			}
-		} else if issue.IssueType == types.TypeEpic || issue.IssueType == types.TypeMolecule {
+		} else if issue.IssueType == types.TypeEpic || issue.IssueType == "molecule" {
 			epic = issue
 		} else {
 			FatalErrorRespectJSON("'%s' is not an epic or swarm molecule (type: %s)", issueID, issue.IssueType)
@@ -950,7 +950,7 @@ Examples:
 		var epicTitle string
 
 		// Check if it's an epic or single issue that needs wrapping
-		if issue.IssueType == types.TypeEpic || issue.IssueType == types.TypeMolecule {
+		if issue.IssueType == types.TypeEpic || issue.IssueType == "molecule" {
 			epicID = issue.ID
 			epicTitle = issue.Title
 		} else {
@@ -1042,7 +1042,7 @@ Examples:
 			Description: fmt.Sprintf("Swarm molecule orchestrating epic %s.\n\nEpic: %s\nCoordinator: %s", epicID, epicID, coordinator),
 			Status:      types.StatusOpen,
 			Priority:    epic.Priority,
-			IssueType:   types.TypeMolecule,
+			IssueType:   "molecule",
 			MolType:     types.MolTypeSwarm,
 			Assignee:    coordinator,
 			CreatedBy:   actor,

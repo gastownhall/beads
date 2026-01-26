@@ -66,7 +66,7 @@ Example:
 			Title:     title,
 			Status:    types.StatusOpen,
 			Priority:  priority,
-			IssueType: types.IssueType(issueType),
+			IssueType: types.IssueType(issueType).Normalize(),
 		}
 
 		ctx := rootCtx

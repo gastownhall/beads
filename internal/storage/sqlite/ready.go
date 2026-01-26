@@ -18,7 +18,7 @@ import (
 func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	whereClauses := []string{
 		"i.pinned = 0",                             // Exclude pinned issues
-		"(i.ephemeral = 0 OR i.ephemeral IS NULL)", // Exclude wisps
+		"(i.ephemeral = 0 OR i.ephemeral IS NULL)", // Exclude wisps by ephemeral flag
 	}
 	args := []interface{}{}
 
@@ -42,7 +42,19 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		// - molecule: workflow containers
 		// - message: mail/communication items
 		// - agent: identity/state tracking beads
-		whereClauses = append(whereClauses, "i.issue_type NOT IN ('merge-request', 'gate', 'molecule', 'message', 'agent')")
+		// - role: agent role definitions (reference metadata)
+		// - rig: rig identity beads (reference metadata)
+		whereClauses = append(whereClauses, "i.issue_type NOT IN ('merge-request', 'gate', 'molecule', 'message', 'agent', 'role', 'rig')")
+		// Exclude IDs matching configured patterns
+		// Default patterns: -mol- (molecule steps), -wisp- (ephemeral wisps)
+		// Configure with: bd config set ready.exclude_id_patterns "-mol-,-wisp-"
+		// Use --type=task to explicitly include them, or IncludeMolSteps for internal callers
+		if !filter.IncludeMolSteps {
+			patterns := s.getExcludeIDPatterns(ctx)
+			for _, pattern := range patterns {
+				whereClauses = append(whereClauses, "i.id NOT LIKE '%"+pattern+"%'")
+			}
+		}
 	}
 
 	if filter.Priority != nil {
@@ -155,7 +167,9 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
-		i.await_type, i.await_id, i.timeout_ns, i.waiters
+		i.await_type, i.await_id, i.timeout_ns, i.waiters,
+		i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,
+		i.due_at, i.defer_until
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -341,6 +355,8 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 	var issues []*types.Issue
 	for rows.Next() {
 		var issue types.Issue
+		var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+		var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
@@ -373,7 +389,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
+			&createdAtStr, &updatedAtStr, &closedAt, &externalRef, &sourceRepo,
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &ephemeral, &pinned, &isTemplate,
@@ -381,6 +397,14 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
+		}
+
+		// Parse timestamp strings (TEXT columns require manual parsing)
+		if createdAtStr.Valid {
+			issue.CreatedAt = parseTimeString(createdAtStr.String)
+		}
+		if updatedAtStr.Valid {
+			issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 		}
 
 		if contentHash.Valid {
@@ -559,6 +583,8 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 	var blocked []*types.BlockedIssue
 	for rows.Next() {
 		var issue types.BlockedIssue
+		var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+		var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
 		var assignee sql.NullString
@@ -570,11 +596,19 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 			&issue.ID, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.CreatedBy, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &issue.BlockedByCount,
+			&createdAtStr, &issue.CreatedBy, &updatedAtStr, &closedAt, &externalRef, &sourceRepo, &issue.BlockedByCount,
 			&blockerIDsStr,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan blocked issue: %w", err)
+		}
+
+		// Parse timestamp strings (TEXT columns require manual parsing)
+		if createdAtStr.Valid {
+			issue.CreatedAt = parseTimeString(createdAtStr.String)
+		}
+		if updatedAtStr.Valid {
+			issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 		}
 
 		if closedAt.Valid {
@@ -747,7 +781,9 @@ func (s *SQLiteStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssu
 		       i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
-		       i.await_type, i.await_id, i.timeout_ns, i.waiters
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
+		       i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,
+		       i.due_at, i.defer_until
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
 		WHERE d.depends_on_id = ?
@@ -796,4 +832,36 @@ func buildOrderByClause(policy types.SortPolicy) string {
 			END ASC,
 			i.created_at ASC`
 	}
+}
+
+// ExcludeIDPatternsConfigKey is the config key for ID exclusion patterns in GetReadyWork
+const ExcludeIDPatternsConfigKey = "ready.exclude_id_patterns"
+
+// DefaultExcludeIDPatterns are the default patterns to exclude from GetReadyWork
+// These exclude molecule steps (-mol-) and wisps (-wisp-) which are internal workflow items
+var DefaultExcludeIDPatterns = []string{"-mol-", "-wisp-"}
+
+// getExcludeIDPatterns returns the ID patterns to exclude from GetReadyWork.
+// Reads from ready.exclude_id_patterns config, defaults to DefaultExcludeIDPatterns.
+// Config format: comma-separated patterns, e.g., "-mol-,-wisp-"
+func (s *SQLiteStorage) getExcludeIDPatterns(ctx context.Context) []string {
+	value, err := s.GetConfig(ctx, ExcludeIDPatternsConfigKey)
+	if err != nil || value == "" {
+		return DefaultExcludeIDPatterns
+	}
+
+	// Parse comma-separated patterns
+	parts := strings.Split(value, ",")
+	patterns := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			patterns = append(patterns, p)
+		}
+	}
+
+	if len(patterns) == 0 {
+		return DefaultExcludeIDPatterns
+	}
+	return patterns
 }

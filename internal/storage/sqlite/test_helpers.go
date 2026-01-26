@@ -149,6 +149,23 @@ func (e *testEnv) AssertBlocked(issue *types.Issue) {
 	}
 }
 
+// CreateIssueWithID creates a test issue with an explicit ID.
+// Useful for testing ID-based filtering (e.g., mol step exclusion).
+func (e *testEnv) CreateIssueWithID(id, title string) *types.Issue {
+	e.t.Helper()
+	issue := &types.Issue{
+		ID:        id,
+		Title:     title,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := e.Store.CreateIssue(e.Ctx, issue, "test-user"); err != nil {
+		e.t.Fatalf("CreateIssue(%q, %q) failed: %v", id, title, err)
+	}
+	return issue
+}
+
 // newTestStore creates a SQLiteStorage with issue_prefix configured (bd-166)
 // This prevents "database not initialized" errors in tests
 //

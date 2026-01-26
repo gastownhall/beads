@@ -681,6 +681,9 @@ func TestExportOnlySync(t *testing.T) {
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
+	// Remove pre-existing issues.jsonl from setupGitRepo (we want a clean slate)
+	_ = os.Remove(jsonlPath)
+
 	// Setup: Create .beads directory
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
@@ -769,4 +772,83 @@ func TestExportOnlySync(t *testing.T) {
 		t.Errorf("expected issues.jsonl to be committed, got: %s", status)
 	}
 	t.Log("✓ issues.jsonl is committed after export-only sync")
+}
+
+// TestSync_FailsWhenOnSyncBranch verifies that bd sync fails gracefully
+// when the current branch matches the configured sync branch.
+// This is the runtime guard for GH#1166 - prevents bd sync from attempting
+// to create a worktree for a branch that's already checked out.
+//
+// The issue: If sync.branch = "main" and user is on "main", bd sync would
+// try to create a worktree for "main" which fails because it's already checked out.
+// Worse, some code paths could commit all staged files instead of just .beads/.
+func TestSync_FailsWhenOnSyncBranch(t *testing.T) {
+	ctx := context.Background()
+	tmpDir, cleanup := setupGitRepo(t)
+	defer cleanup()
+
+	// Get current branch name (should be "main" from setupGitRepo)
+	currentBranch, err := syncbranch.GetCurrentBranch(ctx)
+	if err != nil {
+		t.Fatalf("failed to get current branch: %v", err)
+	}
+	t.Logf("Current branch: %s", currentBranch)
+
+	// Test 1: IsSyncBranchSameAsCurrent returns true when branch matches
+	if !syncbranch.IsSyncBranchSameAsCurrent(ctx, currentBranch) {
+		t.Error("IsSyncBranchSameAsCurrent should return true when sync branch matches current branch")
+	}
+	t.Log("✓ IsSyncBranchSameAsCurrent correctly detects same-branch condition")
+
+	// Test 2: IsSyncBranchSameAsCurrent returns false for different branch
+	if syncbranch.IsSyncBranchSameAsCurrent(ctx, "beads-sync") {
+		t.Error("IsSyncBranchSameAsCurrent should return false for different branch name")
+	}
+	t.Log("✓ IsSyncBranchSameAsCurrent correctly allows different branch names")
+
+	// Test 3: Setup sync.branch config to match current branch (the problematic state)
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	testStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Configure sync.branch to match current branch (this is the bug condition)
+	if err := testStore.SetConfig(ctx, "sync.branch", currentBranch); err != nil {
+		t.Fatalf("failed to set sync.branch: %v", err)
+	}
+	t.Logf("✓ Configured sync.branch = %s (matches current branch)", currentBranch)
+
+	// Verify the config is stored correctly
+	syncBranchValue, err := testStore.GetConfig(ctx, "sync.branch")
+	if err != nil {
+		t.Fatalf("failed to get sync.branch config: %v", err)
+	}
+	if syncBranchValue != currentBranch {
+		t.Errorf("sync.branch config = %q, want %q", syncBranchValue, currentBranch)
+	}
+
+	// Test 4: The runtime guard logic (same as in sync.go)
+	// This simulates what happens in the sync command
+	syncBranchName := syncBranchValue
+	hasSyncBranchConfig := syncBranchName != ""
+
+	if hasSyncBranchConfig {
+		if syncbranch.IsSyncBranchSameAsCurrent(ctx, syncBranchName) {
+			// This is the expected behavior - we caught the misconfiguration
+			t.Log("✓ Runtime guard correctly detected sync-branch = current-branch condition")
+		} else {
+			t.Error("FAIL: Runtime guard did not detect sync-branch = current-branch condition")
+		}
+	} else {
+		t.Error("FAIL: sync.branch config should be set")
+	}
+
+	t.Log("✓ TestSync_FailsWhenOnSyncBranch PASSED")
 }

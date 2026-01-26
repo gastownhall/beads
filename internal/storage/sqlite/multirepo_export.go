@@ -116,10 +116,25 @@ func (s *SQLiteStorage) exportToRepo(ctx context.Context, repoPath string, issue
 		return 0, fmt.Errorf("failed to expand path: %w", err)
 	}
 
-	// Get absolute path
-	absRepoPath, err := filepath.Abs(expandedPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get absolute path: %w", err)
+	// Resolve path to absolute form
+	// For relative paths, resolve from repo root (parent of .beads/), NOT CWD.
+	// This ensures paths like "oss/" in config become "{repo}/oss/", not ".beads/oss/"
+	// when running from different directories or in daemon context.
+	var absRepoPath string
+	if filepath.IsAbs(expandedPath) {
+		absRepoPath = expandedPath
+	} else {
+		// Resolve relative to repo root (parent of .beads/)
+		// Config is at .beads/config.yaml, so go up twice
+		configFile := config.ConfigFileUsed()
+		if configFile != "" {
+			repoRoot := filepath.Dir(filepath.Dir(configFile)) // .beads/config.yaml -> repo/
+			absRepoPath = filepath.Join(repoRoot, expandedPath)
+		} else {
+			// Fallback: dbPath is .beads/beads.db, go up one level to repo root
+			repoRoot := filepath.Dir(filepath.Dir(s.dbPath))
+			absRepoPath = filepath.Join(repoRoot, expandedPath)
+		}
 	}
 
 	// Construct JSONL path

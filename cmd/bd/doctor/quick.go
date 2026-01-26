@@ -24,12 +24,11 @@ func CheckSyncBranchQuick() string {
 // Checks all beads hooks: pre-commit, post-merge, pre-push, post-checkout.
 // cliVersion is the current CLI version to compare against.
 func CheckHooksQuick(cliVersion string) string {
-	// Get actual git directory (handles worktrees where .git is a file)
-	gitDir, err := git.GetGitDir()
+	// Get hooks directory from common git dir (hooks are shared across worktrees)
+	hooksDir, err := git.GetGitHooksDir()
 	if err != nil {
 		return "" // Not a git repo, skip
 	}
-	hooksDir := filepath.Join(gitDir, "hooks")
 
 	// Check if hooks dir exists
 	if _, err := os.Stat(hooksDir); os.IsNotExist(err) {
@@ -94,19 +93,19 @@ func CheckSyncBranchHookQuick(path string) string {
 		return "" // sync-branch not configured, nothing to check
 	}
 
-	// Get git directory
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	// Get common git directory for hooks (shared across worktrees)
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
 	cmd.Dir = path
 	output, err := cmd.Output()
 	if err != nil {
 		return "" // Not a git repo, skip
 	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(path, gitDir)
+	gitCommonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(path, gitCommonDir)
 	}
 
-	// Find pre-push hook (check shared hooks first)
+	// Find pre-push hook (check shared hooks first via core.hooksPath)
 	var hookPath string
 	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
 	hooksPathCmd.Dir = path
@@ -117,7 +116,8 @@ func CheckSyncBranchHookQuick(path string) string {
 		}
 		hookPath = filepath.Join(sharedHooksDir, "pre-push")
 	} else {
-		hookPath = filepath.Join(gitDir, "hooks", "pre-push")
+		// Hooks are in the common git directory, not the worktree-specific one
+		hookPath = filepath.Join(gitCommonDir, "hooks", "pre-push")
 	}
 
 	content, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled

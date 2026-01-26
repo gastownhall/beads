@@ -30,13 +30,13 @@ More content after`,
 
 Some content
 
-` + factoryBeadsSection + `
+` + agentsBeadsSection + `
 More content after`,
 		},
 		{
 			name:     "append when no markers exist",
 			content:  "# My Project\n\nSome content",
-			expected: "# My Project\n\nSome content\n\n" + factoryBeadsSection,
+			expected: "# My Project\n\nSome content\n\n" + agentsBeadsSection,
 		},
 		{
 			name: "handle section at end of file",
@@ -47,7 +47,7 @@ Old content
 <!-- END BEADS INTEGRATION -->`,
 			expected: `# My Project
 
-` + factoryBeadsSection,
+` + agentsBeadsSection,
 		},
 	}
 
@@ -122,11 +122,11 @@ func TestCreateNewAgentsFile(t *testing.T) {
 		t.Error("Missing header in new agents file")
 	}
 
-	if !strings.Contains(content, factoryBeginMarker) {
+	if !strings.Contains(content, agentsBeginMarker) {
 		t.Error("Missing begin marker in new agents file")
 	}
 
-	if !strings.Contains(content, factoryEndMarker) {
+	if !strings.Contains(content, agentsEndMarker) {
 		t.Error("Missing end marker in new agents file")
 	}
 
@@ -170,7 +170,7 @@ func TestInstallFactoryCreatesNewFile(t *testing.T) {
 		t.Fatalf("failed to read AGENTS.md: %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, factoryBeginMarker) || !strings.Contains(content, factoryEndMarker) {
+	if !strings.Contains(content, agentsBeginMarker) || !strings.Contains(content, agentsEndMarker) {
 		t.Fatal("missing factory markers in new file")
 	}
 	if !strings.Contains(stdout.String(), "Factory.ai (Droid) integration installed") {
@@ -247,7 +247,7 @@ func TestCheckFactoryScenarios(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		env, stdout, _ := newFactoryTestEnv(t)
-		if err := os.WriteFile(env.agentsPath, []byte(factoryBeadsSection), 0644); err != nil {
+		if err := os.WriteFile(env.agentsPath, []byte(agentsBeadsSection), 0644); err != nil {
 			t.Fatalf("failed to seed file: %v", err)
 		}
 		if err := checkFactory(env); err != nil {
@@ -262,7 +262,7 @@ func TestCheckFactoryScenarios(t *testing.T) {
 func TestRemoveFactoryScenarios(t *testing.T) {
 	t.Run("remove section and keep file", func(t *testing.T) {
 		env, stdout, _ := newFactoryTestEnv(t)
-		content := "# Top\n\n" + factoryBeadsSection + "\n\n# Bottom"
+		content := "# Top\n\n" + agentsBeadsSection + "\n\n# Bottom"
 		if err := os.WriteFile(env.agentsPath, []byte(content), 0644); err != nil {
 			t.Fatalf("failed to seed AGENTS.md: %v", err)
 		}
@@ -273,7 +273,7 @@ func TestRemoveFactoryScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read AGENTS.md: %v", err)
 		}
-		if strings.Contains(string(data), factoryBeginMarker) {
+		if strings.Contains(string(data), agentsBeginMarker) {
 			t.Error("beads section should be removed")
 		}
 		if !strings.Contains(stdout.String(), "Removed beads section") {
@@ -283,7 +283,7 @@ func TestRemoveFactoryScenarios(t *testing.T) {
 
 	t.Run("delete file when only beads", func(t *testing.T) {
 		env, stdout, _ := newFactoryTestEnv(t)
-		if err := os.WriteFile(env.agentsPath, []byte(factoryBeadsSection), 0644); err != nil {
+		if err := os.WriteFile(env.agentsPath, []byte(agentsBeadsSection), 0644); err != nil {
 			t.Fatalf("failed to seed AGENTS.md: %v", err)
 		}
 		if err := removeFactory(env); err != nil {
@@ -335,7 +335,7 @@ func TestWrapperExitsOnError(t *testing.T) {
 	t.Run("RemoveFactory", func(t *testing.T) {
 		cap := stubSetupExit(t)
 		env := factoryEnv{agentsPath: filepath.Join(t.TempDir(), "AGENTS.md"), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-		if err := os.WriteFile(env.agentsPath, []byte(factoryBeadsSection), 0644); err != nil {
+		if err := os.WriteFile(env.agentsPath, []byte(agentsBeadsSection), 0644); err != nil {
 			t.Fatalf("failed to seed file: %v", err)
 		}
 		if err := os.Chmod(env.agentsPath, 0o000); err != nil {
@@ -350,36 +350,36 @@ func TestWrapperExitsOnError(t *testing.T) {
 }
 
 func TestFactoryBeadsSectionContent(t *testing.T) {
-	section := factoryBeadsSection
+	section := agentsBeadsSection
 	required := []string{"bd create", "bd update", "bd close", "bd ready", "discovered-from"}
 	for _, token := range required {
 		if !strings.Contains(section, token) {
-			t.Errorf("factoryBeadsSection missing %q", token)
+			t.Errorf("agentsBeadsSection missing %q", token)
 		}
 	}
 }
 
 func TestFactoryMarkers(t *testing.T) {
-	if !strings.Contains(factoryBeginMarker, "BEGIN") {
+	if !strings.Contains(agentsBeginMarker, "BEGIN") {
 		t.Error("begin marker should mention BEGIN")
 	}
-	if !strings.Contains(factoryEndMarker, "END") {
+	if !strings.Contains(agentsEndMarker, "END") {
 		t.Error("end marker should mention END")
 	}
 }
 
 func TestMarkersMatch(t *testing.T) {
-	if !strings.HasPrefix(factoryBeadsSection, factoryBeginMarker) {
+	if !strings.HasPrefix(agentsBeadsSection, agentsBeginMarker) {
 		t.Error("section should start with begin marker")
 	}
-	trimmed := strings.TrimSpace(factoryBeadsSection)
-	if !strings.HasSuffix(trimmed, factoryEndMarker) {
+	trimmed := strings.TrimSpace(agentsBeadsSection)
+	if !strings.HasSuffix(trimmed, agentsEndMarker) {
 		t.Error("section should end with end marker")
 	}
 }
 
 func TestUpdateBeadsSectionPreservesWhitespace(t *testing.T) {
-	content := "# Header\n\n" + factoryBeadsSection + "\n\n# Footer"
+	content := "# Header\n\n" + agentsBeadsSection + "\n\n# Footer"
 	updated := updateBeadsSection(content)
 	if !strings.Contains(updated, "# Header") || !strings.Contains(updated, "# Footer") {
 		t.Error("update should preserve surrounding content")

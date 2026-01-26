@@ -391,9 +391,9 @@ func TestCoverage_ShowThread(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	root := &types.Issue{Title: "Root message", IssueType: types.TypeMessage, Status: types.StatusOpen, Sender: "alice", Assignee: "bob"}
-	reply1 := &types.Issue{Title: "Re: Root", IssueType: types.TypeMessage, Status: types.StatusOpen, Sender: "bob", Assignee: "alice"}
-	reply2 := &types.Issue{Title: "Re: Re: Root", IssueType: types.TypeMessage, Status: types.StatusOpen, Sender: "alice", Assignee: "bob"}
+	root := &types.Issue{Title: "Root message", IssueType: "message", Status: types.StatusOpen, Sender: "alice", Assignee: "bob"}
+	reply1 := &types.Issue{Title: "Re: Root", IssueType: "message", Status: types.StatusOpen, Sender: "bob", Assignee: "alice"}
+	reply2 := &types.Issue{Title: "Re: Re: Root", IssueType: "message", Status: types.StatusOpen, Sender: "alice", Assignee: "bob"}
 	if err := s.CreateIssue(ctx, root, "test-user"); err != nil {
 		s.Close()
 		t.Fatalf("CreateIssue root: %v", err)

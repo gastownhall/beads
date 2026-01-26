@@ -1408,3 +1408,236 @@ func TestRequiredPatterns_ContainsSyncStatePatterns(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
+func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// Create .beads directory but no last-touched file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckLastTouchedNotTracked()
+
+	if check.Status != StatusOK {
+		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
+	}
+	if check.Message != "No last-touched file present" {
+		t.Errorf("Expected message about no last-touched file, got: %s", check.Message)
+	}
+}
+
+func TestCheckLastTouchedNotTracked_FileExistsNotTracked(t *testing.T) {
+	// Skip on Windows as git behavior may differ
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// Initialize git repo
+	gitInit := exec.Command("git", "init")
+	if err := gitInit.Run(); err != nil {
+		t.Skipf("git init failed: %v", err)
+	}
+
+	// Create .beads directory with last-touched file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	lastTouchedPath := filepath.Join(beadsDir, "last-touched")
+	if err := os.WriteFile(lastTouchedPath, []byte("bd-test1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckLastTouchedNotTracked()
+
+	if check.Status != StatusOK {
+		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
+	}
+	if check.Message != "last-touched file not tracked (correct)" {
+		t.Errorf("Expected message about correct tracking, got: %s", check.Message)
+	}
+}
+
+func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
+	// Skip on Windows as git behavior may differ
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// Initialize git repo
+	gitInit := exec.Command("git", "init")
+	if err := gitInit.Run(); err != nil {
+		t.Skipf("git init failed: %v", err)
+	}
+
+	// Configure git user for commits
+	exec.Command("git", "config", "user.email", "test@test.com").Run()
+	exec.Command("git", "config", "user.name", "Test").Run()
+
+	// Create .beads directory with last-touched file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	lastTouchedPath := filepath.Join(beadsDir, "last-touched")
+	if err := os.WriteFile(lastTouchedPath, []byte("bd-test1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stage (track) the last-touched file
+	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	if err := gitAdd.Run(); err != nil {
+		t.Skipf("git add failed: %v", err)
+	}
+
+	check := CheckLastTouchedNotTracked()
+
+	if check.Status != StatusWarning {
+		t.Errorf("Expected status %s, got %s", StatusWarning, check.Status)
+	}
+	if check.Message != "last-touched file is tracked by git" {
+		t.Errorf("Expected message about tracked file, got: %s", check.Message)
+	}
+	if check.Fix == "" {
+		t.Error("Expected fix message to be present")
+	}
+}
+
+func TestFixLastTouchedTracking(t *testing.T) {
+	// Skip on Windows as git behavior may differ
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// Initialize git repo
+	gitInit := exec.Command("git", "init")
+	if err := gitInit.Run(); err != nil {
+		t.Skipf("git init failed: %v", err)
+	}
+
+	// Configure git user for commits
+	exec.Command("git", "config", "user.email", "test@test.com").Run()
+	exec.Command("git", "config", "user.name", "Test").Run()
+
+	// Create .beads directory with last-touched file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	lastTouchedPath := filepath.Join(beadsDir, "last-touched")
+	if err := os.WriteFile(lastTouchedPath, []byte("bd-test1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stage (track) the last-touched file
+	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	if err := gitAdd.Run(); err != nil {
+		t.Skipf("git add failed: %v", err)
+	}
+
+	// Verify it's tracked before fix
+	checkBefore := CheckLastTouchedNotTracked()
+	if checkBefore.Status != StatusWarning {
+		t.Fatalf("Expected file to be tracked before fix, status: %s", checkBefore.Status)
+	}
+
+	// Apply the fix
+	if err := FixLastTouchedTracking(); err != nil {
+		t.Fatalf("FixLastTouchedTracking failed: %v", err)
+	}
+
+	// Verify it's no longer tracked after fix
+	checkAfter := CheckLastTouchedNotTracked()
+	if checkAfter.Status != StatusOK {
+		t.Errorf("Expected status %s after fix, got %s", StatusOK, checkAfter.Status)
+	}
+
+	// Verify the file still exists locally
+	if _, err := os.Stat(lastTouchedPath); os.IsNotExist(err) {
+		t.Error("last-touched file should still exist after untracking")
+	}
+}
+
+// TestGitignoreTemplate_ContainsLastTouched verifies that the .beads/.gitignore template
+// includes last-touched to prevent it from being tracked.
+func TestGitignoreTemplate_ContainsLastTouched(t *testing.T) {
+	if !strings.Contains(GitignoreTemplate, "last-touched") {
+		t.Error("GitignoreTemplate should contain 'last-touched' pattern")
+	}
+}
+
+// TestRequiredPatterns_ContainsLastTouched verifies that bd doctor validates
+// the presence of the last-touched pattern in .beads/.gitignore.
+func TestRequiredPatterns_ContainsLastTouched(t *testing.T) {
+	found := false
+	for _, pattern := range requiredPatterns {
+		if pattern == "last-touched" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("requiredPatterns should include 'last-touched'")
+	}
+}

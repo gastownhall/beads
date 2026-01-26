@@ -272,8 +272,12 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	// Case 1: Already up to date (remote has nothing new)
 	if remoteAhead == 0 {
 		result.Pulled = true
-		// Still copy JSONL in case worktree has uncommitted changes
-		if err := copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath); err != nil {
+		// GH#1173: Do NOT copy uncommitted worktree changes to main repo.
+		// The worktree may have uncommitted changes from previous exports that
+		// haven't been committed yet. Copying those to main would make local
+		// data appear as "remote" data, corrupting the 3-way merge.
+		// Instead, copy only the COMMITTED state from the worktree.
+		if err := copyCommittedJSONLToMainRepo(ctx, worktreePath, jsonlRelPath, jsonlPath); err != nil {
 			return nil, err
 		}
 		return result, nil
@@ -655,6 +659,35 @@ func extractJSONLFromCommit(ctx context.Context, worktreePath, commit, filePath 
 	return output, nil
 }
 
+// copyCommittedJSONLToMainRepo copies the COMMITTED JSONL from worktree to main repo.
+// GH#1173: This extracts the file from HEAD rather than the working directory,
+// ensuring uncommitted local changes don't corrupt the 3-way merge.
+func copyCommittedJSONLToMainRepo(ctx context.Context, worktreePath, jsonlRelPath, jsonlPath string) error {
+	// GH#785: Handle bare repo worktrees
+	normalizedRelPath := normalizeBeadsRelPath(jsonlRelPath)
+
+	// Extract the committed JSONL from HEAD
+	data, err := extractJSONLFromCommit(ctx, worktreePath, "HEAD", normalizedRelPath)
+	if err != nil {
+		// File might not exist in HEAD yet (first sync), nothing to copy
+		return nil
+	}
+
+	if err := os.WriteFile(jsonlPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write main JSONL: %w", err)
+	}
+
+	// Also copy committed metadata.json if it exists
+	beadsDir := filepath.Dir(jsonlPath)
+	metadataRelPath := filepath.Join(filepath.Dir(normalizedRelPath), "metadata.json")
+	if metaData, err := extractJSONLFromCommit(ctx, worktreePath, "HEAD", metadataRelPath); err == nil {
+		dstPath := filepath.Join(beadsDir, "metadata.json")
+		_ = os.WriteFile(dstPath, metaData, 0600) // Best effort
+	}
+
+	return nil
+}
+
 // copyJSONLToMainRepo copies JSONL and related files from worktree to main repo.
 func copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath string) error {
 	// GH#785: Handle bare repo worktrees where jsonlRelPath might include the
@@ -728,7 +761,8 @@ func commitInWorktree(ctx context.Context, worktreePath, jsonlRelPath, message s
 
 	// Use -f (force) to add files even if they're gitignored
 	// In contributor mode, .beads/ is excluded in .git/info/exclude but needs to be tracked in sync branch
-	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "-f", beadsRelDir)
+	// Use --sparse to work correctly with sparse-checkout enabled worktrees (fixes #1076)
+	addCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "-f", "--sparse", beadsRelDir)
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add failed in worktree: %w", err)
 	}
@@ -972,6 +1006,10 @@ func getRemoteForBranch(ctx context.Context, worktreePath, branch string) string
 // GetRepoRoot returns the git repository root directory
 // For worktrees, this returns the main repository root (not the worktree root)
 // The returned path is canonicalized to fix case on case-insensitive filesystems (GH#880)
+//
+// Deprecated: Use beads.GetRepoContext().RepoRoot instead. GetRepoContext provides
+// a unified API that correctly handles BEADS_DIR, worktrees, and redirects.
+// This function will be removed in a future release.
 func GetRepoRoot(ctx context.Context) (string, error) {
 	var repoRoot string
 

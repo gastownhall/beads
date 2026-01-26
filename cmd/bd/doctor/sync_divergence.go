@@ -54,6 +54,11 @@ func CheckSyncDivergence(path string) DoctorCheck {
 		}
 	}
 
+	backend := configfile.BackendSQLite
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		backend = cfg.GetBackend()
+	}
+
 	var issues []SyncDivergenceIssue
 
 	// Check 1: JSONL differs from git HEAD
@@ -62,10 +67,13 @@ func CheckSyncDivergence(path string) DoctorCheck {
 		issues = append(issues, *jsonlIssue)
 	}
 
-	// Check 2: SQLite last_import_time vs JSONL mtime
-	mtimeIssue := checkSQLiteMtimeDivergence(path, beadsDir)
-	if mtimeIssue != nil {
-		issues = append(issues, *mtimeIssue)
+	// Check 2: SQLite last_import_time vs JSONL mtime (SQLite only).
+	// Dolt backend does not maintain SQLite metadata; this SQLite-only check doesn't apply.
+	if backend == configfile.BackendSQLite {
+		mtimeIssue := checkSQLiteMtimeDivergence(path, beadsDir)
+		if mtimeIssue != nil {
+			issues = append(issues, *mtimeIssue)
+		}
 	}
 
 	// Check 3: Uncommitted .beads/ changes
@@ -75,10 +83,14 @@ func CheckSyncDivergence(path string) DoctorCheck {
 	}
 
 	if len(issues) == 0 {
+		msg := "JSONL, SQLite, and git are in sync"
+		if backend == configfile.BackendDolt {
+			msg = "JSONL, Dolt, and git are in sync"
+		}
 		return DoctorCheck{
 			Name:     "Sync Divergence",
 			Status:   StatusOK,
-			Message:  "JSONL, SQLite, and git are in sync",
+			Message:  msg,
 			Category: CategoryData,
 		}
 	}
@@ -256,10 +268,16 @@ func checkUncommittedBeadsChanges(path, beadsDir string) *SyncDivergenceIssue {
 		}
 	}
 
+	fixCmd := "bd sync"
+	// For dolt backend, bd sync/import-only workflows don't apply; recommend a plain git commit.
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		fixCmd = "git add .beads/ && git commit -m 'sync beads'"
+	}
+
 	return &SyncDivergenceIssue{
 		Type:        "uncommitted_beads",
 		Description: fmt.Sprintf("Uncommitted .beads/ changes (%d file(s))", fileCount),
-		FixCommand:  "bd sync",
+		FixCommand:  fixCmd,
 	}
 }
 

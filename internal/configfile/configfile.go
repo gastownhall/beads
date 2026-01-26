@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const ConfigFileName = "metadata.json"
@@ -12,6 +13,7 @@ const ConfigFileName = "metadata.json"
 type Config struct {
 	Database    string `json:"database"`
 	JSONLExport string `json:"jsonl_export,omitempty"`
+	Backend     string `json:"backend,omitempty"` // "sqlite" (default) or "dolt"
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -36,7 +38,7 @@ func ConfigPath(beadsDir string) string {
 
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
-	
+
 	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
 		// Try legacy config.json location (migration path)
@@ -48,52 +50,79 @@ func Load(beadsDir string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading legacy config: %w", err)
 		}
-		
+
 		// Migrate: parse legacy config, save as metadata.json, remove old file
 		var cfg Config
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing legacy config: %w", err)
 		}
-		
+
 		// Save to new location
 		if err := cfg.Save(beadsDir); err != nil {
 			return nil, fmt.Errorf("migrating config to metadata.json: %w", err)
 		}
-		
+
 		// Remove legacy file (best effort)
 		_ = os.Remove(legacyPath)
-		
+
 		return &cfg, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
-	
+
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
-	
+
 	return &cfg, nil
 }
 
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
-	
+
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	
+
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
-	
+
 	return nil
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
-	return filepath.Join(beadsDir, c.Database)
+	backend := c.GetBackend()
+
+	// Treat Database as the on-disk storage location:
+	// - SQLite: filename (default: beads.db)
+	// - Dolt: directory name (default: dolt)
+	//
+	// Backward-compat: early dolt configs wrote "beads.db" even when Backend=dolt.
+	// In that case, treat it as "dolt".
+	if backend == BackendDolt {
+		db := strings.TrimSpace(c.Database)
+		if db == "" || db == "beads.db" {
+			db = "dolt"
+		}
+		if filepath.IsAbs(db) {
+			return db
+		}
+		return filepath.Join(beadsDir, db)
+	}
+
+	// SQLite (default)
+	db := strings.TrimSpace(c.Database)
+	if db == "" {
+		db = "beads.db"
+	}
+	if filepath.IsAbs(db) {
+		return db
+	}
+	return filepath.Join(beadsDir, db)
 }
 
 func (c *Config) JSONLPath(beadsDir string) string {
@@ -112,4 +141,47 @@ func (c *Config) GetDeletionsRetentionDays() int {
 		return DefaultDeletionsRetentionDays
 	}
 	return c.DeletionsRetentionDays
+}
+
+// Backend constants
+const (
+	BackendSQLite = "sqlite"
+	BackendDolt   = "dolt"
+)
+
+// BackendCapabilities describes behavioral constraints for a storage backend.
+//
+// This is intentionally small and stable: callers should use these flags to decide
+// whether to enable features like daemon/RPC/autostart and process spawning.
+//
+// NOTE: The embedded Dolt driver is effectively single-writer at the OS-process level.
+// Even if multiple goroutines are safe within one process, multiple processes opening
+// the same Dolt directory concurrently can cause lock contention and transient
+// "read-only" failures. Therefore, Dolt is treated as single-process-only.
+type BackendCapabilities struct {
+	// SingleProcessOnly indicates the backend must not be accessed from multiple
+	// Beads OS processes concurrently (no daemon mode, no RPC client/server split,
+	// no helper-process spawning).
+	SingleProcessOnly bool
+}
+
+// CapabilitiesForBackend returns capabilities for a backend string.
+// Unknown backends are treated conservatively as single-process-only.
+func CapabilitiesForBackend(backend string) BackendCapabilities {
+	switch strings.TrimSpace(strings.ToLower(backend)) {
+	case "", BackendSQLite:
+		return BackendCapabilities{SingleProcessOnly: false}
+	case BackendDolt:
+		return BackendCapabilities{SingleProcessOnly: true}
+	default:
+		return BackendCapabilities{SingleProcessOnly: true}
+	}
+}
+
+// GetBackend returns the configured backend type, defaulting to SQLite.
+func (c *Config) GetBackend() string {
+	if c.Backend == "" {
+		return BackendSQLite
+	}
+	return c.Backend
 }

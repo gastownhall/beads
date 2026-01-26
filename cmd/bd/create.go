@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
@@ -194,7 +197,7 @@ var createCmd = &cobra.Command{
 				Notes:              notes,
 				Status:             types.StatusOpen,
 				Priority:           priority,
-				IssueType:          types.IssueType(issueType),
+				IssueType:          types.IssueType(issueType).Normalize(),
 				Assignee:           assignee,
 				ExternalRef:        externalRefPtr,
 				Ephemeral:          wisp,
@@ -254,6 +257,33 @@ var createCmd = &cobra.Command{
 			return
 		}
 
+		// Auto-route based on explicit ID prefix (if no explicit --rig/--prefix provided)
+		// When creating an issue with --id=pq-xxx, automatically route to the database
+		// that handles the pq- prefix based on routes.jsonl
+		if explicitID != "" && rigOverride == "" && prefixOverride == "" {
+			prefix := routing.ExtractPrefix(explicitID)
+			if prefix != "" {
+				// Load routes from town level
+				townBeadsDir, err := findTownBeadsDir()
+				if err == nil {
+					routes, err := routing.LoadTownRoutes(townBeadsDir)
+					if err == nil && len(routes) > 0 {
+						// Check if this prefix matches a route to a different rig
+						for _, route := range routes {
+							if route.Prefix == prefix && route.Path != "" && route.Path != "." {
+								// Found a matching route - auto-route to that rig
+								rigName := routing.ExtractProjectFromPath(route.Path)
+								if rigName != "" {
+									createInRig(cmd, rigName, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, wisp)
+									return
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Handle --rig or --prefix flag: create issue in a different rig
 		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
 		targetRig := rigOverride
@@ -264,7 +294,7 @@ var createCmd = &cobra.Command{
 			targetRig = prefixOverride
 		}
 		if targetRig != "" {
-			createInRig(cmd, targetRig, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, wisp)
+			createInRig(cmd, targetRig, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, wisp)
 			return
 		}
 
@@ -314,21 +344,63 @@ var createCmd = &cobra.Command{
 				debug.Logf("Warning: failed to detect user role: %v\n", err)
 			}
 
+			// Build routing config with backward compatibility for legacy contributor.* keys
+			routingMode := config.GetString("routing.mode")
+			contributorRepo := config.GetString("routing.contributor")
+
+			// NFR-001: Backward compatibility - fall back to legacy contributor.* keys
+			if routingMode == "" {
+				if config.GetString("contributor.auto_route") == "true" {
+					routingMode = "auto"
+				}
+			}
+			if contributorRepo == "" {
+				contributorRepo = config.GetString("contributor.planning_repo")
+			}
+
 			routingConfig := &routing.RoutingConfig{
-				Mode:             config.GetString("routing.mode"),
+				Mode:             routingMode,
 				DefaultRepo:      config.GetString("routing.default"),
 				MaintainerRepo:   config.GetString("routing.maintainer"),
-				ContributorRepo:  config.GetString("routing.contributor"),
+				ContributorRepo:  contributorRepo,
 				ExplicitOverride: repoOverride,
 			}
 
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
-		// TODO(bd-6x6g): Switch to target repo for multi-repo support
-		// For now, we just log the target repo in debug mode
+		// Switch to target repo for multi-repo support (bd-6x6g)
+		// When routing to a different repo, we bypass daemon mode and use direct storage
+		var targetStore storage.Storage
 		if repoPath != "." {
-			debug.Logf("DEBUG: Target repo: %s\n", repoPath)
+			targetBeadsDir := routing.ExpandPath(repoPath)
+			debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
+
+			// Ensure target beads directory exists with prefix inheritance
+			if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+				FatalError("failed to initialize target repo: %v", err)
+			}
+
+			// Open new store for target repo using factory to respect backend config
+			targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
+			var err error
+			targetStore, err = factory.NewFromConfig(rootCtx, targetBeadsDirPath)
+			if err != nil {
+				FatalError("failed to open target store: %v", err)
+			}
+
+			// Close the original store before replacing it (it won't be used anymore)
+			// Note: We don't defer-close targetStore here because PersistentPostRun
+			// will close whatever store is assigned to the global `store` variable.
+			// This fixes the "database is closed" error during auto-flush (GH#routing-close-bug).
+			if store != nil {
+				_ = store.Close()
+			}
+
+			// Replace store for remainder of create operation
+			// This also bypasses daemon mode since daemon owns the current repo's store
+			store = targetStore
+			daemonClient = nil // Bypass daemon for routed issues (T013)
 		}
 
 		// Check for conflicting flags
@@ -358,9 +430,18 @@ var createCmd = &cobra.Command{
 
 		// Validate explicit ID format if provided
 		if explicitID != "" {
-			requestedPrefix, err := validation.ValidateIDFormat(explicitID)
-			if err != nil {
-				FatalError("%v", err)
+			// For agent types, use agent-aware validation.
+			// This fixes the bug where 3-char polecat names like "nux" in
+			// "nx-nexus-polecat-nux" were incorrectly treated as hash suffixes.
+			if issueType == "agent" {
+				if err := validation.ValidateAgentID(explicitID); err != nil {
+					FatalError("invalid agent ID: %v", err)
+				}
+			} else {
+				_, err := validation.ValidateIDFormat(explicitID)
+				if err != nil {
+					FatalError("%v", err)
+				}
 			}
 
 			// Validate prefix matches database prefix
@@ -381,20 +462,19 @@ var createCmd = &cobra.Command{
 				}
 				// If error, continue without validation (non-fatal)
 			} else {
-				// Direct mode - check config
+				// Direct mode - check config (GH#1145: fallback to config.yaml)
 				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+				if dbPrefix == "" {
+					dbPrefix = config.GetString("issue-prefix")
+				}
 				allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
 			}
 
-			if err := validation.ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes, forceCreate); err != nil {
+			// Use ValidateIDPrefixAllowed which handles multi-hyphen prefixes correctly (GH#1135)
+			// This checks if the ID starts with an allowed prefix, rather than extracting
+			// the prefix first (which can fail for IDs like "hq-cv-test" where "test" looks like a word)
+			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				FatalError("%v", err)
-			}
-
-			// Validate agent ID pattern if type is agent
-			if issueType == "agent" {
-				if err := validation.ValidateAgentID(explicitID); err != nil {
-					FatalError("invalid agent ID: %v", err)
-				}
 			}
 		}
 
@@ -478,7 +558,7 @@ var createCmd = &cobra.Command{
 			Notes:              notes,
 			Status:             types.StatusOpen,
 			Priority:           priority,
-			IssueType:          types.IssueType(issueType),
+			IssueType:          types.IssueType(issueType).Normalize(),
 			Assignee:           assignee,
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
@@ -657,6 +737,12 @@ var createCmd = &cobra.Command{
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
 
+		// If issue was routed to a different repo, flush its JSONL immediately
+		// so the issue appears in bd list when hydration is enabled (bd-fix-routing)
+		if repoPath != "." {
+			flushRoutedRepo(targetStore, repoPath)
+		}
+
 		// Run create hook
 		if hookRunner != nil {
 			hookRunner.Run(hooks.EventCreate, issue)
@@ -681,13 +767,126 @@ var createCmd = &cobra.Command{
 	},
 }
 
+// flushRoutedRepo ensures the target repo's JSONL is updated after routing an issue.
+// This is critical for multi-repo hydration to work correctly (bd-fix-routing).
+func flushRoutedRepo(targetStore storage.Storage, repoPath string) {
+	ctx := context.Background()
+
+	// Expand the repo path and construct the .beads directory path
+	targetBeadsDir := routing.ExpandPath(repoPath)
+	if !filepath.IsAbs(targetBeadsDir) {
+		// If relative path, make it absolute
+		absPath, err := filepath.Abs(targetBeadsDir)
+		if err != nil {
+			debug.Logf("warning: failed to get absolute path for %s: %v", targetBeadsDir, err)
+			return
+		}
+		targetBeadsDir = absPath
+	}
+
+	// Construct paths for daemon socket and JSONL
+	beadsDir := filepath.Join(targetBeadsDir, ".beads")
+	socketPath := filepath.Join(beadsDir, "bd.sock")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	debug.Logf("attempting to flush routed repo at %s", targetBeadsDir)
+
+	// Try to connect to target repo's daemon (if running)
+	flushed := false
+	if client, err := rpc.TryConnect(socketPath); err == nil && client != nil {
+		defer func() { _ = client.Close() }()
+
+		// Daemon is running - ask it to export
+		debug.Logf("found running daemon in target repo, requesting export")
+		exportArgs := &rpc.ExportArgs{
+			JSONLPath: jsonlPath,
+		}
+		if resp, err := client.Export(exportArgs); err == nil && resp.Success {
+			debug.Logf("successfully flushed via target repo daemon")
+			flushed = true
+		} else {
+			if err != nil {
+				debug.Logf("daemon export failed: %v", err)
+			} else {
+				debug.Logf("daemon export error: %s", resp.Error)
+			}
+		}
+	}
+
+	// Fallback: No daemon or daemon flush failed - export directly
+	if !flushed {
+		debug.Logf("no daemon in target repo, exporting directly to JSONL")
+
+		// Get all issues including tombstones (mirrors exportToJSONLDeferred logic)
+		issues, err := targetStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+		if err != nil {
+			WarnError("failed to query issues for export: %v", err)
+			return
+		}
+
+		// Perform atomic export (temporary file + rename)
+		if err := performAtomicExport(ctx, jsonlPath, issues, targetStore); err != nil {
+			WarnError("failed to export target repo JSONL: %v", err)
+			return
+		}
+
+		debug.Logf("successfully exported to %s", jsonlPath)
+	}
+}
+
+// performAtomicExport writes issues to JSONL using atomic temp file + rename
+func performAtomicExport(_ context.Context, jsonlPath string, issues []*types.Issue, _ storage.Storage) error {
+	// Create temp file with PID suffix for atomic write
+	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
+
+	// Ensure we clean up temp file on error
+	defer func() {
+		// Remove temp file if it still exists (rename failed or error occurred)
+		if _, err := os.Stat(tempPath); err == nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	// Open temp file for writing
+	tempFile, err := os.Create(tempPath) //nolint:gosec // tempPath is safely constructed from jsonlPath
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	// Write issues as JSONL
+	encoder := json.NewEncoder(tempFile)
+	for _, issue := range issues {
+		if err := encoder.Encode(issue); err != nil {
+			_ = tempFile.Close()
+			return fmt.Errorf("failed to encode issue %s: %w", issue.ID, err)
+		}
+	}
+
+	// Sync to disk before rename
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempPath, jsonlPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
 func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|rig|convoy|event)")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|rig|convoy|event); enhancement is alias for feature")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
@@ -727,9 +926,9 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 }
 
-// createInRig creates an issue in a different rig using --rig flag.
+// createInRig creates an issue in a different rig using --rig flag or auto-routing.
 // This bypasses the normal daemon/direct flow and directly creates in the target rig.
-func createInRig(cmd *cobra.Command, rigName, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef string, wisp bool) {
+func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef string, wisp bool) {
 	ctx := rootCtx
 
 	// Find the town-level beads directory (where routes.jsonl lives)
@@ -744,9 +943,8 @@ func createInRig(cmd *cobra.Command, rigName, title, description, issueType stri
 		FatalError("%v", err)
 	}
 
-	// Open storage for the target rig
-	targetDBPath := filepath.Join(targetBeadsDir, "beads.db")
-	targetStore, err := sqlite.New(ctx, targetDBPath)
+	// Open storage for the target rig using factory to respect backend config
+	targetStore, err := factory.NewFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		FatalError("failed to open rig %q database: %v", rigName, err)
 	}
@@ -804,8 +1002,9 @@ func createInRig(cmd *cobra.Command, rigName, title, description, issueType stri
 		deferUntil = &t
 	}
 
-	// Create issue without ID - CreateIssue will generate one with the correct prefix
+	// Create issue with explicit ID if provided, otherwise CreateIssue will generate one
 	issue := &types.Issue{
+		ID:                 explicitID, // Set explicit ID if provided (empty string if not)
 		Title:              title,
 		Description:        description,
 		Design:             design,
@@ -813,7 +1012,7 @@ func createInRig(cmd *cobra.Command, rigName, title, description, issueType stri
 		Notes:              notes,
 		Status:             types.StatusOpen,
 		Priority:           priority,
-		IssueType:          types.IssueType(issueType),
+		IssueType:          types.IssueType(issueType).Normalize(),
 		Assignee:           assignee,
 		ExternalRef:        externalRefPtr,
 		Ephemeral:          wisp,
@@ -898,4 +1097,57 @@ func formatTimeForRPC(t *time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+// ensureBeadsDirForPath ensures a beads directory exists at the target path.
+// If the .beads directory doesn't exist, it creates it and initializes with
+// the same prefix as the source store (T010, T012: prefix inheritance).
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.Storage) error {
+	beadsDir := filepath.Join(targetPath, ".beads")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+
+	// Check if beads directory already exists
+	if _, err := os.Stat(beadsDir); err == nil {
+		// Directory exists, check if database exists
+		if _, err := os.Stat(dbPath); err == nil {
+			// Database exists, nothing to do
+			return nil
+		}
+	}
+
+	// Create .beads directory
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		return fmt.Errorf("cannot create .beads directory: %w", err)
+	}
+
+	// Create issues.jsonl if it doesn't exist
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+		// #nosec G306 -- planning repo JSONL must be shareable across collaborators
+		if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
+			return fmt.Errorf("failed to create issues.jsonl: %w", err)
+		}
+	}
+
+	// Initialize database - it will be created when sqlite.New is called
+	// But we need to set the prefix if source store has one (T012: prefix inheritance)
+	if sourceStore != nil {
+		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
+		if err == nil && sourcePrefix != "" {
+			// Open target store temporarily to set prefix
+			tempStore, err := sqlite.New(ctx, dbPath)
+			if err != nil {
+				return fmt.Errorf("failed to initialize target database: %w", err)
+			}
+			if err := tempStore.SetConfig(ctx, "issue_prefix", sourcePrefix); err != nil {
+				_ = tempStore.Close()
+				return fmt.Errorf("failed to set prefix in target store: %w", err)
+			}
+			if err := tempStore.Close(); err != nil {
+				return fmt.Errorf("failed to close target store: %w", err)
+			}
+		}
+	}
+
+	return nil
 }

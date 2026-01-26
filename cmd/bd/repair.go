@@ -68,30 +68,106 @@ func outputJSONAndExit(result repairResult, exitCode int) {
 	os.Exit(exitCode)
 }
 
-func runRepair(cmd *cobra.Command, args []string) {
-	// Find .beads directory
+// validateRepairPaths validates the beads directory and database exist.
+func validateRepairPaths() (string, error) {
 	beadsDir := filepath.Join(repairPath, ".beads")
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		if repairJSON {
-			outputJSONAndExit(repairResult{
-				Status: "error",
-				Error:  fmt.Sprintf(".beads directory not found at %s", beadsDir),
-			}, 1)
-		}
-		fmt.Fprintf(os.Stderr, "Error: .beads directory not found at %s\n", beadsDir)
-		os.Exit(1)
+		return "", fmt.Errorf(".beads directory not found at %s", beadsDir)
 	}
-
-	// Find database file
 	dbPath := filepath.Join(beadsDir, "beads.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		if repairJSON {
-			outputJSONAndExit(repairResult{
-				Status: "error",
-				Error:  fmt.Sprintf("database not found at %s", dbPath),
-			}, 1)
+		return "", fmt.Errorf("database not found at %s", dbPath)
+	}
+	return dbPath, nil
+}
+
+// findAllOrphans finds all orphaned references in the database.
+func findAllOrphans(db *sql.DB) (stats repairStats, orphans allOrphans, err error) {
+	orphans.depsIssueID, err = findOrphanedDepsIssueID(db)
+	if err != nil {
+		return stats, orphans, fmt.Errorf("checking orphaned deps (issue_id): %w", err)
+	}
+	stats.orphanedDepsIssueID = len(orphans.depsIssueID)
+
+	orphans.depsDependsOn, err = findOrphanedDepsDependsOn(db)
+	if err != nil {
+		return stats, orphans, fmt.Errorf("checking orphaned deps (depends_on_id): %w", err)
+	}
+	stats.orphanedDepsDependsOn = len(orphans.depsDependsOn)
+
+	orphans.labels, err = findOrphanedLabels(db)
+	if err != nil {
+		return stats, orphans, fmt.Errorf("checking orphaned labels: %w", err)
+	}
+	stats.orphanedLabels = len(orphans.labels)
+
+	orphans.comments, err = findOrphanedComments(db)
+	if err != nil {
+		return stats, orphans, fmt.Errorf("checking orphaned comments: %w", err)
+	}
+	stats.orphanedComments = len(orphans.comments)
+
+	orphans.events, err = findOrphanedEvents(db)
+	if err != nil {
+		return stats, orphans, fmt.Errorf("checking orphaned events: %w", err)
+	}
+	stats.orphanedEvents = len(orphans.events)
+
+	return stats, orphans, nil
+}
+
+// allOrphans holds all found orphaned references.
+type allOrphans struct {
+	depsIssueID   []orphanedDep
+	depsDependsOn []orphanedDep
+	labels        []orphanedLabel
+	comments      []orphanedComment
+	events        []orphanedEvent
+}
+
+// printOrphansText prints orphan details in text mode.
+func printOrphansText(stats repairStats, orphans allOrphans) {
+	fmt.Printf("Found %d orphaned reference(s):\n", stats.total())
+	if stats.orphanedDepsIssueID > 0 {
+		fmt.Printf("  • %d dependencies with missing issue_id\n", stats.orphanedDepsIssueID)
+		for _, dep := range orphans.depsIssueID {
+			fmt.Printf("    - %s → %s\n", dep.issueID, dep.dependsOnID)
 		}
-		fmt.Fprintf(os.Stderr, "Error: database not found at %s\n", dbPath)
+	}
+	if stats.orphanedDepsDependsOn > 0 {
+		fmt.Printf("  • %d dependencies with missing depends_on_id\n", stats.orphanedDepsDependsOn)
+		for _, dep := range orphans.depsDependsOn {
+			fmt.Printf("    - %s → %s\n", dep.issueID, dep.dependsOnID)
+		}
+	}
+	if stats.orphanedLabels > 0 {
+		fmt.Printf("  • %d labels with missing issue_id\n", stats.orphanedLabels)
+		for _, label := range orphans.labels {
+			fmt.Printf("    - %s: %s\n", label.issueID, label.label)
+		}
+	}
+	if stats.orphanedComments > 0 {
+		fmt.Printf("  • %d comments with missing issue_id\n", stats.orphanedComments)
+		for _, comment := range orphans.comments {
+			fmt.Printf("    - %s (by %s)\n", comment.issueID, comment.author)
+		}
+	}
+	if stats.orphanedEvents > 0 {
+		fmt.Printf("  • %d events with missing issue_id\n", stats.orphanedEvents)
+		for _, event := range orphans.events {
+			fmt.Printf("    - %s: %s\n", event.issueID, event.eventType)
+		}
+	}
+	fmt.Println()
+}
+
+func runRepair(cmd *cobra.Command, args []string) {
+	dbPath, err := validateRepairPaths()
+	if err != nil {
+		if repairJSON {
+			outputJSONAndExit(repairResult{Status: "error", Error: err.Error()}, 1)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -103,71 +179,25 @@ func runRepair(cmd *cobra.Command, args []string) {
 		fmt.Println()
 	}
 
-	// Open database directly, bypassing beads storage layer
 	db, err := openRepairDB(dbPath)
 	if err != nil {
 		if repairJSON {
-			outputJSONAndExit(repairResult{
-				DatabasePath: dbPath,
-				Status:       "error",
-				Error:        fmt.Sprintf("opening database: %v", err),
-			}, 1)
+			outputJSONAndExit(repairResult{DatabasePath: dbPath, Status: "error", Error: fmt.Sprintf("opening database: %v", err)}, 1)
 		}
 		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	// Collect repair statistics
-	stats := repairStats{}
-
-	// Helper for consistent error output
-	exitWithError := func(msg string, err error) {
+	// Find all orphaned references
+	stats, orphans, err := findAllOrphans(db)
+	if err != nil {
 		if repairJSON {
-			outputJSONAndExit(repairResult{
-				DatabasePath: dbPath,
-				Status:       "error",
-				Error:        fmt.Sprintf("%s: %v", msg, err),
-			}, 1)
+			outputJSONAndExit(repairResult{DatabasePath: dbPath, Status: "error", Error: err.Error()}, 1)
 		}
-		fmt.Fprintf(os.Stderr, "Error %s: %v\n", msg, err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// 1. Find and clean orphaned dependencies (issue_id not in issues)
-	orphanedIssueID, err := findOrphanedDepsIssueID(db)
-	if err != nil {
-		exitWithError("checking orphaned deps (issue_id)", err)
-	}
-	stats.orphanedDepsIssueID = len(orphanedIssueID)
-
-	// 2. Find and clean orphaned dependencies (depends_on_id not in issues)
-	orphanedDependsOn, err := findOrphanedDepsDependsOn(db)
-	if err != nil {
-		exitWithError("checking orphaned deps (depends_on_id)", err)
-	}
-	stats.orphanedDepsDependsOn = len(orphanedDependsOn)
-
-	// 3. Find and clean orphaned labels
-	orphanedLabels, err := findOrphanedLabels(db)
-	if err != nil {
-		exitWithError("checking orphaned labels", err)
-	}
-	stats.orphanedLabels = len(orphanedLabels)
-
-	// 4. Find and clean orphaned comments
-	orphanedCommentsList, err := findOrphanedComments(db)
-	if err != nil {
-		exitWithError("checking orphaned comments", err)
-	}
-	stats.orphanedComments = len(orphanedCommentsList)
-
-	// 5. Find and clean orphaned events
-	orphanedEventsList, err := findOrphanedEvents(db)
-	if err != nil {
-		exitWithError("checking orphaned events", err)
-	}
-	stats.orphanedEvents = len(orphanedEventsList)
 
 	// Build JSON result structure (used for both JSON output and tracking)
 	jsonResult := repairResult{
@@ -184,23 +214,23 @@ func runRepair(cmd *cobra.Command, args []string) {
 	}
 
 	// Build orphan details
-	for _, dep := range orphanedIssueID {
+	for _, dep := range orphans.depsIssueID {
 		jsonResult.OrphanDetails.DependenciesIssueID = append(jsonResult.OrphanDetails.DependenciesIssueID,
 			repairDepDetail{IssueID: dep.issueID, DependsOnID: dep.dependsOnID})
 	}
-	for _, dep := range orphanedDependsOn {
+	for _, dep := range orphans.depsDependsOn {
 		jsonResult.OrphanDetails.DependenciesDependsOn = append(jsonResult.OrphanDetails.DependenciesDependsOn,
 			repairDepDetail{IssueID: dep.issueID, DependsOnID: dep.dependsOnID})
 	}
-	for _, label := range orphanedLabels {
+	for _, label := range orphans.labels {
 		jsonResult.OrphanDetails.Labels = append(jsonResult.OrphanDetails.Labels,
 			repairLabelDetail{IssueID: label.issueID, Label: label.label})
 	}
-	for _, comment := range orphanedCommentsList {
+	for _, comment := range orphans.comments {
 		jsonResult.OrphanDetails.Comments = append(jsonResult.OrphanDetails.Comments,
 			repairCommentDetail{ID: comment.id, IssueID: comment.issueID, Author: comment.author})
 	}
-	for _, event := range orphanedEventsList {
+	for _, event := range orphans.events {
 		jsonResult.OrphanDetails.Events = append(jsonResult.OrphanDetails.Events,
 			repairEventDetail{ID: event.id, IssueID: event.issueID, EventType: event.eventType})
 	}
@@ -217,38 +247,7 @@ func runRepair(cmd *cobra.Command, args []string) {
 
 	// Print findings (text mode)
 	if !repairJSON {
-		fmt.Printf("Found %d orphaned reference(s):\n", stats.total())
-		if stats.orphanedDepsIssueID > 0 {
-			fmt.Printf("  • %d dependencies with missing issue_id\n", stats.orphanedDepsIssueID)
-			for _, dep := range orphanedIssueID {
-				fmt.Printf("    - %s → %s\n", dep.issueID, dep.dependsOnID)
-			}
-		}
-		if stats.orphanedDepsDependsOn > 0 {
-			fmt.Printf("  • %d dependencies with missing depends_on_id\n", stats.orphanedDepsDependsOn)
-			for _, dep := range orphanedDependsOn {
-				fmt.Printf("    - %s → %s\n", dep.issueID, dep.dependsOnID)
-			}
-		}
-		if stats.orphanedLabels > 0 {
-			fmt.Printf("  • %d labels with missing issue_id\n", stats.orphanedLabels)
-			for _, label := range orphanedLabels {
-				fmt.Printf("    - %s: %s\n", label.issueID, label.label)
-			}
-		}
-		if stats.orphanedComments > 0 {
-			fmt.Printf("  • %d comments with missing issue_id\n", stats.orphanedComments)
-			for _, comment := range orphanedCommentsList {
-				fmt.Printf("    - %s (by %s)\n", comment.issueID, comment.author)
-			}
-		}
-		if stats.orphanedEvents > 0 {
-			fmt.Printf("  • %d events with missing issue_id\n", stats.orphanedEvents)
-			for _, event := range orphanedEventsList {
-				fmt.Printf("    - %s: %s\n", event.issueID, event.eventType)
-			}
-		}
-		fmt.Println()
+		printOrphansText(stats, orphans)
 	}
 
 	// Handle dry-run
@@ -300,7 +299,7 @@ func runRepair(cmd *cobra.Command, args []string) {
 	var repairErr error
 
 	// Delete orphaned deps (issue_id) and mark affected issues dirty
-	if len(orphanedIssueID) > 0 && repairErr == nil {
+	if len(orphans.depsIssueID) > 0 && repairErr == nil {
 		// Note: orphanedIssueID contains deps where issue_id doesn't exist,
 		// so we can't mark them dirty (the issue is gone). But for depends_on orphans,
 		// the issue_id still exists and should be marked dirty.
@@ -317,9 +316,9 @@ func runRepair(cmd *cobra.Command, args []string) {
 	}
 
 	// Delete orphaned deps (depends_on_id) and mark parent issues dirty
-	if len(orphanedDependsOn) > 0 && repairErr == nil {
+	if len(orphans.depsDependsOn) > 0 && repairErr == nil {
 		// Mark parent issues as dirty for export
-		for _, dep := range orphanedDependsOn {
+		for _, dep := range orphans.depsDependsOn {
 			_, _ = tx.Exec("INSERT OR IGNORE INTO dirty_issues (issue_id) VALUES (?)", dep.issueID)
 		}
 
@@ -337,7 +336,7 @@ func runRepair(cmd *cobra.Command, args []string) {
 	}
 
 	// Delete orphaned labels
-	if len(orphanedLabels) > 0 && repairErr == nil {
+	if len(orphans.labels) > 0 && repairErr == nil {
 		// Labels reference non-existent issues, so no dirty marking needed
 		result, err := tx.Exec(`
 			DELETE FROM labels
@@ -352,7 +351,7 @@ func runRepair(cmd *cobra.Command, args []string) {
 	}
 
 	// Delete orphaned comments
-	if len(orphanedCommentsList) > 0 && repairErr == nil {
+	if len(orphans.comments) > 0 && repairErr == nil {
 		// Comments reference non-existent issues, so no dirty marking needed
 		result, err := tx.Exec(`
 			DELETE FROM comments
@@ -367,7 +366,7 @@ func runRepair(cmd *cobra.Command, args []string) {
 	}
 
 	// Delete orphaned events
-	if len(orphanedEventsList) > 0 && repairErr == nil {
+	if len(orphans.events) > 0 && repairErr == nil {
 		// Events reference non-existent issues, so no dirty marking needed
 		result, err := tx.Exec(`
 			DELETE FROM events

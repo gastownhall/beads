@@ -126,7 +126,7 @@ accordingly:
 
 2. **Routing Configuration** (`internal/config/config.go`):
    ```go
-   v.SetDefault("routing.mode", "auto")
+   v.SetDefault("routing.mode", "")  // Empty = disabled by default
    v.SetDefault("routing.default", ".")
    v.SetDefault("routing.contributor", "~/.beads-planning")
    ```
@@ -256,6 +256,26 @@ bd migrate plan-42 --to .
 
 This creates a new issue in the target repo with a reference to the original.
 
+## Sync Mode Interactions
+
+Contributor routing works independently of the project repo's sync configuration. The planning repo has its own sync behavior:
+
+| Sync Mode | Project Repo | Planning Repo | Notes |
+|-----------|--------------|---------------|-------|
+| **Direct** | Uses `.beads/` directly | Uses `~/.beads-planning/.beads/` | Both use direct storage, no interaction |
+| **Sync-branch** | Uses separate branch for beads | Uses direct storage | Planning repo does NOT inherit `sync.branch` config |
+| **No-db mode** | JSONL-only operations | Routes JSONL operations to planning repo | Planning repo still uses database |
+| **Daemon mode** | Background auto-sync | Daemon bypassed for routed issues | Planning repo operations are synchronous |
+| **Local-only** | No git remote | Works normally | Planning repo can have its own git remote independently |
+| **External (BEADS_DIR)** | Uses separate repo via env var | BEADS_DIR takes precedence over routing | If `BEADS_DIR` is set, routing config is ignored |
+
+### Key Principles
+
+1. **Separate databases**: Planning repo is completely independent - it has its own `.beads/` directory
+2. **No config inheritance**: Planning repo does not inherit project's `sync.branch`, `no-db`, or daemon settings
+3. **BEADS_DIR precedence**: If `BEADS_DIR` environment variable is set, it overrides routing configuration
+4. **Daemon bypass**: Issues routed to planning repo bypass daemon mode to avoid connection staleness
+
 ## Configuration Reference
 
 ### Contributor Setup (Recommended)
@@ -293,6 +313,89 @@ BEADS_DIR=~/.beads-planning bd create "My task" -p 1
 # Or per-shell session
 export BEADS_DIR=~/.beads-planning
 bd create "My task" -p 1
+```
+
+## Troubleshooting
+
+### Routing Not Working
+
+**Symptom**: Issues appear in `./.beads/issues.jsonl` instead of planning repo
+
+**Diagnosis**:
+```bash
+# Check routing configuration
+bd config get routing.mode
+bd config get routing.contributor
+
+# Check detected role
+git config beads.role  # If set, this overrides auto-detection
+git remote get-url --push origin  # Should show HTTPS for contributors
+```
+
+**Solutions**:
+1. Verify `routing.mode` is set to `auto`
+2. Verify `routing.contributor` points to planning repo path
+3. Check that `BEADS_DIR` is NOT set (it overrides routing)
+4. If using SSH URL but want contributor behavior, set `git config beads.role contributor`
+
+### BEADS_DIR Conflicts with Routing
+
+**Symptom**: Warning message about BEADS_DIR overriding routing config
+
+**Explanation**: `BEADS_DIR` environment variable takes precedence over all routing configuration. This is intentional for backward compatibility.
+
+**Solutions**:
+1. **Unset BEADS_DIR** if you want routing to work: `unset BEADS_DIR`
+2. **Keep BEADS_DIR** and ignore routing config (BEADS_DIR will be used)
+3. **Use explicit --repo flag** to override both: `bd create "task" -p 1 --repo /path/to/repo`
+
+### Planning Repo Not Initialized
+
+**Symptom**: Error when creating issue: "failed to initialize target repo"
+
+**Diagnosis**:
+```bash
+ls -la ~/.beads-planning/.beads/  # Should exist
+```
+
+**Solution**:
+```bash
+# Reinitialize planning repo
+bd init --contributor  # Wizard will recreate if missing
+```
+
+### Prefix Mismatch Between Repos
+
+**Symptom**: Planning repo issues have different prefix than expected
+
+**Explanation**: Planning repo inherits the project repo's prefix during initialization. If you want a different prefix:
+
+**Solution**:
+```bash
+# Configure planning repo prefix
+cd ~/.beads-planning
+bd config set db.prefix plan  # Use "plan-" prefix for planning issues
+cd -  # Return to project repo
+```
+
+### Config Keys Not Found (Legacy)
+
+**Symptom**: Old docs or scripts reference `contributor.auto_route` or `contributor.planning_repo`
+
+**Explanation**: Config keys were renamed in v0.48.0:
+- `contributor.auto_route` → `routing.mode` (value: `auto` or `explicit`)
+- `contributor.planning_repo` → `routing.contributor`
+
+**Solution**: Use new keys. Legacy keys still work for backward compatibility but are deprecated.
+
+```bash
+# Old (deprecated but still works)
+bd config set contributor.auto_route true
+bd config set contributor.planning_repo ~/.beads-planning
+
+# New (preferred)
+bd config set routing.mode auto
+bd config set routing.contributor ~/.beads-planning
 ```
 
 ## Pollution Detection Heuristics

@@ -369,16 +369,24 @@ func stopAllDaemons() {
 }
 
 // startDaemon starts the daemon (in foreground if requested, otherwise background)
-func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile, logLevel string, logJSON bool) {
+func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMode, foreground bool, logFile, pidFile, logLevel string, logJSON, federation bool, federationPort, remotesapiPort int) {
 	logPath, err := getLogFilePath(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Guardrail: single-process backends (e.g., Dolt embedded) must never spawn a daemon process.
+	// Exception: federation mode runs dolt sql-server which enables multi-writer support.
+	// This should already be blocked by command guards, but keep it defensive.
+	if singleProcessOnlyBackend() && !federation {
+		fmt.Fprintf(os.Stderr, "Error: daemon mode is not supported for single-process backends (e.g., dolt). Hint: use sqlite backend for daemon mode, use --federation for dolt server mode, or run commands in direct mode\n")
+		os.Exit(1)
+	}
+
 	// Run in foreground if --foreground flag set or if we're the forked child process
 	if foreground || os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON)
+		runDaemonLoop(interval, autoCommit, autoPush, autoPull, localMode, logPath, pidFile, logLevel, logJSON, federation, federationPort, remotesapiPort)
 		return
 	}
 
@@ -411,6 +419,15 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 	}
 	if logJSON {
 		args = append(args, "--log-json")
+	}
+	if federation {
+		args = append(args, "--federation")
+		if federationPort != 0 && federationPort != 3306 {
+			args = append(args, "--federation-port", strconv.Itoa(federationPort))
+		}
+		if remotesapiPort != 0 && remotesapiPort != 8080 {
+			args = append(args, "--remotesapi-port", strconv.Itoa(remotesapiPort))
+		}
 	}
 
 	cmd := exec.Command(exe, args...) // #nosec G204 - bd daemon command from trusted binary

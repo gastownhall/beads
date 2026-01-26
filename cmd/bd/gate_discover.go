@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -226,7 +228,7 @@ func findPendingGates() ([]*types.Issue, error) {
 		}
 	} else {
 		// Direct mode
-		gateType := types.TypeGate
+		gateType := types.IssueType("gate")
 		filter := types.IssueFilter{
 			IssueType: &gateType,
 			ExcludeStatus: []types.Status{types.StatusClosed},
@@ -248,8 +250,14 @@ func findPendingGates() ([]*types.Issue, error) {
 }
 
 // getGitBranchForGateDiscovery returns the current git branch name
+// Uses CWD repo context since this is for user's project CI discovery
 func getGitBranchForGateDiscovery() string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return "main" // Default fallback
+	}
+
+	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "main" // Default fallback
@@ -258,8 +266,14 @@ func getGitBranchForGateDiscovery() string {
 }
 
 // getGitCommitForGateDiscovery returns the current git commit SHA
+// Uses CWD repo context since this is for user's project CI discovery
 func getGitCommitForGateDiscovery() string {
-	cmd := exec.Command("git", "rev-parse", "HEAD")
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return ""
+	}
+
+	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return ""

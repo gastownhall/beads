@@ -292,7 +292,7 @@ func TestRepliesTo(t *testing.T) {
 		Description: "Original content",
 		Status:      types.StatusOpen,
 		Priority:    2,
-		IssueType:   types.TypeMessage,
+		IssueType:   "message",
 		Sender:      "alice",
 		Assignee:    "bob",
 		Ephemeral:        true,
@@ -304,7 +304,7 @@ func TestRepliesTo(t *testing.T) {
 		Description: "Reply content",
 		Status:      types.StatusOpen,
 		Priority:    2,
-		IssueType:   types.TypeMessage,
+		IssueType:   "message",
 		Sender:      "bob",
 		Assignee:    "alice",
 		Ephemeral:        true,
@@ -360,7 +360,7 @@ func TestRepliesTo_Chain(t *testing.T) {
 			Title:     "Message",
 			Status:    types.StatusOpen,
 			Priority:  2,
-			IssueType: types.TypeMessage,
+			IssueType: "message",
 			Sender:    "user",
 			Assignee:  "inbox",
 			Ephemeral: true,
@@ -414,7 +414,7 @@ func TestWispField(t *testing.T) {
 		Title:     "Wisp Issue",
 		Status:    types.StatusOpen,
 		Priority:  2,
-		IssueType: types.TypeMessage,
+		IssueType: "message",
 		Ephemeral:      true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -467,7 +467,7 @@ func TestWispFilter(t *testing.T) {
 			Title:     "Wisp",
 			Status:    types.StatusClosed, // Closed for cleanup test
 			Priority:  2,
-			IssueType: types.TypeMessage,
+			IssueType: "message",
 			Ephemeral:      true,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
@@ -534,7 +534,7 @@ func TestSenderField(t *testing.T) {
 		Title:     "Message",
 		Status:    types.StatusOpen,
 		Priority:  2,
-		IssueType: types.TypeMessage,
+		IssueType: "message",
 		Sender:    "alice@example.com",
 		Assignee:  "bob@example.com",
 		CreatedAt: time.Now(),
@@ -565,7 +565,7 @@ func TestMessageType(t *testing.T) {
 		Title:     "Test Message",
 		Status:    types.StatusOpen,
 		Priority:  2,
-		IssueType: types.TypeMessage,
+		IssueType: "message",
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -579,12 +579,12 @@ func TestMessageType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetIssue failed: %v", err)
 	}
-	if saved.IssueType != types.TypeMessage {
-		t.Errorf("IssueType = %q, want %q", saved.IssueType, types.TypeMessage)
+	if saved.IssueType != "message" {
+		t.Errorf("IssueType = %q, want %q", saved.IssueType, "message")
 	}
 
 	// Filter by message type
-	messageType := types.TypeMessage
+	messageType := types.IssueType("message")
 	filter := types.IssueFilter{
 		IssueType: &messageType,
 	}

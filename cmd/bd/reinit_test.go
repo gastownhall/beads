@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -41,6 +42,7 @@ func TestDatabaseReinitialization(t *testing.T) {
 
 // testFreshCloneAutoImport verifies auto-import works on fresh clone
 func testFreshCloneAutoImport(t *testing.T) {
+	beads.ResetCaches() // Reset cached RepoContext between subtests
 	dir := t.TempDir()
 
 	// Initialize git repo
@@ -124,6 +126,7 @@ func testFreshCloneAutoImport(t *testing.T) {
 
 // testDatabaseRemovalScenario tests the primary bug scenario
 func testDatabaseRemovalScenario(t *testing.T) {
+	beads.ResetCaches() // Reset cached RepoContext between subtests
 	dir := t.TempDir()
 
 	// Initialize git repo
@@ -225,6 +228,7 @@ func testDatabaseRemovalScenario(t *testing.T) {
 
 // testLegacyFilenameSupport tests issues.jsonl fallback
 func testLegacyFilenameSupport(t *testing.T) {
+	beads.ResetCaches() // Reset cached RepoContext between subtests
 	dir := t.TempDir()
 
 	// Initialize git repo
@@ -303,6 +307,7 @@ func testLegacyFilenameSupport(t *testing.T) {
 
 // testPrecedenceTest verifies issues.jsonl is preferred over beads.jsonl
 func testPrecedenceTest(t *testing.T) {
+	beads.ResetCaches() // Reset cached RepoContext between subtests
 	dir := t.TempDir()
 
 	// Initialize git repo
@@ -358,6 +363,7 @@ func testPrecedenceTest(t *testing.T) {
 
 // testInitSafetyCheck tests the safety check that prevents silent data loss
 func testInitSafetyCheck(t *testing.T) {
+	beads.ResetCaches() // Reset cached RepoContext between subtests
 	dir := t.TempDir()
 
 	// Initialize git repo

@@ -231,7 +231,7 @@ Make sure you've initialized a beads database with `bd init` or specify the data
 The monitor requires the daemon to avoid SQLite locking conflicts. Start the daemon first:
 
 ```bash
-bd daemon
+bd daemon start
 ```
 
 ### WebSocket disconnects frequently

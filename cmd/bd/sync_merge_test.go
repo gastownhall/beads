@@ -242,7 +242,7 @@ func makeTestIssue(id, title string, status types.Status, priority int, updatedA
 func TestMergeIssue_NoBase_LocalOnly(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Issue", types.StatusOpen, 1, time.Now())
 
-	merged, strategy := MergeIssue(nil, local, nil)
+	merged, strategy, _ := MergeIssue(nil, local, nil)
 
 	if strategy != StrategyLocal {
 		t.Errorf("Expected strategy=%s, got %s", StrategyLocal, strategy)
@@ -259,7 +259,7 @@ func TestMergeIssue_NoBase_LocalOnly(t *testing.T) {
 func TestMergeIssue_NoBase_RemoteOnly(t *testing.T) {
 	remote := makeTestIssue("bd-5678", "Remote Issue", types.StatusOpen, 2, time.Now())
 
-	merged, strategy := MergeIssue(nil, nil, remote)
+	merged, strategy, _ := MergeIssue(nil, nil, remote)
 
 	if strategy != StrategyRemote {
 		t.Errorf("Expected strategy=%s, got %s", StrategyRemote, strategy)
@@ -278,7 +278,7 @@ func TestMergeIssue_NoBase_BothExist_LocalNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Title", types.StatusOpen, 1, now.Add(time.Hour))
 	remote := makeTestIssue("bd-1234", "Remote Title", types.StatusOpen, 2, now)
 
-	merged, strategy := MergeIssue(nil, local, remote)
+	merged, strategy, _ := MergeIssue(nil, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -297,7 +297,7 @@ func TestMergeIssue_NoBase_BothExist_RemoteNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Title", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "Remote Title", types.StatusOpen, 2, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(nil, local, remote)
+	merged, strategy, _ := MergeIssue(nil, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -316,7 +316,7 @@ func TestMergeIssue_NoBase_BothExist_SameTime(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Title", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "Remote Title", types.StatusOpen, 2, now)
 
-	merged, strategy := MergeIssue(nil, local, remote)
+	merged, strategy, _ := MergeIssue(nil, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -337,7 +337,7 @@ func TestMergeIssue_NoChanges(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Same Title", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "Same Title", types.StatusOpen, 1, now)
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategySame {
 		t.Errorf("Expected strategy=%s, got %s", StrategySame, strategy)
@@ -354,7 +354,7 @@ func TestMergeIssue_OnlyLocalChanged(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Updated Title", types.StatusOpen, 1, now.Add(time.Hour))
 	remote := makeTestIssue("bd-1234", "Original Title", types.StatusOpen, 1, now)
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyLocal {
 		t.Errorf("Expected strategy=%s, got %s", StrategyLocal, strategy)
@@ -374,7 +374,7 @@ func TestMergeIssue_OnlyRemoteChanged(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Original Title", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "Updated Title", types.StatusOpen, 1, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyRemote {
 		t.Errorf("Expected strategy=%s, got %s", StrategyRemote, strategy)
@@ -394,7 +394,7 @@ func TestMergeIssue_BothMadeSameChange(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Same Update", types.StatusClosed, 2, now.Add(time.Hour))
 	remote := makeTestIssue("bd-1234", "Same Update", types.StatusClosed, 2, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategySame {
 		t.Errorf("Expected strategy=%s, got %s", StrategySame, strategy)
@@ -414,7 +414,7 @@ func TestMergeIssue_TrueConflict_LocalNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Update", types.StatusInProgress, 1, now.Add(2*time.Hour))
 	remote := makeTestIssue("bd-1234", "Remote Update", types.StatusClosed, 2, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -438,7 +438,7 @@ func TestMergeIssue_TrueConflict_RemoteNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Update", types.StatusInProgress, 1, now.Add(time.Hour))
 	remote := makeTestIssue("bd-1234", "Remote Update", types.StatusClosed, 2, now.Add(2*time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -461,7 +461,7 @@ func TestMergeIssue_LocalDeleted_RemoteUnchanged(t *testing.T) {
 	base := makeTestIssue("bd-1234", "To Delete", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "To Delete", types.StatusOpen, 1, now)
 
-	merged, strategy := MergeIssue(base, nil, remote)
+	merged, strategy, _ := MergeIssue(base, nil, remote)
 
 	if strategy != StrategyLocal {
 		t.Errorf("Expected strategy=%s (honor local deletion), got %s", StrategyLocal, strategy)
@@ -477,7 +477,7 @@ func TestMergeIssue_LocalDeleted_RemoteChanged(t *testing.T) {
 	base := makeTestIssue("bd-1234", "Original", types.StatusOpen, 1, now)
 	remote := makeTestIssue("bd-1234", "Remote Updated", types.StatusClosed, 2, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, nil, remote)
+	merged, strategy, _ := MergeIssue(base, nil, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s (conflict: deleted vs updated), got %s", StrategyMerged, strategy)
@@ -496,7 +496,7 @@ func TestMergeIssue_RemoteDeleted_LocalUnchanged(t *testing.T) {
 	base := makeTestIssue("bd-1234", "To Delete", types.StatusOpen, 1, now)
 	local := makeTestIssue("bd-1234", "To Delete", types.StatusOpen, 1, now)
 
-	merged, strategy := MergeIssue(base, local, nil)
+	merged, strategy, _ := MergeIssue(base, local, nil)
 
 	if strategy != StrategyRemote {
 		t.Errorf("Expected strategy=%s (honor remote deletion), got %s", StrategyRemote, strategy)
@@ -512,7 +512,7 @@ func TestMergeIssue_RemoteDeleted_LocalChanged(t *testing.T) {
 	base := makeTestIssue("bd-1234", "Original", types.StatusOpen, 1, now)
 	local := makeTestIssue("bd-1234", "Local Updated", types.StatusClosed, 2, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, local, nil)
+	merged, strategy, _ := MergeIssue(base, local, nil)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s (conflict: updated vs deleted), got %s", StrategyMerged, strategy)
@@ -826,7 +826,7 @@ func TestFieldMerge_LWW_LocalNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Update", types.StatusInProgress, 2, now.Add(2*time.Hour))
 	remote := makeTestIssue("bd-1234", "Remote Update", types.StatusClosed, 3, now.Add(time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -853,7 +853,7 @@ func TestFieldMerge_LWW_RemoteNewer(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Update", types.StatusInProgress, 2, now.Add(time.Hour))
 	remote := makeTestIssue("bd-1234", "Remote Update", types.StatusClosed, 3, now.Add(2*time.Hour))
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -880,7 +880,7 @@ func TestFieldMerge_LWW_SameTimestamp(t *testing.T) {
 	local := makeTestIssue("bd-1234", "Local Update", types.StatusInProgress, 2, now)
 	remote := makeTestIssue("bd-1234", "Remote Update", types.StatusClosed, 3, now)
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -904,7 +904,7 @@ func TestLabelUnion_BothAdd(t *testing.T) {
 	local := makeTestIssueWithLabels("bd-1234", "Test Local", types.StatusOpen, 1, now.Add(time.Hour), []string{"original", "local-added"})
 	remote := makeTestIssueWithLabels("bd-1234", "Test Remote", types.StatusOpen, 1, now.Add(2*time.Hour), []string{"original", "remote-added"})
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -939,7 +939,7 @@ func TestLabelUnion_LocalOnly(t *testing.T) {
 	local := makeTestIssueWithLabels("bd-1234", "Test Local", types.StatusOpen, 1, now.Add(time.Hour), []string{"original", "local-added"})
 	remote := makeTestIssueWithLabels("bd-1234", "Test Remote", types.StatusOpen, 1, now.Add(2*time.Hour), []string{"original"})
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -962,7 +962,7 @@ func TestLabelUnion_RemoteOnly(t *testing.T) {
 	local := makeTestIssueWithLabels("bd-1234", "Test Local", types.StatusOpen, 1, now.Add(2*time.Hour), []string{"original"})
 	remote := makeTestIssueWithLabels("bd-1234", "Test Remote", types.StatusOpen, 1, now.Add(time.Hour), []string{"original", "remote-added"})
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -1001,7 +1001,7 @@ func TestDependencyUnion(t *testing.T) {
 	remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 	remote.Dependencies = []*types.Dependency{remoteDep}
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -1070,7 +1070,7 @@ func TestCommentAppend(t *testing.T) {
 	remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 	remote.Comments = []*types.Comment{commonComment, remoteComment}
 
-	merged, strategy := MergeIssue(base, local, remote)
+	merged, strategy, _ := MergeIssue(base, local, remote)
 
 	if strategy != StrategyMerged {
 		t.Errorf("Expected strategy=%s, got %s", StrategyMerged, strategy)
@@ -1103,7 +1103,7 @@ func TestFieldMerge_EdgeCases(t *testing.T) {
 		remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 		remote.Labels = []string{"remote-label"}
 
-		merged, _ := MergeIssue(base, local, remote)
+		merged, _, _ := MergeIssue(base, local, remote)
 		if merged == nil {
 			t.Fatal("Expected merged issue, got nil")
 		}
@@ -1122,7 +1122,7 @@ func TestFieldMerge_EdgeCases(t *testing.T) {
 		remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 		remote.Labels = []string{"remote-label"}
 
-		merged, _ := MergeIssue(base, local, remote)
+		merged, _, _ := MergeIssue(base, local, remote)
 		if merged == nil {
 			t.Fatal("Expected merged issue, got nil")
 		}
@@ -1148,7 +1148,7 @@ func TestFieldMerge_EdgeCases(t *testing.T) {
 		remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 		remote.Dependencies = nil
 
-		merged, _ := MergeIssue(base, local, remote)
+		merged, _, _ := MergeIssue(base, local, remote)
 		if merged == nil {
 			t.Fatal("Expected merged issue, got nil")
 		}
@@ -1175,7 +1175,7 @@ func TestFieldMerge_EdgeCases(t *testing.T) {
 		remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 		remote.Comments = []*types.Comment{comment}
 
-		merged, _ := MergeIssue(base, local, remote)
+		merged, _, _ := MergeIssue(base, local, remote)
 		if merged == nil {
 			t.Fatal("Expected merged issue, got nil")
 		}
@@ -1211,7 +1211,7 @@ func TestFieldMerge_EdgeCases(t *testing.T) {
 		remote := makeTestIssue("bd-1234", "Test Remote", types.StatusClosed, 1, now.Add(2*time.Hour))
 		remote.Dependencies = []*types.Dependency{remoteDep}
 
-		merged, _ := MergeIssue(base, local, remote)
+		merged, _, _ := MergeIssue(base, local, remote)
 		if merged == nil {
 			t.Fatal("Expected merged issue, got nil")
 		}
@@ -1244,7 +1244,7 @@ func TestMergeClockSkewWarning(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		_, _ = MergeIssue(base, local, remote)
+		_, _, _ = MergeIssue(base, local, remote)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -1268,7 +1268,7 @@ func TestMergeClockSkewWarning(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		_, _ = MergeIssue(base, local, remote)
+		_, _, _ = MergeIssue(base, local, remote)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -1295,7 +1295,7 @@ func TestMergeClockSkewWarning(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		_, _ = MergeIssue(base, local, remote)
+		_, _, _ = MergeIssue(base, local, remote)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -1322,7 +1322,7 @@ func TestMergeClockSkewWarning(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		_, _ = MergeIssue(base, local, remote)
+		_, _, _ = MergeIssue(base, local, remote)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -1407,5 +1407,201 @@ func TestMergeLabels(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMergeFieldLevel_CompactionLevel tests compaction_level uses max strategy by default
+func TestMergeFieldLevel_CompactionLevel(t *testing.T) {
+	now := time.Now()
+
+	t.Run("max_strategy_takes_higher_value", func(t *testing.T) {
+		// Local has higher compaction_level
+		local := makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour))
+		local.CompactionLevel = 5
+		remote := makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now)
+		remote.CompactionLevel = 3
+
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+
+		if merged.CompactionLevel != 5 {
+			t.Errorf("Expected compaction_level=5 (max), got %d", merged.CompactionLevel)
+		}
+		if len(manualConflicts) != 0 {
+			t.Errorf("Expected no manual conflicts, got %d", len(manualConflicts))
+		}
+	})
+
+	t.Run("max_strategy_takes_higher_from_remote", func(t *testing.T) {
+		// Remote has higher compaction_level
+		local := makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour))
+		local.CompactionLevel = 2
+		remote := makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now)
+		remote.CompactionLevel = 7
+
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+
+		if merged.CompactionLevel != 7 {
+			t.Errorf("Expected compaction_level=7 (max), got %d", merged.CompactionLevel)
+		}
+		if len(manualConflicts) != 0 {
+			t.Errorf("Expected no manual conflicts, got %d", len(manualConflicts))
+		}
+	})
+}
+
+// TestMergeFieldLevel_EstimatedMinutes tests estimated_minutes uses manual strategy by default
+func TestMergeFieldLevel_EstimatedMinutes(t *testing.T) {
+	now := time.Now()
+
+	t.Run("manual_strategy_flags_conflict_when_different", func(t *testing.T) {
+		// Default is manual strategy - should flag conflict when values differ
+		localMins := 120
+		remoteMins := 60
+		local := makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour))
+		local.EstimatedMinutes = &localMins
+		remote := makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now)
+		remote.EstimatedMinutes = &remoteMins
+
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+
+		// Should keep local value as tentative
+		if merged.EstimatedMinutes == nil || *merged.EstimatedMinutes != 120 {
+			t.Errorf("Expected estimated_minutes=120 (local as tentative), got %v", merged.EstimatedMinutes)
+		}
+		// Should flag for manual resolution
+		if len(manualConflicts) != 1 {
+			t.Errorf("Expected 1 manual conflict, got %d", len(manualConflicts))
+		} else {
+			mc := manualConflicts[0]
+			if mc.Field != "estimated_minutes" {
+				t.Errorf("Expected field=estimated_minutes, got %s", mc.Field)
+			}
+			if mc.LocalValue != 120 {
+				t.Errorf("Expected LocalValue=120, got %v", mc.LocalValue)
+			}
+			if mc.RemoteValue != 60 {
+				t.Errorf("Expected RemoteValue=60, got %v", mc.RemoteValue)
+			}
+		}
+	})
+
+	t.Run("manual_strategy_no_conflict_when_same", func(t *testing.T) {
+		// No conflict when values are the same
+		mins := 120
+		local := makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour))
+		local.EstimatedMinutes = &mins
+		remote := makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now)
+		remoteMins := 120
+		remote.EstimatedMinutes = &remoteMins
+
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+
+		if merged.EstimatedMinutes == nil || *merged.EstimatedMinutes != 120 {
+			t.Errorf("Expected estimated_minutes=120, got %v", merged.EstimatedMinutes)
+		}
+		if len(manualConflicts) != 0 {
+			t.Errorf("Expected no manual conflicts when values match, got %d", len(manualConflicts))
+		}
+	})
+
+	t.Run("manual_strategy_nil_vs_value_flags_conflict", func(t *testing.T) {
+		// Conflict when one is nil and other has value
+		remoteMins := 60
+		local := makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour))
+		local.EstimatedMinutes = nil
+		remote := makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now)
+		remote.EstimatedMinutes = &remoteMins
+
+		merged, manualConflicts := mergeFieldLevel(nil, local, remote)
+
+		// Should keep local value (nil) as tentative
+		if merged.EstimatedMinutes != nil {
+			t.Errorf("Expected estimated_minutes=nil (local as tentative), got %v", *merged.EstimatedMinutes)
+		}
+		// Should flag for manual resolution
+		if len(manualConflicts) != 1 {
+			t.Errorf("Expected 1 manual conflict, got %d", len(manualConflicts))
+		}
+	})
+}
+
+// TestMaxInt tests the maxInt helper function
+func TestMaxInt(t *testing.T) {
+	tests := []struct {
+		a, b, expected int
+	}{
+		{0, 0, 0},
+		{1, 0, 1},
+		{0, 1, 1},
+		{5, 3, 5},
+		{3, 5, 5},
+		{-1, -2, -1},
+		{-2, -1, -1},
+	}
+
+	for _, tc := range tests {
+		result := maxInt(tc.a, tc.b)
+		if result != tc.expected {
+			t.Errorf("maxInt(%d, %d) = %d, expected %d", tc.a, tc.b, result, tc.expected)
+		}
+	}
+}
+
+// TestMaxIntPtr tests the maxIntPtr helper function
+func TestMaxIntPtr(t *testing.T) {
+	five := 5
+	three := 3
+
+	t.Run("both_nil_returns_nil", func(t *testing.T) {
+		result := maxIntPtr(nil, nil)
+		if result != nil {
+			t.Errorf("Expected nil, got %v", result)
+		}
+	})
+
+	t.Run("left_nil_returns_right", func(t *testing.T) {
+		result := maxIntPtr(nil, &three)
+		if result == nil || *result != 3 {
+			t.Errorf("Expected 3, got %v", result)
+		}
+	})
+
+	t.Run("right_nil_returns_left", func(t *testing.T) {
+		result := maxIntPtr(&five, nil)
+		if result == nil || *result != 5 {
+			t.Errorf("Expected 5, got %v", result)
+		}
+	})
+
+	t.Run("returns_larger_value", func(t *testing.T) {
+		result := maxIntPtr(&three, &five)
+		if result == nil || *result != 5 {
+			t.Errorf("Expected 5, got %v", result)
+		}
+
+		result = maxIntPtr(&five, &three)
+		if result == nil || *result != 5 {
+			t.Errorf("Expected 5, got %v", result)
+		}
+	})
+}
+
+// TestMergeResult_ManualConflicts tests that ManualConflicts is properly initialized
+func TestMergeResult_ManualConflicts(t *testing.T) {
+	now := time.Now()
+	base := []*types.Issue{
+		makeTestIssue("bd-1234", "Base", types.StatusOpen, 1, now),
+	}
+	local := []*types.Issue{
+		makeTestIssue("bd-1234", "Local", types.StatusOpen, 1, now.Add(time.Hour)),
+	}
+	remote := []*types.Issue{
+		makeTestIssue("bd-1234", "Remote", types.StatusOpen, 1, now.Add(2*time.Hour)),
+	}
+
+	result := MergeIssues(base, local, remote)
+
+	if result.ManualConflicts == nil {
+		t.Error("ManualConflicts should be initialized, got nil")
 	}
 }

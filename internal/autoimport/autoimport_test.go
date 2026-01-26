@@ -466,6 +466,80 @@ not valid json`
 			t.Error("Expected ClosedAt to be set for closed issue")
 		}
 	})
+
+	t.Run("migrate deleted status to tombstone (GH#1223)", func(t *testing.T) {
+		now := time.Now()
+		deletedAt := now.Format(time.RFC3339)
+		data := `{"id":"test-1","title":"Deleted Issue","status":"deleted","priority":1,"issue_type":"task","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","deleted_at":"` + deletedAt + `"}`
+
+		notify := &testNotifier{}
+		issues, err := parseJSONL([]byte(data), notify)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+
+		if len(issues) != 1 {
+			t.Errorf("Expected 1 issue, got %d", len(issues))
+		}
+
+		if issues[0].Status != types.StatusTombstone {
+			t.Errorf("Expected status 'tombstone', got %s", issues[0].Status)
+		}
+
+		if issues[0].DeletedAt == nil {
+			t.Error("Expected DeletedAt to be set for migrated tombstone")
+		}
+
+		// Check that debug message was logged
+		if len(notify.debugs) == 0 {
+			t.Error("Expected debug notification for status migration")
+		}
+	})
+
+	t.Run("ensure tombstone has deleted_at", func(t *testing.T) {
+		data := `{"id":"test-1","title":"Tombstone Without DeletedAt","status":"tombstone","priority":1,"issue_type":"task","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}`
+
+		notify := &testNotifier{}
+		issues, err := parseJSONL([]byte(data), notify)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+
+		if issues[0].DeletedAt == nil {
+			t.Error("Expected DeletedAt to be auto-set for tombstone without deleted_at")
+		}
+
+		// Check that debug message was logged
+		if len(notify.debugs) == 0 {
+			t.Error("Expected debug notification for auto-added deleted_at")
+		}
+	})
+
+	t.Run("fix corrupted closed issue with deleted_at (GH#1223)", func(t *testing.T) {
+		now := time.Now()
+		deletedAt := now.Format(time.RFC3339)
+		data := `{"id":"bd-6s61","title":"Version Bump","status":"closed","priority":1,"issue_type":"task","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":"2024-01-02T00:00:00Z","deleted_at":"` + deletedAt + `"}`
+
+		notify := &testNotifier{}
+		issues, err := parseJSONL([]byte(data), notify)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+
+		if len(issues) != 1 {
+			t.Errorf("Expected 1 issue, got %d", len(issues))
+		}
+
+		// Issue should be converted to tombstone
+		if issues[0].Status != types.StatusTombstone {
+			t.Errorf("Expected status 'tombstone' for closed issue with deleted_at, got %s", issues[0].Status)
+		}
+
+		// Check that debug message was logged
+		if len(notify.debugs) == 0 {
+			t.Error("Expected debug notification for status correction")
+		}
+	})
 }
 
 func TestShowRemapping(t *testing.T) {

@@ -45,7 +45,10 @@ bd create "Fix bug" -p 1
 Routing is configured via the database config:
 
 ```bash
-# Set routing mode (auto = detect role, explicit = always use default)
+# Auto-routing is disabled by default (routing.mode="")
+# Enable with:
+bd init --contributor
+# OR manually:
 bd config set routing.mode auto
 
 # Set default planning repo
@@ -93,6 +96,105 @@ bd create "Found bug in auth" -p 1 --deps discovered-from:bd-abc
 ```
 
 This ensures discovered work stays in the same repository as the parent task.
+
+## Multi-Repo Hydration
+
+**⚠️ Critical:** When using routing to separate repos, you must enable multi-repo hydration or routed issues won't appear in `bd list`.
+
+### The Problem
+
+Auto-routing writes issues to a separate repository (e.g., `~/.beads-planning`), but by default, `bd list` only shows issues from the current repository's database. Without hydration, routed issues are "invisible" even though they exist.
+
+### The Solution
+
+Add routing targets to `repos.additional` in `config.yaml`:
+
+```yaml
+routing:
+  mode: auto
+  contributor: ~/.beads-planning
+repos:
+  primary: "."
+  additional:
+    - ~/.beads-planning
+```
+
+### Automatic Setup
+
+`bd init --contributor` now automatically configures both routing AND hydration:
+
+```bash
+cd ~/my-forked-repo
+bd init --contributor
+
+# This sets up:
+# 1. routing.mode=auto
+# 2. routing.contributor=~/.beads-planning
+# 3. repos.additional=[~/.beads-planning]
+```
+
+### Manual Setup (Advanced)
+
+If you configured routing before this feature, add hydration manually:
+
+```bash
+# Add planning repo to hydration list
+bd repo add ~/.beads-planning
+
+# Verify configuration
+bd repo list
+```
+
+### How It Works
+
+Multi-repo hydration imports issues from all configured repos into the current database:
+
+1. **JSONL as source of truth**: Each repo maintains its own `issues.jsonl`
+2. **Periodic import**: Daemon imports from `repos.additional` every sync cycle
+3. **Source tracking**: Each issue tagged with `source_repo` field
+4. **Unified view**: `bd list` shows issues from all repos
+
+### Requirements
+
+**For optimal hydration, run daemons in all repos:**
+
+```bash
+# In main repo
+bd daemon start
+
+# In planning repo
+cd ~/.beads-planning
+bd daemon start --local
+```
+
+Without daemons, JSONL files become stale and hydration only sees old data.
+
+### Troubleshooting
+
+Run `bd doctor` to check for configuration issues:
+
+```bash
+bd doctor
+
+# Checks:
+# - routing.mode=auto with routing targets but repos.additional not configured
+# - Routing targets not in repos.additional list
+# - Daemons not running in hydrated repos
+```
+
+**Common Issues:**
+
+1. **Routed issues not appearing in bd list**
+   - **Cause:** `repos.additional` not configured
+   - **Fix:** `bd repo add <routing-target>`
+
+2. **Issues appear but data is stale**
+   - **Cause:** Daemon not running in target repo
+   - **Fix:** `cd <target-repo> && bd daemon start --local`
+
+3. **After upgrading, routed issues missing**
+   - **Cause:** Upgraded before hydration was automatic
+   - **Fix:** `bd repo add <routing-target>` to enable hydration manually
 
 ## Backward Compatibility
 

@@ -274,14 +274,14 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 // This sets compaction_level, compacted_at, compacted_at_commit, and original_size fields.
 func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int, compressedSize int, commitHash string) error {
 	now := time.Now().UTC()
-	
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+
+	return s.withTx(ctx, func(conn *sql.Conn) error {
 		var commitHashPtr *string
 		if commitHash != "" {
 			commitHashPtr = &commitHash
 		}
-		
-		res, err := tx.ExecContext(ctx, `
+
+		res, err := conn.ExecContext(ctx, `
 			UPDATE issues
 			SET compaction_level = ?,
 			    compacted_at = ?,
@@ -290,11 +290,11 @@ func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, lev
 			    updated_at = ?
 			WHERE id = ?
 		`, level, now, commitHashPtr, originalSize, now, issueID)
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to apply compaction metadata: %w", err)
 		}
-		
+
 		rows, err := res.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("failed to get rows affected: %w", err)
@@ -302,24 +302,24 @@ func (s *SQLiteStorage) ApplyCompaction(ctx context.Context, issueID string, lev
 		if rows == 0 {
 			return fmt.Errorf("issue %s not found", issueID)
 		}
-		
+
 		reductionPct := 0.0
 		if originalSize > 0 {
 			reductionPct = (1.0 - float64(compressedSize)/float64(originalSize)) * 100
 		}
-		
+
 		eventData := fmt.Sprintf(`{"tier":%d,"original_size":%d,"compressed_size":%d,"reduction_pct":%.1f}`,
 			level, originalSize, compressedSize, reductionPct)
-		
-		_, err = tx.ExecContext(ctx, `
+
+		_, err = conn.ExecContext(ctx, `
 			INSERT INTO events (issue_id, event_type, actor, comment)
 			VALUES (?, ?, 'compactor', ?)
 		`, issueID, types.EventCompacted, eventData)
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to record compaction event: %w", err)
 		}
-		
+
 		return nil
 	})
 }

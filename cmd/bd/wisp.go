@@ -262,8 +262,8 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 	}
 
 	// Spawn as ephemeral in main database (Ephemeral=true, skips JSONL export)
-	// Use "wisp" prefix for distinct visual recognition
-	result, err := spawnMolecule(ctx, store, subgraph, vars, "", actor, true, "wisp")
+	// Use wisp prefix for distinct visual recognition (see types.IDPrefixWisp)
+	result, err := spawnMolecule(ctx, store, subgraph, vars, "", actor, true, types.IDPrefixWisp)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating wisp: %v\n", err)
 		os.Exit(1)

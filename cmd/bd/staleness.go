@@ -46,7 +46,8 @@ func ensureDatabaseFresh(ctx context.Context) error {
 	// Database is stale - auto-import to refresh (bd-9dao fix)
 	// For read-only commands running in --no-daemon mode, auto-import instead of
 	// returning an error. This allows commands like `bd show` to work after git pull.
-	if !noAutoImport {
+	// Skip auto-import if store is read-only - it can't write anyway (GH#1089)
+	if !noAutoImport && !storeIsReadOnly {
 		autoImportIfNewer()
 		return nil
 	}
