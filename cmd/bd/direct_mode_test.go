@@ -70,6 +70,22 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	}
 	testDBPath := filepath.Join(beadsDir, "test.db")
 
+	// Create metadata.json so factory.NewFromConfig knows which DB to open (GH#e82f5136)
+	metadataJSON := `{"database":"test.db","jsonl_export":"issues.jsonl"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataJSON), 0644); err != nil {
+		t.Fatalf("failed to create metadata.json: %v", err)
+	}
+
+	// Change to temp directory so FindBeadsDir finds our test .beads directory
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to change to temp directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
+
 	// Seed database with issues
 	setupStore := newTestStore(t, testDBPath)
 
@@ -192,6 +208,22 @@ func TestImportFromJSONLInlineAfterDaemonDisconnect(t *testing.T) {
 
 	testDBPath := filepath.Join(beadsDir, "beads.db")
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	// Create metadata.json so factory.NewFromConfig knows which DB to open (GH#e82f5136)
+	metadataJSON := `{"database":"beads.db","jsonl_export":"issues.jsonl"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataJSON), 0644); err != nil {
+		t.Fatalf("failed to create metadata.json: %v", err)
+	}
+
+	// Change to temp directory so FindBeadsDir finds our test .beads directory
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to change to temp directory: %v", err)
+	}
+	defer os.Chdir(originalWd)
 
 	// Create and seed the database
 	setupStore := newTestStore(t, testDBPath)

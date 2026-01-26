@@ -400,10 +400,15 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 		return fmt.Errorf("issue %s not found", id)
 	}
 
-	// Fetch custom statuses for validation
+	// Fetch custom statuses and types for validation
 	customStatuses, err := t.GetCustomStatuses(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get custom statuses: %w", err)
+	}
+
+	customTypes, err := t.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
 	}
 
 	// Build update query with validated field names
@@ -416,8 +421,8 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 			return fmt.Errorf("invalid field for update: %s", key)
 		}
 
-		// Validate field values (with custom status support)
-		if err := validateFieldUpdateWithCustomStatuses(key, value, customStatuses); err != nil {
+		// Validate field values (with custom status and type support)
+		if err := validateFieldUpdateWithCustom(key, value, customStatuses, customTypes); err != nil {
 			return fmt.Errorf("failed to validate field update: %w", err)
 		}
 

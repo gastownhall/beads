@@ -262,6 +262,9 @@ func TestIsBeadsPluginInstalledProjectLevel(t *testing.T) {
 	t.Run("plugin disabled", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
+		// Set temp home to avoid detecting plugin from real ~/.claude/settings.json
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("USERPROFILE", tmpDir)
 
 		if err := os.MkdirAll(".claude", 0o755); err != nil {
 			t.Fatal(err)
@@ -279,6 +282,9 @@ func TestIsBeadsPluginInstalledProjectLevel(t *testing.T) {
 	t.Run("no plugin section", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
+		// Set temp home to avoid detecting plugin from real ~/.claude/settings.json
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("USERPROFILE", tmpDir)
 
 		if err := os.MkdirAll(".claude", 0o755); err != nil {
 			t.Fatal(err)

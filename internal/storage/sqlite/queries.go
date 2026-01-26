@@ -887,10 +887,15 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 		return fmt.Errorf("issue %s not found", id)
 	}
 
-	// Fetch custom statuses for validation
+	// Fetch custom statuses and types for validation
 	customStatuses, err := s.GetCustomStatuses(ctx)
 	if err != nil {
 		return wrapDBError("get custom statuses", err)
+	}
+
+	customTypes, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return wrapDBError("get custom types", err)
 	}
 
 	// Build update query with validated field names
@@ -903,8 +908,8 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 			return fmt.Errorf("invalid field for update: %s", key)
 		}
 
-		// Validate field values (with custom status support)
-		if err := validateFieldUpdateWithCustomStatuses(key, value, customStatuses); err != nil {
+		// Validate field values (with custom status and type support)
+		if err := validateFieldUpdateWithCustom(key, value, customStatuses, customTypes); err != nil {
 			return wrapDBError("validate field update", err)
 		}
 

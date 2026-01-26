@@ -189,6 +189,50 @@ func TestValidateFieldUpdateWithCustomStatuses(t *testing.T) {
 	}
 }
 
+func TestValidateFieldUpdateWithCustom(t *testing.T) {
+	customStatuses := []string{"awaiting_review", "awaiting_testing"}
+	customTypes := []string{"molecule", "agent", "convoy", "role", "event"}
+
+	tests := []struct {
+		name           string
+		key            string
+		value          interface{}
+		customStatuses []string
+		customTypes    []string
+		wantErr        bool
+	}{
+		// Custom type validation
+		{"valid custom type agent", "issue_type", "agent", customStatuses, customTypes, false},
+		{"valid custom type molecule", "issue_type", "molecule", customStatuses, customTypes, false},
+		{"valid custom type convoy", "issue_type", "convoy", customStatuses, customTypes, false},
+		{"valid built-in type task", "issue_type", "task", customStatuses, customTypes, false},
+		{"valid built-in type bug", "issue_type", "bug", customStatuses, customTypes, false},
+		{"invalid type", "issue_type", "invalid_type", customStatuses, customTypes, true},
+		{"valid type without custom types", "issue_type", "task", customStatuses, nil, false},
+		{"custom type without custom types configured", "issue_type", "agent", customStatuses, nil, true},
+
+		// Custom status validation
+		{"valid custom status", "status", "awaiting_review", customStatuses, customTypes, false},
+		{"valid built-in status", "status", "open", customStatuses, customTypes, false},
+		{"invalid status", "status", "invalid_status", customStatuses, customTypes, true},
+
+		// Other field validation
+		{"valid priority", "priority", 3, customStatuses, customTypes, false},
+		{"invalid priority", "priority", 5, customStatuses, customTypes, true},
+		{"valid title", "title", "Test title", customStatuses, customTypes, false},
+		{"empty title", "title", "", customStatuses, customTypes, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFieldUpdateWithCustom(tt.key, tt.value, tt.customStatuses, tt.customTypes)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateFieldUpdateWithCustom() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseCustomStatuses(t *testing.T) {
 	tests := []struct {
 		name  string

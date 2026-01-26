@@ -82,15 +82,37 @@ func validateFieldUpdate(key string, value interface{}) error {
 	return validateFieldUpdateWithCustomStatuses(key, value, nil)
 }
 
-// validateFieldUpdateWithCustomStatuses validates a field update value,
-// allowing custom statuses for status field validation.
-func validateFieldUpdateWithCustomStatuses(key string, value interface{}, customStatuses []string) error {
+// validateFieldUpdateWithCustom validates a field update value,
+// allowing custom statuses and custom types for their respective field validations.
+func validateFieldUpdateWithCustom(key string, value interface{}, customStatuses, customTypes []string) error {
 	// Special handling for status field to support custom statuses
 	if key == "status" {
 		return validateStatusWithCustom(value, customStatuses)
 	}
+	// Special handling for issue_type field to support custom types (federation trust model)
+	if key == "issue_type" {
+		return validateIssueTypeWithCustom(value, customTypes)
+	}
 	if validator, ok := fieldValidators[key]; ok {
 		return validator(value)
+	}
+	return nil
+}
+
+// validateFieldUpdateWithCustomStatuses validates a field update value,
+// allowing custom statuses for status field validation.
+func validateFieldUpdateWithCustomStatuses(key string, value interface{}, customStatuses []string) error {
+	return validateFieldUpdateWithCustom(key, value, customStatuses, nil)
+}
+
+// validateIssueTypeWithCustom validates an issue type value, allowing custom types.
+func validateIssueTypeWithCustom(value interface{}, customTypes []string) error {
+	if issueType, ok := value.(string); ok {
+		// Normalize first to support aliases like "enhancement" -> "feature"
+		normalized := types.IssueType(issueType).Normalize()
+		if !normalized.IsValidWithCustom(customTypes) {
+			return fmt.Errorf("invalid issue type: %s", issueType)
+		}
 	}
 	return nil
 }
