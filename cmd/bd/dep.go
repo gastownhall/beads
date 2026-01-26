@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -464,6 +465,14 @@ Examples:
 		}
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
+		}
+
+		// Resolve external references (cross-rig dependencies)
+		// GetDependenciesWithMetadata only returns local issues, so we need to
+		// fetch raw dependency records and resolve external refs separately
+		if direction == "down" {
+			externalIssues := resolveExternalDependencies(ctx, fullID, typeFilter)
+			issues = append(issues, externalIssues...)
 		}
 
 		// Apply type filter if specified
@@ -1149,6 +1158,107 @@ func ParseExternalRef(ref string) (project, capability string) {
 		return "", ""
 	}
 	return parts[1], parts[2]
+}
+
+// resolveExternalDependencies fetches issue metadata for external (cross-rig) dependencies.
+// It queries raw dependency records, finds external refs, and resolves them via routing.
+func resolveExternalDependencies(ctx context.Context, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
+	if store == nil {
+		return nil
+	}
+
+	// Get raw dependency records to find external refs
+	deps, err := store.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		if isVerbose() {
+			fmt.Fprintf(os.Stderr, "[external-deps] GetDependencyRecords error: %v\n", err)
+		}
+		return nil // Silently fail - local deps still work
+	}
+
+	if isVerbose() {
+		fmt.Fprintf(os.Stderr, "[external-deps] found %d raw deps for %s\n", len(deps), issueID)
+	}
+
+	var result []*types.IssueWithDependencyMetadata
+	beadsDir := getBeadsDir()
+
+	for _, dep := range deps {
+		if isVerbose() {
+			fmt.Fprintf(os.Stderr, "[external-deps] checking dep: %s -> %s (%s)\n", dep.IssueID, dep.DependsOnID, dep.Type)
+		}
+
+		// Skip non-external refs (already handled by GetDependenciesWithMetadata)
+		if !IsExternalRef(dep.DependsOnID) {
+			continue
+		}
+
+		// Apply type filter early if specified
+		if typeFilter != "" && string(dep.Type) != typeFilter {
+			if isVerbose() {
+				fmt.Fprintf(os.Stderr, "[external-deps] skipping due to type filter: %s != %s\n", dep.Type, typeFilter)
+			}
+			continue
+		}
+
+		// Parse external ref: external:<project>:<issue-id>
+		project, targetID := ParseExternalRef(dep.DependsOnID)
+		if project == "" || targetID == "" {
+			if isVerbose() {
+				fmt.Fprintf(os.Stderr, "[external-deps] failed to parse external ref: %s\n", dep.DependsOnID)
+			}
+			continue
+		}
+
+		if isVerbose() {
+			fmt.Fprintf(os.Stderr, "[external-deps] parsed: project=%s, targetID=%s\n", project, targetID)
+		}
+
+		// Resolve the beads directory for this project via routing
+		targetBeadsDir, _, err := routing.ResolveBeadsDirForRig(project, beadsDir)
+		if err != nil {
+			if isVerbose() {
+				fmt.Fprintf(os.Stderr, "[external-deps] routing error for %s: %v\n", project, err)
+			}
+			continue // Project not configured in routes
+		}
+
+		if isVerbose() {
+			fmt.Fprintf(os.Stderr, "[external-deps] resolved beads dir: %s\n", targetBeadsDir)
+		}
+
+		// Open storage for the target rig
+		targetDBPath := filepath.Join(targetBeadsDir, "beads.db")
+		targetStore, err := sqlite.New(ctx, targetDBPath)
+		if err != nil {
+			if isVerbose() {
+				fmt.Fprintf(os.Stderr, "[external-deps] failed to open target db %s: %v\n", targetDBPath, err)
+			}
+			continue // Can't open target database
+		}
+
+		// Fetch the issue from the target rig
+		issue, err := targetStore.GetIssue(ctx, targetID)
+		_ = targetStore.Close()
+		if err != nil || issue == nil {
+			if isVerbose() {
+				fmt.Fprintf(os.Stderr, "[external-deps] issue not found: %s (err=%v)\n", targetID, err)
+			}
+			continue // Issue not found in target
+		}
+
+		if isVerbose() {
+			fmt.Fprintf(os.Stderr, "[external-deps] resolved issue: %s - %s\n", issue.ID, issue.Title)
+		}
+
+		// Convert to IssueWithDependencyMetadata
+		result = append(result, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: dep.Type,
+		})
+	}
+
+	return result
 }
 
 func init() {
