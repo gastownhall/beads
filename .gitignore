@@ -127,3 +127,4 @@ state.json
 .agents/
 output
 bd_test
+.beads/export-state/
