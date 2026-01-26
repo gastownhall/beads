@@ -18,7 +18,7 @@ type Config struct {
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
-	// Dolt server mode configuration (bd-dolt.2.2)
+// Dolt server mode configuration (bd-dolt.2.2)
 	// When Mode is "server", connects to external dolt sql-server instead of embedded.
 	// This enables multi-writer access for multi-agent environments.
 	DoltMode       string `json:"dolt_mode,omitempty"`        // "embedded" (default) or "server"
@@ -26,6 +26,10 @@ type Config struct {
 	DoltServerPort int    `json:"dolt_server_port,omitempty"` // Server port (default: 3307)
 	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
+
+	// Stale closed issues check configuration
+	// 0 = disabled (default), positive = threshold in days
+	StaleClosedIssuesDays int `json:"stale_closed_issues_days,omitempty"`
 
 	// Deprecated: LastBdVersion is no longer used for version tracking.
 	// Version is now stored in .local_version (gitignored) to prevent
@@ -150,6 +154,15 @@ func (c *Config) GetDeletionsRetentionDays() int {
 		return DefaultDeletionsRetentionDays
 	}
 	return c.DeletionsRetentionDays
+}
+
+// GetStaleClosedIssuesDays returns the configured threshold for stale closed issues.
+// Returns 0 if disabled (the default), or a positive value if enabled.
+func (c *Config) GetStaleClosedIssuesDays() int {
+	if c.StaleClosedIssuesDays < 0 {
+		return 0
+	}
+	return c.StaleClosedIssuesDays
 }
 
 // Backend constants

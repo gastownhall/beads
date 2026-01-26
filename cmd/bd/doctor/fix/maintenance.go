@@ -15,9 +15,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// DefaultCleanupAgeDays is the default age threshold for cleanup
-const DefaultCleanupAgeDays = 30
-
 // CleanupResult contains the results of a cleanup operation
 type CleanupResult struct {
 	DeletedCount   int
@@ -27,6 +24,9 @@ type CleanupResult struct {
 
 // StaleClosedIssues converts stale closed issues to tombstones.
 // This is the fix handler for the "Stale Closed Issues" doctor check.
+//
+// This fix is DISABLED by default (stale_closed_issues_days=0). Users must
+// explicitly set a positive threshold in metadata.json to enable cleanup.
 func StaleClosedIssues(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
@@ -34,9 +34,26 @@ func StaleClosedIssues(path string) error {
 
 	beadsDir := filepath.Join(path, ".beads")
 
+	// Load config and check if cleanup is enabled
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Get threshold; 0 means disabled
+	var thresholdDays int
+	if cfg != nil {
+		thresholdDays = cfg.GetStaleClosedIssuesDays()
+	}
+
+	if thresholdDays == 0 {
+		fmt.Println("  Stale closed issues cleanup disabled (set stale_closed_issues_days to enable)")
+		return nil
+	}
+
 	// Get database path
 	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+	if cfg != nil && cfg.Database != "" {
 		dbPath = cfg.DatabasePath(beadsDir)
 	} else {
 		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
@@ -54,8 +71,8 @@ func StaleClosedIssues(path string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Find closed issues older than threshold
-	cutoff := time.Now().AddDate(0, 0, -DefaultCleanupAgeDays)
+	// Find closed issues older than configured threshold
+	cutoff := time.Now().AddDate(0, 0, -thresholdDays)
 	statusClosed := types.StatusClosed
 	filter := types.IssueFilter{
 		Status:       &statusClosed,
@@ -86,7 +103,7 @@ func StaleClosedIssues(path string) error {
 		fmt.Println("  No stale closed issues to clean up")
 	} else {
 		if deleted > 0 {
-			fmt.Printf("  Cleaned up %d stale closed issue(s)\n", deleted)
+			fmt.Printf("  Cleaned up %d stale closed issue(s) (older than %d days)\n", deleted, thresholdDays)
 		}
 		if skipped > 0 {
 			fmt.Printf("  Skipped %d pinned issue(s)\n", skipped)
