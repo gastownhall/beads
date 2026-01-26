@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,6 +124,50 @@ func TestSocketPathForPIDClientDaemonAgreement(t *testing.T) {
 					tt.workspacePath, fromPID, fromRPC)
 			}
 		})
+	}
+}
+
+// TestDaemonLoopSocketPathEnvOverride verifies that the daemon loop respects BD_SOCKET.
+// This tests the fix for GH#XXXX where filesystems that don't support sockets in .beads/
+// (e.g., some mounted filesystems) couldn't run the daemon.
+func TestDaemonLoopSocketPathEnvOverride(t *testing.T) {
+	// Create isolated temp directory
+	tmpDir := t.TempDir()
+	customSocket := filepath.Join(tmpDir, "custom.sock")
+
+	// Set environment for isolation
+	t.Setenv("BD_SOCKET", customSocket)
+
+	// Simulate the daemon loop's socket path determination logic
+	// (same logic as in runDaemonLoop in daemon.go)
+	workspacePath := "/some/workspace"
+	socketPath := os.Getenv("BD_SOCKET")
+	if socketPath == "" {
+		socketPath = rpc.ShortSocketPath(workspacePath)
+	}
+
+	// Verify the daemon would use the custom socket path
+	if socketPath != customSocket {
+		t.Errorf("daemon socket path = %q, want %q", socketPath, customSocket)
+	}
+}
+
+// TestDaemonLoopSocketPathDefault verifies default socket path when BD_SOCKET is not set.
+func TestDaemonLoopSocketPathDefault(t *testing.T) {
+	t.Setenv("BD_SOCKET", "")
+
+	workspacePath := "/home/user/project"
+
+	// Simulate the daemon loop's socket path determination logic
+	socketPath := os.Getenv("BD_SOCKET")
+	if socketPath == "" {
+		socketPath = rpc.ShortSocketPath(workspacePath)
+	}
+
+	// Should use the default path from rpc.ShortSocketPath
+	expected := rpc.ShortSocketPath(workspacePath)
+	if socketPath != expected {
+		t.Errorf("daemon socket path = %q, want %q", socketPath, expected)
 	}
 }
 

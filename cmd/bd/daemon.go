@@ -604,7 +604,13 @@ The daemon will now exit.`, strings.ToUpper(backend))
 	// Get actual workspace root (parent of .beads)
 	workspacePath := filepath.Dir(beadsDir)
 	// Use short socket path to avoid Unix socket path length limits (macOS: 104 chars)
-	socketPath, err := rpc.EnsureSocketDir(rpc.ShortSocketPath(workspacePath))
+	// Check BD_SOCKET env var first for custom socket path (e.g., test isolation,
+	// or filesystems that don't support sockets in .beads directory)
+	socketPath := os.Getenv("BD_SOCKET")
+	if socketPath == "" {
+		socketPath = rpc.ShortSocketPath(workspacePath)
+	}
+	socketPath, err = rpc.EnsureSocketDir(socketPath)
 	if err != nil {
 		log.Error("failed to create socket directory", "error", err)
 		return
