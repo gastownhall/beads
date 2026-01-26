@@ -256,6 +256,14 @@ func tryAutoStartDaemon(socketPath string) bool {
 		return false
 	}
 
+	// Empty dbPath causes filepath.Dir("") to return "." which breaks lock
+	// file operations. This can happen when metadata.json has an empty database
+	// field and no beads.db file exists. Skip daemon start gracefully.
+	if dbPath == "" {
+		debugLog("skipping auto-start: no database path configured")
+		return false
+	}
+
 	if !canRetryDaemonStart() {
 		debugLog("skipping auto-start due to recent failures")
 		return false

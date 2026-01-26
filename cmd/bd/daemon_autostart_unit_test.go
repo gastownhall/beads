@@ -245,14 +245,24 @@ func TestDaemonAutostart_HandleExistingSocket_StaleCleansUp(t *testing.T) {
 func TestDaemonAutostart_TryAutoStartDaemon_EarlyExits(t *testing.T) {
 	oldFailures := daemonStartFailures
 	oldLast := lastDaemonStartAttempt
+	oldDbPath := dbPath
 	defer func() {
 		daemonStartFailures = oldFailures
 		lastDaemonStartAttempt = oldLast
+		dbPath = oldDbPath
 	}()
+
+	// Set up a valid dbPath to pass the empty dbPath check (GH#1288)
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dbPath = filepath.Join(beadsDir, "test.db")
 
 	daemonStartFailures = 1
 	lastDaemonStartAttempt = time.Now()
-	if tryAutoStartDaemon(filepath.Join(t.TempDir(), "bd.sock")) {
+	if tryAutoStartDaemon(filepath.Join(tmpDir, "bd.sock")) {
 		t.Fatalf("expected tryAutoStartDaemon to skip due to backoff")
 	}
 
@@ -260,6 +270,8 @@ func TestDaemonAutostart_TryAutoStartDaemon_EarlyExits(t *testing.T) {
 	lastDaemonStartAttempt = time.Time{}
 	socketPath, cleanup := startTestRPCServer(t)
 	defer cleanup()
+	// Update dbPath to match the test server's directory
+	dbPath = filepath.Join(filepath.Dir(socketPath), "test.db")
 	if !tryAutoStartDaemon(socketPath) {
 		t.Fatalf("expected tryAutoStartDaemon true when daemon already healthy")
 	}
@@ -596,5 +608,23 @@ func TestIsWispOperation(t *testing.T) {
 				t.Errorf("isWispOperation() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestTryAutoStartDaemon_EmptyDbPath verifies that tryAutoStartDaemon returns
+// false early when dbPath is empty, preventing stack overflow from
+// filepath.Dir("") returning "." (GH#1288)
+func TestTryAutoStartDaemon_EmptyDbPath(t *testing.T) {
+	// Save and restore global state
+	oldDbPath := dbPath
+	defer func() { dbPath = oldDbPath }()
+
+	// Set dbPath to empty string (simulates corrupted metadata.json)
+	dbPath = ""
+
+	// tryAutoStartDaemon should return false without crashing
+	result := tryAutoStartDaemon("/tmp/test.sock")
+	if result {
+		t.Errorf("tryAutoStartDaemon() = true, want false when dbPath is empty")
 	}
 }
