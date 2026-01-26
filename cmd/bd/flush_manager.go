@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,6 +48,11 @@ type FlushManager struct {
 
 	// State tracking
 	shutdownOnce sync.Once // Ensures Shutdown() is idempotent
+
+	// didWrite tracks whether any command marked the DB as modified during this process run.
+	// This is used for Dolt auto-commit decisions in PersistentPostRun.
+	// Atomic to remain race-safe when called from concurrent goroutines.
+	didWrite atomic.Bool
 }
 
 // markDirtyEvent signals that the database has been modified
@@ -87,12 +93,27 @@ func NewFlushManager(enabled bool, debounceDuration time.Duration) *FlushManager
 	return fm
 }
 
+// RecordWrite marks that the current command performed a DB write.
+// This is independent of whether auto-flush is enabled; callers may want Dolt
+// auto-commit even when --no-auto-flush is set.
+func (fm *FlushManager) RecordWrite() {
+	fm.didWrite.Store(true)
+}
+
+// DidWrite returns true if RecordWrite/MarkDirty was called during this command.
+func (fm *FlushManager) DidWrite() bool {
+	return fm.didWrite.Load()
+}
+
 // MarkDirty marks the database as dirty and schedules a debounced flush.
 // Safe to call from multiple goroutines. Non-blocking.
 //
 // If called multiple times within debounceDuration, only one flush occurs
 // after the last call (debouncing).
 func (fm *FlushManager) MarkDirty(fullExport bool) {
+	// Always track that a write happened, even if auto-flush is disabled.
+	fm.RecordWrite()
+
 	if !fm.enabled {
 		return
 	}
