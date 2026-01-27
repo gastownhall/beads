@@ -419,62 +419,6 @@ func handleRename(ctx context.Context, s storage.Storage, existing *types.Issue,
 			}
 		}
 		return "", nil
-
-		/* OLD CODE REMOVED
-		// Different content - this is a collision during rename
-		// Allocate a new ID for the incoming issue instead of using the desired ID
-		prefix, err := s.GetConfig(ctx, "issue_prefix")
-		if err != nil || prefix == "" {
-			prefix = "bd"
-		}
-
-		oldID := existing.ID
-
-		// Retry up to 3 times to handle concurrent ID allocation
-		const maxRetries = 3
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			newID, err := s.AllocateNextID(ctx, prefix)
-			if err != nil {
-				return "", fmt.Errorf("failed to generate new ID for rename collision: %w", err)
-			}
-
-			// Update incoming issue to use the new ID
-			incoming.ID = newID
-
-			// Delete old ID (only on first attempt)
-			if attempt == 0 {
-				if err := s.DeleteIssue(ctx, oldID); err != nil {
-					return "", fmt.Errorf("failed to delete old ID %s: %w", oldID, err)
-				}
-			}
-
-			// Create with new ID
-			err = s.CreateIssue(ctx, incoming, "import-rename-collision")
-			if err == nil {
-				// Success!
-				return oldID, nil
-			}
-
-			// Check if it's a UNIQUE constraint error
-			if !sqlite.IsUniqueConstraintError(err) {
-				// Not a UNIQUE constraint error, fail immediately
-				return "", fmt.Errorf("failed to create renamed issue with collision resolution %s: %w", newID, err)
-			}
-
-			// UNIQUE constraint error - retry with new ID
-			if attempt == maxRetries-1 {
-				// Last attempt failed
-				return "", fmt.Errorf("failed to create renamed issue with collision resolution after %d retries: %w", maxRetries, err)
-			}
-		}
-
-		// Note: We don't update text references here because it would be too expensive
-		// to scan all issues during every import. Text references to the old ID will
-		// eventually be cleaned up by manual reference updates or remain as stale.
-		// This is acceptable because the old ID no longer exists in the system.
-
-		return oldID, nil
-		*/
 	}
 
 	// Check if old ID still exists (it might have been deleted by another clone)
