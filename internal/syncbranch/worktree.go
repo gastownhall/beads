@@ -126,7 +126,12 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	}
 
 	// Check for changes in worktree
-	worktreeJSONLPath := filepath.Join(worktreePath, jsonlRelPath)
+	// GH#810, GH#1103: Normalize path for worktree JSONL path handling
+	// When sync-branch is configured, findJSONLPath() returns the worktree path,
+	// making jsonlRelPath include extra path components (e.g., ".git/beads-worktrees/beads-sync/.beads/issues.jsonl").
+	// NormalizeBeadsRelPath strips these to get the correct relative path (".beads/issues.jsonl").
+	normalizedRelPath := git.NormalizeBeadsRelPath(jsonlRelPath)
+	worktreeJSONLPath := filepath.Join(worktreePath, normalizedRelPath)
 	hasChanges, err := hasChangesInWorktree(ctx, worktreePath, worktreeJSONLPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check for changes in worktree: %w", err)
@@ -138,7 +143,7 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 
 	// Commit in worktree
 	result.Message = fmt.Sprintf("bd sync: %s", time.Now().Format("2006-01-02 15:04:05"))
-	if err := commitInWorktree(ctx, worktreePath, jsonlRelPath, result.Message); err != nil {
+	if err := commitInWorktree(ctx, worktreePath, normalizedRelPath, result.Message); err != nil {
 		return nil, fmt.Errorf("failed to commit in worktree: %w", err)
 	}
 	result.Committed = true
