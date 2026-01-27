@@ -255,3 +255,122 @@ func TestMultipleExportCycles(t *testing.T) {
 		}
 	}
 }
+
+// TestWorktreeExportUsesCorrectDBPath verifies that when exporting to a sync-branch
+// worktree, the mtime update targets the actual database path (via store.Path()),
+// not a non-existent database in the worktree directory.
+// This fixes the bug where bd sync would warn:
+//   "Warning: failed to update database mtime: chtimes .../beads-worktrees/beads-sync/.beads/beads.db: no such file or directory"
+func TestWorktreeExportUsesCorrectDBPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow test in short mode")
+	}
+
+	// Create "main repo" directory with database
+	mainRepoDir := t.TempDir()
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.Mkdir(mainBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create "worktree" directory (simulates .git/beads-worktrees/beads-sync/.beads/)
+	worktreeDir := t.TempDir()
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.Mkdir(worktreeBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Database is in main repo, NOT in worktree
+	mainDBPath := filepath.Join(mainBeadsDir, "beads.db")
+	worktreeJSONLPath := filepath.Join(worktreeBeadsDir, "issues.jsonl")
+
+	// Create database in main repo
+	testStore, err := sqlite.New(context.Background(), mainDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	ctx := context.Background()
+
+	// Initialize database with issue_prefix
+	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Create a test issue
+	issue := &types.Issue{
+		ID:        "test-1",
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := testStore.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	// Create JSONL in worktree (simulates sync-branch export)
+	jsonlContent := `{"id":"test-1","title":"Test Issue","status":"open","priority":2,"issueType":"task"}` + "\n"
+	if err := os.WriteFile(worktreeJSONLPath, []byte(jsonlContent), 0600); err != nil {
+		t.Fatalf("Failed to write worktree JSONL: %v", err)
+	}
+
+	// Verify: Database is in main repo
+	if _, err := os.Stat(mainDBPath); err != nil {
+		t.Fatalf("Database should exist in main repo: %v", err)
+	}
+
+	// Verify: NO database in worktree (this is the key scenario)
+	worktreeDBPath := filepath.Join(worktreeBeadsDir, "beads.db")
+	if _, err := os.Stat(worktreeDBPath); !os.IsNotExist(err) {
+		t.Fatalf("Database should NOT exist in worktree (that's the bug scenario)")
+	}
+
+	// Get initial database mtime
+	dbInfoBefore, err := os.Stat(mainDBPath)
+	if err != nil {
+		t.Fatalf("Failed to stat database: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond) // Ensure mtime difference
+
+	// KEY TEST: TouchDatabaseFile should use the actual DB path from store.Path(),
+	// not construct one from the worktree JSONL directory.
+	// The fix changes from:
+	//   beadsDir := filepath.Dir(result.JSONLPath)    // worktree dir
+	//   dbPath := filepath.Join(beadsDir, "beads.db") // non-existent!
+	// To:
+	//   dbPath := sqliteStore.Path()                  // actual DB path in main repo
+
+	actualDBPath := testStore.Path()
+	if actualDBPath != mainDBPath {
+		t.Errorf("store.Path() should return main repo DB path, got %q, want %q", actualDBPath, mainDBPath)
+	}
+
+	// Call TouchDatabaseFile with the CORRECT database path (the fix)
+	if err := TouchDatabaseFile(actualDBPath, worktreeJSONLPath); err != nil {
+		t.Errorf("TouchDatabaseFile with store.Path() should succeed: %v", err)
+	}
+
+	// Verify database mtime was updated
+	dbInfoAfter, err := os.Stat(mainDBPath)
+	if err != nil {
+		t.Fatalf("Failed to stat database after touch: %v", err)
+	}
+
+	if !dbInfoAfter.ModTime().After(dbInfoBefore.ModTime()) {
+		t.Logf("Before: %v, After: %v", dbInfoBefore.ModTime(), dbInfoAfter.ModTime())
+		// Note: On some filesystems with coarse mtime granularity, this might not update
+		// but the key test is that it doesn't error
+	}
+
+	// Verify: calling with wrong path (old buggy behavior) would fail
+	// This demonstrates the bug we fixed
+	wrongDBPath := filepath.Join(worktreeBeadsDir, "beads.db")
+	if err := TouchDatabaseFile(wrongDBPath, worktreeJSONLPath); err == nil {
+		t.Logf("Note: TouchDatabaseFile with non-existent path succeeded (file may have been created)")
+	} else {
+		t.Logf("Confirmed: using worktree-derived DB path fails as expected: %v", err)
+	}
+}

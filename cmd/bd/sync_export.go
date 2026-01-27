@@ -116,10 +116,11 @@ func finalizeExport(ctx context.Context, result *ExportResult) {
 	// This prevents validatePreExport from incorrectly blocking on next export.
 	//
 	// Dolt backend does not use a SQLite DB file, so this check is SQLite-only.
+	// Use store.Path() to get the actual database location, not the JSONL directory,
+	// since sync-branch exports write JSONL to a worktree but the DB stays in the main repo.
 	if result.JSONLPath != "" {
-		if _, ok := store.(*sqlite.SQLiteStorage); ok {
-			beadsDir := filepath.Dir(result.JSONLPath)
-			dbPath := filepath.Join(beadsDir, "beads.db")
+		if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+			dbPath := sqliteStore.Path()
 			if err := TouchDatabaseFile(dbPath, result.JSONLPath); err != nil {
 				// Non-fatal warning
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
