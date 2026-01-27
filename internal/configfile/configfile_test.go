@@ -288,7 +288,7 @@ func TestDoltServerMode(t *testing.T) {
 			want int
 		}{
 			{
-				name: "zero defaults to 3306",
+				name: "zero defaults to 3307",
 				cfg:  &Config{},
 				want: DefaultDoltServerPort,
 			},
@@ -334,6 +334,32 @@ func TestDoltServerMode(t *testing.T) {
 					t.Errorf("GetDoltServerUser() = %q, want %q", got, tt.want)
 				}
 			})
+		}
+	})
+}
+
+// TestIsDoltServerModeEnvVar tests env var overrides for IsDoltServerMode
+func TestIsDoltServerModeEnvVar(t *testing.T) {
+	t.Run("env var override with dolt backend", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true when env var set with dolt backend")
+		}
+	})
+
+	t.Run("env var ignored for sqlite backend", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		cfg := &Config{Backend: BackendSQLite}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false when env var set but sqlite backend")
+		}
+	})
+
+	t.Run("env var not set", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false when no config or env var")
 		}
 	})
 }
@@ -418,4 +444,61 @@ func TestDoltServerModeRoundtrip(t *testing.T) {
 	if loaded.GetDoltServerUser() != "beads_admin" {
 		t.Errorf("GetDoltServerUser() = %q, want %q", loaded.GetDoltServerUser(), "beads_admin")
 	}
+}
+
+// TestEnvVarOverrides tests env var overrides for getter methods
+func TestEnvVarOverrides(t *testing.T) {
+	t.Run("host env var overrides config", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.168.1.1")
+		cfg := &Config{DoltServerHost: "10.0.0.1"}
+		if got := cfg.GetDoltServerHost(); got != "192.168.1.1" {
+			t.Errorf("GetDoltServerHost() = %q, want 192.168.1.1", got)
+		}
+	})
+
+	t.Run("port env var overrides config", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "3309")
+		cfg := &Config{DoltServerPort: 3308}
+		if got := cfg.GetDoltServerPort(); got != 3309 {
+			t.Errorf("GetDoltServerPort() = %d, want 3309", got)
+		}
+	})
+
+	t.Run("invalid port env var falls through to config", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "not-a-number")
+		cfg := &Config{DoltServerPort: 3308}
+		if got := cfg.GetDoltServerPort(); got != 3308 {
+			t.Errorf("GetDoltServerPort() = %d, want 3308", got)
+		}
+	})
+
+	t.Run("user env var overrides config", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
+		cfg := &Config{DoltServerUser: "admin"}
+		if got := cfg.GetDoltServerUser(); got != "envuser" {
+			t.Errorf("GetDoltServerUser() = %q, want envuser", got)
+		}
+	})
+
+	t.Run("database env var overrides config", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
+		cfg := &Config{DoltDatabase: "mydb"}
+		if got := cfg.GetDoltDatabase(); got != "envdb" {
+			t.Errorf("GetDoltDatabase() = %q, want envdb", got)
+		}
+	})
+
+	t.Run("database default", func(t *testing.T) {
+		cfg := &Config{}
+		if got := cfg.GetDoltDatabase(); got != DefaultDoltDatabase {
+			t.Errorf("GetDoltDatabase() = %q, want %q", got, DefaultDoltDatabase)
+		}
+	})
+
+	t.Run("database config value", func(t *testing.T) {
+		cfg := &Config{DoltDatabase: "mydb"}
+		if got := cfg.GetDoltDatabase(); got != "mydb" {
+			t.Errorf("GetDoltDatabase() = %q, want mydb", got)
+		}
+	})
 }
