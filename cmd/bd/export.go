@@ -595,9 +595,10 @@ Examples:
 			// This prevents validatePreExport from incorrectly blocking on next export
 			if output == "" || output == findJSONLPath() {
 				// Dolt backend does not have a SQLite DB file, so only touch mtime for SQLite.
-				if _, ok := store.(*sqlite.SQLiteStorage); ok {
-					beadsDir := filepath.Dir(finalPath)
-					dbPath := filepath.Join(beadsDir, "beads.db")
+				// Use store.Path() to get the actual database location, not the JSONL directory,
+				// since sync-branch exports write JSONL to a worktree but the DB stays in the main repo.
+				if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+					dbPath := sqliteStore.Path()
 					if err := TouchDatabaseFile(dbPath, finalPath); err != nil {
 						// Log warning but don't fail export
 						fmt.Fprintf(os.Stderr, "Warning: failed to update database mtime: %v\n", err)
