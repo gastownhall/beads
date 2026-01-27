@@ -42,6 +42,7 @@ type Options struct {
 	OrphanHandling             OrphanHandling       // How to handle missing parent issues (default: allow)
 	ClearDuplicateExternalRefs bool                 // Clear duplicate external_ref values instead of erroring
 	ProtectLocalExportIDs      map[string]time.Time // IDs from left snapshot with timestamps for timestamp-aware protection (GH#865)
+	DeletionIDs                []string             // IDs to delete (from JSONL deletion markers)
 }
 
 // Result contains statistics about the import operation
@@ -50,6 +51,7 @@ type Result struct {
 	Updated             int               // Existing issues updated
 	Unchanged           int               // Existing issues that matched exactly (idempotent)
 	Skipped             int               // Issues skipped (duplicates, errors)
+	Deleted             int               // Issues deleted (from deletion markers)
 	Collisions          int               // Collisions detected
 	IDMapping           map[string]string // Mapping of remapped IDs (old -> new)
 	CollisionIDs        []string          // IDs that collided
@@ -153,6 +155,37 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	// Validate no duplicate external_ref values in batch
 	if err := validateNoDuplicateExternalRefs(issues, opts.ClearDuplicateExternalRefs, result); err != nil {
 		return result, err
+	}
+
+	// Process deletion markers before issue upserts
+	// This ensures deletions are applied before any updates that might conflict
+	if len(opts.DeletionIDs) > 0 {
+		if opts.DryRun {
+			// In dry-run mode, just count how many would be deleted
+			for _, id := range opts.DeletionIDs {
+				// Check if issue exists
+				if _, err := store.GetIssue(ctx, id); err == nil {
+					result.Deleted++
+				}
+			}
+		} else {
+			for _, id := range opts.DeletionIDs {
+				// Check if issue exists before trying to delete
+				if _, err := store.GetIssue(ctx, id); err != nil {
+					// Issue doesn't exist - might already be deleted, skip silently
+					continue
+				}
+				if err := store.DeleteIssue(ctx, id); err != nil {
+					if opts.Strict {
+						return result, fmt.Errorf("failed to delete issue %s: %w", id, err)
+					}
+					// Non-strict mode: log warning and continue
+					fmt.Fprintf(os.Stderr, "Warning: failed to delete issue %s: %v\n", id, err)
+					continue
+				}
+				result.Deleted++
+			}
+		}
 	}
 
 	// Detect and resolve collisions

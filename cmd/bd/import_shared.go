@@ -167,6 +167,7 @@ type ImportOptions struct {
 	ClearDuplicateExternalRefs bool              // Clear duplicate external_ref values instead of erroring
 	OrphanHandling             string            // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
 	ProtectLocalExportIDs      map[string]time.Time // IDs from left snapshot with timestamps for timestamp-aware protection (GH#865)
+	DeletionIDs                []string          // IDs to delete (from JSONL deletion markers)
 }
 
 // ImportResult contains statistics about the import operation
@@ -175,6 +176,7 @@ type ImportResult struct {
 	Updated             int               // Existing issues updated
 	Unchanged           int               // Existing issues that matched exactly (idempotent)
 	Skipped             int               // Issues skipped (duplicates, errors)
+	Deleted             int               // Issues deleted (from deletion markers)
 	Collisions          int               // Collisions detected
 	IDMapping           map[string]string // Mapping of remapped IDs (old -> new)
 	CollisionIDs        []string          // IDs that collided
@@ -222,6 +224,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		ClearDuplicateExternalRefs: opts.ClearDuplicateExternalRefs,
 		OrphanHandling:             importer.OrphanHandling(orphanHandling),
 		ProtectLocalExportIDs:      opts.ProtectLocalExportIDs,
+		DeletionIDs:                opts.DeletionIDs,
 	}
 
 	// Delegate to the importer package
@@ -236,6 +239,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		Updated:             result.Updated,
 		Unchanged:           result.Unchanged,
 		Skipped:             result.Skipped,
+		Deleted:             result.Deleted,
 		Collisions:          result.Collisions,
 		IDMapping:           result.IDMapping,
 		CollisionIDs:        result.CollisionIDs,
