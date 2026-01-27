@@ -33,6 +33,7 @@ Examples:
   bd comments add bd-123 -f notes.txt`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		localTime, _ := cmd.Flags().GetBool("local-time")
 		issueID := args[0]
 
 		comments := make([]*types.Comment, 0)
@@ -107,7 +108,11 @@ Examples:
 
 		fmt.Printf("\nComments on %s:\n\n", issueID)
 		for _, comment := range comments {
-			fmt.Printf("[%s] at %s\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"))
+			ts := comment.CreatedAt
+			if localTime {
+				ts = ts.Local()
+			}
+			fmt.Printf("[%s] at %s\n", comment.Author, ts.Format("2006-01-02 15:04"))
 			rendered := ui.RenderMarkdown(comment.Text)
 			// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
 			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
@@ -235,6 +240,7 @@ var commentCmd = &cobra.Command{
 
 func init() {
 	commentsCmd.AddCommand(commentsAddCmd)
+	commentsCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
 	commentsAddCmd.Flags().StringP("file", "f", "", "Read comment text from file")
 	commentsAddCmd.Flags().StringP("author", "a", "", "Add author to comment")
 

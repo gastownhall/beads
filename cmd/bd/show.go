@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -28,7 +29,16 @@ var showCmd = &cobra.Command{
 		showChildren, _ := cmd.Flags().GetBool("children")
 		asOfRef, _ := cmd.Flags().GetString("as-of")
 		idFlags, _ := cmd.Flags().GetStringArray("id")
+		localTime, _ := cmd.Flags().GetBool("local-time")
 		ctx := rootCtx
+
+		// Helper to format timestamp based on --local-time flag
+		formatTime := func(t time.Time) string {
+			if localTime {
+				t = t.Local()
+			}
+			return t.Format("2006-01-02 15:04")
+		}
 
 		// Merge --id flag values with positional args
 		// This allows IDs that look like flags (e.g., --xyz or gt--abc) to be passed safely
@@ -346,7 +356,7 @@ var showCmd = &cobra.Command{
 					if len(details.Comments) > 0 {
 						fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
 						for _, comment := range details.Comments {
-							fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.Format("2006-01-02")), comment.Author)
+							fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
 							rendered := ui.RenderMarkdown(comment.Text)
 							// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
 							for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
@@ -601,7 +611,7 @@ var showCmd = &cobra.Command{
 			if len(comments) > 0 {
 				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
 				for _, comment := range comments {
-					fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.Format("2006-01-02")), comment.Author)
+					fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
 					rendered := ui.RenderMarkdown(comment.Text)
 					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
 					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
@@ -1199,6 +1209,7 @@ func init() {
 	showCmd.Flags().Bool("children", false, "Show only the children of this issue")
 	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt)")
 	showCmd.Flags().StringArray("id", nil, "Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)")
+	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }
