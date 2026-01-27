@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -198,4 +200,72 @@ func countJSONLIssues(jsonlPath string) (int, error) {
 	}
 
 	return count, nil
+}
+
+// SyncDivergence fixes JSONL-git divergence issues.
+// In dolt-native mode: restores JSONL from git HEAD (Dolt is source of truth).
+// In other modes: delegates to DBJSONLSync for appropriate sync direction.
+func SyncDivergence(path string) error {
+	// Validate workspace
+	if err := validateBeadsWorkspace(path); err != nil {
+		return err
+	}
+
+	beadsDir := filepath.Join(path, ".beads")
+	beadsDir = resolveBeadsDir(beadsDir)
+
+	// In dolt-native mode, restore JSONL from git HEAD since Dolt is source of truth
+	if config.GetSyncMode() == config.SyncModeDoltNative {
+		return restoreJSONLFromGitHead(path, beadsDir)
+	}
+
+	// For other modes, use the existing DB-JSONL sync logic
+	return DBJSONLSync(path)
+}
+
+// restoreJSONLFromGitHead restores the JSONL file from git HEAD.
+// This is used in dolt-native mode where Dolt is source of truth.
+func restoreJSONLFromGitHead(path, beadsDir string) error {
+	// Find JSONL file
+	var jsonlPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		if cfg.JSONLExport != "" && !isSystemJSONLFilename(cfg.JSONLExport) {
+			p := cfg.JSONLPath(beadsDir)
+			if _, err := os.Stat(p); err == nil {
+				jsonlPath = p
+			}
+		}
+	}
+	if jsonlPath == "" {
+		issuesJSONL := filepath.Join(beadsDir, "issues.jsonl")
+		beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
+
+		if _, err := os.Stat(issuesJSONL); err == nil {
+			jsonlPath = issuesJSONL
+		} else if _, err := os.Stat(beadsJSONL); err == nil {
+			jsonlPath = beadsJSONL
+		}
+	}
+
+	if jsonlPath == "" {
+		return nil // No JSONL file to restore
+	}
+
+	// Get relative path for git command
+	relPath, err := filepath.Rel(path, jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path: %w", err)
+	}
+
+	// Restore from git HEAD
+	cmd := exec.Command("git", "restore", relPath) // #nosec G204 -- relPath derived from validated file path
+	cmd.Dir = path
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restore JSONL from git HEAD: %w", err)
+	}
+
+	return nil
 }

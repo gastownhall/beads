@@ -13,6 +13,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -148,10 +149,15 @@ func checkJSONLGitDivergence(path, beadsDir string) *SyncDivergenceIssue {
 	cmd.Dir = path
 	if err := cmd.Run(); err != nil {
 		// Exit code non-zero means there are differences
+		// In dolt-native mode, Dolt is source of truth - JSONL should be restored from git HEAD
+		fixCmd := "git add .beads/ && git commit -m 'sync beads'"
+		if config.GetSyncMode() == config.SyncModeDoltNative {
+			fixCmd = fmt.Sprintf("git restore %s", relPath)
+		}
 		return &SyncDivergenceIssue{
 			Type:        "jsonl_git_mismatch",
 			Description: fmt.Sprintf("JSONL file differs from git HEAD: %s", filepath.Base(jsonlPath)),
-			FixCommand:  "git add .beads/ && git commit -m 'sync beads'",
+			FixCommand:  fixCmd,
 		}
 	}
 
@@ -269,9 +275,15 @@ func checkUncommittedBeadsChanges(path, beadsDir string) *SyncDivergenceIssue {
 	}
 
 	fixCmd := "bd sync"
-	// For dolt backend, bd sync/import-only workflows don't apply; recommend a plain git commit.
+	// For dolt backend, bd sync/import-only workflows don't apply.
+	// In dolt-native mode, Dolt is source of truth - JSONL should be restored from git HEAD.
+	// In other dolt modes, recommend a plain git commit.
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
-		fixCmd = "git add .beads/ && git commit -m 'sync beads'"
+		if config.GetSyncMode() == config.SyncModeDoltNative {
+			fixCmd = fmt.Sprintf("git restore %s", relBeadsDir)
+		} else {
+			fixCmd = "git add .beads/ && git commit -m 'sync beads'"
+		}
 	}
 
 	return &SyncDivergenceIssue{

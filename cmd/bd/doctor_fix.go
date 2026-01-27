@@ -192,6 +192,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		"Schema Compatibility",
 		"JSONL Integrity",
 		"DB-JSONL Sync",
+		"Sync Divergence",
 	}
 	priority := make(map[string]int, len(order))
 	for i, name := range order {
@@ -235,6 +236,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.Daemon(path)
 		case "DB-JSONL Sync":
 			err = fix.DBJSONLSync(path)
+		case "Sync Divergence":
+			err = fix.SyncDivergence(path)
 		case "Permissions":
 			err = fix.Permissions(path)
 		case "Database":
