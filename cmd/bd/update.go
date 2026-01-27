@@ -113,8 +113,18 @@ create, update, show, or close operation).`,
 			issueType, _ := cmd.Flags().GetString("type")
 			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
 			issueType = util.NormalizeIssueType(issueType)
-			if !types.IssueType(issueType).IsValid() {
-				FatalErrorRespectJSON("invalid issue type %q. Valid types: bug, feature, task, epic, chore, merge-request, molecule, gate, agent, role, rig, convoy, event, slot", issueType)
+			var customTypes []string
+			if store != nil {
+				if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
+					customTypes = ct
+				}
+			}
+			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+				validTypes := "bug, feature, task, epic, chore"
+				if len(customTypes) > 0 {
+					validTypes += ", " + joinStrings(customTypes, ", ")
+				}
+				FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
 			}
 			updates["issue_type"] = issueType
 		}
