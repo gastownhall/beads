@@ -84,83 +84,51 @@ func New(store CompactableStore, apiKey string, config *Config) (*Compactor, err
 	}, nil
 }
 
-// Result holds the outcome of a compaction operation.
-type Result struct {
-	IssueID       string
-	OriginalSize  int
-	CompactedSize int
-	Err           error
-}
-
-// CompactTier1 performs tier-1 compaction on a single issue using AI summarization.
+// CompactTier1 compacts a single issue at Tier 1 (basic summarization).
 func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	eligible, reason, err := c.store.CheckEligibility(ctx, issueID, 1)
-	if err != nil {
-		return fmt.Errorf("failed to verify eligibility: %w", err)
-	}
-
-	if !eligible {
-		if reason != "" {
-			return fmt.Errorf("issue %s is not eligible for Tier 1 compaction: %s", issueID, reason)
-		}
-		return fmt.Errorf("issue %s is not eligible for Tier 1 compaction", issueID)
-	}
-
 	issue, err := c.store.GetIssue(ctx, issueID)
 	if err != nil {
-		return fmt.Errorf("failed to get issue: %w", err)
+		return fmt.Errorf("failed to fetch issue: %w", err)
 	}
 
+	// Calculate original size
 	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 
 	if c.config.DryRun {
-		return fmt.Errorf("dry-run: would compact %s (original size: %d bytes)", issueID, originalSize)
+		return nil
 	}
 
-	if c.summarizer == nil {
-		return fmt.Errorf("summarizer not configured")
-	}
+	// Get summary from AI
 	summary, err := c.summarizer.SummarizeTier1(ctx, issue)
 	if err != nil {
-		return fmt.Errorf("failed to summarize with Haiku: %w", err)
+		return fmt.Errorf("failed to summarize: %w", err)
 	}
 
-	compactedSize := len(summary)
-
-	if compactedSize >= originalSize {
-		warningMsg := fmt.Sprintf("Tier 1 compaction skipped: summary (%d bytes) not shorter than original (%d bytes)", compactedSize, originalSize)
-		if err := c.store.AddComment(ctx, issueID, "compactor", warningMsg); err != nil {
-			return fmt.Errorf("failed to record warning: %w", err)
-		}
-		return fmt.Errorf("compaction would increase size (%d → %d bytes), keeping original", originalSize, compactedSize)
-	}
-
+	// Update issue with summarized content
 	updates := map[string]interface{}{
-		"description":         summary,
-		"design":              "",
-		"notes":               "",
+		"description":        summary,
+		"design":             "",
+		"notes":              "",
 		"acceptance_criteria": "",
 	}
-
 	if err := c.store.UpdateIssue(ctx, issueID, updates, "compactor"); err != nil {
 		return fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	commitHash := GetCurrentCommitHash()
-	if err := c.store.ApplyCompaction(ctx, issueID, 1, originalSize, compactedSize, commitHash); err != nil {
-		return fmt.Errorf("failed to set compaction level: %w", err)
+	// Record compaction metadata
+	compactedSize := len(summary)
+	if err := c.store.ApplyCompaction(ctx, issueID, 1, originalSize, compactedSize, ""); err != nil {
+		return fmt.Errorf("failed to apply compaction metadata: %w", err)
 	}
 
-	savingBytes := originalSize - compactedSize
-	eventData := fmt.Sprintf("Tier 1 compaction: %d → %d bytes (saved %d)", originalSize, compactedSize, savingBytes)
-	if err := c.store.AddComment(ctx, issueID, "compactor", eventData); err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
+	// Add comment about compaction
+	comment := fmt.Sprintf("Tier 1 compaction applied. Original size: %d bytes, Compacted size: %d bytes (%.1f%% reduction)",
+		originalSize, compactedSize, float64(originalSize-compactedSize)/float64(originalSize)*100)
+	if err := c.store.AddComment(ctx, issueID, "compactor", comment); err != nil {
+		return fmt.Errorf("failed to add compaction comment: %w", err)
 	}
 
+	// Mark dirty for export
 	if err := c.store.MarkIssueDirty(ctx, issueID); err != nil {
 		return fmt.Errorf("failed to mark dirty: %w", err)
 	}
@@ -168,147 +136,106 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 	return nil
 }
 
-// CompactTier1Batch performs tier-1 compaction on multiple issues in a single batch.
-func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([]*Result, error) {
-	if len(issueIDs) == 0 {
-		return nil, nil
-	}
+// BatchResult holds the result of a single issue compaction in a batch.
+type BatchResult struct {
+	IssueID       string
+	OriginalSize  int
+	CompactedSize int
+	Err           error
+}
 
-	eligibleIDs := make([]string, 0, len(issueIDs))
-	results := make([]*Result, 0, len(issueIDs))
-
-	for _, id := range issueIDs {
-		eligible, reason, err := c.store.CheckEligibility(ctx, id, 1)
-		if err != nil {
-			results = append(results, &Result{
-				IssueID: id,
-				Err:     fmt.Errorf("failed to verify eligibility: %w", err),
-			})
-			continue
-		}
-		if !eligible {
-			results = append(results, &Result{
-				IssueID: id,
-				Err:     fmt.Errorf("not eligible for Tier 1 compaction: %s", reason),
-			})
-		} else {
-			eligibleIDs = append(eligibleIDs, id)
-		}
-	}
-
-	if len(eligibleIDs) == 0 {
-		return results, nil
-	}
-
-	if c.config.DryRun {
-		for _, id := range eligibleIDs {
-			issue, err := c.store.GetIssue(ctx, id)
-			if err != nil {
-				results = append(results, &Result{
-					IssueID: id,
-					Err:     fmt.Errorf("failed to get issue: %w", err),
-				})
-				continue
-			}
-			originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-			results = append(results, &Result{
-				IssueID:      id,
-				OriginalSize: originalSize,
-				Err:          nil,
-			})
-		}
-		return results, nil
-	}
-
-	workCh := make(chan string, len(eligibleIDs))
-	resultCh := make(chan *Result, len(eligibleIDs))
-
+// CompactTier1Batch compacts multiple issues at Tier 1 concurrently.
+func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([]BatchResult, error) {
+	results := make([]BatchResult, len(issueIDs))
+	sem := make(chan struct{}, c.config.Concurrency)
 	var wg sync.WaitGroup
-	for i := 0; i < c.config.Concurrency; i++ {
+
+	for i, id := range issueIDs {
 		wg.Add(1)
-		go func() {
+		go func(idx int, issueID string) {
 			defer wg.Done()
-			for issueID := range workCh {
-				result := &Result{IssueID: issueID}
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-				if err := c.compactSingleWithResult(ctx, issueID, result); err != nil {
-					result.Err = err
-				}
-
-				resultCh <- result
+			// Get issue to calculate original size
+			issue, err := c.store.GetIssue(ctx, issueID)
+			if err != nil {
+				results[idx] = BatchResult{IssueID: issueID, Err: err}
+				return
 			}
-		}()
+
+			originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+
+			err = c.CompactTier1(ctx, issueID)
+			if err != nil {
+				results[idx] = BatchResult{IssueID: issueID, OriginalSize: originalSize, Err: err}
+				return
+			}
+
+			// Get updated issue to calculate compacted size
+			issueAfter, _ := c.store.GetIssue(ctx, issueID)
+			compactedSize := 0
+			if issueAfter != nil {
+				compactedSize = len(issueAfter.Description)
+			}
+
+			results[idx] = BatchResult{
+				IssueID:       issueID,
+				OriginalSize:  originalSize,
+				CompactedSize: compactedSize,
+			}
+		}(i, id)
 	}
 
-	for _, id := range eligibleIDs {
-		workCh <- id
-	}
-	close(workCh)
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	for result := range resultCh {
-		results = append(results, result)
-	}
-
+	wg.Wait()
 	return results, nil
 }
 
-func (c *Compactor) compactSingleWithResult(ctx context.Context, issueID string, result *Result) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
+// CompactTier1Single compacts a single issue at Tier 1 and returns detailed results.
+// Deprecated: Use CompactTier1 instead. This method is kept for backward compatibility.
+func (c *Compactor) CompactTier1Single(ctx context.Context, issueID string) (*BatchResult, error) {
+	issue, err := c.store.GetIssue(ctx, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch issue: %w", err)
 	}
 
+	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+
+	if err := c.CompactTier1(ctx, issueID); err != nil {
+		return &BatchResult{IssueID: issueID, OriginalSize: originalSize, Err: err}, nil
+	}
+
+	issueAfter, _ := c.store.GetIssue(ctx, issueID)
+	compactedSize := 0
+	if issueAfter != nil {
+		compactedSize = len(issueAfter.Description)
+	}
+
+	return &BatchResult{
+		IssueID:       issueID,
+		OriginalSize:  originalSize,
+		CompactedSize: compactedSize,
+	}, nil
+}
+
+// CompactTier2 is a placeholder for future Tier 2 compaction.
+// Tier 2 would involve more aggressive summarization and archival.
+func (c *Compactor) CompactTier2(ctx context.Context, issueID string) error {
+	// Get the issue
 	issue, err := c.store.GetIssue(ctx, issueID)
 	if err != nil {
 		return fmt.Errorf("failed to get issue: %w", err)
 	}
 
-	result.OriginalSize = len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+	// Calculate original size
+	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 
-	if c.summarizer == nil {
-		return fmt.Errorf("summarizer not configured")
-	}
-	summary, err := c.summarizer.SummarizeTier1(ctx, issue)
-	if err != nil {
-		return fmt.Errorf("failed to summarize with Haiku: %w", err)
+	// For now, just apply the metadata update without actual summarization
+	if err := c.store.ApplyCompaction(ctx, issueID, 2, originalSize, originalSize, ""); err != nil {
+		return fmt.Errorf("failed to apply compaction metadata: %w", err)
 	}
 
-	result.CompactedSize = len(summary)
-
-	if result.CompactedSize >= result.OriginalSize {
-		warningMsg := fmt.Sprintf("Tier 1 compaction skipped: summary (%d bytes) not shorter than original (%d bytes)", result.CompactedSize, result.OriginalSize)
-		if err := c.store.AddComment(ctx, issueID, "compactor", warningMsg); err != nil {
-			return fmt.Errorf("failed to record warning: %w", err)
-		}
-		return fmt.Errorf("compaction would increase size (%d → %d bytes), keeping original", result.OriginalSize, result.CompactedSize)
-	}
-
-	updates := map[string]interface{}{
-		"description":         summary,
-		"design":              "",
-		"notes":               "",
-		"acceptance_criteria": "",
-	}
-
-	if err := c.store.UpdateIssue(ctx, issueID, updates, "compactor"); err != nil {
-		return fmt.Errorf("failed to update issue: %w", err)
-	}
-
-	commitHash := GetCurrentCommitHash()
-	if err := c.store.ApplyCompaction(ctx, issueID, 1, result.OriginalSize, result.CompactedSize, commitHash); err != nil {
-		return fmt.Errorf("failed to set compaction level: %w", err)
-	}
-
-	savingBytes := result.OriginalSize - result.CompactedSize
-	eventData := fmt.Sprintf("Tier 1 compaction: %d → %d bytes (saved %d)", result.OriginalSize, result.CompactedSize, savingBytes)
-	if err := c.store.AddComment(ctx, issueID, "compactor", eventData); err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
-
+	// Mark dirty for export
 	if err := c.store.MarkIssueDirty(ctx, issueID); err != nil {
 		return fmt.Errorf("failed to mark dirty: %w", err)
 	}

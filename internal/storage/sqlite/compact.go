@@ -9,22 +9,13 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// CompactionCandidate represents an issue eligible for compaction
-type CompactionCandidate struct {
-	IssueID        string
-	ClosedAt       time.Time
-	OriginalSize   int
-	EstimatedSize  int
-	DependentCount int
-}
-
 // GetTier1Candidates returns issues eligible for Tier 1 compaction.
 // Criteria:
 // - Status = closed
 // - Closed for at least compact_tier1_days
 // - No open dependents within compact_tier1_dep_levels depth
 // - Not already compacted (compaction_level = 0)
-func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCandidate, error) {
+func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*types.CompactionCandidate, error) {
 	// Get configuration
 	daysStr, err := s.GetConfig(ctx, "compact_tier1_days")
 	if err != nil {
@@ -96,9 +87,9 @@ func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var candidates []*CompactionCandidate
+	var candidates []*types.CompactionCandidate
 	for rows.Next() {
-		var c CompactionCandidate
+		var c types.CompactionCandidate
 		if err := rows.Scan(&c.IssueID, &c.ClosedAt, &c.OriginalSize, &c.EstimatedSize, &c.DependentCount); err != nil {
 			return nil, fmt.Errorf("failed to scan candidate: %w", err)
 		}
@@ -119,7 +110,7 @@ func (s *SQLiteStorage) GetTier1Candidates(ctx context.Context) ([]*CompactionCa
 // - No open dependents within compact_tier2_dep_levels depth
 // - Already at compaction_level = 1
 // - Either has many commits (compact_tier2_commits) or many dependent issues
-func (s *SQLiteStorage) GetTier2Candidates(ctx context.Context) ([]*CompactionCandidate, error) {
+func (s *SQLiteStorage) GetTier2Candidates(ctx context.Context) ([]*types.CompactionCandidate, error) {
 	// Get configuration
 	daysStr, err := s.GetConfig(ctx, "compact_tier2_days")
 	if err != nil {
@@ -174,9 +165,9 @@ func (s *SQLiteStorage) GetTier2Candidates(ctx context.Context) ([]*CompactionCa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var candidates []*CompactionCandidate
+	var candidates []*types.CompactionCandidate
 	for rows.Next() {
-		var c CompactionCandidate
+		var c types.CompactionCandidate
 		if err := rows.Scan(&c.IssueID, &c.ClosedAt, &c.OriginalSize, &c.EstimatedSize, &c.DependentCount); err != nil {
 			return nil, fmt.Errorf("failed to scan candidate: %w", err)
 		}

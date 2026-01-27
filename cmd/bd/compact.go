@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 var (
@@ -591,7 +592,7 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 		})
 	} else {
 		// Get tier candidates
-		var tierCandidates []*sqlite.CompactionCandidate
+		var tierCandidates []*types.CompactionCandidate
 		var err error
 		if compactTier == 1 {
 			tierCandidates, err = store.GetTier1Candidates(ctx)

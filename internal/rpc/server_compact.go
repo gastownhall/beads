@@ -6,7 +6,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/compact"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *Server) handleCompact(req *Request) Response {
@@ -26,11 +27,12 @@ func (s *Server) handleCompact(req *Request) Response {
 		}
 	}
 
-	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+	// Check if storage supports compaction (not all backends do, e.g., Dolt)
+	compactStore, ok := store.(storage.CompactableStorage)
 	if !ok {
 		return Response{
 			Success: false,
-			Error:   "compact requires SQLite storage",
+			Error:   "compact requires a storage backend that supports compaction",
 		}
 	}
 
@@ -43,7 +45,7 @@ func (s *Server) handleCompact(req *Request) Response {
 		config.Concurrency = 5
 	}
 
-	compactor, err := compact.New(sqliteStore, args.APIKey, config)
+	compactor, err := compact.New(compactStore, args.APIKey, config)
 	if err != nil {
 		return Response{
 			Success: false,
@@ -56,7 +58,7 @@ func (s *Server) handleCompact(req *Request) Response {
 
 	if args.IssueID != "" {
 		if !args.Force {
-			eligible, reason, err := sqliteStore.CheckEligibility(ctx, args.IssueID, args.Tier)
+			eligible, reason, err := compactStore.CheckEligibility(ctx, args.IssueID, args.Tier)
 			if err != nil {
 				return Response{
 					Success: false,
@@ -71,7 +73,7 @@ func (s *Server) handleCompact(req *Request) Response {
 			}
 		}
 
-		issue, err := sqliteStore.GetIssue(ctx, args.IssueID)
+		issue, err := compactStore.GetIssue(ctx, args.IssueID)
 		if err != nil {
 			return Response{
 				Success: false,
@@ -112,7 +114,7 @@ func (s *Server) handleCompact(req *Request) Response {
 			}
 		}
 
-		issueAfter, _ := sqliteStore.GetIssue(ctx, args.IssueID)
+		issueAfter, _ := compactStore.GetIssue(ctx, args.IssueID)
 		compactedSize := 0
 		if issueAfter != nil {
 			compactedSize = len(issueAfter.Description)
@@ -135,11 +137,11 @@ func (s *Server) handleCompact(req *Request) Response {
 	}
 
 	if args.All {
-		var candidates []*sqlite.CompactionCandidate
+		var candidates []*types.CompactionCandidate
 
 		switch args.Tier {
 		case 1:
-			tier1, err := sqliteStore.GetTier1Candidates(ctx)
+			tier1, err := compactStore.GetTier1Candidates(ctx)
 			if err != nil {
 				return Response{
 					Success: false,
@@ -148,7 +150,7 @@ func (s *Server) handleCompact(req *Request) Response {
 			}
 			candidates = tier1
 		case 2:
-			tier2, err := sqliteStore.GetTier2Candidates(ctx)
+			tier2, err := compactStore.GetTier2Candidates(ctx)
 			if err != nil {
 				return Response{
 					Success: false,
@@ -241,17 +243,18 @@ func (s *Server) handleCompactStats(req *Request) Response {
 		}
 	}
 
-	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+	// Check if storage supports compaction (not all backends do, e.g., Dolt)
+	compactStore, ok := store.(storage.CompactableStorage)
 	if !ok {
 		return Response{
 			Success: false,
-			Error:   "compact stats requires SQLite storage",
+			Error:   "compact stats requires a storage backend that supports compaction",
 		}
 	}
 
 	ctx := s.reqCtx(req)
 
-	tier1, err := sqliteStore.GetTier1Candidates(ctx)
+	tier1, err := compactStore.GetTier1Candidates(ctx)
 	if err != nil {
 		return Response{
 			Success: false,
@@ -259,7 +262,7 @@ func (s *Server) handleCompactStats(req *Request) Response {
 		}
 	}
 
-	tier2, err := sqliteStore.GetTier2Candidates(ctx)
+	tier2, err := compactStore.GetTier2Candidates(ctx)
 	if err != nil {
 		return Response{
 			Success: false,
