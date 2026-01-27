@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -25,12 +24,15 @@ type Config struct {
 
 // Compactor handles issue compaction using AI summarization.
 type Compactor struct {
-	store      issueStore
+	store      CompactableStore
 	summarizer summarizer
 	config     *Config
 }
 
-type issueStore interface {
+// CompactableStore defines the storage interface required for compaction.
+// This interface can be implemented by any storage backend (SQLite, Dolt, etc.)
+// that wants to support the compaction feature.
+type CompactableStore interface {
 	CheckEligibility(ctx context.Context, issueID string, tier int) (bool, string, error)
 	GetIssue(ctx context.Context, issueID string) (*types.Issue, error)
 	UpdateIssue(ctx context.Context, issueID string, updates map[string]interface{}, actor string) error
@@ -44,7 +46,8 @@ type summarizer interface {
 }
 
 // New creates a new Compactor instance with the given configuration.
-func New(store *sqlite.SQLiteStorage, apiKey string, config *Config) (*Compactor, error) {
+// The store parameter must implement CompactableStore interface.
+func New(store CompactableStore, apiKey string, config *Config) (*Compactor, error) {
 	if config == nil {
 		config = &Config{
 			Concurrency: defaultConcurrency,
