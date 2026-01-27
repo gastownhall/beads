@@ -90,11 +90,10 @@ Examples:
 					health, healthErr := client.Health()
 					_ = client.Close()
 
-					// If we can check version and it's compatible, exit
+					// If we can check version and it's compatible, exit successfully (idempotent)
 					if healthErr == nil && health.Compatible {
-						fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d, version %s)\n", pid, health.Version)
-						fmt.Fprintf(os.Stderr, "Use 'bd daemon stop' to stop it first\n")
-						os.Exit(1)
+						fmt.Printf("Daemon already running (PID %d, version %s)\n", pid, health.Version)
+						os.Exit(0)
 					}
 
 					// Version mismatch - auto-stop old daemon
