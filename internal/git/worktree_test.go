@@ -1346,3 +1346,67 @@ func TestNormalizeBeadsRelPath(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncJSONLToWorktree_SelfCopy tests that syncing a file to itself is a no-op.
+// GH#1298: When sync-branch is configured, findJSONLPath() returns the worktree path
+// due to GH#1103. This causes the sync to attempt copying the worktree JSONL to itself.
+// The fix ensures this is detected and skipped without error.
+func TestSyncJSONLToWorktree_SelfCopy(t *testing.T) {
+	repoPath, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wm := NewWorktreeManager(repoPath)
+	worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
+
+	// Create worktree
+	if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
+		t.Fatalf("CreateBeadsWorktree failed: %v", err)
+	}
+
+	// Create a JSONL file in the worktree
+	worktreeJSONL := filepath.Join(worktreePath, ".beads", "issues.jsonl")
+	originalData := []byte(`{"id":"bd-001","title":"Test Issue","status":"open"}` + "\n")
+	if err := os.WriteFile(worktreeJSONL, originalData, 0644); err != nil {
+		t.Fatalf("Failed to write worktree JSONL: %v", err)
+	}
+
+	// Get the file's modification time before sync
+	statBefore, err := os.Stat(worktreeJSONL)
+	if err != nil {
+		t.Fatalf("Failed to stat worktree JSONL: %v", err)
+	}
+
+	// Simulate GH#1298: jsonlRelPath includes the worktree path prefix
+	// This happens when findJSONLPath() returns the worktree path due to GH#1103
+	// e.g., ".git/beads-worktrees/beads-metadata/.beads/issues.jsonl"
+	worktreeRelPath, err := filepath.Rel(repoPath, worktreeJSONL)
+	if err != nil {
+		t.Fatalf("Failed to get relative path: %v", err)
+	}
+
+	// Sync with the worktree-relative path (simulates the GH#1298 bug scenario)
+	// This should detect srcPath == dstPath and return nil without modifying the file
+	if err := wm.SyncJSONLToWorktree(worktreePath, worktreeRelPath); err != nil {
+		t.Fatalf("SyncJSONLToWorktree failed: %v", err)
+	}
+
+	// Verify the file was not modified (content unchanged)
+	resultData, err := os.ReadFile(worktreeJSONL)
+	if err != nil {
+		t.Fatalf("Failed to read worktree JSONL after sync: %v", err)
+	}
+
+	if string(resultData) != string(originalData) {
+		t.Errorf("File content changed unexpectedly.\nExpected: %s\nGot: %s", string(originalData), string(resultData))
+	}
+
+	// Verify the file's modification time didn't change (file wasn't rewritten)
+	statAfter, err := os.Stat(worktreeJSONL)
+	if err != nil {
+		t.Fatalf("Failed to stat worktree JSONL after sync: %v", err)
+	}
+
+	if !statAfter.ModTime().Equal(statBefore.ModTime()) {
+		t.Errorf("File was modified when it should have been skipped (self-copy detected)")
+	}
+}

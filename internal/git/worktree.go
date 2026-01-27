@@ -199,6 +199,15 @@ func (wm *WorktreeManager) SyncJSONLToWorktreeWithOptions(worktreePath, jsonlRel
 	normalizedRelPath := NormalizeBeadsRelPath(jsonlRelPath)
 	dstPath := filepath.Join(worktreePath, normalizedRelPath)
 
+	// GH#1298: When sync-branch is configured, findJSONLPath() returns the worktree
+	// path due to GH#1103. This causes jsonlRelPath to include the worktree path
+	// (e.g., ".git/beads-worktrees/beads-sync/.beads/issues.jsonl"), making srcPath
+	// point to the worktree JSONL instead of the main repo JSONL. In this case,
+	// srcPath == dstPath and we're copying the file to itself - skip the sync.
+	if srcPath == dstPath {
+		return nil
+	}
+
 	// Ensure destination directory exists
 	dstDir := filepath.Dir(dstPath)
 	if err := os.MkdirAll(dstDir, 0750); err != nil {
