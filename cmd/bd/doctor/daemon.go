@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/rpc"
@@ -294,7 +295,17 @@ func CheckLegacyDaemonConfig(path string) DoctorCheck {
 // configured in repos.additional. Without running daemons, JSONL files won't
 // be kept updated, causing multi-repo hydration to become stale (bd-fix-routing).
 func CheckHydratedRepoDaemons(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific storage, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Hydrated Repo Daemons",
+			Status:  StatusOK,
+			Message: "N/A (dolt backend)",
+		}
+	}
+
 	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	ctx := context.Background()

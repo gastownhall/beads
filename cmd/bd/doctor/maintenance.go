@@ -30,8 +30,17 @@ import (
 const largeClosedIssuesThreshold = 10000
 
 func CheckStaleClosedIssues(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific queries, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:     "Stale Closed Issues",
+			Status:   StatusOK,
+			Message:  "N/A (dolt backend)",
+			Category: CategoryMaintenance,
+		}
+	}
 
 	// Load config and check if this check is enabled
 	cfg, err := configfile.Load(beadsDir)
@@ -213,7 +222,17 @@ func CheckExpiredTombstones(path string) DoctorCheck {
 // CheckStaleMolecules detects complete-but-unclosed molecules.
 // A molecule is stale if all children are closed but the root is still open.
 func CheckStaleMolecules(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific queries, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (dolt backend)",
+			Category: CategoryMaintenance,
+		}
+	}
 
 	// Check metadata.json first for custom database name
 	var dbPath string
@@ -293,8 +312,17 @@ func CheckStaleMolecules(path string) DoctorCheck {
 
 // CheckCompactionCandidates detects issues eligible for compaction.
 func CheckCompactionCandidates(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific queries, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:     "Compaction Candidates",
+			Status:   StatusOK,
+			Message:  "N/A (dolt backend)",
+			Category: CategoryMaintenance,
+		}
+	}
 
 	// Check metadata.json first for custom database name
 	var dbPath string

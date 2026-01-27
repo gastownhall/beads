@@ -1001,7 +1001,16 @@ func isNoDbModeConfigured(beadsDir string) bool {
 // irreversible. The user must make an explicit decision to delete their
 // closed issue history. We only provide guidance, never action.
 func CheckDatabaseSize(path string) DoctorCheck {
-	_, beadsDir := getBackendAndBeadsDir(path)
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific queries, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (dolt backend)",
+		}
+	}
 
 	// Get database path
 	var dbPath string

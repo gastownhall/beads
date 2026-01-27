@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -184,8 +185,17 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 // When gastownMode is true, the threshold parameter defines how many duplicates
 // are acceptable before warning (default 1000 for gastown's ephemeral wisps).
 func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backend: this check uses SQLite-specific storage, skip for now
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Duplicate Issues",
+			Status:  "ok",
+			Message: "N/A (dolt backend)",
+		}
+	}
+
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {

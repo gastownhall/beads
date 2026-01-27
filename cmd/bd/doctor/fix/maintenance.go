@@ -32,12 +32,18 @@ func StaleClosedIssues(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Load config and check if cleanup is enabled
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Dolt backend: this fix uses SQLite-specific storage, skip for now
+	if cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		fmt.Println("  Stale closed issues cleanup skipped (dolt backend)")
+		return nil
 	}
 
 	// Get threshold; 0 means disabled
@@ -205,7 +211,7 @@ func PatrolPollution(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
@@ -213,9 +219,17 @@ func PatrolPollution(path string) error {
 		return nil
 	}
 
-	// Get database path
+	// Get database path and check backend
+	cfg, _ := configfile.Load(beadsDir)
+
+	// Dolt backend: this fix uses SQLite-specific storage, skip for now
+	if cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		fmt.Println("  Patrol pollution cleanup skipped (dolt backend)")
+		return nil
+	}
+
 	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+	if cfg != nil && cfg.Database != "" {
 		dbPath = cfg.DatabasePath(beadsDir)
 	} else {
 		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
