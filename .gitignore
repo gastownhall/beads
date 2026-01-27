@@ -128,3 +128,4 @@ state.json
 output
 bd_test
 .beads/export-state/
+.beads/issues.jsonl
