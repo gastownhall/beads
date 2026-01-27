@@ -690,14 +690,30 @@ func runPrePushHook(args []string) int {
 		return 0 // Skip - changes synced to separate branch
 	}
 
+	// Get RepoContext for git operations (needed for flush and staging)
+	rc, rcErr := beads.GetRepoContext()
+	ctx := context.Background()
+
 	// Flush pending bd changes
 	// Use --no-daemon to ensure direct mode (inline import requires local store)
 	flushCmd := exec.Command("bd", "sync", "--flush-only", "--no-daemon")
 	_ = flushCmd.Run() // Ignore errors
 
-	// Get RepoContext for git operations
-	rc, rcErr := beads.GetRepoContext()
-	ctx := context.Background()
+	// Auto-stage JSONL files after flush to prevent race condition.
+	// Without this, flush creates uncommitted changes that the check below
+	// would detect, causing an infinite loop. See: GH#1208
+	for _, f := range jsonlFilePaths {
+		if _, err := os.Stat(f); err == nil {
+			var gitAdd *exec.Cmd
+			if rcErr == nil {
+				gitAdd = rc.GitCmdCWD(ctx, "add", f)
+			} else {
+				// #nosec G204 -- f comes from jsonlFilePaths (controlled, hardcoded paths)
+				gitAdd = exec.Command("git", "add", f)
+			}
+			_ = gitAdd.Run() // Ignore errors - file may not exist
+		}
+	}
 
 	// Check for uncommitted JSONL changes
 	files := []string{}
