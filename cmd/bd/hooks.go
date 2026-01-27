@@ -954,31 +954,14 @@ func parseAgentIdentity(role string) *agentIdentity {
 	rig := os.Getenv("GT_RIG")
 	identity := &agentIdentity{Role: role, Rig: rig}
 
-	switch role {
-	case "crew":
+	// Handle crew role (the only role beads knows about directly)
+	// Other roles (polecat, witness, refinery, mayor, deacon) are Gas Town
+	// concepts and should be handled by gastown, not beads core.
+	if role == "crew" {
 		crew := os.Getenv("GT_CREW")
 		if rig != "" && crew != "" {
 			identity.FullIdentity = fmt.Sprintf("%s/crew/%s", rig, crew)
 		}
-	case "polecat":
-		polecat := os.Getenv("GT_POLECAT")
-		if rig != "" && polecat != "" {
-			identity.FullIdentity = fmt.Sprintf("%s/%s", rig, polecat)
-		}
-	case "witness":
-		if rig != "" {
-			identity.FullIdentity = fmt.Sprintf("%s/witness", rig)
-		}
-	case "refinery":
-		if rig != "" {
-			identity.FullIdentity = fmt.Sprintf("%s/refinery", rig)
-		}
-	case "mayor":
-		identity.FullIdentity = "mayor"
-		identity.Rig = "" // Mayor is rig-agnostic
-	case "deacon":
-		identity.FullIdentity = "deacon"
-		identity.Rig = "" // Deacon is rig-agnostic
 	}
 
 	if identity.FullIdentity == "" {
@@ -990,14 +973,10 @@ func parseAgentIdentity(role string) *agentIdentity {
 }
 
 // detectAgentFromPath detects agent identity from cwd path patterns.
+// Only detects crew pattern - other Gas Town roles (polecat, witness,
+// refinery, mayor, deacon) should be detected by gastown, not beads.
 func detectAgentFromPath(cwd string) *agentIdentity {
-	// Match patterns like:
-	// - /Users/.../gt/<rig>/crew/<name>/...
-	// - /Users/.../gt/<rig>/polecats/<name>/...
-	// - /Users/.../gt/<rig>/witness/...
-	// - /Users/.../gt/<rig>/refinery/...
-
-	// Crew pattern
+	// Crew pattern: /Users/.../gt/<rig>/crew/<name>/...
 	if strings.Contains(cwd, "/crew/") {
 		parts := strings.Split(cwd, "/crew/")
 		if len(parts) >= 2 {
@@ -1010,49 +989,6 @@ func detectAgentFromPath(cwd string) *agentIdentity {
 				Rig:          rig,
 				Role:         "crew",
 				Molecule:     getPinnedMolecule(),
-			}
-		}
-	}
-
-	// Polecat pattern
-	if strings.Contains(cwd, "/polecats/") {
-		parts := strings.Split(cwd, "/polecats/")
-		if len(parts) >= 2 {
-			rigPath := parts[0]
-			polecatPath := parts[1]
-			rig := filepath.Base(rigPath)
-			polecat := strings.Split(polecatPath, "/")[0]
-			return &agentIdentity{
-				FullIdentity: fmt.Sprintf("%s/%s", rig, polecat),
-				Rig:          rig,
-				Role:         "polecat",
-				Molecule:     getPinnedMolecule(),
-			}
-		}
-	}
-
-	// Witness pattern
-	if strings.Contains(cwd, "/witness/") || strings.HasSuffix(cwd, "/witness") {
-		parts := strings.Split(cwd, "/witness")
-		if len(parts) >= 1 {
-			rig := filepath.Base(parts[0])
-			return &agentIdentity{
-				FullIdentity: fmt.Sprintf("%s/witness", rig),
-				Rig:          rig,
-				Role:         "witness",
-			}
-		}
-	}
-
-	// Refinery pattern
-	if strings.Contains(cwd, "/refinery/") || strings.HasSuffix(cwd, "/refinery") {
-		parts := strings.Split(cwd, "/refinery")
-		if len(parts) >= 1 {
-			rig := filepath.Base(parts[0])
-			return &agentIdentity{
-				FullIdentity: fmt.Sprintf("%s/refinery", rig),
-				Rig:          rig,
-				Role:         "refinery",
 			}
 		}
 	}
