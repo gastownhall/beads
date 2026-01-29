@@ -853,7 +853,7 @@ var rootCmd = &cobra.Command{
 				opts.ServerHost = cfg.GetDoltServerHost()
 				opts.ServerPort = cfg.GetDoltServerPort()
 				if cfg.Database != "" {
-					opts.Database = cfg.Database
+					opts.Database = cfg.GetDoltDatabase()
 				}
 			}
 
