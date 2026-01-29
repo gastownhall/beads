@@ -31,6 +31,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beads-kanban-ui](https://github.com/AvivK5498/Beads-Kanban-UI)** - Visual Kanban board with git branch status tracking, epic/subtask management, design doc viewer, and activity timeline. Install via npm: `npm install -g beads-kanban-ui`. Built by [@AvivK5498](https://github.com/AvivK5498). (TypeScript/Rust)
 
+- **[beads-pm-ui](https://github.com/qosha1/beads-pm-ui)** - Gantt chart timeline view, project / team based filtering (via folder structure), quarterly goal setting and dependency chain visualization. Inline editable. Built by [@qosha1](https://github.com/qosha1). (Nextjs/Typscript)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and daemon management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
