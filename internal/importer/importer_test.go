@@ -958,6 +958,30 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 			t.Errorf("Expected no error for empty refs, got: %v", err)
 		}
 	})
+
+	t.Run("ignores tombstone external_refs (bd-55u)", func(t *testing.T) {
+		ref := "LINEAR-123"
+		issues := []*types.Issue{
+			{ID: "bd-1", Title: "Deleted Issue", ExternalRef: &ref, Status: types.StatusTombstone},
+			{ID: "bd-2", Title: "Live Issue", ExternalRef: &ref, Status: types.StatusOpen},
+		}
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
+		if err != nil {
+			t.Errorf("Expected no error when tombstone has same external_ref as live issue, got: %v", err)
+		}
+	})
+
+	t.Run("multiple tombstones with same external_ref are allowed", func(t *testing.T) {
+		ref := "LINEAR-456"
+		issues := []*types.Issue{
+			{ID: "bd-1", Title: "Deleted 1", ExternalRef: &ref, Status: types.StatusTombstone},
+			{ID: "bd-2", Title: "Deleted 2", ExternalRef: &ref, Status: types.StatusTombstone},
+		}
+		err := validateNoDuplicateExternalRefs(issues, false, nil)
+		if err != nil {
+			t.Errorf("Expected no error for multiple tombstones with same ref, got: %v", err)
+		}
+	})
 }
 
 func TestConcurrentExternalRefImports(t *testing.T) {
