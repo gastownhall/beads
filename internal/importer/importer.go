@@ -1561,6 +1561,10 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool
 	seen := make(map[string][]string)
 
 	for _, issue := range issues {
+		// Skip tombstone records - their external_ref is no longer "claimed" (GH#55u)
+		if issue.Status == types.StatusTombstone {
+			continue
+		}
 		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
 			ref := *issue.ExternalRef
 			seen[ref] = append(seen[ref], issue.ID)
