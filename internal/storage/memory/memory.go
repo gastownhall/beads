@@ -654,6 +654,11 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 				continue
 			}
 		}
+		if filter.SpecIDPrefix != "" {
+			if !strings.HasPrefix(issue.SpecID, filter.SpecIDPrefix) {
+				continue
+			}
+		}
 
 		// Parent filtering (bd-yqhh): filter children by parent issue
 		if filter.ParentID != nil {

@@ -600,7 +600,6 @@ var showCmd = &cobra.Command{
 	},
 }
 
-
 // formatShortIssue returns a compact one-line representation of an issue
 // Format: STATUS_ICON ID PRIORITY [Type] Title
 func formatShortIssue(issue *types.Issue) string {
@@ -718,6 +717,9 @@ func formatIssueMetadata(issue *types.Issue) string {
 	// Line 4: External ref (if exists)
 	if issue.ExternalRef != nil && *issue.ExternalRef != "" {
 		lines = append(lines, fmt.Sprintf("External: %s", *issue.ExternalRef))
+	}
+	if issue.SpecID != "" {
+		lines = append(lines, fmt.Sprintf("Spec: %s", issue.SpecID))
 	}
 
 	// Line 5: Wisp type (if ephemeral with classification)

@@ -605,6 +605,7 @@ var listCmd = &cobra.Command{
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		titleSearch, _ := cmd.Flags().GetString("title")
+		specPrefix, _ := cmd.Flags().GetString("spec")
 		idFilter, _ := cmd.Flags().GetString("id")
 		longFormat, _ := cmd.Flags().GetBool("long")
 		sortBy, _ := cmd.Flags().GetString("sort")
@@ -768,6 +769,9 @@ var listCmd = &cobra.Command{
 			if len(ids) > 0 {
 				filter.IDs = ids
 			}
+		}
+		if specPrefix != "" {
+			filter.SpecIDPrefix = specPrefix
 		}
 
 		// Pattern matching
@@ -959,10 +963,11 @@ var listCmd = &cobra.Command{
 				effectiveStatus = "open"
 			}
 			listArgs := &rpc.ListArgs{
-				Status:    effectiveStatus,
-				IssueType: issueType,
-				Assignee:  assignee,
-				Limit:     effectiveLimit,
+				Status:       effectiveStatus,
+				IssueType:    issueType,
+				Assignee:     assignee,
+				Limit:        effectiveLimit,
+				SpecIDPrefix: specPrefix,
 			}
 			if cmd.Flags().Changed("priority") {
 				priorityStr, _ := cmd.Flags().GetString("priority")
@@ -1370,6 +1375,7 @@ func init() {
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
+	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
 	listCmd.Flags().IntP("limit", "n", 50, "Limit results (default 50, use 0 for unlimited)")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")

@@ -103,6 +103,10 @@ create, update, show, or close operation).`,
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
 		}
+		if cmd.Flags().Changed("spec-id") {
+			specID, _ := cmd.Flags().GetString("spec-id")
+			updates["spec_id"] = specID
+		}
 		if cmd.Flags().Changed("estimate") {
 			estimate, _ := cmd.Flags().GetInt("estimate")
 			if estimate < 0 {
@@ -304,6 +308,9 @@ create, update, show, or close operation).`,
 				}
 				if externalRef, ok := updates["external_ref"].(string); ok {
 					updateArgs.ExternalRef = &externalRef
+				}
+				if specID, ok := updates["spec_id"].(string); ok {
+					updateArgs.SpecID = &specID
 				}
 				if estimate, ok := updates["estimated_minutes"].(int); ok {
 					updateArgs.EstimatedMinutes = &estimate
@@ -687,6 +694,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request|molecule|gate|agent|role|rig|convoy|event|slot)")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")

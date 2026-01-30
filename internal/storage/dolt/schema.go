@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS issues (
     closed_at DATETIME,
     closed_by_session VARCHAR(255) DEFAULT '',
     external_ref VARCHAR(255),
+    spec_id VARCHAR(1024),
     compaction_level INT DEFAULT 0,
     compacted_at DATETIME,
     compacted_at_commit VARCHAR(64),
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS issues (
     INDEX idx_issues_issue_type (issue_type),
     INDEX idx_issues_assignee (assignee),
     INDEX idx_issues_created_at (created_at),
+    INDEX idx_issues_spec_id (spec_id),
     INDEX idx_issues_external_ref (external_ref)
 );
 

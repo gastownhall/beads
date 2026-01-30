@@ -62,6 +62,7 @@ bd create "Issue title" -t bug -p 1 --label bug,critical --json
 # Examples with special characters (all require quoting):
 bd create "Fix: auth doesn't validate tokens" -t bug -p 1 --json
 bd create "Add support for OAuth 2.0" -d "Implement RFC 6749 (OAuth 2.0 spec)" --json
+bd create "Implement auth" --spec-id "docs/specs/auth.md" --json
 
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
@@ -90,6 +91,7 @@ bd create "Found bug" -t bug -p 1 --deps discovered-from:<parent-id> --json
 # Update one or more issues
 bd update <id> [<id>...] --status in_progress --json
 bd update <id> [<id>...] --priority 1 --json
+bd update <id> [<id>...] --spec-id "docs/specs/auth.md" --json
 
 # Edit issue fields in $EDITOR (HUMANS ONLY - not for agents)
 # NOTE: This command is intentionally NOT exposed via the MCP server
@@ -185,6 +187,7 @@ bd list --status open --priority 1 --json               # Status and priority
 bd list --assignee alice --json                         # By assignee
 bd list --type bug --json                               # By issue type
 bd list --id bd-123,bd-456 --json                       # Specific IDs
+bd list --spec "docs/specs/" --json                     # Spec prefix
 ```
 
 ### Label Filters

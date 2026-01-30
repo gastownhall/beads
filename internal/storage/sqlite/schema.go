@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS issues (
     closed_at DATETIME,
     closed_by_session TEXT DEFAULT '',
     external_ref TEXT,
+    spec_id TEXT,
     compaction_level INTEGER DEFAULT 0,
     compacted_at DATETIME,
     compacted_at_commit TEXT,
@@ -70,6 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority);
 CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee);
 CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
+CREATE INDEX IF NOT EXISTS idx_issues_spec_id ON issues(spec_id);
 -- Note: idx_issues_external_ref is created in migrations/002_external_ref_column.go
 
 -- Dependencies table (edge schema - Decision 004)

@@ -123,6 +123,10 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
 	}
+	if filter.SpecIDPrefix != "" {
+		whereClauses = append(whereClauses, "spec_id LIKE ?")
+		args = append(args, filter.SpecIDPrefix+"%")
+	}
 
 	whereSQL := ""
 	if len(whereClauses) > 0 {

@@ -160,6 +160,10 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		whereClauses = append(whereClauses, "id LIKE ?")
 		args = append(args, filter.IDPrefix+"%")
 	}
+	if filter.SpecIDPrefix != "" {
+		whereClauses = append(whereClauses, "spec_id LIKE ?")
+		args = append(args, filter.SpecIDPrefix+"%")
+	}
 
 	// Wisp filtering
 	if filter.Ephemeral != nil {

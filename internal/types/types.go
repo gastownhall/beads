@@ -23,6 +23,7 @@ type Issue struct {
 	Design             string `json:"design,omitempty"`
 	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
 	Notes              string `json:"notes,omitempty"`
+	SpecID             string `json:"spec_id,omitempty"`
 
 	// ===== Status & Workflow =====
 	Status    Status    `json:"status,omitempty"`
@@ -35,9 +36,9 @@ type Issue struct {
 	EstimatedMinutes *int   `json:"estimated_minutes,omitempty"`
 
 	// ===== Timestamps =====
-	CreatedAt   time.Time  `json:"created_at"`
-	CreatedBy   string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
-	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CreatedBy       string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
+	UpdatedAt       time.Time  `json:"updated_at"`
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
@@ -144,6 +145,7 @@ func (i *Issue) ComputeContentHash() string {
 	w.str(i.Design)
 	w.str(i.AcceptanceCriteria)
 	w.str(i.Notes)
+	w.str(i.SpecID)
 	w.str(string(i.Status))
 	w.int(i.Priority)
 	w.str(string(i.IssueType))
@@ -723,7 +725,7 @@ type IssueWithCounts struct {
 // Used for JSON serialization in bd show and RPC responses.
 type IssueDetails struct {
 	Issue
-	Labels       []string                      `json:"labels,omitempty"`
+	Labels       []string                       `json:"labels,omitempty"`
 	Dependencies []*IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 	Dependents   []*IssueWithDependencyMetadata `json:"dependents,omitempty"`
 	Comments     []*Comment                     `json:"comments,omitempty"`
@@ -746,10 +748,10 @@ const (
 	DepDiscoveredFrom DependencyType = "discovered-from"
 
 	// Graph link types
-	DepRepliesTo  DependencyType = "replies-to"  // Conversation threading
-	DepRelatesTo  DependencyType = "relates-to"  // Loose knowledge graph edges
-	DepDuplicates DependencyType = "duplicates"  // Deduplication link
-	DepSupersedes DependencyType = "supersedes"  // Version chain link
+	DepRepliesTo  DependencyType = "replies-to" // Conversation threading
+	DepRelatesTo  DependencyType = "relates-to" // Loose knowledge graph edges
+	DepDuplicates DependencyType = "duplicates" // Deduplication link
+	DepSupersedes DependencyType = "supersedes" // Version chain link
 
 	// Entity types (HOP foundation - Decision 004)
 	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
@@ -876,14 +878,14 @@ type Comment struct {
 
 // Event represents an audit trail entry
 type Event struct {
-	ID        int64      `json:"id"`
-	IssueID   string     `json:"issue_id"`
-	EventType EventType  `json:"event_type"`
-	Actor     string     `json:"actor"`
-	OldValue  *string    `json:"old_value,omitempty"`
-	NewValue  *string    `json:"new_value,omitempty"`
-	Comment   *string    `json:"comment,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        int64     `json:"id"`
+	IssueID   string    `json:"issue_id"`
+	EventType EventType `json:"event_type"`
+	Actor     string    `json:"actor"`
+	OldValue  *string   `json:"old_value,omitempty"`
+	NewValue  *string   `json:"new_value,omitempty"`
+	Comment   *string   `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // EventType categorizes audit trail events
@@ -934,37 +936,38 @@ type MoleculeProgressStats struct {
 
 // Statistics provides aggregate metrics
 type Statistics struct {
-	TotalIssues              int     `json:"total_issues"`
-	OpenIssues               int     `json:"open_issues"`
-	InProgressIssues         int     `json:"in_progress_issues"`
-	ClosedIssues             int     `json:"closed_issues"`
-	BlockedIssues            int     `json:"blocked_issues"`
-	DeferredIssues           int     `json:"deferred_issues"`  // Issues on ice
-	ReadyIssues              int     `json:"ready_issues"`
-	TombstoneIssues          int     `json:"tombstone_issues"` // Soft-deleted issues
-	PinnedIssues             int     `json:"pinned_issues"`    // Persistent issues
-	EpicsEligibleForClosure  int     `json:"epics_eligible_for_closure"`
-	AverageLeadTime          float64 `json:"average_lead_time_hours"`
+	TotalIssues             int     `json:"total_issues"`
+	OpenIssues              int     `json:"open_issues"`
+	InProgressIssues        int     `json:"in_progress_issues"`
+	ClosedIssues            int     `json:"closed_issues"`
+	BlockedIssues           int     `json:"blocked_issues"`
+	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
+	ReadyIssues             int     `json:"ready_issues"`
+	TombstoneIssues         int     `json:"tombstone_issues"` // Soft-deleted issues
+	PinnedIssues            int     `json:"pinned_issues"`    // Persistent issues
+	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
+	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }
 
 // IssueFilter is used to filter issue queries
 type IssueFilter struct {
-	Status      *Status
-	Priority    *int
-	IssueType   *IssueType
-	Assignee    *string
-	Labels      []string  // AND semantics: issue must have ALL these labels
-	LabelsAny   []string  // OR semantics: issue must have AT LEAST ONE of these labels
-	TitleSearch string
-	IDs         []string  // Filter by specific issue IDs
-	IDPrefix    string    // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
-	Limit       int
+	Status       *Status
+	Priority     *int
+	IssueType    *IssueType
+	Assignee     *string
+	Labels       []string // AND semantics: issue must have ALL these labels
+	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
+	TitleSearch  string
+	IDs          []string // Filter by specific issue IDs
+	IDPrefix     string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
+	SpecIDPrefix string   // Filter by spec_id prefix
+	Limit        int
 
 	// Pattern matching
 	TitleContains       string
 	DescriptionContains string
 	NotesContains       string
-	
+
 	// Date ranges
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
@@ -972,12 +975,12 @@ type IssueFilter struct {
 	UpdatedBefore *time.Time
 	ClosedAfter   *time.Time
 	ClosedBefore  *time.Time
-	
+
 	// Empty/null checks
 	EmptyDescription bool
 	NoAssignee       bool
 	NoLabels         bool
-	
+
 	// Numeric ranges
 	PriorityMin *int
 	PriorityMax *int
@@ -1049,12 +1052,12 @@ func (s SortPolicy) IsValid() bool {
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
 	Status     Status
-	Type       string     // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
+	Type       string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority   *int
 	Assignee   *string
-	Unassigned bool       // Filter for issues with no assignee
-	Labels     []string   // AND semantics: issue must have ALL these labels
-	LabelsAny  []string   // OR semantics: issue must have AT LEAST ONE of these labels
+	Unassigned bool     // Filter for issues with no assignee
+	Labels     []string // AND semantics: issue must have ALL these labels
+	LabelsAny  []string // OR semantics: issue must have AT LEAST ONE of these labels
 	Limit      int
 	SortPolicy SortPolicy
 

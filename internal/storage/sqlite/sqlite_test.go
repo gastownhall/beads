@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func setupTestDB(t *testing.T) (*SQLiteStorage, func()) {
@@ -340,7 +340,7 @@ func (h *createIssuesTestHelper) assertNoAutoGenID(issues []*types.Issue, wantEr
 		if issue == nil {
 			continue
 		}
-		hasCustomID := issue.ID != "" && (issue.ID == "bd-100" || issue.ID == "bd-200" || 
+		hasCustomID := issue.ID != "" && (issue.ID == "bd-100" || issue.ID == "bd-200" ||
 			issue.ID == "bd-999" || issue.ID == "bd-existing")
 		if !hasCustomID && issue.ID != "" {
 			h.t.Errorf("issue %d: ID should not be auto-generated on error, got %s", i, issue.ID)
@@ -355,10 +355,10 @@ func TestCreateIssues(t *testing.T) {
 	h := newCreateIssuesHelper(t, store)
 
 	tests := []struct {
-		name       string
-		issues     []*types.Issue
-		wantErr    bool
-		checkFunc  func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue)
+		name      string
+		issues    []*types.Issue
+		wantErr   bool
+		checkFunc func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue)
 	}{
 		{
 			name:    "empty batch",
@@ -400,21 +400,21 @@ func TestCreateIssues(t *testing.T) {
 			},
 		},
 		{
-		name: "mixed ID assignment - explicit and auto-generated",
-		issues: []*types.Issue{
-		h.newIssue("bd-100", "Custom ID 1", types.StatusOpen, 1, types.TypeTask, nil),
-		h.newIssue("", "Auto ID", types.StatusOpen, 1, types.TypeTask, nil),
-		h.newIssue("bd-200", "Custom ID 2", types.StatusOpen, 1, types.TypeTask, nil),
-		},
-		wantErr: false,
-		checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
-		h.assertCount(issues, 3)
-		h.assertEqual("bd-100", issues[0].ID, "ID")
-		if issues[1].ID == "" || issues[1].ID == "bd-100" || issues[1].ID == "bd-200" {
-		t.Errorf("expected auto-generated ID, got %s", issues[1].ID)
-		}
-		h.assertEqual("bd-200", issues[2].ID, "ID")
-		},
+			name: "mixed ID assignment - explicit and auto-generated",
+			issues: []*types.Issue{
+				h.newIssue("bd-100", "Custom ID 1", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("", "Auto ID", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("bd-200", "Custom ID 2", types.StatusOpen, 1, types.TypeTask, nil),
+			},
+			wantErr: false,
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {
+				h.assertCount(issues, 3)
+				h.assertEqual("bd-100", issues[0].ID, "ID")
+				if issues[1].ID == "" || issues[1].ID == "bd-100" || issues[1].ID == "bd-200" {
+					t.Errorf("expected auto-generated ID, got %s", issues[1].ID)
+				}
+				h.assertEqual("bd-200", issues[2].ID, "ID")
+			},
 		},
 		{
 			name: "validation error - missing title",
@@ -422,36 +422,36 @@ func TestCreateIssues(t *testing.T) {
 				h.newIssue("", "Valid issue", types.StatusOpen, 1, types.TypeTask, nil),
 				h.newIssue("", "", types.StatusOpen, 1, types.TypeTask, nil),
 			},
-			wantErr: true,
+			wantErr:   true,
 			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
-			name:    "validation error - invalid priority",
-			issues:  []*types.Issue{h.newIssue("", "Test", types.StatusOpen, 10, types.TypeTask, nil)},
-			wantErr: true,
+			name:      "validation error - invalid priority",
+			issues:    []*types.Issue{h.newIssue("", "Test", types.StatusOpen, 10, types.TypeTask, nil)},
+			wantErr:   true,
 			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
-			name:    "validation error - invalid status",
-			issues:  []*types.Issue{h.newIssue("", "Test", "invalid", 1, types.TypeTask, nil)},
-			wantErr: true,
+			name:      "validation error - invalid status",
+			issues:    []*types.Issue{h.newIssue("", "Test", "invalid", 1, types.TypeTask, nil)},
+			wantErr:   true,
 			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
-		name: "duplicate ID error",
-		issues: []*types.Issue{
-		h.newIssue("bd-999", "First issue", types.StatusOpen, 1, types.TypeTask, nil),
-		h.newIssue("bd-999", "Second issue", types.StatusOpen, 1, types.TypeTask, nil),
-		},
-		wantErr: true,
-		checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
+			name: "duplicate ID error",
+			issues: []*types.Issue{
+				h.newIssue("bd-999", "First issue", types.StatusOpen, 1, types.TypeTask, nil),
+				h.newIssue("bd-999", "Second issue", types.StatusOpen, 1, types.TypeTask, nil),
+			},
+			wantErr:   true,
+			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
 			name: "closed_at invariant - open status with closed_at",
 			issues: []*types.Issue{
 				h.newIssue("", "Invalid closed_at", types.StatusOpen, 1, types.TypeTask, &time.Time{}),
 			},
-			wantErr: true,
+			wantErr:   true,
 			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
@@ -474,7 +474,7 @@ func TestCreateIssues(t *testing.T) {
 				h.newIssue("", "Valid issue", types.StatusOpen, 1, types.TypeTask, nil),
 				nil,
 			},
-			wantErr: true,
+			wantErr:   true,
 			checkFunc: func(t *testing.T, h *createIssuesTestHelper, issues []*types.Issue) {},
 		},
 		{
@@ -851,8 +851,8 @@ func TestSearchIssues(t *testing.T) {
 
 	// Create test issues
 	issues := []*types.Issue{
-		{Title: "Bug in login", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeBug},
-		{Title: "Feature request", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeFeature},
+		{Title: "Bug in login", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeBug, SpecID: "specs/auth.md"},
+		{Title: "Feature request", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeFeature, SpecID: "specs/ui/flow.md"},
 		{Title: "Another bug", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug},
 	}
 
@@ -974,6 +974,22 @@ func TestSearchIssues(t *testing.T) {
 	}
 	if len(results) > 0 && results[0].ID != issues[0].ID {
 		t.Errorf("Expected issue %s, got %s", issues[0].ID, results[0].ID)
+	}
+
+	// Test spec_id prefix filtering
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{SpecIDPrefix: "specs/"})
+	if err != nil {
+		t.Fatalf("SearchIssues with spec_id prefix failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 issues with spec_id prefix 'specs/', got %d", len(results))
+	}
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{SpecIDPrefix: "specs/ui/"})
+	if err != nil {
+		t.Fatalf("SearchIssues with spec_id prefix failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("Expected 1 issue with spec_id prefix 'specs/ui/', got %d", len(results))
 	}
 
 	// Test whitespace trimming in labels
