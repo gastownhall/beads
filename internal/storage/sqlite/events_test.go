@@ -346,6 +346,99 @@ func TestEventTypesInHistory(t *testing.T) {
 	}
 }
 
+func TestGetAllEventsSinceReturnsAllColumns(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create an issue (prerequisite for events due to FK constraint)
+	issue := &types.Issue{
+		Title:     "Test issue for events",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	err := store.CreateIssue(ctx, issue, "test-user")
+	if err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Insert an event directly with ALL fields populated.
+	// No single code path populates old_value, new_value, AND comment together,
+	// so we use direct SQL to ensure GetAllEventsSince reads every column.
+	oldVal := "old-status"
+	newVal := "new-status"
+	commentText := "status change reason"
+	createdAt := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+
+	_, err = store.db.ExecContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, issue.ID, types.EventStatusChanged, "alice", oldVal, newVal, commentText, createdAt)
+	if err != nil {
+		t.Fatalf("Direct INSERT INTO events failed: %v", err)
+	}
+
+	// Call GetAllEventsSince with sinceID=0 to get all events
+	events, err := store.GetAllEventsSince(ctx, 0)
+	if err != nil {
+		t.Fatalf("GetAllEventsSince failed: %v", err)
+	}
+
+	// Find the event we inserted (it should be the status_changed event)
+	var found *types.Event
+	for _, e := range events {
+		if e.EventType == types.EventStatusChanged {
+			found = e
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatal("Expected to find the status_changed event in GetAllEventsSince results")
+	}
+
+	// Verify ALL fields are correctly populated
+	if found.ID == 0 {
+		t.Error("Expected non-zero ID")
+	}
+	if found.IssueID != issue.ID {
+		t.Errorf("Expected IssueID %q, got %q", issue.ID, found.IssueID)
+	}
+	if found.EventType != types.EventStatusChanged {
+		t.Errorf("Expected EventType %q, got %q", types.EventStatusChanged, found.EventType)
+	}
+	if found.Actor != "alice" {
+		t.Errorf("Expected Actor %q, got %q", "alice", found.Actor)
+	}
+	if found.OldValue == nil {
+		t.Fatal("Expected OldValue to be non-nil")
+	}
+	if *found.OldValue != oldVal {
+		t.Errorf("Expected OldValue %q, got %q", oldVal, *found.OldValue)
+	}
+	if found.NewValue == nil {
+		t.Fatal("Expected NewValue to be non-nil")
+	}
+	if *found.NewValue != newVal {
+		t.Errorf("Expected NewValue %q, got %q", newVal, *found.NewValue)
+	}
+	if found.Comment == nil {
+		t.Fatal("Expected Comment to be non-nil")
+	}
+	if *found.Comment != commentText {
+		t.Errorf("Expected Comment %q, got %q", commentText, *found.Comment)
+	}
+	if found.CreatedAt.IsZero() {
+		t.Error("Expected non-zero CreatedAt")
+	}
+	// Compare time with second precision (SQLite may not store sub-second precision)
+	if found.CreatedAt.Unix() != createdAt.Unix() {
+		t.Errorf("Expected CreatedAt %v, got %v", createdAt, found.CreatedAt)
+	}
+}
+
 func TestAddCommentNotFound(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()

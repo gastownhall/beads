@@ -1463,6 +1463,28 @@ func (m *MemoryStorage) GetEvents(ctx context.Context, issueID string, limit int
 	return events, nil
 }
 
+// GetAllEventsSince returns all events with ID greater than sinceID, ordered by ID ascending.
+func (m *MemoryStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*types.Event
+	for _, issueEvents := range m.events {
+		for _, event := range issueEvents {
+			if event.ID > sinceID {
+				result = append(result, event)
+			}
+		}
+	}
+
+	// Sort by ID ascending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+
+	return result, nil
+}
+
 func (m *MemoryStorage) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

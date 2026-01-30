@@ -123,6 +123,9 @@ func (m *mockStorage) AddComment(ctx context.Context, issueID, actor, comment st
 func (m *mockStorage) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
 	return nil, nil
 }
+func (m *mockStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error) {
+	return nil, nil
+}
 func (m *mockStorage) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
 	return nil, nil
 }
@@ -359,6 +362,7 @@ func TestInterfaceDocumentation(t *testing.T) {
 		// Verify event/comment operations
 		_ = s.AddComment
 		_ = s.GetEvents
+		_ = s.GetAllEventsSince
 		_ = s.AddIssueComment
 		_ = s.GetIssueComments
 		_ = s.GetCommentsForIssues

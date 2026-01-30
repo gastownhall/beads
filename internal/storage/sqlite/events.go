@@ -111,6 +111,51 @@ func (s *SQLiteStorage) GetEvents(ctx context.Context, issueID string, limit int
 	return events, nil
 }
 
+// GetAllEventsSince returns all events with ID greater than sinceID, ordered by ID ascending.
+func (s *SQLiteStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error) {
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
+		FROM events
+		WHERE id > ?
+		ORDER BY id ASC
+	`, sinceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get events since %d: %w", sinceID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var events []*types.Event
+	for rows.Next() {
+		var event types.Event
+		var oldValue, newValue, comment sql.NullString
+
+		err := rows.Scan(
+			&event.ID, &event.IssueID, &event.EventType, &event.Actor,
+			&oldValue, &newValue, &comment, &event.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+
+		if oldValue.Valid {
+			event.OldValue = &oldValue.String
+		}
+		if newValue.Valid {
+			event.NewValue = &newValue.String
+		}
+		if comment.Valid {
+			event.Comment = &comment.String
+		}
+
+		events = append(events, &event)
+	}
+
+	return events, rows.Err()
+}
+
 // GetStatistics returns aggregate statistics
 func (s *SQLiteStorage) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	// Hold read lock during database operations to prevent reconnect() from

@@ -125,6 +125,7 @@ type Storage interface {
 	// Events
 	AddComment(ctx context.Context, issueID, actor, comment string) error
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
+	GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error)
 
 	// Comments
 	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)

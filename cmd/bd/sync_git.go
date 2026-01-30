@@ -240,6 +240,7 @@ func gitCommitBeadsDir(ctx context.Context, message string) error {
 	// that may still be tracked from before they were added to .gitignore
 	syncFiles := []string{
 		filepath.Join(rc.BeadsDir, "issues.jsonl"),
+		filepath.Join(rc.BeadsDir, "events.jsonl"),
 		filepath.Join(rc.BeadsDir, "deletions.jsonl"),
 		filepath.Join(rc.BeadsDir, "interactions.jsonl"),
 		filepath.Join(rc.BeadsDir, "metadata.json"),

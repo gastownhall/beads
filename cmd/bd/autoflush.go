@@ -929,6 +929,14 @@ func flushToJSONLWithState(state flushState) {
 	// Update metadata (hashes, timestamps)
 	updateFlushExportMetadata(ctx, store, jsonlPath)
 
+	// Export events to JSONL (non-fatal, opt-in via config)
+	if config.GetBool("events-export") {
+		eventsPath := filepath.Join(filepath.Dir(jsonlPath), "events.jsonl")
+		if err := exportEventsToJSONL(ctx, store, eventsPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: events export failed: %v\n", err)
+		}
+	}
+
 	recordFlushSuccess()
 }
 
