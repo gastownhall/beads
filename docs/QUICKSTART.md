@@ -15,7 +15,7 @@ go build -o bd ./cmd/bd
 First time in a repository:
 
 ```bash
-# Basic setup
+# Basic setup (prompts for contributor mode)
 bd init
 
 # Dolt backend (version-controlled SQL database)
@@ -33,6 +33,7 @@ bd init --branch beads-sync
 
 The wizard will:
 - Create `.beads/` directory and database
+- **Prompt for your role** (maintainer or contributor) unless a flag is provided
 - Import existing issues from git (if any)
 - Prompt to install git hooks (recommended)
 - Prompt to configure git merge driver (recommended)
@@ -43,6 +44,35 @@ Notes:
 - Dolt backend stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
 - Dolt backend runs **single-process-only**; daemon mode is disabled.
 - Dolt backend **auto-commits** after each successful write command by default (`dolt.auto-commit: on`). Disable with `bd --dolt-auto-commit off ...` or config.
+
+### Role Configuration
+
+During `bd init`, you'll be asked: "Contributing to someone else's repo? [y/N]"
+
+- Answer **Y** if you're contributing to a fork (runs contributor wizard)
+- Answer **N** if you're the maintainer or have push access
+
+This sets `git config beads.role` which determines how beads routes issues:
+
+| Role | Use Case | Issue Storage |
+|------|----------|---------------|
+| `maintainer` | Repo owner, team with push access | In-repo `.beads/` |
+| `contributor` | Fork contributor, OSS contributor | Separate planning repo |
+
+You can also configure manually:
+
+```bash
+# Set as contributor
+git config beads.role contributor
+
+# Set as maintainer
+git config beads.role maintainer
+
+# Check current role
+git config --get beads.role
+```
+
+**Note:** If `beads.role` is not configured, beads falls back to URL-based detection (deprecated). Run `bd doctor` to check configuration status.
 
 ## Your First Issues
 

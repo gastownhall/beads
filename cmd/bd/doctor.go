@@ -382,7 +382,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, multiRepoTypesCheck)
 	// Don't fail overall check for multi-repo types, just informational
 
-	// Check 7c: JSONL integrity (malformed lines, missing IDs)
+	// Check 7c: Role configuration (beads.role)
+	roleCheck := convertDoctorCheck(doctor.CheckBeadsRole(path))
+	result.Checks = append(result.Checks, roleCheck)
+	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
+
+	// Check 7d: JSONL integrity (malformed lines, missing IDs)
 	jsonlIntegrityCheck := convertWithCategory(doctor.CheckJSONLIntegrity(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, jsonlIntegrityCheck)
 	if jsonlIntegrityCheck.Status == statusWarning || jsonlIntegrityCheck.Status == statusError {
@@ -861,4 +866,3 @@ func printDiagnostics(result doctorResult) {
 		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
 	}
 }
-

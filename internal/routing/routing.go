@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,11 +28,11 @@ const (
 // based on git configuration and repository permissions.
 //
 // Detection strategy:
-// 1. Check if user has push access to origin (git remote -v shows write URL)
-// 2. Check git config for beads.role setting (explicit override)
-// 3. Fall back to maintainer for local projects (no remote configured)
+// 1. Check git config for beads.role setting (preferred source of truth)
+// 2. Fall back to URL heuristic with deprecation warning (graceful degradation)
+// 3. Default to maintainer for local projects (no remote configured)
 func DetectUserRole(repoPath string) (UserRole, error) {
-	// First check for explicit role in git config
+	// First check for explicit role in git config (preferred source)
 	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
 	if err == nil {
 		role := strings.TrimSpace(string(output))
@@ -41,16 +42,27 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 		if role == string(Contributor) {
 			return Contributor, nil
 		}
+		// Invalid role value - fall through with warning
 	}
 
+	// Fallback to URL heuristic (deprecated, with warning)
+	// This keeps existing users working while encouraging migration
+	fmt.Fprintln(os.Stderr, "warning: beads.role not configured. Run 'bd init' to set.")
+	return detectFromURL(repoPath), nil
+}
+
+// detectFromURL uses remote URL patterns to infer user role.
+// This heuristic is deprecated - SSH URLs don't reliably indicate write access
+// (e.g., fork contributors often use SSH).
+func detectFromURL(repoPath string) UserRole {
 	// Check push access by examining remote URL
-	output, err = gitCommandRunner(repoPath, "remote", "get-url", "--push", "origin")
+	output, err := gitCommandRunner(repoPath, "remote", "get-url", "--push", "origin")
 	if err != nil {
 		// Fallback to standard fetch URL if push URL fails (some git versions/configs)
 		output, err = gitCommandRunner(repoPath, "remote", "get-url", "origin")
 		if err != nil {
 			// No remote means local project - default to maintainer
-			return Maintainer, nil
+			return Maintainer
 		}
 	}
 
@@ -62,11 +74,11 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 	if strings.HasPrefix(pushURL, "git@") ||
 		strings.HasPrefix(pushURL, "ssh://") ||
 		strings.Contains(pushURL, "@") {
-		return Maintainer, nil
+		return Maintainer
 	}
 
 	// HTTPS without credentials likely means read-only contributor
-	return Contributor, nil
+	return Contributor
 }
 
 // RoutingConfig defines routing rules for issues

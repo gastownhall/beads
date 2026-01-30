@@ -20,6 +20,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,24 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 )
+
+// UserRole represents the user's relationship to a repository.
+// Used to determine appropriate behaviors for fork contributors vs maintainers.
+type UserRole string
+
+// Role constants for user relationship to repository.
+const (
+	// Contributor indicates the user is contributing to a fork (not the maintainer).
+	// BEADS_DIR redirection implies contributor role automatically.
+	Contributor UserRole = "contributor"
+
+	// Maintainer indicates the user owns/maintains the repository.
+	Maintainer UserRole = "maintainer"
+)
+
+// ErrRoleNotConfigured is returned when beads.role is not set in git config.
+// This signals that the init prompt should be shown to configure the role.
+var ErrRoleNotConfigured = errors.New("beads.role not configured in git config")
 
 // RepoContext holds resolved repository paths for beads operations.
 //
@@ -339,6 +358,76 @@ func (rc *RepoContext) Validate() error {
 	}
 	if _, err := os.Stat(rc.RepoRoot); os.IsNotExist(err) {
 		return fmt.Errorf("RepoRoot no longer exists: %s", rc.RepoRoot)
+	}
+	return nil
+}
+
+// GitOutput runs a git command in the beads repository and returns its output.
+//
+// This is a convenience wrapper around GitCmd that captures stdout.
+// Returns an error if the command fails or produces no output.
+//
+// Pattern:
+//
+//	output, err := rc.GitOutput(ctx, "config", "--get", "beads.role")
+//	if err != nil {
+//	    // Config key not set or git error
+//	}
+func (rc *RepoContext) GitOutput(ctx context.Context, args ...string) (string, error) {
+	cmd := rc.GitCmd(ctx, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+// Role reads beads.role from git config (fresh each call, ~1ms).
+//
+// If BEADS_DIR is set (IsRedirected), returns Contributor implicitly
+// because external repo mode always indicates a contributor workflow.
+//
+// Returns ("", false) if role is not configured and not redirected.
+// The bool return indicates whether a role was determined.
+func (rc *RepoContext) Role() (UserRole, bool) {
+	// BEADS_DIR implies contributor (external repo mode)
+	if rc.IsRedirected {
+		return Contributor, true
+	}
+
+	output, err := rc.GitOutput(context.Background(), "config", "--get", "beads.role")
+	if err != nil {
+		return "", false // Not configured
+	}
+	return UserRole(strings.TrimSpace(output)), true
+}
+
+// IsContributor returns true if user is configured as contributor.
+//
+// This includes both explicit configuration (git config beads.role contributor)
+// and implicit detection (BEADS_DIR redirect active).
+func (rc *RepoContext) IsContributor() bool {
+	role, ok := rc.Role()
+	return ok && role == Contributor
+}
+
+// IsMaintainer returns true if user is configured as maintainer.
+//
+// Only returns true for explicit configuration (git config beads.role maintainer).
+// BEADS_DIR redirect always implies contributor, never maintainer.
+func (rc *RepoContext) IsMaintainer() bool {
+	role, ok := rc.Role()
+	return ok && role == Maintainer
+}
+
+// RequireRole returns error if role not configured (forces init prompt).
+//
+// Use this at command entry points that need role-aware behavior.
+// If BEADS_DIR is set, role is implicitly determined (contributor),
+// so this will not return an error.
+func (rc *RepoContext) RequireRole() error {
+	if _, ok := rc.Role(); !ok {
+		return ErrRoleNotConfigured
 	}
 	return nil
 }

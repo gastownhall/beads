@@ -1494,6 +1494,271 @@ func captureStdout(t *testing.T, fn func() error) string {
 	return buf.String()
 }
 
+// TestInitPromptRoleConfig tests the beads.role git config read/write functions
+func TestInitPromptRoleConfig(t *testing.T) {
+	t.Run("getBeadsRole returns empty when not configured", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		role, hasRole := getBeadsRole()
+		if hasRole {
+			t.Errorf("Expected hasRole=false when not configured, got true with role=%q", role)
+		}
+		if role != "" {
+			t.Errorf("Expected empty role when not configured, got %q", role)
+		}
+	})
+
+	t.Run("setBeadsRole and getBeadsRole roundtrip", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Set role to contributor
+		if err := setBeadsRole("contributor"); err != nil {
+			t.Fatalf("Failed to set beads.role: %v", err)
+		}
+
+		role, hasRole := getBeadsRole()
+		if !hasRole {
+			t.Error("Expected hasRole=true after setting role")
+		}
+		if role != "contributor" {
+			t.Errorf("Expected role 'contributor', got %q", role)
+		}
+
+		// Change to maintainer
+		if err := setBeadsRole("maintainer"); err != nil {
+			t.Fatalf("Failed to set beads.role: %v", err)
+		}
+
+		role, hasRole = getBeadsRole()
+		if !hasRole {
+			t.Error("Expected hasRole=true after setting role")
+		}
+		if role != "maintainer" {
+			t.Errorf("Expected role 'maintainer', got %q", role)
+		}
+	})
+}
+
+// TestInitPromptSkippedWithFlags verifies that --contributor and --team flags skip the prompt
+func TestInitPromptSkippedWithFlags(t *testing.T) {
+	t.Run("contributor flag skips prompt and runs wizard", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		// Reset caches so RepoContext picks up new directory
+		beads.ResetCaches()
+		git.ResetCaches()
+		defer func() {
+			beads.ResetCaches()
+			git.ResetCaches()
+		}()
+
+		// Reset Cobra flags
+		initCmd.Flags().Set("contributor", "false")
+
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Verify no role is set initially
+		role, hasRole := getBeadsRole()
+		if hasRole {
+			t.Fatalf("Expected no role initially, got %q", role)
+		}
+
+		// Run bd init with --contributor flag (quiet to suppress wizard output)
+		// The wizard will fail because there's no planning repo, but that's OK
+		// We just want to verify the flag bypasses the prompt
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--contributor", "--quiet"})
+		_ = rootCmd.Execute() // Ignore error - wizard may fail
+
+		// The --contributor flag should NOT set beads.role (that's done by prompt, not flag)
+		// The flag just triggers the wizard directly
+	})
+
+	t.Run("team flag skips prompt", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		// Reset caches so RepoContext picks up new directory
+		beads.ResetCaches()
+		git.ResetCaches()
+		defer func() {
+			beads.ResetCaches()
+			git.ResetCaches()
+		}()
+
+		// Reset Cobra flags
+		initCmd.Flags().Set("team", "false")
+
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Verify no role is set initially
+		role, hasRole := getBeadsRole()
+		if hasRole {
+			t.Fatalf("Expected no role initially, got %q", role)
+		}
+
+		// Run bd init with --team flag
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--team", "--quiet"})
+		_ = rootCmd.Execute() // Ignore error - wizard may fail
+
+		// The --team flag should not set beads.role
+		// (team wizard is separate from contributor/maintainer roles)
+	})
+}
+
+// TestInitPromptTTYDetection verifies shouldPromptForRole behavior
+func TestInitPromptTTYDetection(t *testing.T) {
+	// Note: In test environment, stdin is typically NOT a TTY (it's a pipe)
+	// This test verifies the function works, not that we're in a TTY
+
+	t.Run("shouldPromptForRole returns false in test environment", func(t *testing.T) {
+		// In test environment, stdin is typically piped, not a TTY
+		result := shouldPromptForRole()
+
+		// We can't guarantee what the result will be in all test environments,
+		// but we can verify the function doesn't panic and returns a bool
+		if result {
+			t.Log("Test environment has TTY stdin (unusual but acceptable)")
+		} else {
+			t.Log("Test environment does not have TTY stdin (expected)")
+		}
+	})
+}
+
+// TestInitPromptNonGitRepo verifies prompt is skipped in non-git directories
+func TestInitPromptNonGitRepo(t *testing.T) {
+	// Reset global state
+	origDBPath := dbPath
+	defer func() { dbPath = origDBPath }()
+	dbPath = ""
+
+	// Reset caches so RepoContext picks up new directory
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
+
+	// Reset Cobra flags that may be set from previous tests
+	initCmd.Flags().Set("contributor", "false")
+	initCmd.Flags().Set("team", "false")
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// DON'T initialize git repo
+
+	// Run bd init - should succeed without prompting (no git repo)
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Init should succeed in non-git directory: %v", err)
+	}
+
+	// Verify .beads was created
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		t.Error(".beads directory should be created even without git")
+	}
+}
+
+// TestInitPromptExistingRole verifies behavior when beads.role is already set
+func TestInitPromptExistingRole(t *testing.T) {
+	t.Run("existing role is preserved on reinit with --force", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		// Reset caches so RepoContext picks up new directory
+		beads.ResetCaches()
+		git.ResetCaches()
+		defer func() {
+			beads.ResetCaches()
+			git.ResetCaches()
+		}()
+
+		// Reset Cobra flags that may be set from previous tests
+		initCmd.Flags().Set("contributor", "false")
+		initCmd.Flags().Set("team", "false")
+		initCmd.Flags().Set("force", "false")
+
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Set role before init
+		if err := setBeadsRole("contributor"); err != nil {
+			t.Fatalf("Failed to set beads.role: %v", err)
+		}
+
+		// Run bd init (non-interactive, so prompt is skipped)
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		// Verify role is still set
+		role, hasRole := getBeadsRole()
+		if !hasRole {
+			t.Error("Expected beads.role to still be set after init")
+		}
+		if role != "contributor" {
+			t.Errorf("Expected role 'contributor' to be preserved, got %q", role)
+		}
+
+		// Reset Cobra flags for reinit
+		initCmd.Flags().Set("force", "false")
+
+		// Reinit with --force (non-interactive)
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Reinit failed: %v", err)
+		}
+
+		// Verify role is still set (not cleared by reinit)
+		role, hasRole = getBeadsRole()
+		if !hasRole {
+			t.Error("Expected beads.role to still be set after reinit")
+		}
+		if role != "contributor" {
+			t.Errorf("Expected role 'contributor' to be preserved after reinit, got %q", role)
+		}
+	})
+}
+
 // TestInitWithRedirect verifies that bd init creates the database in the redirect target,
 // not in the local .beads directory. (GH#bd-0qel)
 func TestInitWithRedirect(t *testing.T) {

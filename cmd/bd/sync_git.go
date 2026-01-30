@@ -440,6 +440,46 @@ func gitPull(ctx context.Context, configuredRemote string) error {
 	return nil
 }
 
+// isPushPermissionDenied checks if git push output indicates a permission error.
+// This is provider-agnostic and matches common error patterns from GitHub, GitLab,
+// Bitbucket, and other Git hosting providers.
+func isPushPermissionDenied(output string) bool {
+	patterns := []string{
+		"permission denied",
+		"403",
+		"not allowed to push",
+		"you are not allowed to push",
+		"could not read from remote",
+		"remote: permission to",
+		"fatal: unable to access",
+		"authentication failed",
+		"the requested url returned error: 403",
+		"permission to", // GitHub SSH format: "ERROR: Permission to X denied to Y"
+		"denied to",     // Catches "Permission to X denied to Y" patterns
+	}
+	lower := strings.ToLower(output)
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// showPushPermissionGuidance prints contributor setup guidance when push fails due to permissions.
+func showPushPermissionGuidance() {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Push access denied.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "You don't have push access to this repository.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "If you're contributing to someone else's repo:")
+	fmt.Fprintln(os.Stderr, "  git config beads.role contributor")
+	fmt.Fprintln(os.Stderr, "  bd init --contributor")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "See: docs/ROUTING.md for contributor setup")
+}
+
 // gitPush pushes to the current branch's upstream in the beads repository.
 // Returns nil if no remote configured (local-only mode).
 // If configuredRemote is non-empty, pushes to that remote explicitly.
@@ -469,6 +509,10 @@ func gitPush(ctx context.Context, configuredRemote string) error {
 		cmd := rc.GitCmd(ctx, "push", configuredRemote, branch) //nolint:gosec // G204: configuredRemote from bd config
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			outputStr := string(output)
+			if isPushPermissionDenied(outputStr) {
+				showPushPermissionGuidance()
+			}
 			return fmt.Errorf("git push failed: %w\n%s", err, output)
 		}
 		return nil
@@ -478,6 +522,10 @@ func gitPush(ctx context.Context, configuredRemote string) error {
 	cmd := rc.GitCmd(ctx, "push")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		outputStr := string(output)
+		if isPushPermissionDenied(outputStr) {
+			showPushPermissionGuidance()
+		}
 		return fmt.Errorf("git push failed: %w\n%s", err, output)
 	}
 	return nil
