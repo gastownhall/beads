@@ -558,9 +558,10 @@ async def test_stats_tool(mcp_client):
     result = await mcp_client.call_tool("stats", {})
     stats = json.loads(result.content[0].text)
 
-    assert "total_issues" in stats
-    assert "open_issues" in stats
-    assert stats["total_issues"] >= 2
+    assert "summary" in stats
+    assert "total_issues" in stats["summary"]
+    assert "open_issues" in stats["summary"]
+    assert stats["summary"]["total_issues"] >= 2
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from beads_mcp.models import BlockedIssue, Issue, Stats
+from beads_mcp.models import BlockedIssue, Issue, Stats, StatsSummary
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
@@ -426,13 +426,16 @@ async def test_update_issue_routes_open_to_reopen(sample_issue):
 async def test_beads_stats():
     """Test beads_stats tool."""
     stats_data = Stats(
-        total_issues=10,
-        open_issues=5,
-        in_progress_issues=2,
-        closed_issues=3,
-        blocked_issues=1,
-        ready_issues=4,
-        average_lead_time_hours=24.5,
+        summary=StatsSummary(
+            total_issues=10,
+            open_issues=5,
+            in_progress_issues=2,
+            closed_issues=3,
+            blocked_issues=1,
+            ready_issues=4,
+            average_lead_time_hours=24.5,
+        ),
+        recent_activity=None,
     )
     mock_client = AsyncMock()
     mock_client.stats = AsyncMock(return_value=stats_data)
@@ -440,8 +443,8 @@ async def test_beads_stats():
     with patch("beads_mcp.tools._get_client", return_value=mock_client):
         result = await beads_stats()
 
-    assert result.total_issues == 10
-    assert result.open_issues == 5
+    assert result.summary.total_issues == 10
+    assert result.summary.open_issues == 5
     mock_client.stats.assert_called_once()
 
 

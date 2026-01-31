@@ -247,16 +247,39 @@ class ShowIssueParams(BaseModel):
     issue_id: str
 
 
-class Stats(BaseModel):
-    """Beads task statistics."""
+class StatsSummary(BaseModel):
+    """Summary statistics from bd stats."""
 
     total_issues: int
     open_issues: int
     in_progress_issues: int
     closed_issues: int
     blocked_issues: int
+    deferred_issues: int = 0
     ready_issues: int
+    tombstone_issues: int = 0
+    pinned_issues: int = 0
+    epics_eligible_for_closure: int = 0
     average_lead_time_hours: float
+
+
+class RecentActivity(BaseModel):
+    """Recent activity from bd stats."""
+
+    hours_tracked: int = 24
+    commit_count: int = 0
+    issues_created: int = 0
+    issues_closed: int = 0
+    issues_updated: int = 0
+    issues_reopened: int = 0
+    total_changes: int = 0
+
+
+class Stats(BaseModel):
+    """Beads task statistics matching bd stats --json output."""
+
+    summary: StatsSummary
+    recent_activity: RecentActivity | None = None
 
 
 class BlockedIssue(Issue):
