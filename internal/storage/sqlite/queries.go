@@ -353,6 +353,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Time-based scheduling fields (GH#820)
 	var dueAt sql.NullTime
 	var deferUntil sql.NullTime
+	// Custom metadata field (GH#1406)
+	var metadata sql.NullString
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -367,7 +369,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
 		       event_kind, actor, target, payload,
-		       due_at, defer_until
+		       due_at, defer_until, metadata
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -381,7 +383,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
 		&eventKind, &actor, &target, &payload,
-		&dueAt, &deferUntil,
+		&dueAt, &deferUntil, &metadata,
 	)
 
 	if err == sql.ErrNoRows {
@@ -517,6 +519,10 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if deferUntil.Valid {
 		issue.DeferUntil = &deferUntil.Time
+	}
+	// Custom metadata field (GH#1406)
+	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
+		issue.Metadata = []byte(metadata.String)
 	}
 
 	// Fetch labels for this issue
@@ -805,6 +811,8 @@ var allowedUpdateFields = map[string]bool{
 	// Gate fields (bd-z6kw: support await_id updates for gate discovery)
 	"await_id": true,
 	"waiters":  true,
+	// Custom metadata field (GH#1406)
+	"metadata": true,
 }
 
 // validatePriority validates a priority value
@@ -2022,7 +2030,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
-		       due_at, defer_until
+		       due_at, defer_until, metadata
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

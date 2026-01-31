@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS issues (
     quality_score DOUBLE,
     -- Federation source system field
     source_system VARCHAR(255) DEFAULT '',
+    -- Custom metadata field (GH#1406)
+    metadata JSON DEFAULT (JSON_OBJECT()),
     -- Source repo for multi-repo
     source_repo VARCHAR(512) DEFAULT '',
     -- Close reason

@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS issues (
     quality_score REAL,
     -- Federation source system field
     source_system TEXT DEFAULT '',
+    -- Custom metadata field (GH#1406)
+    metadata TEXT NOT NULL DEFAULT '{}',
     -- Event fields (bd-ecmd)
     event_kind TEXT DEFAULT '',
     actor TEXT DEFAULT '',

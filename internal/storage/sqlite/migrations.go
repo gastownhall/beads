@@ -57,6 +57,7 @@ var migrationsList = []Migration{
 	{"work_type_column", migrations.MigrateWorkTypeColumn},
 	{"source_system_column", migrations.MigrateSourceSystemColumn},
 	{"quality_score_column", migrations.MigrateQualityScoreColumn},
+	{"metadata_column", migrations.MigrateMetadataColumn},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -121,6 +122,7 @@ func getMigrationDescription(name string) string {
 		"work_type_column":             "Adds work_type column for work assignment model (mutex vs open_competition per Decision 006)",
 		"source_system_column":         "Adds source_system column for federation adapter tracking",
 		"quality_score_column":         "Adds quality_score column for aggregate quality (0.0-1.0) set by Refineries",
+		"metadata_column":              "Adds metadata column for arbitrary JSON data (tool annotations, file lists) per GH#1406",
 	}
 
 	if desc, ok := descriptions[name]; ok {

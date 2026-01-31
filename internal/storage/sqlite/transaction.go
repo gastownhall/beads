@@ -344,7 +344,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
-		       due_at, defer_until
+		       due_at, defer_until, metadata
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -1378,7 +1378,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
-		       due_at, defer_until
+		       due_at, defer_until, metadata
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1446,6 +1446,8 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	// Time-based scheduling fields
 	var dueAt sql.NullTime
 	var deferUntil sql.NullTime
+	// Custom metadata field (GH#1406)
+	var metadata sql.NullString
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1457,7 +1459,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
-		&dueAt, &deferUntil,
+		&dueAt, &deferUntil, &metadata,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1575,6 +1577,10 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	}
 	if deferUntil.Valid {
 		issue.DeferUntil = &deferUntil.Time
+	}
+	// Custom metadata field (GH#1406)
+	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
+		issue.Metadata = []byte(metadata.String)
 	}
 
 	return &issue, nil

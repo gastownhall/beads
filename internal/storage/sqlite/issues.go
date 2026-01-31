@@ -55,8 +55,8 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 			sender, ephemeral, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
-			due_at, defer_until
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			due_at, defer_until, metadata
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -68,7 +68,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
-		issue.DueAt, issue.DeferUntil,
+		issue.DueAt, issue.DeferUntil, string(issue.Metadata),
 	)
 	if err != nil {
 		// INSERT OR IGNORE should handle duplicates, but driver may still return error
@@ -117,8 +117,8 @@ func insertIssueStrict(ctx context.Context, conn *sql.Conn, issue *types.Issue) 
 			sender, ephemeral, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
-			due_at, defer_until
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			due_at, defer_until, metadata
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -130,7 +130,7 @@ func insertIssueStrict(ctx context.Context, conn *sql.Conn, issue *types.Issue) 
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
-		issue.DueAt, issue.DeferUntil,
+		issue.DueAt, issue.DeferUntil, string(issue.Metadata),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert issue: %w", err)
@@ -149,8 +149,8 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			sender, ephemeral, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
-			due_at, defer_until
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			due_at, defer_until, metadata
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -191,7 +191,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
-			issue.DueAt, issue.DeferUntil,
+			issue.DueAt, issue.DeferUntil, string(issue.Metadata),
 		)
 		if err != nil {
 			// INSERT OR IGNORE should handle duplicates, but driver may still return error
@@ -219,8 +219,8 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			sender, ephemeral, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
-			due_at, defer_until
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			due_at, defer_until, metadata
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -261,7 +261,7 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
-			issue.DueAt, issue.DeferUntil,
+			issue.DueAt, issue.DeferUntil, string(issue.Metadata),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)

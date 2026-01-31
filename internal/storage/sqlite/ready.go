@@ -169,7 +169,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,
-		i.due_at, i.defer_until
+		i.due_at, i.defer_until, i.metadata
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -783,7 +783,7 @@ func (s *SQLiteStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssu
 		       i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,
-		       i.due_at, i.defer_until
+		       i.due_at, i.defer_until, i.metadata
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
 		WHERE d.depends_on_id = ?
