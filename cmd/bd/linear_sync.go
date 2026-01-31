@@ -211,7 +211,8 @@ func doPullFromLinear(ctx context.Context, dryRun bool, state string, skipLinear
 // doPushToLinear exports issues to Linear using the GraphQL API.
 // typeFilters includes only issues matching these types (empty means all).
 // excludeTypes excludes issues matching these types.
-func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRefs bool, forceUpdateIDs map[string]bool, skipUpdateIDs map[string]bool, typeFilters []string, excludeTypes []string) (*linear.PushStats, error) {
+// includeEphemeral: if false (default), ephemeral issues (wisps, etc.) are excluded from push.
+func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRefs bool, forceUpdateIDs map[string]bool, skipUpdateIDs map[string]bool, typeFilters []string, excludeTypes []string, includeEphemeral bool) (*linear.PushStats, error) {
 	stats := &linear.PushStats{}
 
 	client, err := getLinearClient(ctx)
@@ -219,7 +220,11 @@ func doPushToLinear(ctx context.Context, dryRun bool, createOnly bool, updateRef
 		return stats, fmt.Errorf("failed to create Linear client: %w", err)
 	}
 
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	filter := types.IssueFilter{}
+	if !includeEphemeral {
+		filter.Ephemeral = &includeEphemeral
+	}
+	allIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return stats, fmt.Errorf("failed to get local issues: %w", err)
 	}

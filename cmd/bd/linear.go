@@ -83,8 +83,9 @@ Modes:
   (no flags)     Bidirectional sync: pull then push, with conflict resolution
 
 Type Filtering (--push only):
-  --type task,feature    Only sync issues of these types
-  --exclude-type wisp    Exclude issues of these types
+  --type task,feature       Only sync issues of these types
+  --exclude-type wisp       Exclude issues of these types
+  --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
@@ -138,6 +139,7 @@ func init() {
 	linearSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
+	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -156,6 +158,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	state, _ := cmd.Flags().GetString("state")
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
+	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -324,7 +327,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 			fmt.Println("→ Pushing issues to Linear...")
 		}
 
-		pushStats, err := doPushToLinear(ctx, dryRun, createOnly, updateRefs, forceUpdateIDs, skipUpdateIDs, typeFilters, excludeTypes)
+		pushStats, err := doPushToLinear(ctx, dryRun, createOnly, updateRefs, forceUpdateIDs, skipUpdateIDs, typeFilters, excludeTypes, includeEphemeral)
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()

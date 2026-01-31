@@ -1220,7 +1220,7 @@ func TestDoPushToLinearPreferLocalForcesUpdate(t *testing.T) {
 	})
 
 	forceUpdateIDs := map[string]bool{issue.ID: true}
-	stats, err := doPushToLinear(ctx, false, false, true, forceUpdateIDs, nil, nil, nil)
+	stats, err := doPushToLinear(ctx, false, false, true, forceUpdateIDs, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("doPushToLinear failed: %v", err)
 	}
@@ -1232,6 +1232,73 @@ func TestDoPushToLinearPreferLocalForcesUpdate(t *testing.T) {
 	}
 	if stats.Skipped != 0 {
 		t.Fatalf("expected Skipped=0, got %d", stats.Skipped)
+	}
+}
+
+func TestDoPushToLinearIncludeEphemeralFlag(t *testing.T) {
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := testStore.SetConfig(ctx, "linear.api_key", "test-api-key"); err != nil {
+		t.Fatalf("SetConfig linear.api_key failed: %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "linear.team_id", "12345678-1234-1234-1234-123456789abc"); err != nil {
+		t.Fatalf("SetConfig linear.team_id failed: %v", err)
+	}
+
+	now := time.Now()
+	persistent := &types.Issue{
+		Title:      "Persistent issue",
+		Priority:   2,
+		IssueType:  types.TypeTask,
+		Status:     types.StatusOpen,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Ephemeral:  false,
+	}
+	if err := testStore.CreateIssue(ctx, persistent, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue persistent failed: %v", err)
+	}
+
+	ephemeral := &types.Issue{
+		Title:      "Ephemeral wisp",
+		Priority:   2,
+		IssueType:  types.TypeTask,
+		Status:     types.StatusOpen,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Ephemeral:  true,
+	}
+	if err := testStore.CreateIssue(ctx, ephemeral, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue ephemeral failed: %v", err)
+	}
+
+	origStore := store
+	origActor := actor
+	store = testStore
+	actor = "test-actor"
+	t.Cleanup(func() {
+		store = origStore
+		actor = origActor
+	})
+
+	// Default (includeEphemeral=false): only non-ephemeral issues are pushed
+	statsExclude, err := doPushToLinear(ctx, true, false, false, nil, nil, nil, nil, false)
+	if err != nil {
+		t.Fatalf("doPushToLinear includeEphemeral=false failed: %v", err)
+	}
+	if statsExclude.Created != 1 {
+		t.Errorf("includeEphemeral=false: expected Created=1 (persistent only), got %d", statsExclude.Created)
+	}
+
+	// includeEphemeral=true: both issues are pushed
+	statsInclude, err := doPushToLinear(ctx, true, false, false, nil, nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("doPushToLinear includeEphemeral=true failed: %v", err)
+	}
+	if statsInclude.Created != 2 {
+		t.Errorf("includeEphemeral=true: expected Created=2 (persistent + ephemeral), got %d", statsInclude.Created)
 	}
 }
 
