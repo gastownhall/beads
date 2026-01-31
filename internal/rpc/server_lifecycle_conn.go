@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,8 +13,21 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
+
+// isPermissionUnsupportedError checks if an error indicates the filesystem
+// doesn't support permission changes on sockets (e.g., EINVAL on virtio-fs)
+func isPermissionUnsupportedError(err error) bool {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		// EINVAL: filesystem doesn't support chmod on sockets
+		// ENOTSUP/EOPNOTSUPP: operation not supported
+		return errno == syscall.EINVAL || errno == syscall.ENOTSUP
+	}
+	return false
+}
 
 // Start starts the RPC server and listens for connections
 func (s *Server) Start(_ context.Context) error {
@@ -32,10 +46,18 @@ func (s *Server) Start(_ context.Context) error {
 	s.listener = listener
 
 	// Set socket permissions to 0600 for security (owner only)
+	// Some filesystems (e.g., virtio-fs in containers) don't support chmod on sockets,
+	// returning EINVAL. This is non-fatal since the socket is already protected by
+	// its parent directory permissions and umask.
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(s.socketPath, 0600); err != nil {
-			_ = listener.Close()
-			return fmt.Errorf("failed to set socket permissions: %w", err)
+			// EINVAL typically means the filesystem doesn't support chmod on sockets
+			if !isPermissionUnsupportedError(err) {
+				_ = listener.Close()
+				return fmt.Errorf("failed to set socket permissions: %w", err)
+			}
+			// Log but continue - socket is still usable
+			fmt.Fprintf(os.Stderr, "Warning: could not set socket permissions (filesystem limitation): %v\n", err)
 		}
 	}
 
