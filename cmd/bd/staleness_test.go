@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -79,7 +80,12 @@ func TestEnsureDatabaseFresh_AutoImportsOnStale(t *testing.T) {
 	rootCtx = ctx
 	storeActive = true
 
+	// Ensure sync mode is git-portable so JSONL staleness check runs
+	oldSyncMode := config.GetString("sync.mode")
+	config.Set("sync.mode", "git-portable")
+
 	defer func() {
+		config.Set("sync.mode", oldSyncMode)
 		noAutoImport = oldNoAutoImport
 		autoImportEnabled = oldAutoImportEnabled
 		allowStale = oldAllowStale
@@ -171,7 +177,12 @@ func TestEnsureDatabaseFresh_NoAutoImportFlag(t *testing.T) {
 	rootCtx = ctx
 	storeActive = true
 
+	// Ensure sync mode is git-portable so JSONL staleness check runs
+	oldSyncMode := config.GetString("sync.mode")
+	config.Set("sync.mode", "git-portable")
+
 	defer func() {
+		config.Set("sync.mode", oldSyncMode)
 		noAutoImport = oldNoAutoImport
 		autoImportEnabled = oldAutoImportEnabled
 		allowStale = oldAllowStale
@@ -355,7 +366,12 @@ func TestEnsureDatabaseFresh_FreshDB(t *testing.T) {
 	rootCtx = ctx
 	storeActive = true
 
+	// Ensure sync mode is git-portable so JSONL staleness check runs
+	oldSyncMode := config.GetString("sync.mode")
+	config.Set("sync.mode", "git-portable")
+
 	defer func() {
+		config.Set("sync.mode", oldSyncMode)
 		noAutoImport = oldNoAutoImport
 		autoImportEnabled = oldAutoImportEnabled
 		allowStale = oldAllowStale
@@ -369,5 +385,69 @@ func TestEnsureDatabaseFresh_FreshDB(t *testing.T) {
 	err = ensureDatabaseFresh(ctx)
 	if err != nil {
 		t.Errorf("ensureDatabaseFresh() should have returned nil for fresh DB: %v", err)
+	}
+}
+
+// TestEnsureDatabaseFresh_DoltNativeSkipsCheck verifies that in dolt-native mode,
+// ensureDatabaseFresh skips the JSONL staleness check entirely. Dolt is the source
+// of truth in this mode, so JSONL divergence is expected and should not block reads.
+func TestEnsureDatabaseFresh_DoltNativeSkipsCheck(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create beads dir: %v", err)
+	}
+
+	testDBPath := filepath.Join(beadsDir, "bd.db")
+
+	// Create database
+	testStore, err := sqlite.New(ctx, testDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Set prefix
+	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set prefix: %v", err)
+	}
+
+	// Save and set global state
+	oldNoAutoImport := noAutoImport
+	oldAutoImportEnabled := autoImportEnabled
+	oldStore := store
+	oldDbPath := dbPath
+	oldRootCtx := rootCtx
+	oldStoreActive := storeActive
+	oldAllowStale := allowStale
+
+	noAutoImport = false
+	autoImportEnabled = true
+	allowStale = false
+	store = testStore
+	dbPath = testDBPath
+	rootCtx = ctx
+	storeActive = true
+
+	// Set dolt-native mode — staleness check should be skipped entirely
+	oldSyncMode := config.GetString("sync.mode")
+	config.Set("sync.mode", "dolt-native")
+
+	defer func() {
+		config.Set("sync.mode", oldSyncMode)
+		noAutoImport = oldNoAutoImport
+		autoImportEnabled = oldAutoImportEnabled
+		allowStale = oldAllowStale
+		store = oldStore
+		dbPath = oldDbPath
+		rootCtx = oldRootCtx
+		storeActive = oldStoreActive
+	}()
+
+	// Call ensureDatabaseFresh — should return nil without checking JSONL
+	err = ensureDatabaseFresh(ctx)
+	if err != nil {
+		t.Errorf("ensureDatabaseFresh() should skip check in dolt-native mode: %v", err)
 	}
 }

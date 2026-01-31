@@ -28,6 +28,12 @@ func ensureDatabaseFresh(ctx context.Context) error {
 		return nil
 	}
 
+	// In dolt-native mode, Dolt is the source of truth and JSONL is irrelevant.
+	// Skip the staleness check entirely to avoid blocking reads due to stale JSONL.
+	if !ShouldExportJSONL(ctx, store) {
+		return nil
+	}
+
 	// Check if database is stale
 	isStale, err := autoimport.CheckStaleness(ctx, store, dbPath)
 	if err != nil {
