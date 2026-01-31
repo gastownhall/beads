@@ -1,6 +1,8 @@
 package beads
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -898,4 +900,128 @@ func TestGitOutput(t *testing.T) {
 	if err == nil {
 		t.Error("GitOutput() returned nil error for non-existent key, want error")
 	}
+}
+
+// TestGitCmd_WorktreeContext tests that GitCmd correctly operates on the main repo
+// even when running from a git worktree context (GH#2538).
+func TestGitCmd_WorktreeContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	// Create main repo with initial commit (worktrees require at least one commit)
+	mainRepo := t.TempDir()
+	if err := initGitRepoWithCommit(mainRepo); err != nil {
+		t.Fatalf("failed to init main repo: %v", err)
+	}
+
+	// Create .beads directory with required files
+	beadsDir := filepath.Join(mainRepo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	testFile := filepath.Join(beadsDir, "test.jsonl")
+	if err := os.WriteFile(testFile, []byte(`{"id":"test-1"}`), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	// Create a git worktree
+	worktreeDir := filepath.Join(t.TempDir(), "worktree")
+	branchCmd := exec.Command("git", "branch", "test-worktree-branch")
+	branchCmd.Dir = mainRepo
+	if err := branchCmd.Run(); err != nil {
+		t.Fatalf("failed to create branch: %v", err)
+	}
+	wtCmd := exec.Command("git", "worktree", "add", worktreeDir, "test-worktree-branch")
+	wtCmd.Dir = mainRepo
+	output, err := wtCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to create worktree: %v\nOutput: %s", err, output)
+	}
+
+	// Save and restore working directory
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(originalWd) })
+
+	// Change to worktree directory to simulate running from worktree context
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("failed to chdir to worktree: %v", err)
+	}
+	git.ResetCaches()
+
+	// Get RepoContext - should resolve to main repo's .beads
+	rc, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+
+	expectedBeadsDir := resolveSymlinks(beadsDir)
+	if rc.BeadsDir != expectedBeadsDir {
+		t.Errorf("BeadsDir = %q, want %q", rc.BeadsDir, expectedBeadsDir)
+	}
+
+	// GH#2538: The key test - use GitCmd to add a file in the main repo
+	// This should work even though we're "running" from the worktree
+	ctx := context.Background()
+	// Resolve symlinks on testFile (macOS /tmp -> /private/var) to match rc.RepoRoot
+	resolvedTestFile := resolveSymlinks(testFile)
+	relPath, err := filepath.Rel(rc.RepoRoot, resolvedTestFile)
+	if err != nil {
+		t.Fatalf("failed to get relative path: %v", err)
+	}
+
+	addCmd := rc.GitCmd(ctx, "add", relPath)
+	addOutput, err := addCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitCmd git add failed: %v\nOutput: %s", err, addOutput)
+	}
+
+	// Verify the file was staged
+	statusCmd := rc.GitCmd(ctx, "status", "--porcelain", relPath)
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		t.Fatalf("git status failed: %v", err)
+	}
+	if string(statusOutput) == "" {
+		t.Error("file was not staged - git status shows no changes")
+	}
+}
+
+// initGitRepoWithCommit creates a git repo with an initial commit.
+func initGitRepoWithCommit(dir string) error {
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git %v failed: %w", args[1:], err)
+		}
+	}
+	readmeFile := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test Repo"), 0644); err != nil {
+		return err
+	}
+	addCmd := exec.Command("git", "add", "README.md")
+	addCmd.Dir = dir
+	if err := addCmd.Run(); err != nil {
+		return err
+	}
+	commitCmd := exec.Command("git", "commit", "-m", "Initial commit")
+	commitCmd.Dir = dir
+	return commitCmd.Run()
 }
