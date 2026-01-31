@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS issues (
     defer_until DATETIME,
     INDEX idx_issues_status (status),
     INDEX idx_issues_priority (priority),
+    INDEX idx_issues_issue_type (issue_type),
     INDEX idx_issues_assignee (assignee),
     INDEX idx_issues_created_at (created_at),
     INDEX idx_issues_external_ref (external_ref)

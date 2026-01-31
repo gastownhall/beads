@@ -61,13 +61,14 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		whereClauses = append(whereClauses, fmt.Sprintf("status NOT IN (%s)", strings.Join(placeholders, ",")))
 	}
 
+	// Use subquery for type exclusion to prevent Dolt mergeJoinIter panic (same as IssueType above).
 	if len(filter.ExcludeTypes) > 0 {
 		placeholders := make([]string, len(filter.ExcludeTypes))
 		for i, t := range filter.ExcludeTypes {
 			placeholders[i] = "?"
 			args = append(args, string(t))
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("issue_type NOT IN (%s)", strings.Join(placeholders, ",")))
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM issues WHERE issue_type NOT IN (%s))", strings.Join(placeholders, ",")))
 	}
 
 	if filter.Priority != nil {
@@ -83,8 +84,13 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		args = append(args, *filter.PriorityMax)
 	}
 
+	// Use subquery for type filter to prevent Dolt mergeJoinIter panic.
+	// When issue_type equality is combined with other indexed predicates (status, priority)
+	// in the same WHERE clause, Dolt's query optimizer may select a merge join plan
+	// between index scans that panics in mergeJoinIter. Isolating the type predicate
+	// in a subquery forces sequential evaluation and avoids the problematic plan.
 	if filter.IssueType != nil {
-		whereClauses = append(whereClauses, "issue_type = ?")
+		whereClauses = append(whereClauses, "id IN (SELECT id FROM issues WHERE issue_type = ?)")
 		args = append(args, *filter.IssueType)
 	}
 
@@ -242,8 +248,9 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		whereClauses = append(whereClauses, "priority = ?")
 		args = append(args, *filter.Priority)
 	}
+	// Use subquery for type filter to prevent Dolt mergeJoinIter panic (see SearchIssues).
 	if filter.Type != "" {
-		whereClauses = append(whereClauses, "issue_type = ?")
+		whereClauses = append(whereClauses, "id IN (SELECT id FROM issues WHERE issue_type = ?)")
 		args = append(args, filter.Type)
 	}
 	if filter.Assignee != nil {

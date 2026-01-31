@@ -353,6 +353,19 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// Apply index migrations for existing databases.
+	// CREATE TABLE IF NOT EXISTS won't add new indexes to existing tables.
+	indexMigrations := []string{
+		"CREATE INDEX idx_issues_issue_type ON issues(issue_type)",
+	}
+	for _, migration := range indexMigrations {
+		_, err := s.db.ExecContext(ctx, migration)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") &&
+			!strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return fmt.Errorf("failed to apply index migration: %w", err)
+		}
+	}
+
 	// Create views
 	if _, err := db.ExecContext(ctx, readyIssuesView); err != nil {
 		return fmt.Errorf("failed to create ready_issues view: %w", err)
