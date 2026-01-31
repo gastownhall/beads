@@ -142,7 +142,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 	}
 
 	// Check required tables
-	requiredTables := []string{"issues", "dependencies", "config"}
+	requiredTables := []string{"issues", "dependencies", "config", "labels", "events"}
 	var missingTables []string
 
 	for _, table := range requiredTables {
@@ -305,8 +305,9 @@ func CheckDoltStatus(path string) DoctorCheck {
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",
-			Status:   StatusOK,
-			Message:  "Clean working set",
+			Status:   StatusWarning,
+			Message:  "Could not query dolt_status",
+			Detail:   err.Error(),
 			Category: CategoryData,
 		}
 	}

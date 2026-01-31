@@ -204,8 +204,16 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 	// Measure show single issue (get a random one first)
 	var issueID string
 	if err := db.QueryRowContext(ctx, "SELECT id FROM issues LIMIT 1").Scan(&issueID); err == nil && issueID != "" {
-		metrics.ShowIssueTime = measureQueryTime(ctx, db, fmt.Sprintf(
-			"SELECT * FROM issues WHERE id = '%s'", issueID))
+		start := time.Now()
+		rows, qErr := db.QueryContext(ctx, "SELECT * FROM issues WHERE id = ?", issueID)
+		if qErr != nil {
+			metrics.ShowIssueTime = -1
+		} else {
+			for rows.Next() {
+			}
+			rows.Close()
+			metrics.ShowIssueTime = time.Since(start).Milliseconds()
+		}
 	}
 
 	// Measure complex query with filters
@@ -259,12 +267,14 @@ func isDoltServerRunning(host string, port int) bool {
 func getDoltDatabaseSize(doltDir string) string {
 	var totalSize int64
 
-	err := filepath.Walk(doltDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(doltDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip errors
 		}
-		if !info.IsDir() {
-			totalSize += info.Size()
+		if !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				totalSize += info.Size()
+			}
 		}
 		return nil
 	})
