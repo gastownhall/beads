@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -195,6 +196,27 @@ create, update, show, or close operation).`,
 		if persistentChanged {
 			updates["wisp"] = false
 		}
+		// Metadata flag (GH#1413)
+		if cmd.Flags().Changed("metadata") {
+			metadataValue, _ := cmd.Flags().GetString("metadata")
+			var metadataJSON string
+			if strings.HasPrefix(metadataValue, "@") {
+				// Read JSON from file
+				filePath := metadataValue[1:]
+				data, err := os.ReadFile(filePath)
+				if err != nil {
+					FatalErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
+				}
+				metadataJSON = string(data)
+			} else {
+				metadataJSON = metadataValue
+			}
+			// Validate JSON
+			if !json.Valid([]byte(metadataJSON)) {
+				FatalErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
+			}
+			updates["metadata"] = json.RawMessage(metadataJSON)
+		}
 
 		// Get claim flag
 		claimFlag, _ := cmd.Flags().GetBool("claim")
@@ -327,6 +349,11 @@ create, update, show, or close operation).`,
 				// Ephemeral/persistent
 				if wisp, ok := updates["wisp"].(bool); ok {
 					updateArgs.Ephemeral = &wisp
+				}
+				// Metadata (GH#1413)
+				if metadata, ok := updates["metadata"].(json.RawMessage); ok {
+					metadataStr := string(metadata)
+					updateArgs.Metadata = &metadataStr
 				}
 
 				// Set claim flag for atomic claim operation
@@ -684,6 +711,8 @@ func init() {
 	// Ephemeral/persistent flags
 	updateCmd.Flags().Bool("ephemeral", false, "Mark issue as ephemeral (wisp) - not exported to JSONL")
 	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
+	// Metadata flag (GH#1413)
+	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	updateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(updateCmd)
 }
