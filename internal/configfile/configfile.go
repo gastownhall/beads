@@ -112,21 +112,14 @@ func (c *Config) Save(beadsDir string) error {
 func (c *Config) DatabasePath(beadsDir string) string {
 	backend := c.GetBackend()
 
-	// Treat Database as the on-disk storage location:
-	// - SQLite: filename (default: beads.db)
-	// - Dolt: directory name (default: dolt)
-	//
-	// Backward-compat: early dolt configs wrote "beads.db" even when Backend=dolt.
-	// In that case, treat it as "dolt".
 	if backend == BackendDolt {
-		db := strings.TrimSpace(c.Database)
-		if db == "" || db == "beads.db" {
-			db = "dolt"
+		// For dolt backend, always use "dolt" as the directory name.
+		// The Database field is irrelevant for dolt — data always lives at .beads/dolt/.
+		// Stale values like "town", "wyvern", "beads_rig" caused split-brain (see DOLT-HEALTH-P0.md).
+		if filepath.IsAbs(c.Database) {
+			return c.Database
 		}
-		if filepath.IsAbs(db) {
-			return db
-		}
-		return filepath.Join(beadsDir, db)
+		return filepath.Join(beadsDir, "dolt")
 	}
 
 	// SQLite (default)
