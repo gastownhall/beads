@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestValidAgentStates(t *testing.T) {
@@ -76,10 +74,7 @@ agent_roles:
 	// Change to tmp directory and initialize config
 	t.Chdir(tmpDir)
 
-	config.ResetForTesting()
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize() returned error: %v", err)
-	}
+	initConfigForTest(t)
 
 	tests := []struct {
 		name         string

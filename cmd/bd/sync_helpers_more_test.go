@@ -12,9 +12,7 @@ import (
 )
 
 func TestBuildGitCommitArgs_ConfigOptions(t *testing.T) {
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("git.author", "Test User <test@example.com>")
 	config.Set("git.no-gpg-sign", true)
 
@@ -38,9 +36,7 @@ func TestBuildGitCommitArgs_ConfigOptions(t *testing.T) {
 func TestBuildCommitArgs_ForRepoContext(t *testing.T) {
 	// buildCommitArgs is for use with RepoContext.GitCmd() which sets cmd.Dir,
 	// so it should NOT include the -C flag.
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("git.author", "Test User <test@example.com>")
 	config.Set("git.no-gpg-sign", true)
 
@@ -69,9 +65,7 @@ func TestGitCommitBeadsDir_PathspecDoesNotCommitOtherStagedFiles(t *testing.T) {
 	_, cleanup := setupGitRepo(t)
 	defer cleanup()
 
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 
 	if err := os.MkdirAll(".beads", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)

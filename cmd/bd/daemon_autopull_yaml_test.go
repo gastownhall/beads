@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
@@ -59,9 +58,7 @@ issue-prefix: test
 	t.Chdir(tmpDir)
 
 	// Reinitialize viper config to pick up the new config.yaml
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Verify: sync.branch is NOT set in SQLite (the scenario we're testing)
 	t.Logf("sync-branch in config.yaml: beads-sync")

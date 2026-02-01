@@ -282,9 +282,7 @@ func TestDaemonAutostart_MiscHelpers(t *testing.T) {
 		t.Fatalf("determineSocketPath should be identity")
 	}
 
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	old := config.GetDuration("flush-debounce")
 	defer config.Set("flush-debounce", old)
 

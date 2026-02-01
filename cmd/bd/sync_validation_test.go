@@ -63,9 +63,7 @@ func TestValidateOpenIssuesForSync_ModeNone(t *testing.T) {
 	}
 
 	// Set validation mode to "none"
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "none")
 
 	// Should return nil (skip validation)
@@ -95,9 +93,7 @@ func TestValidateOpenIssuesForSync_ModeEmpty(t *testing.T) {
 	}
 
 	// Set validation mode to empty string
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "")
 
 	// Should return nil (skip validation)
@@ -127,9 +123,7 @@ func TestValidateOpenIssuesForSync_ModeWarn(t *testing.T) {
 	}
 
 	// Set validation mode to "warn"
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "warn")
 
 	// Should return nil (warnings printed but sync proceeds)
@@ -160,9 +154,7 @@ func TestValidateOpenIssuesForSync_ModeError(t *testing.T) {
 	}
 
 	// Set validation mode to "error"
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "error")
 
 	// Should return error (function also prints to stderr which we allow)
@@ -200,9 +192,7 @@ func TestValidateOpenIssuesForSync_NoWarnings(t *testing.T) {
 	}
 
 	// Set validation mode to "error" (strictest mode)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "error")
 
 	// Should return nil (no validation errors)
@@ -232,9 +222,7 @@ func TestValidateOpenIssuesForSync_SkipsClosedIssues(t *testing.T) {
 	}
 
 	// Set validation mode to "error"
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "error")
 
 	// Should return nil (closed issues are not validated)
@@ -264,9 +252,7 @@ func TestValidateOpenIssuesForSync_ChoreHasNoRequirements(t *testing.T) {
 	}
 
 	// Set validation mode to "error"
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
+	initConfigForTest(t)
 	config.Set("validation.on-sync", "error")
 
 	// Should return nil (chore has no requirements)
