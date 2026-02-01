@@ -19,9 +19,9 @@ type Config struct {
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
-	// Dolt server mode configuration (bd-dolt.2.2)
-	// When Mode is "server", connects to external dolt sql-server instead of embedded.
-	// This enables multi-writer access for multi-agent environments.
+	// Dolt connection mode configuration (bd-dolt.2.2)
+	// Default is "embedded" (in-process). Server mode ("server") connects to an
+	// external dolt sql-server and should only be used for high-concurrency scenarios.
 	DoltMode       string `json:"dolt_mode,omitempty"`        // "embedded" (default) or "server"
 	DoltServerHost string `json:"dolt_server_host,omitempty"` // Server host (default: 127.0.0.1)
 	DoltServerPort int    `json:"dolt_server_port,omitempty"` // Server port (default: 3307)
@@ -243,9 +243,9 @@ const (
 )
 
 // IsDoltServerMode returns true if Dolt should connect via sql-server.
-// Checks the BEADS_DOLT_SERVER_MODE env var first (set by Gas Town tmux sessions),
-// then falls back to the dolt_mode field in metadata.json.
-// Only applies when backend is "dolt" — ignored for sqlite.
+// Server mode is opt-in for high-concurrency scenarios; embedded is the default.
+// Checks the BEADS_DOLT_SERVER_MODE env var first, then falls back to the
+// dolt_mode field in metadata.json. Only applies when backend is "dolt".
 func (c *Config) IsDoltServerMode() bool {
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" && c.GetBackend() == BackendDolt {
 		return true

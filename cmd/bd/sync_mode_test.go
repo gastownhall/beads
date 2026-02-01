@@ -106,7 +106,7 @@ func TestShouldExportJSONL(t *testing.T) {
 	}{
 		{SyncModeGitPortable, true},
 		{SyncModeRealtime, true},
-		{SyncModeDoltNative, false},
+		{SyncModeDoltNative, true},
 		{SyncModeBeltAndSuspenders, true},
 	}
 
@@ -173,7 +173,7 @@ func TestSyncModeDescription(t *testing.T) {
 	}{
 		{SyncModeGitPortable, "JSONL"},
 		{SyncModeRealtime, "every change"},
-		{SyncModeDoltNative, "no JSONL"},
+		{SyncModeDoltNative, "export-only"},
 		{SyncModeBeltAndSuspenders, "Both"},
 		{"invalid", "unknown"},
 	}

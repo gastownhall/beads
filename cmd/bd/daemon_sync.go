@@ -651,6 +651,12 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 			mode = "local auto-import"
 		}
 
+		// Skip JSONL import in dolt-native mode (JSONL is export-only backup)
+		if !ShouldImportJSONL(importCtx, store) {
+			log.log("Skipping %s (dolt-native mode, JSONL is export-only)", mode)
+			return
+		}
+
 		// Guard: Skip if sync-branch == current-branch (GH#1258)
 		// Local-only mode (skipGit) doesn't use sync-branch, so skip the guard
 		if !skipGit && shouldSkipDueToSameBranch(importCtx, store, mode, log) {
@@ -895,6 +901,13 @@ func performSync(ctx context.Context, store storage.Storage, autoCommit, autoPus
 			// Git-free mode: finalize immediately since there's no git to wait for
 			finalizeExportMetadata()
 			log.log("Local %s complete", mode)
+			return
+		}
+
+		// In dolt-native mode, JSONL is export-only backup — skip git sync and import
+		if !ShouldImportJSONL(syncCtx, store) {
+			finalizeExportMetadata()
+			log.log("%s complete (dolt-native mode, export-only)", mode)
 			return
 		}
 

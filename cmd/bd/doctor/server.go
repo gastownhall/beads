@@ -73,13 +73,11 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	if !cfg.IsDoltServerMode() {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
-			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Dolt mode is '%s' (not server)", cfg.GetDoltMode()),
-			Detail:   "Server health checks require dolt_mode: server in metadata.json",
-			Fix:      "Set dolt_mode: server in metadata.json and start dolt sql-server",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Dolt mode is '%s' (embedded is the default)", cfg.GetDoltMode()),
+			Detail:   "Server health checks only apply when dolt_mode is explicitly set to 'server'",
 			Category: CategoryFederation,
 		})
-		result.OverallOK = false
 		return result
 	}
 

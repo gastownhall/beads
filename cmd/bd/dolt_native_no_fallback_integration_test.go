@@ -103,11 +103,12 @@ sync.mode: "dolt-native"
 		t.Fatalf("unexpected error checking for beads.db: %v", err)
 	}
 
-	// CRITICAL ASSERTION: issues.jsonl must NOT exist.
-	// In dolt-native mode, JSONL should never be written.
+	// NOTE: In dolt-native mode, JSONL is now export-only (backup). However, since
+	// Dolt connection failed above, no storage was created and no export could happen.
+	// So JSONL should still not exist in this failure case.
 	jsonlFile := filepath.Join(beadsDir, "issues.jsonl")
 	if _, err := os.Stat(jsonlFile); err == nil {
-		t.Fatalf("REGRESSION: JSONL file %s was created in dolt-native mode", jsonlFile)
+		t.Fatalf("REGRESSION: JSONL file %s was created in dolt-native mode with no storage", jsonlFile)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("unexpected error checking for issues.jsonl: %v", err)
 	}
@@ -196,10 +197,11 @@ sync.mode: "dolt-native"
 		t.Fatalf("REGRESSION: SQLite database created by 'create' command in dolt-native mode")
 	}
 
-	// Verify no JSONL.
+	// NOTE: In dolt-native mode, JSONL is now export-only (backup). However, since
+	// Dolt connection failed above, no storage was created and no export could happen.
 	jsonlFile := filepath.Join(beadsDir, "issues.jsonl")
 	if _, err := os.Stat(jsonlFile); err == nil {
-		t.Fatalf("REGRESSION: JSONL file created by 'create' command in dolt-native mode")
+		t.Fatalf("REGRESSION: JSONL file created by 'create' command in dolt-native mode with no storage")
 	}
 
 	t.Logf("SUCCESS: 'create' command did not fall back to SQLite/JSONL")
