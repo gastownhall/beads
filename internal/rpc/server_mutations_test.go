@@ -1184,10 +1184,12 @@ func TestHandleUpdate_ClaimFlag_AlreadyClaimed(t *testing.T) {
 		t.Error("expected second claim to fail, but it succeeded")
 	}
 
-	// Verify error message
-	expectedError := "already claimed by first-claimer"
-	if updateResp2.Error != expectedError {
-		t.Errorf("expected error %q, got %q", expectedError, updateResp2.Error)
+	// Verify error message contains the claim information
+	if !strings.Contains(updateResp2.Error, "already claimed") {
+		t.Errorf("expected error to contain 'already claimed', got %q", updateResp2.Error)
+	}
+	if !strings.Contains(updateResp2.Error, "first-claimer") {
+		t.Errorf("expected error to contain 'first-claimer', got %q", updateResp2.Error)
 	}
 }
 
@@ -1254,6 +1256,87 @@ func TestHandleUpdate_ClaimFlag_WithOtherUpdates(t *testing.T) {
 	}
 	if issue.Priority != 0 {
 		t.Errorf("expected priority 0, got %d", issue.Priority)
+	}
+}
+
+// TestHandleUpdate_ClaimFlag_Concurrent verifies atomic claim prevents race conditions
+func TestHandleUpdate_ClaimFlag_Concurrent(t *testing.T) {
+	store := memory.New("/tmp/test.jsonl")
+	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
+
+	// Create an issue first
+	createArgs := CreateArgs{
+		Title:     "Test Issue for Concurrent Claim",
+		IssueType: "task",
+		Priority:  2,
+	}
+	createJSON, _ := json.Marshal(createArgs)
+	createReq := &Request{
+		Operation: OpCreate,
+		Args:      createJSON,
+		Actor:     "test-user",
+	}
+
+	createResp := server.handleCreate(createReq)
+	if !createResp.Success {
+		t.Fatalf("failed to create test issue: %s", createResp.Error)
+	}
+
+	var createdIssue types.Issue
+	if err := json.Unmarshal(createResp.Data, &createdIssue); err != nil {
+		t.Fatalf("failed to parse created issue: %v", err)
+	}
+	issueID := createdIssue.ID
+
+	const numClaimers = 10
+	results := make(chan bool, numClaimers)
+
+	// Launch concurrent claims
+	for i := 0; i < numClaimers; i++ {
+		go func(claimerID int) {
+			updateArgs := UpdateArgs{
+				ID:    issueID,
+				Claim: true,
+			}
+			updateJSON, _ := json.Marshal(updateArgs)
+			updateReq := &Request{
+				Operation: OpUpdate,
+				Args:      updateJSON,
+				Actor:     string(rune('A'+claimerID)) + "-agent",
+			}
+
+			updateResp := server.handleUpdate(updateReq)
+			results <- updateResp.Success
+		}(i)
+	}
+
+	// Collect results
+	successCount := 0
+	failCount := 0
+	for i := 0; i < numClaimers; i++ {
+		if <-results {
+			successCount++
+		} else {
+			failCount++
+		}
+	}
+
+	// Exactly one should succeed
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 successful claim, got %d (failures: %d)", successCount, failCount)
+	}
+
+	// Verify issue is claimed by exactly one agent
+	ctx := context.Background()
+	issue, err := store.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("failed to get issue: %v", err)
+	}
+	if issue.Assignee == "" {
+		t.Error("expected issue to be claimed by someone")
+	}
+	if issue.Status != "in_progress" {
+		t.Errorf("expected status 'in_progress', got %s", issue.Status)
 	}
 }
 

@@ -39,6 +39,9 @@ func (m *mockStorage) GetIssueByExternalRef(ctx context.Context, externalRef str
 func (m *mockStorage) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	return nil
 }
+func (m *mockStorage) ClaimIssue(ctx context.Context, id string, actor string) error {
+	return nil
+}
 func (m *mockStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	return nil
 }
@@ -334,6 +337,7 @@ func TestInterfaceDocumentation(t *testing.T) {
 		_ = s.GetIssue
 		_ = s.GetIssueByExternalRef
 		_ = s.UpdateIssue
+		_ = s.ClaimIssue
 		_ = s.CloseIssue
 		_ = s.DeleteIssue
 		_ = s.SearchIssues

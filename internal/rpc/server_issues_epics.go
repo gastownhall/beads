@@ -579,21 +579,16 @@ func (s *Server) handleUpdate(req *Request) Response {
 
 	actor := s.reqActor(req)
 
-	// Handle claim operation atomically
+	// Handle claim operation atomically using compare-and-swap semantics
 	if updateArgs.Claim {
-		// Check if already claimed (has non-empty assignee)
-		if issue.Assignee != "" {
-			return Response{
-				Success: false,
-				Error:   fmt.Sprintf("already claimed by %s", issue.Assignee),
+		if err := store.ClaimIssue(ctx, updateArgs.ID, actor); err != nil {
+			// Check if it's an "already claimed" error and format appropriately
+			if strings.Contains(err.Error(), "already claimed") {
+				return Response{
+					Success: false,
+					Error:   err.Error(),
+				}
 			}
-		}
-		// Atomically set assignee and status
-		claimUpdates := map[string]interface{}{
-			"assignee": actor,
-			"status":   "in_progress",
-		}
-		if err := store.UpdateIssue(ctx, updateArgs.ID, claimUpdates, actor); err != nil {
 			return Response{
 				Success: false,
 				Error:   fmt.Sprintf("failed to claim issue: %v", err),

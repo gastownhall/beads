@@ -540,20 +540,9 @@ create, update, show, or close operation).`,
 				continue
 			}
 
-			// Handle claim operation atomically
+			// Handle claim operation atomically using compare-and-swap semantics
 			if claimFlag {
-				// Check if already claimed (has non-empty assignee)
-				if issue.Assignee != "" {
-					fmt.Fprintf(os.Stderr, "Error claiming %s: already claimed by %s\n", id, issue.Assignee)
-					result.Close()
-					continue
-				}
-				// Atomically set assignee and status
-				claimUpdates := map[string]interface{}{
-					"assignee": actor,
-					"status":   "in_progress",
-				}
-				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, claimUpdates, actor); err != nil {
+				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
 					result.Close()
 					continue

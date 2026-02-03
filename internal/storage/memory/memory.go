@@ -516,6 +516,43 @@ func (m *MemoryStorage) CloseIssue(ctx context.Context, id string, reason string
 	return m.UpdateIssue(ctx, id, updates, actor)
 }
 
+// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+// It sets the assignee to actor and status to "in_progress" only if the issue
+// currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
+func (m *MemoryStorage) ClaimIssue(ctx context.Context, id string, actor string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	issue, exists := m.issues[id]
+	if !exists {
+		return fmt.Errorf("issue %s not found", id)
+	}
+
+	// Compare-and-swap: only claim if currently unassigned
+	if issue.Assignee != "" {
+		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, issue.Assignee)
+	}
+
+	// Perform the claim
+	now := time.Now()
+	issue.Assignee = actor
+	issue.Status = types.StatusInProgress
+	issue.UpdatedAt = now
+
+	m.dirty[id] = true
+
+	// Record claim event
+	event := &types.Event{
+		IssueID:   id,
+		EventType: "claimed",
+		Actor:     actor,
+		CreatedAt: now,
+	}
+	m.events[id] = append(m.events[id], event)
+
+	return nil
+}
+
 // CreateTombstone converts an existing issue to a tombstone record.
 // This is a soft-delete that preserves the issue with status="tombstone".
 func (m *MemoryStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {

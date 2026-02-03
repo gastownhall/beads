@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1086,6 +1087,111 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 
 		return nil
 	})
+}
+
+// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+// It sets the assignee to actor and status to "in_progress" only if the issue
+// currently has no assignee (empty string). This is done in a single transaction
+// with a conditional UPDATE to prevent race conditions where multiple concurrent
+// callers could both successfully claim the same issue.
+//
+// Returns storage.ErrAlreadyClaimed (wrapped with current assignee) if the issue
+// is already claimed. Returns an error if the issue doesn't exist.
+func (s *SQLiteStorage) ClaimIssue(ctx context.Context, id string, actor string) error {
+	// Get the issue first to check existence and get old data for event
+	oldIssue, err := s.GetIssue(ctx, id)
+	if err != nil {
+		return wrapDBError("get issue for claim", err)
+	}
+	if oldIssue == nil {
+		return fmt.Errorf("issue %s not found", id)
+	}
+
+	// Prepare event data
+	oldData, err := json.Marshal(oldIssue)
+	if err != nil {
+		oldData = []byte(fmt.Sprintf(`{"id":"%s"}`, id))
+	}
+	newUpdates := map[string]interface{}{
+		"assignee": actor,
+		"status":   "in_progress",
+	}
+	newData, err := json.Marshal(newUpdates)
+	if err != nil {
+		newData = []byte(`{}`)
+	}
+
+	now := time.Now()
+
+	// Compute new content hash
+	updatedIssue := *oldIssue
+	updatedIssue.Assignee = actor
+	updatedIssue.Status = types.StatusInProgress
+	newHash := updatedIssue.ComputeContentHash()
+
+	var alreadyClaimedBy string
+
+	err = s.withTx(ctx, func(conn *sql.Conn) error {
+		// Use conditional UPDATE with WHERE clause to ensure atomicity.
+		// The UPDATE only succeeds if assignee is currently empty.
+		// This is the compare-and-swap: we compare assignee='' and swap to new value.
+		result, err := conn.ExecContext(ctx, `
+			UPDATE issues
+			SET assignee = ?, status = 'in_progress', updated_at = ?, content_hash = ?
+			WHERE id = ? AND (assignee = '' OR assignee IS NULL)
+		`, actor, now, newHash, id)
+		if err != nil {
+			return fmt.Errorf("failed to claim issue: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+
+		if rowsAffected == 0 {
+			// The UPDATE didn't affect any rows, which means the assignee was not empty.
+			// Query to find out who has it claimed.
+			var currentAssignee string
+			err := conn.QueryRowContext(ctx, `SELECT assignee FROM issues WHERE id = ?`, id).Scan(&currentAssignee)
+			if err != nil {
+				return fmt.Errorf("failed to get current assignee: %w", err)
+			}
+			alreadyClaimedBy = currentAssignee
+			// Return a sentinel error that we'll convert outside the transaction
+			return fmt.Errorf("already claimed")
+		}
+
+		// Record the claim event
+		_, err = conn.ExecContext(ctx, `
+			INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
+			VALUES (?, ?, ?, ?, ?)
+		`, id, "claimed", actor, string(oldData), string(newData))
+		if err != nil {
+			return fmt.Errorf("failed to record claim event: %w", err)
+		}
+
+		// Mark issue as dirty for incremental export
+		if err := markDirty(ctx, conn, id); err != nil {
+			return fmt.Errorf("failed to mark issue dirty: %w", err)
+		}
+
+		// Invalidate blocked issues cache since status changed
+		if err := s.invalidateBlockedCache(ctx, conn); err != nil {
+			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		if strings.Contains(err.Error(), "already claimed") {
+			return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, alreadyClaimedBy)
+		}
+		return err
+	}
+
+	return nil
 }
 
 // UpdateIssueID updates an issue ID and all its text fields in a single transaction

@@ -4,10 +4,15 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ErrAlreadyClaimed is returned when attempting to claim an issue that is already
+// claimed by another user. The error message contains the current assignee.
+var ErrAlreadyClaimed = errors.New("issue already claimed")
 
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
@@ -89,6 +94,12 @@ type Storage interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
+	// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+	// It sets the assignee to actor and status to "in_progress" only if the issue
+	// has no current assignee. Returns ErrAlreadyClaimed if the issue is already
+	// claimed by another user. This provides race-condition-free claiming for
+	// concurrent agents.
+	ClaimIssue(ctx context.Context, id string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
