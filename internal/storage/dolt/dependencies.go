@@ -96,16 +96,16 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 		var metadata, threadID sql.NullString
 
 		if err := rows.Scan(&depID, &depType, &createdAt, &createdBy, &metadata, &threadID); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("failed to scan dependency: %w", err)
 		}
 		deps = append(deps, depMeta{depID: depID, depType: depType})
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(deps) == 0 {
 		return nil, nil
@@ -162,16 +162,16 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 		var metadata, threadID sql.NullString
 
 		if err := rows.Scan(&depID, &depType, &createdAt, &createdBy, &metadata, &threadID); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("failed to scan dependent: %w", err)
 		}
 		deps = append(deps, depMeta{depID: depID, depType: depType})
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(deps) == 0 {
 		return nil, nil
