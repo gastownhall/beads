@@ -558,6 +558,13 @@ func (s *DoltStore) scanIssueIDs(ctx context.Context, rows *sql.Rows) ([]*types.
 		return nil, err
 	}
 
+	// Close rows before the nested GetIssuesByIDs query.
+	// MySQL server mode (go-sql-driver/mysql) can't handle multiple active
+	// result sets on one connection - the first must be closed before starting
+	// a new query, otherwise "driver: bad connection" errors occur.
+	// Closing here is safe because sql.Rows.Close() is idempotent.
+	rows.Close()
+
 	if len(ids) == 0 {
 		return nil, nil
 	}

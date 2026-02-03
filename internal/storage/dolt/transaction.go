@@ -135,14 +135,27 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var issues []*types.Issue
+	// Collect all IDs first, then close rows before fetching full issues.
+	// MySQL server mode can't handle multiple active result sets on one connection.
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// Now fetch each issue (safe since rows is closed)
+	var issues []*types.Issue
+	for _, id := range ids {
 		issue, err := t.GetIssue(ctx, id)
 		if err != nil {
 			return nil, err
@@ -151,7 +164,7 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 			issues = append(issues, issue)
 		}
 	}
-	return issues, rows.Err()
+	return issues, nil
 }
 
 // UpdateIssue updates an issue within the transaction
