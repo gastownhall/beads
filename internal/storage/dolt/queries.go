@@ -200,6 +200,12 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		args = append(args, string(*filter.MolType))
 	}
 
+	// Wisp type filtering (TTL-based compaction classification)
+	if filter.WispType != nil {
+		whereClauses = append(whereClauses, "wisp_type = ?")
+		args = append(args, string(*filter.WispType))
+	}
+
 	// Time-based scheduling filters
 	if filter.Deferred {
 		whereClauses = append(whereClauses, "defer_until IS NOT NULL")

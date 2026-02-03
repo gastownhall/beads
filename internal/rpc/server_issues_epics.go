@@ -309,6 +309,8 @@ func (s *Server) handleCreate(req *Request) Response {
 		Owner:     createArgs.Owner,
 		// Molecule type
 		MolType: types.MolType(createArgs.MolType),
+		// Wisp type (TTL classification)
+		WispType: types.WispType(createArgs.WispType),
 		// Agent identity fields
 		RoleType: createArgs.RoleType,
 		Rig:      createArgs.Rig,
@@ -1222,6 +1224,12 @@ func (s *Server) handleList(req *Request) Response {
 	if listArgs.MolType != "" {
 		molType := types.MolType(listArgs.MolType)
 		filter.MolType = &molType
+	}
+
+	// Wisp type filtering (TTL-based compaction classification)
+	if listArgs.WispType != "" {
+		wispType := types.WispType(listArgs.WispType)
+		filter.WispType = &wispType
 	}
 
 	// Status exclusion (for default non-closed behavior, GH#788)

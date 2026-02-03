@@ -125,6 +125,12 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		args = append(args, string(*filter.MolType))
 	}
 
+	// Wisp type filtering (TTL-based compaction classification)
+	if filter.WispType != nil {
+		whereClauses = append(whereClauses, "i.wisp_type = ?")
+		args = append(args, string(*filter.WispType))
+	}
+
 	// Time-based deferral filtering (GH#820)
 	// By default, exclude issues where defer_until is in the future.
 	// If IncludeDeferred is true, skip this filter to show deferred issues.

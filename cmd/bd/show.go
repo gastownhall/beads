@@ -720,6 +720,11 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, fmt.Sprintf("External: %s", *issue.ExternalRef))
 	}
 
+	// Line 5: Wisp type (if ephemeral with classification)
+	if issue.Ephemeral && issue.WispType != "" {
+		lines = append(lines, fmt.Sprintf("Wisp type: %s", ui.RenderMuted(string(issue.WispType))))
+	}
+
 	return strings.Join(lines, "\n")
 }
 

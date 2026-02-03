@@ -132,6 +132,16 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		// Parse wisp type (TTL classification for ephemeral wisps)
+		wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+		var wispType types.WispType
+		if wispTypeStr != "" {
+			wispType = types.WispType(wispTypeStr)
+			if !wispType.IsValid() {
+				FatalError("invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)", wispTypeStr)
+			}
+		}
+
 		// Agent-specific flags
 		agentRig, _ := cmd.Flags().GetString("agent-rig")
 
@@ -203,6 +213,7 @@ var createCmd = &cobra.Command{
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				MolType:            molType,
+				WispType:           wispType,
 				Rig:                agentRig,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
@@ -498,6 +509,7 @@ var createCmd = &cobra.Command{
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				MolType:            string(molType),
+				WispType:           string(wispType),
 				Rig:                agentRig,
 				EventCategory:      eventCategory,
 				EventActor:         eventActor,
@@ -557,6 +569,7 @@ var createCmd = &cobra.Command{
 			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			MolType:            molType,
+			WispType:           wispType,
 			Rig:                agentRig,
 			EventKind:          eventCategory,
 			Actor:              eventActor,
@@ -900,6 +913,7 @@ func init() {
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (ephemeral, not exported to JSONL)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-polecat), patrol (recurring ops), work (default)")
+	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
 	// Agent-specific flags (only valid when --type=agent)
 	createCmd.Flags().String("agent-rig", "", "Agent's rig name (requires --type=agent)")
@@ -976,6 +990,13 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	}
 	agentRig, _ := cmd.Flags().GetString("agent-rig")
 
+	// Extract wisp type (TTL classification for ephemeral wisps)
+	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+	var wispType types.WispType
+	if wispTypeStr != "" {
+		wispType = types.WispType(wispTypeStr)
+	}
+
 	// Extract time-based scheduling flags (bd-xwvo fix)
 	var dueAt *time.Time
 	dueStr, _ := cmd.Flags().GetString("due")
@@ -1019,8 +1040,9 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		Target:    eventTarget,
 		Payload:   eventPayload,
 		// Molecule/agent fields (bd-xwvo fix)
-		MolType: molType,
-		Rig:     agentRig,
+		MolType:  molType,
+		WispType: wispType,
+		Rig:      agentRig,
 		// Time scheduling fields (bd-xwvo fix)
 		DueAt:      dueAt,
 		DeferUntil: deferUntil,

@@ -101,6 +101,8 @@ type CreateArgs struct {
 	Owner     string `json:"owner,omitempty"`      // Human owner for CV attribution (git author email)
 	// Molecule type (for swarm coordination)
 	MolType string `json:"mol_type,omitempty"` // swarm, patrol, or work (default)
+	// Wisp type (for TTL-based compaction of ephemeral wisps)
+	WispType string `json:"wisp_type,omitempty"` // heartbeat, ping, patrol, gc_report, recovery, error, escalation
 	// Agent identity fields (only valid when IssueType == "agent")
 	RoleType string `json:"role_type,omitempty"` // polecat|crew|witness|refinery|mayor|deacon
 	Rig      string `json:"rig,omitempty"`       // Rig name (empty for town-level agents)
@@ -243,6 +245,9 @@ type ListArgs struct {
 
 	// Molecule type filtering
 	MolType string `json:"mol_type,omitempty"`
+
+	// Wisp type filtering (TTL-based compaction classification)
+	WispType string `json:"wisp_type,omitempty"`
 
 	// Status exclusion (for default non-closed behavior, GH#788)
 	ExcludeStatus []string `json:"exclude_status,omitempty"`
