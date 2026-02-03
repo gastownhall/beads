@@ -682,6 +682,133 @@ func TestDualPathParity(t *testing.T) {
 	// ADD NEW FIELD PARITY TESTS HERE when extending Issue type
 }
 
+// TestUpdatesFromArgs_Metadata verifies that Metadata is extracted from UpdateArgs
+// and included in the updates map for the storage layer.
+//
+// This test validates GH#1413: --metadata flag support in bd update.
+//
+// Expected behavior: When UpdateArgs.Metadata contains a valid JSON string,
+// it should be validated and added to the updates map as json.RawMessage.
+func TestUpdatesFromArgs_Metadata(t *testing.T) {
+	tests := map[string]struct {
+		input     string
+		wantKey   string
+		wantError bool
+	}{
+		"simple object": {
+			input:   `{"key": "value"}`,
+			wantKey: "metadata",
+		},
+		"nested object": {
+			input:   `{"nested": {"deep": {"value": 123}}}`,
+			wantKey: "metadata",
+		},
+		"array value": {
+			input:   `{"items": [1, 2, 3]}`,
+			wantKey: "metadata",
+		},
+		"empty object": {
+			input:   `{}`,
+			wantKey: "metadata",
+		},
+		"invalid JSON": {
+			input:     `{invalid}`,
+			wantError: true,
+		},
+		"not JSON": {
+			input:     `not json`,
+			wantError: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			args := UpdateArgs{
+				ID:       "test-issue",
+				Metadata: &tt.input,
+			}
+
+			updates, err := updatesFromArgs(args)
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error for invalid JSON metadata, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("updatesFromArgs returned error: %v", err)
+			}
+
+			val, exists := updates[tt.wantKey]
+			if !exists {
+				t.Fatalf("updatesFromArgs did not include %q key; got keys: %v", tt.wantKey, mapKeys(updates))
+			}
+
+			// Verify it's stored as json.RawMessage
+			if _, ok := val.(json.RawMessage); !ok {
+				t.Errorf("expected json.RawMessage value for %q, got %T: %v", tt.wantKey, val, val)
+			}
+		})
+	}
+}
+
+// TestUpdateViaDaemon_Metadata tests end-to-end update of Metadata through the daemon RPC.
+//
+// This test verifies that `bd update --metadata` works via daemon mode.
+func TestUpdateViaDaemon_Metadata(t *testing.T) {
+	_, client, store, cleanup := setupTestServerWithStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create an issue without metadata
+	createArgs := &CreateArgs{
+		Title:     "Issue for metadata update test",
+		IssueType: "task",
+		Priority:  1,
+	}
+
+	createResp, err := client.Create(createArgs)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	var issue types.Issue
+	if err := json.Unmarshal(createResp.Data, &issue); err != nil {
+		t.Fatalf("Failed to unmarshal issue: %v", err)
+	}
+
+	// Update with metadata via daemon RPC
+	metadata := `{"tool": "test", "version": 1}`
+	updateArgs := &UpdateArgs{
+		ID:       issue.ID,
+		Metadata: &metadata,
+	}
+
+	updateResp, err := client.Update(updateArgs)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if !updateResp.Success {
+		t.Fatalf("Update returned error: %s", updateResp.Error)
+	}
+
+	// Verify directly from storage
+	retrieved, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("Failed to get issue: %v", err)
+	}
+
+	if retrieved.Metadata == nil {
+		t.Fatal("expected Metadata to be set after update, got nil")
+	}
+
+	// Verify the metadata content
+	if string(retrieved.Metadata) != metadata {
+		t.Errorf("Metadata mismatch: got %q, want %q", string(retrieved.Metadata), metadata)
+	}
+}
+
 // compareTimePtr compares two time pointers with 1-second tolerance
 func compareTimePtr(t *testing.T, name string, direct, daemon *time.Time) bool {
 	if (direct == nil) != (daemon == nil) {

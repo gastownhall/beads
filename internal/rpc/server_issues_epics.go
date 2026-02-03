@@ -156,6 +156,14 @@ func updatesFromArgs(a UpdateArgs) (map[string]interface{}, error) {
 	if a.Holder != nil {
 		u["holder"] = *a.Holder
 	}
+	// Metadata field (GH#1413)
+	if a.Metadata != nil {
+		// Validate that the metadata is well-formed JSON
+		if !json.Valid([]byte(*a.Metadata)) {
+			return nil, fmt.Errorf("metadata must be valid JSON")
+		}
+		u["metadata"] = json.RawMessage(*a.Metadata)
+	}
 	// Time-based scheduling fields (GH#820)
 	if a.DueAt != nil {
 		if *a.DueAt == "" {
