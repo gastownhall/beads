@@ -26,6 +26,29 @@ func openTestDolt(t *testing.T) *sql.DB {
 		t.Fatalf("failed to get abs path: %v", err)
 	}
 
+	// First connect without database to create it
+	initDSN := fmt.Sprintf("file://%s?commitname=test&commitemail=test@test.com", absPath)
+	initCfg, err := embedded.ParseDSN(initDSN)
+	if err != nil {
+		t.Fatalf("failed to parse init DSN: %v", err)
+	}
+
+	initConnector, err := embedded.NewConnector(initCfg)
+	if err != nil {
+		t.Fatalf("failed to create init connector: %v", err)
+	}
+
+	initDB := sql.OpenDB(initConnector)
+	_, err = initDB.Exec("CREATE DATABASE IF NOT EXISTS beads")
+	if err != nil {
+		_ = initDB.Close()
+		_ = initConnector.Close()
+		t.Fatalf("failed to create database: %v", err)
+	}
+	_ = initDB.Close()
+	_ = initConnector.Close()
+
+	// Now connect with database specified
 	dsn := fmt.Sprintf("file://%s?commitname=test&commitemail=test@test.com&database=beads", absPath)
 	cfg, err := embedded.ParseDSN(dsn)
 	if err != nil {
