@@ -814,13 +814,13 @@ func TestFetchIssuesSince_PaginationLimit(t *testing.T) {
 
 // TestFetchIssues_ContextCancellation verifies that FetchIssues respects context cancellation.
 func TestFetchIssues_ContextCancellation(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		count := requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		// Always return X-Next-Page to continue pagination
 		w.Header().Set("X-Next-Page", "2")
-		_ = json.NewEncoder(w).Encode([]Issue{{ID: requestCount, IID: requestCount, Title: "Issue"}})
+		_ = json.NewEncoder(w).Encode([]Issue{{ID: int(count), IID: int(count), Title: "Issue"}})
 	}))
 	defer server.Close()
 
@@ -844,12 +844,12 @@ func TestFetchIssues_ContextCancellation(t *testing.T) {
 		t.Errorf("error = %v, want context.Canceled or error containing 'context canceled'", err)
 	}
 	// Verify the loop was stopped (not infinite) - requestCount should be reasonable
-	if requestCount > 1000 {
-		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount)
+	if requestCount.Load() > 1000 {
+		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount.Load())
 	}
 	// Note: partial results may or may not be returned depending on whether cancellation
 	// was caught by our loop check (returns partial) or by doRequest (returns nil)
-	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount, len(issues))
+	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount.Load(), len(issues))
 }
 
 // TestFetchIssuesSince_ContextCancellation verifies that FetchIssuesSince respects context cancellation.
