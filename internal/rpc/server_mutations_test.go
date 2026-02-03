@@ -844,7 +844,8 @@ func TestHandleDelete_ErrorCannotDeleteTemplate(t *testing.T) {
 	server := NewServer("/tmp/test.sock", store, "/tmp", "/tmp/test.db")
 
 	// Create a template issue directly in memory store
-	ctx := server.reqCtx(&Request{})
+	ctx, cancel := server.reqCtx(&Request{})
+	defer cancel()
 	template := &types.Issue{
 		ID:          "bd-template-test",
 		Title:       "Template Issue",

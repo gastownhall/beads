@@ -139,7 +139,7 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 
 // checkServerReachable checks if the server is reachable via TCP
 func checkServerReachable(host string, port int) DoctorCheck {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return DoctorCheck{
