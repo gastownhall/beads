@@ -36,6 +36,7 @@ beads.right.meta.json
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 sync_base.jsonl
+config.local.yaml
 
 # Gas Town runtime files (local state)
 .gt-types-configured

@@ -201,6 +201,18 @@ func Initialize() error {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
 		debug.Logf("Debug: loaded config from %s\n", v.ConfigFileUsed())
+
+		// Merge local config overrides if present (config.local.yaml)
+		// This allows machine-specific settings without polluting tracked config
+		configDir := filepath.Dir(v.ConfigFileUsed())
+		localConfigPath := filepath.Join(configDir, "config.local.yaml")
+		if _, err := os.Stat(localConfigPath); err == nil {
+			v.SetConfigFile(localConfigPath)
+			if err := v.MergeInConfig(); err != nil {
+				return fmt.Errorf("error merging local config file: %w", err)
+			}
+			debug.Logf("Debug: merged local config from %s\n", localConfigPath)
+		}
 	} else {
 		// No config.yaml found - use defaults and environment variables
 		debug.Logf("Debug: no config.yaml found; using defaults and environment variables\n")
