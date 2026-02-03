@@ -297,6 +297,16 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.49.3",
+		Date:    "2026-01-31",
+		Changes: []string{
+			"FIX: Dolt split-brain eliminated - DatabasePath() always resolves to .beads/dolt/ for dolt backend; JSONL auto-import blocked in dolt-native mode",
+			"CHANGE: Embedded Dolt is now the default - server mode is opt-in via dolt_mode: server",
+			"FIX: Dolt mergeJoinIter panic on type-filtered queries eliminated",
+			"FIX: CGO/ICU build - Makefile and test.sh auto-detect Homebrew icu4c paths on macOS",
+		},
+	},
+	{
 		Version: "0.49.2",
 		Date:    "2026-01-31",
 		Changes: []string{

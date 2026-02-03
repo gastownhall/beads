@@ -107,9 +107,7 @@ func TestMultiRepoPathResolutionCWDInvariant(t *testing.T) {
 		git.ResetCaches()
 
 		// Initialize config
-		if err := config.Initialize(); err != nil {
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		multiRepo := config.GetMultiRepoConfig()
 		if multiRepo == nil {
@@ -140,9 +138,7 @@ func TestMultiRepoPathResolutionCWDInvariant(t *testing.T) {
 		git.ResetCaches()
 
 		// Re-initialize config from new CWD
-		if err := config.Initialize(); err != nil {
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		multiRepo := config.GetMultiRepoConfig()
 		if multiRepo == nil {
@@ -172,9 +168,7 @@ func TestMultiRepoPathResolutionCWDInvariant(t *testing.T) {
 		git.ResetCaches()
 
 		// Re-initialize config from new CWD
-		if err := config.Initialize(); err != nil {
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		multiRepo := config.GetMultiRepoConfig()
 		if multiRepo == nil {
@@ -285,9 +279,7 @@ func TestExportToMultiRepoCWDInvariant(t *testing.T) {
 		git.ResetCaches()
 
 		// Initialize config
-		if err := config.Initialize(); err != nil {
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		// Open existing store
 		store, err := sqlite.New(ctx, dbPath)
@@ -436,10 +428,7 @@ func TestSyncModePathResolution(t *testing.T) {
 		}
 		git.ResetCaches()
 
-		if err := config.Initialize(); err != nil {
-			store.Close()
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		// Export
 		results, err := store.ExportToMultiRepo(ctx)
@@ -540,10 +529,7 @@ repos:
 		}
 		git.ResetCaches()
 
-		if err := config.Initialize(); err != nil {
-			store.Close()
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		// Export from daemon-like context
 		results, err := store.ExportToMultiRepo(ctx)
@@ -660,10 +646,7 @@ repos:
 		}
 		git.ResetCaches()
 
-		if err := config.Initialize(); err != nil {
-			store.Close()
-			t.Fatalf("config.Initialize() failed: %v", err)
-		}
+		initConfigForTest(t)
 
 		// Export
 		results, err := store.ExportToMultiRepo(ctx)

@@ -656,10 +656,7 @@ func TestInitNoDbMode(t *testing.T) {
 
 	// Reset config so it picks up the newly created config.yaml
 	// (simulates a new process invocation which would load fresh config)
-	config.ResetForTesting()
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to reinitialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Verify config has correct values
 	if !config.GetBool("no-db") {

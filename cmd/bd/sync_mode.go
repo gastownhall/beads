@@ -20,7 +20,7 @@ const (
 	// Provides immediate persistence but more git noise.
 	SyncModeRealtime = string(config.SyncModeRealtime)
 
-	// SyncModeDoltNative uses Dolt remotes for sync, skipping JSONL.
+	// SyncModeDoltNative uses Dolt remotes for sync, JSONL export-only (backup).
 	// Requires Dolt backend and configured Dolt remote.
 	SyncModeDoltNative = string(config.SyncModeDoltNative)
 
@@ -107,10 +107,9 @@ func GetImportTrigger(ctx context.Context, s storage.Storage) string {
 }
 
 // ShouldExportJSONL returns true if the current sync mode uses JSONL export.
+// All modes export JSONL — in dolt-native mode it serves as periodic backup.
 func ShouldExportJSONL(ctx context.Context, s storage.Storage) bool {
-	mode := GetSyncMode(ctx, s)
-	// All modes except dolt-native use JSONL
-	return mode != SyncModeDoltNative
+	return true
 }
 
 // ShouldImportJSONL returns true if the current sync mode uses JSONL import.
@@ -140,7 +139,7 @@ func SyncModeDescription(mode string) string {
 	case SyncModeRealtime:
 		return "JSONL exported on every change"
 	case SyncModeDoltNative:
-		return "Dolt remotes only, no JSONL"
+		return "Dolt remotes for sync, JSONL export-only (backup)"
 	case SyncModeBeltAndSuspenders:
 		return "Both Dolt remotes and JSONL"
 	default:

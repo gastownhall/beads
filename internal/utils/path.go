@@ -42,12 +42,13 @@ func FindJSONLInDir(dbDir string) string {
 		}
 	}
 
-	// Last resort: use first match (but skip deletions.jsonl, interactions.jsonl, and merge artifacts)
+	// Last resort: use first match (but skip deletions.jsonl, interactions.jsonl, routes.jsonl, and merge artifacts)
 	for _, match := range matches {
 		base := filepath.Base(match)
-		// Skip deletions manifest, interactions (audit trail), and merge artifacts
+		// Skip deletions manifest, interactions (audit trail), routes config, and merge artifacts
 		if base == "deletions.jsonl" ||
 			base == "interactions.jsonl" ||
+			base == "routes.jsonl" ||
 			base == "beads.base.jsonl" ||
 			base == "beads.left.jsonl" ||
 			base == "beads.right.jsonl" {

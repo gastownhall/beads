@@ -32,7 +32,7 @@ func TestDoPullFromGitLab_Success(t *testing.T) {
 				WebURL:      "https://gitlab.example.com/group/project/-/issues/1",
 			},
 		}
-		json.NewEncoder(w).Encode(issues)
+		_ = json.NewEncoder(w).Encode(issues)
 	}))
 	defer server.Close()
 
@@ -65,7 +65,7 @@ func TestDoPullFromGitLab_DryRun(t *testing.T) {
 				WebURL:      "https://gitlab.example.com/group/project/-/issues/1",
 			},
 		}
-		json.NewEncoder(w).Encode(issues)
+		_ = json.NewEncoder(w).Encode(issues)
 	}))
 	defer server.Close()
 
@@ -94,7 +94,7 @@ func TestDoPullFromGitLab_SkipIssues(t *testing.T) {
 			{ID: 2, IID: 2, ProjectID: 123, Title: "Issue 2", State: "opened", WebURL: "https://gitlab.example.com/-/issues/2"},
 			{ID: 3, IID: 3, ProjectID: 123, Title: "Issue 3", State: "opened", WebURL: "https://gitlab.example.com/-/issues/3"},
 		}
-		json.NewEncoder(w).Encode(issues)
+		_ = json.NewEncoder(w).Encode(issues)
 	}))
 	defer server.Close()
 
@@ -124,7 +124,7 @@ func TestDoPushToGitLab_CreateNew(t *testing.T) {
 			createCalled = true
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(gitlab.Issue{
+			_ = json.NewEncoder(w).Encode(gitlab.Issue{
 				ID:     100,
 				IID:    42,
 				Title:  "New issue",
@@ -135,7 +135,7 @@ func TestDoPushToGitLab_CreateNew(t *testing.T) {
 		}
 		// GET requests for fetching issues
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]gitlab.Issue{})
+		_ = json.NewEncoder(w).Encode([]gitlab.Issue{})
 	}))
 	defer server.Close()
 
@@ -177,7 +177,7 @@ func TestDoPushToGitLab_UpdateExisting(t *testing.T) {
 			updateCalled = true
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlab.Issue{
+		_ = json.NewEncoder(w).Encode(gitlab.Issue{
 			ID:     100,
 			IID:    42,
 			Title:  "Updated issue",
@@ -225,7 +225,7 @@ func TestDetectGitLabConflicts_NoConflicts(t *testing.T) {
 	now := time.Now()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]gitlab.Issue{
+		_ = json.NewEncoder(w).Encode([]gitlab.Issue{
 			{
 				ID:        100,
 				IID:       42,
@@ -273,7 +273,7 @@ func TestDetectGitLabConflicts_WithConflicts(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]gitlab.Issue{
+		_ = json.NewEncoder(w).Encode([]gitlab.Issue{
 			{
 				ID:        100,
 				IID:       42,
@@ -324,7 +324,7 @@ func TestDoPushToGitLab_PathBasedProjectID(t *testing.T) {
 			updateCalled = true
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlab.Issue{
+		_ = json.NewEncoder(w).Encode(gitlab.Issue{
 			ID:        100,
 			IID:       42,
 			ProjectID: 789, // Numeric project ID from API
@@ -482,7 +482,7 @@ func TestResolveConflicts_PreferLocal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlab.Issue{})
+		_ = json.NewEncoder(w).Encode(gitlab.Issue{})
 	}))
 	defer server.Close()
 
@@ -520,7 +520,7 @@ func TestResolveConflicts_PreferGitLab(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlab.Issue{
+		_ = json.NewEncoder(w).Encode(gitlab.Issue{
 			ID:          100,
 			IID:         42,
 			ProjectID:   123,
@@ -568,7 +568,7 @@ func TestResolveConflicts_PreferNewer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlab.Issue{
+		_ = json.NewEncoder(w).Encode(gitlab.Issue{
 			ID:        100,
 			IID:       42,
 			ProjectID: 123,
@@ -628,7 +628,7 @@ func TestP0_ConflictDetectionBeforePush(t *testing.T) {
 
 		if r.Method == http.MethodGet {
 			// Return issues for conflict detection
-			json.NewEncoder(w).Encode([]gitlab.Issue{
+			_ = json.NewEncoder(w).Encode([]gitlab.Issue{
 				{
 					ID:        100,
 					IID:       42,
@@ -660,7 +660,7 @@ func TestP0_ConflictDetectionBeforePush(t *testing.T) {
 					pushCalls = append(pushCalls, iid)
 				}
 			}
-			json.NewEncoder(w).Encode(gitlab.Issue{})
+			_ = json.NewEncoder(w).Encode(gitlab.Issue{})
 			return
 		}
 	}))
@@ -777,7 +777,7 @@ func TestP0_SyncFunctionsUseSyncContext(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]gitlab.Issue{})
+		_ = json.NewEncoder(w).Encode([]gitlab.Issue{})
 	}))
 	defer server.Close()
 

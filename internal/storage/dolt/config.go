@@ -14,7 +14,7 @@ import (
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO config (` + "`key`" + `, value) VALUES (?, ?)
+		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
 	if err != nil {
@@ -26,8 +26,14 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 // GetConfig retrieves a configuration value
 func (s *DoltStore) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.db.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
+	var scanErr error
+
+	err := s.withRetry(ctx, func() error {
+		scanErr = s.db.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
+		return scanErr
+	})
+
+	if err == sql.ErrNoRows || scanErr == sql.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
@@ -67,7 +73,7 @@ func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
 // SetMetadata sets a metadata value
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO metadata (` + "`key`" + `, value) VALUES (?, ?)
+		INSERT INTO metadata (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
 	if err != nil {

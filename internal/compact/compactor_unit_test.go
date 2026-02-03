@@ -66,11 +66,20 @@ type stubSummarizer struct {
 	summary string
 	err     error
 	calls   int
+	mu      sync.Mutex
 }
 
 func (s *stubSummarizer) SummarizeTier1(ctx context.Context, issue *types.Issue) (string, error) {
+	s.mu.Lock()
 	s.calls++
+	s.mu.Unlock()
 	return s.summary, s.err
+}
+
+func (s *stubSummarizer) getCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func stubIssue() *types.Issue {
@@ -268,9 +277,9 @@ func TestCompactTier1Batch_MixedResults(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
-	resMap := map[string]*Result{}
+	resMap := map[string]*BatchResult{}
 	for _, r := range results {
-		resMap[r.IssueID] = r
+		resMap[r.IssueID] = &r
 	}
 
 	if res := resMap["bd-1"]; res == nil || res.Err != nil || res.CompactedSize == 0 {

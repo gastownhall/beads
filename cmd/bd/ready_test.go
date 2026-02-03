@@ -212,8 +212,10 @@ func TestReadySuite(t *testing.T) {
 		}
 	})
 
-	t.Run("ReadyWorkInProgress", func(t *testing.T) {
-		// Create in-progress issue (should be in ready work)
+	t.Run("ReadyWorkInProgressWithEmptyFilter", func(t *testing.T) {
+		// Create in-progress issue
+		// When no status filter is set, GetReadyWork returns both open and in_progress
+		// This tests the storage layer's default behavior (backwards compatibility)
 		issue := &types.Issue{
 			ID:        "test-wip",
 			Title:     "Work in progress",
@@ -227,7 +229,7 @@ func TestReadySuite(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Test that in-progress shows up in ready work
+		// Test that in-progress shows up when filter.Status is empty (storage default)
 		ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
 		if err != nil {
 			t.Fatalf("GetReadyWork failed: %v", err)
@@ -242,7 +244,24 @@ func TestReadySuite(t *testing.T) {
 		}
 
 		if !found {
-			t.Error("In-progress issue should appear in ready work")
+			t.Error("In-progress issue should appear when filter.Status is empty")
+		}
+	})
+
+	t.Run("ReadyWorkExcludesInProgressWithOpenFilter", func(t *testing.T) {
+		// When Status="open" is explicitly set, in_progress issues should NOT appear
+		// This is the behavior used by 'bd ready' command to show only claimable work
+		ready, err := s.GetReadyWork(ctx, types.WorkFilter{
+			Status: "open",
+		})
+		if err != nil {
+			t.Fatalf("GetReadyWork with Status=open failed: %v", err)
+		}
+
+		for _, i := range ready {
+			if i.ID == "test-wip" {
+				t.Error("In-progress issue should NOT appear when filter.Status='open'")
+			}
 		}
 	})
 }

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
@@ -39,9 +38,7 @@ func TestDaemonAutoSyncFromYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Create a mock cobra command
 	cmd := &cobra.Command{}
@@ -93,9 +90,7 @@ func TestDaemonAutoCommitOnlyFromYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Create a mock cobra command
 	cmd := &cobra.Command{}
@@ -149,9 +144,7 @@ func TestDaemonIndividualSettingsFromYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Create a mock cobra command
 	cmd := &cobra.Command{}
@@ -201,9 +194,7 @@ func TestDaemonEnvVarOverridesYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Set env var to override YAML (env var takes precedence)
 	t.Setenv("BEADS_AUTO_SYNC", "false")
@@ -256,9 +247,7 @@ func TestDaemonCLIFlagOverridesYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Create a mock cobra command with flags explicitly set
 	cmd := &cobra.Command{}
@@ -315,9 +304,7 @@ func TestDaemonIndividualEnvVarOverridesYAML(t *testing.T) {
 
 	// Change to temp directory and reinitialize config
 	t.Chdir(tmpDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("Failed to initialize config: %v", err)
-	}
+	initConfigForTest(t)
 
 	// Set individual env var to override YAML (BEADS_AUTO_PULL should override daemon.auto-pull)
 	t.Setenv("BEADS_AUTO_PULL", "true")

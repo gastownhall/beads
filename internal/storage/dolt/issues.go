@@ -461,7 +461,7 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 			created_at, created_by, owner, updated_at, closed_at, external_ref,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template, crystallizes,
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			mol_type, work_type, quality_score, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
@@ -473,7 +473,7 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
@@ -486,7 +486,7 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullStringPtr(issue.ExternalRef),
 		issue.CompactionLevel, issue.CompactedAt, nullStringPtr(issue.CompactedAtCommit), nullIntVal(issue.OriginalSize),
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-		issue.Sender, issue.Ephemeral, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
+		issue.Sender, issue.Ephemeral, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 		issue.MolType, issue.WorkType, issue.QualityScore, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
@@ -504,7 +504,7 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 	var assignee, externalRef, compactedAtCommit, owner sql.NullString
 	var contentHash, sourceRepo, closeReason, deletedBy, deleteReason, originalType sql.NullString
 	var workType, sourceSystem sql.NullString
-	var sender, molType, eventKind, actor, target, payload sql.NullString
+	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
 	var hookBead, roleBead, agentState, roleType, rig sql.NullString
 	var ephemeral, pinned, isTemplate, crystallizes sql.NullInt64
@@ -517,7 +517,7 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned, is_template, crystallizes,
+		       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
 		       event_kind, actor, target, payload,
@@ -532,7 +532,7 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral, &pinned, &isTemplate, &crystallizes,
+		&sender, &ephemeral, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
 		&eventKind, &actor, &target, &payload,
@@ -607,6 +607,9 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 	}
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
+	}
+	if wispType.Valid {
+		issue.WispType = types.WispType(wispType.String)
 	}
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
@@ -752,7 +755,7 @@ func isAllowedUpdateField(key string) bool {
 		"description": true, "design": true, "acceptance_criteria": true, "notes": true,
 		"issue_type": true, "estimated_minutes": true, "external_ref": true,
 		"closed_at": true, "close_reason": true, "closed_by_session": true,
-		"sender": true, "wisp": true, "pinned": true,
+		"sender": true, "wisp": true, "wisp_type": true, "pinned": true,
 		"hook_bead": true, "role_bead": true, "agent_state": true, "last_activity": true,
 		"role_type": true, "rig": true, "mol_type": true,
 		"event_category": true, "event_actor": true, "event_target": true, "event_payload": true,

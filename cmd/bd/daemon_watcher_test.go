@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,8 +14,8 @@ import (
 	"time"
 )
 
-// newMockLogger creates a daemonLogger that does nothing
-func newMockLogger() daemonLogger {
+// newMockLogger creates a *slog.Logger that does nothing
+func newMockLogger() *slog.Logger {
 	return newTestLogger()
 }
 

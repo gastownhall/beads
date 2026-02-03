@@ -52,6 +52,9 @@ beads.right.meta.json
 sync_base.jsonl
 export-state/
 
+# Process semaphore slot files (runtime concurrency limiting)
+sem/
+
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
 # contributors to accidentally commit upstream issue databases.

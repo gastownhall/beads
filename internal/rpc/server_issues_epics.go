@@ -228,7 +228,7 @@ func (s *Server) handleCreate(req *Request) Response {
 			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
 		}
 	}
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// If parent is specified, generate child ID
 	issueID := createArgs.ID
@@ -317,6 +317,8 @@ func (s *Server) handleCreate(req *Request) Response {
 		Owner:     createArgs.Owner,
 		// Molecule type
 		MolType: types.MolType(createArgs.MolType),
+		// Wisp type (TTL classification)
+		WispType: types.WispType(createArgs.WispType),
 		// Agent identity fields
 		RoleType: createArgs.RoleType,
 		Rig:      createArgs.Rig,
@@ -548,7 +550,7 @@ func (s *Server) handleUpdate(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Check if issue is a template (beads-1ra): templates are read-only
 	issue, err := store.GetIssue(ctx, updateArgs.ID)
@@ -823,7 +825,7 @@ func (s *Server) handleClose(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Check if issue is a template (beads-1ra): templates are read-only
 	issue, err := store.GetIssue(ctx, closeArgs.ID)
@@ -933,7 +935,7 @@ func (s *Server) handleDelete(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Use batch delete for cascade/multi-issue operations if storage supports it
 	// This handles cascade delete properly by expanding dependents recursively
@@ -1232,6 +1234,12 @@ func (s *Server) handleList(req *Request) Response {
 		filter.MolType = &molType
 	}
 
+	// Wisp type filtering (TTL-based compaction classification)
+	if listArgs.WispType != "" {
+		wispType := types.WispType(listArgs.WispType)
+		filter.WispType = &wispType
+	}
+
 	// Status exclusion (for default non-closed behavior, GH#788)
 	if len(listArgs.ExcludeStatus) > 0 {
 		for _, s := range listArgs.ExcludeStatus {
@@ -1299,7 +1307,7 @@ func (s *Server) handleList(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	issues, err := store.SearchIssues(ctx, listArgs.Query, filter)
 	if err != nil {
 		return Response{
@@ -1478,7 +1486,7 @@ func (s *Server) handleCount(req *Request) Response {
 	filter.PriorityMin = countArgs.PriorityMin
 	filter.PriorityMax = countArgs.PriorityMax
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	issues, err := store.SearchIssues(ctx, countArgs.Query, filter)
 	if err != nil {
 		return Response{
@@ -1598,7 +1606,7 @@ func (s *Server) handleResolveID(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	resolvedID, err := utils.ResolvePartialID(ctx, s.storage, args.ID)
 	if err != nil {
 		return Response{
@@ -1631,7 +1639,7 @@ func (s *Server) handleShow(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	issue, err := store.GetIssue(ctx, showArgs.ID)
 	if err != nil {
 		return Response{
@@ -1691,7 +1699,7 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 
 	wf := types.WorkFilter{
-		// Leave Status empty to get both 'open' and 'in_progress' (GH#5aml)
+		Status:          types.Status(readyArgs.Status), // Pass through status filter (e.g., "open" to exclude in_progress)
 		Type:            readyArgs.Type,
 		Priority:        readyArgs.Priority,
 		Unassigned:      readyArgs.Unassigned,
@@ -1712,7 +1720,7 @@ func (s *Server) handleReady(req *Request) Response {
 		wf.MolType = &molType
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	issues, err := store.GetReadyWork(ctx, wf)
 	if err != nil {
 		return Response{
@@ -1764,7 +1772,7 @@ func (s *Server) handleBlocked(req *Request) Response {
 		wf.ParentID = &blockedArgs.ParentID
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	blocked, err := store.GetBlockedIssues(ctx, wf)
 	if err != nil {
 		return Response{
@@ -1803,7 +1811,7 @@ func (s *Server) handleStale(req *Request) Response {
 		Limit:  staleArgs.Limit,
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	issues, err := store.GetStaleIssues(ctx, filter)
 	if err != nil {
 		return Response{
@@ -1828,7 +1836,7 @@ func (s *Server) handleStats(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	stats, err := store.GetStatistics(ctx)
 	if err != nil {
 		return Response{
@@ -1861,7 +1869,7 @@ func (s *Server) handleEpicStatus(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	epics, err := store.GetEpicsEligibleForClosure(ctx)
 	if err != nil {
 		return Response{
@@ -1912,7 +1920,7 @@ func (s *Server) handleGetConfig(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Get config value from database
 	value, err := store.GetConfig(ctx, args.Key)
@@ -1953,7 +1961,7 @@ func (s *Server) handleMolStale(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Get all epics eligible for closure (complete but unclosed)
 	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
@@ -2058,7 +2066,7 @@ func (s *Server) handleGateCreate(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 	now := time.Now()
 
 	// Create gate issue
@@ -2112,7 +2120,7 @@ func (s *Server) handleGateList(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Build filter for gates
 	gateType := types.IssueType("gate")
@@ -2156,7 +2164,7 @@ func (s *Server) handleGateShow(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Resolve partial ID
 	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)
@@ -2211,7 +2219,7 @@ func (s *Server) handleGateClose(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Resolve partial ID
 	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)
@@ -2290,7 +2298,7 @@ func (s *Server) handleGateWait(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req); defer cancel()
 
 	// Resolve partial ID
 	gateID, err := utils.ResolvePartialID(ctx, store, args.ID)

@@ -1307,3 +1307,54 @@ func TestParse_GateInChildStep(t *testing.T) {
 		t.Errorf("Child Gate.Type = %q, want 'gh:run'", child.Gate.Type)
 	}
 }
+
+// TestParseTOML_SnakeCaseFields verifies that snake_case fields like depends_on
+// are correctly parsed from TOML. This tests the fix for GitHub issue #1449.
+func TestParseTOML_SnakeCaseFields(t *testing.T) {
+	tomlData := `
+formula = "mol-snake-test"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "step1"
+title = "First Step"
+
+[[steps]]
+id = "step2"
+title = "Second Step"
+depends_on = ["step1"]
+
+[[steps]]
+id = "step3"
+title = "Third Step"
+needs = ["step2"]
+waits_for = "all-children"
+`
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+
+	if len(formula.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3", len(formula.Steps))
+	}
+
+	// Test depends_on (the field that was broken before the fix)
+	step2 := formula.Steps[1]
+	if len(step2.DependsOn) != 1 || step2.DependsOn[0] != "step1" {
+		t.Errorf("Steps[1].DependsOn = %v, want [step1]", step2.DependsOn)
+	}
+
+	// Test needs (worked before, should still work)
+	step3 := formula.Steps[2]
+	if len(step3.Needs) != 1 || step3.Needs[0] != "step2" {
+		t.Errorf("Steps[2].Needs = %v, want [step2]", step3.Needs)
+	}
+
+	// Test waits_for (another snake_case field)
+	if step3.WaitsFor != "all-children" {
+		t.Errorf("Steps[2].WaitsFor = %q, want 'all-children'", step3.WaitsFor)
+	}
+}

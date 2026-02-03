@@ -12,6 +12,7 @@ linters:
     - misspell
     - unconvert
     - unparam
+    - sloglint
 
   settings:
     errcheck:

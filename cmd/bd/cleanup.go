@@ -82,17 +82,13 @@ SEE ALSO:
 		wispOnly, _ := cmd.Flags().GetBool("ephemeral")
 
 		// Calculate custom TTL for --hard mode
-		// When --hard is set, use --older-than days as the tombstone TTL cutoff
-		// This bypasses the default 30-day tombstone safety period
+		// When --hard is set, always prune tombstones immediately (TTL = -1)
+		// The --older-than flag controls WHICH closed issues to select for deletion,
+		// not how long to keep their tombstones. Since cleanup creates tombstones
+		// with deleted_at=NOW, using olderThanDays as TTL would never prune them. (bd-4q8)
 		var customTTL time.Duration
 		if hardDelete {
-			if olderThanDays > 0 {
-				customTTL = time.Duration(olderThanDays) * 24 * time.Hour
-			} else {
-				// --hard without --older-than: prune ALL tombstones immediately
-				// Negative TTL means "immediately expired" (bd-4q8 fix)
-				customTTL = -1
-			}
+			customTTL = -1
 			if !jsonOutput && !dryRun {
 				fmt.Println(ui.RenderWarn("⚠️  HARD DELETE MODE: Bypassing tombstone TTL safety"))
 			}
@@ -230,7 +226,7 @@ SEE ALSO:
 			} else if tombstoneResult != nil && tombstoneResult.PrunedCount > 0 {
 				if !jsonOutput {
 					ttlMsg := fmt.Sprintf("older than %d days", tombstoneResult.TTLDays)
-					if hardDelete && olderThanDays == 0 {
+					if hardDelete {
 						ttlMsg = "all tombstones (--hard mode)"
 					}
 					fmt.Printf("\nExpired tombstones that would be pruned: %d (%s)\n",
@@ -247,7 +243,7 @@ SEE ALSO:
 			} else if tombstoneResult != nil && tombstoneResult.PrunedCount > 0 {
 				if !jsonOutput {
 					ttlMsg := fmt.Sprintf("older than %d days", tombstoneResult.TTLDays)
-					if hardDelete && olderThanDays == 0 {
+					if hardDelete {
 						ttlMsg = "all tombstones (--hard mode)"
 					}
 					fmt.Printf("\n%s Pruned %d expired tombstone(s) (%s)\n",

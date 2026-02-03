@@ -95,6 +95,36 @@ func TestDatabasePath_Dolt(t *testing.T) {
 			t.Errorf("DatabasePath() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("stale database name is ignored (split-brain fix)", func(t *testing.T) {
+		// Stale values like "town", "wyvern", "beads_rig" must resolve to "dolt"
+		for _, staleName := range []string{"town", "wyvern", "beads_rig", "random"} {
+			cfg := &Config{Database: staleName, Backend: BackendDolt}
+			got := cfg.DatabasePath(beadsDir)
+			want := filepath.Join(beadsDir, "dolt")
+			if got != want {
+				t.Errorf("DatabasePath(%q) = %q, want %q", staleName, got, want)
+			}
+		}
+	})
+
+	t.Run("empty database field resolves to dolt", func(t *testing.T) {
+		cfg := &Config{Database: "", Backend: BackendDolt}
+		got := cfg.DatabasePath(beadsDir)
+		want := filepath.Join(beadsDir, "dolt")
+		if got != want {
+			t.Errorf("DatabasePath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("absolute path is honored", func(t *testing.T) {
+		cfg := &Config{Database: "/custom/path/dolt", Backend: BackendDolt}
+		got := cfg.DatabasePath(beadsDir)
+		want := "/custom/path/dolt"
+		if got != want {
+			t.Errorf("DatabasePath() = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestJSONLPath(t *testing.T) {

@@ -97,28 +97,28 @@ func getGitLabConfig() GitLabConfig {
 	ctx := context.Background()
 	config := GitLabConfig{}
 
-	config.URL, _ = getGitLabConfigValue(ctx, "gitlab.url")
-	config.Token, _ = getGitLabConfigValue(ctx, "gitlab.token")
-	config.ProjectID, _ = getGitLabConfigValue(ctx, "gitlab.project_id")
+	config.URL = getGitLabConfigValue(ctx, "gitlab.url")
+	config.Token = getGitLabConfigValue(ctx, "gitlab.token")
+	config.ProjectID = getGitLabConfigValue(ctx, "gitlab.project_id")
 
 	return config
 }
 
 // getGitLabConfigValue reads a GitLab configuration value from store or environment.
-func getGitLabConfigValue(ctx context.Context, key string) (value string, source string) {
+func getGitLabConfigValue(ctx context.Context, key string) string {
 	// Try to read from store (works in direct mode)
 	if store != nil {
-		value, _ = store.GetConfig(ctx, key)
+		value, _ := store.GetConfig(ctx, key)
 		if value != "" {
-			return value, "project config (bd config)"
+			return value
 		}
 	} else if dbPath != "" {
 		tempStore, err := sqlite.NewWithTimeout(ctx, dbPath, 5*time.Second)
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
-			value, _ = tempStore.GetConfig(ctx, key)
+			value, _ := tempStore.GetConfig(ctx, key)
 			if value != "" {
-				return value, "project config (bd config)"
+				return value
 			}
 		}
 	}
@@ -126,13 +126,12 @@ func getGitLabConfigValue(ctx context.Context, key string) (value string, source
 	// Fall back to environment variable
 	envKey := gitlabConfigToEnvVar(key)
 	if envKey != "" {
-		value = os.Getenv(envKey)
-		if value != "" {
-			return value, fmt.Sprintf("environment variable (%s)", envKey)
+		if value := os.Getenv(envKey); value != "" {
+			return value
 		}
 	}
 
-	return "", ""
+	return ""
 }
 
 // gitlabConfigToEnvVar maps GitLab config keys to their environment variable names.
@@ -193,20 +192,20 @@ func runGitLabStatus(cmd *cobra.Command, args []string) error {
 	config := getGitLabConfig()
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "GitLab Configuration")
-	fmt.Fprintln(out, "====================")
-	fmt.Fprintf(out, "URL:        %s\n", config.URL)
-	fmt.Fprintf(out, "Token:      %s\n", maskGitLabToken(config.Token))
-	fmt.Fprintf(out, "Project ID: %s\n", config.ProjectID)
+	_, _ = fmt.Fprintln(out, "GitLab Configuration")
+	_, _ = fmt.Fprintln(out, "====================")
+	_, _ = fmt.Fprintf(out, "URL:        %s\n", config.URL)
+	_, _ = fmt.Fprintf(out, "Token:      %s\n", maskGitLabToken(config.Token))
+	_, _ = fmt.Fprintf(out, "Project ID: %s\n", config.ProjectID)
 
 	// Validate configuration
 	if err := validateGitLabConfig(config); err != nil {
-		fmt.Fprintf(out, "\nStatus: ❌ Not configured\n")
-		fmt.Fprintf(out, "Error: %v\n", err)
+		_, _ = fmt.Fprintf(out, "\nStatus: ❌ Not configured\n")
+		_, _ = fmt.Fprintf(out, "Error: %v\n", err)
 		return nil
 	}
 
-	fmt.Fprintf(out, "\nStatus: ✓ Configured\n")
+	_, _ = fmt.Fprintf(out, "\nStatus: ✓ Configured\n")
 	return nil
 }
 
@@ -226,18 +225,18 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to fetch projects: %w", err)
 	}
 
-	fmt.Fprintln(out, "Accessible GitLab Projects")
-	fmt.Fprintln(out, "==========================")
+	_, _ = fmt.Fprintln(out, "Accessible GitLab Projects")
+	_, _ = fmt.Fprintln(out, "==========================")
 	for _, p := range projects {
-		fmt.Fprintf(out, "ID: %d\n", p.ID)
-		fmt.Fprintf(out, "  Name: %s\n", p.Name)
-		fmt.Fprintf(out, "  Path: %s\n", p.PathWithNamespace)
-		fmt.Fprintf(out, "  URL:  %s\n", p.WebURL)
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "ID: %d\n", p.ID)
+		_, _ = fmt.Fprintf(out, "  Name: %s\n", p.Name)
+		_, _ = fmt.Fprintf(out, "  Path: %s\n", p.PathWithNamespace)
+		_, _ = fmt.Fprintf(out, "  URL:  %s\n", p.WebURL)
+		_, _ = fmt.Fprintln(out)
 	}
 
 	if len(projects) == 0 {
-		fmt.Fprintln(out, "No projects found (or no membership access)")
+		_, _ = fmt.Fprintln(out, "No projects found (or no membership access)")
 	}
 
 	return nil
@@ -281,8 +280,8 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	syncCtx.SetDBPath(dbPath)
 
 	if gitlabSyncDryRun {
-		fmt.Fprintln(out, "Dry run mode - no changes will be made")
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Dry run mode - no changes will be made")
+		_, _ = fmt.Fprintln(out)
 	}
 
 	// Default: both pull and push
@@ -294,16 +293,16 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	// Pull from GitLab
 	if pull {
 		if gitlabSyncDryRun {
-			fmt.Fprintln(out, "→ [DRY RUN] Would pull issues from GitLab")
+			_, _ = fmt.Fprintln(out, "→ [DRY RUN] Would pull issues from GitLab")
 		} else {
-			fmt.Fprintln(out, "→ Pulling issues from GitLab...")
+			_, _ = fmt.Fprintln(out, "→ Pulling issues from GitLab...")
 		}
 
 		pullStats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, mappingConfig, gitlabSyncDryRun, "all", nil)
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
-			fmt.Fprintf(out, "Error pulling from GitLab: %v\n", err)
+			_, _ = fmt.Fprintf(out, "Error pulling from GitLab: %v\n", err)
 			return err
 		}
 
@@ -313,7 +312,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		result.Stats.Skipped += pullStats.Skipped
 
 		if !gitlabSyncDryRun {
-			fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n",
+			_, _ = fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n",
 				result.Stats.Pulled, pullStats.Created, pullStats.Updated)
 		}
 	}
@@ -333,11 +332,11 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 			var err error
 			localIssues, err = syncCtx.Store().SearchIssues(ctx, "", types.IssueFilter{})
 			if err != nil {
-				fmt.Fprintf(out, "Warning: failed to get local issues for conflict detection: %v\n", err)
+				_, _ = fmt.Fprintf(out, "Warning: failed to get local issues for conflict detection: %v\n", err)
 			} else {
 				conflicts, err = detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
 				if err != nil {
-					fmt.Fprintf(out, "Warning: failed to detect conflicts: %v\n", err)
+					_, _ = fmt.Fprintf(out, "Warning: failed to detect conflicts: %v\n", err)
 				} else if len(conflicts) > 0 {
 					// Handle conflicts based on strategy
 					for _, c := range conflicts {
@@ -359,7 +358,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 							}
 						}
 					}
-					fmt.Fprintf(out, "→ Detected %d conflicts (strategy: %s)\n", len(conflicts), conflictStrategy)
+					_, _ = fmt.Fprintf(out, "→ Detected %d conflicts (strategy: %s)\n", len(conflicts), conflictStrategy)
 				}
 			}
 		}
@@ -368,9 +367,9 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	// Push to GitLab
 	if push {
 		if gitlabSyncDryRun {
-			fmt.Fprintln(out, "→ [DRY RUN] Would push issues to GitLab")
+			_, _ = fmt.Fprintln(out, "→ [DRY RUN] Would push issues to GitLab")
 		} else {
-			fmt.Fprintln(out, "→ Pushing issues to GitLab...")
+			_, _ = fmt.Fprintln(out, "→ Pushing issues to GitLab...")
 		}
 
 		// Get local issues to push
@@ -388,7 +387,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
-			fmt.Fprintf(out, "Error pushing to GitLab: %v\n", err)
+			_, _ = fmt.Fprintf(out, "Error pushing to GitLab: %v\n", err)
 			return err
 		}
 
@@ -398,7 +397,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		result.Stats.Skipped += pushStats.Skipped
 
 		if !gitlabSyncDryRun {
-			fmt.Fprintf(out, "✓ Pushed %d issues (%d created, %d updated)\n",
+			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues (%d created, %d updated)\n",
 				result.Stats.Pushed, pushStats.Created, pushStats.Updated)
 		}
 	}
@@ -407,7 +406,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	// (prefer-gitlab always, prefer-newer when GitLab was newer)
 	// For prefer-local, conflicts were force-pushed so no local update needed.
 	if len(skipUpdateIDs) > 0 && !gitlabSyncDryRun {
-		fmt.Fprintf(out, "→ Updating %d local issues from GitLab...\n", len(skipUpdateIDs))
+		_, _ = fmt.Fprintf(out, "→ Updating %d local issues from GitLab...\n", len(skipUpdateIDs))
 		// Filter conflicts to only those where GitLab version should be applied locally
 		var conflictsToResolve []gitlab.Conflict
 		for _, c := range conflicts {
@@ -416,16 +415,16 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, mappingConfig, conflictsToResolve, conflictStrategy); err != nil {
-			fmt.Fprintf(out, "Warning: failed to resolve some conflicts: %v\n", err)
+			_, _ = fmt.Fprintf(out, "Warning: failed to resolve some conflicts: %v\n", err)
 		} else {
-			fmt.Fprintf(out, "✓ Updated %d local issues\n", len(conflictsToResolve))
+			_, _ = fmt.Fprintf(out, "✓ Updated %d local issues\n", len(conflictsToResolve))
 		}
 		result.Stats.Conflicts = len(conflicts)
 	}
 
 	if gitlabSyncDryRun {
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Run without --dry-run to apply changes")
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}
 
 	return nil

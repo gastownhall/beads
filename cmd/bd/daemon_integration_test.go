@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -455,8 +456,8 @@ func TestEventLoopSignalHandling(t *testing.T) {
 	})
 }
 
-// createTestLogger creates a daemonLogger for testing
-func createTestLogger(t *testing.T) daemonLogger {
+// createTestLogger creates a *slog.Logger for testing
+func createTestLogger(t *testing.T) *slog.Logger {
 	return newTestLogger()
 }
 

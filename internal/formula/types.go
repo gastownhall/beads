@@ -151,16 +151,16 @@ type Step struct {
 	Labels []string `json:"labels,omitempty"`
 
 	// DependsOn lists step IDs this step blocks on (within the formula).
-	DependsOn []string `json:"depends_on,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty" toml:"depends_on,omitempty"`
 
 	// Needs is a simpler alias for DependsOn - lists sibling step IDs that must complete first.
 	// Either Needs or DependsOn can be used; they are merged during cooking.
-	Needs []string `json:"needs,omitempty"`
+	Needs []string `json:"needs,omitempty" toml:"needs,omitempty"`
 
 	// WaitsFor specifies a fanout gate type for this step.
 	// Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
 	// When set, the cooked issue gets a "gate:<value>" label.
-	WaitsFor string `json:"waits_for,omitempty"`
+	WaitsFor string `json:"waits_for,omitempty" toml:"waits_for,omitempty"`
 
 	// Assignee is the default assignee (supports substitution).
 	Assignee string `json:"assignee,omitempty"`
@@ -172,7 +172,7 @@ type Step struct {
 
 	// ExpandVars are variable overrides for the expansion.
 	// Merged with the expansion formula's default vars during inline expansion.
-	ExpandVars map[string]string `json:"expand_vars,omitempty"`
+	ExpandVars map[string]string `json:"expand_vars,omitempty" toml:"expand_vars,omitempty"`
 
 	// Condition makes this step optional based on a variable.
 	// Format: "{{var}}" (truthy), "!{{var}}" (negated), "{{var}} == value", "{{var}} != value".
@@ -193,7 +193,7 @@ type Step struct {
 
 	// OnComplete defines actions triggered when this step completes.
 	// Used for runtime expansion over step output (the for-each construct).
-	OnComplete *OnCompleteSpec `json:"on_complete,omitempty"`
+	OnComplete *OnCompleteSpec `json:"on_complete,omitempty" toml:"on_complete,omitempty"`
 
 	// Source tracing fields: track where this step came from.
 	// These are set during parsing/transformation and copied to Issues during cooking.
@@ -270,7 +270,7 @@ type OnCompleteSpec struct {
 	// ForEach is the path to the iterable collection in step output.
 	// Format: "output.<field>" or "output.<field>.<nested>"
 	// The collection must be an array at runtime.
-	ForEach string `json:"for_each,omitempty"`
+	ForEach string `json:"for_each,omitempty" toml:"for_each,omitempty"`
 
 	// Bond is the formula to instantiate for each item.
 	// A new molecule is created for each element in the ForEach collection.
@@ -324,7 +324,7 @@ type GateRule struct {
 // ComposeRules define how formulas can be bonded together.
 type ComposeRules struct {
 	// BondPoints are named locations where other formulas can attach.
-	BondPoints []*BondPoint `json:"bond_points,omitempty"`
+	BondPoints []*BondPoint `json:"bond_points,omitempty" toml:"bond_points,omitempty"`
 
 	// Hooks are automatic attachments triggered by labels or conditions.
 	Hooks []*Hook `json:"hooks,omitempty"`
@@ -387,11 +387,11 @@ type BondPoint struct {
 
 	// AfterStep is the step ID after which to attach.
 	// Mutually exclusive with BeforeStep.
-	AfterStep string `json:"after_step,omitempty"`
+	AfterStep string `json:"after_step,omitempty" toml:"after_step,omitempty"`
 
 	// BeforeStep is the step ID before which to attach.
 	// Mutually exclusive with AfterStep.
-	BeforeStep string `json:"before_step,omitempty"`
+	BeforeStep string `json:"before_step,omitempty" toml:"before_step,omitempty"`
 
 	// Parallel makes attached steps run in parallel with the anchor step.
 	Parallel bool `json:"parallel,omitempty"`

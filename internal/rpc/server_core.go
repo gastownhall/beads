@@ -255,7 +255,8 @@ func (s *Server) handleGetMoleculeProgress(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req)
+	defer cancel()
 
 	// Get the molecule (parent issue)
 	molecule, err := store.GetIssue(ctx, args.MoleculeID)

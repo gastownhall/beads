@@ -577,4 +577,102 @@ func TestGetNewlyUnblockedByClose_ClosedDependent(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// External Dependency Tests (cross-rig references)
+// =============================================================================
+
+func TestAddDependency_ExternalReference(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create a local issue
+	issue := &types.Issue{
+		ID:        "ext-dep-issue",
+		Title:     "Issue with External Dependency",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add dependency on external reference (cross-rig tracking)
+	// This should NOT fail with FK violation after the fix
+	externalRef := "external:da:da-7eo"
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: externalRef,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add external dependency: %v", err)
+	}
+
+	// Verify the dependency was created
+	records, err := store.GetDependencyRecords(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords failed: %v", err)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 dependency, got %d", len(records))
+	}
+
+	if records[0].DependsOnID != externalRef {
+		t.Errorf("expected DependsOnID %q, got %q", externalRef, records[0].DependsOnID)
+	}
+}
+
+func TestAddDependency_MultipleExternalReferences(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create a convoy-like issue
+	convoy := &types.Issue{
+		ID:        "convoy-test",
+		Title:     "Test Convoy",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, convoy, "tester"); err != nil {
+		t.Fatalf("failed to create convoy: %v", err)
+	}
+
+	// Add multiple external dependencies (simulating cross-rig tracking)
+	externalRefs := []string{
+		"external:da:da-7eo",
+		"external:da:da-1nw",
+		"external:gt:gt-abc",
+	}
+
+	for _, ref := range externalRefs {
+		dep := &types.Dependency{
+			IssueID:     convoy.ID,
+			DependsOnID: ref,
+			Type:        "tracks", // convoy tracking type
+		}
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("failed to add external dependency %s: %v", ref, err)
+		}
+	}
+
+	// Verify all dependencies were created
+	records, err := store.GetDependencyRecords(ctx, convoy.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords failed: %v", err)
+	}
+
+	if len(records) != len(externalRefs) {
+		t.Errorf("expected %d dependencies, got %d", len(externalRefs), len(records))
+	}
+}
+
 // Note: testContext is already defined in dolt_test.go for this package

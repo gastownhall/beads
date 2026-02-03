@@ -843,6 +843,15 @@ var rootCmd = &cobra.Command{
 		}
 
 		if backend == configfile.BackendDolt {
+			// Set advisory lock timeout for dolt embedded mode.
+			// Reads get a shorter timeout (shared lock, less contention expected).
+			// Writes get a longer timeout (exclusive lock, may need to wait for readers).
+			if useReadOnly {
+				opts.OpenTimeout = 5 * time.Second
+			} else {
+				opts.OpenTimeout = 15 * time.Second
+			}
+
 			// For Dolt, use the dolt subdirectory
 			doltPath := filepath.Join(beadsDir, "dolt")
 
@@ -1041,6 +1050,7 @@ var rootCmd = &cobra.Command{
 		if store != nil {
 			_ = store.Close()
 		}
+
 		if profileFile != nil {
 			pprof.StopCPUProfile()
 			_ = profileFile.Close()

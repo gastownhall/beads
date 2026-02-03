@@ -83,23 +83,6 @@ variable.`,
 			os.Exit(1)
 		}
 
-		// Auto-detect dolt server if backend is dolt and --server wasn't explicitly specified
-		// This enables server mode by default when a dolt sql-server is already running
-		if backend == configfile.BackendDolt && !serverMode {
-			if host, port, detected := detectDoltServer(); detected {
-				serverMode = true
-				if serverHost == "" {
-					serverHost = host
-				}
-				if serverPort == 0 {
-					serverPort = port
-				}
-				if !quiet {
-					fmt.Printf("Detected running dolt sql-server on %s:%d, enabling server mode\n", host, port)
-				}
-			}
-		}
-
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
@@ -760,7 +743,7 @@ func init() {
 	initCmd.Flags().Bool("from-jsonl", false, "Import from current .beads/issues.jsonl file instead of git history (preserves manual cleanups)")
 
 	// Dolt server mode flags (bd-dolt.2.2)
-	initCmd.Flags().Bool("server", false, "Configure Dolt in server mode (connect to external dolt sql-server)")
+	initCmd.Flags().Bool("server", false, "Explicitly configure Dolt in server mode for high-concurrency (default: embedded)")
 	initCmd.Flags().String("server-host", "", "Dolt server host (default: 127.0.0.1)")
 	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3306)")
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`bd ready` now shows only open issues** - Excludes in_progress, matching `bd list --ready` behavior. This makes `bd ready` show work that is truly available to claim, not work already being worked on.
+
+## [0.49.3] - 2026-01-31
+
+### Changed
+
+- **Embedded Dolt is now the default** - Server mode is opt-in via `dolt_mode: "server"` in metadata.json or `BEADS_DOLT_SERVER_MODE=1` env var
+
+### Fixed
+
+- **Dolt split-brain root cause eliminated (B1+B2)** - `DatabasePath()` now always resolves to `.beads/dolt/` for dolt backend regardless of stale `database` field values; `bootstrapEmbeddedDolt()` blocks JSONL auto-import in dolt-native sync mode to prevent silent rogue database creation
+- **CGO/ICU build fix** - Makefile and test.sh detect Homebrew's keg-only `icu4c` and export CGO flags so dolt's go-icu-regex dependency links correctly on macOS
+- **Dolt mergeJoinIter panic** - Eliminated three-table joins that triggered panics on type-filtered queries; added guard against nil pointer panic during auto-import in dolt-native mode
+- **Template variable extraction** - Filter Handlebars keywords (`if`, `each`, `unless`, `with`) from `extractVariables` (#1411)
+
 ## [0.49.2] - 2026-01-31
 
 ### Added

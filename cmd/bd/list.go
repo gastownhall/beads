@@ -203,6 +203,7 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 
 	// If we have dependency records, use them to find parent-child relationships
 	if allDeps != nil {
+		addedChild := make(map[string]bool) // tracks "parentID:childID" to prevent duplicates
 		for issueID, deps := range allDeps {
 			for _, dep := range deps {
 				parentID := dep.DependsOnID
@@ -217,7 +218,11 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 				// 1. Explicit parent-child dependency type, OR
 				// 2. Any dependency where the target is an epic
 				if dep.Type == types.DepParentChild || epicIDs[parentID] {
-					childrenMap[parentID] = append(childrenMap[parentID], child)
+					key := parentID + ":" + issueID
+					if !addedChild[key] {
+						childrenMap[parentID] = append(childrenMap[parentID], child)
+						addedChild[key] = true
+					}
 					isChild[issueID] = true
 				}
 			}
@@ -655,6 +660,18 @@ var listCmd = &cobra.Command{
 			molType = &mt
 		}
 
+		// Wisp type filtering (TTL-based compaction classification)
+		wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+		var wispType *types.WispType
+		if wispTypeStr != "" {
+			wt := types.WispType(wispTypeStr)
+			if !wt.IsValid() {
+				fmt.Fprintf(os.Stderr, "Error: invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)\n", wispTypeStr)
+				os.Exit(1)
+			}
+			wispType = &wt
+		}
+
 		// Time-based scheduling filters (GH#820)
 		deferredFlag, _ := cmd.Flags().GetBool("deferred")
 		deferAfter, _ := cmd.Flags().GetString("defer-after")
@@ -877,6 +894,11 @@ var listCmd = &cobra.Command{
 		// Molecule type filtering
 		if molType != nil {
 			filter.MolType = molType
+		}
+
+		// Wisp type filtering
+		if wispType != nil {
+			filter.WispType = wispType
 		}
 
 		// Time-based scheduling filters (GH#820)
@@ -1394,6 +1416,9 @@ func init() {
 
 	// Molecule type filtering
 	listCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
+
+	// Wisp type filtering (TTL-based compaction classification)
+	listCmd.Flags().String("wisp-type", "", "Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 
 	// Time-based scheduling filters (GH#820)
 	listCmd.Flags().Bool("deferred", false, "Show only issues with defer_until set")

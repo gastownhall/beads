@@ -8,11 +8,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 const windowsOS = "windows"
+
+// initConfigForTest initializes viper config for a test and ensures cleanup.
+// main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
+// TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
+// This helper ensures viper is reset after the test completes, preventing state pollution
+// (e.g., sync.mode=dolt-native leaking into JSONL export tests).
+func initConfigForTest(t *testing.T) {
+	t.Helper()
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+}
 
 // ensureTestMode sets BEADS_TEST_MODE environment variable to prevent production pollution
 func ensureTestMode(t *testing.T) {

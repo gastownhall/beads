@@ -31,8 +31,9 @@ type Options struct {
 	ServerMode bool   // Connect to dolt sql-server instead of embedded
 	ServerHost string // Server host (default: 127.0.0.1)
 	ServerPort int    // Server port (default: 3307)
-	ServerUser string // MySQL user (default: root)
-	Database   string // Database name for Dolt server mode (default: beads)
+	ServerUser  string        // MySQL user (default: root)
+	Database    string        // Database name for Dolt server mode (default: beads)
+	OpenTimeout time.Duration // Advisory lock timeout for embedded dolt (0 = no lock)
 }
 
 // New creates a storage backend based on the backend type.

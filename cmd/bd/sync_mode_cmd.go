@@ -16,7 +16,7 @@ var syncModeInfo = []struct {
 }{
 	{SyncModeGitPortable, "JSONL exported on push, imported on pull (default)"},
 	{SyncModeRealtime, "JSONL exported on every change (more git noise)"},
-	{SyncModeDoltNative, "Dolt remotes only, no JSONL (requires Dolt backend)"},
+	{SyncModeDoltNative, "Dolt remotes for sync, JSONL export-only backup (requires Dolt backend)"},
 	{SyncModeBeltAndSuspenders, "Both Dolt remotes and JSONL (maximum redundancy)"},
 }
 
@@ -36,7 +36,7 @@ Sync mode controls how beads synchronizes data with git:
     Provides immediate persistence but more git noise.
 
   dolt-native
-    Uses Dolt remotes for sync, skips JSONL.
+    Dolt remotes for sync, JSONL export-only (backup).
     Requires Dolt backend and configured Dolt remote.
 
   belt-and-suspenders
@@ -126,7 +126,7 @@ var syncModeSetCmd = &cobra.Command{
 Valid modes:
   git-portable          JSONL exported on push, imported on pull (default)
   realtime              JSONL exported on every change
-  dolt-native           Dolt remotes only, no JSONL (requires Dolt backend)
+  dolt-native           Dolt remotes for sync, JSONL export-only backup (requires Dolt backend)
   belt-and-suspenders   Both Dolt remotes and JSONL
 
 Example:

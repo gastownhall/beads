@@ -531,7 +531,7 @@ func setupDaemonModeEnv(t *testing.T) *DualModeTestEnv {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 	// Create daemon logger
-	log := daemonLogger{logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Start RPC server
 	server, serverErrChan, err := startRPCServer(ctx, socketPath, store, tmpDir, dbPath, log)

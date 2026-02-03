@@ -53,7 +53,8 @@ func (s *Server) handleCompact(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req)
+	defer cancel()
 	startTime := time.Now()
 
 	if args.IssueID != "" {
@@ -252,7 +253,8 @@ func (s *Server) handleCompactStats(req *Request) Response {
 		}
 	}
 
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req)
+	defer cancel()
 
 	tier1, err := compactStore.GetTier1Candidates(ctx)
 	if err != nil {

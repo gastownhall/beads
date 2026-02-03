@@ -213,7 +213,7 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 		} else {
 			for rows.Next() {
 			}
-			rows.Close()
+			_ = rows.Close()
 			metrics.ShowIssueTime = time.Since(start).Milliseconds()
 		}
 	}

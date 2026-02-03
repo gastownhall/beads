@@ -39,12 +39,14 @@ import (
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
-	db       *sql.DB
-	dbPath   string       // Path to Dolt database directory
-	closed   atomic.Bool  // Tracks whether Close() has been called
-	connStr  string       // Connection string for reconnection
-	mu       sync.RWMutex // Protects concurrent access
-	readOnly bool         // True if opened in read-only mode
+	db         *sql.DB
+	dbPath     string       // Path to Dolt database directory
+	closed     atomic.Bool  // Tracks whether Close() has been called
+	connStr    string       // Connection string for reconnection
+	mu         sync.RWMutex // Protects concurrent access
+	readOnly   bool         // True if opened in read-only mode
+	serverMode bool         // True if connected to dolt sql-server (vs embedded)
+	accessLock *AccessLock  // Advisory flock preventing concurrent dolt LOCK contention
 
 	// embeddedConnector is non-nil only in embedded mode. It must be closed to release
 	// filesystem locks held by the embedded engine.
@@ -64,7 +66,8 @@ type Config struct {
 	CommitterEmail string // Git-style committer email
 	Remote         string // Default remote name (e.g., "origin")
 	Database       string // Database name within Dolt (default: "beads")
-	ReadOnly       bool   // Open in read-only mode (skip schema init)
+	ReadOnly       bool          // Open in read-only mode (skip schema init)
+	OpenTimeout    time.Duration // Advisory lock timeout (0 = no advisory lock)
 
 	// Server mode options (federation)
 	ServerMode     bool   // Connect to dolt sql-server instead of embedded
@@ -81,6 +84,63 @@ func newEmbeddedOpenBackoff() backoff.BackOff {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = embeddedOpenMaxElapsed
 	return bo
+}
+
+// Server mode retry configuration.
+// Server mode uses go-sql-driver/mysql which doesn't have built-in retry like the
+// embedded driver. We add retry for transient connection errors (stale pool connections,
+// brief network issues, server restarts).
+const serverRetryMaxElapsed = 30 * time.Second
+
+func newServerRetryBackoff() backoff.BackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxElapsedTime = serverRetryMaxElapsed
+	return bo
+}
+
+// isRetryableError returns true if the error is a transient connection error
+// that should be retried in server mode.
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	// MySQL driver transient errors
+	if strings.Contains(errStr, "driver: bad connection") {
+		return true
+	}
+	if strings.Contains(errStr, "invalid connection") {
+		return true
+	}
+	// Network transient errors (brief blips, not persistent failures)
+	if strings.Contains(errStr, "broken pipe") {
+		return true
+	}
+	if strings.Contains(errStr, "connection reset") {
+		return true
+	}
+	// Don't retry "connection refused" - that means server is down
+	return false
+}
+
+// withRetry executes an operation with retry for transient errors.
+// Only active in server mode; embedded mode has driver-level retry.
+func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
+	if !s.serverMode {
+		return op()
+	}
+
+	bo := newServerRetryBackoff()
+	return backoff.Retry(func() error {
+		err := op()
+		if err != nil && isRetryableError(err) {
+			return err // Retryable - backoff will retry
+		}
+		if err != nil {
+			return backoff.Permanent(err) // Non-retryable - stop immediately
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx))
 }
 
 // New creates a new Dolt storage backend
@@ -141,6 +201,18 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
+	// Acquire advisory flock before opening dolt (embedded mode only).
+	// This prevents multiple bd processes from competing for dolt's internal LOCK file.
+	var accessLock *AccessLock
+	if !cfg.ServerMode && cfg.OpenTimeout > 0 {
+		exclusive := !cfg.ReadOnly
+		var lockErr error
+		accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
+		if lockErr != nil {
+			return nil, fmt.Errorf("failed to acquire dolt access lock: %w", lockErr)
+		}
+	}
+
 	var db *sql.DB
 	var connStr string
 	var embeddedConnector *embedded.Connector
@@ -188,6 +260,9 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	if err != nil {
+		if accessLock != nil {
+			accessLock.Release()
+		}
 		return nil, err
 	}
 
@@ -210,6 +285,9 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		if embeddedConnector != nil {
 			_ = embeddedConnector.Close()
 		}
+		if accessLock != nil {
+			accessLock.Release()
+		}
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
 	}
 
@@ -223,6 +301,8 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remote:            cfg.Remote,
 		branch:            "main",
 		readOnly:          cfg.ReadOnly,
+		serverMode:        cfg.ServerMode,
+		accessLock:        accessLock,
 	}
 
 	// Schema initialization:
@@ -366,12 +446,31 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// Remove FK constraint on depends_on_id to allow external references.
+	// See SQLite migration 025_remove_depends_on_fk.go for design context.
+	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
+	_, err := db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
+	if err == nil {
+		// DDL change succeeded - commit it so it persists (required for Dolt server mode)
+		_, _ = db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'migration: remove fk_dep_depends_on for external references')")
+	} else if !strings.Contains(strings.ToLower(err.Error()), "can't drop") &&
+		!strings.Contains(strings.ToLower(err.Error()), "doesn't exist") &&
+		!strings.Contains(strings.ToLower(err.Error()), "check that it exists") &&
+		!strings.Contains(strings.ToLower(err.Error()), "was not found") {
+		return fmt.Errorf("failed to drop fk_dep_depends_on: %w", err)
+	}
+
 	// Create views
 	if _, err := db.ExecContext(ctx, readyIssuesView); err != nil {
 		return fmt.Errorf("failed to create ready_issues view: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, blockedIssuesView); err != nil {
 		return fmt.Errorf("failed to create blocked_issues view: %w", err)
+	}
+
+	// Run schema migrations for existing databases (bd-ijw)
+	if err := RunMigrations(db); err != nil {
+		return fmt.Errorf("failed to run dolt migrations: %w", err)
 	}
 
 	return nil
@@ -449,6 +548,27 @@ func isOnlyComments(stmt string) bool {
 	return true
 }
 
+// closeTimeout is the maximum time to wait for db/connector close operations.
+// Embedded Dolt can hang indefinitely on close; this prevents bd from hanging.
+const closeTimeout = 5 * time.Second
+
+// closeWithTimeout runs a close function with a timeout to prevent indefinite hangs.
+// Returns the close error, or a timeout error if the close doesn't complete in time.
+func closeWithTimeout(name string, closeFn func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- closeFn()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(closeTimeout):
+		// Close is hanging - log and continue rather than blocking forever
+		return fmt.Errorf("%s close timed out after %v", name, closeTimeout)
+	}
+}
+
 // Close closes the database connection
 func (s *DoltStore) Close() error {
 	s.closed.Store(true)
@@ -456,11 +576,16 @@ func (s *DoltStore) Close() error {
 	defer s.mu.Unlock()
 	var err error
 	if s.db != nil {
-		err = errors.Join(err, s.db.Close())
+		if cerr := closeWithTimeout("db", s.db.Close); cerr != nil {
+			// Timeout is non-fatal for cleanup - just log it
+			if !errors.Is(cerr, context.Canceled) {
+				err = errors.Join(err, cerr)
+			}
+		}
 	}
 	// For embedded mode, ensure the underlying engine is closed to release filesystem locks.
 	if s.embeddedConnector != nil {
-		cerr := s.embeddedConnector.Close()
+		cerr := closeWithTimeout("embeddedConnector", s.embeddedConnector.Close)
 		// Ignore context cancellation noise from Dolt shutdown plumbing.
 		if cerr != nil && !errors.Is(cerr, context.Canceled) {
 			err = errors.Join(err, cerr)
@@ -468,6 +593,11 @@ func (s *DoltStore) Close() error {
 		s.embeddedConnector = nil
 	}
 	s.db = nil
+	// Release advisory lock after db and connector are closed
+	if s.accessLock != nil {
+		s.accessLock.Release()
+		s.accessLock = nil
+	}
 	return err
 }
 

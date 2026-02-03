@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS issues (
     -- Messaging fields (bd-kwro)
     sender TEXT DEFAULT '',
     ephemeral INTEGER DEFAULT 0,
+    -- Wisp type for TTL-based compaction (gt-9br)
+    wisp_type TEXT DEFAULT '',
     -- Pinned field (bd-7h5)
     pinned INTEGER DEFAULT 0,
     -- Template field (beads-1ra)

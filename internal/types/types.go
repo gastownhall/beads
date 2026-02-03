@@ -78,8 +78,9 @@ type Issue struct {
 	OriginalType string     `json:"original_type,omitempty"` // Issue type before deletion
 
 	// ===== Messaging Fields (inter-agent communication) =====
-	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
-	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL
+	Sender    string   `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral bool     `json:"ephemeral,omitempty"` // If true, not exported to JSONL
+	WispType  WispType `json:"wisp_type,omitempty"` // Classification for TTL-based compaction (gt-9br)
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -635,6 +636,35 @@ func (m MolType) IsValid() bool {
 	return false
 }
 
+// WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
+type WispType string
+
+// WispType constants - see WISP-COMPACTION-POLICY.md for TTL assignments
+const (
+	// Category 1: High-churn, low forensic value (TTL: 6h)
+	WispTypeHeartbeat WispType = "heartbeat" // Liveness pings
+	WispTypePing      WispType = "ping"      // Health check ACKs
+
+	// Category 2: Operational state (TTL: 24h)
+	WispTypePatrol   WispType = "patrol"    // Patrol cycle reports
+	WispTypeGCReport WispType = "gc_report" // Garbage collection reports
+
+	// Category 3: Significant events (TTL: 7d)
+	WispTypeRecovery   WispType = "recovery"   // Force-kill, recovery actions
+	WispTypeError      WispType = "error"      // Error reports
+	WispTypeEscalation WispType = "escalation" // Human escalations
+)
+
+// IsValid checks if the wisp type value is valid
+func (w WispType) IsValid() bool {
+	switch w {
+	case WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
+		WispTypeRecovery, WispTypeError, WispTypeEscalation, "":
+		return true // empty is valid (uses default TTL)
+	}
+	return false
+}
+
 // WorkType categorizes how work assignment operates for a bead (Decision 006)
 type WorkType string
 
@@ -970,6 +1000,9 @@ type IssueFilter struct {
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
 
+	// Wisp type filtering (TTL-based compaction classification)
+	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
+
 	// Status exclusion (for default non-closed behavior)
 	ExcludeStatus []Status // Exclude issues with these statuses
 
@@ -1030,6 +1063,9 @@ type WorkFilter struct {
 
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
+
+	// Wisp type filtering (TTL-based compaction classification)
+	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
 
 	// Time-based deferral filtering (GH#820)
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps

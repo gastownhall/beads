@@ -13,7 +13,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -668,11 +667,6 @@ func runPrePushHook(args []string) int {
 	// Run chained hook first (if exists)
 	if exitCode := runChainedHook("pre-push", args); exitCode != 0 {
 		return exitCode
-	}
-
-	// Skip JSONL checks for dolt-native mode (no JSONL files to check)
-	if config.GetSyncMode() == config.SyncModeDoltNative {
-		return 0
 	}
 
 	// Check if we're in a bd workspace

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/signal"
 	"time"
@@ -11,10 +12,10 @@ import (
 )
 
 // startRPCServer initializes and starts the RPC server
-func startRPCServer(ctx context.Context, socketPath string, store storage.Storage, workspacePath string, dbPath string, log daemonLogger) (*rpc.Server, chan error, error) {
+func startRPCServer(ctx context.Context, socketPath string, store storage.Storage, workspacePath string, dbPath string, log *slog.Logger) (*rpc.Server, chan error, error) {
 	// Sync daemon version with CLI version
 	rpc.ServerVersion = Version
-	
+
 	server := rpc.NewServer(socketPath, store, workspacePath, dbPath)
 	serverErrChan := make(chan error, 1)
 
@@ -47,19 +48,19 @@ func checkParentProcessAlive(parentPID int) bool {
 		// Parent PID not tracked (older lock files)
 		return true
 	}
-	
+
 	if parentPID == 1 {
 		// Adopted by init/launchd - this is normal for detached daemons on macOS/Linux
 		// Don't treat this as parent death
 		return true
 	}
-	
+
 	// Check if parent process is running
 	return isProcessRunning(parentPID)
 }
 
 // runEventLoop runs the daemon event loop (polling mode)
-func runEventLoop(ctx context.Context, cancel context.CancelFunc, ticker *time.Ticker, doSync func(), server *rpc.Server, serverErrChan chan error, parentPID int, log daemonLogger) {
+func runEventLoop(ctx context.Context, cancel context.CancelFunc, ticker *time.Ticker, doSync func(), server *rpc.Server, serverErrChan chan error, parentPID int, log *slog.Logger) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, daemonSignals...)
 	defer signal.Stop(sigChan)

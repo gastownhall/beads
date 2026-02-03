@@ -18,8 +18,11 @@ import (
 
 var readyCmd = &cobra.Command{
 	Use:   "ready",
-	Short: "Show ready work (no blockers, open or in_progress)",
-	Long: `Show ready work (issues with no blockers that are open or in_progress).
+	Short: "Show ready work (open, no blockers)",
+	Long: `Show ready work (open issues with no blockers).
+
+Excludes in_progress, blocked, deferred, and hooked issues. This matches the
+behavior of 'bd list --ready' and shows work that is truly available to claim.
 
 Use --mol to filter to a specific molecule's steps:
   bd ready --mol bd-patrol   # Show ready steps within molecule
@@ -78,7 +81,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		filter := types.WorkFilter{
-			// Leave Status empty to get both 'open' and 'in_progress'
+			Status:          "open", // Only show open issues, not in_progress (matches bd list --ready)
 			Type:            issueType,
 			Limit:           limit,
 			Unassigned:      unassigned,
@@ -109,6 +112,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			readyArgs := &rpc.ReadyArgs{
+				Status:          "open", // Only show open issues, not in_progress (matches bd list --ready)
 				Assignee:        assignee,
 				Unassigned:      unassigned,
 				Type:            issueType,

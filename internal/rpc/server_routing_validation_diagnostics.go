@@ -263,9 +263,8 @@ func (s *Server) handleRequest(req *Request) Response {
 // reqCtx returns a context with the server's request timeout applied.
 // This prevents request handlers from hanging indefinitely if database
 // operations or other internal calls stall (GH#bd-p76kv).
-func (s *Server) reqCtx(_ *Request) context.Context {
-	ctx, _ := context.WithTimeout(context.Background(), s.requestTimeout)
-	return ctx
+func (s *Server) reqCtx(_ *Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), s.requestTimeout)
 }
 
 func (s *Server) reqActor(req *Request) string {
@@ -407,7 +406,8 @@ func (s *Server) handleMetrics(_ *Request) Response {
 }
 
 func (s *Server) handleGetWorkerStatus(req *Request) Response {
-	ctx := s.reqCtx(req)
+	ctx, cancel := s.reqCtx(req)
+	defer cancel()
 
 	// Parse optional args
 	var args GetWorkerStatusArgs

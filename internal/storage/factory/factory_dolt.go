@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -24,13 +25,14 @@ func init() {
 		}
 
 		store, err := dolt.New(ctx, &dolt.Config{
-			Path:       path,
-			Database:   opts.Database,
-			ReadOnly:   opts.ReadOnly,
-			ServerMode: opts.ServerMode,
-			ServerHost: opts.ServerHost,
-			ServerPort: opts.ServerPort,
-			ServerUser: opts.ServerUser,
+			Path:        path,
+			Database:    opts.Database,
+			ReadOnly:    opts.ReadOnly,
+			OpenTimeout: opts.OpenTimeout,
+			ServerMode:  opts.ServerMode,
+			ServerHost:  opts.ServerHost,
+			ServerPort:  opts.ServerPort,
+			ServerUser:  opts.ServerUser,
 		})
 		if err != nil {
 			// If server mode failed with a connection error, fall back to embedded mode.
@@ -45,10 +47,11 @@ func init() {
 				}
 
 				return dolt.New(ctx, &dolt.Config{
-					Path:       path,
-					Database:   opts.Database,
-					ReadOnly:   opts.ReadOnly,
-					ServerMode: false, // Fall back to embedded
+					Path:        path,
+					Database:    opts.Database,
+					ReadOnly:    opts.ReadOnly,
+					OpenTimeout: opts.OpenTimeout,
+					ServerMode:  false, // Fall back to embedded
 				})
 			}
 			return nil, err
@@ -61,6 +64,17 @@ func init() {
 func bootstrapEmbeddedDolt(ctx context.Context, path string, opts Options) error {
 	// Path is the dolt subdirectory, parent is .beads directory
 	beadsDir := filepath.Dir(path)
+
+	// In dolt-native mode, JSONL is export-only backup — never auto-import.
+	// If the dolt DB doesn't exist in this mode, that's an error, not a bootstrap opportunity.
+	// This prevents split-brain: without this guard, a wrong path (from B1) would silently
+	// create a new DB from stale JSONL, diverging from the real dolt-native data.
+	if config.GetSyncMode() == config.SyncModeDoltNative {
+		if !hasDoltSubdir(path) {
+			return fmt.Errorf("dolt database not found at %s (JSONL auto-import is disabled in dolt-native sync mode; run 'bd init --backend=dolt' to create a new database)", path)
+		}
+		return nil // Dolt exists, no bootstrap needed
+	}
 
 	bootstrapped, result, err := dolt.Bootstrap(ctx, dolt.BootstrapConfig{
 		BeadsDir:    beadsDir,
@@ -83,6 +97,24 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, opts Options) error
 		fmt.Fprintf(os.Stderr, "\n  Dolt database ready\n")
 	}
 	return nil
+}
+
+// hasDoltSubdir checks if the given path contains any subdirectory with a .dolt directory inside.
+func hasDoltSubdir(basePath string) bool {
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		doltDir := filepath.Join(basePath, entry.Name(), ".dolt")
+		if info, err := os.Stat(doltDir); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // isServerConnectionError returns true if the error indicates the Dolt server

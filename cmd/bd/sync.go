@@ -526,7 +526,8 @@ func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGi
 	}
 
 	// Git-based pull (for git-portable, belt-and-suspenders, or when Dolt not available)
-	if ShouldExportJSONL(ctx, store) {
+	// In dolt-native mode, skip git pull for JSONL (JSONL is export-only backup)
+	if syncMode != SyncModeDoltNative {
 		if sbc.IsConfigured() {
 			fmt.Printf("→ Pulling from sync branch '%s'...\n", sbc.Branch)
 			pullResult, err := syncbranch.PullFromSyncBranch(ctx, sbc.RepoRoot, sbc.Branch, jsonlPath, false)
