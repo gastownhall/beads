@@ -25,13 +25,14 @@ func init() {
 		}
 
 		store, err := dolt.New(ctx, &dolt.Config{
-			Path:       path,
-			Database:   opts.Database,
-			ReadOnly:   opts.ReadOnly,
-			ServerMode: opts.ServerMode,
-			ServerHost: opts.ServerHost,
-			ServerPort: opts.ServerPort,
-			ServerUser: opts.ServerUser,
+			Path:        path,
+			Database:    opts.Database,
+			ReadOnly:    opts.ReadOnly,
+			OpenTimeout: opts.OpenTimeout,
+			ServerMode:  opts.ServerMode,
+			ServerHost:  opts.ServerHost,
+			ServerPort:  opts.ServerPort,
+			ServerUser:  opts.ServerUser,
 		})
 		if err != nil {
 			// If server mode failed with a connection error, fall back to embedded mode.
@@ -46,10 +47,11 @@ func init() {
 				}
 
 				return dolt.New(ctx, &dolt.Config{
-					Path:       path,
-					Database:   opts.Database,
-					ReadOnly:   opts.ReadOnly,
-					ServerMode: false, // Fall back to embedded
+					Path:        path,
+					Database:    opts.Database,
+					ReadOnly:    opts.ReadOnly,
+					OpenTimeout: opts.OpenTimeout,
+					ServerMode:  false, // Fall back to embedded
 				})
 			}
 			return nil, err

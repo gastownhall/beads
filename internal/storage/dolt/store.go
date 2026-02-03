@@ -46,6 +46,7 @@ type DoltStore struct {
 	mu         sync.RWMutex // Protects concurrent access
 	readOnly   bool         // True if opened in read-only mode
 	serverMode bool         // True if connected to dolt sql-server (vs embedded)
+	accessLock *AccessLock  // Advisory flock preventing concurrent dolt LOCK contention
 
 	// embeddedConnector is non-nil only in embedded mode. It must be closed to release
 	// filesystem locks held by the embedded engine.
@@ -65,7 +66,8 @@ type Config struct {
 	CommitterEmail string // Git-style committer email
 	Remote         string // Default remote name (e.g., "origin")
 	Database       string // Database name within Dolt (default: "beads")
-	ReadOnly       bool   // Open in read-only mode (skip schema init)
+	ReadOnly       bool          // Open in read-only mode (skip schema init)
+	OpenTimeout    time.Duration // Advisory lock timeout (0 = no advisory lock)
 
 	// Server mode options (federation)
 	ServerMode     bool   // Connect to dolt sql-server instead of embedded
@@ -199,6 +201,18 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
+	// Acquire advisory flock before opening dolt (embedded mode only).
+	// This prevents multiple bd processes from competing for dolt's internal LOCK file.
+	var accessLock *AccessLock
+	if !cfg.ServerMode && cfg.OpenTimeout > 0 {
+		exclusive := !cfg.ReadOnly
+		var lockErr error
+		accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
+		if lockErr != nil {
+			return nil, fmt.Errorf("failed to acquire dolt access lock: %w", lockErr)
+		}
+	}
+
 	var db *sql.DB
 	var connStr string
 	var embeddedConnector *embedded.Connector
@@ -246,6 +260,9 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	if err != nil {
+		if accessLock != nil {
+			accessLock.Release()
+		}
 		return nil, err
 	}
 
@@ -268,6 +285,9 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		if embeddedConnector != nil {
 			_ = embeddedConnector.Close()
 		}
+		if accessLock != nil {
+			accessLock.Release()
+		}
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
 	}
 
@@ -282,6 +302,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		branch:            "main",
 		readOnly:          cfg.ReadOnly,
 		serverMode:        cfg.ServerMode,
+		accessLock:        accessLock,
 	}
 
 	// Schema initialization:
@@ -567,6 +588,11 @@ func (s *DoltStore) Close() error {
 		s.embeddedConnector = nil
 	}
 	s.db = nil
+	// Release advisory lock after db and connector are closed
+	if s.accessLock != nil {
+		s.accessLock.Release()
+		s.accessLock = nil
+	}
 	return err
 }
 
