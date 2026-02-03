@@ -187,14 +187,15 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Open store using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
+	// Open store using factory in read-only mode to avoid creating new database.
+	// ReadOnly mode fails if database doesn't exist.
 	ctx := context.Background()
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
-			Status:  "ok",
-			Message: "N/A (unable to open database)",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
 		}
 	}
 	defer func() { _ = store.Close() }()
