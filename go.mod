@@ -5,7 +5,7 @@ go 1.25.6
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.20.0
-	github.com/cenkalti/backoff/v4 v4.2.1
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/charmbracelet/huh v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
