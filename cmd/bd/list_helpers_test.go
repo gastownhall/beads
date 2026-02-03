@@ -76,6 +76,33 @@ func TestListBuildIssueTree_ParentChildByDotID(t *testing.T) {
 	}
 }
 
+// Regression test for https://github.com/steveyegge/beads/issues/1446
+// A task with multiple dependencies on the same epic should only appear once.
+func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
+	epic := &types.Issue{ID: "bd-epic", Title: "Epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	task := &types.Issue{ID: "bd-task", Title: "Task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+	// The task has two different dependency types pointing at the same epic
+	allDeps := map[string][]*types.Dependency{
+		"bd-task": {
+			{IssueID: "bd-task", DependsOnID: "bd-epic", Type: types.DepParentChild},
+			{IssueID: "bd-task", DependsOnID: "bd-epic", Type: types.DepBlocks},
+		},
+	}
+
+	roots, children := buildIssueTreeWithDeps([]*types.Issue{epic, task}, allDeps)
+
+	if len(roots) != 1 || roots[0].ID != "bd-epic" {
+		t.Fatalf("expected 1 root (epic), got %d: %+v", len(roots), roots)
+	}
+	if len(children["bd-epic"]) != 1 {
+		t.Fatalf("expected 1 child under epic, got %d", len(children["bd-epic"]))
+	}
+	if children["bd-epic"][0].ID != "bd-task" {
+		t.Fatalf("expected bd-task as child, got %s", children["bd-epic"][0].ID)
+	}
+}
+
 func TestListSortIssues_ClosedNilLast(t *testing.T) {
 	t1 := time.Now().Add(-2 * time.Hour)
 	t2 := time.Now().Add(-1 * time.Hour)

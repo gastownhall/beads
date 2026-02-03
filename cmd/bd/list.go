@@ -203,6 +203,7 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 
 	// If we have dependency records, use them to find parent-child relationships
 	if allDeps != nil {
+		addedChild := make(map[string]bool) // tracks "parentID:childID" to prevent duplicates
 		for issueID, deps := range allDeps {
 			for _, dep := range deps {
 				parentID := dep.DependsOnID
@@ -217,7 +218,11 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 				// 1. Explicit parent-child dependency type, OR
 				// 2. Any dependency where the target is an epic
 				if dep.Type == types.DepParentChild || epicIDs[parentID] {
-					childrenMap[parentID] = append(childrenMap[parentID], child)
+					key := parentID + ":" + issueID
+					if !addedChild[key] {
+						childrenMap[parentID] = append(childrenMap[parentID], child)
+						addedChild[key] = true
+					}
 					isChild[issueID] = true
 				}
 			}
