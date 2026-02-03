@@ -22,24 +22,8 @@
       (
         system:
         let
-          # Create overlay for Go 1.25.6
-          # nixpkgs-unstable has 1.25.1 but dolthub/driver requires 1.25.6
-          goOverlay = final: prev: {
-            go_1_25_6 = prev.go.overrideAttrs (oldAttrs: rec {
-              version = "1.25.6";
-              src = prev.fetchurl {
-                url = "https://go.dev/dl/go${version}.src.tar.gz";
-                hash = "sha256-WMv3ceRNdt5vVtGeM7d9dFoeSJNAkih15GWFuXXCsFk=";
-              };
-            });
-          };
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ goOverlay ];
-          };
-          # Override buildGoModule to use Go 1.25.6 for both main build AND go-modules derivation
-          buildGoModule126 = pkgs.buildGoModule.override { go = pkgs.go_1_25_6; };
-          bdBase = pkgs.callPackage ./default.nix { inherit pkgs self; buildGoModule = buildGoModule126; };
+          pkgs = nixpkgs.legacyPackages.${system};
+          bdBase = pkgs.callPackage ./default.nix { inherit pkgs self; };
           # Wrap the base package with shell completions baked in
           bd = pkgs.stdenv.mkDerivation {
             pname = "beads";

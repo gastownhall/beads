@@ -1,5 +1,5 @@
-{ pkgs, self, buildGoModule ? pkgs.buildGoModule }:
-buildGoModule {
+{ pkgs, self }:
+pkgs.buildGoModule {
   pname = "beads";
   version = "0.49.3";
 
@@ -10,6 +10,10 @@ buildGoModule {
   doCheck = false;
   # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
   vendorHash = "sha256-YU+bRLVlWtHzJ1QPzcKJ70f+ynp8lMoIeFlm+29BNPE=";
+
+  # Allow Go toolchain to auto-download newer version if needed
+  # (go.mod requires 1.25.6+ but nixpkgs may have older)
+  env.GOTOOLCHAIN = "auto";
 
   # Git is required for tests
   nativeBuildInputs = [ pkgs.git ];
