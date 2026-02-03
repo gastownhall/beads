@@ -44,7 +44,7 @@ func AcquireAccessLock(doltDir string, exclusive bool, timeout time.Duration) (*
 
 	// Open or create lock file
 	// #nosec G304 - controlled path derived from database configuration
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open access lock: %w", err)
 	}
