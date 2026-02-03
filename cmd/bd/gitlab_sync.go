@@ -367,7 +367,7 @@ func doPullFromGitLabWithContext(ctx context.Context, syncCtx *SyncContext, clie
 }
 
 // doPushToGitLabWithContext pushes local beads issues to GitLab using SyncContext.
-func doPushToGitLabWithContext(ctx context.Context, syncCtx *SyncContext, client *gitlab.Client, config *gitlab.MappingConfig, localIssues []*types.Issue, dryRun, createOnly bool, forceUpdateIDs, skipUpdateIDs map[string]bool) (*gitlab.PushStats, error) {
+func doPushToGitLabWithContext(ctx context.Context, syncCtx *SyncContext, client *gitlab.Client, config *gitlab.MappingConfig, localIssues []*types.Issue, dryRun, createOnly bool, _ /* forceUpdateIDs */, skipUpdateIDs map[string]bool) (*gitlab.PushStats, error) {
 	stats := &gitlab.PushStats{}
 
 	for _, issue := range localIssues {
@@ -459,7 +459,7 @@ func doPushToGitLabWithContext(ctx context.Context, syncCtx *SyncContext, client
 //   out of sync between local machine and GitLab server.
 // - This is a simple heuristic; field-level comparison would be more accurate but
 //   more complex to implement.
-func detectGitLabConflictsWithContext(ctx context.Context, syncCtx *SyncContext, client *gitlab.Client, localIssues []*types.Issue) ([]gitlab.Conflict, error) {
+func detectGitLabConflictsWithContext(ctx context.Context, _ /* syncCtx */ *SyncContext, client *gitlab.Client, localIssues []*types.Issue) ([]gitlab.Conflict, error) {
 	var conflicts []gitlab.Conflict
 
 	// Get all GitLab issues
@@ -513,6 +513,10 @@ func detectGitLabConflictsWithContext(ctx context.Context, syncCtx *SyncContext,
 }
 
 // resolveGitLabConflictsWithContext resolves conflicts using SyncContext.
+// Note: This function logs warnings but continues on individual errors,
+// so it always returns nil. The error return is kept for API consistency.
+//
+//nolint:unparam // error return kept for future use and API consistency
 func resolveGitLabConflictsWithContext(ctx context.Context, syncCtx *SyncContext, client *gitlab.Client, config *gitlab.MappingConfig, conflicts []gitlab.Conflict, strategy ConflictStrategy) error {
 	for _, conflict := range conflicts {
 		var useGitLab bool
