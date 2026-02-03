@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS issues (
     -- Messaging fields
     sender VARCHAR(255) DEFAULT '',
     ephemeral TINYINT(1) DEFAULT 0,
+    -- Wisp classification for TTL-based compaction (gt-9br)
+    wisp_type VARCHAR(32) DEFAULT '',
     -- Pinned field
     pinned TINYINT(1) DEFAULT 0,
     -- Template field

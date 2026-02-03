@@ -52,11 +52,11 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template, crystallizes,
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -64,7 +64,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-		issue.Sender, wisp, pinned, isTemplate, crystallizes,
+		issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
@@ -114,11 +114,11 @@ func insertIssueStrict(ctx context.Context, conn *sql.Conn, issue *types.Issue) 
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template, crystallizes,
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -126,7 +126,7 @@ func insertIssueStrict(ctx context.Context, conn *sql.Conn, issue *types.Issue) 
 		issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-		issue.Sender, wisp, pinned, isTemplate, crystallizes,
+		issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
@@ -146,11 +146,11 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template, crystallizes,
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -187,7 +187,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-			issue.Sender, wisp, pinned, isTemplate, crystallizes,
+			issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
@@ -216,11 +216,11 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, source_repo, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			sender, ephemeral, pinned, is_template, crystallizes,
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -257,7 +257,7 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
-			issue.Sender, wisp, pinned, isTemplate, crystallizes,
+			issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
