@@ -400,18 +400,18 @@ func insertIssueTx(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at,
-			sender, ephemeral, pinned, is_template, crystallizes
+			sender, ephemeral, wisp_type, pinned, is_template, crystallizes
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?
 		)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, nullString(issue.Assignee), nullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt,
-		issue.Sender, issue.Ephemeral, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
+		issue.Sender, issue.Ephemeral, string(issue.WispType), issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 	)
 	return err
 }
