@@ -264,17 +264,21 @@ var showCmd = &cobra.Command{
 						fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(details.Labels, ", "))
 					}
 
+					// Collect related issues from both directions for deduplication
+					// (relates-to is bidirectional, so we merge and show once)
+					relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+
 					// Dependencies grouped by type with semantic colors
 					if len(details.Dependencies) > 0 {
-						var blocks, parent, related, discovered []*types.IssueWithDependencyMetadata
+						var blocks, parent, discovered []*types.IssueWithDependencyMetadata
 						for _, dep := range details.Dependencies {
 							switch dep.DependencyType {
 							case types.DepBlocks:
 								blocks = append(blocks, dep)
 							case types.DepParentChild:
 								parent = append(parent, dep)
-							case types.DepRelated:
-								related = append(related, dep)
+							case types.DepRelated, types.DepRelatesTo:
+								relatedSeen[dep.ID] = dep
 							case types.DepDiscoveredFrom:
 								discovered = append(discovered, dep)
 							default:
@@ -294,12 +298,6 @@ var showCmd = &cobra.Command{
 								fmt.Println(formatDependencyLine("→", dep))
 							}
 						}
-						if len(related) > 0 {
-							fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-							for _, dep := range related {
-								fmt.Println(formatDependencyLine("↔", dep))
-							}
-						}
 						if len(discovered) > 0 {
 							fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
 							for _, dep := range discovered {
@@ -310,15 +308,15 @@ var showCmd = &cobra.Command{
 
 					// Dependents grouped by type with semantic colors
 					if len(details.Dependents) > 0 {
-						var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
+						var blocks, children, discovered []*types.IssueWithDependencyMetadata
 						for _, dep := range details.Dependents {
 							switch dep.DependencyType {
 							case types.DepBlocks:
 								blocks = append(blocks, dep)
 							case types.DepParentChild:
 								children = append(children, dep)
-							case types.DepRelated:
-								related = append(related, dep)
+							case types.DepRelated, types.DepRelatesTo:
+								relatedSeen[dep.ID] = dep
 							case types.DepDiscoveredFrom:
 								discovered = append(discovered, dep)
 							default:
@@ -338,17 +336,19 @@ var showCmd = &cobra.Command{
 								fmt.Println(formatDependencyLine("←", dep))
 							}
 						}
-						if len(related) > 0 {
-							fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-							for _, dep := range related {
-								fmt.Println(formatDependencyLine("↔", dep))
-							}
-						}
 						if len(discovered) > 0 {
 							fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
 							for _, dep := range discovered {
 								fmt.Println(formatDependencyLine("◊", dep))
 							}
+						}
+					}
+
+					// Print deduplicated RELATED section (bidirectional links shown once)
+					if len(relatedSeen) > 0 {
+						fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+						for _, dep := range relatedSeen {
+							fmt.Println(formatDependencyLine("↔", dep))
 						}
 					}
 
@@ -476,19 +476,23 @@ var showCmd = &cobra.Command{
 				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
 			}
 
+			// Collect related issues from both directions for deduplication
+			// (relates-to is bidirectional, so we merge and show once)
+			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+
 			// Show dependencies - grouped by dependency type for clarity
 			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 			if len(depsWithMeta) > 0 {
 				// Group by dependency type
-				var blocks, parent, related, discovered []*types.IssueWithDependencyMetadata
+				var blocks, parent, discovered []*types.IssueWithDependencyMetadata
 				for _, dep := range depsWithMeta {
 					switch dep.DependencyType {
 					case types.DepBlocks:
 						blocks = append(blocks, dep)
 					case types.DepParentChild:
 						parent = append(parent, dep)
-					case types.DepRelated:
-						related = append(related, dep)
+					case types.DepRelated, types.DepRelatesTo:
+						relatedSeen[dep.ID] = dep
 					case types.DepDiscoveredFrom:
 						discovered = append(discovered, dep)
 					default:
@@ -508,12 +512,6 @@ var showCmd = &cobra.Command{
 						fmt.Println(formatDependencyLine("→", dep))
 					}
 				}
-				if len(related) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-					for _, dep := range related {
-						fmt.Println(formatDependencyLine("↔", dep))
-					}
-				}
 				if len(discovered) > 0 {
 					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
 					for _, dep := range discovered {
@@ -526,15 +524,15 @@ var showCmd = &cobra.Command{
 			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID)
 			if len(dependentsWithMeta) > 0 {
 				// Group by dependency type
-				var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
+				var blocks, children, discovered []*types.IssueWithDependencyMetadata
 				for _, dep := range dependentsWithMeta {
 					switch dep.DependencyType {
 					case types.DepBlocks:
 						blocks = append(blocks, dep)
 					case types.DepParentChild:
 						children = append(children, dep)
-					case types.DepRelated:
-						related = append(related, dep)
+					case types.DepRelated, types.DepRelatesTo:
+						relatedSeen[dep.ID] = dep
 					case types.DepDiscoveredFrom:
 						discovered = append(discovered, dep)
 					default:
@@ -554,17 +552,19 @@ var showCmd = &cobra.Command{
 						fmt.Println(formatDependencyLine("←", dep))
 					}
 				}
-				if len(related) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-					for _, dep := range related {
-						fmt.Println(formatDependencyLine("↔", dep))
-					}
-				}
 				if len(discovered) > 0 {
 					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
 					for _, dep := range discovered {
 						fmt.Println(formatDependencyLine("◊", dep))
 					}
+				}
+			}
+
+			// Print deduplicated RELATED section (bidirectional links shown once)
+			if len(relatedSeen) > 0 {
+				fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+				for _, dep := range relatedSeen {
+					fmt.Println(formatDependencyLine("↔", dep))
 				}
 			}
 
