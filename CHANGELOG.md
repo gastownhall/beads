@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`bd ready` now shows only open issues** - Excludes in_progress, matching `bd list --ready` behavior. This makes `bd ready` show work that is truly available to claim, not work already being worked on.
+
 ## [0.49.3] - 2026-01-31
 
 ### Changed

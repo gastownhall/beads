@@ -11,9 +11,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetReadyWork returns issues with no open blockers
-// By default, shows both 'open' and 'in_progress' issues so epics/tasks
-// ready to close are visible.
+// GetReadyWork returns issues with no open blockers.
+// If filter.Status is empty, shows both 'open' and 'in_progress' issues.
+// If filter.Status is set (e.g., "open"), only shows that status.
 // Excludes pinned issues which are persistent anchors, not actionable work.
 func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	whereClauses := []string{

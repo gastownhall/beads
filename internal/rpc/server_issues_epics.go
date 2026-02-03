@@ -1683,7 +1683,7 @@ func (s *Server) handleReady(req *Request) Response {
 	}
 
 	wf := types.WorkFilter{
-		// Leave Status empty to get both 'open' and 'in_progress' (GH#5aml)
+		Status:          types.Status(readyArgs.Status), // Pass through status filter (e.g., "open" to exclude in_progress)
 		Type:            readyArgs.Type,
 		Priority:        readyArgs.Priority,
 		Unassigned:      readyArgs.Unassigned,

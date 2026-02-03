@@ -312,6 +312,7 @@ type ResolveIDArgs struct {
 
 // ReadyArgs represents arguments for the ready operation
 type ReadyArgs struct {
+	Status     string   `json:"status,omitempty"`             // Filter by status (e.g., "open" to exclude in_progress)
 	Assignee   string   `json:"assignee,omitempty"`
 	Unassigned bool     `json:"unassigned,omitempty"`
 	Priority   *int     `json:"priority,omitempty"`
