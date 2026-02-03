@@ -129,6 +129,51 @@ type VarDef struct {
 	Type string `json:"type,omitempty"`
 }
 
+// UnmarshalTOML implements toml.Unmarshaler for VarDef.
+// This allows vars to be defined as either simple strings or tables:
+//
+//	[vars]
+//	wisp_type = "patrol"           # simple string -> Default = "patrol"
+//
+//	[vars.component]               # table with full definition
+//	description = "Component name"
+//	required = true
+func (v *VarDef) UnmarshalTOML(data interface{}) error {
+	switch val := data.(type) {
+	case string:
+		// Simple string value becomes the default
+		v.Default = val
+		return nil
+	case map[string]interface{}:
+		// Table format - parse each field
+		if desc, ok := val["description"].(string); ok {
+			v.Description = desc
+		}
+		if def, ok := val["default"].(string); ok {
+			v.Default = def
+		}
+		if req, ok := val["required"].(bool); ok {
+			v.Required = req
+		}
+		if enum, ok := val["enum"].([]interface{}); ok {
+			for _, e := range enum {
+				if s, ok := e.(string); ok {
+					v.Enum = append(v.Enum, s)
+				}
+			}
+		}
+		if pattern, ok := val["pattern"].(string); ok {
+			v.Pattern = pattern
+		}
+		if typ, ok := val["type"].(string); ok {
+			v.Type = typ
+		}
+		return nil
+	default:
+		return fmt.Errorf("type mismatch for formula.VarDef: expected string or table but found %T", data)
+	}
+}
+
 // Step defines a work item to create when the formula is instantiated.
 type Step struct {
 	// ID is the unique identifier within this formula.
