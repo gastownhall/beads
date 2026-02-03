@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,21 +16,21 @@ import (
 
 // FileWatcher monitors JSONL and git ref changes using filesystem events or polling.
 type FileWatcher struct {
-	watcher        *fsnotify.Watcher
-	debouncer      *Debouncer
-	jsonlPath      string
-	parentDir      string
-	pollingMode    bool
-	lastModTime    time.Time
-	lastExists     bool
-	lastSize       int64
-	pollInterval   time.Duration
-	gitRefsPath    string
-	gitHeadPath    string
+	watcher         *fsnotify.Watcher
+	debouncer       *Debouncer
+	jsonlPath       string
+	parentDir       string
+	pollingMode     bool
+	lastModTime     time.Time
+	lastExists      bool
+	lastSize        int64
+	pollInterval    time.Duration
+	gitRefsPath     string
+	gitHeadPath     string
 	lastHeadModTime time.Time
-	lastHeadExists bool
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup // Track goroutines for graceful shutdown
+	lastHeadExists  bool
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup // Track goroutines for graceful shutdown
 	// Log deduplication: track last log times to avoid duplicate messages
 	lastFileLogTime   time.Time
 	lastGitRefLogTime time.Time
@@ -120,7 +121,7 @@ func NewFileWatcher(jsonlPath string, onChanged func()) (*FileWatcher, error) {
 		_ = watcher.Add(fw.gitRefsPath) // Ignore error - not all setups have this
 	}
 	if fw.gitHeadPath != "" {
-		_ = watcher.Add(fw.gitHeadPath)  // Ignore error - not all setups have this
+		_ = watcher.Add(fw.gitHeadPath) // Ignore error - not all setups have this
 	}
 
 	return fw, nil
@@ -153,7 +154,7 @@ func (fw *FileWatcher) shouldLogGitRefChange() bool {
 // Start begins monitoring filesystem events or polling.
 // Runs in background goroutine until context is canceled.
 // Should only be called once per FileWatcher instance.
-func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
+func (fw *FileWatcher) Start(ctx context.Context, log *slog.Logger) {
 	// Create internal cancel so Close can stop goroutines
 	ctx, cancel := context.WithCancel(ctx)
 	fw.cancel = cancel
@@ -177,7 +178,7 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle parent directory events (file create/replace)
 				if event.Name == filepath.Join(fw.parentDir, jsonlBase) && event.Op&fsnotify.Create != 0 {
-					log.log("JSONL file created: %s", event.Name)
+					log.Info("JSONL file created", "path", event.Name)
 					// Ensure we're watching the file directly
 					_ = fw.watcher.Add(fw.jsonlPath)
 					fw.debouncer.Trigger()
@@ -187,7 +188,7 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 				// Handle JSONL write/chmod events
 				if event.Name == fw.jsonlPath && event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Chmod) != 0 {
 					if fw.shouldLogFileChange() {
-						log.log("File change detected: %s", event.Name)
+						log.Info("File change detected", "path", event.Name)
 					}
 					fw.debouncer.Trigger()
 					continue
@@ -195,8 +196,8 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle JSONL removal/rename (e.g., git checkout)
 				if event.Name == fw.jsonlPath && (event.Op&fsnotify.Remove != 0 || event.Op&fsnotify.Rename != 0) {
-				log.log("JSONL removed/renamed, re-establishing watch")
-				_ = fw.watcher.Remove(fw.jsonlPath)
+					log.Info("JSONL removed/renamed, re-establishing watch")
+					_ = fw.watcher.Remove(fw.jsonlPath)
 					// Retry with exponential backoff
 					fw.reEstablishWatch(ctx, log)
 					continue
@@ -204,7 +205,7 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 
 				// Handle .git/HEAD changes (branch switches)
 				if event.Name == fw.gitHeadPath && event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-					log.log("Git HEAD change detected: %s", event.Name)
+					log.Info("Git HEAD change detected", "path", event.Name)
 					fw.debouncer.Trigger()
 					continue
 				}
@@ -213,7 +214,7 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 				// Fix: check gitRefsPath is not empty, otherwise HasPrefix("any", "") is always true
 				if fw.gitRefsPath != "" && event.Op&fsnotify.Write != 0 && strings.HasPrefix(event.Name, fw.gitRefsPath) {
 					if fw.shouldLogGitRefChange() {
-						log.log("Git ref change detected: %s", event.Name)
+						log.Info("Git ref change detected", "path", event.Name)
 					}
 					fw.debouncer.Trigger()
 					continue
@@ -223,7 +224,7 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 				if !ok {
 					return
 				}
-				log.log("Watcher error: %v", err)
+				log.Info("Watcher error", "error", err)
 
 			case <-ctx.Done():
 				return
@@ -233,9 +234,9 @@ func (fw *FileWatcher) Start(ctx context.Context, log daemonLogger) {
 }
 
 // reEstablishWatch attempts to re-add the JSONL watch with exponential backoff.
-func (fw *FileWatcher) reEstablishWatch(ctx context.Context, log daemonLogger) {
+func (fw *FileWatcher) reEstablishWatch(ctx context.Context, log *slog.Logger) {
 	delays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
-	
+
 	for _, delay := range delays {
 		select {
 		case <-ctx.Done():
@@ -243,24 +244,24 @@ func (fw *FileWatcher) reEstablishWatch(ctx context.Context, log daemonLogger) {
 		case <-time.After(delay):
 			if err := fw.watcher.Add(fw.jsonlPath); err != nil {
 				if os.IsNotExist(err) {
-					log.log("JSONL still missing after %v, retrying...", delay)
+					log.Info("JSONL still missing, retrying...", "delay", delay)
 					continue
 				}
-				log.log("Failed to re-watch JSONL after %v: %v", delay, err)
+				log.Info("Failed to re-watch JSONL", "delay", delay, "error", err)
 				return
 			}
 			// Success!
-			log.log("Successfully re-established JSONL watch after %v", delay)
+			log.Info("Successfully re-established JSONL watch", "delay", delay)
 			fw.debouncer.Trigger()
 			return
 		}
 	}
-	log.log("Failed to re-establish JSONL watch after all retries")
+	log.Info("Failed to re-establish JSONL watch after all retries")
 }
 
 // startPolling begins polling for file changes using a ticker.
-func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
-	log.log("Starting polling mode with %v interval", fw.pollInterval)
+func (fw *FileWatcher) startPolling(ctx context.Context, log *slog.Logger) {
+	log.Info("Starting polling mode", "interval", fw.pollInterval)
 	ticker := time.NewTicker(fw.pollInterval)
 	fw.wg.Add(1)
 	go func() {
@@ -280,11 +281,11 @@ func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
 							fw.lastExists = false
 							fw.lastModTime = time.Time{}
 							fw.lastSize = 0
-							log.log("File missing (polling): %s", fw.jsonlPath)
+							log.Info("File missing (polling)", "path", fw.jsonlPath)
 							changed = true
 						}
 					} else {
-						log.log("Polling error: %v", err)
+						log.Info("Polling error", "error", err)
 					}
 				} else {
 					// File exists
@@ -293,13 +294,13 @@ func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
 						fw.lastExists = true
 						fw.lastModTime = stat.ModTime()
 						fw.lastSize = stat.Size()
-						log.log("File appeared (polling): %s", fw.jsonlPath)
+						log.Info("File appeared (polling)", "path", fw.jsonlPath)
 						changed = true
 					} else if !stat.ModTime().Equal(fw.lastModTime) || stat.Size() != fw.lastSize {
 						// File exists and existed before - check for changes
 						fw.lastModTime = stat.ModTime()
 						fw.lastSize = stat.Size()
-						log.log("File change detected (polling): %s", fw.jsonlPath)
+						log.Info("File change detected (polling)", "path", fw.jsonlPath)
 						changed = true
 					}
 				}
@@ -312,7 +313,7 @@ func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
 							if fw.lastHeadExists {
 								fw.lastHeadExists = false
 								fw.lastHeadModTime = time.Time{}
-								log.log("Git HEAD missing (polling): %s", fw.gitHeadPath)
+								log.Info("Git HEAD missing (polling)", "path", fw.gitHeadPath)
 								changed = true
 							}
 						}
@@ -323,12 +324,12 @@ func (fw *FileWatcher) startPolling(ctx context.Context, log daemonLogger) {
 							// HEAD appeared
 							fw.lastHeadExists = true
 							fw.lastHeadModTime = headStat.ModTime()
-							log.log("Git HEAD appeared (polling): %s", fw.gitHeadPath)
+							log.Info("Git HEAD appeared (polling)", "path", fw.gitHeadPath)
 							changed = true
 						} else if !headStat.ModTime().Equal(fw.lastHeadModTime) {
 							// HEAD changed (branch switch)
 							fw.lastHeadModTime = headStat.ModTime()
-							log.log("Git HEAD change detected (polling): %s", fw.gitHeadPath)
+							log.Info("Git HEAD change detected (polling)", "path", fw.gitHeadPath)
 							changed = true
 						}
 					}

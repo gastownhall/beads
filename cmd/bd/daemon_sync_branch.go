@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,7 @@ import (
 // syncBranchCommitAndPush commits JSONL to the sync branch using a worktree.
 // Returns true if changes were committed, false if no changes or sync.branch not configured.
 // This is a convenience wrapper that calls syncBranchCommitAndPushWithOptions with default options.
-func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPush bool, log daemonLogger) (bool, error) {
+func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPush bool, log *slog.Logger) (bool, error) {
 	return syncBranchCommitAndPushWithOptions(ctx, store, autoPush, false, log)
 }
 
@@ -25,7 +26,7 @@ func syncBranchCommitAndPush(ctx context.Context, store storage.Storage, autoPus
 // Returns true if changes were committed, false if no changes or sync.branch not configured.
 // If forceOverwrite is true, the local JSONL is copied to the worktree without merging,
 // which is necessary for delete mutations to be properly reflected in the sync branch.
-func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Storage, autoPush, forceOverwrite bool, log daemonLogger) (bool, error) {
+func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Storage, autoPush, forceOverwrite bool, log *slog.Logger) (bool, error) {
 	// Check if any remote exists (bd-biwp: support local-only repos)
 	if !hasGitRemote(ctx) {
 		return true, nil // Skip sync branch commit/push in local-only mode
@@ -53,7 +54,7 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 		return true, nil // Signal "handled" to prevent fallback to regular git commit
 	}
 
-	log.log("Using sync branch: %s", syncBranch)
+	log.Info("Using sync branch", "branch", syncBranch)
 
 	// Get main repo root (for worktrees, this is the main repo, not worktree)
 	repoRoot, err := git.GetMainRepoRoot()
@@ -112,7 +113,7 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 	}
 
 	if !hasChanges {
-		log.log("No changes to commit in sync branch")
+		log.Info("No changes to commit in sync branch")
 		return false, nil
 	}
 
@@ -121,7 +122,7 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 	if err := gitCommitInWorktree(ctx, worktreePath, worktreeJSONLPath, message); err != nil {
 		return false, fmt.Errorf("failed to commit in worktree: %w", err)
 	}
-	log.log("Committed changes to sync branch %s", syncBranch)
+	log.Info("Committed changes to sync branch", "branch", syncBranch)
 
 	// Push if enabled
 	if autoPush {
@@ -130,7 +131,7 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 		if err := gitPushFromWorktree(ctx, worktreePath, syncBranch, configuredRemote); err != nil {
 			return false, fmt.Errorf("failed to push from worktree: %w", err)
 		}
-		log.log("Pushed sync branch %s to remote", syncBranch)
+		log.Info("Pushed sync branch to remote", "branch", syncBranch)
 	}
 
 	return true, nil
@@ -265,7 +266,7 @@ func gitPushFromWorktree(ctx context.Context, worktreePath, branch, configuredRe
 
 // syncBranchPull pulls changes from the sync branch into the worktree
 // Returns true if pull was performed, false if sync.branch not configured
-func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger) (bool, error) {
+func syncBranchPull(ctx context.Context, store storage.Storage, log *slog.Logger) (bool, error) {
 	// Check if any remote exists (bd-biwp: support local-only repos)
 	if !hasGitRemote(ctx) {
 		return true, nil // Skip sync branch pull in local-only mode
@@ -315,10 +316,10 @@ func syncBranchPull(ctx context.Context, store storage.Storage, log daemonLogger
 	}
 
 	if result.Pulled {
-		log.log("Pulled sync branch %s (fast-forward: %v, merged: %v)",
-			syncBranch, result.FastForwarded, result.Merged)
+		log.Info("Pulled sync branch", "branch", syncBranch,
+			"fast_forward", result.FastForwarded, "merged", result.Merged)
 	} else {
-		log.log("Sync branch %s is up to date", syncBranch)
+		log.Info("Sync branch is up to date", "branch", syncBranch)
 	}
 
 	return true, nil

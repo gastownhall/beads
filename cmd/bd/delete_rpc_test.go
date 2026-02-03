@@ -898,7 +898,7 @@ func setupDaemonTestEnvForDelete(t *testing.T) (context.Context, context.CancelF
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	log := daemonLogger{logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	server, _, err := startRPCServer(ctx, socketPath, testStore, tmpDir, testDBPath, log)
 	if err != nil {

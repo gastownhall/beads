@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -773,7 +774,7 @@ func TestSyncBranchIntegration_EndToEnd(t *testing.T) {
 
 // Helper types for testing
 
-func newTestSyncBranchLogger() (daemonLogger, *string) {
+func newTestSyncBranchLogger() (*slog.Logger, *string) {
 	// Note: With slog, we can't easily capture formatted messages like before.
 	// For tests that need to verify log output, use strings.Builder and newTestLoggerWithWriter.
 	// This helper is kept for backward compatibility but messages won't be captured.
