@@ -37,7 +37,9 @@
             inherit system;
             overlays = [ goOverlay ];
           };
-          bdBase = pkgs.callPackage ./default.nix { inherit pkgs self; go = pkgs.go_1_25_6; };
+          # Override buildGoModule to use Go 1.25.6 for both main build AND go-modules derivation
+          buildGoModule126 = pkgs.buildGoModule.override { go = pkgs.go_1_25_6; };
+          bdBase = pkgs.callPackage ./default.nix { inherit pkgs self; buildGoModule = buildGoModule126; };
           # Wrap the base package with shell completions baked in
           bd = pkgs.stdenv.mkDerivation {
             pname = "beads";

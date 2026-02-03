@@ -1,6 +1,5 @@
-{ pkgs, self, go ? pkgs.go }:
-pkgs.buildGoModule {
-  inherit go;
+{ pkgs, self, buildGoModule ? pkgs.buildGoModule }:
+buildGoModule {
   pname = "beads";
   version = "0.49.3";
 
