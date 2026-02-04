@@ -13,56 +13,94 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// mustParseTime parses RFC3339 timestamp or panics (for test setup)
+func mustParseTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, s)
+	}
+	if err != nil {
+		panic("invalid time: " + s)
+	}
+	return t
+}
+
+// ptr creates a pointer to a value (helper for test literals)
+func ptr[T any](v T) *T {
+	return &v
+}
+
+// testIssue creates an Issue from JSON for testing.
+// This is the most reliable way to create test Issues since it matches
+// how they're created in production (from JSONL parsing).
+func testIssue(jsonStr string) Issue {
+	var issue Issue
+	if err := json.Unmarshal([]byte(jsonStr), &issue); err != nil {
+		panic("invalid JSON in test: " + err.Error())
+	}
+	issue.RawLine = jsonStr
+	return issue
+}
+
+// testIssueNoRaw creates an Issue from JSON without setting RawLine
+func testIssueNoRaw(jsonStr string) Issue {
+	var issue Issue
+	if err := json.Unmarshal([]byte(jsonStr), &issue); err != nil {
+		panic("invalid JSON in test: " + err.Error())
+	}
+	return issue
+}
+
 // TestMergeStatus tests the status merging logic with special rules
 func TestMergeStatus(t *testing.T) {
 	tests := []struct {
 		name     string
-		base     string
-		left     string
-		right    string
-		expected string
+		base     types.Status
+		left     types.Status
+		right    types.Status
+		expected types.Status
 	}{
 		{
 			name:     "no changes",
-			base:     "open",
-			left:     "open",
-			right:    "open",
-			expected: "open",
+			base:     types.StatusOpen,
+			left:     types.StatusOpen,
+			right:    types.StatusOpen,
+			expected: types.StatusOpen,
 		},
 		{
 			name:     "left closed, right open - closed wins",
-			base:     "open",
-			left:     "closed",
-			right:    "open",
-			expected: "closed",
+			base:     types.StatusOpen,
+			left:     types.StatusClosed,
+			right:    types.StatusOpen,
+			expected: types.StatusClosed,
 		},
 		{
 			name:     "left open, right closed - closed wins",
-			base:     "open",
-			left:     "open",
-			right:    "closed",
-			expected: "closed",
+			base:     types.StatusOpen,
+			left:     types.StatusOpen,
+			right:    types.StatusClosed,
+			expected: types.StatusClosed,
 		},
 		{
 			name:     "both closed",
-			base:     "open",
-			left:     "closed",
-			right:    "closed",
-			expected: "closed",
+			base:     types.StatusOpen,
+			left:     types.StatusClosed,
+			right:    types.StatusClosed,
+			expected: types.StatusClosed,
 		},
 		{
 			name:     "base closed, left open, right open - open (standard merge)",
-			base:     "closed",
-			left:     "open",
-			right:    "open",
-			expected: "open",
+			base:     types.StatusClosed,
+			left:     types.StatusOpen,
+			right:    types.StatusOpen,
+			expected: types.StatusOpen,
 		},
 		{
 			name:     "base closed, left open, right closed - closed wins",
-			base:     "closed",
-			left:     "open",
-			right:    "closed",
-			expected: "closed",
+			base:     types.StatusClosed,
+			left:     types.StatusOpen,
+			right:    types.StatusClosed,
+			expected: types.StatusClosed,
 		},
 	}
 
@@ -279,132 +317,116 @@ func TestMergeDependencies(t *testing.T) {
 
 // TestMaxTime tests timestamp merging (max wins)
 func TestMaxTime(t *testing.T) {
+	t1Base := mustParseTime("2024-01-01T00:00:00Z")
+	t2Base := mustParseTime("2024-01-02T00:00:00Z")
+	t1Nano := mustParseTime("2024-01-01T00:00:00.123456Z")
+	t2Nano := mustParseTime("2024-01-01T00:00:00.123455Z")
+
 	tests := []struct {
 		name     string
-		t1       string
-		t2       string
-		expected string
+		t1       time.Time
+		t2       time.Time
+		expected time.Time
 	}{
 		{
-			name:     "both empty",
-			t1:       "",
-			t2:       "",
-			expected: "",
+			name:     "both zero",
+			t1:       time.Time{},
+			t2:       time.Time{},
+			expected: time.Time{},
 		},
 		{
-			name:     "t1 empty",
-			t1:       "",
-			t2:       "2024-01-02T00:00:00Z",
-			expected: "2024-01-02T00:00:00Z",
+			name:     "t1 zero",
+			t1:       time.Time{},
+			t2:       t2Base,
+			expected: t2Base,
 		},
 		{
-			name:     "t2 empty",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "",
-			expected: "2024-01-01T00:00:00Z",
+			name:     "t2 zero",
+			t1:       t1Base,
+			t2:       time.Time{},
+			expected: t1Base,
 		},
 		{
 			name:     "t1 newer",
-			t1:       "2024-01-02T00:00:00Z",
-			t2:       "2024-01-01T00:00:00Z",
-			expected: "2024-01-02T00:00:00Z",
+			t1:       t2Base,
+			t2:       t1Base,
+			expected: t2Base,
 		},
 		{
 			name:     "t2 newer",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "2024-01-02T00:00:00Z",
-			expected: "2024-01-02T00:00:00Z",
+			t1:       t1Base,
+			t2:       t2Base,
+			expected: t2Base,
 		},
 		{
 			name:     "identical timestamps",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "2024-01-01T00:00:00Z",
-			expected: "2024-01-01T00:00:00Z",
+			t1:       t1Base,
+			t2:       t1Base,
+			expected: t1Base,
 		},
 		{
 			name:     "with fractional seconds (RFC3339Nano)",
-			t1:       "2024-01-01T00:00:00.123456Z",
-			t2:       "2024-01-01T00:00:00.123455Z",
-			expected: "2024-01-01T00:00:00.123456Z",
-		},
-		{
-			name:     "invalid timestamps - returns t2 as fallback",
-			t1:       "invalid",
-			t2:       "also-invalid",
-			expected: "also-invalid",
+			t1:       t1Nano,
+			t2:       t2Nano,
+			expected: t1Nano,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := maxTime(tt.t1, tt.t2)
-			if result != tt.expected {
-				t.Errorf("maxTime() = %q, want %q", result, tt.expected)
+			if !result.Equal(tt.expected) {
+				t.Errorf("maxTime() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
 
-// TestIsTimeAfter tests timestamp comparison including error handling
+// TestIsTimeAfter tests timestamp comparison
 func TestIsTimeAfter(t *testing.T) {
+	t1Base := mustParseTime("2024-01-01T00:00:00Z")
+	t2Base := mustParseTime("2024-01-02T00:00:00Z")
+
 	tests := []struct {
 		name     string
-		t1       string
-		t2       string
+		t1       time.Time
+		t2       time.Time
 		expected bool
 	}{
 		{
-			name:     "both empty - prefer left",
-			t1:       "",
-			t2:       "",
+			name:     "both zero - prefer left",
+			t1:       time.Time{},
+			t2:       time.Time{},
+			expected: true,
+		},
+		{
+			name:     "t1 zero - t2 wins",
+			t1:       time.Time{},
+			t2:       t2Base,
 			expected: false,
 		},
 		{
-			name:     "t1 empty - t2 wins",
-			t1:       "",
-			t2:       "2024-01-02T00:00:00Z",
-			expected: false,
-		},
-		{
-			name:     "t2 empty - t1 wins",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "",
+			name:     "t2 zero - t1 wins",
+			t1:       t1Base,
+			t2:       time.Time{},
 			expected: true,
 		},
 		{
 			name:     "t1 newer",
-			t1:       "2024-01-02T00:00:00Z",
-			t2:       "2024-01-01T00:00:00Z",
+			t1:       t2Base,
+			t2:       t1Base,
 			expected: true,
 		},
 		{
 			name:     "t2 newer",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "2024-01-02T00:00:00Z",
+			t1:       t1Base,
+			t2:       t2Base,
 			expected: false,
 		},
 		{
 			name:     "identical timestamps - left wins (bd-8nz)",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "2024-01-01T00:00:00Z",
-			expected: true,
-		},
-		{
-			name:     "t1 invalid, t2 valid - t2 wins",
-			t1:       "not-a-timestamp",
-			t2:       "2024-01-01T00:00:00Z",
-			expected: false,
-		},
-		{
-			name:     "t1 valid, t2 invalid - t1 wins",
-			t1:       "2024-01-01T00:00:00Z",
-			t2:       "not-a-timestamp",
-			expected: true,
-		},
-		{
-			name:     "both invalid - prefer left",
-			t1:       "invalid1",
-			t2:       "invalid2",
+			t1:       t1Base,
+			t2:       t1Base,
 			expected: true,
 		},
 	}
@@ -413,7 +435,7 @@ func TestIsTimeAfter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isTimeAfter(tt.t1, tt.t2)
 			if result != tt.expected {
-				t.Errorf("isTimeAfter(%q, %q) = %v, want %v", tt.t1, tt.t2, result, tt.expected)
+				t.Errorf("isTimeAfter(%v, %v) = %v, want %v", tt.t1, tt.t2, result, tt.expected)
 			}
 		})
 	}
@@ -422,30 +444,12 @@ func TestIsTimeAfter(t *testing.T) {
 // TestMerge3Way_SimpleUpdates tests simple field update scenarios
 func TestMerge3Way_SimpleUpdates(t *testing.T) {
 	base := []Issue{
-		{
-			ID:        "bd-abc123",
-			Title:     "Original title",
-			Status:    "open",
-			Priority:  2,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			UpdatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-			RawLine:   `{"id":"bd-abc123","title":"Original title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-		},
+		testIssue(`{"id":"bd-abc123","title":"Original title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 	}
 
 	t.Run("left updates title", func(t *testing.T) {
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Updated title",
-				Status:    "open",
-				Priority:  2,
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Updated title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Updated title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 		right := base
 
@@ -464,16 +468,7 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 	t.Run("right updates status", func(t *testing.T) {
 		left := base
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Original title",
-				Status:    "in_progress",
-				Priority:  2,
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original title","status":"in_progress","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Original title","status":"in_progress","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -483,35 +478,17 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
-		if result[0].Status != "in_progress" {
+		if result[0].Status != types.StatusInProgress {
 			t.Errorf("expected status 'in_progress', got %q", result[0].Status)
 		}
 	})
 
 	t.Run("both update different fields", func(t *testing.T) {
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Updated title",
-				Status:    "open",
-				Priority:  2,
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Updated title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Updated title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Original title",
-				Status:    "in_progress",
-				Priority:  2,
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original title","status":"in_progress","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Original title","status":"in_progress","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -524,7 +501,7 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 		if result[0].Title != "Updated title" {
 			t.Errorf("expected title 'Updated title', got %q", result[0].Title)
 		}
-		if result[0].Status != "in_progress" {
+		if result[0].Status != types.StatusInProgress {
 			t.Errorf("expected status 'in_progress', got %q", result[0].Status)
 		}
 	})
@@ -656,34 +633,15 @@ func TestMergePriority(t *testing.T) {
 func TestMerge3Way_AutoResolve(t *testing.T) {
 	t.Run("conflicting title changes - latest updated_at wins", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Original",
-				UpdatedAt: "2024-01-01T00:00:00Z",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original","updated_at":"2024-01-01T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Original","updated_at":"2024-01-01T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Left has older updated_at
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Left version",
-				UpdatedAt: "2024-01-02T00:00:00Z", // Older
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Right has newer updated_at - this should win
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Right version",
-				UpdatedAt: "2024-01-03T00:00:00Z", // Newer - this should win
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -701,31 +659,15 @@ func TestMerge3Way_AutoResolve(t *testing.T) {
 
 	t.Run("conflicting priority changes - higher priority wins (lower number)", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Priority:  2,
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","priority":2,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","priority":2,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Left has lower priority (higher number)
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Priority:  3, // Lower priority (higher number)
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","priority":3,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","priority":3,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Right has higher priority (lower number) - this should win
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Priority:  1, // Higher priority (lower number) - this should win
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","priority":1,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","priority":1,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -743,31 +685,13 @@ func TestMerge3Way_AutoResolve(t *testing.T) {
 
 	t.Run("conflicting notes - concatenated", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Notes:     "Original notes",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","notes":"Original notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","notes":"Original notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Notes:     "Left notes",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","notes":"Left notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","notes":"Left notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Notes:     "Right notes",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","notes":"Right notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","notes":"Right notes","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -786,31 +710,14 @@ func TestMerge3Way_AutoResolve(t *testing.T) {
 
 	t.Run("conflicting issue_type - local (left) wins", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				IssueType: "task",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","issue_type":"task","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","issue_type":"task","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Local change - should win
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				IssueType: "bug", // Local change - should win
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","issue_type":"bug","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","issue_type":"bug","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				IssueType: "feature",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","issue_type":"feature","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","issue_type":"feature","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -821,7 +728,7 @@ func TestMerge3Way_AutoResolve(t *testing.T) {
 			t.Fatalf("expected 1 merged issue, got %d", len(result))
 		}
 		// Local (left) wins for issue_type
-		if result[0].IssueType != "bug" {
+		if result[0].IssueType != types.TypeBug {
 			t.Errorf("expected issue_type 'bug' (local wins), got %q", result[0].IssueType)
 		}
 	})
@@ -831,13 +738,7 @@ func TestMerge3Way_AutoResolve(t *testing.T) {
 func TestMerge3Way_Deletions(t *testing.T) {
 	t.Run("deleted in left, unchanged in right", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Will be deleted",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Will be deleted","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Will be deleted","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		left := []Issue{} // Deleted in left
 		right := base     // Unchanged in right
@@ -853,13 +754,7 @@ func TestMerge3Way_Deletions(t *testing.T) {
 
 	t.Run("deleted in right, unchanged in left", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Will be deleted",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Will be deleted","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Will be deleted","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		left := base     // Unchanged in left
 		right := []Issue{} // Deleted in right
@@ -875,25 +770,11 @@ func TestMerge3Way_Deletions(t *testing.T) {
 
 	t.Run("deleted in left, modified in right - deletion wins", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Original",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		left := []Issue{} // Deleted in left
 		right := []Issue{ // Modified in right
-			{
-				ID:        "bd-abc123",
-				Title:     "Modified",
-				Status:    "in_progress",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Modified","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Modified","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -907,24 +788,10 @@ func TestMerge3Way_Deletions(t *testing.T) {
 
 	t.Run("deleted in right, modified in left - deletion wins", func(t *testing.T) {
 		base := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Original",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		left := []Issue{ // Modified in left
-			{
-				ID:        "bd-abc123",
-				Title:     "Modified",
-				Status:    "in_progress",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Modified","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Modified","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		right := []Issue{} // Deleted in right
 
@@ -943,13 +810,7 @@ func TestMerge3Way_Additions(t *testing.T) {
 	t.Run("added only in left", func(t *testing.T) {
 		base := []Issue{}
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "New issue",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"New issue","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"New issue","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		right := []Issue{}
 
@@ -969,13 +830,7 @@ func TestMerge3Way_Additions(t *testing.T) {
 		base := []Issue{}
 		left := []Issue{}
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "New issue",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"New issue","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"New issue","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -992,15 +847,7 @@ func TestMerge3Way_Additions(t *testing.T) {
 
 	t.Run("added in both with identical content", func(t *testing.T) {
 		base := []Issue{}
-		issueData := Issue{
-			ID:        "bd-abc123",
-			Title:     "New issue",
-			Status:    "open",
-			Priority:  2,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-			RawLine:   `{"id":"bd-abc123","title":"New issue","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-		}
+		issueData := testIssue(`{"id":"bd-abc123","title":"New issue","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 		left := []Issue{issueData}
 		right := []Issue{issueData}
 
@@ -1015,25 +862,13 @@ func TestMerge3Way_Additions(t *testing.T) {
 
 	t.Run("added in both with different content - auto-resolved", func(t *testing.T) {
 		base := []Issue{}
+		// Left has older updated_at
 		left := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Left version",
-				UpdatedAt: "2024-01-02T00:00:00Z", // Older
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Left version","updated_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
+		// Right has newer updated_at - should win
 		right := []Issue{
-			{
-				ID:        "bd-abc123",
-				Title:     "Right version",
-				UpdatedAt: "2024-01-03T00:00:00Z", // Newer - should win
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-abc123","title":"Right version","updated_at":"2024-01-03T00:00:00Z","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -1056,31 +891,13 @@ func TestMerge3Way_ResurrectionPrevention(t *testing.T) {
 		// Simulate the broken merge case that was creating invalid data
 		// Base: issue is closed
 		base := []Issue{
-			{
-				ID:        "bd-test",
-				Title:     "Test issue",
-				Status:    "closed",
-				ClosedAt:  "2024-01-02T00:00:00Z",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-test","title":"Test issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-test","title":"Test issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 		// Left: still closed with closed_at
 		left := base
 		// Right: somehow got reopened but WITHOUT removing closed_at (the bug scenario)
 		right := []Issue{
-			{
-				ID:        "bd-test",
-				Title:     "Test issue",
-				Status:    "open", // reopened
-				ClosedAt:  "",     // correctly removed
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-03T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-test","title":"Test issue","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-03T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-test","title":"Test issue","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-03T00:00:00Z","created_by":"user1"}`),
 		}
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -1092,47 +909,29 @@ func TestMerge3Way_ResurrectionPrevention(t *testing.T) {
 		}
 
 		// CRITICAL: Status should be closed (closed wins over open)
-		if result[0].Status != "closed" {
+		if result[0].Status != types.StatusClosed {
 			t.Errorf("expected status 'closed', got %q", result[0].Status)
 		}
 
 		// CRITICAL: If status is closed, closed_at MUST be set
-		if result[0].Status == "closed" && result[0].ClosedAt == "" {
+		if result[0].Status == types.StatusClosed && (result[0].ClosedAt == nil || result[0].ClosedAt.IsZero()) {
 			t.Error("INVALID STATE: status='closed' but closed_at is empty")
 		}
 
 		// CRITICAL: If status is open, closed_at MUST be empty
-		if result[0].Status == "open" && result[0].ClosedAt != "" {
-			t.Errorf("INVALID STATE: status='open' but closed_at='%s'", result[0].ClosedAt)
+		if result[0].Status == types.StatusOpen && result[0].ClosedAt != nil && !result[0].ClosedAt.IsZero() {
+			t.Errorf("INVALID STATE: status='open' but closed_at='%v'", result[0].ClosedAt)
 		}
 	})
 
 	t.Run("bd-hv01 regression: closed issue not resurrected", func(t *testing.T) {
 		// Base: issue is open
 		base := []Issue{
-			{
-				ID:        "bd-hv01",
-				Title:     "Test issue",
-				Status:    "open",
-				ClosedAt:  "",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-hv01","title":"Test issue","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-hv01","title":"Test issue","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
 		// Left: issue is closed (newer)
 		left := []Issue{
-			{
-				ID:        "bd-hv01",
-				Title:     "Test issue",
-				Status:    "closed",
-				ClosedAt:  "2024-01-02T00:00:00Z",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				RawLine:   `{"id":"bd-hv01","title":"Test issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`,
-			},
+			testIssue(`{"id":"bd-hv01","title":"Test issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
 		}
 		// Right: issue is still open (stale)
 		right := base
@@ -1145,15 +944,16 @@ func TestMerge3Way_ResurrectionPrevention(t *testing.T) {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
 		// Issue should remain closed (left's version)
-		if result[0].Status != "closed" {
+		if result[0].Status != types.StatusClosed {
 			t.Errorf("expected status 'closed', got %q - issue was resurrected!", result[0].Status)
 		}
-		if result[0].ClosedAt == "" {
-			t.Error("expected closed_at to be set, got empty string")
+		if result[0].ClosedAt == nil || result[0].ClosedAt.IsZero() {
+			t.Error("expected closed_at to be set, got empty/nil")
 		}
 		// UpdatedAt should be the max (left's newer timestamp)
-		if result[0].UpdatedAt != "2024-01-02T00:00:00Z" {
-			t.Errorf("expected updated_at '2024-01-02T00:00:00Z', got %q", result[0].UpdatedAt)
+		expectedUpdatedAt := mustParseTime("2024-01-02T00:00:00Z")
+		if !result[0].UpdatedAt.Equal(expectedUpdatedAt) {
+			t.Errorf("expected updated_at '2024-01-02T00:00:00Z', got %v", result[0].UpdatedAt)
 		}
 	})
 }
@@ -1259,27 +1059,27 @@ func TestMerge3Way_Integration(t *testing.T) {
 func TestIsTombstone(t *testing.T) {
 	tests := []struct {
 		name     string
-		status   string
+		status   types.Status
 		expected bool
 	}{
 		{
 			name:     "tombstone status",
-			status:   "tombstone",
+			status:   types.StatusTombstone,
 			expected: true,
 		},
 		{
 			name:     "open status",
-			status:   "open",
+			status:   types.StatusOpen,
 			expected: false,
 		},
 		{
 			name:     "closed status",
-			status:   "closed",
+			status:   types.StatusClosed,
 			expected: false,
 		},
 		{
 			name:     "in_progress status",
-			status:   "in_progress",
+			status:   types.StatusInProgress,
 			expected: false,
 		},
 		{
@@ -1291,7 +1091,7 @@ func TestIsTombstone(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issue := Issue{Status: tt.status}
+			issue := Issue{Issue: types.Issue{Status: tt.status}}
 			result := IsTombstone(issue)
 			if result != tt.expected {
 				t.Errorf("IsTombstone() = %v, want %v", result, tt.expected)
@@ -1336,17 +1136,23 @@ func TestMergeTombstones(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			leftTime := mustParseTime(tt.leftDeletedAt)
+			rightTime := mustParseTime(tt.rightDeletedAt)
 			left := Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: tt.leftDeletedAt,
-				DeletedBy: "user-left",
+				Issue: types.Issue{
+					ID:        "bd-test",
+					Status:    StatusTombstone,
+					DeletedAt: &leftTime,
+					DeletedBy: "user-left",
+				},
 			}
 			right := Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: tt.rightDeletedAt,
-				DeletedBy: "user-right",
+				Issue: types.Issue{
+					ID:        "bd-test",
+					Status:    StatusTombstone,
+					DeletedAt: &rightTime,
+					DeletedBy: "user-right",
+				},
 			}
 			result := mergeTombstones(left, right)
 			if tt.expectedSide == "left" && result.DeletedBy != "user-left" {
@@ -1362,56 +1168,20 @@ func TestMergeTombstones(t *testing.T) {
 // TestMerge3Way_TombstoneVsLive tests tombstone vs live issue scenarios
 func TestMerge3Way_TombstoneVsLive(t *testing.T) {
 	// Base issue (live)
-	baseIssue := Issue{
-		ID:        "bd-abc123",
-		Title:     "Original title",
-		Status:    "open",
-		Priority:  2,
-		CreatedAt: "2024-01-01T00:00:00Z",
-		UpdatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	baseIssue := testIssue(`{"id":"bd-abc123","title":"Original title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
-	// Recent tombstone (not expired)
-	recentTombstone := Issue{
-		ID:           "bd-abc123",
-		Title:        "Original title",
-		Status:       StatusTombstone,
-		Priority:     2,
-		CreatedAt:    "2024-01-01T00:00:00Z",
-		UpdatedAt:    "2024-01-02T00:00:00Z",
-		CreatedBy:    "user1",
-		DeletedAt:    time.Now().Add(-24 * time.Hour).Format(time.RFC3339), // 1 day ago
-		DeletedBy:    "user2",
-		DeleteReason: "Duplicate issue",
-		OriginalType: "task",
-	}
+	// Recent tombstone (not expired) - create dynamically
+	recentDeletedAt := time.Now().Add(-24 * time.Hour)
+	recentTombstoneJSON := `{"id":"bd-abc123","title":"Original title","status":"tombstone","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","deleted_at":"` + recentDeletedAt.Format(time.RFC3339) + `","deleted_by":"user2","delete_reason":"Duplicate issue","original_type":"task"}`
+	recentTombstone := testIssue(recentTombstoneJSON)
 
 	// Expired tombstone (older than TTL)
-	expiredTombstone := Issue{
-		ID:           "bd-abc123",
-		Title:        "Original title",
-		Status:       StatusTombstone,
-		Priority:     2,
-		CreatedAt:    "2024-01-01T00:00:00Z",
-		UpdatedAt:    "2024-01-02T00:00:00Z",
-		CreatedBy:    "user1",
-		DeletedAt:    time.Now().Add(-60 * 24 * time.Hour).Format(time.RFC3339), // 60 days ago
-		DeletedBy:    "user2",
-		DeleteReason: "Duplicate issue",
-		OriginalType: "task",
-	}
+	expiredDeletedAt := time.Now().Add(-60 * 24 * time.Hour)
+	expiredTombstoneJSON := `{"id":"bd-abc123","title":"Original title","status":"tombstone","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","deleted_at":"` + expiredDeletedAt.Format(time.RFC3339) + `","deleted_by":"user2","delete_reason":"Duplicate issue","original_type":"task"}`
+	expiredTombstone := testIssue(expiredTombstoneJSON)
 
 	// Modified live issue
-	modifiedLive := Issue{
-		ID:        "bd-abc123",
-		Title:     "Updated title",
-		Status:    "in_progress",
-		Priority:  1,
-		CreatedAt: "2024-01-01T00:00:00Z",
-		UpdatedAt: "2024-01-03T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	modifiedLive := testIssue(`{"id":"bd-abc123","title":"Updated title","status":"in_progress","priority":1,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-03T00:00:00Z","created_by":"user1"}`)
 
 	t.Run("recent tombstone in left wins over live in right", func(t *testing.T) {
 		base := []Issue{baseIssue}
@@ -1487,35 +1257,12 @@ func TestMerge3Way_TombstoneVsLive(t *testing.T) {
 
 // TestMerge3Way_TombstoneVsTombstone tests merging two tombstones
 func TestMerge3Way_TombstoneVsTombstone(t *testing.T) {
-	baseIssue := Issue{
-		ID:        "bd-abc123",
-		Title:     "Original title",
-		Status:    "open",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	baseIssue := testIssue(`{"id":"bd-abc123","title":"Original title","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 	t.Run("later tombstone wins", func(t *testing.T) {
-		leftTombstone := Issue{
-			ID:           "bd-abc123",
-			Title:        "Original title",
-			Status:       StatusTombstone,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    "2024-01-02T00:00:00Z",
-			DeletedBy:    "user-left",
-			DeleteReason: "Left reason",
-		}
-		rightTombstone := Issue{
-			ID:           "bd-abc123",
-			Title:        "Original title",
-			Status:       StatusTombstone,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    "2024-01-03T00:00:00Z", // Later
-			DeletedBy:    "user-right",
-			DeleteReason: "Right reason",
-		}
+		leftTombstone := testIssue(`{"id":"bd-abc123","title":"Original title","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-02T00:00:00Z","deleted_by":"user-left","delete_reason":"Left reason"}`)
+		// Right has later deleted_at
+		rightTombstone := testIssue(`{"id":"bd-abc123","title":"Original title","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-03T00:00:00Z","deleted_by":"user-right","delete_reason":"Right reason"}`)
 
 		base := []Issue{baseIssue}
 		left := []Issue{leftTombstone}
@@ -1540,15 +1287,7 @@ func TestMerge3Way_TombstoneVsTombstone(t *testing.T) {
 // TestMerge3Way_TombstoneNoBase tests tombstone scenarios without a base
 func TestMerge3Way_TombstoneNoBase(t *testing.T) {
 	t.Run("tombstone added only in left", func(t *testing.T) {
-		tombstone := Issue{
-			ID:        "bd-abc123",
-			Title:     "New tombstone",
-			Status:    StatusTombstone,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-			DeletedAt: "2024-01-02T00:00:00Z",
-			DeletedBy: "user1",
-		}
+		tombstone := testIssue(`{"id":"bd-abc123","title":"New tombstone","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-02T00:00:00Z","deleted_by":"user1"}`)
 
 		result, conflicts := merge3Way([]Issue{}, []Issue{tombstone}, []Issue{}, false)
 		if len(conflicts) != 0 {
@@ -1563,15 +1302,7 @@ func TestMerge3Way_TombstoneNoBase(t *testing.T) {
 	})
 
 	t.Run("tombstone added only in right", func(t *testing.T) {
-		tombstone := Issue{
-			ID:        "bd-abc123",
-			Title:     "New tombstone",
-			Status:    StatusTombstone,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-			DeletedAt: "2024-01-02T00:00:00Z",
-			DeletedBy: "user1",
-		}
+		tombstone := testIssue(`{"id":"bd-abc123","title":"New tombstone","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-02T00:00:00Z","deleted_by":"user1"}`)
 
 		result, conflicts := merge3Way([]Issue{}, []Issue{}, []Issue{tombstone}, false)
 		if len(conflicts) != 0 {
@@ -1586,22 +1317,9 @@ func TestMerge3Way_TombstoneNoBase(t *testing.T) {
 	})
 
 	t.Run("tombstone in left vs live in right (no base)", func(t *testing.T) {
-		recentTombstone := Issue{
-			ID:        "bd-abc123",
-			Title:     "Issue",
-			Status:    StatusTombstone,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-			DeletedAt: time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-			DeletedBy: "user1",
-		}
-		live := Issue{
-			ID:        "bd-abc123",
-			Title:     "Issue",
-			Status:    "open",
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-		}
+		recentDeletedAt := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+		recentTombstone := testIssue(`{"id":"bd-abc123","title":"Issue","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"` + recentDeletedAt + `","deleted_by":"user1"}`)
+		live := testIssue(`{"id":"bd-abc123","title":"Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 		result, conflicts := merge3Way([]Issue{}, []Issue{recentTombstone}, []Issue{live}, false)
 		if len(conflicts) != 0 {
@@ -1619,32 +1337,13 @@ func TestMerge3Way_TombstoneNoBase(t *testing.T) {
 
 // TestMerge3WayWithTTL tests the TTL-configurable merge function
 func TestMerge3WayWithTTL(t *testing.T) {
-	baseIssue := Issue{
-		ID:        "bd-abc123",
-		Title:     "Original",
-		Status:    "open",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	baseIssue := testIssue(`{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 	// Tombstone deleted 10 days ago
-	tombstone := Issue{
-		ID:        "bd-abc123",
-		Title:     "Original",
-		Status:    StatusTombstone,
-		CreatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-		DeletedAt: time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339),
-		DeletedBy: "user2",
-	}
+	tombstoneDeletedAt := time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339)
+	tombstone := testIssue(`{"id":"bd-abc123","title":"Original","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"` + tombstoneDeletedAt + `","deleted_by":"user2"}`)
 
-	liveIssue := Issue{
-		ID:        "bd-abc123",
-		Title:     "Updated",
-		Status:    "open",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	liveIssue := testIssue(`{"id":"bd-abc123","title":"Updated","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 	t.Run("with short TTL tombstone is expired", func(t *testing.T) {
 		// 7 day TTL + 1 hour grace = tombstone (10 days old) is expired
@@ -1658,7 +1357,7 @@ func TestMerge3WayWithTTL(t *testing.T) {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
 		// With short TTL, tombstone is expired, live issue wins
-		if result[0].Status != "open" {
+		if result[0].Status != types.StatusOpen {
 			t.Errorf("expected live issue to win with short TTL, got status %q", result[0].Status)
 		}
 	})
@@ -1685,35 +1384,35 @@ func TestMerge3WayWithTTL(t *testing.T) {
 func TestMergeStatus_Tombstone(t *testing.T) {
 	tests := []struct {
 		name     string
-		base     string
-		left     string
-		right    string
-		expected string
+		base     types.Status
+		left     types.Status
+		right    types.Status
+		expected types.Status
 	}{
 		{
 			name:     "tombstone in left wins over open in right",
-			base:     "open",
+			base:     types.StatusOpen,
 			left:     StatusTombstone,
-			right:    "open",
+			right:    types.StatusOpen,
 			expected: StatusTombstone,
 		},
 		{
 			name:     "tombstone in right wins over open in left",
-			base:     "open",
-			left:     "open",
+			base:     types.StatusOpen,
+			left:     types.StatusOpen,
 			right:    StatusTombstone,
 			expected: StatusTombstone,
 		},
 		{
 			name:     "tombstone in left wins over closed in right",
-			base:     "open",
+			base:     types.StatusOpen,
 			left:     StatusTombstone,
-			right:    "closed",
+			right:    types.StatusClosed,
 			expected: StatusTombstone,
 		},
 		{
 			name:     "both tombstone",
-			base:     "open",
+			base:     types.StatusOpen,
 			left:     StatusTombstone,
 			right:    StatusTombstone,
 			expected: StatusTombstone,
@@ -1734,24 +1433,10 @@ func TestMergeStatus_Tombstone(t *testing.T) {
 // TestMerge3Way_TombstoneWithImplicitDeletion tests bd-ki14 fix:
 // tombstones should be preserved even when the other side implicitly deleted
 func TestMerge3Way_TombstoneWithImplicitDeletion(t *testing.T) {
-	baseIssue := Issue{
-		ID:        "bd-abc123",
-		Title:     "Original",
-		Status:    "open",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		CreatedBy: "user1",
-	}
+	baseIssue := testIssue(`{"id":"bd-abc123","title":"Original","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
-	tombstone := Issue{
-		ID:           "bd-abc123",
-		Title:        "Original",
-		Status:       StatusTombstone,
-		CreatedAt:    "2024-01-01T00:00:00Z",
-		CreatedBy:    "user1",
-		DeletedAt:    time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-		DeletedBy:    "user2",
-		DeleteReason: "Duplicate",
-	}
+	tombstoneDeletedAt := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	tombstone := testIssue(`{"id":"bd-abc123","title":"Original","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"` + tombstoneDeletedAt + `","deleted_by":"user2","delete_reason":"Duplicate"}`)
 
 	t.Run("bd-ki14: tombstone in left preserved when right implicitly deleted", func(t *testing.T) {
 		base := []Issue{baseIssue}
@@ -1792,13 +1477,7 @@ func TestMerge3Way_TombstoneWithImplicitDeletion(t *testing.T) {
 
 	t.Run("bd-ki14: live issue in left still deleted when right implicitly deleted", func(t *testing.T) {
 		base := []Issue{baseIssue}
-		modifiedLive := Issue{
-			ID:        "bd-abc123",
-			Title:     "Modified",
-			Status:    "in_progress",
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-		}
+		modifiedLive := testIssue(`{"id":"bd-abc123","title":"Modified","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 		left := []Issue{modifiedLive}
 		right := []Issue{} // Implicitly deleted in right
 
@@ -1818,26 +1497,26 @@ func TestMerge3Way_TombstoneWithImplicitDeletion(t *testing.T) {
 func TestMergeTombstones_EmptyDeletedAt(t *testing.T) {
 	tests := []struct {
 		name           string
-		leftDeletedAt  string
-		rightDeletedAt string
+		leftDeletedAt  *time.Time
+		rightDeletedAt *time.Time
 		expectedSide   string // "left" or "right"
 	}{
 		{
-			name:           "bd-6x5: both empty - left wins as tie-breaker",
-			leftDeletedAt:  "",
-			rightDeletedAt: "",
+			name:           "bd-6x5: both nil - left wins as tie-breaker",
+			leftDeletedAt:  nil,
+			rightDeletedAt: nil,
 			expectedSide:   "left",
 		},
 		{
-			name:           "bd-6x5: left empty, right valid - right wins",
-			leftDeletedAt:  "",
-			rightDeletedAt: "2024-01-01T00:00:00Z",
+			name:           "bd-6x5: left nil, right valid - right wins",
+			leftDeletedAt:  nil,
+			rightDeletedAt: ptr(mustParseTime("2024-01-01T00:00:00Z")),
 			expectedSide:   "right",
 		},
 		{
-			name:           "bd-6x5: left valid, right empty - left wins",
-			leftDeletedAt:  "2024-01-01T00:00:00Z",
-			rightDeletedAt: "",
+			name:           "bd-6x5: left valid, right nil - left wins",
+			leftDeletedAt:  ptr(mustParseTime("2024-01-01T00:00:00Z")),
+			rightDeletedAt: nil,
 			expectedSide:   "left",
 		},
 	}
@@ -1845,16 +1524,20 @@ func TestMergeTombstones_EmptyDeletedAt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			left := Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: tt.leftDeletedAt,
-				DeletedBy: "user-left",
+				Issue: types.Issue{
+					ID:        "bd-test",
+					Status:    StatusTombstone,
+					DeletedAt: tt.leftDeletedAt,
+					DeletedBy: "user-left",
+				},
 			}
 			right := Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: tt.rightDeletedAt,
-				DeletedBy: "user-right",
+				Issue: types.Issue{
+					ID:        "bd-test",
+					Status:    StatusTombstone,
+					DeletedAt: tt.rightDeletedAt,
+					DeletedBy: "user-right",
+				},
 			}
 			result := mergeTombstones(left, right)
 			if tt.expectedSide == "left" && result.DeletedBy != "user-left" {
@@ -1871,35 +1554,17 @@ func TestMergeTombstones_EmptyDeletedAt(t *testing.T) {
 // tombstone fields should be copied when status becomes tombstone via safety fallback
 func TestMergeIssue_TombstoneFields(t *testing.T) {
 	t.Run("bd-1sn: tombstone fields copied from left when tombstone via mergeStatus", func(t *testing.T) {
-		base := Issue{
-			ID:        "bd-test",
-			Status:    "open",
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-		}
-		left := Issue{
-			ID:           "bd-test",
-			Status:       StatusTombstone,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    "2024-01-02T00:00:00Z",
-			DeletedBy:    "user2",
-			DeleteReason: "Duplicate",
-			OriginalType: "task",
-		}
-		right := Issue{
-			ID:        "bd-test",
-			Status:    "open",
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-		}
+		base := testIssue(`{"id":"bd-test","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
+		left := testIssue(`{"id":"bd-test","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-02T00:00:00Z","deleted_by":"user2","delete_reason":"Duplicate","original_type":"task"}`)
+		right := testIssue(`{"id":"bd-test","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 		result, _ := mergeIssue(base, left, right)
 		if result.Status != StatusTombstone {
 			t.Errorf("expected tombstone status, got %q", result.Status)
 		}
-		if result.DeletedAt != "2024-01-02T00:00:00Z" {
-			t.Errorf("expected DeletedAt to be copied, got %q", result.DeletedAt)
+		expectedDeletedAt := mustParseTime("2024-01-02T00:00:00Z")
+		if result.DeletedAt == nil || !result.DeletedAt.Equal(expectedDeletedAt) {
+			t.Errorf("expected DeletedAt to be copied, got %v", result.DeletedAt)
 		}
 		if result.DeletedBy != "user2" {
 			t.Errorf("expected DeletedBy to be copied, got %q", result.DeletedBy)
@@ -1913,30 +1578,9 @@ func TestMergeIssue_TombstoneFields(t *testing.T) {
 	})
 
 	t.Run("bd-1sn: tombstone fields copied from right when it has later deleted_at", func(t *testing.T) {
-		base := Issue{
-			ID:        "bd-test",
-			Status:    "open",
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1",
-		}
-		left := Issue{
-			ID:           "bd-test",
-			Status:       StatusTombstone,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    "2024-01-02T00:00:00Z",
-			DeletedBy:    "user-left",
-			DeleteReason: "Left reason",
-		}
-		right := Issue{
-			ID:           "bd-test",
-			Status:       StatusTombstone,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    "2024-01-03T00:00:00Z", // Later
-			DeletedBy:    "user-right",
-			DeleteReason: "Right reason",
-		}
+		base := testIssue(`{"id":"bd-test","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
+		left := testIssue(`{"id":"bd-test","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-02T00:00:00Z","deleted_by":"user-left","delete_reason":"Left reason"}`)
+		right := testIssue(`{"id":"bd-test","status":"tombstone","created_at":"2024-01-01T00:00:00Z","created_by":"user1","deleted_at":"2024-01-03T00:00:00Z","deleted_by":"user-right","delete_reason":"Right reason"}`)
 
 		result, _ := mergeIssue(base, left, right)
 		if result.Status != StatusTombstone {
@@ -1956,6 +1600,11 @@ func TestMergeIssue_TombstoneFields(t *testing.T) {
 func TestIsExpiredTombstone(t *testing.T) {
 	now := time.Now()
 
+	// Helper to create a test issue with DeletedAt
+	makeIssue := func(status types.Status, deletedAt *time.Time) Issue {
+		return Issue{Issue: types.Issue{ID: "bd-test", Status: status, DeletedAt: deletedAt}}
+	}
+
 	tests := []struct {
 		name     string
 		issue    Issue
@@ -1963,132 +1612,68 @@ func TestIsExpiredTombstone(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "non-tombstone returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    "open",
-				DeletedAt: now.Add(-100 * 24 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "non-tombstone returns false",
+			issue:    makeIssue(types.StatusOpen, ptr(now.Add(-100*24*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "closed status returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    "closed",
-				DeletedAt: now.Add(-100 * 24 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "closed status returns false",
+			issue:    makeIssue(types.StatusClosed, ptr(now.Add(-100*24*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "tombstone with empty deleted_at returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: "",
-			},
+			name:     "tombstone with nil deleted_at returns false",
+			issue:    makeIssue(StatusTombstone, nil),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "tombstone with invalid timestamp returns false (safety)",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: "not-a-valid-date",
-			},
+			name:     "tombstone with zero deleted_at returns false",
+			issue:    makeIssue(StatusTombstone, ptr(time.Time{})),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "tombstone with malformed RFC3339 returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: "2024-13-45T99:99:99Z",
-			},
+			name:     "recent tombstone (within TTL) returns false",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-1*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "recent tombstone (within TTL) returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-1 * time.Hour).Format(time.RFC3339),
-			},
-			ttl:      24 * time.Hour,
-			expected: false,
-		},
-		{
-			name: "old tombstone (beyond TTL) returns true",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-48 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "old tombstone (beyond TTL) returns true",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-48*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: true,
 		},
 		{
-			name: "tombstone just inside TTL boundary (with clock skew grace) returns false",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-24 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "tombstone just inside TTL boundary (with clock skew grace) returns false",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-24*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: false,
 		},
 		{
-			name: "tombstone just past TTL boundary (with clock skew grace) returns true",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-26 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "tombstone just past TTL boundary (with clock skew grace) returns true",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-26*time.Hour))),
 			ttl:      24 * time.Hour,
 			expected: true,
 		},
 		{
-			name: "ttl=0 falls back to DefaultTombstoneTTL (30 days)",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-20 * 24 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "ttl=0 falls back to DefaultTombstoneTTL (30 days)",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-20*24*time.Hour))),
 			ttl:      0,
 			expected: false,
 		},
 		{
-			name: "ttl=0 with old tombstone (beyond default TTL) returns true",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-60 * 24 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "ttl=0 with old tombstone (beyond default TTL) returns true",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-60*24*time.Hour))),
 			ttl:      0,
 			expected: true,
 		},
 		{
-			name: "RFC3339Nano format is supported",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-48 * time.Hour).Format(time.RFC3339Nano),
-			},
-			ttl:      24 * time.Hour,
-			expected: true,
-		},
-		{
-			name: "very short TTL (1 minute) works correctly",
-			issue: Issue{
-				ID:        "bd-test",
-				Status:    StatusTombstone,
-				DeletedAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
-			},
+			name:     "very short TTL (1 minute) works correctly",
+			issue:    makeIssue(StatusTombstone, ptr(now.Add(-2*time.Hour))),
 			ttl:      1 * time.Minute,
 			expected: true,
 		},
@@ -2098,7 +1683,7 @@ func TestIsExpiredTombstone(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := IsExpiredTombstone(tt.issue, tt.ttl)
 			if result != tt.expected {
-				t.Errorf("IsExpiredTombstone() = %v, want %v (deleted_at=%q, ttl=%v)",
+				t.Errorf("IsExpiredTombstone() = %v, want %v (deleted_at=%v, ttl=%v)",
 					result, tt.expected, tt.issue.DeletedAt, tt.ttl)
 			}
 		})
@@ -2111,43 +1696,28 @@ func TestIsExpiredTombstone(t *testing.T) {
 // then both B and C independently recreate an issue with same ID. (bd-bob)
 func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 	// Base is a tombstone (issue was deleted)
+	deletedAt := time.Now().Add(-10 * 24 * time.Hour)
 	baseTombstone := Issue{
-		ID:           "bd-abc123",
-		Title:        "Original title",
-		Status:       StatusTombstone,
-		Priority:     2,
-		CreatedAt:    "2024-01-01T00:00:00Z",
-		UpdatedAt:    "2024-01-05T00:00:00Z",
-		CreatedBy:    "user1",
-		DeletedAt:    time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339), // 10 days ago
-		DeletedBy:    "user2",
-		DeleteReason: "Obsolete",
-		OriginalType: "task",
+		Issue: types.Issue{
+			ID:           "bd-abc123",
+			Title:        "Original title",
+			Status:       StatusTombstone,
+			Priority:     2,
+			CreatedAt:    mustParseTime("2024-01-01T00:00:00Z"),
+			UpdatedAt:    mustParseTime("2024-01-05T00:00:00Z"),
+			CreatedBy:    "user1",
+			DeletedAt:    &deletedAt,
+			DeletedBy:    "user2",
+			DeleteReason: "Obsolete",
+			OriginalType: "task",
+		},
 	}
 
 	// Left resurrects the issue with new content
-	leftLive := Issue{
-		ID:        "bd-abc123",
-		Title:     "Resurrected by left",
-		Status:    "open",
-		Priority:  2,
-		IssueType: "task",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		UpdatedAt: "2024-01-10T00:00:00Z", // Left is older
-		CreatedBy: "user1",
-	}
+	leftLive := testIssue(`{"id":"bd-abc123","title":"Resurrected by left","status":"open","priority":2,"type":"task","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-10T00:00:00Z","created_by":"user1"}`)
 
 	// Right also resurrects with different content
-	rightLive := Issue{
-		ID:        "bd-abc123",
-		Title:     "Resurrected by right",
-		Status:    "in_progress",
-		Priority:  1, // Higher priority (lower number)
-		IssueType: "bug",
-		CreatedAt: "2024-01-01T00:00:00Z",
-		UpdatedAt: "2024-01-15T00:00:00Z", // Right is newer
-		CreatedBy: "user1",
-	}
+	rightLive := testIssue(`{"id":"bd-abc123","title":"Resurrected by right","status":"in_progress","priority":1,"type":"bug","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-15T00:00:00Z","created_by":"user1"}`)
 
 	t.Run("both sides resurrect with different content - standard merge applies", func(t *testing.T) {
 		base := []Issue{baseTombstone}
@@ -2184,13 +1754,13 @@ func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 		// Status: standard 3-way merge applies. When both sides changed from base,
 		// left wins (standard merge conflict resolution). Note: status does NOT use
 		// UpdatedAt tiebreaker like title does - it uses mergeField which picks left.
-		if merged.Status != "open" {
+		if merged.Status != types.StatusOpen {
 			t.Errorf("expected status 'open' from left (both changed from base), got %q", merged.Status)
 		}
 
 		// Tombstone fields should NOT be present on merged result
-		if merged.DeletedAt != "" {
-			t.Errorf("expected empty DeletedAt on resurrected issue, got %q", merged.DeletedAt)
+		if merged.DeletedAt != nil && !merged.DeletedAt.IsZero() {
+			t.Errorf("expected nil/zero DeletedAt on resurrected issue, got %v", merged.DeletedAt)
 		}
 		if merged.DeletedBy != "" {
 			t.Errorf("expected empty DeletedBy on resurrected issue, got %q", merged.DeletedBy)
@@ -2199,9 +1769,9 @@ func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 
 	t.Run("both resurrect with same status - no conflict", func(t *testing.T) {
 		leftOpen := leftLive
-		leftOpen.Status = "open"
+		leftOpen.Status = types.StatusOpen
 		rightOpen := rightLive
-		rightOpen.Status = "open"
+		rightOpen.Status = types.StatusOpen
 
 		base := []Issue{baseTombstone}
 		left := []Issue{leftOpen}
@@ -2215,7 +1785,7 @@ func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
-		if result[0].Status != "open" {
+		if result[0].Status != types.StatusOpen {
 			t.Errorf("expected status 'open', got %q", result[0].Status)
 		}
 	})
@@ -2223,12 +1793,13 @@ func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 	t.Run("one side closes after resurrection", func(t *testing.T) {
 		// Left resurrects and keeps open
 		leftOpen := leftLive
-		leftOpen.Status = "open"
+		leftOpen.Status = types.StatusOpen
 
 		// Right resurrects and then closes
 		rightClosed := rightLive
-		rightClosed.Status = "closed"
-		rightClosed.ClosedAt = "2024-01-16T00:00:00Z"
+		rightClosed.Status = types.StatusClosed
+		closedAt := mustParseTime("2024-01-16T00:00:00Z")
+		rightClosed.ClosedAt = &closedAt
 
 		base := []Issue{baseTombstone}
 		left := []Issue{leftOpen}
@@ -2243,7 +1814,7 @@ func TestMerge3Way_TombstoneBaseBothLiveResurrection(t *testing.T) {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
 		// Closed should win over open
-		if result[0].Status != "closed" {
+		if result[0].Status != types.StatusClosed {
 			t.Errorf("expected closed to win over open, got %q", result[0].Status)
 		}
 	})
@@ -2259,40 +1830,27 @@ func TestMerge3Way_TombstoneVsLiveTimestampPrecisionMismatch(t *testing.T) {
 
 	t.Run("tombstone wins despite different CreatedAt precision", func(t *testing.T) {
 		// Base: issue with status=closed
-		baseIssue := Issue{
-			ID:        "bd-ghost1",
-			Title:     "Original title",
-			Status:    "closed",
-			Priority:  2,
-			CreatedAt: "2024-01-01T00:00:00Z", // No fractional seconds
-			UpdatedAt: "2024-01-10T00:00:00Z",
-			CreatedBy: "user1",
-		}
+		baseIssue := testIssue(`{"id":"bd-ghost1","title":"Original title","status":"closed","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-10T00:00:00Z","created_by":"user1"}`)
 
 		// Left: tombstone with DIFFERENT timestamp precision (has microseconds)
+		deletedAt := time.Now().Add(-24 * time.Hour)
 		tombstone := Issue{
-			ID:           "bd-ghost1",
-			Title:        "(deleted)",
-			Status:       StatusTombstone,
-			Priority:     2,
-			CreatedAt:    "2024-01-01T00:00:00.000000Z", // WITH fractional seconds
-			UpdatedAt:    "2024-01-15T00:00:00Z",
-			CreatedBy:    "user1",
-			DeletedAt:    time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-			DeletedBy:    "user2",
-			DeleteReason: "Duplicate issue",
+			Issue: types.Issue{
+				ID:           "bd-ghost1",
+				Title:        "(deleted)",
+				Status:       StatusTombstone,
+				Priority:     2,
+				CreatedAt:    mustParseTime("2024-01-01T00:00:00.000000Z"),
+				UpdatedAt:    mustParseTime("2024-01-15T00:00:00Z"),
+				CreatedBy:    "user1",
+				DeletedAt:    &deletedAt,
+				DeletedBy:    "user2",
+				DeleteReason: "Duplicate issue",
+			},
 		}
 
 		// Right: same closed issue (same precision as base)
-		closedIssue := Issue{
-			ID:        "bd-ghost1",
-			Title:     "Original title",
-			Status:    "closed",
-			Priority:  2,
-			CreatedAt: "2024-01-01T00:00:00Z", // No fractional seconds
-			UpdatedAt: "2024-01-12T00:00:00Z",
-			CreatedBy: "user1",
-		}
+		closedIssue := testIssue(`{"id":"bd-ghost1","title":"Original title","status":"closed","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-12T00:00:00Z","created_by":"user1"}`)
 
 		base := []Issue{baseIssue}
 		left := []Issue{tombstone}
@@ -2320,26 +1878,22 @@ func TestMerge3Way_TombstoneVsLiveTimestampPrecisionMismatch(t *testing.T) {
 
 	t.Run("tombstone wins with CreatedBy mismatch", func(t *testing.T) {
 		// Test case where CreatedBy differs (e.g., empty vs populated)
+		deletedAt := time.Now().Add(-24 * time.Hour)
 		tombstone := Issue{
-			ID:           "bd-ghost2",
-			Title:        "(deleted)",
-			Status:       StatusTombstone,
-			Priority:     2,
-			CreatedAt:    "2024-01-01T00:00:00Z",
-			CreatedBy:    "", // Empty CreatedBy
-			DeletedAt:    time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-			DeletedBy:    "user2",
-			DeleteReason: "Cleanup",
+			Issue: types.Issue{
+				ID:           "bd-ghost2",
+				Title:        "(deleted)",
+				Status:       StatusTombstone,
+				Priority:     2,
+				CreatedAt:    mustParseTime("2024-01-01T00:00:00Z"),
+				CreatedBy:    "", // Empty CreatedBy
+				DeletedAt:    &deletedAt,
+				DeletedBy:    "user2",
+				DeleteReason: "Cleanup",
+			},
 		}
 
-		closedIssue := Issue{
-			ID:        "bd-ghost2",
-			Title:     "Original title",
-			Status:    "closed",
-			Priority:  2,
-			CreatedAt: "2024-01-01T00:00:00Z",
-			CreatedBy: "user1", // Non-empty CreatedBy
-		}
+		closedIssue := testIssue(`{"id":"bd-ghost2","title":"Original title","status":"closed","priority":2,"created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 		base := []Issue{}
 		left := []Issue{tombstone}
@@ -2364,21 +1918,8 @@ func TestMerge3Way_TombstoneVsLiveTimestampPrecisionMismatch(t *testing.T) {
 
 	t.Run("no duplicates when both have same ID but different keys", func(t *testing.T) {
 		// Ensure we don't create duplicate entries
-		liveLeft := Issue{
-			ID:        "bd-ghost3",
-			Title:     "Left version",
-			Status:    "open",
-			CreatedAt: "2024-01-01T00:00:00.123456Z", // With nanoseconds
-			CreatedBy: "user1",
-		}
-
-		liveRight := Issue{
-			ID:        "bd-ghost3",
-			Title:     "Right version",
-			Status:    "in_progress",
-			CreatedAt: "2024-01-01T00:00:00Z", // Without nanoseconds
-			CreatedBy: "user1",
-		}
+		liveLeft := testIssue(`{"id":"bd-ghost3","title":"Left version","status":"open","created_at":"2024-01-01T00:00:00.123456Z","created_by":"user1"}`)
+		liveRight := testIssue(`{"id":"bd-ghost3","title":"Right version","status":"in_progress","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)
 
 		base := []Issue{}
 		left := []Issue{liveLeft}
@@ -2406,11 +1947,11 @@ func TestMerge3Way_TombstoneVsLiveTimestampPrecisionMismatch(t *testing.T) {
 func TestMerge3Way_DeterministicOutputOrder(t *testing.T) {
 	// Create issues with IDs that would appear in different orders
 	// if map iteration order determined output order
-	issueA := Issue{ID: "beads-aaa", Title: "A", Status: "open", CreatedAt: "2024-01-01T00:00:00Z"}
-	issueB := Issue{ID: "beads-bbb", Title: "B", Status: "open", CreatedAt: "2024-01-02T00:00:00Z"}
-	issueC := Issue{ID: "beads-ccc", Title: "C", Status: "open", CreatedAt: "2024-01-03T00:00:00Z"}
-	issueZ := Issue{ID: "beads-zzz", Title: "Z", Status: "open", CreatedAt: "2024-01-04T00:00:00Z"}
-	issueM := Issue{ID: "beads-mmm", Title: "M", Status: "open", CreatedAt: "2024-01-05T00:00:00Z"}
+	issueA := testIssue(`{"id":"beads-aaa","title":"A","status":"open","created_at":"2024-01-01T00:00:00Z"}`)
+	issueB := testIssue(`{"id":"beads-bbb","title":"B","status":"open","created_at":"2024-01-02T00:00:00Z"}`)
+	issueC := testIssue(`{"id":"beads-ccc","title":"C","status":"open","created_at":"2024-01-03T00:00:00Z"}`)
+	issueZ := testIssue(`{"id":"beads-zzz","title":"Z","status":"open","created_at":"2024-01-04T00:00:00Z"}`)
+	issueM := testIssue(`{"id":"beads-mmm","title":"M","status":"open","created_at":"2024-01-05T00:00:00Z"}`)
 
 	t.Run("output is sorted by ID", func(t *testing.T) {
 		// Input in arbitrary (non-sorted) order
@@ -2469,39 +2010,9 @@ func TestMerge3Way_DeterministicOutputOrder(t *testing.T) {
 // are preserved during merge/sync operations (GH#891)
 func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 	t.Run("close_reason preserved when both sides closed - later closed_at wins", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:        "bd-close1",
-				Title:     "Test Issue",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-			},
-		}
-		left := []Issue{
-			{
-				ID:              "bd-close1",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-02T00:00:00Z", // Earlier
-				CloseReason:     "Fixed in commit abc",
-				ClosedBySession: "session-left",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
-		right := []Issue{
-			{
-				ID:              "bd-close1",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-03T00:00:00Z", // Later - should win
-				CloseReason:     "Fixed in commit xyz",
-				ClosedBySession: "session-right",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-close1","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		left := []Issue{testIssue(`{"id":"bd-close1","title":"Test Issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","close_reason":"Fixed in commit abc","closed_by_session":"session-left","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		right := []Issue{testIssue(`{"id":"bd-close1","title":"Test Issue","status":"closed","closed_at":"2024-01-03T00:00:00Z","close_reason":"Fixed in commit xyz","closed_by_session":"session-right","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
 
 		result, conflicts := merge3Way(base, left, right, false)
 		if len(conflicts) != 0 {
@@ -2520,39 +2031,9 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 	})
 
 	t.Run("close_reason preserved when left has later closed_at", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:        "bd-close2",
-				Title:     "Test Issue",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-			},
-		}
-		left := []Issue{
-			{
-				ID:              "bd-close2",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-03T00:00:00Z", // Later - should win
-				CloseReason:     "Resolved by PR #123",
-				ClosedBySession: "session-left",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
-		right := []Issue{
-			{
-				ID:              "bd-close2",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-02T00:00:00Z", // Earlier
-				CloseReason:     "Duplicate",
-				ClosedBySession: "session-right",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-close2","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		left := []Issue{testIssue(`{"id":"bd-close2","title":"Test Issue","status":"closed","closed_at":"2024-01-03T00:00:00Z","close_reason":"Resolved by PR #123","closed_by_session":"session-left","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		right := []Issue{testIssue(`{"id":"bd-close2","title":"Test Issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","close_reason":"Duplicate","closed_by_session":"session-right","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
 
 		result, conflicts := merge3Way(base, left, right, false)
 		if len(conflicts) != 0 {
@@ -2571,42 +2052,9 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 	})
 
 	t.Run("close_reason cleared when status becomes open", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:              "bd-close3",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-02T00:00:00Z",
-				CloseReason:     "Fixed",
-				ClosedBySession: "session-old",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
-		left := []Issue{
-			{
-				ID:              "bd-close3",
-				Title:           "Test Issue",
-				Status:          "open", // Reopened
-				ClosedAt:        "",
-				CloseReason:     "", // Should be cleared
-				ClosedBySession: "",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
-		right := []Issue{
-			{
-				ID:              "bd-close3",
-				Title:           "Test Issue",
-				Status:          "open", // Both reopened
-				ClosedAt:        "",
-				CloseReason:     "",
-				ClosedBySession: "",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-close3","title":"Test Issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","close_reason":"Fixed","closed_by_session":"session-old","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		left := []Issue{testIssue(`{"id":"bd-close3","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		right := []Issue{testIssue(`{"id":"bd-close3","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
 
 		result, conflicts := merge3Way(base, left, right, false)
 		if len(conflicts) != 0 {
@@ -2615,7 +2063,7 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("expected 1 merged issue, got %d", len(result))
 		}
-		if result[0].Status != "open" {
+		if result[0].Status != types.StatusOpen {
 			t.Errorf("expected status 'open', got %q", result[0].Status)
 		}
 		if result[0].CloseReason != "" {
@@ -2627,36 +2075,9 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 	})
 
 	t.Run("close_reason from single side preserved", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:        "bd-close4",
-				Title:     "Test Issue",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-			},
-		}
-		left := []Issue{
-			{
-				ID:              "bd-close4",
-				Title:           "Test Issue",
-				Status:          "closed",
-				ClosedAt:        "2024-01-02T00:00:00Z",
-				CloseReason:     "Won't fix - by design",
-				ClosedBySession: "session-abc",
-				CreatedAt:       "2024-01-01T00:00:00Z",
-				CreatedBy:       "user1",
-			},
-		}
-		right := []Issue{
-			{
-				ID:        "bd-close4",
-				Title:     "Test Issue",
-				Status:    "open", // Still open on right
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-close4","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		left := []Issue{testIssue(`{"id":"bd-close4","title":"Test Issue","status":"closed","closed_at":"2024-01-02T00:00:00Z","close_reason":"Won't fix - by design","closed_by_session":"session-abc","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		right := []Issue{testIssue(`{"id":"bd-close4","title":"Test Issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
 
 		result, conflicts := merge3Way(base, left, right, false)
 		if len(conflicts) != 0 {
@@ -2666,7 +2087,7 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 			t.Fatalf("expected 1 merged issue, got %d", len(result))
 		}
 		// Closed wins over open
-		if result[0].Status != "closed" {
+		if result[0].Status != types.StatusClosed {
 			t.Errorf("expected status 'closed', got %q", result[0].Status)
 		}
 		// Close reason from the closed side should be preserved
@@ -2732,27 +2153,8 @@ func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
 func TestMerge3Way_FieldPreservation(t *testing.T) {
 	t.Run("metadata is preserved through merge", func(t *testing.T) {
 		metadata := json.RawMessage(`{"files":["foo.go","bar.go"],"tool":"linter@1.0"}`)
-		base := []Issue{
-			{
-				ID:        "bd-meta1",
-				Title:     "Issue with metadata",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				Metadata:  metadata,
-			},
-		}
-		left := []Issue{
-			{
-				ID:        "bd-meta1",
-				Title:     "Issue with metadata",
-				Status:    "in_progress", // Changed status
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				Metadata:  metadata,
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-meta1","title":"Issue with metadata","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","metadata":{"files":["foo.go","bar.go"],"tool":"linter@1.0"}}`)}
+		left := []Issue{testIssue(`{"id":"bd-meta1","title":"Issue with metadata","status":"in_progress","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","metadata":{"files":["foo.go","bar.go"],"tool":"linter@1.0"}}`)}
 		right := base
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -2771,27 +2173,8 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 
 	t.Run("labels are preserved through merge", func(t *testing.T) {
 		labels := []string{"bug", "high-priority", "backend"}
-		base := []Issue{
-			{
-				ID:        "bd-label1",
-				Title:     "Issue with labels",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				Labels:    labels,
-			},
-		}
-		left := []Issue{
-			{
-				ID:        "bd-label1",
-				Title:     "Updated title", // Changed title
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				Labels:    labels,
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-label1","title":"Issue with labels","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","labels":["bug","high-priority","backend"]}`)}
+		left := []Issue{testIssue(`{"id":"bd-label1","title":"Updated title","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","labels":["bug","high-priority","backend"]}`)}
 		right := base
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -2812,29 +2195,8 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 	})
 
 	t.Run("assignee and owner are preserved through merge", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:        "bd-assign1",
-				Title:     "Assigned issue",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				Assignee:  "dev@example.com",
-				Owner:     "owner@example.com",
-			},
-		}
-		left := []Issue{
-			{
-				ID:        "bd-assign1",
-				Title:     "Assigned issue",
-				Status:    "in_progress",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				UpdatedAt: "2024-01-02T00:00:00Z",
-				CreatedBy: "user1",
-				Assignee:  "dev@example.com",
-				Owner:     "owner@example.com",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-assign1","title":"Assigned issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","assignee":"dev@example.com","owner":"owner@example.com"}`)}
+		left := []Issue{testIssue(`{"id":"bd-assign1","title":"Assigned issue","status":"in_progress","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","assignee":"dev@example.com","owner":"owner@example.com"}`)}
 		right := base
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -2853,35 +2215,8 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 	})
 
 	t.Run("content fields are preserved through merge", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:                 "bd-content1",
-				Title:              "Issue with content",
-				Description:        "Original description",
-				Design:             "# Design\n\nArchitecture details",
-				AcceptanceCriteria: "- [ ] Criterion 1\n- [ ] Criterion 2",
-				Notes:              "Some notes",
-				SpecID:             "SPEC-123",
-				Status:             "open",
-				CreatedAt:          "2024-01-01T00:00:00Z",
-				CreatedBy:          "user1",
-			},
-		}
-		left := []Issue{
-			{
-				ID:                 "bd-content1",
-				Title:              "Issue with content",
-				Description:        "Original description",
-				Design:             "# Design\n\nArchitecture details",
-				AcceptanceCriteria: "- [ ] Criterion 1\n- [ ] Criterion 2",
-				Notes:              "Some notes",
-				SpecID:             "SPEC-123",
-				Status:             "in_progress", // Changed status only
-				CreatedAt:          "2024-01-01T00:00:00Z",
-				UpdatedAt:          "2024-01-02T00:00:00Z",
-				CreatedBy:          "user1",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-content1","title":"Issue with content","description":"Original description","design":"# Design\n\nArchitecture details","acceptance_criteria":"- [ ] Criterion 1\n- [ ] Criterion 2","notes":"Some notes","spec_id":"SPEC-123","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`)}
+		left := []Issue{testIssue(`{"id":"bd-content1","title":"Issue with content","description":"Original description","design":"# Design\n\nArchitecture details","acceptance_criteria":"- [ ] Criterion 1\n- [ ] Criterion 2","notes":"Some notes","spec_id":"SPEC-123","status":"in_progress","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`)}
 		right := base
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -2903,17 +2238,7 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 	})
 
 	t.Run("scheduling fields are preserved through merge", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:         "bd-sched1",
-				Title:      "Scheduled issue",
-				Status:     "open",
-				CreatedAt:  "2024-01-01T00:00:00Z",
-				CreatedBy:  "user1",
-				DueAt:      "2024-02-01T00:00:00Z",
-				DeferUntil: "2024-01-15T00:00:00Z",
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-sched1","title":"Scheduled issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","due_at":"2024-02-01T00:00:00Z","defer_until":"2024-01-15T00:00:00Z"}`)}
 		left := base
 		right := base
 
@@ -2924,27 +2249,18 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("expected 1 issue, got %d", len(result))
 		}
-		if result[0].DueAt != "2024-02-01T00:00:00Z" {
-			t.Errorf("due_at lost: got %q", result[0].DueAt)
+		expectedDueAt := mustParseTime("2024-02-01T00:00:00Z")
+		if result[0].DueAt == nil || !result[0].DueAt.Equal(expectedDueAt) {
+			t.Errorf("due_at lost: got %v", result[0].DueAt)
 		}
-		if result[0].DeferUntil != "2024-01-15T00:00:00Z" {
-			t.Errorf("defer_until lost: got %q", result[0].DeferUntil)
+		expectedDeferUntil := mustParseTime("2024-01-15T00:00:00Z")
+		if result[0].DeferUntil == nil || !result[0].DeferUntil.Equal(expectedDeferUntil) {
+			t.Errorf("defer_until lost: got %v", result[0].DeferUntil)
 		}
 	})
 
 	t.Run("gate fields are preserved through merge", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:        "bd-gate1",
-				Title:     "Gate issue",
-				Status:    "open",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				CreatedBy: "user1",
-				AwaitType: "gh:run",
-				AwaitID:   "12345",
-				Waiters:   []string{"user1@example.com", "user2@example.com"},
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-gate1","title":"Gate issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","await_type":"gh:run","await_id":"12345","waiters":["user1@example.com","user2@example.com"]}`)}
 		left := base
 		right := base
 
@@ -2967,18 +2283,7 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 	})
 
 	t.Run("flags are preserved through merge", func(t *testing.T) {
-		base := []Issue{
-			{
-				ID:         "bd-flags1",
-				Title:      "Flagged issue",
-				Status:     "open",
-				CreatedAt:  "2024-01-01T00:00:00Z",
-				CreatedBy:  "user1",
-				Pinned:     true,
-				IsTemplate: true,
-				Ephemeral:  false,
-			},
-		}
+		base := []Issue{testIssue(`{"id":"bd-flags1","title":"Flagged issue","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","pinned":true,"is_template":true,"ephemeral":false}`)}
 		left := base
 		right := base
 

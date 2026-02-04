@@ -39,113 +39,21 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Issue represents a beads issue with all possible fields.
-// IMPORTANT: This struct must stay in sync with types.Issue to prevent data loss during merge.
-// See GH#1480 for the bug this caused and GH#1481 for the long-term refactor plan.
+// Issue embeds types.Issue to prevent field drift (GH#1481).
+// It shadows Dependencies to maintain local string-timestamp behavior for now,
+// and adds RawLine for conflict marker output.
 type Issue struct {
-	ID          string `json:"id"`
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description,omitempty"`
-	Notes       string `json:"notes,omitempty"`
-	Status      string `json:"status,omitempty"`
-	Priority    int    `json:"priority"` // No omitempty: 0 is valid (P0/critical)
-	IssueType   string `json:"issue_type,omitempty"`
+	types.Issue
 
-	// Timestamps (kept as strings for merge logic compatibility)
-	CreatedAt string `json:"created_at,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
-	ClosedAt  string `json:"closed_at,omitempty"`
-
-	// Close metadata (GH#891)
-	CloseReason     string `json:"close_reason,omitempty"`
-	ClosedBySession string `json:"closed_by_session,omitempty"`
-
-	CreatedBy    string       `json:"created_by,omitempty"`
+	// Dependencies stored with string timestamps for JSONL compatibility
 	Dependencies []Dependency `json:"dependencies,omitempty"`
-	RawLine      string       `json:"-"` // Store original line for conflict output
 
-	// Tombstone fields: inline soft-delete support for merge
-	DeletedAt    string `json:"deleted_at,omitempty"`
-	DeletedBy    string `json:"deleted_by,omitempty"`
-	DeleteReason string `json:"delete_reason,omitempty"`
-	OriginalType string `json:"original_type,omitempty"`
-
-	// HOP quality field
-	QualityScore *float32 `json:"quality_score,omitempty"`
-
-	// === Fields added in GH#1480 to prevent data loss ===
-
-	// Content fields
-	Design             string `json:"design,omitempty"`
-	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
-	SpecID             string `json:"spec_id,omitempty"`
-
-	// Assignment
-	Assignee string `json:"assignee,omitempty"`
-	Owner    string `json:"owner,omitempty"`
-
-	// Scheduling (kept as strings for merge compatibility)
-	DueAt      string `json:"due_at,omitempty"`
-	DeferUntil string `json:"defer_until,omitempty"`
-
-	// External references
-	ExternalRef  string `json:"external_ref,omitempty"`
-	SourceSystem string `json:"source_system,omitempty"`
-
-	// Labels
-	Labels []string `json:"labels,omitempty"`
-
-	// Comments
-	Comments []Comment `json:"comments,omitempty"`
-
-	// Custom metadata (GH#1406)
-	Metadata json.RawMessage `json:"metadata,omitempty"`
-
-	// Gate fields
-	AwaitType string   `json:"await_type,omitempty"`
-	AwaitID   string   `json:"await_id,omitempty"`
-	Timeout   int64    `json:"timeout,omitempty"` // nanoseconds (kept as int64 for simplicity)
-	Waiters   []string `json:"waiters,omitempty"`
-
-	// Flags
-	Pinned       bool `json:"pinned,omitempty"`
-	IsTemplate   bool `json:"is_template,omitempty"`
-	Ephemeral    bool `json:"ephemeral,omitempty"`
-	Crystallizes bool `json:"crystallizes,omitempty"`
-
-	// Wisp/messaging
-	Sender   string `json:"sender,omitempty"`
-	WispType string `json:"wisp_type,omitempty"`
-
-	// Agent fields
-	HookBead     string `json:"hook_bead,omitempty"`
-	RoleBead     string `json:"role_bead,omitempty"`
-	AgentState   string `json:"agent_state,omitempty"`
-	LastActivity string `json:"last_activity,omitempty"` // kept as string
-	RoleType     string `json:"role_type,omitempty"`
-	Rig          string `json:"rig,omitempty"`
-
-	// Molecule type
-	MolType string `json:"mol_type,omitempty"`
-
-	// Compaction fields
-	CompactionLevel   int    `json:"compaction_level,omitempty"`
-	CompactedAt       string `json:"compacted_at,omitempty"` // kept as string
-	CompactedAtCommit string `json:"compacted_at_commit,omitempty"`
-	OriginalSize      int    `json:"original_size,omitempty"`
-
-	// Slot holder
-	Holder string `json:"holder,omitempty"`
-
-	// Formula tracking
-	SourceFormula  string `json:"source_formula,omitempty"`
-	SourceLocation string `json:"source_location,omitempty"`
-
-	// Estimated minutes
-	EstimatedMinutes *int `json:"estimated_minutes,omitempty"`
+	// RawLine stores the original JSON line for conflict marker output
+	RawLine string `json:"-"`
 }
 
-// Dependency represents an issue dependency
+// Dependency represents an issue dependency with string timestamps for JSONL compatibility.
+// Note: types.Dependency uses time.Time; we keep strings here for stable JSONL round-trips.
 type Dependency struct {
 	IssueID     string `json:"issue_id"`
 	DependsOnID string `json:"depends_on_id"`
@@ -154,19 +62,10 @@ type Dependency struct {
 	CreatedBy   string `json:"created_by"`
 }
 
-// Comment represents an issue comment
-type Comment struct {
-	ID        string `json:"id,omitempty"`
-	IssueID   string `json:"issue_id,omitempty"`
-	Author    string `json:"author,omitempty"`
-	Text      string `json:"text,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
-}
-
 // IssueKey uniquely identifies an issue for matching
 type IssueKey struct {
 	ID        string
-	CreatedAt string
+	CreatedAt time.Time
 	CreatedBy string
 }
 
@@ -337,9 +236,12 @@ func makeKey(issue Issue) IssueKey {
 
 // Use constants from types package to avoid duplication
 const (
-	StatusTombstone = string(types.StatusTombstone)
-	StatusClosed    = string(types.StatusClosed)
+	StatusTombstone = types.StatusTombstone
+	StatusClosed    = types.StatusClosed
 )
+
+// Comment is an alias to types.Comment for backward compatibility
+type Comment = types.Comment
 
 // Alias TTL constants from types package for local use
 var (
@@ -362,7 +264,7 @@ func IsExpiredTombstone(issue Issue, ttl time.Duration) bool {
 	}
 
 	// Tombstones without DeletedAt are not expired (safety: shouldn't happen in valid data)
-	if issue.DeletedAt == "" {
+	if issue.DeletedAt == nil || issue.DeletedAt.IsZero() {
 		return false
 	}
 
@@ -371,21 +273,11 @@ func IsExpiredTombstone(issue Issue, ttl time.Duration) bool {
 		ttl = DefaultTombstoneTTL
 	}
 
-	// Parse the deleted_at timestamp
-	deletedAt, err := time.Parse(time.RFC3339Nano, issue.DeletedAt)
-	if err != nil {
-		deletedAt, err = time.Parse(time.RFC3339, issue.DeletedAt)
-		if err != nil {
-			// Invalid timestamp means not expired (safety)
-			return false
-		}
-	}
-
 	// Add clock skew grace period to the TTL
 	effectiveTTL := ttl + ClockSkewGrace
 
 	// Check if the tombstone has exceeded its TTL
-	expirationTime := deletedAt.Add(effectiveTTL)
+	expirationTime := issue.DeletedAt.Add(effectiveTTL)
 	return time.Now().After(expirationTime)
 }
 
@@ -583,9 +475,11 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration, debug bool) 
 
 			// CASE: Both are live - merge using deterministic rules with empty base
 			emptyBase := Issue{
-				ID:        leftIssue.ID,
-				CreatedAt: leftIssue.CreatedAt,
-				CreatedBy: leftIssue.CreatedBy,
+				Issue: types.Issue{
+					ID:        leftIssue.ID,
+					CreatedAt: leftIssue.CreatedAt,
+					CreatedBy: leftIssue.CreatedBy,
+				},
 			}
 			merged, _ := mergeIssue(emptyBase, leftIssue, rightIssue)
 			result = append(result, merged)
@@ -629,29 +523,32 @@ func Merge3WayWithTTL(base, left, right []Issue, ttl time.Duration, debug bool) 
 // mergeTombstones merges two tombstones for the same issue.
 // The tombstone with the later deleted_at timestamp wins.
 //
-// Edge cases for empty DeletedAt:
-//   - If both empty: left wins (arbitrary but deterministic)
-//   - If left empty, right not: right wins (has timestamp)
-//   - If right empty, left not: left wins (has timestamp)
+// Edge cases for nil/zero DeletedAt:
+//   - If both nil/zero: left wins (arbitrary but deterministic)
+//   - If left nil/zero, right not: right wins (has timestamp)
+//   - If right nil/zero, left not: left wins (has timestamp)
 //
-// Empty DeletedAt shouldn't happen in valid data (validation catches it),
+// Nil/zero DeletedAt shouldn't happen in valid data (validation catches it),
 // but we handle it defensively here.
 func mergeTombstones(left, right Issue) Issue {
-	// Handle empty DeletedAt explicitly for clarity
-	if left.DeletedAt == "" && right.DeletedAt == "" {
+	leftHasDeletedAt := left.DeletedAt != nil && !left.DeletedAt.IsZero()
+	rightHasDeletedAt := right.DeletedAt != nil && !right.DeletedAt.IsZero()
+
+	// Handle nil/zero DeletedAt explicitly for clarity
+	if !leftHasDeletedAt && !rightHasDeletedAt {
 		// Both invalid - left wins as tie-breaker
 		return left
 	}
-	if left.DeletedAt == "" {
+	if !leftHasDeletedAt {
 		// Left invalid, right valid - right wins
 		return right
 	}
-	if right.DeletedAt == "" {
+	if !rightHasDeletedAt {
 		// Right invalid, left valid - left wins
 		return left
 	}
 	// Both valid - use later deleted_at as the authoritative tombstone
-	if isTimeAfter(left.DeletedAt, right.DeletedAt) {
+	if isTimePtrAfter(left.DeletedAt, right.DeletedAt) {
 		return left
 	}
 	return right
@@ -659,9 +556,11 @@ func mergeTombstones(left, right Issue) Issue {
 
 func mergeIssue(base, left, right Issue) (Issue, string) {
 	result := Issue{
-		ID:        base.ID,
-		CreatedAt: base.CreatedAt,
-		CreatedBy: base.CreatedBy,
+		Issue: types.Issue{
+			ID:        base.ID,
+			CreatedAt: base.CreatedAt,
+			CreatedBy: base.CreatedBy,
+		},
 	}
 
 	// Merge title - on conflict, side with latest updated_at wins
@@ -680,7 +579,7 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	result.Priority = mergePriority(base.Priority, left.Priority, right.Priority)
 
 	// Merge issue_type - on conflict, local (left) wins
-	result.IssueType = mergeField(base.IssueType, left.IssueType, right.IssueType)
+	result.IssueType = mergeIssueType(base.IssueType, left.IssueType, right.IssueType)
 
 	// Merge updated_at - take the max
 	result.UpdatedAt = maxTime(left.UpdatedAt, right.UpdatedAt)
@@ -688,22 +587,22 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	// Merge closed_at - only if status is closed
 	// This prevents invalid state (status=open with closed_at set)
 	if result.Status == StatusClosed {
-		result.ClosedAt = maxTime(left.ClosedAt, right.ClosedAt)
+		result.ClosedAt = maxTimePtr(left.ClosedAt, right.ClosedAt)
 		// Merge close_reason and closed_by_session - use value from side with later closed_at (GH#891)
 		// This ensures we keep the most recent close action's metadata
-		if isTimeAfter(left.ClosedAt, right.ClosedAt) {
+		if isTimePtrAfter(left.ClosedAt, right.ClosedAt) {
 			result.CloseReason = left.CloseReason
 			result.ClosedBySession = left.ClosedBySession
-		} else if right.ClosedAt != "" {
+		} else if right.ClosedAt != nil && !right.ClosedAt.IsZero() {
 			result.CloseReason = right.CloseReason
 			result.ClosedBySession = right.ClosedBySession
 		} else {
-			// Both empty or only left has value - prefer left
+			// Both nil/zero or only left has value - prefer left
 			result.CloseReason = left.CloseReason
 			result.ClosedBySession = left.ClosedBySession
 		}
 	} else {
-		result.ClosedAt = ""
+		result.ClosedAt = nil
 		result.CloseReason = ""
 		result.ClosedBySession = ""
 	}
@@ -723,19 +622,19 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	result.Assignee = mergeField(base.Assignee, left.Assignee, right.Assignee)
 	result.Owner = mergeField(base.Owner, left.Owner, right.Owner)
 
-	// Scheduling - use maxTime for time fields (latest wins)
-	result.DueAt = maxTime(left.DueAt, right.DueAt)
-	result.DeferUntil = maxTime(left.DeferUntil, right.DeferUntil)
+	// Scheduling - use maxTimePtr for pointer time fields (latest wins)
+	result.DueAt = maxTimePtr(left.DueAt, right.DueAt)
+	result.DeferUntil = maxTimePtr(left.DeferUntil, right.DeferUntil)
 
 	// External references
-	result.ExternalRef = mergeField(base.ExternalRef, left.ExternalRef, right.ExternalRef)
+	result.ExternalRef = mergeStringPtr(base.ExternalRef, left.ExternalRef, right.ExternalRef)
 	result.SourceSystem = mergeField(base.SourceSystem, left.SourceSystem, right.SourceSystem)
 
 	// Labels - prefer left's version on conflict (no sophisticated merge for now)
 	result.Labels = mergeLabels(base.Labels, left.Labels, right.Labels)
 
 	// Comments - prefer left's version on conflict
-	result.Comments = mergeComments(base.Comments, left.Comments, right.Comments)
+	result.Comments = mergeCommentPtrs(base.Comments, left.Comments, right.Comments)
 
 	// Metadata - prefer the version from the side with latest updated_at
 	result.Metadata = mergeMetadata(base.Metadata, left.Metadata, right.Metadata, left.UpdatedAt, right.UpdatedAt)
@@ -743,7 +642,7 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	// Gate fields
 	result.AwaitType = mergeField(base.AwaitType, left.AwaitType, right.AwaitType)
 	result.AwaitID = mergeField(base.AwaitID, left.AwaitID, right.AwaitID)
-	result.Timeout = mergeInt64(base.Timeout, left.Timeout, right.Timeout)
+	result.Timeout = mergeDuration(base.Timeout, left.Timeout, right.Timeout)
 	result.Waiters = mergeStringSlice(base.Waiters, left.Waiters, right.Waiters)
 
 	// Flags - any true value wins (union semantics)
@@ -754,26 +653,26 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 
 	// Wisp/messaging
 	result.Sender = mergeField(base.Sender, left.Sender, right.Sender)
-	result.WispType = mergeField(base.WispType, left.WispType, right.WispType)
+	result.WispType = mergeWispType(base.WispType, left.WispType, right.WispType)
 
 	// Agent fields
 	result.HookBead = mergeField(base.HookBead, left.HookBead, right.HookBead)
 	result.RoleBead = mergeField(base.RoleBead, left.RoleBead, right.RoleBead)
-	result.AgentState = mergeField(base.AgentState, left.AgentState, right.AgentState)
-	result.LastActivity = maxTime(left.LastActivity, right.LastActivity)
+	result.AgentState = mergeAgentState(base.AgentState, left.AgentState, right.AgentState)
+	result.LastActivity = maxTimePtr(left.LastActivity, right.LastActivity)
 	result.RoleType = mergeField(base.RoleType, left.RoleType, right.RoleType)
 	result.Rig = mergeField(base.Rig, left.Rig, right.Rig)
 
 	// Molecule type
-	result.MolType = mergeField(base.MolType, left.MolType, right.MolType)
+	result.MolType = mergeMolType(base.MolType, left.MolType, right.MolType)
 
 	// Compaction fields - prefer newer compaction
-	if isTimeAfter(left.CompactedAt, right.CompactedAt) {
+	if isTimePtrAfter(left.CompactedAt, right.CompactedAt) {
 		result.CompactionLevel = left.CompactionLevel
 		result.CompactedAt = left.CompactedAt
 		result.CompactedAtCommit = left.CompactedAtCommit
 		result.OriginalSize = left.OriginalSize
-	} else if right.CompactedAt != "" {
+	} else if right.CompactedAt != nil && !right.CompactedAt.IsZero() {
 		result.CompactionLevel = right.CompactionLevel
 		result.CompactedAt = right.CompactedAt
 		result.CompactedAtCommit = right.CompactedAtCommit
@@ -802,17 +701,17 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	// copy tombstone fields from whichever side has them
 	if result.Status == StatusTombstone {
 		// Prefer the side with more recent deleted_at, or left if tied
-		if isTimeAfter(left.DeletedAt, right.DeletedAt) {
+		if isTimePtrAfter(left.DeletedAt, right.DeletedAt) {
 			result.DeletedAt = left.DeletedAt
 			result.DeletedBy = left.DeletedBy
 			result.DeleteReason = left.DeleteReason
 			result.OriginalType = left.OriginalType
-		} else if right.DeletedAt != "" {
+		} else if right.DeletedAt != nil && !right.DeletedAt.IsZero() {
 			result.DeletedAt = right.DeletedAt
 			result.DeletedBy = right.DeletedBy
 			result.DeleteReason = right.DeleteReason
 			result.OriginalType = right.OriginalType
-		} else if left.DeletedAt != "" {
+		} else if left.DeletedAt != nil {
 			result.DeletedAt = left.DeletedAt
 			result.DeletedBy = left.DeletedBy
 			result.DeleteReason = left.DeleteReason
@@ -826,7 +725,7 @@ func mergeIssue(base, left, right Issue) (Issue, string) {
 	return result, ""
 }
 
-func mergeStatus(base, left, right string) string {
+func mergeStatus(base, left, right types.Status) types.Status {
 	// RULE 0: tombstone is handled at the merge3Way level, not here.
 	// If a tombstone status reaches here, it means both sides have the same
 	// issue with possibly different statuses - tombstone should not be one of them
@@ -845,7 +744,14 @@ func mergeStatus(base, left, right string) string {
 	}
 
 	// Otherwise use standard 3-way merge
-	return mergeField(base, left, right)
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	// Both changed to same value or no change - left wins
+	return left
 }
 
 func mergeField(base, left, right string) string {
@@ -861,7 +767,7 @@ func mergeField(base, left, right string) string {
 
 // mergeFieldByUpdatedAt resolves conflicts by picking the value from the side
 // with the latest updated_at timestamp
-func mergeFieldByUpdatedAt(base, left, right, leftUpdatedAt, rightUpdatedAt string) string {
+func mergeFieldByUpdatedAt(base, left, right string, leftUpdatedAt, rightUpdatedAt time.Time) string {
 	// Standard 3-way merge for non-conflict cases
 	if base == left && base != right {
 		return right
@@ -878,6 +784,88 @@ func mergeFieldByUpdatedAt(base, left, right, leftUpdatedAt, rightUpdatedAt stri
 		return left
 	}
 	return right
+}
+
+// mergeIssueType performs a 3-way merge for IssueType
+func mergeIssueType(base, left, right types.IssueType) types.IssueType {
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	// Both changed to same value or no change - left wins
+	return left
+}
+
+// mergeStringPtr performs a 3-way merge for *string fields
+func mergeStringPtr(base, left, right *string) *string {
+	baseVal := ""
+	if base != nil {
+		baseVal = *base
+	}
+	leftVal := ""
+	if left != nil {
+		leftVal = *left
+	}
+	rightVal := ""
+	if right != nil {
+		rightVal = *right
+	}
+
+	if baseVal == leftVal && baseVal != rightVal {
+		return right
+	}
+	if baseVal == rightVal && baseVal != leftVal {
+		return left
+	}
+	// Both changed to same value or no change - left wins
+	return left
+}
+
+// mergeDuration performs a 3-way merge for time.Duration fields
+func mergeDuration(base, left, right time.Duration) time.Duration {
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	// Both changed to same value or no change - left wins
+	return left
+}
+
+// mergeWispType performs a 3-way merge for WispType
+func mergeWispType(base, left, right types.WispType) types.WispType {
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	return left
+}
+
+// mergeAgentState performs a 3-way merge for AgentState
+func mergeAgentState(base, left, right types.AgentState) types.AgentState {
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	return left
+}
+
+// mergeMolType performs a 3-way merge for MolType
+func mergeMolType(base, left, right types.MolType) types.MolType {
+	if base == left && base != right {
+		return right
+	}
+	if base == right && base != left {
+		return left
+	}
+	return left
 }
 
 // mergeNotes handles notes merging - on conflict, concatenate both sides
@@ -934,79 +922,87 @@ func mergePriority(base, left, right int) int {
 	return right
 }
 
-// isTimeAfter returns true if t1 is after t2
-func isTimeAfter(t1, t2 string) bool {
-	if t1 == "" {
-		return false
+// isTimeAfter returns true if t1 is after t2.
+// Zero times are treated as "unset" - a set time beats an unset time.
+// On exact tie, returns true (left wins for consistency).
+func isTimeAfter(t1, t2 time.Time) bool {
+	t1Zero := t1.IsZero()
+	t2Zero := t2.IsZero()
+
+	if t1Zero && t2Zero {
+		return true // both unset, left wins
 	}
-	if t2 == "" {
-		return true
+	if t1Zero {
+		return false // t1 unset, t2 set - t2 wins
+	}
+	if t2Zero {
+		return true // t1 set, t2 unset - t1 wins
 	}
 
-	time1, err1 := time.Parse(time.RFC3339Nano, t1)
-	if err1 != nil {
-		time1, err1 = time.Parse(time.RFC3339, t1)
-	}
-
-	time2, err2 := time.Parse(time.RFC3339Nano, t2)
-	if err2 != nil {
-		time2, err2 = time.Parse(time.RFC3339, t2)
-	}
-
-	// Handle parse errors consistently with maxTime:
-	// - Valid timestamp beats invalid
-	// - If both invalid, prefer left (t1) for consistency
-	if err1 != nil && err2 != nil {
-		return true // both invalid, prefer left
-	}
-	if err1 != nil {
-		return false // t1 invalid, t2 valid - t2 wins
-	}
-	if err2 != nil {
-		return true // t1 valid, t2 invalid - t1 wins
-	}
-
-	// Both valid - compare. On exact tie, left wins for consistency with IssueType rule
-	// Using !time2.After(time1) returns true when t1 > t2 OR t1 == t2
-	return !time2.After(time1)
+	// Both set - compare. On exact tie, left wins for consistency
+	return !t2.After(t1)
 }
 
-func maxTime(t1, t2 string) string {
-	if t1 == "" && t2 == "" {
-		return ""
+// isTimePtrAfter returns true if t1 is after t2 for pointer times.
+// Nil pointers are treated as "unset" - a set time beats an unset time.
+// On exact tie, returns true (left wins for consistency).
+func isTimePtrAfter(t1, t2 *time.Time) bool {
+	t1Set := t1 != nil && !t1.IsZero()
+	t2Set := t2 != nil && !t2.IsZero()
+
+	if !t1Set && !t2Set {
+		return true // both unset, left wins
 	}
-	if t1 == "" {
+	if !t1Set {
+		return false // t1 unset, t2 set - t2 wins
+	}
+	if !t2Set {
+		return true // t1 set, t2 unset - t1 wins
+	}
+
+	// Both set - compare. On exact tie, left wins for consistency
+	return !t2.After(*t1)
+}
+
+// maxTime returns the later of two times.
+// Zero times are treated as "unset" - a set time beats an unset time.
+func maxTime(t1, t2 time.Time) time.Time {
+	t1Zero := t1.IsZero()
+	t2Zero := t2.IsZero()
+
+	if t1Zero && t2Zero {
+		return time.Time{}
+	}
+	if t1Zero {
 		return t2
 	}
-	if t2 == "" {
+	if t2Zero {
 		return t1
 	}
 
-	// Try RFC3339Nano first (supports fractional seconds), fall back to RFC3339
-	time1, err1 := time.Parse(time.RFC3339Nano, t1)
-	if err1 != nil {
-		time1, err1 = time.Parse(time.RFC3339, t1)
+	if t1.After(t2) {
+		return t1
 	}
+	return t2
+}
 
-	time2, err2 := time.Parse(time.RFC3339Nano, t2)
-	if err2 != nil {
-		time2, err2 = time.Parse(time.RFC3339, t2)
+// maxTimePtr returns the later of two pointer times.
+// Nil or zero times are treated as "unset" - a set time beats an unset time.
+func maxTimePtr(t1, t2 *time.Time) *time.Time {
+	t1Set := t1 != nil && !t1.IsZero()
+	t2Set := t2 != nil && !t2.IsZero()
+
+	if !t1Set && !t2Set {
+		return nil
 	}
-
-	// If both fail to parse, return t2 as fallback
-	if err1 != nil && err2 != nil {
+	if !t1Set {
 		return t2
 	}
-	// If only t1 failed to parse, return t2
-	if err1 != nil {
-		return t2
-	}
-	// If only t2 failed to parse, return t1
-	if err2 != nil {
+	if !t2Set {
 		return t1
 	}
 
-	if time1.After(time2) {
+	if t1.After(*t2) {
 		return t1
 	}
 	return t2
@@ -1122,16 +1118,43 @@ func mergeLabels(base, left, right []string) []string {
 
 // mergeComments performs a 3-way merge of comments.
 // For simplicity, uses set union semantics based on comment ID.
+// Kept for backward compatibility with any code using []Comment.
 func mergeComments(base, left, right []Comment) []Comment {
-	seen := make(map[string]bool)
+	seen := make(map[int64]bool)
 	var result []Comment
 
 	for _, comments := range [][]Comment{base, left, right} {
 		for _, comment := range comments {
 			key := comment.ID
-			if key == "" {
-				// No ID - use content hash as fallback
-				key = comment.Author + ":" + comment.CreatedAt + ":" + comment.Text
+			if key == 0 {
+				// No ID - generate a pseudo-key from content
+				// Use a hash-like approach: combine author + timestamp + start of text
+				key = int64(len(comment.Author) + len(comment.Text) + comment.CreatedAt.Nanosecond())
+			}
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, comment)
+			}
+		}
+	}
+	return result
+}
+
+// mergeCommentPtrs performs a 3-way merge of comment pointers.
+// For simplicity, uses set union semantics based on comment ID.
+func mergeCommentPtrs(base, left, right []*types.Comment) []*types.Comment {
+	seen := make(map[int64]bool)
+	var result []*types.Comment
+
+	for _, comments := range [][]*types.Comment{base, left, right} {
+		for _, comment := range comments {
+			if comment == nil {
+				continue
+			}
+			key := comment.ID
+			if key == 0 {
+				// No ID - generate a pseudo-key from content
+				key = int64(len(comment.Author) + len(comment.Text) + comment.CreatedAt.Nanosecond())
 			}
 			if !seen[key] {
 				seen[key] = true
@@ -1144,7 +1167,7 @@ func mergeComments(base, left, right []Comment) []Comment {
 
 // mergeMetadata performs a 3-way merge of JSON metadata.
 // Prefers the version from the side with the latest updated_at.
-func mergeMetadata(base, left, right json.RawMessage, leftUpdatedAt, rightUpdatedAt string) json.RawMessage {
+func mergeMetadata(base, left, right json.RawMessage, leftUpdatedAt, rightUpdatedAt time.Time) json.RawMessage {
 	// If both sides have the same metadata as base, keep base
 	if jsonEqual(base, left) && jsonEqual(base, right) {
 		return base
