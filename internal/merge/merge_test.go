@@ -4,8 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestMergeStatus tests the status merging logic with special rules
@@ -3094,4 +3099,102 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestIssueFieldParity ensures merge.Issue has all JSON fields from types.Issue (GH#1481).
+// This is a compile-time/test-time check to prevent struct drift - when new fields are added
+// to types.Issue, this test will fail until merge.Issue is updated to match.
+//
+// The test extracts JSON tag names from both structs and verifies that any JSON field
+// present in types.Issue is also present in merge.Issue. Fields with json:"-" tags and
+// internal-only fields (like ContentHash) are excluded from comparison.
+func TestIssueFieldParity(t *testing.T) {
+	// Get JSON field names from types.Issue
+	typesFields := getJSONFieldNames(reflect.TypeOf(types.Issue{}))
+
+	// Get JSON field names from merge.Issue
+	mergeFields := getJSONFieldNames(reflect.TypeOf(Issue{}))
+
+	// Build a set of merge fields for O(1) lookup
+	mergeFieldSet := make(map[string]bool)
+	for _, f := range mergeFields {
+		mergeFieldSet[f] = true
+	}
+
+	// Fields that are intentionally excluded from merge.Issue:
+	// - ContentHash: internal computation, not in JSONL
+	// - SourceRepo, IDPrefix, PrefixOverride: internal routing, not exported
+	// - BondedFrom, Creator, Validations: complex nested types, preserved via pass-through
+	// - WorkType: advanced feature, preserved via pass-through
+	// - EventKind, Actor, Target, Payload: event-specific, preserved via pass-through
+	excluded := map[string]bool{
+		"content_hash":   true, // internal, json:"-"
+		"source_repo":    true, // internal, json:"-"
+		"id_prefix":      true, // internal, json:"-"
+		"prefix_override": true, // internal, json:"-"
+		// Complex nested types - these are preserved by JSON round-trip
+		// but not explicitly handled in merge logic
+		"bonded_from":  true,
+		"creator":      true,
+		"validations":  true,
+		"work_type":    true,
+		"event_kind":   true,
+		"actor":        true,
+		"target":       true,
+		"payload":      true,
+	}
+
+	// Check for missing fields
+	var missing []string
+	for _, field := range typesFields {
+		if excluded[field] {
+			continue
+		}
+		if !mergeFieldSet[field] {
+			missing = append(missing, field)
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("merge.Issue is missing JSON fields from types.Issue (GH#1481 drift protection):\n"+
+			"  Missing fields: %v\n\n"+
+			"To fix: Add these fields to the Issue struct in internal/merge/merge.go\n"+
+			"and update the merge logic in mergeIssue() to handle them.\n"+
+			"See GH#1480 for an example of how field drift caused data loss.",
+			missing)
+	}
+}
+
+// getJSONFieldNames extracts JSON tag names from a struct type, recursively handling embedded structs.
+// Returns field names as they appear in JSON (using the tag name, not Go field name).
+// Skips fields with json:"-" tags (internal fields).
+func getJSONFieldNames(t reflect.Type) []string {
+	var fields []string
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		// Handle embedded structs by recursing
+		if field.Anonymous && field.Type.Kind() == reflect.Struct {
+			fields = append(fields, getJSONFieldNames(field.Type)...)
+			continue
+		}
+
+		// Get JSON tag
+		jsonTag := field.Tag.Get("json")
+		if jsonTag == "" || jsonTag == "-" {
+			continue
+		}
+
+		// Extract field name from tag (before any comma)
+		jsonName := strings.Split(jsonTag, ",")[0]
+		if jsonName == "" || jsonName == "-" {
+			continue
+		}
+
+		fields = append(fields, jsonName)
+	}
+
+	return fields
 }
