@@ -175,6 +175,8 @@ irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 
 The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
 
+**Dolt backend on Windows:** The Dolt backend is currently **not available** in Windows builds. Use SQLite on Windows or build/run on Linux/macOS (or WSL) if you need Dolt features.
+
 **Via go install**:
 ```pwsh
 go install github.com/steveyegge/beads/cmd/bd@latest
