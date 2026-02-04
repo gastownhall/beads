@@ -293,6 +293,7 @@ install_with_go() {
         return 0
     else
         log_error "go install failed"
+        log_warning "If you see 'unicode/uregex.h' missing, install ICU headers (macOS: brew install icu4c; Linux: libicu-dev or libicu-devel) and try again."
         return 1
     fi
 }
@@ -350,6 +351,7 @@ build_from_source() {
             return 0
         else
             log_error "Build failed"
+            log_warning "If you see 'unicode/uregex.h' missing, install ICU headers (macOS: brew install icu4c; Linux: libicu-dev or libicu-devel) and try again."
     cd - > /dev/null || cd "$HOME"
             cd - > /dev/null
             rm -rf "$tmp_dir"
@@ -524,4 +526,3 @@ main() {
 }
 
 main "$@"
-
