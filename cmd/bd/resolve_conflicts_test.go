@@ -284,15 +284,19 @@ func TestMergeIssueConflict(t *testing.T) {
 
 	t.Run("dependencies union", func(t *testing.T) {
 		left := merge.Issue{
-			Issue: types.Issue{ID: "bd-1"},
-			Dependencies: []merge.Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"},
+			Issue: types.Issue{
+				ID: "bd-1",
+				Dependencies: []*types.Dependency{
+					{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+				},
 			},
 		}
 		right := merge.Issue{
-			Issue: types.Issue{ID: "bd-1"},
-			Dependencies: []merge.Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "blocks"},
+			Issue: types.Issue{
+				ID: "bd-1",
+				Dependencies: []*types.Dependency{
+					{IssueID: "bd-1", DependsOnID: "bd-3", Type: types.DepBlocks},
+				},
 			},
 		}
 

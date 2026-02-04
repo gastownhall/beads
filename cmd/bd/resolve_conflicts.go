@@ -464,13 +464,19 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 		}
 	}
 
-	// Dependencies: union
-	depMap := make(map[string]merge.Dependency)
+	// Dependencies: union (left wins on duplicates)
+	depMap := make(map[string]*types.Dependency)
 	for _, dep := range left.Dependencies {
+		if dep == nil {
+			continue
+		}
 		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 		depMap[key] = dep
 	}
 	for _, dep := range right.Dependencies {
+		if dep == nil {
+			continue
+		}
 		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 		if _, exists := depMap[key]; !exists {
 			depMap[key] = dep

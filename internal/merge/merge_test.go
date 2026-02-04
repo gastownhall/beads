@@ -173,118 +173,128 @@ func TestMergeField(t *testing.T) {
 
 // TestMergeDependencies tests 3-way dependency merge with removal semantics (bd-ndye)
 func TestMergeDependencies(t *testing.T) {
+	// Helper to create dependency with parsed time
+	dep := func(issueID, dependsOnID string, depType types.DependencyType, createdAt string) *types.Dependency {
+		return &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: dependsOnID,
+			Type:        depType,
+			CreatedAt:   mustParseTime(createdAt),
+		}
+	}
+
 	tests := []struct {
 		name     string
-		base     []Dependency
-		left     []Dependency
-		right    []Dependency
-		expected []Dependency
+		base     []*types.Dependency
+		left     []*types.Dependency
+		right    []*types.Dependency
+		expected []*types.Dependency
 	}{
 		{
 			name:     "empty all sides",
-			base:     []Dependency{},
-			left:     []Dependency{},
-			right:    []Dependency{},
-			expected: []Dependency{},
+			base:     []*types.Dependency{},
+			left:     []*types.Dependency{},
+			right:    []*types.Dependency{},
+			expected: []*types.Dependency{},
 		},
 		{
 			name: "left adds dep (not in base)",
-			base: []Dependency{},
-			left: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{},
+			left: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			right: []Dependency{},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			right: []*types.Dependency{},
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
 		},
 		{
 			name: "right adds dep (not in base)",
-			base: []Dependency{},
-			left: []Dependency{},
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{},
+			left: []*types.Dependency{},
+			right: []*types.Dependency{
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"),
 			},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"),
 			},
 		},
 		{
 			name: "both add different deps (not in base)",
-			base: []Dependency{},
-			left: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{},
+			left: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
+			right: []*types.Dependency{
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"),
 			},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"},
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"),
 			},
 		},
 		{
 			name: "both add same dep (not in base) - no duplicates",
-			base: []Dependency{},
-			left: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{},
+			left: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-02T00:00:00Z"},
+			right: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-02T00:00:00Z"),
 			},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"}, // Left preferred
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"), // Left preferred
 			},
 		},
 		{
 			name: "left removes dep from base - REMOVAL WINS",
-			base: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			left:     []Dependency{}, // Left removed it
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			left: []*types.Dependency{}, // Left removed it
+			right: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			expected: []Dependency{}, // Should be empty - removal wins
+			expected: []*types.Dependency{}, // Should be empty - removal wins
 		},
 		{
 			name: "right removes dep from base - REMOVAL WINS",
-			base: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			left: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			left: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			right:    []Dependency{}, // Right removed it
-			expected: []Dependency{}, // Should be empty - removal wins
+			right:    []*types.Dependency{}, // Right removed it
+			expected: []*types.Dependency{}, // Should be empty - removal wins
 		},
 		{
 			name: "both keep dep from base",
-			base: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			left: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			left: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-02T00:00:00Z"},
+			right: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-02T00:00:00Z"),
 			},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
 		},
 		{
 			name: "complex: left removes one, right adds one",
-			base: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
+			base: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
 			},
-			left: []Dependency{}, // Left removed bd-2
-			right: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks", CreatedAt: "2024-01-01T00:00:00Z"},
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"}, // Right added bd-3
+			left: []*types.Dependency{}, // Left removed bd-2
+			right: []*types.Dependency{
+				dep("bd-1", "bd-2", types.DepBlocks, "2024-01-01T00:00:00Z"),
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"), // Right added bd-3
 			},
-			expected: []Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "related", CreatedAt: "2024-01-01T00:00:00Z"}, // Only the new one
+			expected: []*types.Dependency{
+				dep("bd-1", "bd-3", types.DepRelated, "2024-01-01T00:00:00Z"), // Only the new one
 			},
 		},
 	}
@@ -503,6 +513,29 @@ func TestMerge3Way_SimpleUpdates(t *testing.T) {
 		}
 		if result[0].Status != types.StatusInProgress {
 			t.Errorf("expected status 'in_progress', got %q", result[0].Status)
+		}
+	})
+
+	t.Run("both update title with equal updated_at - left wins (bd-tie)", func(t *testing.T) {
+		// When both sides change the same field and have identical updated_at,
+		// left wins as the tie-breaker (consistent with isTimeAfter behavior)
+		left := []Issue{
+			testIssue(`{"id":"bd-abc123","title":"Left title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
+		}
+		right := []Issue{
+			testIssue(`{"id":"bd-abc123","title":"Right title","status":"open","priority":2,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1"}`),
+		}
+
+		result, conflicts := merge3Way(base, left, right, false)
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+		// Left should win when updated_at is identical (tie-breaker)
+		if result[0].Title != "Left title" {
+			t.Errorf("expected title 'Left title' (left wins on tie), got %q", result[0].Title)
 		}
 	})
 }
@@ -2402,6 +2435,104 @@ func TestMerge3Way_FieldPreservation(t *testing.T) {
 				t.Errorf("label mismatch at index %d: got %v", i, outputIssue.Labels)
 				break
 			}
+		}
+	})
+
+	t.Run("dependencies are preserved through merge", func(t *testing.T) {
+		base := []Issue{testIssue(`{"id":"bd-deps1","title":"Issue with deps","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","dependencies":[{"issue_id":"bd-deps1","depends_on_id":"bd-other","type":"blocks","created_at":"2024-01-01T00:00:00Z"}]}`)}
+		left := []Issue{testIssue(`{"id":"bd-deps1","title":"Issue with deps","status":"in_progress","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","dependencies":[{"issue_id":"bd-deps1","depends_on_id":"bd-other","type":"blocks","created_at":"2024-01-01T00:00:00Z"}]}`)}
+		right := base
+
+		result, conflicts := merge3Way(base, left, right, false)
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+		if len(result[0].Dependencies) != 1 {
+			t.Errorf("dependencies lost: got %d, want 1", len(result[0].Dependencies))
+		} else {
+			dep := result[0].Dependencies[0]
+			if dep.IssueID != "bd-deps1" || dep.DependsOnID != "bd-other" || dep.Type != types.DepBlocks {
+				t.Errorf("dependency content corrupted: got %+v", dep)
+			}
+		}
+	})
+
+	t.Run("dependencies survive JSONL round-trip", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		baseContent := `{"id":"bd-jsonl-deps","title":"Test","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","dependencies":[{"issue_id":"bd-jsonl-deps","depends_on_id":"bd-blocker","type":"blocks","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}]}`
+		leftContent := `{"id":"bd-jsonl-deps","title":"Test Updated","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","dependencies":[{"issue_id":"bd-jsonl-deps","depends_on_id":"bd-blocker","type":"blocks","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}]}`
+		rightContent := baseContent
+
+		basePath := filepath.Join(tmpDir, "base.jsonl")
+		leftPath := filepath.Join(tmpDir, "left.jsonl")
+		rightPath := filepath.Join(tmpDir, "right.jsonl")
+		outputPath := filepath.Join(tmpDir, "output.jsonl")
+
+		if err := os.WriteFile(basePath, []byte(baseContent+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(leftPath, []byte(leftContent+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rightPath, []byte(rightContent+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := Merge3Way(outputPath, basePath, leftPath, rightPath, false); err != nil {
+			t.Fatalf("Merge3Way failed: %v", err)
+		}
+
+		outputData, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var outputIssue Issue
+		if err := json.Unmarshal(outputData[:len(outputData)-1], &outputIssue); err != nil {
+			t.Fatalf("failed to parse output: %v", err)
+		}
+
+		if len(outputIssue.Dependencies) != 1 {
+			t.Errorf("dependencies lost during JSONL round-trip: got %d, want 1", len(outputIssue.Dependencies))
+		} else {
+			dep := outputIssue.Dependencies[0]
+			if dep.IssueID != "bd-jsonl-deps" {
+				t.Errorf("dependency issue_id corrupted: got %q", dep.IssueID)
+			}
+			if dep.DependsOnID != "bd-blocker" {
+				t.Errorf("dependency depends_on_id corrupted: got %q", dep.DependsOnID)
+			}
+			if dep.Type != types.DepBlocks {
+				t.Errorf("dependency type corrupted: got %q", dep.Type)
+			}
+			if dep.CreatedBy != "user1" {
+				t.Errorf("dependency created_by corrupted: got %q", dep.CreatedBy)
+			}
+		}
+	})
+
+	t.Run("dependency removal wins in 3-way merge", func(t *testing.T) {
+		// Base has a dependency
+		base := []Issue{testIssue(`{"id":"bd-deprem1","title":"Issue with dep to remove","status":"open","created_at":"2024-01-01T00:00:00Z","created_by":"user1","dependencies":[{"issue_id":"bd-deprem1","depends_on_id":"bd-old","type":"blocks","created_at":"2024-01-01T00:00:00Z"}]}`)}
+		// Left removes the dependency
+		left := []Issue{testIssue(`{"id":"bd-deprem1","title":"Issue with dep to remove","status":"open","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","created_by":"user1","dependencies":[]}`)}
+		// Right keeps the dependency unchanged
+		right := base
+
+		result, conflicts := merge3Way(base, left, right, false)
+		if len(conflicts) != 0 {
+			t.Errorf("unexpected conflicts: %v", conflicts)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 issue, got %d", len(result))
+		}
+		// Removal should win - dependency should be gone
+		if len(result[0].Dependencies) != 0 {
+			t.Errorf("dependency removal failed: expected 0 deps, got %d", len(result[0].Dependencies))
 		}
 	})
 }

@@ -40,26 +40,13 @@ import (
 )
 
 // Issue embeds types.Issue to prevent field drift (GH#1481).
-// It shadows Dependencies to maintain local string-timestamp behavior for now,
-// and adds RawLine for conflict marker output.
+// It only adds RawLine for conflict marker output.
+// Dependencies are now inherited from types.Issue directly.
 type Issue struct {
 	types.Issue
 
-	// Dependencies stored with string timestamps for JSONL compatibility
-	Dependencies []Dependency `json:"dependencies,omitempty"`
-
 	// RawLine stores the original JSON line for conflict marker output
 	RawLine string `json:"-"`
-}
-
-// Dependency represents an issue dependency with string timestamps for JSONL compatibility.
-// Note: types.Dependency uses time.Time; we keep strings here for stable JSONL round-trips.
-type Dependency struct {
-	IssueID     string `json:"issue_id"`
-	DependsOnID string `json:"depends_on_id"`
-	Type        string `json:"type"`
-	CreatedAt   string `json:"created_at"`
-	CreatedBy   string `json:"created_by"`
 }
 
 // IssueKey uniquely identifies an issue for matching
@@ -922,9 +909,9 @@ func mergePriority(base, left, right int) int {
 	return right
 }
 
-// isTimeAfter returns true if t1 is after t2.
+// isTimeAfter returns true if t1 is after t2 (or equal - left wins on tie).
 // Zero times are treated as "unset" - a set time beats an unset time.
-// On exact tie, returns true (left wins for consistency).
+// On exact tie, returns true (left wins for consistency with original behavior).
 func isTimeAfter(t1, t2 time.Time) bool {
 	t1Zero := t1.IsZero()
 	t2Zero := t2.IsZero()
@@ -939,13 +926,13 @@ func isTimeAfter(t1, t2 time.Time) bool {
 		return true // t1 set, t2 unset - t1 wins
 	}
 
-	// Both set - compare. On exact tie, left wins for consistency
+	// Both set - left wins on tie (matching original: !time2.After(time1))
 	return !t2.After(t1)
 }
 
-// isTimePtrAfter returns true if t1 is after t2 for pointer times.
+// isTimePtrAfter returns true if t1 is after t2 (or equal - left wins on tie) for pointer times.
 // Nil pointers are treated as "unset" - a set time beats an unset time.
-// On exact tie, returns true (left wins for consistency).
+// On exact tie, returns true (left wins for consistency with original behavior).
 func isTimePtrAfter(t1, t2 *time.Time) bool {
 	t1Set := t1 != nil && !t1.IsZero()
 	t2Set := t2 != nil && !t2.IsZero()
@@ -960,7 +947,7 @@ func isTimePtrAfter(t1, t2 *time.Time) bool {
 		return true // t1 set, t2 unset - t1 wins
 	}
 
-	// Both set - compare. On exact tie, left wins for consistency
+	// Both set - left wins on tie (matching original: !time2.After(time1))
 	return !t2.After(*t1)
 }
 
@@ -1013,31 +1000,40 @@ func maxTimePtr(t1, t2 *time.Time) *time.Time {
 // - If dep was in base and removed by left OR right → exclude (removal wins)
 // - If dep wasn't in base and added by left OR right → include
 // - If dep was in base and both still have it → include
-func mergeDependencies(base, left, right []Dependency) []Dependency {
+func mergeDependencies(base, left, right []*types.Dependency) []*types.Dependency {
 	// Build sets for O(1) lookup
-	depKey := func(dep Dependency) string {
+	depKey := func(dep *types.Dependency) string {
+		if dep == nil {
+			return ""
+		}
 		return fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 	}
 
 	baseSet := make(map[string]bool)
 	for _, dep := range base {
-		baseSet[depKey(dep)] = true
+		if dep != nil {
+			baseSet[depKey(dep)] = true
+		}
 	}
 
 	leftSet := make(map[string]bool)
-	leftDeps := make(map[string]Dependency)
+	leftDeps := make(map[string]*types.Dependency)
 	for _, dep := range left {
-		key := depKey(dep)
-		leftSet[key] = true
-		leftDeps[key] = dep
+		if dep != nil {
+			key := depKey(dep)
+			leftSet[key] = true
+			leftDeps[key] = dep
+		}
 	}
 
 	rightSet := make(map[string]bool)
-	rightDeps := make(map[string]Dependency)
+	rightDeps := make(map[string]*types.Dependency)
 	for _, dep := range right {
-		key := depKey(dep)
-		rightSet[key] = true
-		rightDeps[key] = dep
+		if dep != nil {
+			key := depKey(dep)
+			rightSet[key] = true
+			rightDeps[key] = dep
+		}
 	}
 
 	// Collect all unique keys
@@ -1052,7 +1048,7 @@ func mergeDependencies(base, left, right []Dependency) []Dependency {
 		allKeys[k] = true
 	}
 
-	var result []Dependency
+	var result []*types.Dependency
 	seen := make(map[string]bool)
 
 	for key := range allKeys {
@@ -1098,71 +1094,64 @@ func mergeDependencies(base, left, right []Dependency) []Dependency {
 
 // === Helper functions for new field merging (GH#1480) ===
 
-// mergeLabels performs a 3-way merge of labels.
-// For simplicity, uses set union semantics: all unique labels are kept.
+// mergeLabels performs a 3-way merge of labels using standard 3-way merge semantics.
+// On conflict, left wins (consistent with other field merge behavior).
 func mergeLabels(base, left, right []string) []string {
-	seen := make(map[string]bool)
-	var result []string
-
-	// Add all labels from all sides (union)
-	for _, labels := range [][]string{base, left, right} {
-		for _, label := range labels {
-			if !seen[label] {
-				seen[label] = true
-				result = append(result, label)
-			}
-		}
+	// Standard 3-way merge logic
+	if slicesEqual(base, left) && !slicesEqual(base, right) {
+		return right // Only right changed
 	}
-	return result
+	if slicesEqual(base, right) && !slicesEqual(base, left) {
+		return left // Only left changed
+	}
+	// Both changed or neither changed - left wins
+	return left
 }
 
-// mergeComments performs a 3-way merge of comments.
-// For simplicity, uses set union semantics based on comment ID.
-// Kept for backward compatibility with any code using []Comment.
-func mergeComments(base, left, right []Comment) []Comment {
-	seen := make(map[int64]bool)
-	var result []Comment
-
-	for _, comments := range [][]Comment{base, left, right} {
-		for _, comment := range comments {
-			key := comment.ID
-			if key == 0 {
-				// No ID - generate a pseudo-key from content
-				// Use a hash-like approach: combine author + timestamp + start of text
-				key = int64(len(comment.Author) + len(comment.Text) + comment.CreatedAt.Nanosecond())
-			}
-			if !seen[key] {
-				seen[key] = true
-				result = append(result, comment)
-			}
+// slicesEqual checks if two string slices are equal
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
 	}
-	return result
+	return true
 }
 
-// mergeCommentPtrs performs a 3-way merge of comment pointers.
-// For simplicity, uses set union semantics based on comment ID.
+// mergeCommentPtrs performs a 3-way merge of comment pointers using standard 3-way merge semantics.
+// On conflict, left wins (consistent with other field merge behavior).
 func mergeCommentPtrs(base, left, right []*types.Comment) []*types.Comment {
-	seen := make(map[int64]bool)
-	var result []*types.Comment
+	// Standard 3-way merge logic
+	if commentSlicesEqual(base, left) && !commentSlicesEqual(base, right) {
+		return right // Only right changed
+	}
+	if commentSlicesEqual(base, right) && !commentSlicesEqual(base, left) {
+		return left // Only left changed
+	}
+	// Both changed or neither changed - left wins
+	return left
+}
 
-	for _, comments := range [][]*types.Comment{base, left, right} {
-		for _, comment := range comments {
-			if comment == nil {
-				continue
-			}
-			key := comment.ID
-			if key == 0 {
-				// No ID - generate a pseudo-key from content
-				key = int64(len(comment.Author) + len(comment.Text) + comment.CreatedAt.Nanosecond())
-			}
-			if !seen[key] {
-				seen[key] = true
-				result = append(result, comment)
-			}
+// commentSlicesEqual checks if two comment slices are equal by comparing IDs
+func commentSlicesEqual(a, b []*types.Comment) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] == nil && b[i] == nil {
+			continue
+		}
+		if a[i] == nil || b[i] == nil {
+			return false
+		}
+		if a[i].ID != b[i].ID {
+			return false
 		}
 	}
-	return result
+	return true
 }
 
 // mergeMetadata performs a 3-way merge of JSON metadata.
@@ -1215,21 +1204,18 @@ func mergeInt64(base, left, right int64) int64 {
 	return left
 }
 
-// mergeStringSlice performs a 3-way merge of string slices.
-// Uses set union semantics: all unique values are kept.
+// mergeStringSlice performs a 3-way merge of string slices using standard 3-way merge semantics.
+// On conflict, left wins (consistent with other field merge behavior).
 func mergeStringSlice(base, left, right []string) []string {
-	seen := make(map[string]bool)
-	var result []string
-
-	for _, slice := range [][]string{base, left, right} {
-		for _, s := range slice {
-			if !seen[s] {
-				seen[s] = true
-				result = append(result, s)
-			}
-		}
+	// Standard 3-way merge logic
+	if slicesEqual(base, left) && !slicesEqual(base, right) {
+		return right // Only right changed
 	}
-	return result
+	if slicesEqual(base, right) && !slicesEqual(base, left) {
+		return left // Only left changed
+	}
+	// Both changed or neither changed - left wins
+	return left
 }
 
 // mergeIntPtr performs a 3-way merge of *int values.
