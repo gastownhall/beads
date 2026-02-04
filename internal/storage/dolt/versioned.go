@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -268,3 +267,4 @@ func (s *DoltStore) CommitExists(ctx context.Context, commitHash string) (bool, 
 
 	return count > 0, nil
 }
+

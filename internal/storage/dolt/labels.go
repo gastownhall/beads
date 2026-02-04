@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -119,3 +118,4 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 	}
 	return issues, rows.Err()
 }
+

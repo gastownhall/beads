@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package doctor
 
 import (
@@ -348,3 +347,4 @@ func CheckDoltStatus(path string) DoctorCheck {
 		Category: CategoryData,
 	}
 }
+

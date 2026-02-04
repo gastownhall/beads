@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package main
 
 import (
@@ -483,3 +482,4 @@ func runFederationListPeers(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println()
 }
+

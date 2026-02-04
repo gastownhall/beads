@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -38,3 +37,4 @@ func parseNullableTimeString(ns sql.NullString) *time.Time {
 	}
 	return nil // Unparseable - shouldn't happen with valid data
 }
+

@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -942,3 +941,4 @@ func formatJSONStringArray(arr []string) string {
 	}
 	return string(data)
 }
+

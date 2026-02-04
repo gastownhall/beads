@@ -1,5 +1,4 @@
-//go:build !cgo
-
+//go:build !cgo || windows
 package main
 
 import (
@@ -32,3 +31,4 @@ each maintaining their own Dolt database while sharing updates via remotes.`,
 func init() {
 	rootCmd.AddCommand(federationCmd)
 }
+

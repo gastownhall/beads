@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package main
 
 import (
@@ -72,3 +71,4 @@ func (h *DoltServerHandle) Host() string {
 func DoltServerAvailable() bool {
 	return true
 }
+

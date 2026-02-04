@@ -1,5 +1,4 @@
-//go:build !cgo
-
+//go:build !cgo || windows
 package main
 
 import (
@@ -38,3 +37,4 @@ func handleToSQLiteMigration(dryRun bool, autoYes bool) {
 	}
 	os.Exit(1)
 }
+

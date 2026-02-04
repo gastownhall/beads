@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -83,4 +82,5 @@ func withEmbeddedDolt(
 
 	return fn(ctx, db)
 }
+
 

@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -500,3 +499,4 @@ func TestBootstrapWithoutOptionalFiles(t *testing.T) {
 		t.Errorf("expected 0 interactions imported, got %d", result.InteractionsImported)
 	}
 }
+

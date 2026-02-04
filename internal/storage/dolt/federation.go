@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -243,3 +242,4 @@ type SyncResult struct {
 	Error             error
 	PushError         error // Non-fatal push error
 }
+

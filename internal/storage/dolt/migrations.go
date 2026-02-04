@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -54,3 +53,4 @@ func ListMigrations() []string {
 	}
 	return names
 }
+

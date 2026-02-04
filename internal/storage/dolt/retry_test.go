@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -142,3 +141,4 @@ func TestWithRetry_ServerMode_NonRetryableError(t *testing.T) {
 		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
 	}
 }
+

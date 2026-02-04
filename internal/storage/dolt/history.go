@@ -1,5 +1,4 @@
-//go:build cgo
-
+//go:build cgo && !windows
 package dolt
 
 import (
@@ -362,3 +361,4 @@ func (s *DoltStore) ResolveConflicts(ctx context.Context, table string, strategy
 	}
 	return nil
 }
+
