@@ -139,7 +139,7 @@ func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string) error 
 	if err != nil {
 		return fmt.Errorf("failed to open Dolt database: %w", err)
 	}
-	defer db.Close()
+	defer closeDoltDBWithTimeout(db)
 
 	// Single connection for embedded mode
 	db.SetMaxOpenConns(1)
