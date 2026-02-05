@@ -21,10 +21,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// localConfig represents the config.yaml structure for no-db mode detection
+// localConfig represents the config.yaml structure for no-db and prefer-dolt detection
 type localConfig struct {
 	SyncBranch string `yaml:"sync-branch"`
 	NoDb       bool   `yaml:"no-db"`
+	PreferDolt bool   `yaml:"prefer-dolt"`
 }
 
 // CheckDatabaseVersion checks the database version and migration status

@@ -329,6 +329,11 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 2d: Backend migration (SQLite + prefer-dolt → recommend Dolt)
+	backendMigrationCheck := convertDoctorCheck(doctor.CheckBackendMigration(path))
+	result.Checks = append(result.Checks, backendMigrationCheck)
+	// Don't fail overall check for backend migration, just warn
+
 	// Check 3: ID format (hash vs sequential)
 	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, idCheck)

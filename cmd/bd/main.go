@@ -430,6 +430,11 @@ var rootCmd = &cobra.Command{
 		// Protect forks from accidentally committing upstream issue database
 		ensureForkProtection()
 
+		// Show migration hint if SQLite + prefer-dolt configured (rate-limited, non-blocking)
+		if hintDir := beads.FindBeadsDir(); hintDir != "" {
+			maybeShowMigrationHint(hintDir)
+		}
+
 		// Performance profiling setup
 		// When --profile is enabled, force direct mode to capture actual database operations
 		// rather than just RPC serialization/network overhead. This gives accurate profiles

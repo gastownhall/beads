@@ -142,6 +142,15 @@ Displays:
 				}
 			}
 
+			// Add migration info for SQLite backends (agent detection path)
+			if backend == configfile.BackendSQLite {
+				result["migration_available"] = true
+				if isPreferDoltConfigured(beadsDir) {
+					result["needs_migration"] = true
+					result["migration_command"] = "bd migrate dolt"
+				}
+			}
+
 			outputJSON(result)
 			return
 		}
