@@ -119,23 +119,26 @@ create, update, show, or close operation).`,
 			issueType, _ := cmd.Flags().GetString("type")
 			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
 			issueType = util.NormalizeIssueType(issueType)
-			var customTypes []string
-			if store != nil {
-				if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
-					customTypes = ct
+			// In daemon mode, skip client-side type pre-validation.
+			// The daemon validates authoritatively with database access (GH#1499).
+			if daemonClient == nil {
+				var customTypes []string
+				if store != nil {
+					if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
+						customTypes = ct
+					}
 				}
-			}
-			// Fallback to config.yaml when store is nil (daemon mode).
-			// Mirrors the same fallback in internal/storage/sqlite/config.go.
-			if len(customTypes) == 0 {
-				customTypes = config.GetCustomTypesFromYAML()
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				validTypes := "bug, feature, task, epic, chore"
-				if len(customTypes) > 0 {
-					validTypes += ", " + joinStrings(customTypes, ", ")
+				// Fallback to config.yaml when store returns no custom types.
+				if len(customTypes) == 0 {
+					customTypes = config.GetCustomTypesFromYAML()
 				}
-				FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
+				if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+					validTypes := "bug, feature, task, epic, chore"
+					if len(customTypes) > 0 {
+						validTypes += ", " + joinStrings(customTypes, ", ")
+					}
+					FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
+				}
 			}
 			updates["issue_type"] = issueType
 		}
