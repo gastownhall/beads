@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -123,6 +124,11 @@ create, update, show, or close operation).`,
 				if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
 					customTypes = ct
 				}
+			}
+			// Fallback to config.yaml when store is nil (daemon mode).
+			// Mirrors the same fallback in internal/storage/sqlite/config.go.
+			if len(customTypes) == 0 {
+				customTypes = config.GetCustomTypesFromYAML()
 			}
 			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
 				validTypes := "bug, feature, task, epic, chore"
