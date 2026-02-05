@@ -887,6 +887,26 @@ func flushToJSONLWithState(state flushState) {
 	}
 
 	jsonlPath := findJSONLPath()
+	if jsonlPath == "" {
+		return
+	}
+
+	// Acquire exclusive JSONL lock before reading/writing
+	// This prevents race conditions between concurrent flush operations and imports
+	// (SECURITY_AUDIT.md Issue #1, fixes TestExportImportRace_ConcurrentOperations)
+	beadsDir := filepath.Dir(jsonlPath)
+	lock := newJSONLLock(beadsDir)
+	locked, err := lock.TryAcquireExclusive()
+	if err != nil {
+		debug.Logf("auto-flush: failed to acquire exclusive lock: %v", err)
+		return
+	}
+	if !locked {
+		// Another process is writing - skip this flush, will retry later
+		debug.Logf("auto-flush: JSONL lock held by another process, skipping")
+		return
+	}
+	defer func() { _ = lock.Release() }()
 
 	// Double-check store is still active before accessing
 	storeMutex.Lock()
