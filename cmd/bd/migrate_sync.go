@@ -192,8 +192,10 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orpha
 	createOrphanBranch := func() error {
 		fmt.Printf("  Creating orphan branch '%s' (no shared history)...\n", branchName)
 
-		// Create an empty tree object
-		emptyTreeCmd := rc.GitCmd(ctx, "hash-object", "-t", "tree", "/dev/null")
+		// Create an empty tree object using --stdin for cross-platform compatibility
+		// (avoids /dev/null which doesn't exist on Windows)
+		emptyTreeCmd := rc.GitCmd(ctx, "hash-object", "-t", "tree", "--stdin")
+		emptyTreeCmd.Stdin = strings.NewReader("")
 		emptyTreeOutput, err := emptyTreeCmd.Output()
 		if err != nil {
 			return fmt.Errorf("failed to create empty tree: %w", err)
