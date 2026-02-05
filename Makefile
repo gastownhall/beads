@@ -9,6 +9,10 @@ BINARY := bd
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
 
+# Dolt backend requires CGO for embedded database support.
+# Without CGO, builds will fail with "dolt backend requires CGO".
+export CGO_ENABLED := 1
+
 # ICU4C is keg-only on macOS (Homebrew doesn't symlink it into /opt/homebrew).
 # Dolt's go-icu-regex dependency needs these paths to compile and link.
 ifeq ($(shell uname),Darwin)
