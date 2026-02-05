@@ -454,11 +454,34 @@ func shouldUseIncrementalExport(ctx context.Context, jsonlPath string) (bool, []
 // performIncrementalExport performs the actual incremental export.
 // It reads the existing JSONL, queries only dirty issues, merges them,
 // and writes the result.
+//
+// Thread-safety: Acquires an exclusive JSONL lock to prevent concurrent writes.
+// The lock is stored in the ExportResult and released by finalizeExport() or
+// releaseExportLock(). This fixes the race condition where sync export and
+// daemon auto-flush could write simultaneously (SECURITY_AUDIT.md Issue #1).
 func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []string) (*ExportResult, error) {
+	// Acquire exclusive JSONL lock before reading/writing
+	// This prevents race condition with daemon auto-flush (SECURITY_AUDIT.md Issue #1)
+	beadsDir := filepath.Dir(jsonlPath)
+	lock := newJSONLLock(beadsDir)
+	if err := lock.AcquireExclusive(ctx); err != nil {
+		return nil, fmt.Errorf("failed to acquire JSONL lock for incremental export: %w", err)
+	}
+
+	// If we fail after this point, ensure the lock is released
+	success := false
+	defer func() {
+		if !success {
+			_ = lock.Release()
+		}
+	}()
+
 	// Read existing JSONL into map[id]rawJSON
 	issueMap, allIDs, err := readJSONLToMap(jsonlPath)
 	if err != nil {
 		// Fall back to full export on read error
+		// Release our lock first since exportToJSONLDeferred will acquire its own
+		_ = lock.Release()
 		return exportToJSONLDeferred(ctx, jsonlPath)
 	}
 
@@ -601,6 +624,9 @@ func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []
 	contentHash, _ := computeJSONLHash(jsonlPath)
 	exportTime := time.Now().Format(time.RFC3339Nano)
 
+	// Mark success so lock is transferred to result instead of released
+	success = true
+
 	// Note: exportedIDs contains ALL IDs in the file, but we only need to clear
 	// dirty flags for the dirtyIDs (which we received as parameter)
 	return &ExportResult{
@@ -609,6 +635,7 @@ func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []
 		ContentHash:        contentHash,
 		ExportTime:         exportTime,
 		IssueContentHashes: issueContentHashes,
+		lock:               lock, // Transfer lock ownership to result
 	}, nil
 }
 
