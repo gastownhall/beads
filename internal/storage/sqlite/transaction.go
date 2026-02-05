@@ -1741,7 +1741,7 @@ func (t *sqliteTxStorage) getLabelsForIssues(ctx context.Context, issueIDs []str
 // filterByLabelRegex filters issues to only include those with at least one label
 // matching the given regex pattern. This is done at the application level because
 // SQLite doesn't have built-in regex support without extensions.
-func (t *sqliteTxStorage) filterByLabelRegex(ctx context.Context, issues []*types.Issue, pattern string) ([]*types.Issue, error) {
+func (t *sqliteTxStorage) filterByLabelRegex(_ context.Context, issues []*types.Issue, pattern string) ([]*types.Issue, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
