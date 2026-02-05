@@ -35,6 +35,9 @@
               mkdir -p $out/bin
               cp ${bdBase}/bin/bd $out/bin/bd
 
+              # Create 'beads' alias symlink
+              ln -s bd $out/bin/beads
+
               # Generate shell completions
               mkdir -p $out/share/fish/vendor_completions.d
               mkdir -p $out/share/bash-completion/completions

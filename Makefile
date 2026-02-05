@@ -57,11 +57,15 @@ bench-quick:
 	go test -bench=. -benchtime=100ms -tags=bench -run=^$$ ./internal/storage/sqlite/ -timeout=15m
 
 # Install bd to ~/.local/bin (builds, signs on macOS, and copies)
+# Also creates 'beads' symlink as an alias for bd
 install: build
 	@mkdir -p $(INSTALL_DIR)
 	@rm -f $(INSTALL_DIR)/$(BINARY)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@rm -f $(INSTALL_DIR)/beads
+	@ln -s $(BINARY) $(INSTALL_DIR)/beads
+	@echo "Created 'beads' alias -> $(BINARY)"
 
 # Clean build artifacts and benchmark profiles
 clean:
@@ -77,6 +81,6 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
-	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS)"
+	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make help         - Show this help message"

@@ -13,6 +13,25 @@ function Write-Success($Message) { Write-Host "==> $Message" -ForegroundColor Gr
 function Write-WarningMsg($Message) { Write-Warning $Message }
 function Write-Err($Message)     { Write-Host "Error: $Message" -ForegroundColor Red }
 
+# Create 'beads' alias (copy of bd.exe)
+# On Windows, symlinks require admin privileges, so we create a copy instead
+function Create-BeadsAlias {
+    param([string]$BinDir)
+
+    $bdPath = Join-Path $BinDir "bd.exe"
+    $beadsPath = Join-Path $BinDir "beads.exe"
+
+    if (Test-Path $bdPath) {
+        Write-Info "Creating 'beads' alias..."
+        try {
+            Copy-Item -Path $bdPath -Destination $beadsPath -Force
+            Write-Success "Created 'beads.exe' alias -> bd.exe"
+        } catch {
+            Write-WarningMsg "Failed to create beads.exe alias: $_"
+        }
+    }
+}
+
 function Test-GoSupport {
     $goCmd = Get-Command go -ErrorAction SilentlyContinue
     if (-not $goCmd) {
@@ -88,6 +107,9 @@ function Install-WithGo {
 
     if (-not (Test-Path $bdPath)) {
         Write-WarningMsg "bd.exe not found in $binDir after install"
+    } else {
+        # Create 'beads' alias
+        Create-BeadsAlias -BinDir $binDir
     }
 
     $pathEntries = [Environment]::GetEnvironmentVariable("PATH", "Process").Split([IO.Path]::PathSeparator) | ForEach-Object { $_.Trim() }
@@ -150,8 +172,11 @@ function Install-FromSource {
         Copy-Item -Path (Join-Path $repoPath "bd.exe") -Destination (Join-Path $installDir "bd.exe") -Force
         Write-Success "bd installed to $installDir\bd.exe"
 
-            # Record where we installed the binary when building from source
-            $Script:LastInstallPath = Join-Path $installDir "bd.exe"
+        # Create 'beads' alias
+        Create-BeadsAlias -BinDir $installDir
+
+        # Record where we installed the binary when building from source
+        $Script:LastInstallPath = Join-Path $installDir "bd.exe"
 
         $pathEntries = [Environment]::GetEnvironmentVariable("PATH", "Process").Split([IO.Path]::PathSeparator) | ForEach-Object { $_.Trim() }
         if (-not ($pathEntries -contains $installDir)) {
@@ -296,7 +321,8 @@ if ($goSupport.Present -and $goSupport.MeetsRequirement) {
 
 if ($installed) {
     Verify-Install | Out-Null
-    Write-Success "Installation complete. Run 'bd quickstart' inside a repo to begin."
+    Write-Success "Installation complete. You can use either 'bd' or 'beads' to run the command."
+    Write-Host "Run 'bd quickstart' inside a repo to begin." -ForegroundColor Cyan
 } else {
     Write-Err "Installation failed. Please install Go 1.24+ and try again."
     exit 1

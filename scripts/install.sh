@@ -109,6 +109,20 @@ detect_platform() {
     echo "${os}_${arch}"
 }
 
+# Create 'beads' symlink alias for bd
+create_beads_alias() {
+    local install_dir=$1
+
+    log_info "Creating 'beads' alias..."
+    rm -f "$install_dir/beads"
+    if [[ -w "$install_dir" ]]; then
+        ln -s bd "$install_dir/beads"
+    else
+        sudo ln -s bd "$install_dir/beads"
+    fi
+    log_success "Created 'beads' alias -> bd"
+}
+
 # Stop existing daemons before upgrade (safe for fresh installs)
 stop_existing_daemons() {
     # Skip if bd isn't installed (fresh install)
@@ -217,6 +231,9 @@ install_from_release() {
     # Re-sign for macOS to avoid Gatekeeper delays
     resign_for_macos "$install_dir/bd"
 
+    # Create 'beads' alias symlink
+    create_beads_alias "$install_dir"
+
     log_success "bd installed to $install_dir/bd"
 
     # Check if install_dir is in PATH
@@ -281,6 +298,9 @@ install_with_go() {
         # Re-sign for macOS to avoid Gatekeeper delays
         resign_for_macos "$bin_dir/bd"
 
+        # Create 'beads' alias symlink
+        create_beads_alias "$bin_dir"
+
         # Check if GOPATH/bin (or GOBIN) is in PATH
         if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
             log_warning "$bin_dir is not in your PATH"
@@ -331,6 +351,9 @@ build_from_source() {
             # Re-sign for macOS to avoid Gatekeeper delays
             resign_for_macos "$install_dir/bd"
 
+            # Create 'beads' alias symlink
+            create_beads_alias "$install_dir"
+
             log_success "bd installed to $install_dir/bd"
 
             # Record where we installed the binary when building from source
@@ -371,6 +394,8 @@ verify_installation() {
         log_success "bd is installed and ready!"
         echo ""
         bd version 2>/dev/null || echo "bd (development build)"
+        echo ""
+        echo "You can use either 'bd' or 'beads' to run the command."
         echo ""
         echo "Get started:"
         echo "  cd your-project"
