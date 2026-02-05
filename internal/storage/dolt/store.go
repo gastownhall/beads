@@ -203,8 +203,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Acquire advisory flock before opening dolt (embedded mode only).
 	// This prevents multiple bd processes from competing for dolt's internal LOCK file.
+	// Set BD_SKIP_ACCESS_LOCK=1 to bypass flock for testing whether Dolt's internal
+	// locking is sufficient. See bd-39gso for testing plan.
 	var accessLock *AccessLock
-	if !cfg.ServerMode && cfg.OpenTimeout > 0 {
+	if !cfg.ServerMode && cfg.OpenTimeout > 0 && os.Getenv("BD_SKIP_ACCESS_LOCK") == "" {
 		exclusive := !cfg.ReadOnly
 		var lockErr error
 		accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
