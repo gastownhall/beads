@@ -106,7 +106,7 @@ func TestShouldExportJSONL(t *testing.T) {
 	}{
 		{SyncModeGitPortable, true},
 		{SyncModeRealtime, true},
-		{SyncModeDoltNative, true},
+		{SyncModeDoltNative, false}, // dolt-native uses Dolt remotes, not JSONL
 		{SyncModeBeltAndSuspenders, true},
 	}
 

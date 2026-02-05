@@ -107,9 +107,11 @@ func GetImportTrigger(ctx context.Context, s storage.Storage) string {
 }
 
 // ShouldExportJSONL returns true if the current sync mode uses JSONL export.
-// All modes export JSONL — in dolt-native mode it serves as periodic backup.
+// In dolt-native mode, JSONL is not used — all sync is via Dolt remotes.
+// Belt-and-suspenders mode uses both Dolt AND JSONL for maximum redundancy.
 func ShouldExportJSONL(ctx context.Context, s storage.Storage) bool {
-	return true
+	mode := GetSyncMode(ctx, s)
+	return mode != SyncModeDoltNative
 }
 
 // ShouldImportJSONL returns true if the current sync mode uses JSONL import.
