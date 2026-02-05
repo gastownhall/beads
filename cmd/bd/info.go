@@ -297,6 +297,25 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.49.4",
+		Date:    "2026-02-05",
+		Changes: []string{
+			"NEW: --label-pattern and --label-regex flags for bd list and bd ready - glob and regex filtering on labels",
+			"NEW: Simple query language for complex bd list filtering",
+			"NEW: spec_id field for linking issues to specification documents",
+			"NEW: Wisp type field for TTL-based compaction of ephemeral molecules",
+			"NEW: Dolt schema migration runner and doctor validation checks",
+			"NEW: --metadata flag for bd update (JSON metadata from CLI)",
+			"NEW: config.local.yaml for local configuration overrides",
+			"FIX: JSONL file locking prevents race conditions in concurrent writes",
+			"FIX: Merge driver preserves all issue fields (spec_id, metadata, deps)",
+			"FIX: Atomic bd claim with compare-and-swap semantics",
+			"FIX: Dolt lock contention - advisory flock prevents zombie processes",
+			"FIX: Windows Dolt build via pure-Go regex backend",
+			"CHANGE: bd ready excludes in_progress issues (shows only claimable work)",
+		},
+	},
+	{
 		Version: "0.49.3",
 		Date:    "2026-01-31",
 		Changes: []string{

@@ -1,6 +1,6 @@
 {
   "name": "@beads/bd",
-  "version": "0.49.3",
+  "version": "0.49.4",
   "description": "Beads issue tracker - lightweight memory system for coding agents with native binary support",
   "main": "bin/bd.js",
   "bin": {
