@@ -37,7 +37,8 @@ func maybeShowMigrationHint(beadsDir string) {
 
 	// Rate-limit: check timestamp file
 	tsFile := filepath.Join(beadsDir, ".migration-hint-ts")
-	if data, err := os.ReadFile(tsFile); err == nil { // #nosec G304 - path from beadsDir
+	//nolint:gosec // G304: tsFile is constructed from beadsDir, not user input
+	if data, err := os.ReadFile(tsFile); err == nil {
 		if ts, err := strconv.ParseInt(string(data), 10, 64); err == nil {
 			lastShown := time.Unix(ts, 0)
 			if time.Since(lastShown) < migrationHintCooldown {

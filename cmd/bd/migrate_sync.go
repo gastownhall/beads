@@ -255,14 +255,15 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orpha
 			if err != nil {
 				return fmt.Errorf("failed to create backup file: %w", err)
 			}
-			backupFile.Close()
+			_ = backupFile.Close() // Close before writing content
 			backupJSONLPath = backupFile.Name()
 
 			// Copy JSONL to backup
-			input, err := os.ReadFile(worktreeJSONL)
+			input, err := os.ReadFile(worktreeJSONL) // #nosec G304 - path constructed from git worktree
 			if err != nil {
 				return fmt.Errorf("failed to read JSONL for backup: %w", err)
 			}
+			// nolint:gosec // G306: JSONL needs 0644 for other tools to read
 			if err := os.WriteFile(backupJSONLPath, input, 0644); err != nil {
 				return fmt.Errorf("failed to create backup: %w", err)
 			}
@@ -340,10 +341,11 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orpha
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return fmt.Errorf("failed to create .beads directory: %w", err)
 		}
-		input, err := os.ReadFile(preservedJSONLPath)
+		input, err := os.ReadFile(preservedJSONLPath) // #nosec G304 - path from backup temp file
 		if err != nil {
 			return fmt.Errorf("failed to read preserved JSONL: %w", err)
 		}
+		// nolint:gosec // G306: JSONL needs 0644 for other tools to read
 		if err := os.WriteFile(destPath, input, 0644); err != nil {
 			return fmt.Errorf("failed to restore JSONL to worktree: %w", err)
 		}
@@ -360,10 +362,11 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orpha
 				if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 					return fmt.Errorf("failed to create .beads directory: %w", err)
 				}
-				input, err := os.ReadFile(mainJSONL)
+				input, err := os.ReadFile(mainJSONL) // #nosec G304 - path constructed from repoRoot
 				if err != nil {
 					return fmt.Errorf("failed to read main JSONL: %w", err)
 				}
+				// nolint:gosec // G306: JSONL needs 0644 for other tools to read
 				if err := os.WriteFile(destPath, input, 0644); err != nil {
 					return fmt.Errorf("failed to copy JSONL to worktree: %w", err)
 				}
@@ -437,9 +440,9 @@ func runMigrateSync(ctx context.Context, branchName string, dryRun, force, orpha
 	}
 
 	fmt.Println()
-	// Clean up backup file on success
+	// Clean up backup file on success (best-effort, ignore errors)
 	if backupJSONLPath != "" {
-		os.Remove(backupJSONLPath)
+		_ = os.Remove(backupJSONLPath)
 	}
 
 	fmt.Println("✓ Migration complete!")
