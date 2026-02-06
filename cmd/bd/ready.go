@@ -21,8 +21,10 @@ var readyCmd = &cobra.Command{
 	Short: "Show ready work (open, no blockers)",
 	Long: `Show ready work (open issues with no blockers).
 
-Excludes in_progress, blocked, deferred, and hooked issues. This matches the
-behavior of 'bd list --ready' and shows work that is truly available to claim.
+Excludes in_progress, blocked, deferred, and hooked issues. This uses the
+GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
+
+Note: 'bd list --ready' is NOT equivalent - it only filters by status=open.
 
 Use --mol to filter to a specific molecule's steps:
   bd ready --mol bd-patrol   # Show ready steps within molecule
@@ -201,20 +203,20 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		issues, err := store.GetReadyWork(ctx, filter)
 		if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-	// If no ready work found, check if git has issues and auto-import
-	if len(issues) == 0 {
-		if checkAndAutoImport(ctx, store) {
-			// Re-run the query after import
-			issues, err = store.GetReadyWork(ctx, filter)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+		// If no ready work found, check if git has issues and auto-import
+		if len(issues) == 0 {
+			if checkAndAutoImport(ctx, store) {
+				// Re-run the query after import
+				issues, err = store.GetReadyWork(ctx, filter)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 			}
 		}
-	}
 		if jsonOutput {
 			// Always output array, even if empty
 			if issues == nil {
@@ -455,12 +457,12 @@ type MoleculeReadyStep struct {
 
 // MoleculeReadyOutput is the JSON output for bd ready --mol
 type MoleculeReadyOutput struct {
-	MoleculeID     string                  `json:"molecule_id"`
-	MoleculeTitle  string                  `json:"molecule_title"`
-	TotalSteps     int                     `json:"total_steps"`
-	ReadySteps     int                     `json:"ready_steps"`
-	Steps          []*MoleculeReadyStep    `json:"steps"`
-	ParallelGroups map[string][]string     `json:"parallel_groups"`
+	MoleculeID     string               `json:"molecule_id"`
+	MoleculeTitle  string               `json:"molecule_title"`
+	TotalSteps     int                  `json:"total_steps"`
+	ReadySteps     int                  `json:"ready_steps"`
+	Steps          []*MoleculeReadyStep `json:"steps"`
+	ParallelGroups map[string][]string  `json:"parallel_groups"`
 }
 
 func init() {
