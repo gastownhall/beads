@@ -105,6 +105,11 @@ By default, shows only open gates. Use --all to include closed gates.`,
 			return
 		}
 
+		// Check database freshness before reading (bd-2q6d)
+		if err := ensureDatabaseFresh(ctx); err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
+
 		// Direct mode
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {

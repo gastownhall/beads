@@ -92,6 +92,13 @@ Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred`,
 			os.Exit(1)
 		}
 
+		// Check database freshness before reading (bd-2q6d)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+		}
+
 		// Handle --all flag: show graph for all open issues
 		if graphAll {
 			subgraphs, err := loadAllGraphSubgraphs(ctx, store)

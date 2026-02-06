@@ -30,6 +30,13 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
+		// Check database freshness before reading (bd-2q6d)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+		}
+
 		// Check if storage supports versioning
 		vs, ok := storage.AsVersioned(store)
 		if !ok {
