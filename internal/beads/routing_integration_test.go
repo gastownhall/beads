@@ -52,8 +52,11 @@ func TestRoutingIntegration(t *testing.T) {
 			setupGit: func(t *testing.T, dir string) {
 				runGitCmd(t, dir, "git", "init")
 				runGitCmd(t, dir, "git", "remote", "add", "origin", "git@github.com:owner/repo.git")
+				// Set explicit role to avoid relying on deprecated URL heuristic,
+				// which can be flaky when git config rewrites SSH to HTTPS.
+				runGitCmd(t, dir, "git", "config", "beads.role", "maintainer")
 			},
-			expectedRole:       routing.Maintainer, // SSH = maintainer
+			expectedRole:       routing.Maintainer,
 			expectedTargetRepo: ".",
 		},
 	}
