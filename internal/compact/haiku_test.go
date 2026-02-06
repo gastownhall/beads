@@ -203,6 +203,70 @@ func TestIsRetryable(t *testing.T) {
 	}
 }
 
+func TestSummarizeTier1_CancelledContext(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	client, err := NewHaikuClient("test-key-fake")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	issue := &types.Issue{
+		ID:          "bd-1",
+		Title:       "Test",
+		Description: "Test desc",
+	}
+
+	_, err = client.SummarizeTier1(ctx, issue)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	client, err := NewHaikuClient("test-key-fake")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	client.auditEnabled = true
+	client.auditActor = "test-actor"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	issue := &types.Issue{
+		ID:          "bd-audit",
+		Title:       "Audit Test",
+		Description: "Test audit logging",
+	}
+
+	_, err = client.SummarizeTier1(ctx, issue)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestCallWithRetry_ImmediateContextCancel(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	client, err := NewHaikuClient("test-key-fake")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	client.initialBackoff = 1 * time.Millisecond
+	client.maxRetries = 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.callWithRetry(ctx, "test prompt")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestBytesWriterAppends(t *testing.T) {
 	w := &bytesWriter{}
 	if _, err := w.Write([]byte("hello")); err != nil {
