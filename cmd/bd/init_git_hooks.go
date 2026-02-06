@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
@@ -108,31 +107,6 @@ func detectExistingHooks() []hookInfo {
 	return hooks
 }
 
-// promptHookAction asks user what to do with existing hooks
-func promptHookAction(existingHooks []hookInfo) string {
-	fmt.Printf("\n%s Found existing git hooks:\n", ui.RenderWarn("⚠"))
-	for _, hook := range existingHooks {
-		if hook.exists && !hook.isBdHook {
-			hookType := "custom script"
-			if hook.isPreCommitFramework {
-				hookType = "pre-commit/prek framework"
-			}
-			fmt.Printf("  - %s (%s)\n", hook.name, hookType)
-		}
-	}
-
-	fmt.Printf("\nHow should bd proceed?\n")
-	fmt.Printf("  [1] Chain with existing hooks (recommended)\n")
-	fmt.Printf("  [2] Overwrite existing hooks\n")
-	fmt.Printf("  [3] Skip git hooks installation\n")
-	fmt.Printf("Choice [1-3]: ")
-
-	var response string
-	_, _ = fmt.Scanln(&response)
-	response = strings.TrimSpace(response)
-
-	return response
-}
 
 // installGitHooks installs git hooks inline (no external dependencies)
 func installGitHooks() error {
@@ -158,41 +132,20 @@ func installGitHooks() error {
 		}
 	}
 
-	// Determine installation mode
-	chainHooks := false
-	if hasExistingHooks {
-		choice := promptHookAction(existingHooks)
-		switch choice {
-		case "1", "":
-			chainHooks = true
-			// Chain mode - rename existing hooks to .old so they can be called
-			for _, hook := range existingHooks {
-				if hook.exists && !hook.isBdHook {
-					oldPath := hook.path + ".old"
-					if err := os.Rename(hook.path, oldPath); err != nil {
-						return fmt.Errorf("failed to rename %s to .old: %w", hook.name, err)
-					}
-					fmt.Printf("  Renamed %s to %s\n", hook.name, filepath.Base(oldPath))
+	// Default to chaining with existing hooks (no prompting)
+	chainHooks := hasExistingHooks
+	if chainHooks {
+		// Chain mode - rename existing hooks to .old so they can be called
+		for _, hook := range existingHooks {
+			if hook.exists && !hook.isBdHook {
+				oldPath := hook.path + ".old"
+				if err := os.Rename(hook.path, oldPath); err != nil {
+					fmt.Fprintf(os.Stderr, "%s Failed to chain with existing %s hook: %v\n", ui.RenderWarn("⚠"), hook.name, err)
+					fmt.Fprintf(os.Stderr, "You can resolve this with: %s\n", ui.RenderAccent("bd doctor --fix"))
+					continue
 				}
+				fmt.Printf("  Chained with existing %s hook\n", hook.name)
 			}
-		case "2":
-			// Overwrite mode - backup existing hooks
-			for _, hook := range existingHooks {
-				if hook.exists && !hook.isBdHook {
-					timestamp := time.Now().Format("20060102-150405")
-					backup := hook.path + ".backup-" + timestamp
-					if err := os.Rename(hook.path, backup); err != nil {
-						return fmt.Errorf("failed to backup %s: %w", hook.name, err)
-					}
-					fmt.Printf("  Backed up %s to %s\n", hook.name, filepath.Base(backup))
-				}
-			}
-		case "3":
-			fmt.Printf("Skipping git hooks installation.\n")
-			fmt.Printf("You can install manually later with: %s\n", ui.RenderAccent("./examples/git-hooks/install.sh"))
-			return nil
-		default:
-			return fmt.Errorf("invalid choice: %s", choice)
 		}
 	}
 
@@ -480,40 +433,20 @@ func installJJHooks() error {
 		}
 	}
 
-	// Determine installation mode
-	chainHooks := false
-	if hasExistingHooks {
-		choice := promptHookAction(existingHooks)
-		switch choice {
-		case "1", "":
-			chainHooks = true
-			// Chain mode - rename existing hooks to .old so they can be called
-			for _, hook := range existingHooks {
-				if hook.exists && !hook.isBdHook {
-					oldPath := hook.path + ".old"
-					if err := os.Rename(hook.path, oldPath); err != nil {
-						return fmt.Errorf("failed to rename %s to .old: %w", hook.name, err)
-					}
-					fmt.Printf("  Renamed %s to %s\n", hook.name, filepath.Base(oldPath))
+	// Default to chaining with existing hooks (no prompting)
+	chainHooks := hasExistingHooks
+	if chainHooks {
+		// Chain mode - rename existing hooks to .old so they can be called
+		for _, hook := range existingHooks {
+			if hook.exists && !hook.isBdHook {
+				oldPath := hook.path + ".old"
+				if err := os.Rename(hook.path, oldPath); err != nil {
+					fmt.Fprintf(os.Stderr, "%s Failed to chain with existing %s hook: %v\n", ui.RenderWarn("⚠"), hook.name, err)
+					fmt.Fprintf(os.Stderr, "You can resolve this with: %s\n", ui.RenderAccent("bd doctor --fix"))
+					continue
 				}
+				fmt.Printf("  Chained with existing %s hook\n", hook.name)
 			}
-		case "2":
-			// Overwrite mode - backup existing hooks
-			for _, hook := range existingHooks {
-				if hook.exists && !hook.isBdHook {
-					timestamp := time.Now().Format("20060102-150405")
-					backup := hook.path + ".backup-" + timestamp
-					if err := os.Rename(hook.path, backup); err != nil {
-						return fmt.Errorf("failed to backup %s: %w", hook.name, err)
-					}
-					fmt.Printf("  Backed up %s to %s\n", hook.name, filepath.Base(backup))
-				}
-			}
-		case "3":
-			fmt.Printf("Skipping git hooks installation.\n")
-			return nil
-		default:
-			return fmt.Errorf("invalid choice: %s", choice)
 		}
 	}
 
