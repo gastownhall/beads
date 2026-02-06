@@ -268,9 +268,13 @@ var labelListAllCmd = &cobra.Command{
 				}
 			}
 		}
+		type labelInfo struct {
+			Label string `json:"label"`
+			Count int    `json:"count"`
+		}
 		if len(labelCounts) == 0 {
 			if jsonOutput {
-				outputJSON([]string{})
+				outputJSON([]labelInfo{})
 			} else {
 				fmt.Println("\nNo labels found in database")
 			}
@@ -284,10 +288,6 @@ var labelListAllCmd = &cobra.Command{
 		sort.Strings(labels)
 		if jsonOutput {
 			// Output as array of {label, count} objects
-			type labelInfo struct {
-				Label string `json:"label"`
-				Count int    `json:"count"`
-			}
 			result := make([]labelInfo, 0, len(labels))
 			for _, label := range labels {
 				result = append(result, labelInfo{

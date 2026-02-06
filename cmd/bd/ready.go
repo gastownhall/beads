@@ -289,8 +289,7 @@ var blockedCmd = &cobra.Command{
 			var err error
 			store, err = factory.NewFromConfig(ctx, filepath.Dir(dbPath))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("failed to open database: %v", err)
 			}
 			defer func() { _ = store.Close() }()
 		}
@@ -301,8 +300,7 @@ var blockedCmd = &cobra.Command{
 		}
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			FatalErrorRespectJSON("%v", err)
 		}
 		if jsonOutput {
 			// Always output array, even if empty

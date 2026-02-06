@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -79,8 +78,7 @@ Examples:
 		ctx := rootCtx
 		if daemonClient == nil {
 			if err := ensureDatabaseFresh(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", err)
 			}
 		}
 
@@ -88,21 +86,18 @@ Examples:
 		if daemonClient != nil {
 			resp, rpcErr := daemonClient.Stats()
 			if rpcErr != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", rpcErr)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", rpcErr)
 			}
 
 			if err := json.Unmarshal(resp.Data, &stats); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("parsing response: %v", err)
 			}
 		} else {
 			// Direct mode
 			ctx := rootCtx
 			stats, err = store.GetStatistics(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", err)
 			}
 		}
 
@@ -110,8 +105,7 @@ Examples:
 		if showAssigned {
 			stats = getAssignedStatistics(actor)
 			if stats == nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to get assigned statistics\n")
-				os.Exit(1)
+				FatalErrorRespectJSON("failed to get assigned statistics")
 			}
 		}
 

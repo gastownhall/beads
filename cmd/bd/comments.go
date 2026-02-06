@@ -92,11 +92,7 @@ Examples:
 		}
 
 		if jsonOutput {
-			data, err := json.MarshalIndent(comments, "", "  ")
-			if err != nil {
-				FatalErrorRespectJSON("encoding JSON: %v", err)
-			}
-			fmt.Println(string(data))
+			outputJSON(comments)
 			return
 		}
 
@@ -215,11 +211,7 @@ Examples:
 		}
 
 		if jsonOutput {
-			data, err := json.MarshalIndent(comment, "", "  ")
-			if err != nil {
-				FatalErrorRespectJSON("encoding JSON: %v", err)
-			}
-			fmt.Println(string(data))
+			outputJSON(comment)
 			return
 		}
 

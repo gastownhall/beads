@@ -51,11 +51,10 @@ var epicStatusCmd = &cobra.Command{
 			}
 		}
 		if jsonOutput {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(epics); err != nil {
-				FatalErrorRespectJSON("encoding JSON: %v", err)
+			if epics == nil {
+				epics = []*types.EpicStatus{}
 			}
+			outputJSON(epics)
 			return
 		}
 		// Human-readable output
@@ -124,20 +123,16 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			}
 		}
 		if len(eligibleEpics) == 0 {
-			if !jsonOutput {
-				fmt.Println("No epics eligible for closure")
+			if jsonOutput {
+				outputJSON([]*types.EpicStatus{})
 			} else {
-				fmt.Println("[]")
+				fmt.Println("No epics eligible for closure")
 			}
 			return
 		}
 		if dryRun {
 			if jsonOutput {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(eligibleEpics); err != nil {
-					FatalErrorRespectJSON("encoding JSON: %v", err)
-				}
+				outputJSON(eligibleEpics)
 			} else {
 				fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
 				for _, epicStatus := range eligibleEpics {
@@ -175,14 +170,10 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			closedIDs = append(closedIDs, epicStatus.Epic.ID)
 		}
 		if jsonOutput {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(map[string]interface{}{
+			outputJSON(map[string]interface{}{
 				"closed": closedIDs,
 				"count":  len(closedIDs),
-			}); err != nil {
-				FatalErrorRespectJSON("encoding JSON: %v", err)
-			}
+			})
 		} else {
 			fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
 			for _, id := range closedIDs {
