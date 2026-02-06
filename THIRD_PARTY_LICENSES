@@ -19,14 +19,6 @@ Repository: https://github.com/dolthub/go-mysql-server
 License: Apache License 2.0
 Copyright: Copyright 2019-2026 DoltHub, Inc.
 
---------------------------------------------------------------------------------
-dolthub/driver
---------------------------------------------------------------------------------
-
-Repository: https://github.com/dolthub/driver
-License: Apache License 2.0
-Copyright: Copyright 2019-2026 DoltHub, Inc.
-
 ================================================================================
 Apache License 2.0
 ================================================================================

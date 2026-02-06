@@ -377,8 +377,8 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 		os.Exit(1)
 	}
 
-	// Guardrail: single-process backends (e.g., Dolt embedded) must never spawn a daemon process.
-	// Exception: federation mode runs dolt sql-server which enables multi-writer support.
+	// Guardrail: single-process backends must never spawn a daemon process.
+	// Exception: federation mode enables multi-writer support.
 	// This should already be blocked by command guards, but keep it defensive.
 	if singleProcessOnlyBackend() && !federation {
 		fmt.Fprintf(os.Stderr, "Error: daemon mode is not supported for single-process backends (e.g., dolt). Hint: use sqlite backend for daemon mode, use --federation for dolt server mode, or run commands in direct mode\n")

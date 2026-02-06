@@ -1,4 +1,3 @@
-//go:build cgo
 package doctor
 
 import (

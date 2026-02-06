@@ -1,4 +1,3 @@
-//go:build cgo
 package dolt
 
 import (
@@ -128,9 +127,9 @@ func TestGetLabelsForIssues_NoLabels(t *testing.T) {
 
 func TestGetIssuesByLabel(t *testing.T) {
 	// Skip: GetIssuesByLabel makes nested queries (GetIssue calls inside a rows cursor)
-	// which can cause connection issues in embedded Dolt mode.
+	// which can cause connection issues with single-connection pools.
 	// This is a known limitation that should be fixed in bd-tdgo.3.
-	t.Skip("Skipping: GetIssuesByLabel has nested query issue in embedded Dolt mode")
+	t.Skip("Skipping: GetIssuesByLabel has nested query issue in Dolt mode")
 }
 
 func TestGetIssuesByLabel_NoMatches(t *testing.T) {

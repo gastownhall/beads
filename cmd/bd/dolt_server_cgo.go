@@ -1,4 +1,3 @@
-//go:build cgo
 package main
 
 import (
@@ -7,7 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// DoltServerHandle wraps a dolt.Server for CGO builds
+// DoltServerHandle wraps a dolt.Server
 type DoltServerHandle struct {
 	server *dolt.Server
 }
@@ -67,7 +66,7 @@ func (h *DoltServerHandle) Host() string {
 	return ""
 }
 
-// DoltServerAvailable returns true when CGO is available
+// DoltServerAvailable returns true (Dolt server is always available)
 func DoltServerAvailable() bool {
 	return true
 }

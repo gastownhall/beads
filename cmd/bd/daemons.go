@@ -255,7 +255,7 @@ Stops the daemon gracefully, then starts a new one.`,
 		}
 		workspace := targetDaemon.WorkspacePath
 
-		// Guardrail: don't (re)start daemons for single-process backends (e.g., embedded Dolt).
+		// Guardrail: don't (re)start daemons for single-process backends.
 		// This command may be run from a different workspace, so check the target workspace.
 		// Note: Dolt server mode supports multi-process, so GetCapabilities() is used.
 		targetBeadsDir := beads.FollowRedirect(filepath.Join(workspace, ".beads"))

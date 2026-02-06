@@ -34,7 +34,7 @@ func importFromJSONL(ctx context.Context, jsonlPath string, renameOnImport bool,
 		protectLeftSnapshot = opts[1]
 	}
 
-	// Guardrail: single-process backends (e.g., Dolt) must not spawn a helper `bd import`
+	// Guardrail: single-process backends must not spawn a helper `bd import`
 	// process while the parent holds an open store. Use inline import instead.
 	if singleProcessOnlyBackend() {
 		return importFromJSONLInline(ctx, jsonlPath, renameOnImport, noGitHistory, protectLeftSnapshot)

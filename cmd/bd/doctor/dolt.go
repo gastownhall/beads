@@ -1,4 +1,3 @@
-//go:build cgo
 package doctor
 
 import (
@@ -8,20 +7,11 @@ import (
 	"os"
 	"path/filepath"
 
-	// Import Dolt driver for direct connection
-	_ "github.com/dolthub/driver"
+	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/factory"
 )
-
-// closeDoltDBWithTimeout closes a sql.DB with a timeout to prevent indefinite hangs.
-// This is needed because embedded Dolt can hang on close.
-func closeDoltDBWithTimeout(db *sql.DB) {
-	// Use the shared helper; ignore errors since we're just cleaning up
-	_ = doltutil.CloseWithTimeout("db", db.Close)
-}
 
 // GetBackend returns the configured backend type from configuration.
 // It checks config.yaml first (storage-backend key), then falls back to metadata.json.
@@ -34,6 +24,44 @@ func GetBackend(beadsDir string) string {
 // IsDoltBackend returns true if the configured backend is Dolt.
 func IsDoltBackend(beadsDir string) bool {
 	return GetBackend(beadsDir) == configfile.BackendDolt
+}
+
+// openDoltServerDB opens a connection to the Dolt server via MySQL protocol.
+// Returns the connection and any error.
+func openDoltServerDB(beadsDir string) (*sql.DB, error) {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		// Fall back to defaults
+		cfg = configfile.DefaultConfig()
+	}
+
+	host := cfg.GetDoltServerHost()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := cfg.GetDoltServerPort()
+	if port == 0 {
+		port = 3306
+	}
+	user := cfg.GetDoltServerUser()
+	if user == "" {
+		user = "root"
+	}
+	database := cfg.GetDoltDatabase()
+	if database == "" {
+		database = "beads"
+	}
+
+	connStr := fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true", user, host, port, database)
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open Dolt server connection: %w", err)
+	}
+
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+
+	return db, nil
 }
 
 // CheckDoltConnection verifies connectivity to the Dolt database.
@@ -63,11 +91,8 @@ func CheckDoltConnection(path string) DoctorCheck {
 		}
 	}
 
-	// Try to connect to Dolt
-	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	db, err := sql.Open("dolt", connStr)
+	// Try to connect to Dolt server
+	db, err := openDoltServerDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
@@ -77,26 +102,17 @@ func CheckDoltConnection(path string) DoctorCheck {
 			Category: CategoryCore,
 		}
 	}
-	defer closeDoltDBWithTimeout(db)
+	defer db.Close()
 
-	// Switch to beads database and ping
+	// Ping
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return DoctorCheck{
-			Name:     "Dolt Connection",
-			Status:   StatusError,
-			Message:  "Failed to switch to beads database",
-			Detail:   err.Error(),
-			Category: CategoryCore,
-		}
-	}
-
 	if err := db.PingContext(ctx); err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusError,
 			Message:  "Failed to ping Dolt database",
 			Detail:   err.Error(),
+			Fix:      "Ensure dolt sql-server is running",
 			Category: CategoryCore,
 		}
 	}
@@ -105,7 +121,7 @@ func CheckDoltConnection(path string) DoctorCheck {
 		Name:     "Dolt Connection",
 		Status:   StatusOK,
 		Message:  "Connected successfully",
-		Detail:   "Storage: Dolt",
+		Detail:   "Storage: Dolt (server mode)",
 		Category: CategoryCore,
 	}
 }
@@ -124,10 +140,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 		}
 	}
 
-	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	db, err := sql.Open("dolt", connStr)
+	db, err := openDoltServerDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
@@ -137,18 +150,9 @@ func CheckDoltSchema(path string) DoctorCheck {
 			Category: CategoryCore,
 		}
 	}
-	defer closeDoltDBWithTimeout(db)
+	defer db.Close()
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return DoctorCheck{
-			Name:     "Dolt Schema",
-			Status:   StatusError,
-			Message:  "Failed to switch to beads database",
-			Detail:   err.Error(),
-			Category: CategoryCore,
-		}
-	}
 
 	// Check required tables
 	requiredTables := []string{"issues", "dependencies", "config", "labels", "events"}
@@ -212,11 +216,8 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 		}
 	}
 
-	// Get Dolt count
-	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	db, err := sql.Open("dolt", connStr)
+	// Get Dolt count via server
+	db, err := openDoltServerDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt-JSONL Sync",
@@ -226,19 +227,9 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 			Category: CategoryData,
 		}
 	}
-	defer closeDoltDBWithTimeout(db)
+	defer db.Close()
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return DoctorCheck{
-			Name:     "Dolt-JSONL Sync",
-			Status:   StatusError,
-			Message:  "Failed to switch to beads database",
-			Detail:   err.Error(),
-			Category: CategoryData,
-		}
-	}
-
 	var doltCount int
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&doltCount)
 	if err != nil {
@@ -283,10 +274,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 		}
 	}
 
-	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	db, err := sql.Open("dolt", connStr)
+	db, err := openDoltServerDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",
@@ -296,18 +284,9 @@ func CheckDoltStatus(path string) DoctorCheck {
 			Category: CategoryData,
 		}
 	}
-	defer closeDoltDBWithTimeout(db)
+	defer db.Close()
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return DoctorCheck{
-			Name:     "Dolt Status",
-			Status:   StatusWarning,
-			Message:  "Could not switch to beads database",
-			Detail:   err.Error(),
-			Category: CategoryData,
-		}
-	}
 
 	// Check dolt_status for uncommitted changes
 	rows, err := db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
@@ -355,5 +334,3 @@ func CheckDoltStatus(path string) DoctorCheck {
 		Category: CategoryData,
 	}
 }
-
-

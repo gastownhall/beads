@@ -1,4 +1,3 @@
-//go:build cgo
 package doctor
 
 import (
@@ -12,23 +11,21 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/dolthub/driver"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 // DoltPerfMetrics holds performance metrics for Dolt operations
 type DoltPerfMetrics struct {
-	Backend      string        // "dolt-embedded" or "dolt-server"
-	ServerMode   bool          // Whether connected via sql-server
-	ServerStatus string        // "running", "not running", or N/A
-	Platform     string        // OS/arch
-	GoVersion    string        // Go runtime version
-	DoltVersion  string        // Dolt version if available
-	TotalIssues  int           // Total issue count
-	OpenIssues   int           // Open issue count
-	ClosedIssues int           // Closed issue count
-	Dependencies int           // Dependency count
-	DatabaseSize string        // Size of .dolt directory
+	Backend      string // "dolt-server"
+	ServerStatus string // "running" or "not running"
+	Platform     string // OS/arch
+	GoVersion    string // Go runtime version
+	DoltVersion  string // Dolt version if available
+	TotalIssues  int    // Total issue count
+	OpenIssues   int    // Open issue count
+	ClosedIssues int    // Closed issue count
+	Dependencies int    // Dependency count
+	DatabaseSize string // Size of .dolt directory
 
 	// Timing metrics (milliseconds)
 	ConnectionTime   int64 // Time to establish connection
@@ -52,11 +49,11 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 	}
 
 	metrics := &DoltPerfMetrics{
-		Platform:   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
-		GoVersion:  runtime.Version(),
+		Platform:  fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		GoVersion: runtime.Version(),
 	}
 
-	// Check if server mode is available
+	// Check if server is running
 	doltDir := filepath.Join(beadsDir, "dolt")
 	serverRunning := isDoltServerRunning("127.0.0.1", 3306)
 	if serverRunning {
@@ -76,18 +73,13 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		}
 	}
 
-	// Connect and run diagnostics - try server mode first if available
-	if serverRunning {
-		if err := runDoltServerDiagnostics(metrics, "127.0.0.1", 3306); err != nil {
-			fmt.Fprintf(os.Stderr, "Server mode diagnostics failed, falling back to embedded: %v\n", err)
-			if err := runDoltEmbeddedDiagnostics(metrics, doltDir); err != nil {
-				return metrics, fmt.Errorf("embedded mode diagnostics failed: %w", err)
-			}
-		}
-	} else {
-		if err := runDoltEmbeddedDiagnostics(metrics, doltDir); err != nil {
-			return metrics, fmt.Errorf("embedded mode diagnostics failed: %w", err)
-		}
+	// Run server mode diagnostics
+	if !serverRunning {
+		return metrics, fmt.Errorf("dolt sql-server is not running; start it with: dolt sql-server")
+	}
+
+	if err := runDoltServerDiagnostics(metrics, "127.0.0.1", 3306); err != nil {
+		return metrics, fmt.Errorf("server mode diagnostics failed: %w", err)
 	}
 
 	// Calculate database size
@@ -99,7 +91,6 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 // runDoltServerDiagnostics runs diagnostics via dolt sql-server
 func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int) error {
 	metrics.Backend = "dolt-server"
-	metrics.ServerMode = true
 
 	dsn := fmt.Sprintf("root:@tcp(%s:%d)/beads?parseTime=true", host, port)
 
@@ -118,41 +109,6 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int) e
 	ctx := context.Background()
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping server: %w", err)
-	}
-	metrics.ConnectionTime = time.Since(start).Milliseconds()
-
-	// Run all diagnostics
-	return runDoltDiagnosticQueries(ctx, db, metrics)
-}
-
-// runDoltEmbeddedDiagnostics runs diagnostics via embedded Dolt
-func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string) error {
-	metrics.Backend = "dolt-embedded"
-	metrics.ServerMode = false
-
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	// Measure connection time (includes bootstrap overhead)
-	start := time.Now()
-	db, err := sql.Open("dolt", connStr)
-	if err != nil {
-		return fmt.Errorf("failed to open Dolt database: %w", err)
-	}
-	defer closeDoltDBWithTimeout(db)
-
-	// Single connection for embedded mode
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	ctx := context.Background()
-
-	// Switch to beads database
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return fmt.Errorf("failed to switch to beads database: %w", err)
-	}
-
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("failed to ping database: %w", err)
 	}
 	metrics.ConnectionTime = time.Since(start).Milliseconds()
 
@@ -309,7 +265,7 @@ func PrintDoltPerfReport(metrics *DoltPerfMetrics) {
 	fmt.Println(strings.Repeat("=", 50))
 
 	fmt.Printf("\nBackend: %s\n", metrics.Backend)
-	fmt.Printf("Server Mode: %v (status: %s)\n", metrics.ServerMode, metrics.ServerStatus)
+	fmt.Printf("Server Status: %s\n", metrics.ServerStatus)
 	fmt.Printf("Platform: %s\n", metrics.Platform)
 	fmt.Printf("Go: %s\n", metrics.GoVersion)
 	fmt.Printf("Dolt: %s\n", metrics.DoltVersion)
@@ -322,7 +278,7 @@ func PrintDoltPerfReport(metrics *DoltPerfMetrics) {
 	fmt.Printf("  Database size:     %s\n", metrics.DatabaseSize)
 
 	fmt.Printf("\nOperation Performance (ms):\n")
-	fmt.Printf("  Connection/Bootstrap:     %s\n", formatTiming(metrics.ConnectionTime))
+	fmt.Printf("  Connection:               %s\n", formatTiming(metrics.ConnectionTime))
 	fmt.Printf("  bd ready (GetReadyWork):  %s\n", formatTiming(metrics.ReadyWorkTime))
 	fmt.Printf("  bd list --status=open:    %s\n", formatTiming(metrics.ListOpenTime))
 	fmt.Printf("  bd show <issue>:          %s\n", formatTiming(metrics.ShowIssueTime))
@@ -352,17 +308,6 @@ func formatTiming(ms int64) string {
 func assessDoltPerformance(metrics *DoltPerfMetrics) {
 	var warnings []string
 	var recommendations []string
-
-	// Check connection time (embedded mode bootstrap overhead)
-	if !metrics.ServerMode && metrics.ConnectionTime > 500 {
-		warnings = append(warnings, fmt.Sprintf("High bootstrap time (%dms) in embedded mode", metrics.ConnectionTime))
-		recommendations = append(recommendations, "Consider using server mode: set BEADS_DOLT_SERVER_MODE=1")
-	}
-
-	// Check if server mode is available but not being used
-	if !metrics.ServerMode && metrics.ServerStatus == "running" {
-		recommendations = append(recommendations, "Server is running but not being used. Enable server mode for better performance.")
-	}
 
 	// Check ready work query time
 	if metrics.ReadyWorkTime > 200 {
@@ -426,7 +371,7 @@ func CheckDoltPerformance(path string) DoctorCheck {
 	var issues []string
 
 	if metrics.ConnectionTime > 1000 {
-		issues = append(issues, fmt.Sprintf("slow bootstrap (%dms)", metrics.ConnectionTime))
+		issues = append(issues, fmt.Sprintf("slow connection (%dms)", metrics.ConnectionTime))
 	}
 
 	if metrics.ReadyWorkTime > 500 {
@@ -434,86 +379,19 @@ func CheckDoltPerformance(path string) DoctorCheck {
 	}
 
 	if len(issues) > 0 {
-		fix := "Run 'bd doctor perf-dolt' for detailed analysis"
-		if !metrics.ServerMode && metrics.ServerStatus != "running" {
-			fix = "Consider enabling server mode: BEADS_DOLT_SERVER_MODE=1"
-		}
 		return DoctorCheck{
 			Name:     "Dolt Performance",
 			Status:   StatusWarning,
 			Message:  strings.Join(issues, "; "),
-			Fix:      fix,
+			Fix:      "Run 'bd doctor perf-dolt' for detailed analysis",
 			Category: CategoryPerformance,
 		}
 	}
 
-	mode := "embedded"
-	if metrics.ServerMode {
-		mode = "server"
-	}
 	return DoctorCheck{
 		Name:     "Dolt Performance",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("OK (mode: %s, connect: %dms, ready: %dms)", mode, metrics.ConnectionTime, metrics.ReadyWorkTime),
+		Message:  fmt.Sprintf("OK (server mode, connect: %dms, ready: %dms)", metrics.ConnectionTime, metrics.ReadyWorkTime),
 		Category: CategoryPerformance,
 	}
 }
-
-// CompareDoltModes runs diagnostics in both embedded and server mode for comparison
-func CompareDoltModes(path string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	if !IsDoltBackend(beadsDir) {
-		return fmt.Errorf("not a Dolt backend")
-	}
-
-	doltDir := filepath.Join(beadsDir, "dolt")
-	serverRunning := isDoltServerRunning("127.0.0.1", 3306)
-
-	fmt.Println("\nDolt Mode Comparison")
-	fmt.Println(strings.Repeat("=", 50))
-
-	// Run embedded mode diagnostics
-	fmt.Println("\n[Embedded Mode]")
-	embeddedMetrics := &DoltPerfMetrics{}
-	if err := runDoltEmbeddedDiagnostics(embeddedMetrics, doltDir); err != nil {
-		fmt.Printf("  Error: %v\n", err)
-	} else {
-		fmt.Printf("  Connection time: %dms\n", embeddedMetrics.ConnectionTime)
-		fmt.Printf("  Ready-work query: %dms\n", embeddedMetrics.ReadyWorkTime)
-		fmt.Printf("  List open query: %dms\n", embeddedMetrics.ListOpenTime)
-		fmt.Printf("  Complex query: %dms\n", embeddedMetrics.ComplexQueryTime)
-	}
-
-	// Run server mode diagnostics if available
-	if serverRunning {
-		fmt.Println("\n[Server Mode]")
-		serverMetrics := &DoltPerfMetrics{}
-		if err := runDoltServerDiagnostics(serverMetrics, "127.0.0.1", 3306); err != nil {
-			fmt.Printf("  Error: %v\n", err)
-		} else {
-			fmt.Printf("  Connection time: %dms\n", serverMetrics.ConnectionTime)
-			fmt.Printf("  Ready-work query: %dms\n", serverMetrics.ReadyWorkTime)
-			fmt.Printf("  List open query: %dms\n", serverMetrics.ListOpenTime)
-			fmt.Printf("  Complex query: %dms\n", serverMetrics.ComplexQueryTime)
-
-			// Print comparison
-			if embeddedMetrics.ConnectionTime > 0 && serverMetrics.ConnectionTime > 0 {
-				fmt.Println("\n[Comparison]")
-				fmt.Printf("  Connection speedup: %.1fx faster in server mode\n",
-					float64(embeddedMetrics.ConnectionTime)/float64(serverMetrics.ConnectionTime))
-				if embeddedMetrics.ReadyWorkTime > 0 && serverMetrics.ReadyWorkTime > 0 {
-					fmt.Printf("  Ready-work speedup: %.1fx\n",
-						float64(embeddedMetrics.ReadyWorkTime)/float64(serverMetrics.ReadyWorkTime))
-				}
-			}
-		}
-	} else {
-		fmt.Println("\n[Server Mode]")
-		fmt.Println("  Not available (start with: dolt sql-server)")
-	}
-
-	fmt.Println()
-	return nil
-}
-
-

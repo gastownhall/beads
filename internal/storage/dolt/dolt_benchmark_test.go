@@ -95,7 +95,6 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
-		ServerMode:     false, // Force embedded mode
 	}
 
 	initStore, err := New(ctx, cfg)
@@ -143,7 +142,6 @@ func BenchmarkColdStart(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
-		ServerMode:     false, // Force embedded mode
 	}
 
 	b.ResetTimer()
@@ -227,7 +225,6 @@ func BenchmarkCLIWorkflow(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
-		ServerMode:     false,
 	}
 
 	b.ResetTimer()

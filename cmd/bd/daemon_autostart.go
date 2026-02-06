@@ -78,7 +78,7 @@ func isDoltBackendImpl() bool {
 }
 
 // singleProcessOnlyBackend returns true if the current workspace backend is configured
-// as single-process-only (currently Dolt embedded).
+// as single-process-only.
 // This is a wrapper that calls singleProcessOnlyBackendFn for testability.
 func singleProcessOnlyBackend() bool {
 	return singleProcessOnlyBackendFn()

@@ -1,4 +1,3 @@
-//go:build cgo
 package dolt
 
 import (
@@ -225,8 +224,7 @@ func (s *DoltStore) GetChangesSinceExport(ctx context.Context, fromCommit string
 	}
 
 	// If fromCommit equals HEAD, there are no changes.
-	// Note: This also avoids a nil pointer panic in the embedded Dolt driver
-	// when querying dolt_diff with identical from/to refs.
+	// Note: This also avoids issues when querying dolt_diff with identical from/to refs.
 	if fromCommit == currentCommit {
 		return &ExportChanges{Entries: nil}, nil
 	}

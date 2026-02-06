@@ -641,17 +641,6 @@ var rootCmd = &cobra.Command{
 			debug.Logf("wisp operation detected, using direct mode")
 		}
 
-		// Embedded Dolt is single-process-only; never use daemon/RPC.
-		// (Dolt server mode supports multi-process and won't trigger this.)
-		// This must be checked after dbPath is resolved.
-		if !noDaemon && singleProcessOnlyBackend() {
-			noDaemon = true
-			daemonStatus.AutoStartEnabled = false
-			daemonStatus.FallbackReason = FallbackSingleProcessOnly
-			daemonStatus.Detail = "backend is single-process-only (embedded dolt): daemon mode disabled; using direct mode"
-			debug.Logf("single-process backend detected, using direct mode")
-		}
-
 		// Try to connect to daemon first (unless --no-daemon flag is set or worktree safety check fails)
 		if noDaemon {
 			// Only set FallbackFlagNoDaemon if not already set by auto-bypass logic
@@ -854,22 +843,12 @@ var rootCmd = &cobra.Command{
 		}
 
 		if backend == configfile.BackendDolt {
-			// Set advisory lock timeout for dolt embedded mode.
-			// Reads get a shorter timeout (shared lock, less contention expected).
-			// Writes get a longer timeout (exclusive lock, may need to wait for readers).
-			if useReadOnly {
-				opts.OpenTimeout = 5 * time.Second
-			} else {
-				opts.OpenTimeout = 15 * time.Second
-			}
-
 			// For Dolt, use the dolt subdirectory
 			doltPath := filepath.Join(beadsDir, "dolt")
 
-			// Check if server mode is configured in metadata.json
+			// Load server connection config from metadata.json
 			cfg, cfgErr := configfile.Load(beadsDir)
-			if cfgErr == nil && cfg != nil && cfg.IsDoltServerMode() {
-				opts.ServerMode = true
+			if cfgErr == nil && cfg != nil {
 				opts.ServerHost = cfg.GetDoltServerHost()
 				opts.ServerPort = cfg.GetDoltServerPort()
 				if cfg.Database != "" {

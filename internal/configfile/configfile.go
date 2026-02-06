@@ -19,10 +19,10 @@ type Config struct {
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
-	// Dolt connection mode configuration (bd-dolt.2.2)
-	// Default is "embedded" (in-process). Server mode ("server") connects to an
-	// external dolt sql-server and should only be used for high-concurrency scenarios.
-	DoltMode       string `json:"dolt_mode,omitempty"`        // "embedded" (default) or "server"
+	// Dolt connection mode configuration
+	// Server mode connects to an external dolt sql-server via MySQL protocol.
+	// The "embedded" value is accepted for backward compatibility but treated as "server".
+	DoltMode       string `json:"dolt_mode,omitempty"`        // "server" (only mode supported)
 	DoltServerHost string `json:"dolt_server_host,omitempty"` // Server host (default: 127.0.0.1)
 	DoltServerPort int    `json:"dolt_server_port,omitempty"` // Server port (default: 3307)
 	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
@@ -170,11 +170,6 @@ const (
 //
 // This is intentionally small and stable: callers should use these flags to decide
 // whether to enable features like daemon/RPC/autostart and process spawning.
-//
-// NOTE: The embedded Dolt driver is effectively single-writer at the OS-process level.
-// Even if multiple goroutines are safe within one process, multiple processes opening
-// the same Dolt directory concurrently can cause lock contention and transient
-// "read-only" failures. Therefore, Dolt is treated as single-process-only.
 type BackendCapabilities struct {
 	// SingleProcessOnly indicates the backend must not be accessed from multiple
 	// Beads OS processes concurrently (no daemon mode, no RPC client/server split,
@@ -184,33 +179,21 @@ type BackendCapabilities struct {
 
 // CapabilitiesForBackend returns capabilities for a backend string.
 // Unknown backends are treated conservatively as single-process-only.
-//
-// Note: For Dolt, this returns SingleProcessOnly=true for embedded mode.
-// Use Config.GetCapabilities() when you have the full config to properly
-// handle server mode (which supports multi-process access).
 func CapabilitiesForBackend(backend string) BackendCapabilities {
 	switch strings.TrimSpace(strings.ToLower(backend)) {
 	case "", BackendSQLite:
 		return BackendCapabilities{SingleProcessOnly: false}
 	case BackendDolt:
-		// Embedded Dolt is single-process-only.
-		// Server mode is handled by Config.GetCapabilities().
-		return BackendCapabilities{SingleProcessOnly: true}
+		// Dolt uses server mode which supports multi-writer access
+		return BackendCapabilities{SingleProcessOnly: false}
 	default:
 		return BackendCapabilities{SingleProcessOnly: true}
 	}
 }
 
 // GetCapabilities returns the backend capabilities for this config.
-// Unlike CapabilitiesForBackend(string), this considers Dolt server mode
-// which supports multi-process access.
 func (c *Config) GetCapabilities() BackendCapabilities {
-	backend := c.GetBackend()
-	if backend == BackendDolt && c.IsDoltServerMode() {
-		// Server mode supports multi-writer, so NOT single-process-only
-		return BackendCapabilities{SingleProcessOnly: false}
-	}
-	return CapabilitiesForBackend(backend)
+	return CapabilitiesForBackend(c.GetBackend())
 }
 
 // GetBackend returns the configured backend type, defaulting to SQLite.
@@ -236,22 +219,14 @@ const (
 )
 
 // IsDoltServerMode returns true if Dolt should connect via sql-server.
-// Server mode is opt-in for high-concurrency scenarios; embedded is the default.
-// Checks the BEADS_DOLT_SERVER_MODE env var first, then falls back to the
-// dolt_mode field in metadata.json. Only applies when backend is "dolt".
+// Always returns true for Dolt backends (embedded mode has been removed).
 func (c *Config) IsDoltServerMode() bool {
-	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" && c.GetBackend() == BackendDolt {
-		return true
-	}
-	return c.GetBackend() == BackendDolt && strings.ToLower(c.DoltMode) == DoltModeServer
+	return c.GetBackend() == BackendDolt
 }
 
-// GetDoltMode returns the Dolt connection mode, defaulting to embedded.
+// GetDoltMode returns the Dolt connection mode. Always returns "server".
 func (c *Config) GetDoltMode() string {
-	if c.DoltMode == "" {
-		return DoltModeEmbedded
-	}
-	return c.DoltMode
+	return DoltModeServer
 }
 
 // GetDoltServerHost returns the Dolt server host.

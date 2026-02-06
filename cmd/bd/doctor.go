@@ -473,7 +473,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false // Unresolved conflicts are a real problem
 	}
 
-	// Check 8h: Dolt init vs embedded mode mismatch
+	// Check 8h: Dolt server mode configuration
 	doltModeCheck := convertWithCategory(doctor.CheckDoltServerModeMismatch(path), doctor.CategoryFederation)
 	result.Checks = append(result.Checks, doltModeCheck)
 

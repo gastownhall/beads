@@ -7,17 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKIP_FILE="$REPO_ROOT/.test-skip"
 
-# ICU4C is keg-only on macOS (Homebrew doesn't symlink it into /opt/homebrew).
-# Dolt's go-icu-regex dependency needs these paths to compile and link.
-if [[ "$(uname)" == "Darwin" ]]; then
-    ICU_PREFIX="$(brew --prefix icu4c 2>/dev/null || true)"
-    if [[ -n "$ICU_PREFIX" ]]; then
-        export CGO_CFLAGS="${CGO_CFLAGS:+$CGO_CFLAGS }-I${ICU_PREFIX}/include"
-        export CGO_CPPFLAGS="${CGO_CPPFLAGS:+$CGO_CPPFLAGS }-I${ICU_PREFIX}/include"
-        export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-L${ICU_PREFIX}/lib"
-    fi
-fi
-
 # Build skip pattern from .test-skip file
 build_skip_pattern() {
     if [[ ! -f "$SKIP_FILE" ]]; then

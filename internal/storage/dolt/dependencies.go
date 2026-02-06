@@ -1,4 +1,3 @@
-//go:build cgo
 package dolt
 
 import (
@@ -84,7 +83,7 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	}
 
 	// Collect dep metadata first, then close rows before fetching issues.
-	// This avoids connection pool deadlock when MaxOpenConns=1 (embedded dolt).
+	// This avoids connection pool deadlock when MaxOpenConns=1.
 	type depMeta struct {
 		depID, depType string
 	}
@@ -150,7 +149,7 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 	}
 
 	// Collect dep metadata first, then close rows before fetching issues.
-	// This avoids connection pool deadlock when MaxOpenConns=1 (embedded dolt).
+	// This avoids connection pool deadlock when MaxOpenConns=1.
 	type depMeta struct {
 		depID, depType string
 	}

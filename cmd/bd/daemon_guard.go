@@ -20,13 +20,13 @@ func singleProcessBackendHelp(backend string) string {
 }
 
 // guardDaemonStartForDolt blocks daemon start/restart commands when the current
-// workspace backend is Dolt, unless --federation is specified.
+// workspace backend is single-process-only, unless --federation is specified.
 //
-// Rationale: embedded Dolt is effectively single-writer at the OS-process level. The
+// Rationale: some backends may be single-writer at the OS-process level. The
 // daemon architecture relies on multiple processes (CLI + daemon + helper spawns),
-// which can trigger lock contention and transient "read-only" failures.
+// which can trigger lock contention.
 //
-// Exception: --federation flag enables dolt sql-server mode which is multi-writer.
+// Exception: --federation flag enables multi-writer mode.
 //
 // Note: This guard should only be attached to commands that START a daemon process
 // (start, restart). Read-only commands (status, stop, logs, health, list) are allowed
