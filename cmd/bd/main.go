@@ -269,6 +269,12 @@ var rootCmd = &cobra.Command{
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
 
+		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
+		if err := checkBlockedEnvVars(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults
 		// Do this BEFORE early-return so init/version/help respect config
@@ -1070,6 +1076,22 @@ var rootCmd = &cobra.Command{
 			rootCancel()
 		}
 	},
+}
+
+// blockedEnvVars lists environment variables that must not be set because they
+// could silently override the storage backend via viper's AutomaticEnv, causing
+// data fragmentation between sqlite and dolt (bd-hevyw).
+var blockedEnvVars = []string{"BD_BACKEND", "BD_DATABASE_BACKEND"}
+
+// checkBlockedEnvVars returns an error if any blocked env vars are set.
+func checkBlockedEnvVars() error {
+	for _, name := range blockedEnvVars {
+		if os.Getenv(name) != "" {
+			return fmt.Errorf("%s env var is not supported and has been removed to prevent data fragmentation.\n"+
+				"The storage backend is set in .beads/metadata.json. To change it, use: bd migrate dolt (or bd migrate sqlite)", name)
+		}
+	}
+	return nil
 }
 
 func main() {
