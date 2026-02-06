@@ -175,12 +175,14 @@ irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 
 The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
 
-**Dolt backend on Windows:** Supported. Windows builds use a pure-Go regex backend to avoid ICU/CGO headers. If you need full ICU regex semantics, use Linux/macOS (or WSL) with ICU installed.
+**Dolt backend on Windows:** Supported via pure-Go regex backend. Windows builds automatically use Go's stdlib `regexp` instead of ICU regex to avoid CGO/header dependencies. If you need full ICU regex semantics, use Linux/macOS (or WSL) with ICU installed.
 
 **Via go install**:
 ```pwsh
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
+
+The installer automatically applies the pure-Go regex backend on Windows.
 
 **From source**:
 ```pwsh
@@ -190,7 +192,7 @@ go build -o bd.exe ./cmd/bd
 Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
 ```
 
-If you see `unicode/uregex.h` missing while building, use the PowerShell install script instead (it downloads a prebuilt binary).
+The build automatically applies the pure-Go regex backend on Windows via the `gms_pure_go` build tag. If you see `unicode/uregex.h` missing while building, this is normal—the build will skip it on Windows.
 
 **Verify installation**:
 ```pwsh

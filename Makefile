@@ -12,10 +12,14 @@ INSTALL_DIR := $(HOME)/.local/bin
 # Build the bd binary
 build:
 	@echo "Building bd..."
+ifeq ($(OS),Windows_NT)
+	go build -tags gms_pure_go -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
+else
 	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
 ifeq ($(shell uname),Darwin)
 	@codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null || true
 	@echo "Signed $(BINARY) for macOS"
+endif
 endif
 
 # Run all tests (skips known broken tests listed in .test-skip)
