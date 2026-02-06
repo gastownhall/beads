@@ -36,14 +36,10 @@ beads.right.meta.json
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 sync_base.jsonl
-config.local.yaml
+export-state/
 
-# Gas Town runtime files (local state)
-.gt-types-configured
-PRIME.md
-beads_rig/
-dolt/
-metadata.json
+# Process semaphore slot files (runtime concurrency limiting)
+sem/
 
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
