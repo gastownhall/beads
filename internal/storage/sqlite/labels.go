@@ -97,9 +97,12 @@ func (s *SQLiteStorage) GetLabels(ctx context.Context, issueID string) ([]string
 	for rows.Next() {
 		var label string
 		if err := rows.Scan(&label); err != nil {
-			return nil, err
+			return nil, wrapDBError("scan label", err)
 		}
 		labels = append(labels, label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate labels", err)
 	}
 
 	return labels, nil
@@ -140,9 +143,12 @@ func (s *SQLiteStorage) GetLabelsForIssues(ctx context.Context, issueIDs []strin
 	for rows.Next() {
 		var issueID, label string
 		if err := rows.Scan(&issueID, &label); err != nil {
-			return nil, err
+			return nil, wrapDBError("scan label for issue", err)
 		}
 		result[issueID] = append(result[issueID], label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate labels for issues", err)
 	}
 
 	return result, nil

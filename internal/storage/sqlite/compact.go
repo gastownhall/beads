@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -197,7 +198,7 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 		WHERE id = ?
 	`, issueID).Scan(&status, &closedAt, &compactionLevel, &pinned)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, "issue not found", nil
 	}
 	if err != nil {

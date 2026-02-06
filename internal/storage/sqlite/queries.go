@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -177,7 +178,7 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	// Get prefix from config (needed for both ID generation and validation)
 	var configPrefix string
 	err = conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&configPrefix)
-	if err == sql.ErrNoRows || configPrefix == "" {
+	if errors.Is(err, sql.ErrNoRows) || configPrefix == "" {
 		// CRITICAL: Reject operation if issue_prefix config is missing
 		// This prevents duplicate issues with wrong prefix
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
@@ -390,7 +391,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&dueAt, &deferUntil, &metadata,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -555,7 +556,7 @@ func (s *SQLiteStorage) GetCloseReason(ctx context.Context, issueID string) (str
 		LIMIT 1
 	`, issueID, types.EventClosed).Scan(&comment)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -678,7 +679,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

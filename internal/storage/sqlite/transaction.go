@@ -194,7 +194,7 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 	// Get prefix from config (needed for both ID generation and validation)
 	var configPrefix string
 	err = t.conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&configPrefix)
-	if err == sql.ErrNoRows || configPrefix == "" {
+	if errors.Is(err, sql.ErrNoRows) || configPrefix == "" {
 		// CRITICAL: Reject operation if issue_prefix config is missing
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {
@@ -325,7 +325,7 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 	// Get prefix from config
 	var prefix string
 	err = t.conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
-	if err == sql.ErrNoRows || prefix == "" {
+	if errors.Is(err, sql.ErrNoRows) || prefix == "" {
 		return fmt.Errorf("database not initialized: issue_prefix config is missing")
 	} else if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
@@ -1068,7 +1068,7 @@ func (t *sqliteTxStorage) SetConfig(ctx context.Context, key, value string) erro
 func (t *sqliteTxStorage) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
 	err := t.conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -1118,7 +1118,7 @@ func (t *sqliteTxStorage) SetMetadata(ctx context.Context, key, value string) er
 func (t *sqliteTxStorage) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
 	err := t.conn.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {

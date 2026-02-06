@@ -818,11 +818,14 @@ func (s *SQLiteStorage) loadDependencyGraph(ctx context.Context) (map[string][]s
 	for rows.Next() {
 		var from, to string
 		if err := rows.Scan(&from, &to); err != nil {
-			return nil, err
+			return nil, wrapDBError("scan dependency graph edge", err)
 		}
 		deps[from] = append(deps[from], to)
 	}
-	return deps, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate dependency graph", err)
+	}
+	return deps, nil
 }
 
 // DetectCycles finds circular dependencies and returns the actual cycle paths.

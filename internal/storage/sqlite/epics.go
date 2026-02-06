@@ -42,7 +42,7 @@ func (s *SQLiteStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*type
 
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, wrapDBError("query epics eligible for closure", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -61,7 +61,7 @@ func (s *SQLiteStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*type
 			&totalChildren, &closedChildren,
 		)
 		if err != nil {
-			return nil, err
+			return nil, wrapDBError("scan epic status", err)
 		}
 
 		// Convert sql.NullString to string
@@ -82,5 +82,8 @@ func (s *SQLiteStorage) GetEpicsEligibleForClosure(ctx context.Context) ([]*type
 		})
 	}
 
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate epics", err)
+	}
+	return results, nil
 }

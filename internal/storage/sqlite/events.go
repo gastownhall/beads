@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -153,7 +154,10 @@ func (s *SQLiteStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([
 		events = append(events, &event)
 	}
 
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapDBError("iterate events", err)
+	}
+	return events, nil
 }
 
 // GetStatistics returns aggregate statistics
@@ -275,7 +279,7 @@ func (s *SQLiteStorage) GetMoleculeProgress(ctx context.Context, moleculeID stri
 	var title string
 	err := s.db.QueryRowContext(ctx, `SELECT title FROM issues WHERE id = ?`, moleculeID).Scan(&title)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("molecule not found: %s", moleculeID)
 		}
 		return nil, fmt.Errorf("failed to get molecule: %w", err)

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -19,7 +20,7 @@ func (s *SQLiteStorage) GetExportHash(ctx context.Context, issueID string) (stri
 		SELECT content_hash FROM export_hashes WHERE issue_id = ?
 	`, issueID).Scan(&hash)
 	
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No hash stored yet
 	}
 	if err != nil {
@@ -79,7 +80,7 @@ func (s *SQLiteStorage) GetJSONLFileHash(ctx context.Context) (string, error) {
 		SELECT value FROM metadata WHERE key = 'jsonl_file_hash'
 	`).Scan(&hash)
 	
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No hash stored yet
 	}
 	if err != nil {

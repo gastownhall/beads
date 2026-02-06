@@ -3,6 +3,7 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -122,7 +123,7 @@ func checkRequiredConfig(db *sql.DB, snapshot *Snapshot) error {
 	// Check for required config keys
 	var value string
 	err = db.QueryRow("SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&value)
-	if err == sql.ErrNoRows || value == "" {
+	if errors.Is(err, sql.ErrNoRows) || value == "" {
 		return fmt.Errorf("required config key missing: issue_prefix (database has %d issues)", currentCount)
 	} else if err != nil {
 		return fmt.Errorf("failed to check config key issue_prefix: %w", err)

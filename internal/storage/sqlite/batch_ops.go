@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	// Get prefix from config (needed for both generation and validation)
 	var prefix string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "issue_prefix").Scan(&prefix)
-	if err == sql.ErrNoRows || prefix == "" {
+	if errors.Is(err, sql.ErrNoRows) || prefix == "" {
 		// CRITICAL: Reject operation if issue_prefix config is missing
 		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
 	} else if err != nil {

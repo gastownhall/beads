@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -33,7 +34,7 @@ func (s *SQLiteStorage) GetConfig(ctx context.Context, key string) (string, erro
 
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, wrapDBError("get config", err)
@@ -128,7 +129,7 @@ func (s *SQLiteStorage) GetMetadata(ctx context.Context, key string) (string, er
 
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, wrapDBError("get metadata", err)

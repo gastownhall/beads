@@ -104,7 +104,7 @@ func countTopLevelIssues(ctx context.Context, conn *sql.Conn, prefix string) (in
 		  AND instr(substr(id, length(?) + 2), '.') = 0
 	`, prefix, prefix).Scan(&count)
 	if err != nil {
-		return 0, err
+		return 0, wrapDBError("count top-level issues", err)
 	}
 	return count, nil
 }
@@ -114,7 +114,7 @@ func GetAdaptiveIDLength(ctx context.Context, conn *sql.Conn, prefix string) (in
 	// Get current issue count
 	numIssues, err := countTopLevelIssues(ctx, conn, prefix)
 	if err != nil {
-		return 6, err // Fallback to 6 on error
+		return 6, wrapDBErrorf(err, "get adaptive ID length for prefix %s", prefix)
 	}
 	
 	// Get adaptive config
