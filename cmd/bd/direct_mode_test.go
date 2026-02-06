@@ -40,6 +40,15 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 	}
 
 	defer func() {
+		// Shutdown FlushManager BEFORE closing store to prevent deadlock (bd-4ri).
+		// The FlushManager's background goroutine may hold a DB connection via
+		// flushToJSONLWithState → validateJSONLIntegrity → GetJSONLFileHash.
+		// Closing the store while that goroutine holds the connection causes
+		// database/sql.(*DB).Close to block on its internal mutex.
+		if flushManager != nil && flushManager != origFlushManager {
+			_ = flushManager.Shutdown()
+		}
+
 		if store != nil && store != origStore {
 			_ = store.Close()
 		}
@@ -55,11 +64,6 @@ func TestFallbackToDirectModeEnablesFlush(t *testing.T) {
 		autoFlushEnabled = origAutoFlush
 		flushFailureCount = origFlushFailures
 		lastFlushError = origLastFlushErr
-
-		// Restore FlushManager
-		if flushManager != nil {
-			_ = flushManager.Shutdown()
-		}
 		flushManager = origFlushManager
 	}()
 

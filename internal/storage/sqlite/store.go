@@ -324,8 +324,14 @@ func NewReadOnlyWithTimeout(ctx context.Context, path string, busyTimeout time.D
 // are flushed to the main database file. If another process holds a read lock,
 // checkpoint will retry with exponential backoff (up to ~3 seconds total).
 // For read-only connections (GH#804), it skips checkpointing to avoid file modifications.
+// Idempotent: subsequent calls after the first return nil immediately (bd-4ri).
 func (s *SQLiteStorage) Close() error {
-	s.closed.Store(true)
+	// Use CompareAndSwap to ensure only the first call proceeds.
+	// Without this, double-close triggers the WAL retry backoff (~3.1s each),
+	// which caused test suite timeouts when t.Cleanup and manual Close() overlap.
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	// Acquire write lock to prevent racing with reconnect() (GH#607)
 	s.reconnectMu.Lock()
 	defer s.reconnectMu.Unlock()
