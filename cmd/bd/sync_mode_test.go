@@ -124,6 +124,45 @@ func TestShouldExportJSONL(t *testing.T) {
 	}
 }
 
+// TestShouldExportJSONL_DirectDB verifies ShouldExportJSONL reads from the database
+// directly, not through GetSyncMode/viper. This catches the bug where viper loads
+// config.yaml from the wrong directory, causing GetSyncMode to return git-portable
+// even when the database has dolt-native.
+func TestShouldExportJSONL_DirectDB(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	testStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Set dolt-native directly in database (bypassing SetSyncMode/viper)
+	if err := testStore.SetConfig(ctx, SyncModeConfigKey, SyncModeDoltNative); err != nil {
+		t.Fatalf("failed to set config: %v", err)
+	}
+
+	// ShouldExportJSONL must return false — it reads the DB directly
+	if ShouldExportJSONL(ctx, testStore) {
+		t.Error("ShouldExportJSONL() = true, want false for dolt-native set in DB")
+	}
+
+	// Default (no config set) should return true
+	if err := testStore.SetConfig(ctx, SyncModeConfigKey, ""); err != nil {
+		t.Fatalf("failed to clear config: %v", err)
+	}
+	if !ShouldExportJSONL(ctx, testStore) {
+		t.Error("ShouldExportJSONL() = false, want true for default (no config)")
+	}
+}
+
 // TestShouldImportJSONL verifies JSONL import behavior per mode.
 func TestShouldImportJSONL(t *testing.T) {
 	ctx := context.Background()
