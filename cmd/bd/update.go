@@ -124,7 +124,14 @@ create, update, show, or close operation).`,
 			if daemonClient == nil {
 				var customTypes []string
 				if store != nil {
-					if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
+					ct, err := store.GetCustomTypes(cmd.Context())
+					if err != nil {
+						// Log DB error but continue with YAML fallback (GH#1499 bd-2ll)
+						if !jsonOutput {
+							fmt.Fprintf(os.Stderr, "%s Failed to get custom types from DB: %v (falling back to config.yaml)\n",
+								ui.RenderWarn("!"), err)
+						}
+					} else {
 						customTypes = ct
 					}
 				}
