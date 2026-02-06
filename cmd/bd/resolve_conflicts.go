@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/merge"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -393,9 +395,11 @@ func resolveConflict(conflict conflictRegion, _ int) ([]string, conflictResoluti
 // Uses similar logic to internal/merge but simplified for conflict resolution
 func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 	result := merge.Issue{
-		ID:        left.ID,
-		CreatedAt: left.CreatedAt,
-		CreatedBy: left.CreatedBy,
+		Issue: types.Issue{
+			ID:        left.ID,
+			CreatedAt: left.CreatedAt,
+			CreatedBy: left.CreatedBy,
+		},
 	}
 
 	// Title: prefer later updated_at
@@ -416,12 +420,12 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 	}
 
 	// Status: tombstone wins (explicit deletion), then closed
-	if left.Status == "tombstone" || right.Status == "tombstone" {
-		result.Status = "tombstone"
-	} else if left.Status == "closed" || right.Status == "closed" {
-		result.Status = "closed"
+	if left.Status == types.StatusTombstone || right.Status == types.StatusTombstone {
+		result.Status = types.StatusTombstone
+	} else if left.Status == types.StatusClosed || right.Status == types.StatusClosed {
+		result.Status = types.StatusClosed
 	} else {
-		result.Status = pickByUpdatedAt(left.Status, right.Status, left.UpdatedAt, right.UpdatedAt)
+		result.Status = pickStatusByUpdatedAt(left.Status, right.Status, left.UpdatedAt, right.UpdatedAt)
 	}
 
 	// Priority: lower number (higher priority) wins
@@ -445,13 +449,13 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 	}
 
 	// UpdatedAt: max
-	result.UpdatedAt = maxTimeStr(left.UpdatedAt, right.UpdatedAt)
+	result.UpdatedAt = maxTimeVal(left.UpdatedAt, right.UpdatedAt)
 
 	// ClosedAt: max (if status is closed)
-	if result.Status == "closed" {
-		result.ClosedAt = maxTimeStr(left.ClosedAt, right.ClosedAt)
+	if result.Status == types.StatusClosed {
+		result.ClosedAt = maxTimePtr(left.ClosedAt, right.ClosedAt)
 		// CloseReason and ClosedBySession from whichever has later ClosedAt
-		if isTimeAfterStr(left.ClosedAt, right.ClosedAt) {
+		if isTimePtrAfter(left.ClosedAt, right.ClosedAt) {
 			result.CloseReason = left.CloseReason
 			result.ClosedBySession = left.ClosedBySession
 		} else {
@@ -460,13 +464,19 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 		}
 	}
 
-	// Dependencies: union
-	depMap := make(map[string]merge.Dependency)
+	// Dependencies: union (left wins on duplicates)
+	depMap := make(map[string]*types.Dependency)
 	for _, dep := range left.Dependencies {
+		if dep == nil {
+			continue
+		}
 		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 		depMap[key] = dep
 	}
 	for _, dep := range right.Dependencies {
+		if dep == nil {
+			continue
+		}
 		key := fmt.Sprintf("%s:%s:%s", dep.IssueID, dep.DependsOnID, dep.Type)
 		if _, exists := depMap[key]; !exists {
 			depMap[key] = dep
@@ -477,8 +487,8 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 	}
 
 	// Tombstone fields
-	if result.Status == "tombstone" {
-		if isTimeAfterStr(left.DeletedAt, right.DeletedAt) {
+	if result.Status == types.StatusTombstone {
+		if isTimePtrAfter(left.DeletedAt, right.DeletedAt) {
 			result.DeletedAt = left.DeletedAt
 			result.DeletedBy = left.DeletedBy
 			result.DeleteReason = left.DeleteReason
@@ -494,38 +504,93 @@ func mergeIssueConflict(left, right merge.Issue) merge.Issue {
 	return result
 }
 
-func pickByUpdatedAt(left, right, leftTime, rightTime string) string {
+func pickByUpdatedAt(left, right string, leftTime, rightTime time.Time) string {
 	if left == right {
 		return left
 	}
-	if isTimeAfterStr(leftTime, rightTime) {
+	if isTimeAfter(leftTime, rightTime) {
 		return left
 	}
 	return right
 }
 
-func maxTimeStr(t1, t2 string) string {
-	if t1 == "" {
+func pickStatusByUpdatedAt(left, right types.Status, leftTime, rightTime time.Time) types.Status {
+	if left == right {
+		return left
+	}
+	if isTimeAfter(leftTime, rightTime) {
+		return left
+	}
+	return right
+}
+
+func maxTimeVal(t1, t2 time.Time) time.Time {
+	if t1.IsZero() {
 		return t2
 	}
-	if t2 == "" {
+	if t2.IsZero() {
 		return t1
 	}
-	if isTimeAfterStr(t1, t2) {
+	if t1.After(t2) {
 		return t1
 	}
 	return t2
 }
 
-func isTimeAfterStr(t1, t2 string) bool {
-	if t1 == "" {
-		return false
+func maxTimePtr(t1, t2 *time.Time) *time.Time {
+	t1Set := t1 != nil && !t1.IsZero()
+	t2Set := t2 != nil && !t2.IsZero()
+
+	if !t1Set && !t2Set {
+		return nil
 	}
-	if t2 == "" {
-		return true
+	if !t1Set {
+		return t2
 	}
-	// Simple string comparison works for RFC3339 timestamps
-	return t1 > t2
+	if !t2Set {
+		return t1
+	}
+	if t1.After(*t2) {
+		return t1
+	}
+	return t2
+}
+
+// isTimeAfter returns true if t1 is after t2 (or equal - left wins on tie).
+// Zero times are treated as "unset" - a set time beats an unset time.
+// Matches internal/merge.isTimeAfter semantics for consistency.
+func isTimeAfter(t1, t2 time.Time) bool {
+	if t1.IsZero() && t2.IsZero() {
+		return true // both unset, left wins
+	}
+	if t1.IsZero() {
+		return false // t1 unset, t2 set - t2 wins
+	}
+	if t2.IsZero() {
+		return true // t1 set, t2 unset - t1 wins
+	}
+	// Both set - left wins on tie (matches internal/merge)
+	return !t2.After(t1)
+}
+
+// isTimePtrAfter returns true if t1 is after t2 (or equal - left wins on tie) for pointer times.
+// Nil pointers are treated as "unset" - a set time beats an unset time.
+// Matches internal/merge.isTimePtrAfter semantics for consistency.
+func isTimePtrAfter(t1, t2 *time.Time) bool {
+	t1Set := t1 != nil && !t1.IsZero()
+	t2Set := t2 != nil && !t2.IsZero()
+
+	if !t1Set && !t2Set {
+		return true // both unset, left wins
+	}
+	if !t1Set {
+		return false // t1 unset, t2 set - t2 wins
+	}
+	if !t2Set {
+		return true // t1 set, t2 unset - t1 wins
+	}
+	// Both set - left wins on tie (matches internal/merge)
+	return !t2.After(*t1)
 }
 
 func outputResolveError(filePath, errMsg string) {

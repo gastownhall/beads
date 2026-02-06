@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -109,3 +108,5 @@ func (s *DoltStore) GetJSONLFileHash(ctx context.Context) (string, error) {
 func (s *DoltStore) SetJSONLFileHash(ctx context.Context, fileHash string) error {
 	return s.SetMetadata(ctx, "jsonl_file_hash", fileHash)
 }
+
+

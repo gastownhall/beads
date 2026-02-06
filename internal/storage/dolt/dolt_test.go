@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -916,7 +917,7 @@ func TestDoltStoreGetReadyWork(t *testing.T) {
 func TestCloseWithTimeout(t *testing.T) {
 	// Test 1: Fast close succeeds
 	t.Run("fast close succeeds", func(t *testing.T) {
-		err := closeWithTimeout("test", func() error {
+		err := doltutil.CloseWithTimeout("test", func() error {
 			return nil
 		})
 		if err != nil {
@@ -927,7 +928,7 @@ func TestCloseWithTimeout(t *testing.T) {
 	// Test 2: Fast close with error returns error
 	t.Run("fast close with error", func(t *testing.T) {
 		expectedErr := context.Canceled
-		err := closeWithTimeout("test", func() error {
+		err := doltutil.CloseWithTimeout("test", func() error {
 			return expectedErr
 		})
 		if err != expectedErr {
@@ -938,15 +939,15 @@ func TestCloseWithTimeout(t *testing.T) {
 	// Test 3: Slow close times out (use shorter timeout for test)
 	t.Run("slow close times out", func(t *testing.T) {
 		// Save original timeout and restore after test
-		originalTimeout := closeTimeout
-		// Note: closeTimeout is a const, so we can't actually change it
+		originalTimeout := doltutil.CloseTimeout
+		// Note: CloseTimeout is a const, so we can't actually change it
 		// This test verifies the timeout mechanism works conceptually
 		// In practice, the 5s timeout is reasonable for production use
 
 		// This test would take 5+ seconds with the real timeout,
 		// so we just verify the function signature works correctly
 		start := time.Now()
-		err := closeWithTimeout("test", func() error {
+		err := doltutil.CloseWithTimeout("test", func() error {
 			// Return immediately for this test
 			return nil
 		})

@@ -1,5 +1,4 @@
 //go:build cgo
-
 package migrations
 
 import (
@@ -10,6 +9,8 @@ import (
 	"testing"
 
 	embedded "github.com/dolthub/driver"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // openTestDolt creates a temporary embedded Dolt database for testing.
@@ -41,12 +42,12 @@ func openTestDolt(t *testing.T) *sql.DB {
 	initDB := sql.OpenDB(initConnector)
 	_, err = initDB.Exec("CREATE DATABASE IF NOT EXISTS beads")
 	if err != nil {
-		_ = initDB.Close()
-		_ = initConnector.Close()
+		_ = doltutil.CloseWithTimeout("initDB", initDB.Close)
+		_ = doltutil.CloseWithTimeout("initConnector", initConnector.Close)
 		t.Fatalf("failed to create database: %v", err)
 	}
-	_ = initDB.Close()
-	_ = initConnector.Close()
+	_ = doltutil.CloseWithTimeout("initDB", initDB.Close)
+	_ = doltutil.CloseWithTimeout("initConnector", initConnector.Close)
 
 	// Now connect with database specified
 	dsn := fmt.Sprintf("file://%s?commitname=test&commitemail=test@test.com&database=beads", absPath)
@@ -59,10 +60,10 @@ func openTestDolt(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to create connector: %v", err)
 	}
-	t.Cleanup(func() { _ = connector.Close() })
+	t.Cleanup(func() { _ = doltutil.CloseWithTimeout("connector", connector.Close) })
 
 	db := sql.OpenDB(connector)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = doltutil.CloseWithTimeout("db", db.Close) })
 
 	// Create minimal issues table without wisp_type (simulating old schema)
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS issues (
@@ -150,3 +151,5 @@ func TestTableExists(t *testing.T) {
 		t.Fatal("nonexistent table should not exist")
 	}
 }
+
+

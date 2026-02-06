@@ -604,6 +604,8 @@ var listCmd = &cobra.Command{
 		formatStr, _ := cmd.Flags().GetString("format")
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		labelPattern, _ := cmd.Flags().GetString("label-pattern")
+		labelRegex, _ := cmd.Flags().GetString("label-regex")
 		titleSearch, _ := cmd.Flags().GetString("title")
 		specPrefix, _ := cmd.Flags().GetString("spec")
 		idFilter, _ := cmd.Flags().GetString("id")
@@ -760,6 +762,12 @@ var listCmd = &cobra.Command{
 		}
 		if len(labelsAny) > 0 {
 			filter.LabelsAny = labelsAny
+		}
+		if labelPattern != "" {
+			filter.LabelPattern = labelPattern
+		}
+		if labelRegex != "" {
+			filter.LabelRegex = labelRegex
 		}
 		if titleSearch != "" {
 			filter.TitleSearch = titleSearch
@@ -983,6 +991,12 @@ var listCmd = &cobra.Command{
 			}
 			if len(labelsAny) > 0 {
 				listArgs.LabelsAny = labelsAny
+			}
+			if labelPattern != "" {
+				listArgs.LabelPattern = labelPattern
+			}
+			if labelRegex != "" {
+				listArgs.LabelRegex = labelRegex
 			}
 			// Forward title search via Query field (searches title/description/id)
 			if titleSearch != "" {
@@ -1374,6 +1388,8 @@ func init() {
 	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule")
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	listCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
+	listCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")

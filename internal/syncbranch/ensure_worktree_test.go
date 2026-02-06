@@ -311,10 +311,15 @@ func TestFreshCloneScenario(t *testing.T) {
 	}
 
 	// Verify getBeadsWorktreePath returns the worktree path
+	// Note: On macOS, /var is a symlink to /private/var, so we need to resolve
+	// symlinks before comparing paths
 	repoRoot := localDir
 	gotPath := getBeadsWorktreePath(ctx, repoRoot, "beads-sync")
-	if gotPath != worktreePath {
-		t.Errorf("getBeadsWorktreePath returned %q, expected %q", gotPath, worktreePath)
+	gotPathResolved, _ := filepath.EvalSymlinks(gotPath)
+	worktreePathResolved, _ := filepath.EvalSymlinks(worktreePath)
+	if gotPathResolved != worktreePathResolved {
+		t.Errorf("getBeadsWorktreePath returned %q (resolved: %q), expected %q (resolved: %q)",
+			gotPath, gotPathResolved, worktreePath, worktreePathResolved)
 	}
 
 	t.Logf("Fresh clone scenario test passed: worktree created at %s with current issues", worktreePath)

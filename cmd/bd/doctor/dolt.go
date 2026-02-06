@@ -1,5 +1,4 @@
 //go:build cgo
-
 package doctor
 
 import (
@@ -13,8 +12,16 @@ import (
 	_ "github.com/dolthub/driver"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/factory"
 )
+
+// closeDoltDBWithTimeout closes a sql.DB with a timeout to prevent indefinite hangs.
+// This is needed because embedded Dolt can hang on close.
+func closeDoltDBWithTimeout(db *sql.DB) {
+	// Use the shared helper; ignore errors since we're just cleaning up
+	_ = doltutil.CloseWithTimeout("db", db.Close)
+}
 
 // GetBackend returns the configured backend type from configuration.
 // It checks config.yaml first (storage-backend key), then falls back to metadata.json.
@@ -70,7 +77,7 @@ func CheckDoltConnection(path string) DoctorCheck {
 			Category: CategoryCore,
 		}
 	}
-	defer db.Close()
+	defer closeDoltDBWithTimeout(db)
 
 	// Switch to beads database and ping
 	ctx := context.Background()
@@ -130,7 +137,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 			Category: CategoryCore,
 		}
 	}
-	defer db.Close()
+	defer closeDoltDBWithTimeout(db)
 
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
@@ -219,7 +226,7 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 			Category: CategoryData,
 		}
 	}
-	defer db.Close()
+	defer closeDoltDBWithTimeout(db)
 
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
@@ -289,7 +296,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 			Category: CategoryData,
 		}
 	}
-	defer db.Close()
+	defer closeDoltDBWithTimeout(db)
 
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
@@ -348,3 +355,5 @@ func CheckDoltStatus(path string) DoctorCheck {
 		Category: CategoryData,
 	}
 }
+
+

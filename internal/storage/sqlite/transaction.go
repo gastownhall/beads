@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,15 +31,23 @@ type sqliteTxStorage struct {
 // preventing deadlocks when multiple goroutines compete for the same lock.
 //
 // Transaction lifecycle:
-//  1. Acquire dedicated connection from pool
-//  2. Begin IMMEDIATE transaction with retry on SQLITE_BUSY
-//  3. Execute user function with Transaction interface
-//  4. On success: COMMIT
-//  5. On error or panic: ROLLBACK
+//  1. Increment active transaction counter (blocks reconnect during active transactions)
+//  2. Acquire dedicated connection from pool
+//  3. Begin IMMEDIATE transaction with retry on SQLITE_BUSY
+//  4. Execute user function with Transaction interface
+//  5. On success: COMMIT
+//  6. On error or panic: ROLLBACK
+//  7. Decrement active transaction counter (via defer)
 //
 // Panic safety: If the callback panics, the transaction is rolled back
 // and the panic is re-raised to the caller.
 func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
+	// Increment active transaction count BEFORE acquiring connection.
+	// This blocks reconnect() from closing the connection while we're using it.
+	// The counter is decremented via defer to ensure it always happens.
+	s.activeTxCount.Add(1)
+	defer s.activeTxCount.Add(-1)
+
 	// Acquire a dedicated connection for the transaction.
 	// This ensures all operations in the transaction use the same connection.
 	conn, err := s.db.Conn(ctx)
@@ -48,9 +57,8 @@ func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 	defer func() { _ = conn.Close() }()
 
 	// Start IMMEDIATE transaction to acquire write lock early.
-	// BEGIN IMMEDIATE prevents deadlocks by acquiring the write lock upfront.
-	// The connection's busy_timeout pragma (30s) handles retries if locked.
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	// Use retry logic with exponential backoff to handle SQLITE_BUSY
+	if err := beginImmediateWithRetry(ctx, conn, 5, 10*time.Millisecond); err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
@@ -88,6 +96,47 @@ func (s *SQLiteStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 	}
 	committed = true
 	return nil
+}
+
+// beginImmediateWithRetry starts a transaction with BEGIN IMMEDIATE, retrying
+// on SQLITE_BUSY errors with exponential backoff.
+//
+// This is more robust than relying solely on busy_timeout because:
+// 1. Some BUSY errors aren't retryable by the busy handler (SQLITE_BUSY_SNAPSHOT)
+// 2. Explicit retries give us control over backoff timing
+// 3. We can log retry attempts for debugging
+func beginImmediateWithRetry(ctx context.Context, conn *sql.Conn, maxRetries int, initialBackoff time.Duration) error {
+	backoff := initialBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		_, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE")
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		// Check if this is a retryable error (SQLITE_BUSY)
+		errStr := err.Error()
+		if !strings.Contains(errStr, "database is locked") &&
+			!strings.Contains(errStr, "SQLITE_BUSY") {
+			// Not a busy error, don't retry
+			return err
+		}
+
+		// Check context before sleeping
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Sleep with exponential backoff
+		if attempt < maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+
+	return fmt.Errorf("failed to begin transaction after %d retries: %w", maxRetries, lastErr)
 }
 
 // CreateIssue creates a new issue within the transaction.
@@ -1317,6 +1366,15 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(placeholders, ", ")))
 	}
 
+	// Label pattern filtering (glob): issue must have at least one label matching the pattern
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label GLOB ?)")
+		args = append(args, filter.LabelPattern)
+	}
+
+	// Label regex filtering: done at application level after query (see filterByLabelRegex)
+	// SQLite doesn't have built-in regex support without extensions
+
 	// ID filtering: match specific issue IDs
 	if len(filter.IDs) > 0 {
 		placeholders := make([]string, len(filter.IDs))
@@ -1395,7 +1453,21 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	}
 	defer func() { _ = rows.Close() }()
 
-	return t.scanIssues(ctx, rows)
+	issues, err := t.scanIssues(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply label regex filtering at application level
+	// SQLite doesn't have built-in regex support without extensions
+	if filter.LabelRegex != "" {
+		issues, err = t.filterByLabelRegex(ctx, issues, filter.LabelRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to filter by label regex: %w", err)
+		}
+	}
+
+	return issues, nil
 }
 
 // scanner is an interface that both *sql.Row and *sql.Rows satisfy
@@ -1664,4 +1736,28 @@ func (t *sqliteTxStorage) getLabelsForIssues(ctx context.Context, issueIDs []str
 	}
 
 	return result, rows.Err()
+}
+
+// filterByLabelRegex filters issues to only include those with at least one label
+// matching the given regex pattern. This is done at the application level because
+// SQLite doesn't have built-in regex support without extensions.
+func (t *sqliteTxStorage) filterByLabelRegex(_ context.Context, issues []*types.Issue, pattern string) ([]*types.Issue, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
+	}
+
+	// Filter issues that have at least one label matching the regex
+	// Note: Labels were already loaded by scanIssues
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		for _, label := range issue.Labels {
+			if re.MatchString(label) {
+				filtered = append(filtered, issue)
+				break // Only need one match
+			}
+		}
+	}
+
+	return filtered, nil
 }

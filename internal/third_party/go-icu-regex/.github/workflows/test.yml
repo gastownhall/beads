@@ -1,0 +1,46 @@
+name: Test
+on: [pull_request]
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        go-version: [1.24.x]
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+    - name: Install Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: ${{ matrix.go-version }}
+    - name: Checkout code
+      uses: actions/checkout@v3
+    - name: Install ICU4C (MacOS)
+      if: ${{ matrix.platform == 'macos-latest' }}
+      run: |
+        dir=$(brew --cellar icu4c)
+        dir="$dir"/$(ls "$dir")
+        echo CGO_CPPFLAGS=-I$dir/include >> $GITHUB_ENV
+        echo CGO_LDFLAGS=-L$dir/lib >> $GITHUB_ENV
+    - name: Install ICU4C (Windows)
+      if: ${{ matrix.platform == 'windows-latest' }}
+      uses: msys2/setup-msys2@v2
+      with:
+        path-type: inherit
+        msystem: UCRT64
+        pacboy: icu:p toolchain:p pkg-config:p
+    - name: Test
+      if: ${{ matrix.platform == 'macos-latest' }}
+      run: go test ./...
+    - name: Test
+      if: ${{ matrix.platform == 'windows-latest' }}
+      shell: msys2 {0}
+      run: |
+        go.exe test ./...
+    - name: Test
+      if: ${{ matrix.platform == 'ubuntu-latest' }}
+      run: go test -race ./...

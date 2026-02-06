@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -950,6 +951,13 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 		if key == "waiters" {
 			waitersJSON, _ := json.Marshal(value)
 			args = append(args, string(waitersJSON))
+		} else if key == "metadata" {
+			// GH#1417: Normalize metadata to string, accepting string/[]byte/json.RawMessage
+			metadataStr, err := storage.NormalizeMetadataValue(value)
+			if err != nil {
+				return fmt.Errorf("invalid metadata: %w", err)
+			}
+			args = append(args, metadataStr)
 		} else {
 			args = append(args, value)
 		}
@@ -2059,6 +2067,15 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(placeholders, ", ")))
 	}
 
+	// Label pattern filtering (glob): issue must have at least one label matching the pattern
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label GLOB ?)")
+		args = append(args, filter.LabelPattern)
+	}
+
+	// Label regex filtering: done at application level after query (see filterByLabelRegex)
+	// SQLite doesn't have built-in regex support without extensions
+
 	// ID filtering: match specific issue IDs
 	if len(filter.IDs) > 0 {
 		placeholders := make([]string, len(filter.IDs))
@@ -2182,5 +2199,54 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	}
 	defer func() { _ = rows.Close() }()
 
-	return s.scanIssues(ctx, rows)
+	issues, err := s.scanIssues(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply label regex filtering at application level
+	// SQLite doesn't have built-in regex support without extensions
+	if filter.LabelRegex != "" {
+		issues, err = s.filterByLabelRegex(ctx, issues, filter.LabelRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to filter by label regex: %w", err)
+		}
+	}
+
+	return issues, nil
+}
+
+// filterByLabelRegex filters issues to only include those with at least one label
+// matching the given regex pattern. This is done at the application level because
+// SQLite doesn't have built-in regex support without extensions.
+func (s *SQLiteStorage) filterByLabelRegex(ctx context.Context, issues []*types.Issue, pattern string) ([]*types.Issue, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
+	}
+
+	// Get all issue IDs to fetch labels in bulk
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+
+	labelsMap, err := s.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter issues that have at least one label matching the regex
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		labels := labelsMap[issue.ID]
+		for _, label := range labels {
+			if re.MatchString(label) {
+				filtered = append(filtered, issue)
+				break // Only need one match
+			}
+		}
+	}
+
+	return filtered, nil
 }

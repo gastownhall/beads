@@ -297,3 +297,117 @@ func TestAgentShowWithRouting(t *testing.T) {
 
 	t.Logf("Successfully resolved agent %s via routing for show test", result.Issue.ID)
 }
+
+// TestBeadsDirOverrideSkipsRouting tests that when BEADS_DIR is set,
+// prefix-based routing is skipped and the local store is used.
+// This is a regression test for GH#663: when BEADS_DIR points to town beads,
+// bd show should query that store directly instead of prefix-routing to a rig.
+//
+// NOTE: This test uses os.Chdir and cannot run in parallel with other tests.
+func TestBeadsDirOverrideSkipsRouting(t *testing.T) {
+	ctx := context.Background()
+
+	// Create temp directory structure:
+	// tmpDir/
+	//   .beads/
+	//     beads.db (town database with prefix "gt" - has the bead)
+	//     routes.jsonl (routing config that would route gt- to rig/)
+	//   rig/
+	//     .beads/
+	//       beads.db (rig database with prefix "gt" - does NOT have the bead)
+	//
+	// Without BEADS_DIR: routing sends gt-* lookups to rig/.beads → miss
+	// With BEADS_DIR=tmpDir/.beads: routing skipped → found in town store
+	tmpDir := t.TempDir()
+
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create town beads dir: %v", err)
+	}
+
+	rigBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create rig beads dir: %v", err)
+	}
+
+	// Both stores use prefix "gt" — town holds the bead, rig is empty
+	townDBPath := filepath.Join(townBeadsDir, "beads.db")
+	townStore := newTestStoreWithPrefix(t, townDBPath, "gt")
+
+	rigDBPath := filepath.Join(rigBeadsDir, "beads.db")
+	_ = newTestStoreWithPrefix(t, rigDBPath, "gt")
+
+	// Create a bead in the town database
+	townBead := &types.Issue{
+		ID:        "gt-town-message",
+		Title:     "Message stored in town beads",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+	if err := townStore.CreateIssue(ctx, townBead, "test"); err != nil {
+		t.Fatalf("Failed to create bead: %v", err)
+	}
+
+	// Create routes.jsonl that would route gt- to rig/
+	routesContent := `{"prefix":"gt-","path":"rig"}`
+	routesPath := filepath.Join(townBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte(routesContent), 0644); err != nil {
+		t.Fatalf("Failed to write routes.jsonl: %v", err)
+	}
+
+	// Set up global state
+	oldDbPath := dbPath
+	dbPath = townDBPath
+	t.Cleanup(func() { dbPath = oldDbPath })
+
+	// Change to tmpDir so routing can find town root via CWD
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change to temp directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	// Set BEADS_DIR to town beads — this should override prefix routing
+	t.Setenv("BEADS_DIR", townBeadsDir)
+
+	// Test: resolveAndGetIssueWithRouting should find the bead in town store
+	// WITHOUT routing, because BEADS_DIR is set.
+	result, err := resolveAndGetIssueWithRouting(ctx, townStore, "gt-town-message")
+	if err != nil {
+		t.Fatalf("resolveAndGetIssueWithRouting with BEADS_DIR failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("resolveAndGetIssueWithRouting returned nil — BEADS_DIR override not working")
+	}
+	defer result.Close()
+
+	if result.Issue == nil {
+		t.Fatal("resolveAndGetIssueWithRouting returned nil issue")
+	}
+	if result.Issue.ID != "gt-town-message" {
+		t.Errorf("Expected issue ID %q, got %q", "gt-town-message", result.Issue.ID)
+	}
+	if result.Routed {
+		t.Error("Expected result.Routed to be false when BEADS_DIR is set")
+	}
+
+	// Test: needsRouting should return false when BEADS_DIR is set
+	if needsRouting("gt-town-message") {
+		t.Error("needsRouting should return false when BEADS_DIR is set")
+	}
+
+	// Test: getRoutedStoreForID should return nil when BEADS_DIR is set
+	routedStore, err := getRoutedStoreForID(ctx, "gt-town-message")
+	if err != nil {
+		t.Fatalf("getRoutedStoreForID with BEADS_DIR failed: %v", err)
+	}
+	if routedStore != nil {
+		t.Error("getRoutedStoreForID should return nil when BEADS_DIR is set")
+		_ = routedStore.Close()
+	}
+
+	t.Log("BEADS_DIR override correctly skipped prefix routing (GH#663)")
+}

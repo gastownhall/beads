@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -99,6 +100,20 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 			args = append(args, label)
 		}
 	}
+
+	// Label pattern filtering (glob): issue must have at least one label matching the pattern
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, `
+			EXISTS (
+				SELECT 1 FROM labels
+				WHERE issue_id = i.id AND label GLOB ?
+			)
+		`)
+		args = append(args, filter.LabelPattern)
+	}
+
+	// Label regex filtering: done at application level after query
+	// SQLite doesn't have built-in regex support without extensions
 
 	// Parent filtering: filter to all descendants of a root issue (epic/molecule)
 	// Uses recursive CTE to find all descendants via parent-child dependencies
@@ -205,7 +220,39 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		}
 	}
 
+	// Apply label regex filtering at application level
+	// SQLite doesn't have built-in regex support without extensions
+	if filter.LabelRegex != "" {
+		issues, err = s.filterReadyByLabelRegex(issues, filter.LabelRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to filter by label regex: %w", err)
+		}
+	}
+
 	return issues, nil
+}
+
+// filterReadyByLabelRegex filters issues to only include those with at least one label
+// matching the given regex pattern. Used by GetReadyWork.
+func (s *SQLiteStorage) filterReadyByLabelRegex(issues []*types.Issue, pattern string) ([]*types.Issue, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
+	}
+
+	// Filter issues that have at least one label matching the regex
+	// Labels are already populated by scanReadyIssues
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		for _, label := range issue.Labels {
+			if re.MatchString(label) {
+				filtered = append(filtered, issue)
+				break // Only need one match
+			}
+		}
+	}
+
+	return filtered, nil
 }
 
 // filterByExternalDeps removes issues that have unsatisfied external dependencies.

@@ -42,6 +42,7 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 | --- | --- |
 | `bd ready` | List tasks with no open blockers. |
 | `bd create "Title" -p 0` | Create a P0 task. |
+| `bd update <id> --claim` | Atomically claim a task (sets assignee + in_progress). |
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
 

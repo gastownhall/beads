@@ -144,4 +144,125 @@ func TestIssueMetadataRoundTrip(t *testing.T) {
 			t.Errorf("Expected nil Metadata for issue without metadata, got %s", got.Metadata)
 		}
 	})
+
+	// GH#1417: Test updating metadata with []byte and json.RawMessage
+	t.Run("update issue metadata with []byte", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Issue to update metadata with []byte",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Metadata:  json.RawMessage(`{"version":1}`),
+		}
+
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Update metadata using []byte
+		newMetadata := []byte(`{"version":2,"source":"[]byte"}`)
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": newMetadata,
+		}, "test-user"); err != nil {
+			t.Fatalf("UpdateIssue with []byte failed: %v", err)
+		}
+
+		// Verify update
+		got, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if !jsonEqual(t, got.Metadata, json.RawMessage(newMetadata)) {
+			t.Errorf("Updated metadata = %s, want %s", got.Metadata, newMetadata)
+		}
+	})
+
+	t.Run("update issue metadata with json.RawMessage", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Issue to update metadata with json.RawMessage",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Metadata:  json.RawMessage(`{"version":1}`),
+		}
+
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Update metadata using json.RawMessage
+		newMetadata := json.RawMessage(`{"version":3,"source":"json.RawMessage"}`)
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": newMetadata,
+		}, "test-user"); err != nil {
+			t.Fatalf("UpdateIssue with json.RawMessage failed: %v", err)
+		}
+
+		// Verify update
+		got, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue failed: %v", err)
+		}
+		if !jsonEqual(t, got.Metadata, newMetadata) {
+			t.Errorf("Updated metadata = %s, want %s", got.Metadata, newMetadata)
+		}
+	})
+
+	t.Run("update metadata with invalid JSON returns error", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Issue for invalid metadata test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Try to update with invalid JSON string
+		err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": "{invalid json}",
+		}, "test-user")
+		if err == nil {
+			t.Error("Expected error when updating with invalid JSON, got nil")
+		}
+
+		// Try to update with invalid JSON []byte
+		err = store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": []byte("not json"),
+		}, "test-user")
+		if err == nil {
+			t.Error("Expected error when updating with invalid JSON []byte, got nil")
+		}
+	})
+
+	t.Run("update metadata with unsupported type returns error", func(t *testing.T) {
+		issue := &types.Issue{
+			Title:     "Issue for unsupported type test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Try to update with unsupported type (int)
+		err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": 123,
+		}, "test-user")
+		if err == nil {
+			t.Error("Expected error when updating with int, got nil")
+		}
+
+		// Try to update with unsupported type (map)
+		err = store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"metadata": map[string]string{"key": "value"},
+		}, "test-user")
+		if err == nil {
+			t.Error("Expected error when updating with map, got nil")
+		}
+	})
 }

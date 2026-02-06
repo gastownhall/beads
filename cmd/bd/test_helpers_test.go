@@ -2,16 +2,33 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 )
+
+// testIDCounter ensures unique IDs across all test runs
+var testIDCounter atomic.Uint64
+
+// generateUniqueTestID creates a globally unique test ID using prefix, test name, and atomic counter.
+// This prevents ID collisions when multiple tests manipulate global state.
+func generateUniqueTestID(t *testing.T, prefix string, index int) string {
+	t.Helper()
+	counter := testIDCounter.Add(1)
+	// include test name, counter, and index for uniqueness
+	data := []byte(t.Name() + prefix + string(rune(counter)) + string(rune(index)))
+	hash := sha256.Sum256(data)
+	return prefix + "-" + hex.EncodeToString(hash[:])[:8]
+}
 
 const windowsOS = "windows"
 
@@ -50,24 +67,24 @@ func ensureCleanGlobalState(t *testing.T) {
 // and fails the test to prevent test pollution (bd-2c5a)
 func failIfProductionDatabase(t *testing.T, dbPath string) {
 	t.Helper()
-	
+
 	// CRITICAL (bd-2c5a): Set test mode flag
 	ensureTestMode(t)
-	
+
 	// Get absolute path for comparison
 	absPath, err := filepath.Abs(dbPath)
 	if err != nil {
 		t.Logf("Warning: Could not get absolute path for %s: %v", dbPath, err)
 		return
 	}
-	
+
 	// Use worktree-aware git directory detection
 	gitDir, err := git.GetGitDir()
 	if err != nil {
 		// Not a git repository, no pollution risk
 		return
 	}
-	
+
 	// Check if database is in .beads/ directory of this git repository
 	beadsPath := ""
 	gitDirAbs, err := filepath.Abs(gitDir)
@@ -75,12 +92,12 @@ func failIfProductionDatabase(t *testing.T, dbPath string) {
 		t.Logf("Warning: Could not get absolute path for git dir %s: %v", gitDir, err)
 		return
 	}
-	
+
 	// The .beads directory should be at the root of the git repository
 	// For worktrees, gitDir points to the main repo's .git directory
 	repoRoot := filepath.Dir(gitDirAbs)
 	beadsPath = filepath.Join(repoRoot, ".beads")
-	
+
 	if strings.HasPrefix(absPath, beadsPath) {
 		// Database is in .beads/ directory of a git repository
 		// This is ONLY allowed if we're in a temp directory
@@ -132,19 +149,19 @@ func newTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 // newTestStoreWithPrefix creates a SQLite store with custom issue_prefix configured
 func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *sqlite.SQLiteStorage {
 	t.Helper()
-	
+
 	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
 	failIfProductionDatabase(t, dbPath)
-	
+
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatalf("Failed to create database directory: %v", err)
 	}
-	
+
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
-	
+
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
 	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {

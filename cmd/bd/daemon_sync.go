@@ -15,7 +15,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
@@ -63,14 +62,8 @@ func shouldSkipDueToSameBranch(ctx context.Context, store storage.Storage, opera
 // exportToJSONLWithStore exports issues to JSONL using the provided store.
 // If multi-repo mode is configured, routes issues to their respective JSONL files.
 // Otherwise, exports to a single JSONL file.
-// Respects sync mode: skips JSONL export in dolt-native mode (bd-u9yv).
+// Always writes local JSONL as a safety net (even in dolt-native mode).
 func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
-	// Check sync mode before JSONL export (bd-u9yv: dolt-native mode should skip JSONL)
-	if !ShouldExportJSONL(ctx, store) {
-		debug.Logf("skipping JSONL export (dolt-native mode)")
-		return nil
-	}
-
 	// Try multi-repo export first
 	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 	if ok {
@@ -515,6 +508,54 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 			log.Info("Removed stale lock, proceeding", "holder", holder)
 		}
 
+		// Auto-import if JSONL has changed since last import (GH#XXXX)
+		// This prevents "refusing to export: JSONL content has changed" errors
+		// when external changes (git pull, other clones) modify JSONL between imports.
+		// Check JSONL content hash to detect external changes
+		repoKey := getRepoKeyForPath(jsonlPath)
+		if hasJSONLChanged(exportCtx, store, jsonlPath, repoKey) {
+			log.Info("JSONL changed externally, importing before export")
+
+			// Count issues before import for validation
+			beforeCount, err := countDBIssues(exportCtx, store)
+			if err != nil {
+				log.Info("Failed to count issues before auto-import", "error", err)
+				return
+			}
+
+			// Import external changes
+			if err := importToJSONLWithStore(exportCtx, store, jsonlPath); err != nil {
+				log.Info("Auto-import failed", "error", err)
+				return
+			}
+
+			// Validate import didn't cause data loss
+			afterCount, err := countDBIssues(exportCtx, store)
+			if err != nil {
+				log.Info("Failed to count issues after auto-import", "error", err)
+				return
+			}
+
+			if err := validatePostImport(beforeCount, afterCount, jsonlPath); err != nil {
+				log.Info("Post-import validation failed", "error", err)
+				return
+			}
+
+			// Update metadata hash to match imported JSONL
+			// This prevents pre-export validation from failing
+			if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
+				hashKey := "jsonl_content_hash"
+				if repoKey != "" {
+					hashKey += ":" + repoKey
+				}
+				if err := store.SetMetadata(exportCtx, hashKey, currentHash); err != nil {
+					log.Info("Failed to update JSONL hash after auto-import", "error", err)
+				}
+			}
+
+			log.Info("Auto-import complete, proceeding with export")
+		}
+
 		// Pre-export validation
 		if err := validatePreExport(exportCtx, store, jsonlPath); err != nil {
 			log.Info("Pre-export validation failed", "error", err)
@@ -699,17 +740,7 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 			log.Info("Removed stale lock, proceeding", "holder", holder)
 		}
 
-		// Check JSONL content hash to avoid redundant imports
-		// Use content-based check (not mtime) to avoid git resurrection bug
-		// Use getRepoKeyForPath for multi-repo support
-		repoKey := getRepoKeyForPath(jsonlPath)
-		if !hasJSONLChanged(importCtx, store, jsonlPath, repoKey) {
-			log.Info("Skipping: JSONL content unchanged", "mode", mode)
-			return
-		}
-		log.Info("JSONL content changed, proceeding", "mode", mode)
-
-		// Pull from git if not in git-free mode
+		// Pull from git if not in git-free mode (do this BEFORE checking if JSONL changed)
 		if !skipGit {
 			// SAFETY CHECK: Warn if there are uncommitted local changes
 			// This helps detect race conditions where local work hasn't been pushed yet
@@ -742,6 +773,17 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 				log.Info("Pulled from remote")
 			}
 		}
+
+		// Check JSONL content hash AFTER pulling to detect changes from remote
+		// Use content-based check (not mtime) to avoid git resurrection bug
+		// Use getRepoKeyForPath for multi-repo support
+		log.Info("🔍 Checking JSONL content hash AFTER pull (fix: auto-pull-not-pulling)")
+		repoKey := getRepoKeyForPath(jsonlPath)
+		if !hasJSONLChanged(importCtx, store, jsonlPath, repoKey) {
+			log.Info("Skipping: JSONL content unchanged", "mode", mode)
+			return
+		}
+		log.Info("JSONL content changed, proceeding with operation...", "mode", mode)
 
 		// Count issues before import
 		beforeCount, err := countDBIssues(importCtx, store)

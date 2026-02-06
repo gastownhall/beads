@@ -27,6 +27,8 @@ require (
 	rsc.io/script v0.0.2
 )
 
+replace github.com/dolthub/go-icu-regex => ./internal/third_party/go-icu-regex
+
 require (
 	cel.dev/expr v0.24.0 // indirect
 	cloud.google.com/go v0.120.0 // indirect

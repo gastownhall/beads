@@ -71,6 +71,31 @@ The installer will:
 
 **TL;DR:** Use Homebrew if available. Use npm if you're in a Node.js environment. Use the script for quick one-off installs or CI.
 
+## Build Dependencies (go install / from source)
+
+If you install via `go install` or build from source, you need system dependencies for CGO:
+
+macOS (Homebrew):
+```bash
+brew install icu4c zstd
+```
+
+Linux (Debian/Ubuntu):
+```bash
+sudo apt-get install -y libicu-dev libzstd-dev
+```
+
+Linux (Fedora/RHEL):
+```bash
+sudo dnf install -y libicu-devel libzstd-devel
+```
+
+If you see `unicode/uregex.h` missing on macOS, `icu4c` is keg-only. Use:
+```bash
+ICU_PREFIX="$(brew --prefix icu4c)"
+CGO_CFLAGS="-I${ICU_PREFIX}/include" CGO_CPPFLAGS="-I${ICU_PREFIX}/include" CGO_LDFLAGS="-L${ICU_PREFIX}/lib" go install github.com/steveyegge/beads/cmd/bd@latest
+```
+
 ## Platform-Specific Installation
 
 ### macOS
@@ -148,6 +173,10 @@ Beads now ships with native Windows support—no MSYS or MinGW required.
 irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 ```
 
+The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
+
+**Dolt backend on Windows:** Supported. Windows builds use a pure-Go regex backend to avoid ICU/CGO headers. If you need full ICU regex semantics, use Linux/macOS (or WSL) with ICU installed.
+
 **Via go install**:
 ```pwsh
 go install github.com/steveyegge/beads/cmd/bd@latest
@@ -160,6 +189,8 @@ cd beads
 go build -o bd.exe ./cmd/bd
 Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
 ```
+
+If you see `unicode/uregex.h` missing while building, use the PowerShell install script instead (it downloads a prebuilt binary).
 
 **Verify installation**:
 ```pwsh

@@ -1,5 +1,4 @@
 //go:build cgo
-
 package main
 
 import (
@@ -483,3 +482,5 @@ func runFederationListPeers(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println()
 }
+
+

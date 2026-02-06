@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -8,6 +7,8 @@ import (
 	"errors"
 
 	embedded "github.com/dolthub/driver"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 func ignoreContextCanceled(err error) error {
@@ -65,9 +66,10 @@ func withEmbeddedDolt(
 
 	defer func() {
 		// Close DB first (stops pool activity), then close the connector to release engine locks.
+		// Use CloseWithTimeout to prevent indefinite hangs (same issue as DoltStore.Close).
 		cerr := errors.Join(
-			ignoreContextCanceled(db.Close()),
-			ignoreContextCanceled(connector.Close()),
+			ignoreContextCanceled(doltutil.CloseWithTimeout("db", db.Close)),
+			ignoreContextCanceled(doltutil.CloseWithTimeout("connector", connector.Close)),
 		)
 		if err == nil {
 			err = cerr
@@ -83,4 +85,6 @@ func withEmbeddedDolt(
 
 	return fn(ctx, db)
 }
+
+
 

@@ -55,10 +55,11 @@ var (
 	checkHealthMode      bool
 	doctorCheckFlag      string // run specific check (e.g., "pollution")
 	doctorClean          bool   // for pollution check, delete detected issues
-	doctorDeep                  bool // full graph integrity validation
-	doctorGastown               bool // running in gastown multi-workspace mode
-	gastownDuplicatesThreshold  int  // duplicate tolerance threshold for gastown mode
-	doctorServer                bool // run server mode health checks
+	doctorDeep                  bool   // full graph integrity validation
+	doctorGastown               bool   // running in gastown multi-workspace mode
+	gastownDuplicatesThreshold  int    // duplicate tolerance threshold for gastown mode
+	doctorServer                bool   // run server mode health checks
+	doctorMigration             string // migration validation mode: "pre" or "post"
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -123,6 +124,19 @@ Server Mode (--server):
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
 
+Migration Validation Mode (--migration):
+  Run Dolt migration validation checks with machine-parseable output.
+  Use --migration=pre before migration to verify readiness:
+  - JSONL file exists and is valid (parseable, no corruption)
+  - All JSONL issues are present in SQLite (or explains discrepancies)
+  - No blocking issues prevent migration
+  Use --migration=post after migration to verify completion:
+  - Dolt database exists and is healthy
+  - All issues from JSONL are present in Dolt
+  - No data was lost during migration
+  - Dolt database has no locks or uncommitted changes
+  Combine with --json for machine-parseable output for automation.
+
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
@@ -139,7 +153,10 @@ Examples:
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --deep             # Full graph integrity validation
-  bd doctor --server           # Dolt server mode health checks`,
+  bd doctor --server           # Dolt server mode health checks
+  bd doctor --migration=pre    # Validate readiness for Dolt migration
+  bd doctor --migration=post   # Validate Dolt migration completed
+  bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 
@@ -199,6 +216,12 @@ Examples:
 			return
 		}
 
+		// Run migration validation if --migration flag is set
+		if doctorMigration != "" {
+			runMigrationValidation(absPath, doctorMigration)
+			return
+		}
+
 		// Run diagnostics
 		result := runDiagnostics(absPath)
 
@@ -253,6 +276,7 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorGastown, "gastown", false, "Running in gastown multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
 	doctorCmd.Flags().IntVar(&gastownDuplicatesThreshold, "gastown-duplicates-threshold", 1000, "Duplicate tolerance threshold for gastown mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
+	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -328,6 +352,11 @@ func runDiagnostics(path string) doctorResult {
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
+
+	// Check 2d: Backend migration (SQLite + prefer-dolt → recommend Dolt)
+	backendMigrationCheck := convertDoctorCheck(doctor.CheckBackendMigration(path))
+	result.Checks = append(result.Checks, backendMigrationCheck)
+	// Don't fail overall check for backend migration, just warn
 
 	// Check 3: ID format (hash vs sequential)
 	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
@@ -690,6 +719,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, kvSyncCheck)
 	// Don't fail overall check for KV sync warning, just inform
 
+	// Check 32: Dolt locks (uncommitted changes)
+	doltLocksCheck := convertDoctorCheck(doctor.CheckDoltLocks(path))
+	result.Checks = append(result.Checks, doltLocksCheck)
+	// Don't fail overall check for Dolt locks, just warn
+
 	return result
 }
 
@@ -871,5 +905,116 @@ func printDiagnostics(result doctorResult) {
 	} else {
 		fmt.Println()
 		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
+	}
+}
+
+// runMigrationValidation runs Dolt migration validation checks.
+// Phase can be "pre" (before migration) or "post" (after migration).
+// Outputs machine-parseable JSON when --json flag is set.
+func runMigrationValidation(path string, phase string) {
+	var check doctorCheck
+	var result doctor.MigrationValidationResult
+
+	switch phase {
+	case "pre":
+		dc, mr := doctor.CheckMigrationReadiness(path)
+		check = convertDoctorCheck(dc)
+		result = mr
+	case "post":
+		dc, mr := doctor.CheckMigrationCompletion(path)
+		check = convertDoctorCheck(dc)
+		result = mr
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid migration phase %q (use 'pre' or 'post')\n", phase)
+		os.Exit(1)
+	}
+
+	// JSON output for machine consumption
+	if jsonOutput {
+		output := struct {
+			Check      doctorCheck                       `json:"check"`
+			Validation doctor.MigrationValidationResult `json:"validation"`
+			CLIVersion string                            `json:"cli_version"`
+			Timestamp  string                            `json:"timestamp"`
+		}{
+			Check:      check,
+			Validation: result,
+			CLIVersion: Version,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		}
+		outputJSON(output)
+		if !result.Ready {
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Human-readable output
+	fmt.Printf("\nbd doctor --migration=%s v%s\n\n", phase, Version)
+
+	// Print main status
+	var statusIcon string
+	switch check.Status {
+	case statusOK:
+		statusIcon = ui.RenderPassIcon()
+	case statusWarning:
+		statusIcon = ui.RenderWarnIcon()
+	case statusError:
+		statusIcon = ui.RenderFailIcon()
+	}
+
+	fmt.Printf("%s  %s: %s\n", statusIcon, check.Name, check.Message)
+	if check.Detail != "" {
+		for _, line := range strings.Split(check.Detail, "\n") {
+			fmt.Printf("     %s\n", ui.RenderMuted(line))
+		}
+	}
+
+	// Print validation details
+	fmt.Println()
+	fmt.Println(ui.RenderCategory("Validation Details"))
+	fmt.Printf("  Backend:     %s\n", result.Backend)
+	fmt.Printf("  JSONL Count: %d\n", result.JSONLCount)
+	if result.SQLiteCount > 0 {
+		fmt.Printf("  SQLite Count: %d\n", result.SQLiteCount)
+	}
+	if result.DoltCount > 0 {
+		fmt.Printf("  Dolt Count:  %d\n", result.DoltCount)
+	}
+	fmt.Printf("  JSONL Valid: %v\n", result.JSONLValid)
+	if result.JSONLMalformed > 0 {
+		fmt.Printf("  Malformed Lines: %d\n", result.JSONLMalformed)
+	}
+
+	// Print warnings
+	if len(result.Warnings) > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderCategory("Warnings"))
+		for _, warn := range result.Warnings {
+			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), warn)
+		}
+	}
+
+	// Print errors
+	if len(result.Errors) > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderCategory("Errors"))
+		for _, err := range result.Errors {
+			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), err)
+		}
+	}
+
+	// Print fix suggestion
+	if check.Fix != "" {
+		fmt.Println()
+		fmt.Printf("%s  %s\n", ui.RenderMuted("Fix:"), check.Fix)
+	}
+
+	fmt.Println()
+	if result.Ready {
+		fmt.Printf("%s\n", ui.RenderPass("✓ Migration validation passed"))
+	} else {
+		fmt.Printf("%s\n", ui.RenderFail("✗ Migration validation failed"))
+		os.Exit(1)
 	}
 }

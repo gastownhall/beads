@@ -64,12 +64,17 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	
 	// Normalize input:
 	// 1. If it has the full prefix with hyphen (bd-a3f8e9), use as-is
-	// 2. Otherwise, add prefix with hyphen (handles both bare hashes and prefix-without-hyphen cases)
-	
+	// 2. If it has ANY prefix (different from configured), use as-is for cross-prefix lookup
+	// 3. Otherwise, add prefix with hyphen (handles both bare hashes and prefix-without-hyphen cases)
+
 	var normalizedID string
-	
+
 	if strings.HasPrefix(input, prefixWithHyphen) {
-		// Already has prefix with hyphen: "bd-a3f8e9"
+		// Already has configured prefix with hyphen: "bd-a3f8e9"
+		normalizedID = input
+	} else if looksLikePrefixedID(input) {
+		// Has a different prefix (e.g., "aap-4ar" when configured prefix is "hq-")
+		// Don't prepend configured prefix - use as-is for cross-prefix lookup (GH#1513)
 		normalizedID = input
 	} else {
 		// Bare hash or prefix without hyphen: "a3f8e9", "07b8c8", "bda3f8e9" → all get prefix with hyphen added
@@ -152,4 +157,37 @@ func ResolvePartialIDs(ctx context.Context, store storage.Storage, inputs []stri
 		resolved = append(resolved, fullID)
 	}
 	return resolved, nil
+}
+
+// looksLikePrefixedID checks if input appears to already have a prefix.
+// A prefixed ID has the format "prefix-hash" where prefix is 1-8 lowercase
+// letters/numbers and hash is alphanumeric (potentially with dots for hierarchical IDs).
+// Examples: "aap-4ar", "bd-a3f8e9", "myproject-abc.1"
+func looksLikePrefixedID(input string) bool {
+	idx := strings.Index(input, "-")
+	if idx <= 0 || idx > 8 {
+		// No hyphen, hyphen at start, or prefix too long
+		return false
+	}
+
+	prefix := input[:idx]
+	suffix := input[idx+1:]
+
+	// Prefix must be non-empty lowercase alphanumeric
+	for _, c := range prefix {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+
+	// Suffix must be non-empty and start with alphanumeric
+	if len(suffix) == 0 {
+		return false
+	}
+	first := rune(suffix[0])
+	if !((first >= 'a' && first <= 'z') || (first >= '0' && first <= '9')) {
+		return false
+	}
+
+	return true
 }

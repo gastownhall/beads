@@ -1,5 +1,4 @@
 //go:build cgo && !windows
-
 package dolt
 
 import (
@@ -29,3 +28,4 @@ func terminateProcess(p *os.Process) error {
 	}
 	return nil
 }
+

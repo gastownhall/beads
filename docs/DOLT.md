@@ -377,10 +377,14 @@ sync:
 
 | Variable | Purpose |
 |----------|---------|
-| `BD_BACKEND` | Override backend (sqlite/dolt) |
-| `BD_DOLT_MODE` | Override mode (embedded/server) |
 | `BEADS_DOLT_PASSWORD` | Server mode password |
+| `BEADS_DOLT_SERVER_MODE` | Enable server mode (set to "1") |
+| `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
+| `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307) |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
+
+**Note**: Backend selection (`sqlite` vs `dolt`) is controlled by `metadata.json`,
+not environment variables. This prevents accidental data fragmentation across backends.
 
 ## Dolt Version Control
 

@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -624,3 +623,5 @@ func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string
 
 	return fmt.Sprintf("%s.%d", parentID, nextChild), nil
 }
+
+

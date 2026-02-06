@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -676,3 +675,5 @@ func TestAddDependency_MultipleExternalReferences(t *testing.T) {
 }
 
 // Note: testContext is already defined in dolt_test.go for this package
+
+

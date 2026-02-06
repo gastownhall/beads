@@ -206,6 +206,9 @@ func (e *DualModeTestEnv) UpdateIssue(id string, updates map[string]interface{})
 	if desc, ok := updates["description"].(string); ok {
 		args.Description = &desc
 	}
+	if issueType, ok := updates["issue_type"].(string); ok {
+		args.IssueType = &issueType
+	}
 
 	resp, err := e.client.Update(args)
 	if err != nil {

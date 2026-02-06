@@ -957,6 +957,8 @@ type IssueFilter struct {
 	Assignee     *string
 	Labels       []string // AND semantics: issue must have ALL these labels
 	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
+	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
 	TitleSearch  string
 	IDs          []string // Filter by specific issue IDs
 	IDPrefix     string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
@@ -1056,9 +1058,11 @@ type WorkFilter struct {
 	Priority   *int
 	Assignee   *string
 	Unassigned bool     // Filter for issues with no assignee
-	Labels     []string // AND semantics: issue must have ALL these labels
-	LabelsAny  []string // OR semantics: issue must have AT LEAST ONE of these labels
-	Limit      int
+	Labels       []string // AND semantics: issue must have ALL these labels
+	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
+	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	Limit        int
 	SortPolicy SortPolicy
 
 	// Parent filtering: filter to descendants of a bead/epic (recursive)

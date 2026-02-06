@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -243,3 +242,5 @@ type SyncResult struct {
 	Error             error
 	PushError         error // Non-fatal push error
 }
+
+

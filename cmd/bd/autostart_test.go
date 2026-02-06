@@ -10,7 +10,17 @@ import (
 func TestDaemonAutoStart(t *testing.T) {
 	// Initialize config for tests
 	initConfigForTest(t)
-	
+
+	// Stub out backend checks so they don't interfere with env var testing
+	oldIsDoltBackendFn := isDoltBackendFn
+	oldSingleProcessOnlyBackendFn := singleProcessOnlyBackendFn
+	isDoltBackendFn = func() bool { return false }
+	singleProcessOnlyBackendFn = func() bool { return false }
+	defer func() {
+		isDoltBackendFn = oldIsDoltBackendFn
+		singleProcessOnlyBackendFn = oldSingleProcessOnlyBackendFn
+	}()
+
 	// Save original env
 	origAutoStart := os.Getenv("BEADS_AUTO_START_DAEMON")
 	origNoDaemon := os.Getenv("BEADS_NO_DAEMON")

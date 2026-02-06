@@ -1,5 +1,4 @@
 //go:build cgo
-
 package factory
 
 import (
@@ -74,3 +73,5 @@ func TestIsServerConnectionError(t *testing.T) {
 		})
 	}
 }
+
+

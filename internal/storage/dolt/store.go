@@ -1,5 +1,4 @@
 //go:build cgo
-
 // Package dolt implements the storage interface using Dolt (versioned MySQL-compatible database).
 //
 // Dolt provides native version control for SQL data with cell-level merge, history queries,
@@ -35,6 +34,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // DoltStore implements the Storage interface using Dolt
@@ -203,8 +203,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Acquire advisory flock before opening dolt (embedded mode only).
 	// This prevents multiple bd processes from competing for dolt's internal LOCK file.
+	// Set BD_SKIP_ACCESS_LOCK=1 to bypass flock for testing whether Dolt's internal
+	// locking is sufficient. See bd-39gso for testing plan.
 	var accessLock *AccessLock
-	if !cfg.ServerMode && cfg.OpenTimeout > 0 {
+	if !cfg.ServerMode && cfg.OpenTimeout > 0 && os.Getenv("BD_SKIP_ACCESS_LOCK") == "" {
 		exclusive := !cfg.ReadOnly
 		var lockErr error
 		accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
@@ -238,12 +240,14 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			c.BackOff = newEmbeddedOpenBackoff()
 		}
 
-		// UOW 1: ensure database exists.
-		if err := withEmbeddedDolt(ctx, initDSN, configureRetries, func(ctx context.Context, db *sql.DB) error {
-			_, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database))
-			return err
-		}); err != nil {
-			return nil, fmt.Errorf("failed to create dolt database: %w", err)
+		// UOW 1: ensure database exists. Skip in read-only mode.
+		if !cfg.ReadOnly {
+			if err := withEmbeddedDolt(ctx, initDSN, configureRetries, func(ctx context.Context, db *sql.DB) error {
+				_, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database))
+				return err
+			}); err != nil {
+				return nil, fmt.Errorf("failed to create dolt database: %w", err)
+			}
 		}
 
 		// UOW 2: initialize schema (idempotent). Skip in read-only mode.
@@ -548,27 +552,6 @@ func isOnlyComments(stmt string) bool {
 	return true
 }
 
-// closeTimeout is the maximum time to wait for db/connector close operations.
-// Embedded Dolt can hang indefinitely on close; this prevents bd from hanging.
-const closeTimeout = 5 * time.Second
-
-// closeWithTimeout runs a close function with a timeout to prevent indefinite hangs.
-// Returns the close error, or a timeout error if the close doesn't complete in time.
-func closeWithTimeout(name string, closeFn func() error) error {
-	done := make(chan error, 1)
-	go func() {
-		done <- closeFn()
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(closeTimeout):
-		// Close is hanging - log and continue rather than blocking forever
-		return fmt.Errorf("%s close timed out after %v", name, closeTimeout)
-	}
-}
-
 // Close closes the database connection
 func (s *DoltStore) Close() error {
 	s.closed.Store(true)
@@ -576,7 +559,7 @@ func (s *DoltStore) Close() error {
 	defer s.mu.Unlock()
 	var err error
 	if s.db != nil {
-		if cerr := closeWithTimeout("db", s.db.Close); cerr != nil {
+		if cerr := doltutil.CloseWithTimeout("db", s.db.Close); cerr != nil {
 			// Timeout is non-fatal for cleanup - just log it
 			if !errors.Is(cerr, context.Canceled) {
 				err = errors.Join(err, cerr)
@@ -585,7 +568,7 @@ func (s *DoltStore) Close() error {
 	}
 	// For embedded mode, ensure the underlying engine is closed to release filesystem locks.
 	if s.embeddedConnector != nil {
-		cerr := closeWithTimeout("embeddedConnector", s.embeddedConnector.Close)
+		cerr := doltutil.CloseWithTimeout("embeddedConnector", s.embeddedConnector.Close)
 		// Ignore context cancellation noise from Dolt shutdown plumbing.
 		if cerr != nil && !errors.Is(cerr, context.Canceled) {
 			err = errors.Join(err, cerr)
@@ -820,3 +803,5 @@ type StatusEntry struct {
 	Table  string
 	Status string // "new", "modified", "deleted"
 }
+
+

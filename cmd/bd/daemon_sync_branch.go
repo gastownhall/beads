@@ -62,10 +62,14 @@ func syncBranchCommitAndPushWithOptions(ctx context.Context, store storage.Stora
 		return false, fmt.Errorf("failed to get main repo root: %w", err)
 	}
 
-	// Use worktree-aware git directory detection
-	gitDir, err := git.GetGitDir()
+	// Use GetGitCommonDir() instead of GetGitDir() for worktree creation.
+	// In a bare repo + worktree setup, GetGitDir() returns the worktree-specific
+	// path (e.g., .git/worktrees/main), but we need the common git directory
+	// to create new worktrees. GetGitCommonDir() always returns the bare repo's
+	// .git directory. GH#1500
+	gitDir, err := git.GetGitCommonDir()
 	if err != nil {
-		return false, fmt.Errorf("not a git repository: %w", err)
+		return false, fmt.Errorf("failed to get git common dir: %w", err)
 	}
 
 	// Worktree path is under .git/beads-worktrees/<branch>

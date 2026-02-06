@@ -330,11 +330,19 @@ func TestDaemonAutostart_StartDaemonProcess_Stubbed(t *testing.T) {
 	oldExec := execCommandFn
 	oldWait := waitForSocketReadinessFn
 	oldCfg := configureDaemonProcessFn
+	oldIsDolt := isDoltBackendFn
+	oldSingleProcess := singleProcessOnlyBackendFn
 	defer func() {
 		execCommandFn = oldExec
 		waitForSocketReadinessFn = oldWait
 		configureDaemonProcessFn = oldCfg
+		isDoltBackendFn = oldIsDolt
+		singleProcessOnlyBackendFn = oldSingleProcess
 	}()
+
+	// Stub out backend checks so they don't interfere with this test
+	isDoltBackendFn = func() bool { return false }
+	singleProcessOnlyBackendFn = func() bool { return false }
 
 	execCommandFn = func(string, ...string) *exec.Cmd {
 		return exec.Command(os.Args[0], "-test.run=^$")

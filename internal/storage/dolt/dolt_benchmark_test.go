@@ -1,5 +1,4 @@
 //go:build cgo
-
 // Package dolt provides performance benchmarks for the Dolt storage backend.
 // Run with: go test -bench=. -benchmem ./internal/storage/dolt/...
 //
@@ -974,3 +973,5 @@ func BenchmarkGetLabels(b *testing.B) {
 		}
 	}
 }
+
+

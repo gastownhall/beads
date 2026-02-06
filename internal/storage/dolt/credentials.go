@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -330,3 +329,5 @@ func (s *DoltStore) PullWithCredentials(ctx context.Context, remoteName string) 
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.
 type FederationPeer = storage.FederationPeer
+
+

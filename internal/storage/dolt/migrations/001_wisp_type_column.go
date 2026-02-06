@@ -1,5 +1,4 @@
 //go:build cgo
-
 package migrations
 
 import (
@@ -27,3 +26,5 @@ func MigrateWispTypeColumn(db *sql.DB) error {
 
 	return nil
 }
+
+

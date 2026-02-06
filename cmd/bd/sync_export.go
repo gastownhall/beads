@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -47,6 +48,10 @@ type ExportResult struct {
 	// IssueContentHashes maps issue IDs to their content hashes (GH#1278)
 	// Used to populate export_hashes table after successful export
 	IssueContentHashes map[string]string
+
+	// lock holds the JSONL lock that must be released after finalization
+	// This ensures the lock is held for the entire export+commit+finalize sequence
+	lock *JSONLLock
 }
 
 // finalizeExport updates SQLite metadata after a successful git commit.
@@ -54,9 +59,21 @@ type ExportResult struct {
 // only after the git commit succeeds. If git commit fails, the metadata
 // remains unchanged so the system knows the sync is incomplete.
 // See GH#885 for the atomicity gap this fixes.
+//
+// IMPORTANT: This also releases the JSONL lock that was acquired during export.
 func finalizeExport(ctx context.Context, result *ExportResult) {
 	if result == nil {
 		return
+	}
+
+	// Release the JSONL lock at the end of finalization
+	// This ensures lock is held for entire export+commit+finalize sequence
+	if result.lock != nil {
+		defer func() {
+			if err := result.lock.Release(); err != nil {
+				debug.Logf("warning: failed to release JSONL lock: %v", err)
+			}
+		}()
 	}
 
 	// Ensure store is initialized
@@ -129,10 +146,28 @@ func finalizeExport(ctx context.Context, result *ExportResult) {
 	}
 }
 
+// releaseExportLock releases the JSONL lock if the export result has one.
+// Call this if you need to abort an export without finalizing (e.g., git commit failed).
+func releaseExportLock(result *ExportResult) {
+	if result != nil && result.lock != nil {
+		if err := result.lock.Release(); err != nil {
+			debug.Logf("warning: failed to release JSONL lock: %v", err)
+		}
+		result.lock = nil
+	}
+}
+
 // exportToJSONL exports the database to JSONL format.
 // This is a convenience wrapper that exports and immediately finalizes.
 // For atomic sync operations, use exportToJSONLDeferred + finalizeExport.
+//
+// In dolt-native mode, this is a no-op - all sync happens via Dolt remotes.
 func exportToJSONL(ctx context.Context, jsonlPath string) error {
+	// Skip JSONL export in dolt-native mode (bd-zlih1)
+	if store != nil && !ShouldExportJSONL(ctx, store) {
+		return nil
+	}
+
 	result, err := exportToJSONLDeferred(ctx, jsonlPath)
 	if err != nil {
 		return err
@@ -146,7 +181,19 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 // SQLite metadata. The caller must call finalizeExport() after git commit succeeds.
 // This enables atomic sync where metadata is only updated after git commit.
 // See GH#885 for the atomicity gap this fixes.
+//
+// Thread-safety: Acquires an exclusive JSONL lock to prevent concurrent writes.
+// The lock is stored in the ExportResult and released by finalizeExport() or
+// releaseExportLock(). This fixes the critical race condition where sync export
+// and daemon auto-flush could write simultaneously (SECURITY_AUDIT.md Issue #1).
+//
+// In dolt-native mode, returns nil result - all sync happens via Dolt remotes.
 func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult, error) {
+	// Skip JSONL export in dolt-native mode (bd-zlih1)
+	if store != nil && !ShouldExportJSONL(ctx, store) {
+		return nil, nil
+	}
+
 	// If daemon is running, use RPC
 	// Note: daemon already handles its own metadata updates
 	if daemonClient != nil {
@@ -169,6 +216,22 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 	if err := ensureStoreActive(); err != nil {
 		return nil, fmt.Errorf("failed to initialize store: %w", err)
 	}
+
+	// Acquire exclusive JSONL lock before writing
+	// This prevents race condition with daemon auto-flush (SECURITY_AUDIT.md Issue #1)
+	beadsDir := filepath.Dir(jsonlPath)
+	lock := newJSONLLock(beadsDir)
+	if err := lock.AcquireExclusive(ctx); err != nil {
+		return nil, fmt.Errorf("failed to acquire JSONL lock for export: %w", err)
+	}
+
+	// If we fail after this point, ensure the lock is released
+	success := false
+	defer func() {
+		if !success {
+			_ = lock.Release()
+		}
+	}()
 
 	// Get all issues including tombstones for sync propagation (bd-rp4o fix)
 	// Tombstones must be exported so they propagate to other clones and prevent resurrection
@@ -283,12 +346,16 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 	contentHash, _ := computeJSONLHash(jsonlPath)
 	exportTime := time.Now().Format(time.RFC3339Nano)
 
+	// Mark success so lock is transferred to result instead of released
+	success = true
+
 	return &ExportResult{
 		JSONLPath:          jsonlPath,
 		ExportedIDs:        exportedIDs,
 		ContentHash:        contentHash,
 		ExportTime:         exportTime,
 		IssueContentHashes: issueContentHashes,
+		lock:               lock, // Transfer lock ownership to result
 	}, nil
 }
 
@@ -298,7 +365,14 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 // Falls back to full export when incremental is not beneficial.
 //
 // Returns the export result for deferred finalization (same as exportToJSONLDeferred).
+//
+// In dolt-native mode, returns nil result - all sync happens via Dolt remotes.
 func exportToJSONLIncrementalDeferred(ctx context.Context, jsonlPath string) (*ExportResult, error) {
+	// Skip JSONL export in dolt-native mode (bd-zlih1)
+	if store != nil && !ShouldExportJSONL(ctx, store) {
+		return nil, nil
+	}
+
 	// If daemon is running, delegate to it (daemon has its own optimization)
 	if daemonClient != nil {
 		return exportToJSONLDeferred(ctx, jsonlPath)
@@ -380,11 +454,34 @@ func shouldUseIncrementalExport(ctx context.Context, jsonlPath string) (bool, []
 // performIncrementalExport performs the actual incremental export.
 // It reads the existing JSONL, queries only dirty issues, merges them,
 // and writes the result.
+//
+// Thread-safety: Acquires an exclusive JSONL lock to prevent concurrent writes.
+// The lock is stored in the ExportResult and released by finalizeExport() or
+// releaseExportLock(). This fixes the race condition where sync export and
+// daemon auto-flush could write simultaneously (SECURITY_AUDIT.md Issue #1).
 func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []string) (*ExportResult, error) {
+	// Acquire exclusive JSONL lock before reading/writing
+	// This prevents race condition with daemon auto-flush (SECURITY_AUDIT.md Issue #1)
+	beadsDir := filepath.Dir(jsonlPath)
+	lock := newJSONLLock(beadsDir)
+	if err := lock.AcquireExclusive(ctx); err != nil {
+		return nil, fmt.Errorf("failed to acquire JSONL lock for incremental export: %w", err)
+	}
+
+	// If we fail after this point, ensure the lock is released
+	success := false
+	defer func() {
+		if !success {
+			_ = lock.Release()
+		}
+	}()
+
 	// Read existing JSONL into map[id]rawJSON
 	issueMap, allIDs, err := readJSONLToMap(jsonlPath)
 	if err != nil {
 		// Fall back to full export on read error
+		// Release our lock first since exportToJSONLDeferred will acquire its own
+		_ = lock.Release()
 		return exportToJSONLDeferred(ctx, jsonlPath)
 	}
 
@@ -527,6 +624,9 @@ func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []
 	contentHash, _ := computeJSONLHash(jsonlPath)
 	exportTime := time.Now().Format(time.RFC3339Nano)
 
+	// Mark success so lock is transferred to result instead of released
+	success = true
+
 	// Note: exportedIDs contains ALL IDs in the file, but we only need to clear
 	// dirty flags for the dirtyIDs (which we received as parameter)
 	return &ExportResult{
@@ -535,6 +635,7 @@ func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []
 		ContentHash:        contentHash,
 		ExportTime:         exportTime,
 		IssueContentHashes: issueContentHashes,
+		lock:               lock, // Transfer lock ownership to result
 	}, nil
 }
 

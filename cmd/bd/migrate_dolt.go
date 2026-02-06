@@ -1,5 +1,4 @@
 //go:build cgo
-
 package main
 
 import (
@@ -846,3 +845,5 @@ func formatJSONArray(arr []string) string {
 	}
 	return string(data)
 }
+
+

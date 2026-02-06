@@ -72,7 +72,7 @@ func New(store CompactableStore, apiKey string, config *Config) (*Compactor, err
 			}
 		}
 	}
-	if hc, ok := haikuClient.(*HaikuClient); ok {
+	if hc, ok := haikuClient.(*HaikuClient); ok && hc != nil {
 		hc.auditEnabled = config.AuditEnabled
 		hc.auditActor = config.Actor
 	}

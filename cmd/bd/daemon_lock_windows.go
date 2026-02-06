@@ -33,20 +33,3 @@ func flockExclusive(f *os.File) error {
 
 	return err
 }
-
-// flockExclusiveBlocking acquires an exclusive lock, blocking until available
-func flockExclusiveBlocking(f *os.File) error {
-	// LOCKFILE_EXCLUSIVE_LOCK without LOCKFILE_FAIL_IMMEDIATELY = blocking
-	const flags = windows.LOCKFILE_EXCLUSIVE_LOCK
-
-	ol := &windows.Overlapped{}
-
-	return windows.LockFileEx(
-		windows.Handle(f.Fd()),
-		flags,
-		0,
-		0xFFFFFFFF,
-		0xFFFFFFFF,
-		ol,
-	)
-}

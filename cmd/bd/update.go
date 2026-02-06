@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -118,18 +119,26 @@ create, update, show, or close operation).`,
 			issueType, _ := cmd.Flags().GetString("type")
 			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
 			issueType = util.NormalizeIssueType(issueType)
-			var customTypes []string
-			if store != nil {
-				if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
-					customTypes = ct
+			// In daemon mode, skip client-side type pre-validation.
+			// The daemon validates authoritatively with database access (GH#1499).
+			if daemonClient == nil {
+				var customTypes []string
+				if store != nil {
+					if ct, err := store.GetCustomTypes(cmd.Context()); err == nil {
+						customTypes = ct
+					}
 				}
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				validTypes := "bug, feature, task, epic, chore"
-				if len(customTypes) > 0 {
-					validTypes += ", " + joinStrings(customTypes, ", ")
+				// Fallback to config.yaml when store returns no custom types.
+				if len(customTypes) == 0 {
+					customTypes = config.GetCustomTypesFromYAML()
 				}
-				FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
+				if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+					validTypes := "bug, feature, task, epic, chore"
+					if len(customTypes) > 0 {
+						validTypes += ", " + joinStrings(customTypes, ", ")
+					}
+					FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
+				}
 			}
 			updates["issue_type"] = issueType
 		}

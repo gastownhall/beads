@@ -12,7 +12,3 @@ func flockExclusive(f *os.File) error {
 	// In a WASM environment, we're typically single-process anyway
 	return fmt.Errorf("file locking not supported in WASM")
 }
-
-func flockExclusiveBlocking(f *os.File) error {
-	return fmt.Errorf("file locking not supported in WASM")
-}

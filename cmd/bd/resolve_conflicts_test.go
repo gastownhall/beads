@@ -1,13 +1,35 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/merge"
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// Helper to parse time or panic
+func mustParseTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic("invalid time: " + s)
+	}
+	return t
+}
+
+// testMergeIssue creates a merge.Issue from a JSON string
+func testMergeIssue(jsonStr string) merge.Issue {
+	var issue merge.Issue
+	if err := json.Unmarshal([]byte(jsonStr), &issue); err != nil {
+		panic("invalid JSON in test: " + err.Error())
+	}
+	issue.RawLine = jsonStr
+	return issue
+}
 
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
@@ -217,16 +239,8 @@ func TestResolveConflict(t *testing.T) {
 
 func TestMergeIssueConflict(t *testing.T) {
 	t.Run("title picks later updated_at", func(t *testing.T) {
-		left := merge.Issue{
-			ID:        "bd-1",
-			Title:     "Old Title",
-			UpdatedAt: "2024-01-01T00:00:00Z",
-		}
-		right := merge.Issue{
-			ID:        "bd-1",
-			Title:     "New Title",
-			UpdatedAt: "2024-01-02T00:00:00Z",
-		}
+		left := testMergeIssue(`{"id":"bd-1","title":"Old Title","updated_at":"2024-01-01T00:00:00Z"}`)
+		right := testMergeIssue(`{"id":"bd-1","title":"New Title","updated_at":"2024-01-02T00:00:00Z"}`)
 
 		result := mergeIssueConflict(left, right)
 
@@ -236,31 +250,19 @@ func TestMergeIssueConflict(t *testing.T) {
 	})
 
 	t.Run("closed status wins", func(t *testing.T) {
-		left := merge.Issue{
-			ID:     "bd-1",
-			Status: "open",
-		}
-		right := merge.Issue{
-			ID:     "bd-1",
-			Status: "closed",
-		}
+		left := testMergeIssue(`{"id":"bd-1","status":"open"}`)
+		right := testMergeIssue(`{"id":"bd-1","status":"closed"}`)
 
 		result := mergeIssueConflict(left, right)
 
-		if result.Status != "closed" {
+		if result.Status != types.StatusClosed {
 			t.Errorf("Expected status 'closed', got %q", result.Status)
 		}
 	})
 
 	t.Run("higher priority wins", func(t *testing.T) {
-		left := merge.Issue{
-			ID:       "bd-1",
-			Priority: 2,
-		}
-		right := merge.Issue{
-			ID:       "bd-1",
-			Priority: 1,
-		}
+		left := testMergeIssue(`{"id":"bd-1","priority":2}`)
+		right := testMergeIssue(`{"id":"bd-1","priority":1}`)
 
 		result := mergeIssueConflict(left, right)
 
@@ -270,14 +272,8 @@ func TestMergeIssueConflict(t *testing.T) {
 	})
 
 	t.Run("notes concatenate when different", func(t *testing.T) {
-		left := merge.Issue{
-			ID:    "bd-1",
-			Notes: "Note A",
-		}
-		right := merge.Issue{
-			ID:    "bd-1",
-			Notes: "Note B",
-		}
+		left := testMergeIssue(`{"id":"bd-1","notes":"Note A"}`)
+		right := testMergeIssue(`{"id":"bd-1","notes":"Note B"}`)
 
 		result := mergeIssueConflict(left, right)
 
@@ -288,15 +284,19 @@ func TestMergeIssueConflict(t *testing.T) {
 
 	t.Run("dependencies union", func(t *testing.T) {
 		left := merge.Issue{
-			ID: "bd-1",
-			Dependencies: []merge.Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"},
+			Issue: types.Issue{
+				ID: "bd-1",
+				Dependencies: []*types.Dependency{
+					{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+				},
 			},
 		}
 		right := merge.Issue{
-			ID: "bd-1",
-			Dependencies: []merge.Dependency{
-				{IssueID: "bd-1", DependsOnID: "bd-3", Type: "blocks"},
+			Issue: types.Issue{
+				ID: "bd-1",
+				Dependencies: []*types.Dependency{
+					{IssueID: "bd-1", DependsOnID: "bd-3", Type: types.DepBlocks},
+				},
 			},
 		}
 
@@ -309,42 +309,37 @@ func TestMergeIssueConflict(t *testing.T) {
 }
 
 func TestTimeHelpers(t *testing.T) {
-	t.Run("isTimeAfterStr", func(t *testing.T) {
+	t.Run("isTimeAfter", func(t *testing.T) {
 		tests := []struct {
 			t1, t2 string
 			want   bool
 		}{
 			{"2024-01-02T00:00:00Z", "2024-01-01T00:00:00Z", true},
 			{"2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", false},
-			{"2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", false},
-			{"2024-01-01T00:00:00Z", "", true},
-			{"", "2024-01-01T00:00:00Z", false},
-			{"", "", false},
+			{"2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", true}, // left wins on tie
 		}
 
 		for _, tt := range tests {
-			got := isTimeAfterStr(tt.t1, tt.t2)
+			got := isTimeAfter(mustParseTime(tt.t1), mustParseTime(tt.t2))
 			if got != tt.want {
-				t.Errorf("isTimeAfterStr(%q, %q) = %v, want %v", tt.t1, tt.t2, got, tt.want)
+				t.Errorf("isTimeAfter(%q, %q) = %v, want %v", tt.t1, tt.t2, got, tt.want)
 			}
 		}
 	})
 
-	t.Run("maxTimeStr", func(t *testing.T) {
+	t.Run("maxTimeVal", func(t *testing.T) {
 		tests := []struct {
 			t1, t2, want string
 		}{
 			{"2024-01-02T00:00:00Z", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z"},
 			{"2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", "2024-01-02T00:00:00Z"},
-			{"2024-01-01T00:00:00Z", "", "2024-01-01T00:00:00Z"},
-			{"", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z"},
-			{"", "", ""},
 		}
 
 		for _, tt := range tests {
-			got := maxTimeStr(tt.t1, tt.t2)
-			if got != tt.want {
-				t.Errorf("maxTimeStr(%q, %q) = %q, want %q", tt.t1, tt.t2, got, tt.want)
+			got := maxTimeVal(mustParseTime(tt.t1), mustParseTime(tt.t2))
+			want := mustParseTime(tt.want)
+			if !got.Equal(want) {
+				t.Errorf("maxTimeVal(%q, %q) = %v, want %v", tt.t1, tt.t2, got, want)
 			}
 		}
 	})
@@ -359,7 +354,7 @@ func TestTimeHelpers(t *testing.T) {
 		}
 
 		for _, tt := range tests {
-			got := pickByUpdatedAt(tt.left, tt.right, tt.leftTime, tt.rightTime)
+			got := pickByUpdatedAt(tt.left, tt.right, mustParseTime(tt.leftTime), mustParseTime(tt.rightTime))
 			if got != tt.want {
 				t.Errorf("pickByUpdatedAt(%q, %q, ...) = %q, want %q", tt.left, tt.right, got, tt.want)
 			}

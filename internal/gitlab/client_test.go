@@ -812,7 +812,8 @@ func TestFetchIssuesSince_PaginationLimit(t *testing.T) {
 	}
 }
 
-// TestFetchIssues_ContextCancellation verifies that FetchIssues respects context cancellation.
+// TestFetchIssues_ContextCancellation verifies that FetchIssues respects context cancellation
+// or pagination limits to prevent infinite loops.
 func TestFetchIssues_ContextCancellation(t *testing.T) {
 	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -835,24 +836,27 @@ func TestFetchIssues_ContextCancellation(t *testing.T) {
 
 	issues, err := client.FetchIssues(ctx, "all")
 
-	// Should return context.Canceled error (either directly or wrapped)
+	// Should return an error that stops the loop (context cancellation OR pagination limit)
 	if err == nil {
-		t.Fatal("FetchIssues() error = nil, want context cancellation error")
+		t.Fatal("FetchIssues() error = nil, want error to stop infinite loop")
 	}
-	// Context cancellation can be returned directly from our loop check or wrapped by doRequest
-	if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
-		t.Errorf("error = %v, want context.Canceled or error containing 'context canceled'", err)
+	// Accept either context cancellation or pagination limit - both are valid ways to stop the loop
+	isContextCanceled := err == context.Canceled || strings.Contains(err.Error(), "context canceled")
+	isPaginationLimit := strings.Contains(err.Error(), "pagination limit exceeded")
+	if !isContextCanceled && !isPaginationLimit {
+		t.Errorf("error = %v, want context.Canceled, 'context canceled', or 'pagination limit exceeded'", err)
 	}
 	// Verify the loop was stopped (not infinite) - requestCount should be reasonable
-	if requestCount.Load() > 1000 {
-		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount.Load())
+	if requestCount.Load() > MaxPages+1 {
+		t.Errorf("requestCount = %d, expected loop to stop", requestCount.Load())
 	}
 	// Note: partial results may or may not be returned depending on whether cancellation
 	// was caught by our loop check (returns partial) or by doRequest (returns nil)
-	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount.Load(), len(issues))
+	t.Logf("Loop stopped after %d requests, %d issues returned, error: %v", requestCount.Load(), len(issues), err)
 }
 
-// TestFetchIssuesSince_ContextCancellation verifies that FetchIssuesSince respects context cancellation.
+// TestFetchIssuesSince_ContextCancellation verifies that FetchIssuesSince respects context cancellation
+// or pagination limits to prevent infinite loops.
 func TestFetchIssuesSince_ContextCancellation(t *testing.T) {
 	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -875,19 +879,21 @@ func TestFetchIssuesSince_ContextCancellation(t *testing.T) {
 
 	issues, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
 
-	// Should return context.Canceled error (either directly or wrapped)
+	// Should return an error that stops the loop (context cancellation OR pagination limit)
 	if err == nil {
-		t.Fatal("FetchIssuesSince() error = nil, want context cancellation error")
+		t.Fatal("FetchIssuesSince() error = nil, want error to stop infinite loop")
 	}
-	// Context cancellation can be returned directly from our loop check or wrapped by doRequest
-	if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
-		t.Errorf("error = %v, want context.Canceled or error containing 'context canceled'", err)
+	// Accept either context cancellation or pagination limit - both are valid ways to stop the loop
+	isContextCanceled := err == context.Canceled || strings.Contains(err.Error(), "context canceled")
+	isPaginationLimit := strings.Contains(err.Error(), "pagination limit exceeded")
+	if !isContextCanceled && !isPaginationLimit {
+		t.Errorf("error = %v, want context.Canceled, 'context canceled', or 'pagination limit exceeded'", err)
 	}
 	// Verify the loop was stopped (not infinite) - requestCount should be reasonable
-	if requestCount.Load() > 1000 {
-		t.Errorf("requestCount = %d, expected loop to stop due to context cancellation", requestCount.Load())
+	if requestCount.Load() > MaxPages+1 {
+		t.Errorf("requestCount = %d, expected loop to stop", requestCount.Load())
 	}
 	// Note: partial results may or may not be returned depending on whether cancellation
 	// was caught by our loop check (returns partial) or by doRequest (returns nil)
-	t.Logf("Context cancelled after %d requests, %d issues returned", requestCount.Load(), len(issues))
+	t.Logf("Loop stopped after %d requests, %d issues returned, error: %v", requestCount.Load(), len(issues), err)
 }

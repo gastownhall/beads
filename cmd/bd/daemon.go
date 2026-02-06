@@ -661,6 +661,46 @@ The daemon will now exit.`, strings.ToUpper(backend))
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Import JSONL on daemon startup to ensure metadata hash is current
+	// This prevents "refusing to export: JSONL content has changed" errors on first sync
+	if !localMode {
+		jsonlPath := findJSONLPath()
+		if jsonlPath != "" {
+			// Only import if JSONL exists and is newer/different
+			importCtx, importCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer importCancel()
+
+			// Suppress stderr during initial import to avoid confusing parent process
+			// The import prints "Import complete: no changes" which the parent mistakes for an error
+			oldStderr := os.Stderr
+			os.Stderr, _ = os.Open(os.DevNull)
+
+			err := importToJSONLWithStore(importCtx, store, jsonlPath)
+
+			// Restore stderr
+			os.Stderr = oldStderr
+
+			if err != nil {
+				log.Warn("initial import failed (continuing anyway)", "error", err)
+			} else {
+				// Update metadata hash to match imported JSONL
+				// This is necessary because importToJSONLWithStore doesn't update the hash
+				// (only exportToJSONLWithStore updates it via updateExportMetadata)
+				if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
+					repoKey := getRepoKeyForPath(jsonlPath)
+					hashKey := "jsonl_content_hash"
+					if repoKey != "" {
+						hashKey += ":" + repoKey
+					}
+					if err := store.SetMetadata(importCtx, hashKey, currentHash); err != nil {
+						log.Warn("failed to update JSONL hash after import", "error", err)
+					}
+				}
+				log.Info("initial import complete")
+			}
+		}
+	}
+
 	// Create sync function based on mode
 	var doSync func()
 	if localMode {

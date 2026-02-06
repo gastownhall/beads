@@ -223,6 +223,463 @@ func TestCompactTier1_UpdateError(t *testing.T) {
 	}
 }
 
+// --- New constructor tests ---
+
+func TestNew_NilConfig(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	store := &stubStore{}
+	c, err := New(store, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.config.Concurrency != defaultConcurrency {
+		t.Errorf("expected default concurrency %d, got %d", defaultConcurrency, c.config.Concurrency)
+	}
+	if !c.config.DryRun {
+		t.Error("expected DryRun to be set when no API key")
+	}
+}
+
+func TestNew_DryRunExplicit(t *testing.T) {
+	store := &stubStore{}
+	c, err := New(store, "", &Config{DryRun: true, Concurrency: 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.config.Concurrency != 3 {
+		t.Errorf("expected concurrency 3, got %d", c.config.Concurrency)
+	}
+	if c.summarizer != nil {
+		t.Error("expected nil summarizer in dry run")
+	}
+}
+
+func TestNew_NoAPIKeyFallsToDryRun(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	store := &stubStore{}
+	c, err := New(store, "", &Config{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !c.config.DryRun {
+		t.Error("expected DryRun to be set when no API key")
+	}
+}
+
+func TestNew_WithAPIKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	store := &stubStore{}
+	c, err := New(store, "test-key-123", &Config{Concurrency: 2, AuditEnabled: true, Actor: "testbot"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.config.Concurrency != 2 {
+		t.Errorf("expected concurrency 2, got %d", c.config.Concurrency)
+	}
+	if c.summarizer == nil {
+		t.Error("expected non-nil summarizer with API key")
+	}
+	if c.config.APIKey != "test-key-123" {
+		t.Errorf("expected API key to be set, got %q", c.config.APIKey)
+	}
+}
+
+func TestNew_ZeroConcurrency(t *testing.T) {
+	store := &stubStore{}
+	c, err := New(store, "", &Config{DryRun: true, Concurrency: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.config.Concurrency != defaultConcurrency {
+		t.Errorf("expected default concurrency %d for zero value, got %d", defaultConcurrency, c.config.Concurrency)
+	}
+}
+
+func TestNew_NegativeConcurrency(t *testing.T) {
+	store := &stubStore{}
+	c, err := New(store, "", &Config{DryRun: true, Concurrency: -1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.config.Concurrency != defaultConcurrency {
+		t.Errorf("expected default concurrency %d for negative value, got %d", defaultConcurrency, c.config.Concurrency)
+	}
+}
+
+func TestNew_EnvKeyOverridesParam(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "env-key")
+	store := &stubStore{}
+	c, err := New(store, "param-key", &Config{Concurrency: 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.summarizer == nil {
+		t.Error("expected non-nil summarizer when env key set")
+	}
+}
+
+// --- CompactTier1 additional error path tests ---
+
+func TestCompactTier1_CancelledContext(t *testing.T) {
+	c := &Compactor{store: &stubStore{}, config: &Config{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := c.CompactTier1(ctx, "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestCompactTier1_EligibilityCheckError(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) {
+			return false, "", errors.New("db error")
+		},
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to verify eligibility") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_IneligibleNoReason(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return false, "", nil },
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	expected := "issue bd-123 is not eligible for Tier 1 compaction"
+	if err.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+func TestCompactTier1_GetIssueFetchError(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn: func(context.Context, string) (*types.Issue, error) {
+			return nil, errors.New("fetch error")
+		},
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to fetch issue") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_SummarizerError(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+	}
+	summary := &stubSummarizer{err: errors.New("API error")}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to summarize") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_ApplyCompactionError(t *testing.T) {
+	cleanup := withGitHash(t, "abc\n")
+	t.Cleanup(cleanup)
+
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
+		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return errors.New("apply failed") },
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to apply compaction metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_AddCommentError(t *testing.T) {
+	cleanup := withGitHash(t, "abc\n")
+	t.Cleanup(cleanup)
+
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
+		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return nil },
+		addCommentFn:       func(context.Context, string, string, string) error { return errors.New("comment failed") },
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to add compaction comment") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_MarkDirtyError(t *testing.T) {
+	cleanup := withGitHash(t, "abc\n")
+	t.Cleanup(cleanup)
+
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
+		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return nil },
+		addCommentFn:       func(context.Context, string, string, string) error { return nil },
+		markDirtyFn:        func(context.Context, string) error { return errors.New("mark failed") },
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to mark dirty") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1_SummaryNotSmaller_CommentError(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		addCommentFn:       func(context.Context, string, string, string) error { return errors.New("comment failed") },
+	}
+	summary := &stubSummarizer{summary: strings.Repeat("X", 40)}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to record warning") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// --- CompactTier1Single tests ---
+
+func TestCompactTier1Single_Success(t *testing.T) {
+	cleanup := withGitHash(t, "deadbeef\n")
+	t.Cleanup(cleanup)
+
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
+		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return nil },
+		addCommentFn:       func(context.Context, string, string, string) error { return nil },
+		markDirtyFn:        func(context.Context, string) error { return nil },
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	result, err := c.CompactTier1Single(context.Background(), "bd-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("unexpected result error: %v", result.Err)
+	}
+	if result.IssueID != "bd-123" {
+		t.Errorf("expected issue ID bd-123, got %s", result.IssueID)
+	}
+	if result.OriginalSize == 0 {
+		t.Error("expected non-zero original size")
+	}
+	if result.CompactedSize == 0 {
+		t.Error("expected non-zero compacted size")
+	}
+}
+
+func TestCompactTier1Single_GetIssueError(t *testing.T) {
+	store := &stubStore{
+		getIssueFn: func(context.Context, string) (*types.Issue, error) {
+			return nil, errors.New("not found")
+		},
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	_, err := c.CompactTier1Single(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to fetch issue") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier1Single_CompactError(t *testing.T) {
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return false, "nope", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	result, err := c.CompactTier1Single(context.Background(), "bd-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Err == nil {
+		t.Fatal("expected result error")
+	}
+	if result.OriginalSize == 0 {
+		t.Error("expected non-zero original size")
+	}
+}
+
+// --- CompactTier2 tests ---
+
+func TestCompactTier2_Success(t *testing.T) {
+	applyCalled := false
+	markCalled := false
+	store := &stubStore{
+		getIssueFn: func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		applyCompactionFn: func(ctx context.Context, id string, tier, original, compacted int, hash string) error {
+			applyCalled = true
+			if tier != 2 {
+				t.Fatalf("expected tier 2, got %d", tier)
+			}
+			if original != compacted {
+				t.Fatalf("Tier 2 placeholder should pass same size for original and compacted")
+			}
+			return nil
+		},
+		markDirtyFn: func(context.Context, string) error {
+			markCalled = true
+			return nil
+		},
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier2(context.Background(), "bd-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !applyCalled {
+		t.Error("expected ApplyCompaction to be called")
+	}
+	if !markCalled {
+		t.Error("expected MarkIssueDirty to be called")
+	}
+}
+
+func TestCompactTier2_GetIssueError(t *testing.T) {
+	store := &stubStore{
+		getIssueFn: func(context.Context, string) (*types.Issue, error) {
+			return nil, errors.New("not found")
+		},
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier2(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to get issue") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier2_ApplyError(t *testing.T) {
+	store := &stubStore{
+		getIssueFn:        func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		applyCompactionFn: func(context.Context, string, int, int, int, string) error { return errors.New("apply failed") },
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier2(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to apply compaction metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompactTier2_MarkDirtyError(t *testing.T) {
+	store := &stubStore{
+		getIssueFn:        func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		applyCompactionFn: func(context.Context, string, int, int, int, string) error { return nil },
+		markDirtyFn:       func(context.Context, string) error { return errors.New("mark failed") },
+	}
+	c := &Compactor{store: store, config: &Config{}}
+
+	err := c.CompactTier2(context.Background(), "bd-123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to mark dirty") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// --- CompactTier1Batch additional tests ---
+
+func TestCompactTier1Batch_GetIssueError(t *testing.T) {
+	store := &stubStore{
+		getIssueFn: func(ctx context.Context, id string) (*types.Issue, error) {
+			return nil, errors.New("not found")
+		},
+	}
+	c := &Compactor{store: store, config: &Config{Concurrency: 1}}
+
+	results, err := c.CompactTier1Batch(context.Background(), []string{"bd-1"})
+	if err != nil {
+		t.Fatalf("batch should not return top-level error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err == nil {
+		t.Error("expected error in result")
+	}
+}
+
+func TestCompactTier1Batch_Empty(t *testing.T) {
+	c := &Compactor{store: &stubStore{}, config: &Config{Concurrency: 1}}
+
+	results, err := c.CompactTier1Batch(context.Background(), []string{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(results))
+	}
+}
+
 func TestCompactTier1Batch_MixedResults(t *testing.T) {
 	cleanup := withGitHash(t, "cafebabe\n")
 	t.Cleanup(cleanup)

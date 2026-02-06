@@ -776,9 +776,34 @@ bd daemons list
 """
 
 [[steps]]
+id = "generate-newsletter"
+title = "Generate release newsletter"
+needs = ["push-tag"]
+description = """
+Generate a narrative newsletter summarizing this release.
+
+The newsletter generator aggregates changelog, commits, new commands, and
+breaking changes into a narrative format suitable for users.
+
+```bash
+# Generate newsletter for this release
+uv run scripts/generate-newsletter.py --to-release v{{version}}
+
+# Or specify the range explicitly (e.g., from last release)
+PREV_TAG=$(git describe --tags --abbrev=0 v{{version}}^)
+uv run scripts/generate-newsletter.py --from-release $PREV_TAG --to-release v{{version}}
+```
+
+The script outputs to NEWSLETTER.md by default. Review and commit if desired.
+
+**Note:** This step can run in parallel with verification steps since it only
+needs the tag to exist, not the CI artifacts.
+"""
+
+[[steps]]
 id = "release-complete"
 title = "Release complete"
-needs = ["restart-daemons"]
+needs = ["restart-daemons", "generate-newsletter"]
 description = """
 Release v{{version}} is complete!
 
@@ -789,8 +814,10 @@ Summary:
 - npm and PyPI packages verified
 - Local installation updated
 - Daemons restarted
+- Newsletter generated
 
 Optional next steps:
+- Review and publish NEWSLETTER.md
 - Announce on social media
 - Update documentation site
 - Close related milestone

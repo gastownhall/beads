@@ -1130,6 +1130,12 @@ func (s *Server) handleList(req *Request) Response {
 	if len(labelsAny) > 0 {
 		filter.LabelsAny = labelsAny
 	}
+	if listArgs.LabelPattern != "" {
+		filter.LabelPattern = listArgs.LabelPattern
+	}
+	if listArgs.LabelRegex != "" {
+		filter.LabelRegex = listArgs.LabelRegex
+	}
 	if len(listArgs.IDs) > 0 {
 		ids := util.NormalizeLabels(listArgs.IDs)
 		if len(ids) > 0 {

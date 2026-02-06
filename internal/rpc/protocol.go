@@ -210,6 +210,8 @@ type ListArgs struct {
 	Label        string   `json:"label,omitempty"`          // Deprecated: use Labels
 	Labels       []string `json:"labels,omitempty"`         // AND semantics
 	LabelsAny    []string `json:"labels_any,omitempty"`     // OR semantics
+	LabelPattern string   `json:"label_pattern,omitempty"`  // Glob pattern (e.g., "tech-*")
+	LabelRegex   string   `json:"label_regex,omitempty"`    // Regex pattern (e.g., "tech-(debt|legacy)")
 	IDs          []string `json:"ids,omitempty"`            // Filter by specific issue IDs
 	SpecIDPrefix string   `json:"spec_id_prefix,omitempty"` // Filter by spec_id prefix
 	Limit        int      `json:"limit,omitempty"`

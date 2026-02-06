@@ -28,7 +28,7 @@ type DaemonLock struct {
 	path string
 }
 
-// Close releases the daemon lock
+// Close releases the daemon lock and removes the lock file
 func (l *DaemonLock) Close() error {
 	if l.file == nil {
 		return nil
@@ -36,6 +36,13 @@ func (l *DaemonLock) Close() error {
 	// Closing the file descriptor automatically releases the flock
 	err := l.file.Close()
 	l.file = nil
+
+	// Best-effort removal of lock file on clean shutdown
+	// This prevents stale lock files when daemon exits normally
+	if l.path != "" {
+		_ = os.Remove(l.path)
+	}
+
 	return err
 }
 
@@ -69,13 +76,13 @@ func acquireDaemonLock(beadsDir string, dbPath string) (*DaemonLock, error) {
 		Version:   Version,
 		StartedAt: time.Now().UTC(),
 	}
-	
-	_ = f.Truncate(0)              // Clear file for fresh write (we hold lock)
+
+	_ = f.Truncate(0) // Clear file for fresh write (we hold lock)
 	_, _ = f.Seek(0, 0)
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(lockInfo)   // Write can't fail if Truncate succeeded
-	_ = f.Sync()                   // Best-effort sync to disk
+	_ = encoder.Encode(lockInfo) // Write can't fail if Truncate succeeded
+	_ = f.Sync()                 // Best-effort sync to disk
 
 	// Also write PID file for Windows compatibility (can't read locked files on Windows)
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
@@ -86,6 +93,11 @@ func acquireDaemonLock(beadsDir string, dbPath string) (*DaemonLock, error) {
 
 // tryDaemonLock attempts to acquire and immediately release the daemon lock
 // to check if a daemon is running. Returns true if daemon is running.
+//
+// This function uses flock semantics for reliable daemon detection:
+// - If flock succeeds: no daemon is running (stale lock file detected and cleaned up)
+// - If flock fails with EWOULDBLOCK: daemon is actively running
+//
 // Falls back to PID file check for backward compatibility with pre-lock daemons.
 func tryDaemonLock(beadsDir string) (running bool, pid int) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
@@ -98,29 +110,33 @@ func tryDaemonLock(beadsDir string) (running bool, pid int) {
 		// Fall back to PID file check for backward compatibility
 		return checkPIDFile(beadsDir)
 	}
-	defer func() { _ = f.Close() }()
 
 	// Try to acquire lock non-blocking
 	if err := flockExclusive(f); err != nil {
+		_ = f.Close()
 		if err == ErrDaemonLocked {
-			// Lock is held - daemon is running
-			// Try to read PID from JSON format (best effort)
-			_, _ = f.Seek(0, 0)
-			var lockInfo DaemonLockInfo
-			if err := json.NewDecoder(f).Decode(&lockInfo); err == nil {
-				pid = lockInfo.PID
-			} else {
-				// Fallback: try reading as plain integer (old format)
-				_, _ = f.Seek(0, 0)
-				data := make([]byte, 32)
-				n, _ := f.Read(data)
-				if n > 0 {
-					_, _ = fmt.Sscanf(string(data[:n]), "%d", &pid)
+			// Lock is held by another process - daemon IS running
+			// Re-open to read metadata (we just closed the file)
+			// #nosec G304 - controlled path from config
+			metaFile, metaErr := os.Open(lockPath)
+			if metaErr == nil {
+				defer func() { _ = metaFile.Close() }()
+				var lockInfo DaemonLockInfo
+				if err := json.NewDecoder(metaFile).Decode(&lockInfo); err == nil {
+					pid = lockInfo.PID
+				} else {
+					// Fallback: try reading as plain integer (old format)
+					_, _ = metaFile.Seek(0, 0)
+					data := make([]byte, 32)
+					n, _ := metaFile.Read(data)
+					if n > 0 {
+						_, _ = fmt.Sscanf(string(data[:n]), "%d", &pid)
+					}
 				}
-				// Fallback to PID file if we couldn't read PID from lock file
-				if pid == 0 {
-					_, pid = checkPIDFile(beadsDir)
-				}
+			}
+			// Final fallback to PID file if we couldn't read PID from lock file
+			if pid == 0 {
+				_, pid = checkPIDFile(beadsDir)
 			}
 			return true, pid
 		}
@@ -128,8 +144,16 @@ func tryDaemonLock(beadsDir string) (running bool, pid int) {
 		return false, 0
 	}
 
-	// We got the lock - no daemon running
-	// Release immediately (file close will do this)
+	// We acquired the lock - daemon is NOT running (stale lock file)
+	// Clean up stale lock file to prevent confusion on next check
+	// Close the file first to release the flock before removing
+	_ = f.Close()
+	_ = os.Remove(lockPath)
+
+	// Also clean up stale PID file if it exists
+	pidFile := filepath.Join(beadsDir, "daemon.pid")
+	_ = os.Remove(pidFile)
+
 	return false, 0
 }
 
@@ -137,13 +161,13 @@ func tryDaemonLock(beadsDir string) (running bool, pid int) {
 // Returns lock info if available, or error if file doesn't exist or can't be parsed
 func readDaemonLockInfo(beadsDir string) (*DaemonLockInfo, error) {
 	lockPath := filepath.Join(beadsDir, "daemon.lock")
-	
+
 	// #nosec G304 - controlled path from config
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var lockInfo DaemonLockInfo
 	if err := json.Unmarshal(data, &lockInfo); err != nil {
 		// Try parsing as old format (plain PID)
@@ -153,7 +177,7 @@ func readDaemonLockInfo(beadsDir string) (*DaemonLockInfo, error) {
 		}
 		return nil, fmt.Errorf("cannot parse lock file: %w", err)
 	}
-	
+
 	return &lockInfo, nil
 }
 
@@ -165,21 +189,21 @@ func validateDaemonLock(beadsDir string, expectedDB string) error {
 		// No lock file or can't read - not an error for validation
 		return nil
 	}
-	
+
 	// Validate database path if specified in lock
 	if lockInfo.Database != "" && expectedDB != "" {
 		if lockInfo.Database != expectedDB {
 			return fmt.Errorf("daemon database mismatch: daemon uses %s but expected %s", lockInfo.Database, expectedDB)
 		}
 	}
-	
+
 	// Version mismatch is a warning, not a hard error (handled elsewhere)
 	// But we return the info for caller to decide
 	if lockInfo.Version != "" && lockInfo.Version != Version {
 		// Not a hard error - version compatibility check happens via RPC
 		// This is just informational
 	}
-	
+
 	return nil
 }
 
@@ -203,4 +227,14 @@ func checkPIDFile(beadsDir string) (running bool, pid int) {
 	}
 
 	return true, pidVal
+}
+
+// cleanupDaemonLockFile removes the daemon.lock file (best-effort)
+// This is called from panic handlers and other cleanup paths
+func cleanupDaemonLockFile(beadsDir string) {
+	if beadsDir == "" {
+		return
+	}
+	lockPath := filepath.Join(beadsDir, "daemon.lock")
+	_ = os.Remove(lockPath)
 }

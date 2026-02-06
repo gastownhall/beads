@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 import (
@@ -500,3 +499,5 @@ func TestBootstrapWithoutOptionalFiles(t *testing.T) {
 		t.Errorf("expected 0 interactions imported, got %d", result.InteractionsImported)
 	}
 }
+
+

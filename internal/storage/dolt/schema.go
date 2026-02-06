@@ -1,5 +1,4 @@
 //go:build cgo
-
 package dolt
 
 // schema defines the MySQL-compatible database schema for Dolt.
@@ -339,3 +338,5 @@ WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
       )
   );
 `
+
+

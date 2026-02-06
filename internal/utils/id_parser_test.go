@@ -508,8 +508,8 @@ func TestExtractIssueNumber(t *testing.T) {
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && 
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
 		findSubstring(s, substr)))
 }
 
@@ -520,4 +520,137 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestResolvePartialID_CrossPrefix tests resolution of IDs with different prefixes
+// than the configured prefix. This is the GH#1513 fix for multi-repo scenarios
+// where issues from different rigs (with different prefixes) are hydrated into
+// a single database.
+func TestResolvePartialID_CrossPrefix(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+
+	// Create issues with different prefixes (simulating multi-repo hydration)
+	hqIssue := &types.Issue{
+		ID:        "hq-abc12",
+		Title:     "HQ Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	aapIssue := &types.Issue{
+		ID:        "aap-4ar",
+		Title:     "AAP Issue from different rig",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	crIssue := &types.Issue{
+		ID:        "cr-xyz99",
+		Title:     "CR Issue from another rig",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+
+	if err := store.CreateIssue(ctx, hqIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, aapIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, crIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set config prefix to "hq" (the "town" prefix)
+	if err := store.SetConfig(ctx, "issue_prefix", "hq"); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		input       string
+		expected    string
+		shouldError bool
+	}{
+		{
+			name:     "configured prefix - full ID",
+			input:    "hq-abc12",
+			expected: "hq-abc12",
+		},
+		{
+			name:     "configured prefix - short ID",
+			input:    "abc12",
+			expected: "hq-abc12",
+		},
+		{
+			name:     "different prefix - full ID (GH#1513)",
+			input:    "aap-4ar",
+			expected: "aap-4ar",
+		},
+		{
+			name:     "different prefix - another rig (GH#1513)",
+			input:    "cr-xyz99",
+			expected: "cr-xyz99",
+		},
+		{
+			name:     "different prefix - short ID falls back to substring match",
+			input:    "4ar",
+			expected: "aap-4ar",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ResolvePartialID(ctx, store, tt.input)
+
+			if tt.shouldError {
+				if err == nil {
+					t.Errorf("ResolvePartialID(%q) expected error, got nil", tt.input)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ResolvePartialID(%q) unexpected error: %v", tt.input, err)
+				}
+				if result != tt.expected {
+					t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+				}
+			}
+		})
+	}
+}
+
+// TestLooksLikePrefixedID tests the helper function for detecting prefixed IDs
+func TestLooksLikePrefixedID(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"aap-4ar", true},
+		{"bd-abc123", true},
+		{"hq-xyz", true},
+		{"cr-99", true},
+		{"myproj-task1", true},
+		{"a-b", true},       // minimal valid prefix
+		{"abc12345-x", true}, // 8-char prefix (max)
+
+		// Invalid cases
+		{"abc", false},           // no hyphen
+		{"", false},              // empty
+		{"-abc", false},          // hyphen at start
+		{"ABC-123", false},       // uppercase
+		{"abcdefghi-x", false},   // prefix too long (9 chars)
+		{"abc-", false},          // empty suffix
+		{"abc--def", false},      // suffix starts with hyphen
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := looksLikePrefixedID(tt.input)
+			if result != tt.expected {
+				t.Errorf("looksLikePrefixedID(%q) = %v; want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
 }

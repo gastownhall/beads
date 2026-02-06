@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/autoimport"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/export"
 	"github.com/steveyegge/beads/internal/importer"
@@ -264,6 +265,10 @@ func (s *Server) handleImport(req *Request) Response {
 // This fixes bd-132: daemon shows stale data after git pull
 // This fixes bd-8931: daemon gets stuck when auto-import blocked by git conflicts
 func (s *Server) checkAndAutoImportIfStale(req *Request) error {
+	if !config.NeedsJSONLImport() {
+		return nil
+	}
+
 	// Get storage for this request
 	store := s.storage
 

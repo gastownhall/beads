@@ -733,6 +733,15 @@ func NeedsJSONL() bool {
 	return mode == SyncModeGitPortable || mode == SyncModeRealtime || mode == SyncModeBeltAndSuspenders
 }
 
+// NeedsJSONLImport returns true if the sync mode should import from JSONL.
+// In dolt-native mode, imports are disabled to prevent stale JSONL from
+// overwriting dolt data. This is for use by internal/rpc which can't
+// import cmd/bd.
+func NeedsJSONLImport() bool {
+	mode := GetSyncMode()
+	return mode != SyncModeDoltNative
+}
+
 // GetCustomTypesFromYAML retrieves custom issue types from config.yaml.
 // This is used as a fallback when the database doesn't have types.custom set yet
 // (e.g., during bd init auto-import before the database is fully configured).

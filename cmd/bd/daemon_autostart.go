@@ -35,21 +35,29 @@ var (
 )
 
 var (
-	executableFn             = os.Executable
-	execCommandFn            = exec.Command
-	openFileFn               = os.OpenFile
-	findProcessFn            = os.FindProcess
-	removeFileFn             = os.Remove
-	configureDaemonProcessFn = configureDaemonProcess
-	waitForSocketReadinessFn = waitForSocketReadiness
-	startDaemonProcessFn     = startDaemonProcess
-	isDaemonRunningFn        = isDaemonRunning
-	sendStopSignalFn         = sendStopSignal
+	executableFn               = os.Executable
+	execCommandFn              = exec.Command
+	openFileFn                 = os.OpenFile
+	findProcessFn              = os.FindProcess
+	removeFileFn               = os.Remove
+	configureDaemonProcessFn   = configureDaemonProcess
+	waitForSocketReadinessFn   = waitForSocketReadiness
+	startDaemonProcessFn       = startDaemonProcess
+	isDaemonRunningFn          = isDaemonRunning
+	sendStopSignalFn           = sendStopSignal
+	isDoltBackendFn            = isDoltBackendImpl
+	singleProcessOnlyBackendFn = singleProcessOnlyBackendImpl
 )
 
 // isDoltBackend returns true if the current workspace uses any Dolt backend mode.
 // The daemon is only needed for SQLite - Dolt has its own sync mechanism.
+// This is a wrapper that calls isDoltBackendFn for testability.
 func isDoltBackend() bool {
+	return isDoltBackendFn()
+}
+
+// isDoltBackendImpl is the actual implementation of isDoltBackend.
+func isDoltBackendImpl() bool {
 	beadsDir := ""
 	if dbPath != "" {
 		beadsDir = filepath.Dir(dbPath)
@@ -71,9 +79,15 @@ func isDoltBackend() bool {
 
 // singleProcessOnlyBackend returns true if the current workspace backend is configured
 // as single-process-only (currently Dolt embedded).
+// This is a wrapper that calls singleProcessOnlyBackendFn for testability.
+func singleProcessOnlyBackend() bool {
+	return singleProcessOnlyBackendFn()
+}
+
+// singleProcessOnlyBackendImpl is the actual implementation of singleProcessOnlyBackend.
 //
 // Best-effort: if we can't determine the backend, we return false and defer to other logic.
-func singleProcessOnlyBackend() bool {
+func singleProcessOnlyBackendImpl() bool {
 	// Prefer dbPath if set; it points to either .beads/<db>.db (sqlite) or .beads/dolt (dolt dir).
 	beadsDir := ""
 	if dbPath != "" {
