@@ -22,6 +22,7 @@ var validRoutingModes = map[string]bool{
 	"auto":        true,
 	"maintainer":  true,
 	"contributor": true,
+	"explicit":    true,
 }
 
 // validBranchNameRegex validates git branch names

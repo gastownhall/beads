@@ -293,6 +293,14 @@ func runDiagnostics(path string) doctorResult {
 		OverallOK:  true,
 	}
 
+	// Auto-detect gastown mode: routes.jsonl is only created by gastown workspaces
+	if !doctorGastown {
+		routesFile := filepath.Join(path, ".beads", "routes.jsonl")
+		if _, err := os.Stat(routesFile); err == nil {
+			doctorGastown = true
+		}
+	}
+
 	// Check 1: Installation (.beads/ directory)
 	installCheck := convertWithCategory(doctor.CheckInstallation(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, installCheck)

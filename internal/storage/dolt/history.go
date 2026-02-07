@@ -310,9 +310,8 @@ type IssueDiff struct {
 // GetInternalConflicts returns any merge conflicts in the current state (internal format).
 // For the public interface, use GetConflicts which returns storage.Conflict.
 func (s *DoltStore) GetInternalConflicts(ctx context.Context) ([]*TableConflict, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT table_name, num_conflicts FROM dolt_conflicts
-	`)
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `table`, num_conflicts FROM dolt_conflicts")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get conflicts: %w", err)
 	}

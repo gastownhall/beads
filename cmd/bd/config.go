@@ -337,7 +337,7 @@ Checks:
   - federation.remote is set when sync.mode requires it
   - Remote URL format is valid (dolthub://, gs://, s3://, file://)
   - sync.branch is a valid git branch name
-  - routing.mode is valid (auto, maintainer, contributor)
+  - routing.mode is valid (auto, maintainer, contributor, explicit)
 
 Examples:
   bd config validate
