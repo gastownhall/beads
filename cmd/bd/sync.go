@@ -1057,6 +1057,8 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 		return resolveSyncConflictsManually(ctx, jsonlPath, beadsDir, conflictState, baseMap, localMap, remoteMap)
 	}
 
+	// Determine winner for each conflict based on strategy
+	winners := make(map[string]*beads.Issue) // issueID -> winning version
 	resolved := 0
 	for _, conflict := range conflictState.Conflicts {
 		local := localMap[conflict.IssueID]
@@ -1085,6 +1087,13 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 			}
 		}
 
+		// Store the winning version
+		if winner == "local" && local != nil {
+			winners[conflict.IssueID] = local
+		} else if remote != nil {
+			winners[conflict.IssueID] = remote
+		}
+
 		fmt.Printf("✓ %s: kept %s", conflict.IssueID, winner)
 		if strategy == config.ConflictStrategyNewest {
 			fmt.Print(" (newer)")
@@ -1098,12 +1107,14 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 		return fmt.Errorf("clearing conflict state: %w", err)
 	}
 
-	// Re-run merge with the resolved conflicts
+	// Run merge for non-conflicting issues, then override conflicts with chosen winners
 	mergeResult := MergeIssues(baseIssues, localIssues, remoteIssues)
 
-	// Display any remaining manual conflicts
-	if len(mergeResult.ManualConflicts) > 0 {
-		displayManualConflicts(mergeResult.ManualConflicts)
+	// Override conflicting issues with the strategy-chosen winner
+	for i, issue := range mergeResult.Merged {
+		if winner, ok := winners[issue.ID]; ok {
+			mergeResult.Merged[i] = winner
+		}
 	}
 
 	// Write merged state
