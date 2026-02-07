@@ -1003,7 +1003,7 @@ func flushToJSONLWithState(state flushState) {
 // For full export, returns all issue IDs. For incremental, returns only dirty IDs.
 func getIssuesToExport(ctx context.Context, fullExport bool) ([]string, error) {
 	if fullExport {
-		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 		if err != nil {
 			return nil, fmt.Errorf("failed to get all issues: %w", err)
 		}
