@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-// Snapshot captures database state before migrations for validation
-type Snapshot struct {
+// snapshot captures database state before migrations for validation
+type snapshot struct {
 	IssueCount      int
 	ConfigKeys      []string
 	DependencyCount int
@@ -21,7 +21,7 @@ type Snapshot struct {
 type MigrationInvariant struct {
 	Name        string
 	Description string
-	Check       func(*sql.DB, *Snapshot) error
+	Check       func(*sql.DB, *snapshot) error
 }
 
 // invariants is the list of all invariants checked after migrations
@@ -44,8 +44,8 @@ var invariants = []MigrationInvariant{
 }
 
 // captureSnapshot takes a snapshot of the database state before migrations
-func captureSnapshot(db *sql.DB) (*Snapshot, error) {
-	snapshot := &Snapshot{}
+func captureSnapshot(db *sql.DB) (*snapshot, error) {
+	snapshot := &snapshot{}
 
 	// Count issues
 	err := db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&snapshot.IssueCount)
@@ -88,7 +88,7 @@ func captureSnapshot(db *sql.DB) (*Snapshot, error) {
 }
 
 // verifyInvariants checks all migration invariants and returns error if any fail
-func verifyInvariants(db *sql.DB, snapshot *Snapshot) error {
+func verifyInvariants(db *sql.DB, snapshot *snapshot) error {
 	var failures []string
 
 	for _, invariant := range invariants {
@@ -106,7 +106,7 @@ func verifyInvariants(db *sql.DB, snapshot *Snapshot) error {
 
 // checkRequiredConfig ensures required config keys exist (would have caught GH #201)
 // Only enforces issue_prefix requirement if there are issues in the database
-func checkRequiredConfig(db *sql.DB, snapshot *Snapshot) error {
+func checkRequiredConfig(db *sql.DB, snapshot *snapshot) error {
 	// Check current issue count (not snapshot, since migrations may add/remove issues)
 	var currentCount int
 	err := db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&currentCount)
@@ -133,7 +133,7 @@ func checkRequiredConfig(db *sql.DB, snapshot *Snapshot) error {
 }
 
 // checkForeignKeys ensures no orphaned dependencies or labels exist
-func checkForeignKeys(db *sql.DB, snapshot *Snapshot) error {
+func checkForeignKeys(db *sql.DB, snapshot *snapshot) error {
 	// Check for orphaned dependencies (issue_id not in issues)
 	var orphanedDepsIssue int
 	err := db.QueryRow(`
@@ -183,7 +183,7 @@ func checkForeignKeys(db *sql.DB, snapshot *Snapshot) error {
 }
 
 // checkIssueCount ensures issue count doesn't decrease unexpectedly
-func checkIssueCount(db *sql.DB, snapshot *Snapshot) error {
+func checkIssueCount(db *sql.DB, snapshot *snapshot) error {
 	var currentCount int
 	err := db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&currentCount)
 	if err != nil {

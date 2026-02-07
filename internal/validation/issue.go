@@ -117,18 +117,18 @@ func HasType(allowed ...types.IssueType) IssueValidator {
 	}
 }
 
-// ForUpdate returns a validator chain for update operations.
+// forUpdate returns a validator chain for update operations.
 // Validates: issue exists and is not a template.
-func ForUpdate() IssueValidator {
+func forUpdate() IssueValidator {
 	return Chain(
 		Exists(),
 		NotTemplate(),
 	)
 }
 
-// ForClose returns a validator chain for close operations.
+// forClose returns a validator chain for close operations.
 // Validates: issue exists, is not a template, and is not pinned (unless force).
-func ForClose(force bool) IssueValidator {
+func forClose(force bool) IssueValidator {
 	return Chain(
 		Exists(),
 		NotTemplate(),
@@ -136,18 +136,18 @@ func ForClose(force bool) IssueValidator {
 	)
 }
 
-// ForDelete returns a validator chain for delete operations.
+// forDelete returns a validator chain for delete operations.
 // Validates: issue exists and is not a template.
-func ForDelete() IssueValidator {
+func forDelete() IssueValidator {
 	return Chain(
 		Exists(),
 		NotTemplate(),
 	)
 }
 
-// ForReopen returns a validator chain for reopen operations.
+// forReopen returns a validator chain for reopen operations.
 // Validates: issue exists, is not a template, and is closed.
-func ForReopen() IssueValidator {
+func forReopen() IssueValidator {
 	return Chain(
 		Exists(),
 		NotTemplate(),

@@ -309,9 +309,9 @@ func TestForUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ForUpdate()("bd-test", tt.issue)
+			err := forUpdate()("bd-test", tt.issue)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ForUpdate() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("forUpdate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -358,9 +358,9 @@ func TestForClose(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ForClose(tt.force)("bd-test", tt.issue)
+			err := forClose(tt.force)("bd-test", tt.issue)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ForClose() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("forClose() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

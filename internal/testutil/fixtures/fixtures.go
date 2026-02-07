@@ -153,8 +153,8 @@ func LargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string) 
 	return generateFromJSONL(ctx, store, tempDir, cfg)
 }
 
-// XLargeFromJSONL creates a 20K issue database by exporting to JSONL and reimporting
-func XLargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string) error {
+// xLargeFromJSONL creates a 20K issue database by exporting to JSONL and reimporting
+func xLargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string) error {
 	cfg := DefaultXLargeConfig()
 	cfg.RandSeed = 45 // different seed for JSONL path
 	return generateFromJSONL(ctx, store, tempDir, cfg)

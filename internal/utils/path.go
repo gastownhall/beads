@@ -61,10 +61,10 @@ func FindJSONLInDir(dbDir string) string {
 	return filepath.Join(dbDir, "issues.jsonl")
 }
 
-// FindMoleculesJSONLInDir finds the molecules.jsonl file in the given .beads directory.
+// findMoleculesJSONLInDir finds the molecules.jsonl file in the given .beads directory.
 // Returns the path to molecules.jsonl if it exists, empty string otherwise.
 // Molecules are template issues used for instantiation (beads-1ra).
-func FindMoleculesJSONLInDir(dbDir string) string {
+func findMoleculesJSONLInDir(dbDir string) string {
 	moleculesPath := filepath.Join(dbDir, "molecules.jsonl")
 	// Check if file exists - we don't fall back to any other file
 	// because molecules.jsonl is optional and specific

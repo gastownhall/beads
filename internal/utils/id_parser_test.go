@@ -55,9 +55,9 @@ func TestParseIssueID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ParseIssueID(tt.input, tt.prefix)
+			result := parseIssueID(tt.input, tt.prefix)
 			if result != tt.expected {
-				t.Errorf("ParseIssueID(%q, %q) = %q; want %q", tt.input, tt.prefix, result, tt.expected)
+				t.Errorf("parseIssueID(%q, %q) = %q; want %q", tt.input, tt.prefix, result, tt.expected)
 			}
 		})
 	}

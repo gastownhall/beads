@@ -42,16 +42,16 @@ func Printf(format string, args ...interface{}) {
 	}
 }
 
-// PrintNormal prints output unless quiet mode is enabled
+// printNormal prints output unless quiet mode is enabled
 // Use this for normal informational output that should be suppressed in quiet mode
-func PrintNormal(format string, args ...interface{}) {
+func printNormal(format string, args ...interface{}) {
 	if !quietMode {
 		fmt.Printf(format, args...)
 	}
 }
 
-// PrintlnNormal prints a line unless quiet mode is enabled
-func PrintlnNormal(args ...interface{}) {
+// printlnNormal prints a line unless quiet mode is enabled
+func printlnNormal(args ...interface{}) {
 	if !quietMode {
 		fmt.Println(args...)
 	}

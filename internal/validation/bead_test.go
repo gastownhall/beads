@@ -185,7 +185,7 @@ func TestValidateIDFormat_ParentChildFlow(t *testing.T) {
 
 			// Simulate the prefix validation from create.go:389
 			// This is where the "prefix mismatch" error occurs
-			err = ValidatePrefix(extractedPrefix, tt.dbPrefix, false)
+			err = validatePrefix(extractedPrefix, tt.dbPrefix, false)
 			prefixMatches := (err == nil)
 
 			if prefixMatches != tt.shouldMatch {
@@ -281,9 +281,9 @@ func TestValidatePrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePrefix(tt.requestedPrefix, tt.dbPrefix, tt.force)
+			err := validatePrefix(tt.requestedPrefix, tt.dbPrefix, tt.force)
 			if (err != nil) != tt.wantError {
-				t.Errorf("ValidatePrefix() error = %v, wantError %v", err, tt.wantError)
+				t.Errorf("validatePrefix() error = %v, wantError %v", err, tt.wantError)
 			}
 		})
 	}
@@ -298,7 +298,7 @@ func TestValidatePrefixWithAllowed(t *testing.T) {
 		force           bool
 		wantError       bool
 	}{
-		// Basic cases (same as ValidatePrefix)
+		// Basic cases (same as validatePrefix)
 		{"matching prefixes", "bd", "bd", "", false, false},
 		{"empty db prefix", "bd", "", "", false, false},
 		{"mismatched with force", "foo", "bd", "", true, false},
@@ -326,9 +326,9 @@ func TestValidatePrefixWithAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePrefixWithAllowed(tt.requestedPrefix, tt.dbPrefix, tt.allowedPrefixes, tt.force)
+			err := validatePrefixWithAllowed(tt.requestedPrefix, tt.dbPrefix, tt.allowedPrefixes, tt.force)
 			if (err != nil) != tt.wantError {
-				t.Errorf("ValidatePrefixWithAllowed() error = %v, wantError %v", err, tt.wantError)
+				t.Errorf("validatePrefixWithAllowed() error = %v, wantError %v", err, tt.wantError)
 			}
 		})
 	}

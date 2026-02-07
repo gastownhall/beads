@@ -223,14 +223,14 @@ func TestPrintNormal(t *testing.T) {
 			r, w, _ := os.Pipe()
 			os.Stdout = w
 
-			PrintNormal(tt.format, tt.args...)
+			printNormal(tt.format, tt.args...)
 
 			w.Close()
 			var buf bytes.Buffer
 			io.Copy(&buf, r)
 
 			if got := buf.String(); got != tt.wantOutput {
-				t.Errorf("PrintNormal() output = %q, want %q", got, tt.wantOutput)
+				t.Errorf("printNormal() output = %q, want %q", got, tt.wantOutput)
 			}
 		})
 	}
@@ -271,7 +271,7 @@ func TestPrintlnNormal(t *testing.T) {
 			r, w, _ := os.Pipe()
 			os.Stdout = w
 
-			PrintlnNormal(tt.args...)
+			printlnNormal(tt.args...)
 
 			w.Close()
 			var buf bytes.Buffer

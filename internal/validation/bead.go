@@ -75,13 +75,13 @@ func ValidateIDFormat(id string) (string, error) {
 	return prefix, nil
 }
 
-// ValidatePrefix checks that the requested prefix matches the database prefix.
+// validatePrefix checks that the requested prefix matches the database prefix.
 // Returns an error if they don't match (unless force is true).
-func ValidatePrefix(requestedPrefix, dbPrefix string, force bool) error {
-	return ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, "", force)
+func validatePrefix(requestedPrefix, dbPrefix string, force bool) error {
+	return validatePrefixWithAllowed(requestedPrefix, dbPrefix, "", force)
 }
 
-// ValidatePrefixWithAllowed checks that the requested prefix is allowed.
+// validatePrefixWithAllowed checks that the requested prefix is allowed.
 // It matches if:
 // - force is true
 // - dbPrefix is empty
@@ -94,7 +94,7 @@ func ValidatePrefix(requestedPrefix, dbPrefix string, force bool) error {
 // (because "test" is word-like), but if "hq-cv" is in allowedPrefixes, we
 // should accept "hq" since it's clearly intended to be part of "hq-cv".
 // Returns an error if none of these conditions are met.
-func ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes string, force bool) error {
+func validatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes string, force bool) error {
 	if force || dbPrefix == "" || dbPrefix == requestedPrefix {
 		return nil
 	}
@@ -124,7 +124,7 @@ func ValidatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes string
 }
 
 // ValidateIDPrefixAllowed checks that an issue ID's prefix is allowed.
-// Unlike ValidatePrefixWithAllowed which takes an extracted prefix, this function
+// Unlike validatePrefixWithAllowed which takes an extracted prefix, this function
 // takes the full ID and checks if it starts with any allowed prefix.
 // This correctly handles multi-hyphen prefixes like "hq-cv-" where the suffix
 // might look like an English word (e.g., "hq-cv-test").

@@ -171,9 +171,9 @@ func TestIsCompactDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := IsCompactDuration(tt.input)
+			got := isCompactDuration(tt.input)
 			if got != tt.want {
-				t.Errorf("IsCompactDuration(%q) = %v, want %v", tt.input, got, tt.want)
+				t.Errorf("isCompactDuration(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}

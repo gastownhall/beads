@@ -83,8 +83,8 @@ func applyDuration(base time.Time, amount int, unit string) time.Time {
 	}
 }
 
-// IsCompactDuration returns true if the string matches compact duration syntax.
-func IsCompactDuration(s string) bool {
+// isCompactDuration returns true if the string matches compact duration syntax.
+func isCompactDuration(s string) bool {
 	return compactDurationRe.MatchString(s)
 }
 
@@ -102,7 +102,7 @@ func getNLPParser() *when.Parser {
 	return nlpParser
 }
 
-// ParseNaturalLanguage parses natural language time expressions using olebedev/when.
+// parseNaturalLanguage parses natural language time expressions using olebedev/when.
 //
 // Examples:
 //   - "tomorrow" -> tomorrow at current time
@@ -117,7 +117,7 @@ func getNLPParser() *when.Parser {
 //     This is a known issue in the olebedev/when library.
 //
 // Returns error if input cannot be parsed as natural language.
-func ParseNaturalLanguage(s string, now time.Time) (time.Time, error) {
+func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
 	parser := getNLPParser()
 	result, err := parser.Parse(s, now)
 	if err != nil {
@@ -172,7 +172,7 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)
-	if t, err := ParseNaturalLanguage(s, now); err == nil {
+	if t, err := parseNaturalLanguage(s, now); err == nil {
 		return t, nil
 	}
 

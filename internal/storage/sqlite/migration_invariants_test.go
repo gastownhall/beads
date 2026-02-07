@@ -48,7 +48,7 @@ func TestCheckRequiredConfig(t *testing.T) {
 	defer db.Close()
 
 	// Test with no issues - should pass even without issue_prefix
-	snapshot := &Snapshot{IssueCount: 0}
+	snapshot := &snapshot{IssueCount: 0}
 	err := checkRequiredConfig(db, snapshot)
 	if err != nil {
 		t.Errorf("expected no error with 0 issues, got: %v", err)
@@ -89,7 +89,7 @@ func TestCheckForeignKeys(t *testing.T) {
 	db := setupInvariantTestDB(t)
 	defer db.Close()
 
-	snapshot := &Snapshot{}
+	snapshot := &snapshot{}
 
 	// Test with no data - should pass
 	err := checkForeignKeys(db, snapshot)
@@ -305,7 +305,7 @@ func TestCleanOrphanedRefs(t *testing.T) {
 	}
 
 	// Verify we have orphaned refs (checkForeignKeys should fail)
-	err = checkForeignKeys(db, &Snapshot{})
+	err = checkForeignKeys(db, &snapshot{})
 	if err == nil {
 		t.Error("expected checkForeignKeys to fail with orphaned refs")
 	}
@@ -327,7 +327,7 @@ func TestCleanOrphanedRefs(t *testing.T) {
 	}
 
 	// Verify checkForeignKeys now passes
-	err = checkForeignKeys(db, &Snapshot{})
+	err = checkForeignKeys(db, &snapshot{})
 	if err != nil {
 		t.Errorf("expected checkForeignKeys to pass after cleanup, got: %v", err)
 	}

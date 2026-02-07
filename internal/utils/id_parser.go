@@ -10,11 +10,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// ParseIssueID ensures an issue ID has the configured prefix.
+// parseIssueID ensures an issue ID has the configured prefix.
 // If the input already has the prefix (e.g., "bd-a3f8e9"), returns it as-is.
 // If the input lacks the prefix (e.g., "a3f8e9"), adds the configured prefix.
 // Works with hierarchical IDs too: "a3f8e9.1.2" → "bd-a3f8e9.1.2"
-func ParseIssueID(input string, prefix string) string {
+func parseIssueID(input string, prefix string) string {
 	if prefix == "" {
 		prefix = "bd-"
 	}

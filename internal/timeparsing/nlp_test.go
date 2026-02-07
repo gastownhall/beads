@@ -125,9 +125,9 @@ func TestParseNaturalLanguage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseNaturalLanguage(tt.input, now)
+			got, err := parseNaturalLanguage(tt.input, now)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseNaturalLanguage(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				t.Errorf("parseNaturalLanguage(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 				return
 			}
 			if tt.wantErr {
@@ -135,16 +135,16 @@ func TestParseNaturalLanguage(t *testing.T) {
 			}
 
 			if got.Year() != tt.wantYear {
-				t.Errorf("ParseNaturalLanguage(%q) year = %d, want %d", tt.input, got.Year(), tt.wantYear)
+				t.Errorf("parseNaturalLanguage(%q) year = %d, want %d", tt.input, got.Year(), tt.wantYear)
 			}
 			if got.Month() != tt.wantMonth {
-				t.Errorf("ParseNaturalLanguage(%q) month = %v, want %v", tt.input, got.Month(), tt.wantMonth)
+				t.Errorf("parseNaturalLanguage(%q) month = %v, want %v", tt.input, got.Month(), tt.wantMonth)
 			}
 			if got.Day() != tt.wantDay {
-				t.Errorf("ParseNaturalLanguage(%q) day = %d, want %d", tt.input, got.Day(), tt.wantDay)
+				t.Errorf("parseNaturalLanguage(%q) day = %d, want %d", tt.input, got.Day(), tt.wantDay)
 			}
 			if tt.wantHour >= 0 && got.Hour() != tt.wantHour {
-				t.Errorf("ParseNaturalLanguage(%q) hour = %d, want %d", tt.input, got.Hour(), tt.wantHour)
+				t.Errorf("parseNaturalLanguage(%q) hour = %d, want %d", tt.input, got.Hour(), tt.wantHour)
 			}
 		})
 	}
