@@ -31,8 +31,8 @@ func TestCheckBeadsRole_NotConfigured(t *testing.T) {
 	if check.Name != "Role Configuration" {
 		t.Errorf("expected name 'Role Configuration', got %q", check.Name)
 	}
-	if check.Fix != "bd init" {
-		t.Errorf("expected fix 'bd init', got %q", check.Fix)
+	if check.Fix != "bd config set beads.role maintainer" {
+		t.Errorf("expected fix 'bd config set beads.role maintainer', got %q", check.Fix)
 	}
 }
 
