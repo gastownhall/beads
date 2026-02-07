@@ -137,11 +137,17 @@ func TestListCommandSuite(t *testing.T) {
 		t.Run("filter by label", func(t *testing.T) {
 			results := h.search(types.IssueFilter{Labels: []string{"critical"}})
 			h.assertCount(len(results), 1, "issues with critical label")
+			if len(results) > 0 {
+				h.assertEqual("Bug Issue", results[0].Title, "label-filtered issue title")
+			}
 		})
 
 		t.Run("filter by title search", func(t *testing.T) {
 			results := h.search(types.IssueFilter{TitleSearch: "Bug"})
 			h.assertCount(len(results), 1, "issues matching 'Bug'")
+			if len(results) > 0 {
+				h.assertEqual("Bug Issue", results[0].Title, "title-search result")
+			}
 		})
 
 		t.Run("limit results", func(t *testing.T) {
