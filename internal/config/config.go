@@ -191,6 +191,9 @@ func Initialize() error {
 	// Maps directory patterns to labels for automatic filtering in monorepos
 	v.SetDefault("directory.labels", map[string]string{})
 
+	// AI configuration defaults
+	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+
 	// External projects for cross-project dependency resolution (bd-h807)
 	// Maps project names to paths for resolving external: blocked_by references
 	v.SetDefault("external_projects", map[string]string{})
@@ -427,6 +430,12 @@ func Set(key string, value interface{}) {
 // 	}
 // 	return v.BindPFlag(key, flag)
 // }
+
+// DefaultAIModel returns the configured AI model identifier.
+// Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
+func DefaultAIModel() string {
+	return GetString("ai.model")
+}
 
 // AllSettings returns all configuration settings as a map
 func AllSettings() map[string]interface{} {

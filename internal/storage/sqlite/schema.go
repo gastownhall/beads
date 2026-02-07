@@ -149,7 +149,7 @@ INSERT OR IGNORE INTO config (key, value) VALUES
     ('compact_tier2_days', '90'),
     ('compact_tier2_dep_levels', '5'),
     ('compact_tier2_commits', '100'),
-    ('compact_model', 'claude-3-5-haiku-20241022'),
+    ('compact_model', 'claude-haiku-4-5-20251001'),
     ('compact_batch_size', '50'),
     ('compact_parallel_workers', '5'),
     ('auto_compact_enabled', 'false');

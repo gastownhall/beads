@@ -13,6 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -55,7 +56,7 @@ func init() {
 	findDuplicatesCmd.Flags().Float64("threshold", 0.5, "Similarity threshold (0.0-1.0, lower = more results)")
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
-	findDuplicatesCmd.Flags().String("model", "claude-haiku-4-5-20251001", "AI model to use (only with --method ai)")
+	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -74,6 +75,9 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
+	if model == "" {
+		model = config.DefaultAIModel()
+	}
 
 	ctx := rootCtx
 

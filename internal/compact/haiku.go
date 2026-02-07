@@ -14,11 +14,11 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 const (
-	defaultModel   = "claude-3-5-haiku-20241022"
 	maxRetries     = 3
 	initialBackoff = 1 * time.Second
 )
@@ -56,7 +56,7 @@ func NewHaikuClient(apiKey string) (*HaikuClient, error) {
 
 	return &HaikuClient{
 		client:         client,
-		model:          defaultModel,
+		model:          anthropic.Model(config.DefaultAIModel()),
 		tier1Template:  tier1Tmpl,
 		maxRetries:     maxRetries,
 		initialBackoff: initialBackoff,
