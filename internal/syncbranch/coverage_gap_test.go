@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestCheckForcePush_WithGitRepo exercises the full CheckForcePush code paths
+// TestCheckForcePush_WithGitRepo exercises the full checkForcePush code paths
 // that require a real git repository with remote refs.
 func TestCheckForcePush_WithGitRepo(t *testing.T) {
 	if testing.Short() {
@@ -53,12 +53,12 @@ func TestCheckForcePush_WithGitRepo(t *testing.T) {
 		runGit(t, repoDir, "push", "origin", syncBranch)
 
 		// Check for force push - should NOT detect one
-		status, err := CheckForcePush(ctx, store, repoDir, syncBranch)
+		status, err := checkForcePush(ctx, store, repoDir, syncBranch)
 		if err != nil {
-			t.Fatalf("CheckForcePush() error = %v", err)
+			t.Fatalf("checkForcePush() error = %v", err)
 		}
 		if status.Detected {
-			t.Error("CheckForcePush() detected force push on normal fast-forward")
+			t.Error("checkForcePush() detected force push on normal fast-forward")
 		}
 		if !strings.Contains(status.Message, "fast-forward") {
 			t.Errorf("Message = %q, want to contain 'fast-forward'", status.Message)
@@ -103,12 +103,12 @@ func TestCheckForcePush_WithGitRepo(t *testing.T) {
 		runGit(t, repoDir, "push", "--force", "origin", syncBranch)
 
 		// Check for force push - should detect it
-		status, err := CheckForcePush(ctx, store, repoDir, syncBranch)
+		status, err := checkForcePush(ctx, store, repoDir, syncBranch)
 		if err != nil {
-			t.Fatalf("CheckForcePush() error = %v", err)
+			t.Fatalf("checkForcePush() error = %v", err)
 		}
 		if !status.Detected {
-			t.Error("CheckForcePush() did NOT detect force push")
+			t.Error("checkForcePush() did NOT detect force push")
 		}
 		if !strings.Contains(status.Message, "FORCE-PUSH DETECTED") {
 			t.Errorf("Message = %q, want to contain 'FORCE-PUSH DETECTED'", status.Message)
@@ -150,12 +150,12 @@ func TestCheckForcePush_WithGitRepo(t *testing.T) {
 		}
 
 		// Check - SHA should match, no force push
-		status, err := CheckForcePush(ctx, store, repoDir, syncBranch)
+		status, err := checkForcePush(ctx, store, repoDir, syncBranch)
 		if err != nil {
-			t.Fatalf("CheckForcePush() error = %v", err)
+			t.Fatalf("checkForcePush() error = %v", err)
 		}
 		if status.Detected {
-			t.Error("CheckForcePush() should not detect force push when SHA matches")
+			t.Error("checkForcePush() should not detect force push when SHA matches")
 		}
 		if !strings.Contains(status.Message, "unchanged") {
 			t.Errorf("Message = %q, want to contain 'unchanged'", status.Message)
@@ -185,9 +185,9 @@ func TestCheckForcePush_WithGitRepo(t *testing.T) {
 		}
 
 		// Check force push for a branch that doesn't exist on remote
-		status, err := CheckForcePush(ctx, store, repoDir, "nonexistent-sync")
+		status, err := checkForcePush(ctx, store, repoDir, "nonexistent-sync")
 		if err != nil {
-			t.Fatalf("CheckForcePush() error = %v", err)
+			t.Fatalf("checkForcePush() error = %v", err)
 		}
 		if status.Detected {
 			t.Error("Should not detect force push when remote branch doesn't exist")
@@ -231,9 +231,9 @@ func TestUpdateStoredRemoteSHA_WithGitRepo(t *testing.T) {
 		defer store.Close()
 
 		// Update stored SHA
-		err := UpdateStoredRemoteSHA(ctx, store, repoDir, syncBranch)
+		err := updateStoredRemoteSHA(ctx, store, repoDir, syncBranch)
 		if err != nil {
-			t.Fatalf("UpdateStoredRemoteSHA() error = %v", err)
+			t.Fatalf("updateStoredRemoteSHA() error = %v", err)
 		}
 
 		// Verify stored SHA matches
@@ -265,9 +265,9 @@ func TestUpdateStoredRemoteSHA_WithGitRepo(t *testing.T) {
 		defer store.Close()
 
 		// Update stored SHA — should fall back to local branch
-		err := UpdateStoredRemoteSHA(ctx, store, repoDir, syncBranch)
+		err := updateStoredRemoteSHA(ctx, store, repoDir, syncBranch)
 		if err != nil {
-			t.Fatalf("UpdateStoredRemoteSHA() error = %v", err)
+			t.Fatalf("updateStoredRemoteSHA() error = %v", err)
 		}
 
 		storedSHA, err := store.GetConfig(ctx, RemoteSHAConfigKey)
@@ -291,9 +291,9 @@ func TestUpdateStoredRemoteSHA_WithGitRepo(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
 
-		err := UpdateStoredRemoteSHA(ctx, store, repoDir, "nonexistent-branch")
+		err := updateStoredRemoteSHA(ctx, store, repoDir, "nonexistent-branch")
 		if err == nil {
-			t.Error("UpdateStoredRemoteSHA() expected error for nonexistent branch")
+			t.Error("updateStoredRemoteSHA() expected error for nonexistent branch")
 		}
 	})
 }
@@ -595,9 +595,9 @@ func TestResetToRemote_FullCycle(t *testing.T) {
 		runGit(t, repoDir, "reset", "--hard", baseCommit)
 
 		// Reset to remote — works from worktree, we stay on beads-sync
-		err := ResetToRemote(ctx, repoDir, syncBranch, jsonlPath)
+		err := resetToRemote(ctx, repoDir, syncBranch, jsonlPath)
 		if err != nil {
-			t.Fatalf("ResetToRemote() error = %v", err)
+			t.Fatalf("resetToRemote() error = %v", err)
 		}
 
 		// Verify JSONL was updated with remote content

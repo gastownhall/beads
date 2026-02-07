@@ -671,7 +671,7 @@ func TestFormatVanishedIssues(t *testing.T) {
 	})
 }
 
-// TestCheckDivergence tests the public CheckDivergence function
+// TestCheckDivergence tests the public checkDivergence function
 func TestCheckDivergence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -691,7 +691,7 @@ func TestCheckDivergence(t *testing.T) {
 		// Add remote but don't create the branch on it
 		runGit(t, repoDir, "remote", "add", "origin", repoDir) // Use self as remote
 
-		info, err := CheckDivergence(ctx, repoDir, "beads-sync")
+		info, err := checkDivergence(ctx, repoDir, "beads-sync")
 		if err != nil {
 			// Expected to fail since remote branch doesn't exist
 			return
@@ -699,7 +699,7 @@ func TestCheckDivergence(t *testing.T) {
 
 		// If it succeeds, verify no divergence
 		if info.IsDiverged {
-			t.Error("CheckDivergence() should not report divergence when remote doesn't exist")
+			t.Error("checkDivergence() should not report divergence when remote doesn't exist")
 		}
 	})
 }

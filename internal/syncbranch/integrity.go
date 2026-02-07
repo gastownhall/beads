@@ -17,8 +17,8 @@ const (
 	RemoteSHAConfigKey = "sync.remote_sha"
 )
 
-// ForcePushStatus represents the result of a force-push detection check.
-type ForcePushStatus struct {
+// forcePushStatus represents the result of a force-push detection check.
+type forcePushStatus struct {
 	// Detected is true if a force-push was detected on the remote sync branch.
 	Detected bool
 
@@ -38,7 +38,7 @@ type ForcePushStatus struct {
 	Remote string
 }
 
-// CheckForcePush detects if the remote sync branch has been force-pushed since the last sync.
+// checkForcePush detects if the remote sync branch has been force-pushed since the last sync.
 //
 // A force-push is detected when:
 // 1. We have a stored remote SHA from a previous sync
@@ -52,9 +52,9 @@ type ForcePushStatus struct {
 //   - repoRoot: Path to the git repository root
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
-// Returns ForcePushStatus with details about the check.
-func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) (*ForcePushStatus, error) {
-	status := &ForcePushStatus{
+// Returns forcePushStatus with details about the check.
+func checkForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) (*forcePushStatus, error) {
+	status := &forcePushStatus{
 		Detected: false,
 		Branch:   syncBranch,
 	}
@@ -133,7 +133,7 @@ func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 	return status, nil
 }
 
-// UpdateStoredRemoteSHA stores the current remote sync branch SHA in the database.
+// updateStoredRemoteSHA stores the current remote sync branch SHA in the database.
 // Call this after a successful sync to track the remote state.
 //
 // Parameters:
@@ -143,7 +143,7 @@ func CheckForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
 // Returns error if the update fails.
-func UpdateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) error {
+func updateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) error {
 	// Get worktree path for git operations
 	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
@@ -173,13 +173,13 @@ func UpdateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot,
 	return nil
 }
 
-// ClearStoredRemoteSHA removes the stored remote SHA.
+// clearStoredRemoteSHA removes the stored remote SHA.
 // Use this when resetting the sync state (e.g., after accepting a rebase).
-func ClearStoredRemoteSHA(ctx context.Context, store storage.Storage) error {
+func clearStoredRemoteSHA(ctx context.Context, store storage.Storage) error {
 	return store.DeleteConfig(ctx, RemoteSHAConfigKey)
 }
 
-// GetStoredRemoteSHA returns the stored remote sync branch SHA.
-func GetStoredRemoteSHA(ctx context.Context, store storage.Storage) (string, error) {
+// getStoredRemoteSHA returns the stored remote sync branch SHA.
+func getStoredRemoteSHA(ctx context.Context, store storage.Storage) (string, error) {
 	return store.GetConfig(ctx, RemoteSHAConfigKey)
 }

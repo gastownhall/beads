@@ -235,8 +235,8 @@ func TestResetToRemote(t *testing.T) {
 		runGit(t, repoDir, "commit", "-m", "local commit")
 		runGit(t, repoDir, "checkout", "main")
 
-		// ResetToRemote should fail since remote branch doesn't exist
-		err := ResetToRemote(ctx, repoDir, syncBranch, jsonlPath)
+		// resetToRemote should fail since remote branch doesn't exist
+		err := resetToRemote(ctx, repoDir, syncBranch, jsonlPath)
 		if err == nil {
 			// If it succeeds without remote, that's also acceptable
 			// (the remote is set to self, might not have sync branch)
@@ -266,8 +266,8 @@ func TestPushSyncBranch(t *testing.T) {
 		runGit(t, repoDir, "commit", "-m", "initial")
 		runGit(t, repoDir, "checkout", "main")
 
-		// PushSyncBranch should handle the worktree creation
-		err := PushSyncBranch(ctx, repoDir, syncBranch)
+		// pushSyncBranch should handle the worktree creation
+		err := pushSyncBranch(ctx, repoDir, syncBranch)
 		// Will fail because origin doesn't have the branch, but should not panic
 		if err != nil {
 			// Expected - push will fail since origin doesn't have the branch set up

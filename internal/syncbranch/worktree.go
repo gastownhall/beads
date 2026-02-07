@@ -73,8 +73,8 @@ type CommitResult struct {
 	Message    string // Commit message used
 }
 
-// DivergenceInfo contains information about sync branch divergence from remote
-type DivergenceInfo struct {
+// divergenceInfo contains information about sync branch divergence from remote
+type divergenceInfo struct {
 	LocalAhead   int    // Number of commits local is ahead of remote
 	RemoteAhead  int    // Number of commits remote is ahead of local
 	Branch       string // The sync branch name
@@ -83,9 +83,9 @@ type DivergenceInfo struct {
 	IsSignificant bool  // True if divergence exceeds threshold (suggests recovery needed)
 }
 
-// SignificantDivergenceThreshold is the number of commits at which divergence is considered significant
+// significantDivergenceThreshold is the number of commits at which divergence is considered significant
 // When both local and remote are ahead by at least this many commits, the user should consider recovery options
-const SignificantDivergenceThreshold = 5
+const significantDivergenceThreshold = 5
 
 // PullResult contains information about a worktree pull operation
 type PullResult struct {
@@ -258,7 +258,7 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 //
 // IMPORTANT: If requireMassDeleteConfirmation is true and the safety check triggers,
 // the function will NOT auto-push. Instead, it sets SafetyCheckTriggered=true in the result
-// and the caller should prompt for confirmation then call PushSyncBranch.
+// and the caller should prompt for confirmation then call pushSyncBranch.
 //
 // This ensures sync never fails due to git merge conflicts, as we handle merging at the
 // JSONL content level where we have semantic understanding of the data.
@@ -502,7 +502,7 @@ func getDivergence(ctx context.Context, worktreePath, branch, remote string) (in
 	return localAhead, remoteAhead, nil
 }
 
-// CheckDivergence checks the divergence between local sync branch and remote.
+// checkDivergence checks the divergence between local sync branch and remote.
 // This should be called before attempting sync operations to detect significant divergence
 // that may require user intervention.
 //
@@ -511,9 +511,9 @@ func getDivergence(ctx context.Context, worktreePath, branch, remote string) (in
 //   - repoRoot: Path to the git repository root
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
-// Returns DivergenceInfo with details about the divergence, or error if check fails.
-func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*DivergenceInfo, error) {
-	info := &DivergenceInfo{
+// Returns divergenceInfo with details about the divergence, or error if check fails.
+func checkDivergence(ctx context.Context, repoRoot, syncBranch string) (*divergenceInfo, error) {
+	info := &divergenceInfo{
 		Branch: syncBranch,
 	}
 
@@ -555,14 +555,14 @@ func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*Diverge
 
 	// Significant divergence: both sides have many commits
 	// This suggests automatic merge may be problematic
-	if info.IsDiverged && (localAhead >= SignificantDivergenceThreshold || remoteAhead >= SignificantDivergenceThreshold) {
+	if info.IsDiverged && (localAhead >= significantDivergenceThreshold || remoteAhead >= significantDivergenceThreshold) {
 		info.IsSignificant = true
 	}
 
 	return info, nil
 }
 
-// ResetToRemote resets the local sync branch to match the remote state.
+// resetToRemote resets the local sync branch to match the remote state.
 // This discards all local commits on the sync branch and adopts the remote's history.
 // Use this when the sync branch has diverged significantly and you want to discard local changes.
 //
@@ -573,7 +573,7 @@ func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*Diverge
 //   - jsonlPath: Path to the JSONL file in the main repo (will be updated with remote content)
 //
 // Returns error if reset fails.
-func ResetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) error {
+func resetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) error {
 	// GH#639: Use git-common-dir for worktree path to support bare repos
 	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
@@ -1001,7 +1001,7 @@ Merge error: %v`, branch, remote, branch, branch, lastErr, mergeErr)
 	return fmt.Errorf("push failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-// PushSyncBranch pushes the sync branch to remote.
+// pushSyncBranch pushes the sync branch to remote.
 // This is used after confirmation when sync.require_confirmation_on_mass_delete is enabled
 // and a mass deletion was detected during merge.
 //
@@ -1011,7 +1011,7 @@ Merge error: %v`, branch, remote, branch, branch, lastErr, mergeErr)
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
 // Returns error if push fails.
-func PushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
+func pushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
 	// Worktree path is under .git/beads-worktrees/<branch>
 	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
 
