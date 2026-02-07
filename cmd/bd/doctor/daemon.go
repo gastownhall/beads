@@ -235,7 +235,7 @@ func CheckDaemonAutoSync(path string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("Daemon running without %v (slows agent workflows)", missing),
 			Detail:  "With sync-branch configured, auto-commit and auto-push should be enabled",
-			Fix:     "Restart daemon: bd daemon stop && bd daemon start",
+			Fix:     "Restart daemon: bd daemon stop . && bd daemon start",
 		}
 	}
 
