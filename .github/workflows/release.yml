@@ -34,6 +34,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
 
+      - name: Install go-winres for Windows PE resource embedding
+        run: go install github.com/tc-hib/go-winres@latest
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

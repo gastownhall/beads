@@ -92,14 +92,20 @@ If you're building beads from source or distributing it:
 
 ### Current Build Configuration
 
-Beads releases are built with optimizations to reduce false positives:
+Beads releases are built with multiple optimizations to reduce false positives:
 
 ```yaml
 ldflags:
   - -s -w  # Strip debug symbols and DWARF info
 ```
 
-These flags are already applied in the official builds.
+**Windows PE version info**: Release builds embed legitimate PE resource metadata
+(company name, product name, file description, version, copyright, and an
+application manifest) into the Windows binary using `go-winres`. This is one of the
+most effective measures against AV false positives — legitimate software almost
+always has PE metadata, and AV heuristics use its absence as a suspicion signal.
+
+These optimizations are applied automatically in official release builds.
 
 ### Code Signing
 
@@ -158,8 +164,9 @@ The issue isn't specific to beads' code - it's a characteristic of Go binaries i
 ### Will this be fixed in future releases?
 
 We've implemented:
+- **Windows PE version info** embedded in binaries (company name, product name, version, manifest)
 - **Code signing infrastructure** for Windows releases (requires EV certificate)
-- **Build optimizations** to reduce heuristic triggers
+- **Build optimizations** to reduce heuristic triggers (`-s -w` ldflags)
 - **Documentation** for users to add exclusions and report false positives
 
 Still in progress:

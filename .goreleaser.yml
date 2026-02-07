@@ -7,6 +7,9 @@ before:
   hooks:
     # Ensure dependencies are up to date
     - go mod tidy
+    # Generate Windows PE version info resources (.syso files)
+    # Reduces antivirus false positives by embedding legitimate metadata
+    - ./scripts/gen-winres.sh
 
 builds:
   - id: bd-linux-amd64

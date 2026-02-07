@@ -1,0 +1,32 @@
+{
+  "RT_GROUP_ICON": {},
+  "RT_MANIFEST": {
+    "#1": {
+      "0000": "manifest.xml"
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.49.4",
+          "product_version": "0.49.4",
+          "type": "App"
+        },
+        "info": {
+          "0409": {
+            "Comments": "AI-supervised issue tracker for coding workflows",
+            "CompanyName": "Steve Yegge",
+            "FileDescription": "beads - AI-supervised issue tracker",
+            "FileVersion": "0.49.4",
+            "InternalName": "bd",
+            "LegalCopyright": "Copyright (c) 2024-2026 Steve Yegge. MIT License.",
+            "OriginalFilename": "bd.exe",
+            "ProductName": "beads",
+            "ProductVersion": "0.49.4"
+          }
+        }
+      }
+    }
+  }
+}
