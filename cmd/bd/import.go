@@ -635,11 +635,12 @@ func checkUncommittedChanges(filePath string, result *ImportResult) {
 	workDir := filepath.Dir(filePath)
 
 	// Use git diff to check if working tree differs from HEAD
-	cmd := fmt.Sprintf("git diff --quiet HEAD %s", filePath)
-	exitCode, _ := runGitCommand(cmd, workDir)
+	gitCmd := exec.Command("git", "diff", "--quiet", "HEAD", "--", filePath)
+	gitCmd.Dir = workDir
+	err := gitCmd.Run()
 
 	// Exit code 0 = no changes, 1 = changes exist, >1 = error
-	if exitCode == 1 {
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 		// Get line counts for context
 		workingTreeLines := countLines(filePath)
 		headLines := countLinesInGitHEAD(filePath, workDir)
@@ -653,24 +654,6 @@ func checkUncommittedChanges(filePath string, result *ImportResult) {
 		fmt.Fprintf(os.Stderr, "   Run: git diff %s\n", filePath)
 		fmt.Fprintf(os.Stderr, "   To review uncommitted changes\n")
 	}
-}
-
-// runGitCommand executes a git command and returns exit code and output
-// workDir is the directory to run the command in (empty = current dir)
-func runGitCommand(cmd string, workDir string) (int, string) {
-	// #nosec G204 - command is constructed internally
-	gitCmd := exec.Command("sh", "-c", cmd)
-	if workDir != "" {
-		gitCmd.Dir = workDir
-	}
-	output, err := gitCmd.CombinedOutput()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), string(output)
-		}
-		return -1, string(output)
-	}
-	return 0, string(output)
 }
 
 // countLines counts the number of lines in a file
@@ -693,12 +676,13 @@ func countLines(filePath string) int {
 // countLinesInGitHEAD counts lines in the file as it exists in git HEAD
 func countLinesInGitHEAD(filePath string, workDir string) int {
 	// First, find the git root
-	findRootCmd := "git rev-parse --show-toplevel 2>/dev/null"
-	exitCode, gitRootOutput := runGitCommand(findRootCmd, workDir)
-	if exitCode != 0 {
+	gitRootCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	gitRootCmd.Dir = workDir
+	gitRootOutput, err := gitRootCmd.Output()
+	if err != nil {
 		return 0
 	}
-	gitRoot := strings.TrimSpace(gitRootOutput)
+	gitRoot := strings.TrimSpace(string(gitRootOutput))
 
 	// Make filePath relative to git root
 	absPath, err := filepath.Abs(filePath)
@@ -711,16 +695,19 @@ func countLinesInGitHEAD(filePath string, workDir string) int {
 		return 0
 	}
 
-	cmd := fmt.Sprintf("git show HEAD:%s 2>/dev/null | wc -l", relPath)
-	exitCode, output := runGitCommand(cmd, workDir)
-	if exitCode != 0 {
+	// Get file content from git HEAD and count lines in Go (no shell pipe)
+	gitShowCmd := exec.Command("git", "show", "HEAD:"+relPath)
+	gitShowCmd.Dir = workDir
+	output, err := gitShowCmd.Output()
+	if err != nil {
 		return 0
 	}
 
-	var lines int
-	_, err = fmt.Sscanf(strings.TrimSpace(output), "%d", &lines)
-	if err != nil {
-		return 0
+	// Count lines in the output
+	lines := 0
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		lines++
 	}
 	return lines
 }

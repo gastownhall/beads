@@ -31,6 +31,14 @@ func (s *Server) handleExport(req *Request) Response {
 		}
 	}
 
+	// Validate that JSONLPath resolves within the workspace directory (path traversal prevention)
+	if err := s.validatePathWithinWorkspace(exportArgs.JSONLPath); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid export path: %v", err),
+		}
+	}
+
 	store := s.storage
 	ctx, cancel := s.reqCtx(req)
 	defer cancel()
@@ -437,6 +445,43 @@ func hasUncommittedBeadsFiles(workspacePath string) bool {
 	}
 
 	return false
+}
+
+// validatePathWithinWorkspace checks that a file path resolves within the server's workspace directory.
+// It canonicalizes both paths (resolving symlinks and ".." components) to prevent path traversal attacks.
+func (s *Server) validatePathWithinWorkspace(path string) error {
+	if path == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+
+	// Make absolute relative to workspace
+	absPath := path
+	if !filepath.IsAbs(path) {
+		absPath = filepath.Join(s.workspacePath, path)
+	}
+
+	// Clean the path to resolve ".." components
+	absPath = filepath.Clean(absPath)
+
+	// Resolve symlinks to prevent symlink traversal
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Dir(absPath))
+	if err != nil {
+		// If parent directory doesn't exist yet, validate the cleaned path without symlink resolution
+		resolvedPath = filepath.Dir(absPath)
+	}
+	resolvedPath = filepath.Join(resolvedPath, filepath.Base(absPath))
+
+	resolvedWorkspace, err := filepath.EvalSymlinks(s.workspacePath)
+	if err != nil {
+		resolvedWorkspace = filepath.Clean(s.workspacePath)
+	}
+
+	// Ensure the resolved path is within the workspace
+	if !strings.HasPrefix(resolvedPath, resolvedWorkspace+string(filepath.Separator)) && resolvedPath != resolvedWorkspace {
+		return fmt.Errorf("path %q resolves outside workspace directory", path)
+	}
+
+	return nil
 }
 
 // triggerExport exports all issues to JSONL after auto-import remaps IDs

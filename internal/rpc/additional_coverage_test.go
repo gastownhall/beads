@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -818,7 +819,7 @@ func TestGetMutations(t *testing.T) {
 
 // TestExport tests the Export operation via RPC
 func TestExport(t *testing.T) {
-	_, client, cleanup := setupTestServer(t)
+	server, client, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	// Create some issues first
@@ -834,17 +835,12 @@ func TestExport(t *testing.T) {
 		}
 	}
 
-	// Create a temp file for export
-	tmpFile, err := os.CreateTemp("", "beads-export-*.jsonl")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	// Create export file within the workspace directory (path traversal prevention)
+	exportPath := filepath.Join(server.workspacePath, ".beads", "export.jsonl")
 
-	// Export to the temp file
+	// Export to the file within workspace
 	resp, err := client.Export(&ExportArgs{
-		JSONLPath: tmpFile.Name(),
+		JSONLPath: exportPath,
 	})
 	if err != nil {
 		t.Fatalf("Export failed: %v", err)
@@ -855,7 +851,7 @@ func TestExport(t *testing.T) {
 	}
 
 	// Verify file was written
-	info, err := os.Stat(tmpFile.Name())
+	info, err := os.Stat(exportPath)
 	if err != nil {
 		t.Fatalf("Failed to stat export file: %v", err)
 	}
