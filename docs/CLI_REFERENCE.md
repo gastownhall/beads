@@ -86,6 +86,11 @@ bd create "Tests" -p 1 --parent bd-a3f8e9 --json                # Auto-assigned:
 
 # Create and link discovered work (one command)
 bd create "Found bug" -t bug -p 1 --deps discovered-from:<parent-id> --json
+
+# Create with external reference (v0.9.2+)
+bd create "Fix login" -t bug -p 1 --external-ref "gh-123" --json  # Short form
+bd create "Fix login" -t bug -p 1 --external-ref "https://github.com/org/repo/issues/123" --json  # Full URL
+bd create "Jira task" -t task -p 1 --external-ref "jira-PROJ-456" --json  # Custom prefix
 ```
 
 ### Update Issues
@@ -95,6 +100,10 @@ bd create "Found bug" -t bug -p 1 --deps discovered-from:<parent-id> --json
 bd update <id> [<id>...] --status in_progress --json
 bd update <id> [<id>...] --priority 1 --json
 bd update <id> [<id>...] --spec-id "docs/specs/auth.md" --json
+
+# Update external reference (v0.9.2+)
+bd update <id> --external-ref "gh-456" --json           # Short form
+bd update <id> --external-ref "jira-PROJ-789" --json    # Custom prefix
 
 # Atomically claim an issue for work (prevents race conditions)
 # Sets assignee to you and status to in_progress in one atomic operation
@@ -218,6 +227,9 @@ bd list --title "auth" --json
 bd list --title-contains "auth" --json                  # Search in title
 bd list --desc-contains "implement" --json              # Search in description
 bd list --notes-contains "TODO" --json                  # Search in notes
+
+# Find beads issue by external reference
+bd list --json | jq -r '.[] | select(.external_ref == "gh-123") | .id'
 ```
 
 ### Date Range Filters
@@ -762,6 +774,14 @@ bd kv list --json                      # Machine-readable output
 Only `blocks` dependencies affect the ready work queue.
 
 **Note:** When creating an issue with a `discovered-from` dependency, the new issue automatically inherits the parent's `source_repo` field.
+
+## External References
+
+The `--external-ref` flag (v0.9.2+) links beads issues to external trackers:
+
+- Supports short form (`gh-123`) or full URL (`https://github.com/...`)
+- Portable via JSONL - survives sync across machines
+- Custom prefixes work for any tracker (`jira-PROJ-456`, `linear-789`)
 
 ## Output Formats
 
