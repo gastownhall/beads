@@ -11,6 +11,27 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// cleanTestTables deletes all data from all tables to ensure test isolation.
+// This is called at the start of each test to avoid duplicate primary key
+// errors from data left over by previous test runs on the shared Dolt server.
+var testTables = []string{
+	"federation_peers", "interactions", "routes", "repo_mtimes",
+	"compaction_snapshots", "issue_snapshots", "child_counters",
+	"export_hashes", "dirty_issues", "metadata", "events", "comments",
+	"labels", "dependencies", "config",
+	"issues", // issues last due to foreign key references
+}
+
+func cleanTestTables(ctx context.Context, store *DoltStore) error {
+	for _, table := range testTables {
+		if _, err := store.db.ExecContext(ctx, "DELETE FROM `"+table+"`"); err != nil {
+			// Table may not exist yet if schema hasn't been fully initialized
+			continue
+		}
+	}
+	return nil
+}
+
 // testTimeout is the maximum time for any single test operation.
 const testTimeout = 30 * time.Second
 
@@ -28,7 +49,9 @@ func skipIfNoDolt(t *testing.T) {
 	}
 }
 
-// setupTestStore creates a test store with a temporary directory
+// setupTestStore creates a test store connected to the shared Dolt server.
+// It cleans all table data before returning to ensure test isolation and
+// prevent duplicate primary key errors from data left by previous runs.
 func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
@@ -53,6 +76,13 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 		os.RemoveAll(tmpDir)
 		// Server mode requires a running Dolt server - skip if unavailable
 		t.Skipf("failed to create Dolt store: %v", err)
+	}
+
+	// Clean all tables to ensure this test starts with a fresh state
+	if err := cleanTestTables(ctx, store); err != nil {
+		store.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("failed to clean test tables: %v", err)
 	}
 
 	// Set up issue prefix
