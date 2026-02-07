@@ -46,6 +46,14 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 			"run 'bd init' to initialize bd")
 	}
 
+	// Check if daemon is running - migration with a running daemon risks race conditions
+	pidFile := filepath.Join(beadsDir, "daemon.pid")
+	if isRunning, pid := isDaemonRunning(pidFile); isRunning {
+		exitWithError("daemon_running",
+			fmt.Sprintf("bd daemon is running (PID %d). Stop it before migrating to avoid race conditions.", pid),
+			"run 'bd daemon stop' first, then retry migration")
+	}
+
 	// Load config
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
