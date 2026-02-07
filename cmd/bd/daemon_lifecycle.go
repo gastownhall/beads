@@ -72,7 +72,7 @@ func showDaemonStatus(pidFile string) {
 		// Try to get detailed status from daemon via RPC
 		var rpcStatus *rpc.StatusResponse
 		beadsDir := filepath.Dir(pidFile)
-		socketPath := filepath.Join(beadsDir, "bd.sock")
+		socketPath := rpc.ShortSocketPath(filepath.Dir(beadsDir))
 		if client, err := rpc.TryConnectWithTimeout(socketPath, 1*time.Second); err == nil && client != nil {
 			if status, err := client.Status(); err == nil {
 				rpcStatus = status
@@ -133,7 +133,7 @@ func showDaemonHealth() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	socketPath := filepath.Join(beadsDir, "bd.sock")
+	socketPath := rpc.ShortSocketPath(filepath.Dir(beadsDir))
 
 	client, err := rpc.TryConnect(socketPath)
 	if err != nil {
@@ -190,7 +190,7 @@ func showDaemonMetrics() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	socketPath := filepath.Join(beadsDir, "bd.sock")
+	socketPath := rpc.ShortSocketPath(filepath.Dir(beadsDir))
 
 	client, err := rpc.TryConnect(socketPath)
 	if err != nil {

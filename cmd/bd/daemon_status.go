@@ -144,8 +144,8 @@ func showCurrentDaemonStatus() {
 	}
 
 	beadsDir := filepath.Dir(pidFile)
-	socketPath := filepath.Join(beadsDir, "bd.sock")
 	workspacePath := filepath.Dir(beadsDir)
+	socketPath := rpc.ShortSocketPath(workspacePath)
 
 	// Check if daemon is running
 	isRunning, pid := isDaemonRunning(pidFile)
