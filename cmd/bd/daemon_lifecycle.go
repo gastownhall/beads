@@ -423,7 +423,7 @@ func startDaemon(interval time.Duration, autoCommit, autoPush, autoPull, localMo
 	}
 	if federation {
 		args = append(args, "--federation")
-		if federationPort != 0 && federationPort != 3306 {
+		if federationPort != 0 && federationPort != 3307 {
 			args = append(args, "--federation-port", strconv.Itoa(federationPort))
 		}
 		if remotesapiPort != 0 && remotesapiPort != 8080 {

@@ -176,6 +176,6 @@ func init() {
 	daemonStartCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonStartCmd.Flags().Bool("log-json", false, "Output logs in JSON format")
 	daemonStartCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server)")
-	daemonStartCmd.Flags().Int("federation-port", 3306, "MySQL port for federation mode dolt sql-server")
+	daemonStartCmd.Flags().Int("federation-port", 3307, "MySQL port for federation mode dolt sql-server")
 	daemonStartCmd.Flags().Int("remotesapi-port", 8080, "remotesapi port for peer-to-peer sync in federation mode")
 }

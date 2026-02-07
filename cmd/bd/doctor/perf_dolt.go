@@ -12,6 +12,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // DoltPerfMetrics holds performance metrics for Dolt operations
@@ -53,9 +55,17 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		GoVersion: runtime.Version(),
 	}
 
+	// Load config for server connection settings
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+	host := cfg.GetDoltServerHost()
+	port := cfg.GetDoltServerPort()
+
 	// Check if server is running
 	doltDir := filepath.Join(beadsDir, "dolt")
-	serverRunning := isDoltServerRunning("127.0.0.1", 3306)
+	serverRunning := isDoltServerRunning(host, port)
 	if serverRunning {
 		metrics.ServerStatus = "running"
 	} else {
@@ -78,7 +88,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		return metrics, fmt.Errorf("dolt sql-server is not running; start it with: dolt sql-server")
 	}
 
-	if err := runDoltServerDiagnostics(metrics, "127.0.0.1", 3306); err != nil {
+	if err := runDoltServerDiagnostics(metrics, host, port); err != nil {
 		return metrics, fmt.Errorf("server mode diagnostics failed: %w", err)
 	}
 

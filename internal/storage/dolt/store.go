@@ -59,7 +59,7 @@ type Config struct {
 
 	// Server connection options
 	ServerHost     string // Server host (default: 127.0.0.1)
-	ServerPort     int    // Server port (default: 3306)
+	ServerPort     int    // Server port (default: 3307)
 	ServerUser     string // MySQL user (default: root)
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 }

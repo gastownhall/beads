@@ -276,7 +276,7 @@ func init() {
 	daemonCmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	daemonCmd.Flags().Bool("log-json", false, "Output logs in JSON format (structured logging)")
 	daemonCmd.Flags().Bool("federation", false, "Enable federation mode (runs dolt sql-server with remotesapi)")
-	daemonCmd.Flags().Int("federation-port", 3306, "MySQL port for federation mode dolt sql-server")
+	daemonCmd.Flags().Int("federation-port", 3307, "MySQL port for federation mode dolt sql-server")
 	daemonCmd.Flags().Int("remotesapi-port", 8080, "remotesapi port for peer-to-peer sync in federation mode")
 	daemonCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 	rootCmd.AddCommand(daemonCmd)

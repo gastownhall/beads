@@ -745,7 +745,7 @@ func init() {
 	// Dolt server mode flags
 	initCmd.Flags().Bool("server", false, "Configure Dolt server connection settings (server mode is always used)")
 	initCmd.Flags().String("server-host", "", "Dolt server host (default: 127.0.0.1)")
-	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3306)")
+	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3307)")
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
 
 	rootCmd.AddCommand(initCmd)

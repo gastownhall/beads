@@ -137,6 +137,7 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 	// Update metadata.json
 	cfg.Backend = configfile.BackendDolt
 	cfg.Database = "dolt"
+	cfg.DoltServerPort = configfile.DefaultDoltServerPort
 	if err := cfg.Save(beadsDir); err != nil {
 		exitWithError("config_save_failed", err.Error(),
 			"data was imported but metadata.json was not updated - manually set backend to 'dolt'")

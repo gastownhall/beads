@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	// DefaultSQLPort is the default port for dolt sql-server MySQL protocol
-	DefaultSQLPort = 3306
+	// DefaultSQLPort is the default port for dolt sql-server MySQL protocol.
+	// Gas Town uses 3307 to avoid conflict with MySQL on 3306.
+	DefaultSQLPort = 3307
 	// DefaultRemotesAPIPort is the default port for dolt remotesapi (peer-to-peer sync)
 	DefaultRemotesAPIPort = 8080
 	// ServerStartTimeout is how long to wait for server to start
@@ -32,7 +33,7 @@ const (
 // ServerConfig holds configuration for the dolt sql-server
 type ServerConfig struct {
 	DataDir        string // Path to Dolt database directory
-	SQLPort        int    // MySQL protocol port (default: 3306)
+	SQLPort        int    // MySQL protocol port (default: 3307)
 	RemotesAPIPort int    // remotesapi port for peer sync (default: 8080)
 	Host           string // Host to bind to (default: 127.0.0.1)
 	LogFile        string // Log file for server output (optional)

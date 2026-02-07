@@ -40,9 +40,6 @@ func openDoltServerDB(beadsDir string) (*sql.DB, error) {
 		host = "127.0.0.1"
 	}
 	port := cfg.GetDoltServerPort()
-	if port == 0 {
-		port = 3306
-	}
 	user := cfg.GetDoltServerUser()
 	if user == "" {
 		user = "root"
