@@ -91,9 +91,11 @@ func (s *Server) handleDepAdd(req *Request) Response {
 	return Response{Success: true, Data: data}
 }
 
-// Generic handler for simple store operations with standard error handling
+// Generic handler for simple store operations with standard error handling.
+// issueIDFunc is called after args are unmarshaled to extract the issue ID
+// for mutation events (passing the ID directly would evaluate before unmarshal).
 func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc string,
-	opFunc func(context.Context, storage.Storage, string) error, issueID string,
+	opFunc func(context.Context, storage.Storage, string) error, issueIDFunc func() string,
 	responseData func() map[string]interface{}) Response {
 	if err := json.Unmarshal(req.Args, argsPtr); err != nil {
 		return Response{
@@ -120,6 +122,7 @@ func (s *Server) handleSimpleStoreOp(req *Request, argsPtr interface{}, argDesc 
 	}
 
 	// Emit mutation event for event-driven daemon
+	issueID := issueIDFunc()
 	title, assignee := s.lookupIssueMeta(ctx, issueID)
 	s.emitMutation(MutationUpdate, issueID, title, assignee)
 
@@ -136,7 +139,7 @@ func (s *Server) handleDepRemove(req *Request) Response {
 		func(ctx context.Context, store storage.Storage, actor string) error {
 			return store.RemoveDependency(ctx, depArgs.FromID, depArgs.ToID, actor)
 		},
-		depArgs.FromID,
+		func() string { return depArgs.FromID },
 		func() map[string]interface{} {
 			return map[string]interface{}{
 				"status":        "removed",
@@ -151,14 +154,14 @@ func (s *Server) handleLabelAdd(req *Request) Response {
 	var labelArgs LabelAddArgs
 	return s.handleSimpleStoreOp(req, &labelArgs, "label add", func(ctx context.Context, store storage.Storage, actor string) error {
 		return store.AddLabel(ctx, labelArgs.ID, labelArgs.Label, actor)
-	}, labelArgs.ID, nil)
+	}, func() string { return labelArgs.ID }, nil)
 }
 
 func (s *Server) handleLabelRemove(req *Request) Response {
 	var labelArgs LabelRemoveArgs
 	return s.handleSimpleStoreOp(req, &labelArgs, "label remove", func(ctx context.Context, store storage.Storage, actor string) error {
 		return store.RemoveLabel(ctx, labelArgs.ID, labelArgs.Label, actor)
-	}, labelArgs.ID, nil)
+	}, func() string { return labelArgs.ID }, nil)
 }
 
 func (s *Server) handleCommentList(req *Request) Response {
