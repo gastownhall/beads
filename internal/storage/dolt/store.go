@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +166,17 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
+
+	// Fail-fast TCP check before MySQL protocol initialization.
+	// This gives an immediate, clear error if the Dolt server isn't running,
+	// rather than waiting for MySQL driver timeouts.
+	addr := net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  dolt sql-server  # Manual start in database directory",
+			addr, err)
+	}
+	_ = conn.Close()
 
 	// Connect to dolt sql-server via MySQL protocol
 	db, connStr, err := openServerConnection(ctx, cfg)
