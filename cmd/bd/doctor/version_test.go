@@ -65,6 +65,30 @@ func TestIsValidSemver(t *testing.T) {
 	}
 }
 
+func TestUpgradeCommandForPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		execPath string
+		expected string
+	}{
+		{"homebrew apple silicon", "/opt/homebrew/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
+		{"homebrew intel mac", "/usr/local/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
+		{"homebrew linux", "/home/linuxbrew/.linuxbrew/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
+		{"legacy tap formula", "/opt/homebrew/Cellar/bd/0.49.0/bin/bd", "brew upgrade beads"},
+		{"usr local bin symlink", "/usr/local/bin/bd", installScriptCommand},
+		{"go install", "/home/user/go/bin/bd", installScriptCommand},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := upgradeCommandForPath(tt.execPath)
+			if result != tt.expected {
+				t.Errorf("upgradeCommandForPath(%q)\n  got:  %q\n  want: %q", tt.execPath, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestParseVersionParts(t *testing.T) {
 	tests := []struct {
 		name     string
