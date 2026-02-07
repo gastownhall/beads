@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -28,12 +28,13 @@ func runValidateCheck(path string) {
 func runValidateCheckInner(path string) bool {
 	checks := collectValidateChecks(path)
 
-	overallOK := true
-	for _, cr := range checks {
-		if cr.check.Status == statusError || cr.check.Status == statusWarning {
-			overallOK = false
-		}
+	// Apply fixes if --fix is set, then re-check to reflect post-fix state
+	if doctorFix {
+		applyValidateFixes(path, checks)
+		checks = collectValidateChecks(path)
 	}
+
+	overallOK := validateOverallOK(checks)
 
 	// JSON output
 	if jsonOutput {
@@ -53,6 +54,46 @@ func runValidateCheckInner(path string) bool {
 	}
 
 	// Human-readable output
+	printValidateChecks(checks)
+
+	if !doctorFix && !overallOK {
+		// Suggest --fix if there are fixable issues
+		for _, cr := range checks {
+			if cr.fixable && cr.check.Status != statusOK {
+				fmt.Printf("\n%s\n", ui.RenderMuted("Tip: Use 'bd doctor --check=validate --fix' to auto-repair fixable issues"))
+				break
+			}
+		}
+	}
+
+	if overallOK {
+		fmt.Println()
+		fmt.Printf("%s\n", ui.RenderPass("✓ All data-integrity checks passed"))
+	}
+
+	return overallOK
+}
+
+// collectValidateChecks runs the four data-integrity checks.
+func collectValidateChecks(path string) []validateCheckResult {
+	return []validateCheckResult{
+		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))},
+		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
+		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
+		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},
+	}
+}
+
+func validateOverallOK(checks []validateCheckResult) bool {
+	for _, cr := range checks {
+		if cr.check.Status == statusError || cr.check.Status == statusWarning {
+			return false
+		}
+	}
+	return true
+}
+
+func printValidateChecks(checks []validateCheckResult) {
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Data Integrity"))
 
@@ -88,61 +129,36 @@ func runValidateCheckInner(path string) bool {
 		ui.RenderWarnIcon(), warnCount,
 		ui.RenderFailIcon(), failCount,
 	)
-
-	// Apply fixes if --fix is set
-	if doctorFix {
-		applyValidateFixes(path, checks)
-	} else if !overallOK {
-		// Suggest --fix if there are fixable issues
-		for _, cr := range checks {
-			if cr.fixable && cr.check.Status != statusOK {
-				fmt.Printf("\n%s\n", ui.RenderMuted("Tip: Use 'bd doctor --check=validate --fix' to auto-repair fixable issues"))
-				break
-			}
-		}
-	}
-
-	if overallOK {
-		fmt.Println()
-		fmt.Printf("%s\n", ui.RenderPass("✓ All data-integrity checks passed"))
-	}
-
-	return overallOK
-}
-
-// collectValidateChecks runs the four data-integrity checks.
-func collectValidateChecks(path string) []validateCheckResult {
-	return []validateCheckResult{
-		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))},
-		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
-		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
-		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},
-	}
 }
 
 // applyValidateFixes auto-repairs fixable validation issues.
+// Reuses doctor's applyFixList for dispatch (doctor_fix.go), which already
+// handles the "Orphaned Dependencies" case and any future fixable checks.
 func applyValidateFixes(path string, checks []validateCheckResult) {
-	var fixable []validateCheckResult
+	var fixable []doctorCheck
 	for _, cr := range checks {
 		if cr.fixable && cr.check.Status != statusOK {
-			fixable = append(fixable, cr)
+			fixable = append(fixable, cr.check)
 		}
 	}
 
 	if len(fixable) == 0 {
-		fmt.Println("\nNo auto-fixable issues found.")
 		return
 	}
 
-	// Confirm unless --yes
+	// Confirm unless --yes (matching doctor's applyFixes pattern)
 	if !doctorYes {
-		fmt.Printf("\nWill fix %d issue(s):\n", len(fixable))
-		for _, cr := range fixable {
-			fmt.Printf("  - %s: %s\n", cr.check.Name, cr.check.Message)
+		fmt.Println("\nFixable issues:")
+		for i, check := range fixable {
+			fmt.Printf("  %d. %s: %s\n", i+1, check.Name, check.Message)
 		}
-		fmt.Print("\nContinue? (Y/n): ")
-		var response string
-		fmt.Scanln(&response)
+		fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixable))
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			return
+		}
 		response = strings.TrimSpace(strings.ToLower(response))
 		if response != "" && response != "y" && response != "yes" {
 			fmt.Println("Fix canceled.")
@@ -151,20 +167,5 @@ func applyValidateFixes(path string, checks []validateCheckResult) {
 	}
 
 	fmt.Println("\nApplying fixes...")
-	for _, cr := range fixable {
-		fmt.Printf("\nFixing %s...\n", cr.check.Name)
-		var err error
-		switch cr.check.Name {
-		case "Orphaned Dependencies":
-			err = fix.OrphanedDependencies(path, doctorVerbose)
-		default:
-			fmt.Printf("  No automatic fix for %s\n", cr.check.Name)
-			continue
-		}
-		if err != nil {
-			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
-		} else {
-			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
-		}
-	}
+	applyFixList(path, fixable)
 }

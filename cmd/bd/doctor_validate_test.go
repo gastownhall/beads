@@ -11,7 +11,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// helper to create a test beads workspace with a database
+// setupValidateTestDB creates a temp .beads workspace with a configured database.
+// The caller must call store.Close() when done inserting test data.
 func setupValidateTestDB(t *testing.T, prefix string) (tmpDir string, store *sqlite.SQLiteStorage) {
 	t.Helper()
 	tmpDir = t.TempDir()
@@ -28,9 +29,9 @@ func setupValidateTestDB(t *testing.T, prefix string) (tmpDir string, store *sql
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
+	t.Cleanup(func() { store.Close() })
 
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
@@ -51,7 +52,7 @@ func TestValidateCheck_AllClean(t *testing.T) {
 		}
 	}
 
-	// Write clean JSONL
+	// Write clean JSONL so git conflicts check has a file to scan
 	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
 	if err := os.WriteFile(jsonlPath, []byte(""), 0644); err != nil {
 		t.Fatalf("Failed to create JSONL: %v", err)
@@ -119,7 +120,6 @@ func TestValidateCheck_DetectsOrphanedDeps(t *testing.T) {
 	_, err := db.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
 		issue.ID, "test-nonexistent", "blocks", "test")
 	if err != nil {
-		store.Close()
 		t.Fatalf("Failed to insert orphaned dep: %v", err)
 	}
 	store.Close()
@@ -230,12 +230,11 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 	_, err := db.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
 		issue.ID, "test-nonexistent", "blocks", "test")
 	if err != nil {
-		store.Close()
 		t.Fatalf("Failed to insert orphaned dep: %v", err)
 	}
 	store.Close()
 
-	// Verify orphan exists
+	// Verify orphan exists before fix
 	checks := collectValidateChecks(tmpDir)
 	for _, cr := range checks {
 		if cr.check.Name == "Orphaned Dependencies" && cr.check.Status == statusOK {
@@ -243,7 +242,7 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 		}
 	}
 
-	// Enable fix mode
+	// Enable fix mode with --yes to skip confirmation
 	origFix := doctorFix
 	origYes := doctorYes
 	doctorFix = true
@@ -253,10 +252,12 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 		doctorYes = origYes
 	}()
 
-	// Run with fix enabled (uses runValidateCheckInner to avoid os.Exit)
-	runValidateCheckInner(tmpDir)
+	// runValidateCheckInner applies fixes then re-checks
+	ok := runValidateCheckInner(tmpDir)
 
-	// Verify fix was applied
+	// The orphaned dep should be fixed, but test pollution from "test-" prefix
+	// means overallOK may still be false. Just verify orphans are gone.
+	_ = ok
 	doctorFix = false
 	checks = collectValidateChecks(tmpDir)
 	for _, cr := range checks {
@@ -268,4 +269,30 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 		}
 	}
 	t.Error("Orphaned Dependencies check not found after fix")
+}
+
+func TestValidateOverallOK(t *testing.T) {
+	allPass := []validateCheckResult{
+		{check: doctorCheck{Status: statusOK}},
+		{check: doctorCheck{Status: statusOK}},
+	}
+	if !validateOverallOK(allPass) {
+		t.Error("Expected true when all checks pass")
+	}
+
+	hasWarning := []validateCheckResult{
+		{check: doctorCheck{Status: statusOK}},
+		{check: doctorCheck{Status: statusWarning}},
+	}
+	if validateOverallOK(hasWarning) {
+		t.Error("Expected false when a check has warning")
+	}
+
+	hasError := []validateCheckResult{
+		{check: doctorCheck{Status: statusOK}},
+		{check: doctorCheck{Status: statusError}},
+	}
+	if validateOverallOK(hasError) {
+		t.Error("Expected false when a check has error")
+	}
 }
