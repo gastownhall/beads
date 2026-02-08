@@ -30,7 +30,9 @@ Examples:
   bd search "bug" --created-after 2025-01-01
   bd search "refactor" --updated-after 2025-01-01 --priority-min 1
   bd search "bug" --sort priority
-  bd search "task" --sort created --reverse`,
+  bd search "task" --sort created --reverse
+  bd search "api" --desc-contains "endpoint"
+  bd search "cleanup" --no-assignee --no-labels`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get query from args or --query flag
 		queryFlag, _ := cmd.Flags().GetString("query")
@@ -73,6 +75,15 @@ Examples:
 		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
 		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
 
+		// Pattern matching flags
+		descContains, _ := cmd.Flags().GetString("desc-contains")
+		notesContains, _ := cmd.Flags().GetString("notes-contains")
+
+		// Empty/null check flags
+		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
+		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
+		noLabels, _ := cmd.Flags().GetBool("no-labels")
+
 		// Normalize labels
 		labels = utils.NormalizeLabels(labels)
 		labelsAny = utils.NormalizeLabels(labelsAny)
@@ -102,6 +113,25 @@ Examples:
 
 		if len(labelsAny) > 0 {
 			filter.LabelsAny = labelsAny
+		}
+
+		// Pattern matching
+		if descContains != "" {
+			filter.DescriptionContains = descContains
+		}
+		if notesContains != "" {
+			filter.NotesContains = notesContains
+		}
+
+		// Empty/null checks
+		if emptyDesc {
+			filter.EmptyDescription = true
+		}
+		if noAssignee {
+			filter.NoAssignee = true
+		}
+		if noLabels {
+			filter.NoLabels = true
 		}
 
 		// Date ranges
@@ -217,6 +247,15 @@ Examples:
 			// Priority range
 			listArgs.PriorityMin = filter.PriorityMin
 			listArgs.PriorityMax = filter.PriorityMax
+
+			// Pattern matching
+			listArgs.DescriptionContains = descContains
+			listArgs.NotesContains = notesContains
+
+			// Empty/null checks
+			listArgs.EmptyDescription = filter.EmptyDescription
+			listArgs.NoAssignee = filter.NoAssignee
+			listArgs.NoLabels = filter.NoLabels
 
 			resp, err := daemonClient.List(listArgs)
 			if err != nil {
@@ -392,6 +431,15 @@ func init() {
 	// Priority range flags
 	searchCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	searchCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
+
+	// Pattern matching flags
+	searchCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
+	searchCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
+
+	// Empty/null check flags
+	searchCmd.Flags().Bool("empty-description", false, "Filter issues with empty or missing description")
+	searchCmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
+	searchCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 
 	rootCmd.AddCommand(searchCmd)
 }
