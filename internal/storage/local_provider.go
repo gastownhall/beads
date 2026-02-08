@@ -4,10 +4,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"os"
-	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -82,25 +78,6 @@ var _ types.IssueProvider = (*LocalProvider)(nil)
 
 // openDBReadOnly opens a SQLite database in read-only mode.
 func openDBReadOnly(dbPath string) (*sql.DB, error) {
-	connStr := sqliteReadOnlyConnString(dbPath)
+	connStr := SQLiteConnString(dbPath, true)
 	return sql.Open("sqlite3", connStr)
-}
-
-// sqliteReadOnlyConnString builds a read-only SQLite connection string.
-func sqliteReadOnlyConnString(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-
-	// Honor BD_LOCK_TIMEOUT env var for busy timeout
-	busy := 30 * time.Second
-	if v := strings.TrimSpace(os.Getenv("BD_LOCK_TIMEOUT")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			busy = d
-		}
-	}
-	busyMs := int64(busy / time.Millisecond)
-
-	return fmt.Sprintf("file:%s?mode=ro&_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)", path, busyMs)
 }
