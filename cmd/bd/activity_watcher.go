@@ -14,8 +14,8 @@ import (
 // Falls back to polling if fsnotify fails (some filesystems don't support it).
 type ActivityWatcher struct {
 	watcher      *fsnotify.Watcher
-	watchPaths   []string     // Paths being watched
-	pollingMode  bool         // True if using polling fallback
+	watchPaths   []string // Paths being watched
+	pollingMode  bool     // True if using polling fallback
 	pollInterval time.Duration
 	events       chan struct{} // Sends wake-up signals on changes
 	cancel       context.CancelFunc
@@ -231,4 +231,3 @@ func (aw *ActivityWatcher) Close() error {
 	}
 	return nil
 }
-

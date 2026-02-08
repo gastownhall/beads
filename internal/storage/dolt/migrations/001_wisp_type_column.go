@@ -25,5 +25,3 @@ func MigrateWispTypeColumn(db *sql.DB) error {
 
 	return nil
 }
-
-

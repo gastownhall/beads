@@ -15,7 +15,7 @@ func TestDaemonExitsWhenParentDies(t *testing.T) {
 	}
 
 	t.Skip("Manual test - requires daemon to be run externally")
-	
+
 	// This is a manual test scenario:
 	// 1. Start a shell process that spawns the daemon
 	// 2. Verify daemon tracks parent PID

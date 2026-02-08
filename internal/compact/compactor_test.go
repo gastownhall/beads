@@ -42,13 +42,13 @@ func createClosedIssue(t *testing.T, store *sqlite.SQLiteStorage, id string) *ty
 	t.Helper()
 
 	ctx := context.Background()
-	
+
 	// Get the configured prefix to determine actor
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		prefix = "bd" // fallback
 	}
-	
+
 	now := time.Now()
 	// Issue closed 8 days ago (beyond 7-day threshold for Tier 1)
 	closedAt := now.Add(-8 * 24 * time.Hour)
@@ -95,12 +95,12 @@ Testing strategy:
 - Tokens can be refreshed before expiry
 - Logout invalidates current session
 - All security requirements met per OWASP guidelines`,
-		Status:     types.StatusClosed,
-		Priority:   2,
-		IssueType:  types.TypeTask,
-		CreatedAt:  now.Add(-48 * time.Hour),
-		UpdatedAt:  now.Add(-24 * time.Hour),
-		ClosedAt:   &closedAt,
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: now.Add(-48 * time.Hour),
+		UpdatedAt: now.Add(-24 * time.Hour),
+		ClosedAt:  &closedAt,
 	}
 
 	if err := store.CreateIssue(ctx, issue, prefix); err != nil {
@@ -174,13 +174,13 @@ func TestCompactTier1_IneligibleIssue(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	
+
 	// Get the configured prefix to determine actor
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		prefix = "bd" // fallback
 	}
-	
+
 	now := time.Now()
 	issue := &types.Issue{
 		ID:          "bd-open",
@@ -293,13 +293,13 @@ func TestCompactTier1Batch_WithIneligible(t *testing.T) {
 	closedIssue := createClosedIssue(t, store, "bd-closed")
 
 	ctx := context.Background()
-	
+
 	// Get the configured prefix to determine actor
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		prefix = "bd" // fallback
 	}
-	
+
 	now := time.Now()
 	openIssue := &types.Issue{
 		ID:          "bd-open",
@@ -420,13 +420,13 @@ func TestBatchOperations_ErrorHandling(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	
+
 	// Get the configured prefix to determine actor
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		prefix = "bd" // fallback
 	}
-	
+
 	closedIssue := createClosedIssue(t, store, "bd-closed")
 	openIssue := &types.Issue{
 		ID:          "bd-open",

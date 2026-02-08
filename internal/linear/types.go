@@ -250,4 +250,3 @@ type TeamsResponse struct {
 		Nodes []Team `json:"nodes"`
 	} `json:"teams"`
 }
-

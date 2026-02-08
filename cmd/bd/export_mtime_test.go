@@ -260,7 +260,8 @@ func TestMultipleExportCycles(t *testing.T) {
 // worktree, the mtime update targets the actual database path (via store.Path()),
 // not a non-existent database in the worktree directory.
 // This fixes the bug where bd sync would warn:
-//   "Warning: failed to update database mtime: chtimes .../beads-worktrees/beads-sync/.beads/beads.db: no such file or directory"
+//
+//	"Warning: failed to update database mtime: chtimes .../beads-worktrees/beads-sync/.beads/beads.db: no such file or directory"
 func TestWorktreeExportUsesCorrectDBPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow test in short mode")

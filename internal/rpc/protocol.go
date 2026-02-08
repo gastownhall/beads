@@ -323,15 +323,15 @@ type ResolveIDArgs struct {
 
 // ReadyArgs represents arguments for the ready operation
 type ReadyArgs struct {
-	Status     string   `json:"status,omitempty"`             // Filter by status (e.g., "open" to exclude in_progress)
-	Assignee   string   `json:"assignee,omitempty"`
-	Unassigned bool     `json:"unassigned,omitempty"`
-	Priority   *int     `json:"priority,omitempty"`
-	Type       string   `json:"type,omitempty"`
-	Limit      int      `json:"limit,omitempty"`
-	SortPolicy string   `json:"sort_policy,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	LabelsAny  []string `json:"labels_any,omitempty"`
+	Status          string   `json:"status,omitempty"` // Filter by status (e.g., "open" to exclude in_progress)
+	Assignee        string   `json:"assignee,omitempty"`
+	Unassigned      bool     `json:"unassigned,omitempty"`
+	Priority        *int     `json:"priority,omitempty"`
+	Type            string   `json:"type,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
+	SortPolicy      string   `json:"sort_policy,omitempty"`
+	Labels          []string `json:"labels,omitempty"`
+	LabelsAny       []string `json:"labels_any,omitempty"`
 	ParentID        string   `json:"parent_id,omitempty"`        // Filter to descendants of this bead/epic
 	MolType         string   `json:"mol_type,omitempty"`         // Filter by molecule type: swarm, patrol, or work
 	IncludeDeferred bool     `json:"include_deferred,omitempty"` // Include issues with future defer_until (GH#820)

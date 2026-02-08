@@ -1088,7 +1088,6 @@ func mergeDependencies(base, left, right []*types.Dependency) []*types.Dependenc
 	return result
 }
 
-
 // === Helper functions for new field merging (GH#1480) ===
 
 // mergeLabels performs a 3-way merge of labels using standard 3-way merge semantics.

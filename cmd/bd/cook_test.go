@@ -14,10 +14,10 @@ import (
 // TestSubstituteFormulaVars tests variable substitution in formulas
 func TestSubstituteFormulaVars(t *testing.T) {
 	tests := []struct {
-		name        string
-		formula     *formula.Formula
-		vars        map[string]string
-		wantDesc    string
+		name          string
+		formula       *formula.Formula
+		vars          map[string]string
+		wantDesc      string
 		wantStepTitle string
 	}{
 		{
@@ -37,9 +37,9 @@ func TestSubstituteFormulaVars(t *testing.T) {
 					{Title: "Implement {{name}}"},
 				},
 			},
-			vars:           map[string]string{"name": "login"},
-			wantDesc:       "Feature work",
-			wantStepTitle:  "Implement login",
+			vars:          map[string]string{"name": "login"},
+			wantDesc:      "Feature work",
+			wantStepTitle: "Implement login",
 		},
 		{
 			name: "substitute multiple variables",
@@ -196,13 +196,13 @@ func TestCompileTimeVsRuntimeMode(t *testing.T) {
 // TestCreateGateIssue tests that createGateIssue creates proper gate issues
 func TestCreateGateIssue(t *testing.T) {
 	tests := []struct {
-		name        string
-		step        *formula.Step
-		parentID    string
-		wantID      string
-		wantTitle   string
+		name          string
+		step          *formula.Step
+		parentID      string
+		wantID        string
+		wantTitle     string
 		wantAwaitType string
-		wantAwaitID string
+		wantAwaitID   string
 	}{
 		{
 			name: "gh:run gate with ID",
@@ -369,8 +369,8 @@ func TestCookFormulaToSubgraph_GateBeads(t *testing.T) {
 				},
 			},
 			{
-				ID:    "verify",
-				Title: "Verify deployment",
+				ID:        "verify",
+				Title:     "Verify deployment",
 				DependsOn: []string{"await-ci"},
 			},
 		},

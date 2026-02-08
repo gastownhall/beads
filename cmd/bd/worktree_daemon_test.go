@@ -339,7 +339,7 @@ func restoreTestEnv(key, value string) {
 // setupWorktreeTestRepo creates a git repo with a worktree for testing.
 // Returns the main repo directory and worktree directory.
 // Caller is responsible for cleanup via cleanupTestWorktree.
-// 
+//
 // IMPORTANT: This function also reinitializes the config package to use the
 // temp directory's config, avoiding interference from the beads project's own config.
 func setupWorktreeTestRepo(t *testing.T) (mainDir, worktreeDir string) {

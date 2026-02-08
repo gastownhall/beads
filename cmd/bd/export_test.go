@@ -11,8 +11,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-
-
 func TestExportCommand(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "bd-test-export-*")
 	if err != nil {
@@ -290,7 +288,7 @@ func TestExportCommand(t *testing.T) {
 
 		// Simulate corrupted export by truncating file
 		corruptedPath := filepath.Join(tmpDir, "export_corrupted.jsonl")
-		
+
 		// First export normally
 		if err := s.ClearAllExportHashes(ctx); err != nil {
 			t.Fatalf("Failed to clear export hashes: %v", err)

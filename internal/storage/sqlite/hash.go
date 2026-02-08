@@ -19,14 +19,14 @@ func (s *SQLiteStorage) GetExportHash(ctx context.Context, issueID string) (stri
 	err := s.db.QueryRowContext(ctx, `
 		SELECT content_hash FROM export_hashes WHERE issue_id = ?
 	`, issueID).Scan(&hash)
-	
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No hash stored yet
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to get export hash for %s: %w", issueID, err)
 	}
-	
+
 	return hash, nil
 }
 
@@ -44,11 +44,11 @@ func (s *SQLiteStorage) SetExportHash(ctx context.Context, issueID, contentHash 
 			content_hash = excluded.content_hash,
 			exported_at = CURRENT_TIMESTAMP
 	`, issueID, contentHash)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to set export hash for %s: %w", issueID, err)
 	}
-	
+
 	return nil
 }
 
@@ -79,14 +79,14 @@ func (s *SQLiteStorage) GetJSONLFileHash(ctx context.Context) (string, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT value FROM metadata WHERE key = 'jsonl_file_hash'
 	`).Scan(&hash)
-	
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil // No hash stored yet
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to get jsonl_file_hash: %w", err)
 	}
-	
+
 	return hash, nil
 }
 
@@ -102,10 +102,10 @@ func (s *SQLiteStorage) SetJSONLFileHash(ctx context.Context, fileHash string) e
 		VALUES ('jsonl_file_hash', ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value
 	`, fileHash)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to set jsonl_file_hash: %w", err)
 	}
-	
+
 	return nil
 }

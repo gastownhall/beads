@@ -234,10 +234,10 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name                string
-		query               string
-		expectFilter        func(*types.IssueFilter) bool
-		requiresPredicate   bool
+		name              string
+		query             string
+		expectFilter      func(*types.IssueFilter) bool
+		requiresPredicate bool
 	}{
 		{
 			name:  "status equals",
@@ -454,31 +454,31 @@ func TestPredicateEvaluation(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
 	openBug := &types.Issue{
-		ID:       "bd-1",
-		Status:   types.StatusOpen,
-		Priority: 1,
+		ID:        "bd-1",
+		Status:    types.StatusOpen,
+		Priority:  1,
 		IssueType: types.TypeBug,
-		Labels:   []string{"urgent", "frontend"},
+		Labels:    []string{"urgent", "frontend"},
 		CreatedAt: now.AddDate(0, 0, -5),
 		UpdatedAt: now.AddDate(0, 0, -1),
 	}
 
 	closedTask := &types.Issue{
-		ID:       "bd-2",
-		Status:   types.StatusClosed,
-		Priority: 2,
+		ID:        "bd-2",
+		Status:    types.StatusClosed,
+		Priority:  2,
 		IssueType: types.TypeTask,
-		Labels:   []string{"backend"},
+		Labels:    []string{"backend"},
 		CreatedAt: now.AddDate(0, 0, -30),
 		UpdatedAt: now.AddDate(0, 0, -10),
 	}
 
 	blockedFeature := &types.Issue{
-		ID:       "bd-3",
-		Status:   types.StatusBlocked,
-		Priority: 0,
+		ID:        "bd-3",
+		Status:    types.StatusBlocked,
+		Priority:  0,
 		IssueType: types.TypeFeature,
-		Labels:   []string{},
+		Labels:    []string{},
 		CreatedAt: now.AddDate(0, 0, -2),
 		UpdatedAt: now,
 	}

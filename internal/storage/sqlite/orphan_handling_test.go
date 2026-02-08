@@ -131,11 +131,11 @@ func TestOrphanHandling_Skip(t *testing.T) {
 
 	// In skip mode, operation should succeed but child should not be created
 	err := store.CreateIssuesWithOptions(ctx, []*types.Issue{child}, "test", OrphanSkip)
-	
+
 	// Skip mode should not error, but also should not create the child
 	// Note: Current implementation may still error - need to check implementation
 	// For now, we'll verify the child wasn't created
-	
+
 	issues, searchErr := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if searchErr != nil {
 		t.Fatalf("Failed to search issues: %v", searchErr)
@@ -202,9 +202,9 @@ func TestOrphanHandling_Config(t *testing.T) {
 	defer cleanup()
 
 	tests := []struct {
-		name           string
-		configValue    string
-		expectedMode   OrphanHandling
+		name         string
+		configValue  string
+		expectedMode OrphanHandling
 	}{
 		{"strict mode", "strict", OrphanStrict},
 		{"resurrect mode", "resurrect", OrphanResurrect},
@@ -385,7 +385,7 @@ func TestOrphanHandling_NonHierarchical(t *testing.T) {
 			// Use unique ID for each mode
 			testIssue := *issue
 			testIssue.ID = "test-" + string(mode)
-			
+
 			err := store.CreateIssuesWithOptions(ctx, []*types.Issue{&testIssue}, "test", mode)
 			if err != nil {
 				t.Errorf("Non-hierarchical issue should succeed in %s mode: %v", mode, err)

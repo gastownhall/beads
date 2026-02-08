@@ -219,10 +219,10 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 					}()
 					in = f
 					scanner = bufio.NewScanner(in)
-					allIssues = nil        // Reset issues list
-					deletionMarkers = nil  // Reset deletion markers list
-					lineNum = 0            // Reset line counter
-					continue               // Restart parsing from beginning
+					allIssues = nil       // Reset issues list
+					deletionMarkers = nil // Reset deletion markers list
+					lineNum = 0           // Reset line counter
+					continue              // Restart parsing from beginning
 				} else {
 					// Can't retry stdin - should not happen since git conflicts only in files
 					fmt.Fprintf(os.Stderr, "Error: Cannot retry merge from stdin\n")

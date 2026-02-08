@@ -33,4 +33,3 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
 }
-

@@ -224,41 +224,41 @@ func (s *SQLiteStorage) CheckEligibility(ctx context.Context, issueID string, ti
 		if compactionLevel != 0 {
 			return false, "issue is already compacted", nil
 		}
-		
+
 		// Check if it appears in tier1 candidates
 		candidates, err := s.GetTier1Candidates(ctx)
 		if err != nil {
 			return false, "", fmt.Errorf("failed to get tier1 candidates: %w", err)
 		}
-		
+
 		for _, c := range candidates {
 			if c.IssueID == issueID {
 				return true, "", nil
 			}
 		}
-		
+
 		return false, "issue has open dependents or not closed long enough", nil
-		
+
 	case 2:
 		if compactionLevel != 1 {
 			return false, "issue must be at compaction level 1 for tier 2", nil
 		}
-		
+
 		// Check if it appears in tier2 candidates
 		candidates, err := s.GetTier2Candidates(ctx)
 		if err != nil {
 			return false, "", fmt.Errorf("failed to get tier2 candidates: %w", err)
 		}
-		
+
 		for _, c := range candidates {
 			if c.IssueID == issueID {
 				return true, "", nil
 			}
 		}
-		
+
 		return false, "issue has open dependents, not closed long enough, or insufficient events", nil
 	}
-	
+
 	return false, fmt.Sprintf("invalid tier: %d", tier), nil
 }
 

@@ -18,11 +18,11 @@ func parseIssueID(input string, prefix string) string {
 	if prefix == "" {
 		prefix = "bd-"
 	}
-	
+
 	if strings.HasPrefix(input, prefix) {
 		return input
 	}
-	
+
 	return prefix + input
 }
 
@@ -49,19 +49,19 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	if issues, err := store.SearchIssues(ctx, "", exactFilter); err == nil && len(issues) > 0 {
 		return issues[0].ID, nil
 	}
-	
+
 	// Get the configured prefix
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil || prefix == "" {
 		prefix = "bd"
 	}
-	
+
 	// Ensure prefix has hyphen for ID format
 	prefixWithHyphen := prefix
 	if !strings.HasSuffix(prefix, "-") {
 		prefixWithHyphen = prefix + "-"
 	}
-	
+
 	// Normalize input:
 	// 1. If it has the full prefix with hyphen (bd-a3f8e9), use as-is
 	// 2. If it has ANY prefix (different from configured), use as-is for cross-prefix lookup
@@ -80,34 +80,34 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		// Bare hash or prefix without hyphen: "a3f8e9", "07b8c8", "bda3f8e9" → all get prefix with hyphen added
 		normalizedID = prefixWithHyphen + input
 	}
-	
+
 	// Try exact match on normalized ID using SearchIssues (GH#942)
 	normalizedFilter := types.IssueFilter{IDs: []string{normalizedID}}
 	if issues, err := store.SearchIssues(ctx, "", normalizedFilter); err == nil && len(issues) > 0 {
 		return issues[0].ID, nil
 	}
-	
+
 	// If exact match failed, try substring search
 	filter := types.IssueFilter{}
-	
+
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return "", fmt.Errorf("failed to search issues: %w", err)
 	}
-	
+
 	// Extract the hash part for substring matching
 	hashPart := strings.TrimPrefix(normalizedID, prefixWithHyphen)
 
 	var matches []string
 	var exactMatch string
-	
+
 	for _, issue := range issues {
 		// Check for exact full ID match first (case: user typed full ID with different prefix)
 		if issue.ID == input {
 			exactMatch = issue.ID
 			break
 		}
-		
+
 		// Extract hash from each issue, regardless of its prefix
 		// This handles cross-prefix matching (e.g., "3d0" matching "offlinebrew-3d0")
 		var issueHash string
@@ -116,32 +116,32 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		} else {
 			issueHash = issue.ID
 		}
-		
+
 		// Check for exact hash match (excluding hierarchical children)
 		if issueHash == hashPart {
 			exactMatch = issue.ID
 			// Don't break - keep searching in case there's a full ID match
 		}
-		
+
 		// Check if the issue hash contains the input hash as substring
 		if strings.Contains(issueHash, hashPart) {
 			matches = append(matches, issue.ID)
 		}
 	}
-	
+
 	// Prefer exact match over substring matches
 	if exactMatch != "" {
 		return exactMatch, nil
 	}
-	
+
 	if len(matches) == 0 {
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
-	
+
 	if len(matches) > 1 {
 		return "", fmt.Errorf("ambiguous ID %q matches %d issues: %v\nUse more characters to disambiguate", input, len(matches), matches)
 	}
-	
+
 	return matches[0], nil
 }
 

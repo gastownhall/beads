@@ -367,9 +367,9 @@ func TestLabelPatternAndRegexCombined(t *testing.T) {
 	// Add labels - issue1 has both area-frontend and tech-debt
 	store.AddLabel(ctx, issue1.ID, "area-frontend", "test-user")
 	store.AddLabel(ctx, issue1.ID, "tech-debt", "test-user")
-	store.AddLabel(ctx, issue2.ID, "area-backend", "test-user")   // matches area-* but not tech-
-	store.AddLabel(ctx, issue3.ID, "tech-legacy", "test-user")    // matches tech- but not area-*
-	store.AddLabel(ctx, issue4.ID, "other", "test-user")          // matches neither
+	store.AddLabel(ctx, issue2.ID, "area-backend", "test-user") // matches area-* but not tech-
+	store.AddLabel(ctx, issue3.ID, "tech-legacy", "test-user")  // matches tech- but not area-*
+	store.AddLabel(ctx, issue4.ID, "other", "test-user")        // matches neither
 
 	// Filter with both pattern (area-*) and regex (tech-)
 	// The issue must have at least one label matching each filter

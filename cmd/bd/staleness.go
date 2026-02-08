@@ -71,17 +71,17 @@ func ensureDatabaseFresh(ctx context.Context) error {
 
 	// Auto-import is disabled, refuse to operate
 	return fmt.Errorf(
-		"Database out of sync with JSONL. Run 'bd sync --import-only' to fix.\n\n"+
-			"The JSONL file has been updated (e.g., after 'git pull') but the database\n"+
-			"hasn't been imported yet. This would cause you to see stale/incomplete data.\n\n"+
-			"To fix:\n"+
-			"  bd sync --import-only            # Import JSONL updates to database\n"+
-			"  bd import -i .beads/issues.jsonl  # Alternative: specify file explicitly\n\n"+
-			"If in a sandboxed environment (e.g., Codex) where daemon can't be stopped:\n"+
-			"  bd --sandbox ready               # Use direct mode (no daemon)\n"+
-			"  bd ready --allow-stale           # Skip staleness check (use with caution)\n\n"+
-			"Or use daemon mode (auto-imports on every operation):\n"+
-			"  bd daemon start\n"+
+		"Database out of sync with JSONL. Run 'bd sync --import-only' to fix.\n\n" +
+			"The JSONL file has been updated (e.g., after 'git pull') but the database\n" +
+			"hasn't been imported yet. This would cause you to see stale/incomplete data.\n\n" +
+			"To fix:\n" +
+			"  bd sync --import-only            # Import JSONL updates to database\n" +
+			"  bd import -i .beads/issues.jsonl  # Alternative: specify file explicitly\n\n" +
+			"If in a sandboxed environment (e.g., Codex) where daemon can't be stopped:\n" +
+			"  bd --sandbox ready               # Use direct mode (no daemon)\n" +
+			"  bd ready --allow-stale           # Skip staleness check (use with caution)\n\n" +
+			"Or use daemon mode (auto-imports on every operation):\n" +
+			"  bd daemon start\n" +
 			"  bd <command>     # Will auto-import before executing",
 	)
 }

@@ -658,7 +658,6 @@ func collectSteps(steps []*formula.Step, parentID string,
 	}
 }
 
-
 // resolveAndCookFormula loads a formula by name, resolves it, applies all transformations,
 // and returns an in-memory TemplateSubgraph ready for instantiation.
 // This is the main entry point for ephemeral proto cooking.

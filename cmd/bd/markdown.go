@@ -42,8 +42,6 @@ type IssueTemplate struct {
 	Dependencies       []string
 }
 
-
-
 // parseStringList extracts a list of strings from content, splitting by comma or whitespace.
 // This is a generic helper used by parseLabels and parseDependencies.
 func parseStringList(content string) []string {

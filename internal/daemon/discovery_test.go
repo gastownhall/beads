@@ -143,11 +143,11 @@ func TestWalkWithDepth(t *testing.T) {
 		maxDepth  int
 		wantFiles int
 	}{
-		{"depth 0", 0, 1},        // Only file1.txt
-		{"depth 1", 1, 2},        // file1.txt, file2.txt
-		{"depth 2", 2, 3},        // file1.txt, file2.txt, file3.txt
-		{"depth 3", 3, 4},        // All files
-		{"depth 10", 10, 4},      // All files (max depth not reached)
+		{"depth 0", 0, 1},   // Only file1.txt
+		{"depth 1", 1, 2},   // file1.txt, file2.txt
+		{"depth 2", 2, 3},   // file1.txt, file2.txt, file3.txt
+		{"depth 3", 3, 4},   // All files
+		{"depth 10", 10, 4}, // All files (max depth not reached)
 	}
 
 	for _, tt := range tests {

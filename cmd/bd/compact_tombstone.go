@@ -447,13 +447,13 @@ func runCompactPurgeTombstones() {
 
 		if jsonOutput {
 			output := map[string]interface{}{
-				"dry_run":             true,
-				"tombstones_before":   result.TombstonesBefore,
+				"dry_run":              true,
+				"tombstones_before":    result.TombstonesBefore,
 				"tombstones_to_delete": result.TombstonesDeleted,
-				"tombstones_to_keep":  result.TombstonesKept,
-				"deps_to_remove":      result.DepsRemoved,
-				"deleted_ids":         result.DeletedIDs,
-				"kept_ids":            result.KeptIDs,
+				"tombstones_to_keep":   result.TombstonesKept,
+				"deps_to_remove":       result.DepsRemoved,
+				"deleted_ids":          result.DeletedIDs,
+				"kept_ids":             result.KeptIDs,
 			}
 			outputJSON(output)
 			return
@@ -485,12 +485,12 @@ func runCompactPurgeTombstones() {
 
 	if jsonOutput {
 		output := map[string]interface{}{
-			"success":             true,
-			"tombstones_before":   result.TombstonesBefore,
-			"tombstones_deleted":  result.TombstonesDeleted,
-			"tombstones_kept":     result.TombstonesKept,
-			"deps_removed":        result.DepsRemoved,
-			"elapsed_ms":          elapsed.Milliseconds(),
+			"success":            true,
+			"tombstones_before":  result.TombstonesBefore,
+			"tombstones_deleted": result.TombstonesDeleted,
+			"tombstones_kept":    result.TombstonesKept,
+			"deps_removed":       result.DepsRemoved,
+			"elapsed_ms":         elapsed.Milliseconds(),
 		}
 		outputJSON(output)
 		return

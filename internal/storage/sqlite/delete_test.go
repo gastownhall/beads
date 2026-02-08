@@ -23,7 +23,7 @@ func TestDeleteIssues(t *testing.T) {
 
 	t.Run("delete with dependents - should fail without force or cascade", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
-		
+
 		// Create issues with dependency
 		issue1 := &types.Issue{ID: "bd-1", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue2 := &types.Issue{ID: "bd-2", Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
@@ -37,7 +37,7 @@ func TestDeleteIssues(t *testing.T) {
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
 			t.Fatalf("Failed to add dependency: %v", err)
 		}
-		
+
 		_, err := store.DeleteIssues(ctx, []string{"bd-1"}, false, false, false)
 		if err == nil {
 			t.Fatal("Expected error when deleting issue with dependents")
@@ -143,10 +143,10 @@ func TestDeleteIssues(t *testing.T) {
 
 	t.Run("dry run - should not delete", func(t *testing.T) {
 		store := newTestStore(t, "file::memory:?mode=memory&cache=private")
-		
+
 		issue1 := &types.Issue{ID: "bd-1", Title: "DryRun Issue 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
 		issue2 := &types.Issue{ID: "bd-2", Title: "DryRun Issue 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-		
+
 		if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 			t.Fatalf("Failed to create issue1: %v", err)
 		}

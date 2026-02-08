@@ -243,7 +243,7 @@ func squashMolecule(ctx context.Context, s storage.Storage, root *types.Issue, c
 		CloseReason: fmt.Sprintf("Squashed from %d wisps", len(children)),
 		Priority:    root.Priority,
 		IssueType:   types.TypeTask,
-		Ephemeral:        false, // Digest is permanent, not a wisp
+		Ephemeral:   false, // Digest is permanent, not a wisp
 		ClosedAt:    &now,
 	}
 

@@ -31,7 +31,7 @@ func TestJSONLLock_MissingLockCoordination(t *testing.T) {
 	issues := make([]*types.Issue, 20)
 	for i := 0; i < 20; i++ {
 		issues[i] = &types.Issue{
-			ID:        generateUniqueTestID(t,"lock", i),
+			ID:        generateUniqueTestID(t, "lock", i),
 			Title:     "Lock Test Issue",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -123,7 +123,7 @@ func TestJSONLLock_ExportLockAcquisitionFailure(t *testing.T) {
 	// Create some issues in the database
 	for i := 0; i < 5; i++ {
 		issue := &types.Issue{
-			ID:        generateUniqueTestID(t,"lockfail", i),
+			ID:        generateUniqueTestID(t, "lockfail", i),
 			Title:     "Lock Failure Test",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -253,7 +253,7 @@ func TestJSONLLock_ImportWithExportInProgress(t *testing.T) {
 	issues := make([]*types.Issue, 10)
 	for i := 0; i < 10; i++ {
 		issues[i] = &types.Issue{
-			ID:        generateUniqueTestID(t,"impexp", i),
+			ID:        generateUniqueTestID(t, "impexp", i),
 			Title:     "Import Export Test",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -484,7 +484,7 @@ func TestJSONLLock_ConcurrentSyncOperations(t *testing.T) {
 	// Create initial issues
 	for i := 0; i < 10; i++ {
 		issue := &types.Issue{
-			ID:        generateUniqueTestID(t,"csync", i),
+			ID:        generateUniqueTestID(t, "csync", i),
 			Title:     "Concurrent Sync Test",
 			Status:    types.StatusOpen,
 			Priority:  1,

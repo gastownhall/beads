@@ -255,7 +255,7 @@ func TestIsHashID(t *testing.T) {
 		{"bd-1", false},
 		{"bd-123", false},
 		{"bd-9999", false},
-		
+
 		// Hash IDs with letters
 		{"bd-a3f8e9a2", true},
 		{"bd-abc123", true},
@@ -265,20 +265,20 @@ func TestIsHashID(t *testing.T) {
 		// Hash IDs that are numeric but 5+ characters (likely hash)
 		{"bd-12345", true},
 		{"bd-0088", false}, // 4 chars, all numeric - ambiguous, defaults to false
-		{"bd-00880", true},  // 5+ chars, likely hash
-		
+		{"bd-00880", true}, // 5+ chars, likely hash
+
 		// Base36 hash IDs with letters
 		{"bd-5n3", true},
 		{"bd-65w", true},
 		{"bd-jmx", true},
 		{"bd-4rt", true},
-		
+
 		// Edge cases
 		{"bd-", false},     // Empty suffix
 		{"invalid", false}, // No dash
 		{"bd-0", false},    // Single digit
 
-        // Hyphenated prefixes
+		// Hyphenated prefixes
 		{"bd-beads-1", false},
 		{"bd-beads-123", false},
 		{"bd-beads-a3f8e9a2", true},

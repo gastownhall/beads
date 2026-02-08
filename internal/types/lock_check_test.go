@@ -58,7 +58,7 @@ func TestShouldSkipDatabase(t *testing.T) {
 		// and killing a real process, because high PIDs may return EPERM (treated as alive).
 		// This test verifies the logic path exists, but actual cleanup relies on
 		// integration testing or manual verification.
-		
+
 		// Instead, test that a lock with a different hostname (remote) is assumed alive
 		lockPath := filepath.Join(tmpDir, ".exclusive-lock")
 		lock := &ExclusiveLock{

@@ -549,7 +549,6 @@ func TestIsWithinWorkspace(t *testing.T) {
 	}
 }
 
-
 // TestDBJSONLSync_MissingDatabase tests DBJSONLSync when database doesn't exist
 func TestDBJSONLSync_MissingDatabase(t *testing.T) {
 	dir := setupTestWorkspace(t)
@@ -573,7 +572,6 @@ func TestDBJSONLSync_MissingDatabase(t *testing.T) {
 		t.Errorf("expected no error when database doesn't exist, got: %v", err)
 	}
 }
-
 
 // TestSyncBranchConfig_BranchDoesNotExist tests fixing config when branch doesn't exist
 func TestSyncBranchConfig_BranchDoesNotExist(t *testing.T) {
@@ -707,4 +705,3 @@ invalid json line
 		}
 	})
 }
-

@@ -193,14 +193,14 @@ func TestMergeIssuesWithBaseState(t *testing.T) {
 	remoteTime := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name           string
-		base           []*beads.Issue
-		local          []*beads.Issue
-		remote         []*beads.Issue
-		wantCount      int
-		wantConflicts  int
-		wantStrategy   map[string]string
-		wantTitles     map[string]string // id -> expected title
+		name          string
+		base          []*beads.Issue
+		local         []*beads.Issue
+		remote        []*beads.Issue
+		wantCount     int
+		wantConflicts int
+		wantStrategy  map[string]string
+		wantTitles    map[string]string // id -> expected title
 	}{
 		{
 			name: "only remote changed",
@@ -251,8 +251,8 @@ func TestMergeIssuesWithBaseState(t *testing.T) {
 			wantTitles:    map[string]string{"bd-1": "Remote Edit"}, // Remote wins (later timestamp)
 		},
 		{
-			name: "new issue from remote",
-			base: []*beads.Issue{},
+			name:  "new issue from remote",
+			base:  []*beads.Issue{},
 			local: []*beads.Issue{},
 			remote: []*beads.Issue{
 				{ID: "bd-1", Title: "New Remote Issue", UpdatedAt: remoteTime},

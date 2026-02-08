@@ -117,7 +117,7 @@ func TestCreateBeadsWorktree(t *testing.T) {
 
 	t.Run("idempotent - calling twice succeeds", func(t *testing.T) {
 		worktreePath2 := filepath.Join(t.TempDir(), "beads-worktree-idempotent")
-		
+
 		// Create once
 		if err := wm.CreateBeadsWorktree("beads-metadata-idempotent", worktreePath2); err != nil {
 			t.Fatalf("First CreateBeadsWorktree failed: %v", err)
@@ -127,7 +127,7 @@ func TestCreateBeadsWorktree(t *testing.T) {
 		if err := wm.CreateBeadsWorktree("beads-metadata-idempotent", worktreePath2); err != nil {
 			t.Errorf("Second CreateBeadsWorktree failed (should be idempotent): %v", err)
 		}
-		
+
 		// Verify worktree still exists and is valid
 		if valid, err := wm.isValidWorktree(worktreePath2); err != nil || !valid {
 			t.Errorf("Worktree should still be valid after idempotent call: valid=%v, err=%v", valid, err)
@@ -171,7 +171,7 @@ func TestCheckWorktreeHealth(t *testing.T) {
 
 	t.Run("healthy worktree passes check", func(t *testing.T) {
 		worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
-		
+
 		if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
 			t.Fatalf("CreateBeadsWorktree failed: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestCheckWorktreeHealth(t *testing.T) {
 
 	t.Run("non-existent path fails check", func(t *testing.T) {
 		nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-		
+
 		err := wm.CheckWorktreeHealth(nonExistentPath)
 		if err == nil {
 			t.Error("CheckWorktreeHealth should fail for non-existent path")
@@ -280,7 +280,7 @@ func TestIsValidWorktree(t *testing.T) {
 
 	t.Run("created worktree is valid", func(t *testing.T) {
 		worktreePath := filepath.Join(t.TempDir(), "beads-worktree")
-		
+
 		if err := wm.CreateBeadsWorktree("beads-metadata", worktreePath); err != nil {
 			t.Fatalf("CreateBeadsWorktree failed: %v", err)
 		}

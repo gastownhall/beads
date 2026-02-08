@@ -129,7 +129,7 @@ func TestOutputContextFunction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer stubIsEphemeralBranch(tt.ephemeralMode)()
-			defer stubIsDaemonAutoSyncing(false)()             // Default: no auto-sync in tests
+			defer stubIsDaemonAutoSyncing(false)()           // Default: no auto-sync in tests
 			defer stubPrimeHasGitRemote(!tt.localOnlyMode)() // localOnly = !primeHasGitRemote
 
 			var buf bytes.Buffer

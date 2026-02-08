@@ -197,9 +197,9 @@ func getConfigFromDB(dbPath string, key string) string {
 // GH#909: Writing to both ensures bd doctor and migrate detection work correctly.
 //
 // Config precedence on read (from Get function):
-//   1. BEADS_SYNC_BRANCH env var
-//   2. sync-branch in config.yaml (recommended, version controlled)
-//   3. sync.branch in database (legacy, for backward compatibility)
+//  1. BEADS_SYNC_BRANCH env var
+//  2. sync-branch in config.yaml (recommended, version controlled)
+//  3. sync.branch in database (legacy, for backward compatibility)
 func Set(ctx context.Context, store storage.Storage, branch string) error {
 	// GH#807: Use sync-specific validation that rejects main/master
 	if err := ValidateSyncBranchName(branch); err != nil {

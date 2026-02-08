@@ -72,9 +72,9 @@ func TestEnsureDatabaseFresh_AutoImportsOnStale(t *testing.T) {
 	oldStoreActive := storeActive
 	oldAllowStale := allowStale
 
-	noAutoImport = false      // Allow auto-import
-	autoImportEnabled = true  // Enable auto-import
-	allowStale = false        // Don't skip staleness check
+	noAutoImport = false     // Allow auto-import
+	autoImportEnabled = true // Enable auto-import
+	allowStale = false       // Don't skip staleness check
 	store = testStore
 	dbPath = testDBPath
 	rootCtx = ctx
@@ -266,9 +266,9 @@ func TestEnsureDatabaseFresh_AllowStaleFlag(t *testing.T) {
 	oldStoreActive := storeActive
 	oldAllowStale := allowStale
 
-	noAutoImport = true       // Disable auto-import (shouldn't matter with allowStale)
+	noAutoImport = true // Disable auto-import (shouldn't matter with allowStale)
 	autoImportEnabled = false
-	allowStale = true         // Skip staleness check entirely
+	allowStale = true // Skip staleness check entirely
 	store = testStore
 	dbPath = testDBPath
 	rootCtx = ctx

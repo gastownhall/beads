@@ -53,5 +53,3 @@ func ListMigrations() []string {
 	}
 	return names
 }
-
-

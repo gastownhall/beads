@@ -487,7 +487,7 @@ func TestFlushManagerFullExportFlagRace(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			fullExport := (id % 2 == 0)
+			fullExport := (id%2 == 0)
 			for j := 0; j < 50; j++ {
 				fm.MarkDirty(fullExport)
 				time.Sleep(time.Millisecond)

@@ -78,8 +78,8 @@ func TestFindAllDatabases(t *testing.T) {
 	}
 
 	// Root database should NOT be found - it's out of scope (parent of closest .beads)
-	_ = rootDB     // referenced but not expected in results
-	_ = rootBeads  // referenced but not expected in results
+	_ = rootDB    // referenced but not expected in results
+	_ = rootBeads // referenced but not expected in results
 }
 
 func TestFindAllDatabases_Single(t *testing.T) {

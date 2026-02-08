@@ -4,8 +4,8 @@ import "testing"
 
 func TestParseGitLsFilesFlag(t *testing.T) {
 	tests := map[string]struct {
-		flag              byte
-		wantHasAnyFlag    bool
+		flag                byte
+		wantHasAnyFlag      bool
 		wantHasSkipWorktree bool
 	}{
 		"normal tracked file (H)": {

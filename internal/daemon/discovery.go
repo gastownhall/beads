@@ -153,7 +153,7 @@ func discoverDaemon(socketPath string) DaemonInfo {
 	// If socket exists, we proceed with RPC for backwards compatibility
 	_, err := os.Stat(socketPath)
 	socketExists := err == nil
-	
+
 	if !socketExists {
 		beadsDir := filepath.Dir(socketPath)
 		running, _ := lockfile.TryDaemonLock(beadsDir)
@@ -290,12 +290,12 @@ func checkDaemonErrorFile(socketPath string) string {
 	// Socket path is typically .beads/bd.sock, so get the parent dir
 	beadsDir := filepath.Dir(socketPath)
 	errFile := filepath.Join(beadsDir, "daemon-error")
-	
+
 	data, err := os.ReadFile(errFile)
 	if err != nil {
 		return ""
 	}
-	
+
 	return string(data)
 }
 

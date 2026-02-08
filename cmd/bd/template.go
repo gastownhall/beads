@@ -26,12 +26,12 @@ var variablePattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
 // TemplateSubgraph holds a template epic and all its descendants
 type TemplateSubgraph struct {
-	Root         *types.Issue                // The template epic
-	Issues       []*types.Issue              // All issues in the subgraph (including root)
-	Dependencies []*types.Dependency         // All dependencies within the subgraph
-	IssueMap     map[string]*types.Issue     // ID -> Issue for quick lookup
-	VarDefs      map[string]formula.VarDef   // Variable definitions from formula (for defaults)
-	Phase        string                      // Recommended phase: "liquid" (pour) or "vapor" (wisp)
+	Root         *types.Issue              // The template epic
+	Issues       []*types.Issue            // All issues in the subgraph (including root)
+	Dependencies []*types.Dependency       // All dependencies within the subgraph
+	IssueMap     map[string]*types.Issue   // ID -> Issue for quick lookup
+	VarDefs      map[string]formula.VarDef // Variable definitions from formula (for defaults)
+	Phase        string                    // Recommended phase: "liquid" (pour) or "vapor" (wisp)
 }
 
 // InstantiateResult holds the result of template instantiation
@@ -47,7 +47,7 @@ type CloneOptions struct {
 	Assignee  string            // Assign the root epic to this agent/user
 	Actor     string            // Actor performing the operation
 	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
-	Prefix   string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
+	Prefix    string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
@@ -325,10 +325,10 @@ Example:
 
 		// Clone the subgraph (deprecated command, non-wisp for backwards compatibility)
 		opts := CloneOptions{
-			Vars:     vars,
-			Assignee: assignee,
-			Actor:    actor,
-			Ephemeral:     false,
+			Vars:      vars,
+			Assignee:  assignee,
+			Actor:     actor,
+			Ephemeral: false,
 		}
 		var result *InstantiateResult
 		if daemonClient != nil {
@@ -594,7 +594,7 @@ func resolveProtoIDOrTitle(ctx context.Context, s storage.Storage, input string)
 // IssueDetailsFromShow represents the response structure from daemon Show RPC
 type IssueDetailsFromShow struct {
 	types.Issue
-	Labels       []string                              `json:"labels,omitempty"`
+	Labels       []string                             `json:"labels,omitempty"`
 	Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 	Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
 }
@@ -714,7 +714,7 @@ func cloneSubgraphViaDaemon(client *rpc.Client, subgraph *TemplateSubgraph, opts
 			AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
-			Ephemeral:               opts.Ephemeral,
+			Ephemeral:          opts.Ephemeral,
 			IDPrefix:           opts.Prefix, // distinct prefixes for mols/wisps
 		}
 
@@ -979,7 +979,7 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
 				Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
-				IDPrefix:           opts.Prefix,   // distinct prefixes for mols/wisps
+				IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
 				// Gate fields (for async coordination)
 				AwaitType: oldIssue.AwaitType,
 				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),

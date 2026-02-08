@@ -796,10 +796,10 @@ func TestExplicitRoleOverride(t *testing.T) {
 	// even when the remote URL would indicate contributor
 
 	tests := []struct {
-		name           string
-		configRole     string
-		expectedRole   routing.UserRole
-		description    string
+		name         string
+		configRole   string
+		expectedRole routing.UserRole
+		description  string
 	}{
 		{
 			name:         "explicit maintainer",

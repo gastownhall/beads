@@ -426,9 +426,9 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgr
 
 	// Build CloneOptions for spawning
 	opts := CloneOptions{
-		Vars:  vars,
-		Actor: actorName,
-		Ephemeral:  makeEphemeral,
+		Vars:      vars,
+		Actor:     actorName,
+		Ephemeral: makeEphemeral,
 	}
 
 	// Dynamic bonding: use custom IDs if childRef is provided

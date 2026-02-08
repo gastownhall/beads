@@ -22,14 +22,14 @@ func TestCollisionProbability(t *testing.T) {
 
 	for _, tt := range tests {
 		got := collisionProbability(tt.numIssues, tt.idLength)
-		
+
 		// Allow 20% tolerance for approximation (birthday paradox is an approximation)
 		diff := got - tt.expected
 		if diff < 0 {
 			diff = -diff
 		}
 		tolerance := tt.expected * 0.2
-		
+
 		if diff > tolerance {
 			t.Errorf("collisionProbability(%d, %d) = %f, want ~%f (diff: %f)",
 				tt.numIssues, tt.idLength, got, tt.expected, diff)
@@ -113,10 +113,10 @@ func TestGenerateHashID_VariableLengths(t *testing.T) {
 	description := "Test description"
 	creator := "test@example.com"
 	timestamp, _ := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
-	
+
 	tests := []struct {
-		length       int
-		expectedLen  int // length of hash portion (without prefix)
+		length      int
+		expectedLen int // length of hash portion (without prefix)
 	}{
 		{3, 3},
 		{4, 4},
@@ -125,16 +125,16 @@ func TestGenerateHashID_VariableLengths(t *testing.T) {
 		{7, 7},
 		{8, 8},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("length_%d", tt.length), func(t *testing.T) {
 			id := generateHashID(prefix, title, description, creator, timestamp, tt.length, 0)
-			
+
 			// Format: "bd-xxxx" where xxxx is the hash
 			if !strings.HasPrefix(id, prefix+"-") {
 				t.Errorf("ID should start with %s-, got %s", prefix, id)
 			}
-			
+
 			hashPart := strings.TrimPrefix(id, prefix+"-")
 			if len(hashPart) != tt.expectedLen {
 				t.Errorf("Hash length = %d, want %d (full ID: %s)",
@@ -148,16 +148,16 @@ func TestGetAdaptiveIDLength_Integration(t *testing.T) {
 	// Use newTestStore for proper test isolation
 	db := newTestStore(t, "")
 	defer db.Close()
-	
+
 	ctx := context.Background()
-	
+
 	// Get a dedicated connection for this test
 	conn, err := db.db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("Failed to get connection: %v", err)
 	}
 	defer conn.Close()
-	
+
 	// Test default config (should use 3 chars for empty database)
 
 	length, err := getAdaptiveIDLength(ctx, conn, "test")
@@ -168,21 +168,21 @@ func TestGetAdaptiveIDLength_Integration(t *testing.T) {
 	if length != 3 {
 		t.Errorf("Empty database should use 3 chars, got %d", length)
 	}
-	
+
 	// Test custom config
 	if err := db.SetConfig(ctx, "max_collision_prob", "0.01"); err != nil {
 		t.Fatalf("Failed to set max_collision_prob: %v", err)
 	}
-	
+
 	if err := db.SetConfig(ctx, "min_hash_length", "5"); err != nil {
 		t.Fatalf("Failed to set min_hash_length: %v", err)
 	}
-	
+
 	length, err = getAdaptiveIDLength(ctx, conn, "test")
 	if err != nil {
 		t.Fatalf("getAdaptiveIDLength with custom config failed: %v", err)
 	}
-	
+
 	if length < 5 {
 		t.Errorf("With min_hash_length=5, got %d", length)
 	}

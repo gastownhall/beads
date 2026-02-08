@@ -26,7 +26,7 @@ func TestFlushManagerConcurrentMarkDirty(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		go func(id int) {
 			defer wg.Done()
-			fullExport := (id % 2 == 0) // Alternate between incremental and full
+			fullExport := (id%2 == 0) // Alternate between incremental and full
 			for j := 0; j < numCallsPerGoroutine; j++ {
 				fm.MarkDirty(fullExport)
 				// Small random delay to increase interleaving

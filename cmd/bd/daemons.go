@@ -67,6 +67,7 @@ type DaemonHealthResponse struct {
 	Unresponsive int                  `json:"unresponsive"`
 	Daemons      []DaemonHealthReport `json:"daemons"`
 }
+
 var daemonsCmd = &cobra.Command{
 	Use:     "daemons",
 	GroupID: "sync",
@@ -140,11 +141,12 @@ uptime, last activity, and exclusive lock status.`,
 				lock = fmt.Sprintf("🔒 %s", d.ExclusiveLockHolder)
 			}
 			_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n",
-			workspace, d.PID, d.Version, uptime, lastActivity, lock)
-			}
-			_ = w.Flush()
+				workspace, d.PID, d.Version, uptime, lastActivity, lock)
+		}
+		_ = w.Flush()
 	},
 }
+
 func formatDaemonDuration(seconds float64) string {
 	d := time.Duration(seconds * float64(time.Second))
 	if d < time.Minute {
@@ -167,6 +169,7 @@ func formatDaemonRelativeTime(t time.Time) string {
 	}
 	return fmt.Sprintf("%.1fd ago", d.Hours()/24)
 }
+
 var daemonsStopCmd = &cobra.Command{
 	Use:   "stop <workspace-path|pid>",
 	Short: "Stop a specific bd daemon",
@@ -426,6 +429,7 @@ Supports tail mode (last N lines) and follow mode (like tail -f).`,
 		}
 	},
 }
+
 func tailLines(filePath string, n int) error {
 	// #nosec G304 - controlled path from daemon discovery
 	file, err := os.Open(filePath)
@@ -477,6 +481,7 @@ func tailFollow(filePath string) {
 		fmt.Print(strings.TrimRight(line, "\n\r") + "\n")
 	}
 }
+
 var daemonsKillallCmd = &cobra.Command{
 	Use:   "killall",
 	Short: "Stop all running bd daemons",
@@ -618,15 +623,16 @@ stale sockets, version mismatches, and unresponsive daemons.`,
 				issue = "-"
 			}
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			workspace, pidStr, version, status, issue)
-			}
-			_ = w.Flush()
+				workspace, pidStr, version, status, issue)
+		}
+		_ = w.Flush()
 		// Exit with error if there are any issues
 		if staleCount > 0 || mismatchCount > 0 || unresponsiveCount > 0 {
 			os.Exit(1)
 		}
 	},
 }
+
 func init() {
 	// Add multi-daemon subcommands to daemonCmd (primary location)
 	daemonCmd.AddCommand(daemonsListCmd)

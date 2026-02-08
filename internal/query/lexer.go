@@ -23,23 +23,23 @@ import (
 type TokenType int
 
 const (
-	TokenEOF TokenType = iota
-	TokenIdent       // field names, values
-	TokenString      // quoted strings
-	TokenNumber      // numeric values
-	TokenDuration    // duration values like 7d, 24h
-	TokenEquals      // =
-	TokenNotEquals   // !=
-	TokenLess        // <
-	TokenLessEq      // <=
-	TokenGreater     // >
-	TokenGreaterEq   // >=
-	TokenAnd         // AND
-	TokenOr          // OR
-	TokenNot         // NOT
-	TokenLParen      // (
-	TokenRParen      // )
-	TokenComma       // , (for lists)
+	TokenEOF       TokenType = iota
+	TokenIdent               // field names, values
+	TokenString              // quoted strings
+	TokenNumber              // numeric values
+	TokenDuration            // duration values like 7d, 24h
+	TokenEquals              // =
+	TokenNotEquals           // !=
+	TokenLess                // <
+	TokenLessEq              // <=
+	TokenGreater             // >
+	TokenGreaterEq           // >=
+	TokenAnd                 // AND
+	TokenOr                  // OR
+	TokenNot                 // NOT
+	TokenLParen              // (
+	TokenRParen              // )
+	TokenComma               // , (for lists)
 )
 
 // String returns the string representation of a TokenType.

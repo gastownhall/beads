@@ -42,7 +42,7 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 	// Create issues with multiple prefixes (simulating corruption)
 	// We need to directly insert into the database to bypass prefix validation
 	db := testStore.UnderlyingDB()
-	
+
 	now := time.Now()
 	issues := []struct {
 		ID    string

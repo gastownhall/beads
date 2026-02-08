@@ -487,5 +487,3 @@ func scanIssueTx(ctx context.Context, tx *sql.Tx, id string) (*types.Issue, erro
 
 	return &issue, nil
 }
-
-

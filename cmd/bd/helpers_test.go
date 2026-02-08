@@ -16,7 +16,7 @@ func TestIsNumeric(t *testing.T) {
 		{"123", true},
 		{"999", true},
 		{"abc", false},
-		{"", true},    // empty string returns true (loop never runs)
+		{"", true}, // empty string returns true (loop never runs)
 		{"12a", false},
 	}
 
@@ -42,8 +42,8 @@ func TestExtractPrefix(t *testing.T) {
 		{"bd-123", "bd"},
 		{"custom-1", "custom"},
 		{"TEST-999", "TEST"},
-		{"no-number", "no"},     // Has hyphen, suffix not numeric, first hyphen
-		{"nonumber", ""},        // No hyphen
+		{"no-number", "no"}, // Has hyphen, suffix not numeric, first hyphen
+		{"nonumber", ""},    // No hyphen
 		{"", ""},
 		// Multi-part non-numeric suffixes (bd-fasa regression tests)
 		{"vc-baseline-test", "vc"},
@@ -70,14 +70,14 @@ func TestGetPrefixList(t *testing.T) {
 		"custom": 3,
 		"test":   1,
 	}
-	
+
 	result := importer.GetPrefixList(prefixMap)
-	
+
 	// Should have 3 entries
 	if len(result) != 3 {
 		t.Errorf("Expected 3 entries, got %d", len(result))
 	}
-	
+
 	// Function returns formatted strings like "bd- (5 issues)"
 	// Just check we got sensible output
 	for _, entry := range result {

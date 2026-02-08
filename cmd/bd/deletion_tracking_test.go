@@ -588,7 +588,7 @@ func TestGetMultiRepoJSONLPaths_Duplicates(t *testing.T) {
 	initConfigForTest(t)
 	// Setup temp dirs
 	primaryDir := t.TempDir()
-	
+
 	// Create .beads directories
 	if err := os.MkdirAll(filepath.Join(primaryDir, ".beads"), 0755); err != nil {
 		t.Fatalf("Failed to create .beads dir: %v", err)
@@ -603,14 +603,14 @@ func TestGetMultiRepoJSONLPaths_Duplicates(t *testing.T) {
 	}()
 
 	paths := getMultiRepoJSONLPaths()
-	
+
 	// Current implementation doesn't dedupe - just verify it returns all entries
 	// (This documents current behavior; future improvement could dedupe)
 	expectedCount := 3 // primary + 2 duplicates
 	if len(paths) != expectedCount {
 		t.Errorf("Expected %d paths, got %d: %v", expectedCount, len(paths), paths)
 	}
-	
+
 	// All should point to same JSONL location
 	expectedJSONL := filepath.Join(primaryDir, ".beads", "issues.jsonl")
 	for i, p := range paths {
@@ -627,7 +627,7 @@ func TestGetMultiRepoJSONLPaths_PathsWithSpaces(t *testing.T) {
 	baseDir := t.TempDir()
 	primaryDir := filepath.Join(baseDir, "my project")
 	additionalDir := filepath.Join(baseDir, "other repo")
-	
+
 	// Create .beads directories
 	if err := os.MkdirAll(filepath.Join(primaryDir, ".beads"), 0755); err != nil {
 		t.Fatalf("Failed to create primary .beads: %v", err)
@@ -644,15 +644,15 @@ func TestGetMultiRepoJSONLPaths_PathsWithSpaces(t *testing.T) {
 	}()
 
 	paths := getMultiRepoJSONLPaths()
-	
+
 	if len(paths) != 2 {
 		t.Fatalf("Expected 2 paths, got %d", len(paths))
 	}
-	
+
 	// Verify paths are constructed correctly
 	expectedPrimary := filepath.Join(primaryDir, ".beads", "issues.jsonl")
 	expectedAdditional := filepath.Join(additionalDir, ".beads", "issues.jsonl")
-	
+
 	if paths[0] != expectedPrimary {
 		t.Errorf("Primary path = %s, want %s", paths[0], expectedPrimary)
 	}
@@ -674,17 +674,17 @@ func TestGetMultiRepoJSONLPaths_RelativePaths(t *testing.T) {
 	}()
 
 	paths := getMultiRepoJSONLPaths()
-	
+
 	if len(paths) != 3 {
 		t.Fatalf("Expected 3 paths, got %d", len(paths))
 	}
-	
+
 	// Current implementation: relative paths are NOT expanded to absolute
 	// They're used as-is with filepath.Join
 	expectedPrimary := filepath.Join(".", ".beads", "issues.jsonl")
 	expectedOther := filepath.Join("../other", ".beads", "issues.jsonl")
 	expectedBar := filepath.Join("./foo/../bar", ".beads", "issues.jsonl")
-	
+
 	if paths[0] != expectedPrimary {
 		t.Errorf("Primary path = %s, want %s", paths[0], expectedPrimary)
 	}
@@ -708,15 +708,15 @@ func TestGetMultiRepoJSONLPaths_TildeExpansion(t *testing.T) {
 	}()
 
 	paths := getMultiRepoJSONLPaths()
-	
+
 	if len(paths) != 2 {
 		t.Fatalf("Expected 2 paths, got %d", len(paths))
 	}
-	
+
 	// Tilde should be literal (NOT expanded) in current implementation
 	expectedPrimary := filepath.Join("~/repos/main", ".beads", "issues.jsonl")
 	expectedAdditional := filepath.Join("~/repos/other", ".beads", "issues.jsonl")
-	
+
 	if paths[0] != expectedPrimary {
 		t.Errorf("Primary path = %s, want %s", paths[0], expectedPrimary)
 	}

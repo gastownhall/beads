@@ -789,7 +789,7 @@ func TestMerge3Way_Deletions(t *testing.T) {
 		base := []Issue{
 			testIssue(`{"id":"bd-abc123","title":"Will be deleted","created_at":"2024-01-01T00:00:00Z","created_by":"user1"}`),
 		}
-		left := base     // Unchanged in left
+		left := base       // Unchanged in left
 		right := []Issue{} // Deleted in right
 
 		result, conflicts := merge3Way(base, left, right, false)
@@ -1136,10 +1136,10 @@ func TestIsTombstone(t *testing.T) {
 // TestMergeTombstones tests merging two tombstones
 func TestMergeTombstones(t *testing.T) {
 	tests := []struct {
-		name            string
-		leftDeletedAt   string
-		rightDeletedAt  string
-		expectedSide    string // "left" or "right"
+		name           string
+		leftDeletedAt  string
+		rightDeletedAt string
+		expectedSide   string // "left" or "right"
 	}{
 		{
 			name:           "left deleted later",
@@ -2039,6 +2039,7 @@ func TestMerge3Way_DeterministicOutputOrder(t *testing.T) {
 		}
 	})
 }
+
 // TestMerge3Way_CloseReasonPreservation tests that close_reason and closed_by_session
 // are preserved during merge/sync operations (GH#891)
 func TestMerge3Way_CloseReasonPreservation(t *testing.T) {
@@ -2564,20 +2565,20 @@ func TestIssueFieldParity(t *testing.T) {
 	// - WorkType: advanced feature, preserved via pass-through
 	// - EventKind, Actor, Target, Payload: event-specific, preserved via pass-through
 	excluded := map[string]bool{
-		"content_hash":   true, // internal, json:"-"
-		"source_repo":    true, // internal, json:"-"
-		"id_prefix":      true, // internal, json:"-"
+		"content_hash":    true, // internal, json:"-"
+		"source_repo":     true, // internal, json:"-"
+		"id_prefix":       true, // internal, json:"-"
 		"prefix_override": true, // internal, json:"-"
 		// Complex nested types - these are preserved by JSON round-trip
 		// but not explicitly handled in merge logic
-		"bonded_from":  true,
-		"creator":      true,
-		"validations":  true,
-		"work_type":    true,
-		"event_kind":   true,
-		"actor":        true,
-		"target":       true,
-		"payload":      true,
+		"bonded_from": true,
+		"creator":     true,
+		"validations": true,
+		"work_type":   true,
+		"event_kind":  true,
+		"actor":       true,
+		"target":      true,
+		"payload":     true,
 	}
 
 	// Check for missing fields

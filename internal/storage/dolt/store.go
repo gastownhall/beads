@@ -35,12 +35,12 @@ import (
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
-	db         *sql.DB
-	dbPath     string       // Path to Dolt database directory
-	closed     atomic.Bool  // Tracks whether Close() has been called
-	connStr    string       // Connection string for reconnection
-	mu         sync.RWMutex // Protects concurrent access
-	readOnly   bool         // True if opened in read-only mode
+	db       *sql.DB
+	dbPath   string       // Path to Dolt database directory
+	closed   atomic.Bool  // Tracks whether Close() has been called
+	connStr  string       // Connection string for reconnection
+	mu       sync.RWMutex // Protects concurrent access
+	readOnly bool         // True if opened in read-only mode
 
 	// Version control config
 	committerName  string
@@ -663,5 +663,3 @@ type StatusEntry struct {
 	Table  string
 	Status string // "new", "modified", "deleted"
 }
-
-

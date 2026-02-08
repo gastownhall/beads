@@ -241,5 +241,3 @@ type SyncResult struct {
 	Error             error
 	PushError         error // Non-fatal push error
 }
-
-

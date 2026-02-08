@@ -57,12 +57,12 @@ func TestDoPullFromGitLab_DryRun(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		issues := []gitlab.Issue{
 			{
-				ID:          1,
-				IID:         1,
-				ProjectID:   123,
-				Title:       "Test issue",
-				State:       "opened",
-				WebURL:      "https://gitlab.example.com/group/project/-/issues/1",
+				ID:        1,
+				IID:       1,
+				ProjectID: 123,
+				Title:     "Test issue",
+				State:     "opened",
+				WebURL:    "https://gitlab.example.com/group/project/-/issues/1",
 			},
 		}
 		_ = json.NewEncoder(w).Encode(issues)
@@ -420,12 +420,12 @@ func TestGenerateIssueIDHasRandomComponent(t *testing.T) {
 // TestGetConflictStrategy verifies conflict strategy selection from flags.
 func TestGetConflictStrategy(t *testing.T) {
 	tests := []struct {
-		name           string
-		preferLocal    bool
-		preferGitLab   bool
-		preferNewer    bool
-		wantStrategy   ConflictStrategy
-		wantError      bool
+		name         string
+		preferLocal  bool
+		preferGitLab bool
+		preferNewer  bool
+		wantStrategy ConflictStrategy
+		wantError    bool
 	}{
 		{
 			name:         "no flags - default to prefer-newer",
@@ -476,7 +476,7 @@ func TestGetConflictStrategy(t *testing.T) {
 // TestResolveConflicts_PreferLocal verifies --prefer-local always uses local version.
 func TestResolveConflicts_PreferLocal(t *testing.T) {
 	localTime := time.Now().Add(-1 * time.Hour) // Local is OLDER
-	gitlabTime := time.Now()                     // GitLab is newer
+	gitlabTime := time.Now()                    // GitLab is newer
 
 	var fetchCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +513,7 @@ func TestResolveConflicts_PreferLocal(t *testing.T) {
 
 // TestResolveConflicts_PreferGitLab verifies --prefer-gitlab always fetches from GitLab.
 func TestResolveConflicts_PreferGitLab(t *testing.T) {
-	localTime := time.Now()                       // Local is newer
+	localTime := time.Now()                      // Local is newer
 	gitlabTime := time.Now().Add(-1 * time.Hour) // GitLab is OLDER
 
 	var fetchCalled bool
@@ -562,7 +562,7 @@ func TestResolveConflicts_PreferGitLab(t *testing.T) {
 // TestResolveConflicts_PreferNewer verifies default behavior uses timestamps.
 func TestResolveConflicts_PreferNewer(t *testing.T) {
 	localTime := time.Now().Add(-1 * time.Hour) // Local is older
-	gitlabTime := time.Now()                     // GitLab is newer
+	gitlabTime := time.Now()                    // GitLab is newer
 
 	var fetchCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -820,36 +820,36 @@ func TestP0_SyncFunctionsUseSyncContext(t *testing.T) {
 // TestParseGitLabSourceSystem verifies parsing source system string.
 func TestParseGitLabSourceSystem(t *testing.T) {
 	tests := []struct {
-		name        string
-		sourceSystem string
+		name          string
+		sourceSystem  string
 		wantProjectID int
 		wantIID       int
 		wantOK        bool
 	}{
 		{
-			name:        "valid gitlab source",
-			sourceSystem: "gitlab:123:42",
+			name:          "valid gitlab source",
+			sourceSystem:  "gitlab:123:42",
 			wantProjectID: 123,
 			wantIID:       42,
 			wantOK:        true,
 		},
 		{
-			name:        "different project",
-			sourceSystem: "gitlab:456:99",
+			name:          "different project",
+			sourceSystem:  "gitlab:456:99",
 			wantProjectID: 456,
 			wantIID:       99,
 			wantOK:        true,
 		},
 		{
-			name:        "non-gitlab source",
-			sourceSystem: "linear:ABC-123",
+			name:          "non-gitlab source",
+			sourceSystem:  "linear:ABC-123",
 			wantProjectID: 0,
 			wantIID:       0,
 			wantOK:        false,
 		},
 		{
-			name:        "empty source",
-			sourceSystem: "",
+			name:          "empty source",
+			sourceSystem:  "",
 			wantProjectID: 0,
 			wantIID:       0,
 			wantOK:        false,

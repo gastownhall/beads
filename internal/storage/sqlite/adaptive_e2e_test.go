@@ -22,12 +22,12 @@ func TestAdaptiveIDLength_E2E(t *testing.T) {
 		t.Fatalf("Failed to create database: %v", err)
 	}
 	defer db.Close()
-	
+
 	// Initialize with prefix
 	if err := db.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
-	
+
 	// Helper to create issue and verify ID length
 	createAndCheckLength := func(title string, expectedHashLen int) string {
 		issue := &types.Issue{
@@ -37,24 +37,24 @@ func TestAdaptiveIDLength_E2E(t *testing.T) {
 			Priority:    1,
 			IssueType:   "task",
 		}
-		
+
 		if err := db.CreateIssue(ctx, issue, "test@example.com"); err != nil {
 			t.Fatalf("Failed to create issue: %v", err)
 		}
-		
+
 		// Check ID format: test-xxxx
 		if !strings.HasPrefix(issue.ID, "test-") {
 			t.Errorf("ID should start with test-, got %s", issue.ID)
 		}
-		
+
 		hashPart := strings.TrimPrefix(issue.ID, "test-")
 		if len(hashPart) != expectedHashLen {
 			t.Errorf("Issue %s: hash length = %d, want %d", title, len(hashPart), expectedHashLen)
 		}
-		
+
 		return issue.ID
 	}
-	
+
 	// Test 1: First few issues should use 3-char IDs (base36 allows shorter IDs)
 	t.Run("first_50_issues_use_3_chars", func(t *testing.T) {
 		for i := 0; i < 50; i++ {
@@ -87,7 +87,7 @@ func TestAdaptiveIDLength_E2E(t *testing.T) {
 			}
 		}
 	})
-	
+
 	// Test 3: At 500-1000 issues, should scale to 4-5 chars
 	// (4 chars good up to ~980 issues with 25% threshold)
 	t.Run("verify_adaptive_scaling_works", func(t *testing.T) {
@@ -129,12 +129,12 @@ func TestAdaptiveIDLength_CustomConfig(t *testing.T) {
 		t.Fatalf("Failed to create database: %v", err)
 	}
 	defer db.Close()
-	
+
 	// Initialize with custom config
 	if err := db.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
-	
+
 	// Set stricter collision threshold (1%) and min length of 5
 	if err := db.SetConfig(ctx, "max_collision_prob", "0.01"); err != nil {
 		t.Fatalf("Failed to set max_collision_prob: %v", err)
@@ -142,7 +142,7 @@ func TestAdaptiveIDLength_CustomConfig(t *testing.T) {
 	if err := db.SetConfig(ctx, "min_hash_length", "5"); err != nil {
 		t.Fatalf("Failed to set min_hash_length: %v", err)
 	}
-	
+
 	// With min_hash_length=5, all IDs should be at least 5 chars
 	for i := 0; i < 20; i++ {
 		issue := &types.Issue{
@@ -152,11 +152,11 @@ func TestAdaptiveIDLength_CustomConfig(t *testing.T) {
 			Priority:    1,
 			IssueType:   "task",
 		}
-		
+
 		if err := db.CreateIssue(ctx, issue, "test@example.com"); err != nil {
 			t.Fatalf("Failed to create issue: %v", err)
 		}
-		
+
 		hashPart := strings.TrimPrefix(issue.ID, "test-")
 		// With min_hash_length=5, should use at least 5 chars
 		if len(hashPart) < 5 {

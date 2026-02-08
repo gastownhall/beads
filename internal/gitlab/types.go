@@ -45,26 +45,26 @@ type Client struct {
 
 // Issue represents an issue from the GitLab API.
 type Issue struct {
-	ID          int        `json:"id"`          // Global issue ID
-	IID         int        `json:"iid"`         // Project-scoped issue ID
-	ProjectID   int        `json:"project_id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	State       string     `json:"state"`       // "opened", "closed", "reopened"
-	CreatedAt   *time.Time `json:"created_at"`
-	UpdatedAt   *time.Time `json:"updated_at"`
-	ClosedAt    *time.Time `json:"closed_at,omitempty"`
-	ClosedBy    *User      `json:"closed_by,omitempty"`
-	Labels      []string   `json:"labels"`
-	Assignee    *User      `json:"assignee,omitempty"`
-	Assignees   []User     `json:"assignees,omitempty"`
-	Author      *User      `json:"author,omitempty"`
-	Milestone   *Milestone `json:"milestone,omitempty"`
-	WebURL      string     `json:"web_url"`
-	DueDate     string     `json:"due_date,omitempty"` // YYYY-MM-DD format
-	Weight      int        `json:"weight,omitempty"`   // GitLab Premium feature
-	Type        string     `json:"type,omitempty"`     // "issue", "incident", "test_case", "task"
-	Confidential bool      `json:"confidential"`
+	ID           int        `json:"id"`  // Global issue ID
+	IID          int        `json:"iid"` // Project-scoped issue ID
+	ProjectID    int        `json:"project_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	State        string     `json:"state"` // "opened", "closed", "reopened"
+	CreatedAt    *time.Time `json:"created_at"`
+	UpdatedAt    *time.Time `json:"updated_at"`
+	ClosedAt     *time.Time `json:"closed_at,omitempty"`
+	ClosedBy     *User      `json:"closed_by,omitempty"`
+	Labels       []string   `json:"labels"`
+	Assignee     *User      `json:"assignee,omitempty"`
+	Assignees    []User     `json:"assignees,omitempty"`
+	Author       *User      `json:"author,omitempty"`
+	Milestone    *Milestone `json:"milestone,omitempty"`
+	WebURL       string     `json:"web_url"`
+	DueDate      string     `json:"due_date,omitempty"` // YYYY-MM-DD format
+	Weight       int        `json:"weight,omitempty"`   // GitLab Premium feature
+	Type         string     `json:"type,omitempty"`     // "issue", "incident", "test_case", "task"
+	Confidential bool       `json:"confidential"`
 
 	// Links contains related URLs (populated in some API responses)
 	Links *IssueLinks `json:"links,omitempty"`
@@ -126,13 +126,13 @@ type IssueLink struct {
 
 // Project represents a GitLab project.
 type Project struct {
-	ID                int    `json:"id"`
-	Name              string `json:"name"`
-	Path              string `json:"path"`
-	PathWithNamespace string `json:"path_with_namespace"`
-	Description       string `json:"description,omitempty"`
-	WebURL            string `json:"web_url"`
-	DefaultBranch     string `json:"default_branch,omitempty"`
+	ID                int        `json:"id"`
+	Name              string     `json:"name"`
+	Path              string     `json:"path"`
+	PathWithNamespace string     `json:"path_with_namespace"`
+	Description       string     `json:"description,omitempty"`
+	WebURL            string     `json:"web_url"`
+	DefaultBranch     string     `json:"default_branch,omitempty"`
 	Namespace         *Namespace `json:"namespace,omitempty"`
 }
 

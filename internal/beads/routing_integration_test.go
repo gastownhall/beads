@@ -65,7 +65,7 @@ func TestRoutingIntegration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create temp directory
 			tmpDir := t.TempDir()
-			
+
 			// Set up git
 			tt.setupGit(t, tmpDir)
 

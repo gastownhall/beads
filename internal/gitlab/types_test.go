@@ -207,12 +207,12 @@ func TestSyncStatsZeroValue(t *testing.T) {
 func TestConflictFields(t *testing.T) {
 	now := time.Now()
 	conflict := Conflict{
-		IssueID:          "bd-abc123",
-		LocalUpdated:     now,
-		GitLabUpdated:    now.Add(time.Hour),
+		IssueID:           "bd-abc123",
+		LocalUpdated:      now,
+		GitLabUpdated:     now.Add(time.Hour),
 		GitLabExternalRef: "https://gitlab.example.com/group/project/-/issues/42",
-		GitLabIID:        42,
-		GitLabID:         123456,
+		GitLabIID:         42,
+		GitLabID:          123456,
 	}
 
 	if conflict.IssueID != "bd-abc123" {

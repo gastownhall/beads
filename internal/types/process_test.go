@@ -24,7 +24,6 @@ func TestIsProcessAlive(t *testing.T) {
 			want:     true,
 		},
 
-
 		{
 			name:     "different hostname (assume alive)",
 			pid:      12345,

@@ -31,7 +31,7 @@ func (wm *WorktreeManager) CreateBeadsWorktree(branch, worktreePath string) erro
 	pruneCmd := exec.Command("git", "worktree", "prune")
 	pruneCmd.Dir = wm.repoPath
 	_ = pruneCmd.Run() // Best effort, ignore errors
-	
+
 	// Check if worktree already exists
 	if _, err := os.Stat(worktreePath); err == nil {
 		// Worktree path exists, check if it's a valid worktree
@@ -85,7 +85,7 @@ func (wm *WorktreeManager) CreateBeadsWorktree(branch, worktreePath string) erro
 		_ = wm.RemoveBeadsWorktree(worktreePath)
 		return fmt.Errorf("failed to configure sparse checkout: %w", err)
 	}
-	
+
 	// Now checkout the branch with sparse checkout active
 	checkoutCmd := exec.Command("git", "checkout", branch)
 	checkoutCmd.Dir = worktreePath
@@ -110,16 +110,16 @@ func (wm *WorktreeManager) RemoveBeadsWorktree(worktreePath string) error {
 	// First, try to remove via git worktree remove
 	cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
 	cmd.Dir = wm.repoPath
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If git worktree remove fails, manually remove the directory
 		// and prune the worktree list
 		if removeErr := os.RemoveAll(worktreePath); removeErr != nil {
-			return fmt.Errorf("failed to remove worktree directory: %w (git error: %v, output: %s)", 
+			return fmt.Errorf("failed to remove worktree directory: %w (git error: %v, output: %s)",
 				removeErr, err, string(output))
 		}
-		
+
 		// Prune stale worktree entries
 		pruneCmd := exec.Command("git", "worktree", "prune")
 		pruneCmd.Dir = wm.repoPath

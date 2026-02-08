@@ -18,16 +18,16 @@ import (
 
 // DeepValidationResult holds all deep validation check results
 type DeepValidationResult struct {
-	ParentConsistency    DoctorCheck   `json:"parent_consistency"`
-	DependencyIntegrity  DoctorCheck   `json:"dependency_integrity"`
-	EpicCompleteness     DoctorCheck   `json:"epic_completeness"`
-	AgentBeadIntegrity   DoctorCheck   `json:"agent_bead_integrity"`
-	MailThreadIntegrity  DoctorCheck   `json:"mail_thread_integrity"`
-	MoleculeIntegrity    DoctorCheck   `json:"molecule_integrity"`
-	AllChecks            []DoctorCheck `json:"all_checks"`
-	TotalIssues          int           `json:"total_issues"`
-	TotalDependencies    int           `json:"total_dependencies"`
-	OverallOK            bool          `json:"overall_ok"`
+	ParentConsistency   DoctorCheck   `json:"parent_consistency"`
+	DependencyIntegrity DoctorCheck   `json:"dependency_integrity"`
+	EpicCompleteness    DoctorCheck   `json:"epic_completeness"`
+	AgentBeadIntegrity  DoctorCheck   `json:"agent_bead_integrity"`
+	MailThreadIntegrity DoctorCheck   `json:"mail_thread_integrity"`
+	MoleculeIntegrity   DoctorCheck   `json:"molecule_integrity"`
+	AllChecks           []DoctorCheck `json:"all_checks"`
+	TotalIssues         int           `json:"total_issues"`
+	TotalDependencies   int           `json:"total_dependencies"`
+	OverallOK           bool          `json:"overall_ok"`
 }
 
 // RunDeepValidation runs all deep validation checks on the issue graph.

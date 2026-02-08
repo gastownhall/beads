@@ -39,7 +39,7 @@ func TestGetReadyWork(t *testing.T) {
 
 	env.AssertReady(issue1)
 	env.AssertReady(issue3)
-	env.AssertReady(issue5)  // blocker (issue4) is closed
+	env.AssertReady(issue5) // blocker (issue4) is closed
 	env.AssertBlocked(issue2)
 }
 
@@ -228,8 +228,8 @@ func TestParentBlockerBlocksChildren(t *testing.T) {
 	epic1 := env.CreateEpic("Epic 1")
 	task1 := env.CreateIssue("Task 1")
 
-	env.AddDep(epic1, blocker)        // epic1 blocked by blocker
-	env.AddParentChild(task1, epic1)  // task1 is child of epic1
+	env.AddDep(epic1, blocker)       // epic1 blocked by blocker
+	env.AddParentChild(task1, epic1) // task1 is child of epic1
 
 	env.AssertBlocked(epic1)
 	env.AssertBlocked(task1)
@@ -252,9 +252,9 @@ func TestGrandparentBlockerBlocksGrandchildren(t *testing.T) {
 	epic2 := env.CreateEpic("Epic 2")
 	task1 := env.CreateIssue("Task 1")
 
-	env.AddDep(epic1, blocker)        // epic1 blocked by blocker
-	env.AddParentChild(epic2, epic1)  // epic2 is child of epic1
-	env.AddParentChild(task1, epic2)  // task1 is child of epic2
+	env.AddDep(epic1, blocker)       // epic1 blocked by blocker
+	env.AddParentChild(epic2, epic1) // epic2 is child of epic1
+	env.AddParentChild(task1, epic2) // task1 is child of epic2
 
 	env.AssertBlocked(epic1)
 	env.AssertBlocked(epic2)
@@ -278,12 +278,12 @@ func TestMultipleParentsOneBlocked(t *testing.T) {
 	epic2 := env.CreateEpic("Epic 2 (ready)")
 	task1 := env.CreateIssue("Task 1")
 
-	env.AddDep(epic1, blocker)        // epic1 blocked by blocker
-	env.AddParentChild(task1, epic1)  // task1 is child of both epic1 and epic2
+	env.AddDep(epic1, blocker)       // epic1 blocked by blocker
+	env.AddParentChild(task1, epic1) // task1 is child of both epic1 and epic2
 	env.AddParentChild(task1, epic2)
 
 	env.AssertBlocked(epic1)
-	env.AssertBlocked(task1)  // blocked because one parent (epic1) is blocked
+	env.AssertBlocked(task1) // blocked because one parent (epic1) is blocked
 	env.AssertReady(blocker)
 	env.AssertReady(epic2)
 }
@@ -331,11 +331,11 @@ func TestRelatedDoesNotPropagate(t *testing.T) {
 	epic1 := env.CreateEpic("Epic 1")
 	task1 := env.CreateIssue("Task 1")
 
-	env.AddDep(epic1, blocker)                      // epic1 blocked by blocker
-	env.AddDepType(task1, epic1, types.DepRelated)  // task1 is related to epic1 (NOT parent-child)
+	env.AddDep(epic1, blocker)                     // epic1 blocked by blocker
+	env.AddDepType(task1, epic1, types.DepRelated) // task1 is related to epic1 (NOT parent-child)
 
 	env.AssertBlocked(epic1)
-	env.AssertReady(task1)   // related deps don't propagate blocking
+	env.AssertReady(task1) // related deps don't propagate blocking
 	env.AssertReady(blocker)
 }
 
@@ -415,7 +415,7 @@ func TestReadyIssuesViewMatchesGetReadyWork(t *testing.T) {
 
 	// Verify they match
 	if len(readyIDsFromFunc) != len(readyIDsFromView) {
-		t.Errorf("Mismatch: GetReadyWork returned %d issues, VIEW returned %d", 
+		t.Errorf("Mismatch: GetReadyWork returned %d issues, VIEW returned %d",
 			len(readyIDsFromFunc), len(readyIDsFromView))
 	}
 
@@ -461,10 +461,10 @@ func TestDeepHierarchyBlocking(t *testing.T) {
 	var issues []*types.Issue
 	for i := 0; i < 50; i++ {
 		issue := &types.Issue{
-			Title:      "Level " + string(rune(i)),
-			Status:     types.StatusOpen,
-			Priority:   1,
-			IssueType:  types.TypeEpic,
+			Title:     "Level " + string(rune(i)),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeEpic,
 		}
 		store.CreateIssue(ctx, issue, "test-user")
 		issues = append(issues, issue)
@@ -691,8 +691,8 @@ func TestExplainQueryPlanReadyWork(t *testing.T) {
 
 	foundTableScan := false
 	for _, line := range planLines {
-		if strings.Contains(line, "SCAN TABLE issues") || 
-		   strings.Contains(line, "SCAN TABLE dependencies") {
+		if strings.Contains(line, "SCAN TABLE issues") ||
+			strings.Contains(line, "SCAN TABLE dependencies") {
 			foundTableScan = true
 			t.Errorf("Found table scan in query plan: %s", line)
 		}

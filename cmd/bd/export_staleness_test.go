@@ -10,7 +10,7 @@ import (
 // has fewer issues than JSONL (indicating staleness)
 func TestExportStaleness_DBHasFewerIssues(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create JSONL with 3 issues
 	jsonlPath := filepath.Join(tmpDir, "test.jsonl")
 	jsonlContent := `{"id":"test-1","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
@@ -35,7 +35,7 @@ func TestExportStaleness_DBHasFewerIssues(t *testing.T) {
 // has same number of issues as JSONL
 func TestExportStaleness_DBHasSameIssues(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create JSONL with 2 issues
 	jsonlPath := filepath.Join(tmpDir, "test.jsonl")
 	jsonlContent := `{"id":"test-1","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
@@ -74,7 +74,7 @@ func TestExportStaleness_NoJSONL(t *testing.T) {
 // has different issues than JSONL (even with same count)
 func TestExportStaleness_DifferentIssues(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create JSONL with issues test-1, test-2, test-3
 	jsonlPath := filepath.Join(tmpDir, "test.jsonl")
 	jsonlContent := `{"id":"test-1","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
@@ -102,7 +102,7 @@ func TestExportStaleness_DifferentIssues(t *testing.T) {
 func TestGetIssueIDsFromJSONL_InvalidJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	jsonlPath := filepath.Join(tmpDir, "corrupt.jsonl")
-	
+
 	// Create JSONL with invalid JSON on second line
 	jsonlContent := `{"id":"test-1","title":"Issue 1","status":"open","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
 this is not valid JSON

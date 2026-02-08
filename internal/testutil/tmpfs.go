@@ -20,7 +20,7 @@ func TempDirInMemory(t testing.TB) string {
 	t.Helper()
 
 	var baseDir string
-	
+
 	switch runtime.GOOS {
 	case "linux":
 		// Try /dev/shm (tmpfs ramdisk) first

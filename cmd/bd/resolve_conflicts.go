@@ -59,25 +59,25 @@ func init() {
 
 // conflictRegion represents a single conflict in the file
 type conflictRegion struct {
-	StartLine int      // Line number where <<<<<<< starts
-	EndLine   int      // Line number where >>>>>>> ends
-	LeftSide  []string // Lines between <<<<<<< and =======
-	RightSide []string // Lines between ======= and >>>>>>>
-	LeftLabel string   // Label after <<<<<<< (e.g., "HEAD")
-	RightLabel string  // Label after >>>>>>> (e.g., "branch-name")
+	StartLine  int      // Line number where <<<<<<< starts
+	EndLine    int      // Line number where >>>>>>> ends
+	LeftSide   []string // Lines between <<<<<<< and =======
+	RightSide  []string // Lines between ======= and >>>>>>>
+	LeftLabel  string   // Label after <<<<<<< (e.g., "HEAD")
+	RightLabel string   // Label after >>>>>>> (e.g., "branch-name")
 }
 
 // resolveConflictsResult is the JSON output structure
 type resolveConflictsResult struct {
-	FilePath         string                   `json:"file_path"`
-	DryRun           bool                     `json:"dry_run"`
-	Mode             string                   `json:"mode"`
-	ConflictsFound   int                      `json:"conflicts_found"`
-	ConflictsResolved int                     `json:"conflicts_resolved"`
-	Status           string                   `json:"status"` // "success", "no_conflicts", "dry_run", "error"
-	BackupPath       string                   `json:"backup_path,omitempty"`
-	Error            string                   `json:"error,omitempty"`
-	Conflicts        []conflictResolutionInfo `json:"conflicts,omitempty"`
+	FilePath          string                   `json:"file_path"`
+	DryRun            bool                     `json:"dry_run"`
+	Mode              string                   `json:"mode"`
+	ConflictsFound    int                      `json:"conflicts_found"`
+	ConflictsResolved int                      `json:"conflicts_resolved"`
+	Status            string                   `json:"status"` // "success", "no_conflicts", "dry_run", "error"
+	BackupPath        string                   `json:"backup_path,omitempty"`
+	Error             string                   `json:"error,omitempty"`
+	Conflicts         []conflictResolutionInfo `json:"conflicts,omitempty"`
 }
 
 type conflictResolutionInfo struct {
@@ -240,8 +240,8 @@ func parseConflicts(content string) ([]conflictRegion, []string, error) {
 				return nil, nil, fmt.Errorf("nested conflict at line %d", lineNum)
 			}
 			current = &conflictRegion{
-				StartLine:  lineNum,
-				LeftLabel:  strings.TrimSpace(strings.TrimPrefix(line, "<<<<<<<")),
+				StartLine: lineNum,
+				LeftLabel: strings.TrimSpace(strings.TrimPrefix(line, "<<<<<<<")),
 			}
 			inLeft = true
 			continue

@@ -253,8 +253,6 @@ func getLocalSyncBranch(beadsDir string) string {
 	return cfg.SyncBranch
 }
 
-
-
 // importFromJSONLData imports issues from raw JSONL bytes.
 // This is the shared implementation used by both importFromGit and importFromLocalJSONL.
 // Returns the number of issues imported and any error.

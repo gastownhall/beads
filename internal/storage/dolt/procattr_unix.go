@@ -1,4 +1,5 @@
 //go:build !windows
+
 package dolt
 
 import (
@@ -11,4 +12,3 @@ func setDoltServerSysProcAttr(cmd *exec.Cmd) {
 		Setpgid: true,
 	}
 }
-

@@ -276,10 +276,11 @@ func clearSyncBranchGitignore(path string) error {
 // Returns (hasAnyFlag, hasSkipWorktree) based on the first character of the line.
 //
 // Git ls-files -v output flags:
-//   'H' = tracked normally (no flags)
-//   'h' = assume-unchanged only
-//   'S' = skip-worktree only
-//   's' = both skip-worktree + assume-unchanged (lowercase due to assume-unchanged)
+//
+//	'H' = tracked normally (no flags)
+//	'h' = assume-unchanged only
+//	'S' = skip-worktree only
+//	's' = both skip-worktree + assume-unchanged (lowercase due to assume-unchanged)
 func parseGitLsFilesFlag(flag byte) (hasAnyFlag bool, hasSkipWorktree bool) {
 	hasAnyFlag = flag == 'h' || flag == 'S' || flag == 's'
 	hasSkipWorktree = flag == 'S' || flag == 's'

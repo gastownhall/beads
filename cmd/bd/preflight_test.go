@@ -154,9 +154,9 @@ func TestPreflightResult_WithWarning(t *testing.T) {
 
 func TestTruncateOutput(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		maxLen   int
+		name      string
+		input     string
+		maxLen    int
 		wantTrunc bool
 	}{
 		{"short string", "hello world", 500, false},

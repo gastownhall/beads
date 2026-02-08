@@ -336,9 +336,9 @@ func TestSyncModeValidation(t *testing.T) {
 		{"realtime", true},
 		{"dolt-native", true},
 		{"belt-and-suspenders", true},
-		{"GIT-PORTABLE", true},  // Case insensitive
-		{"Git-Portable", true},  // Case insensitive
-		{" realtime ", true},    // Whitespace trimmed
+		{"GIT-PORTABLE", true}, // Case insensitive
+		{"Git-Portable", true}, // Case insensitive
+		{" realtime ", true},   // Whitespace trimmed
 		{"invalid", false},
 		{"", false},
 		{"git portable", false}, // Space not hyphen

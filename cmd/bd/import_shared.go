@@ -19,7 +19,7 @@ type fieldComparator struct {
 
 func newFieldComparator() *fieldComparator {
 	fc := &fieldComparator{}
-	
+
 	fc.strFrom = func(v interface{}) (string, bool) {
 		switch t := v.(type) {
 		case string:
@@ -35,7 +35,7 @@ func newFieldComparator() *fieldComparator {
 			return "", false
 		}
 	}
-	
+
 	fc.intFrom = func(v interface{}) (int64, bool) {
 		switch t := v.(type) {
 		case int:
@@ -54,7 +54,7 @@ func newFieldComparator() *fieldComparator {
 			return 0, false
 		}
 	}
-	
+
 	return fc
 }
 
@@ -146,28 +146,28 @@ func (fc *fieldComparator) checkFieldChanged(key string, existing *types.Issue, 
 // Returns true if any field changed, false if all fields match
 func issueDataChanged(existing *types.Issue, updates map[string]interface{}) bool {
 	fc := newFieldComparator()
-	
+
 	// Check each field in updates map
 	for key, newVal := range updates {
 		if fc.checkFieldChanged(key, existing, newVal) {
 			return true
 		}
 	}
-	
+
 	return false // No changes detected
 }
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	DryRun                     bool              // Preview changes without applying them
-	SkipUpdate                 bool              // Skip updating existing issues (create-only mode)
-	Strict                     bool              // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport             bool              // Rename imported issues to match database prefix
-	SkipPrefixValidation       bool              // Skip prefix validation (for auto-import)
-	ClearDuplicateExternalRefs bool              // Clear duplicate external_ref values instead of erroring
-	OrphanHandling             string            // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
+	DryRun                     bool                 // Preview changes without applying them
+	SkipUpdate                 bool                 // Skip updating existing issues (create-only mode)
+	Strict                     bool                 // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool                 // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool                 // Skip prefix validation (for auto-import)
+	ClearDuplicateExternalRefs bool                 // Clear duplicate external_ref values instead of erroring
+	OrphanHandling             string               // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
 	ProtectLocalExportIDs      map[string]time.Time // IDs from left snapshot with timestamps for timestamp-aware protection (GH#865)
-	DeletionIDs                []string          // IDs to delete (from JSONL deletion markers)
+	DeletionIDs                []string             // IDs to delete (from JSONL deletion markers)
 }
 
 // ImportResult contains statistics about the import operation
@@ -213,7 +213,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		// No store available, default to allow
 		orphanHandling = "allow"
 	}
-	
+
 	// Convert ImportOptions to importer.Options
 	importerOpts := importer.Options{
 		DryRun:                     opts.DryRun,
@@ -249,7 +249,6 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		SkippedDependencies: result.SkippedDependencies,
 	}, nil
 }
-
 
 // isNumeric returns true if the string contains only digits
 func isNumeric(s string) bool {

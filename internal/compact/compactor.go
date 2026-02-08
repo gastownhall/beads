@@ -132,9 +132,9 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 
 	// Update issue with summarized content
 	updates := map[string]interface{}{
-		"description":        summary,
-		"design":             "",
-		"notes":              "",
+		"description":         summary,
+		"design":              "",
+		"notes":               "",
 		"acceptance_criteria": "",
 	}
 	if err := c.store.UpdateIssue(ctx, issueID, updates, "compactor"); err != nil {

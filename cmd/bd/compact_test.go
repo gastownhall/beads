@@ -399,7 +399,7 @@ func TestPruneExpiredTombstones(t *testing.T) {
 	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
 	now := time.Now()
 
-	freshTombstoneTime := now.Add(-10 * 24 * time.Hour)  // 10 days ago - NOT expired
+	freshTombstoneTime := now.Add(-10 * 24 * time.Hour)   // 10 days ago - NOT expired
 	expiredTombstoneTime := now.Add(-60 * 24 * time.Hour) // 60 days ago - expired (> 30 day TTL)
 
 	issues := []*types.Issue{

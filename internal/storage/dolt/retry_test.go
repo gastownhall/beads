@@ -122,5 +122,3 @@ func TestWithRetry_NonRetryableError(t *testing.T) {
 		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
 	}
 }
-
-

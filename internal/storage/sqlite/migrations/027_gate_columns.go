@@ -12,10 +12,10 @@ func MigrateGateColumns(db *sql.DB) error {
 		name    string
 		sqlType string
 	}{
-		{"await_type", "TEXT"},          // Condition type: gh:run, gh:pr, timer, human, mail
-		{"await_id", "TEXT"},            // Condition identifier (e.g., run ID, PR number)
-		{"timeout_ns", "INTEGER"},       // Timeout in nanoseconds (Go's time.Duration)
-		{"waiters", "TEXT"},             // JSON array of mail addresses to notify
+		{"await_type", "TEXT"},    // Condition type: gh:run, gh:pr, timer, human, mail
+		{"await_id", "TEXT"},      // Condition identifier (e.g., run ID, PR number)
+		{"timeout_ns", "INTEGER"}, // Timeout in nanoseconds (Go's time.Duration)
+		{"waiters", "TEXT"},       // JSON array of mail addresses to notify
 	}
 
 	for _, col := range columns {

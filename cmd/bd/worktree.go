@@ -87,13 +87,13 @@ func warnWorktreeDaemon(dbPathForWarning string) {
 	if syncbranch.IsConfiguredWithDB("") {
 		return
 	}
-	
+
 	gitDir := getWorktreeGitDir()
 	beadsDir := filepath.Dir(dbPathForWarning)
 	if beadsDir == "." || beadsDir == "" {
 		beadsDir = dbPathForWarning
 	}
-	
+
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(os.Stderr, "║ WARNING: Git worktree detected with daemon mode                         ║")
@@ -144,23 +144,23 @@ func warnMultipleDatabases(currentDB string) {
 	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════════════╣")
 	fmt.Fprintln(os.Stderr, "║ Multiple databases can cause confusion and database pollution.          ║")
 	fmt.Fprintln(os.Stderr, "║                                                                          ║")
-	
+
 	for i, db := range databases {
 		isActive := (i == activeIdx)
 		issueInfo := ""
 		if db.IssueCount >= 0 {
 			issueInfo = fmt.Sprintf(" (%d issues)", db.IssueCount)
 		}
-		
+
 		marker := " "
 		if isActive {
 			marker = "▶"
 		}
-		
+
 		line := fmt.Sprintf("%s %s%s", marker, db.BeadsDir, issueInfo)
 		fmt.Fprintf(os.Stderr, "║ %-72s ║\n", truncateForBox(line, 72))
 	}
-	
+
 	fmt.Fprintln(os.Stderr, "║                                                                          ║")
 	if activeIdx == 0 {
 		fmt.Fprintln(os.Stderr, "║ Currently using the closest database (▶). This is usually correct.      ║")

@@ -24,9 +24,9 @@ func flockExclusive(f *os.File) error {
 	err := windows.LockFileEx(
 		windows.Handle(f.Fd()),
 		flags,
-		0,             // reserved
-		0xFFFFFFFF,    // number of bytes to lock (low)
-		0xFFFFFFFF,    // number of bytes to lock (high)
+		0,          // reserved
+		0xFFFFFFFF, // number of bytes to lock (low)
+		0xFFFFFFFF, // number of bytes to lock (high)
 		ol,
 	)
 

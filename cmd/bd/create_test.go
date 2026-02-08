@@ -554,7 +554,7 @@ func TestCreateSuite(t *testing.T) {
 
 	t.Run("WithBothDueAndDefer", func(t *testing.T) {
 		// Create issue with both due and defer
-		dueTime := time.Now().Add(48 * time.Hour)  // Due in 48 hours
+		dueTime := time.Now().Add(48 * time.Hour)   // Due in 48 hours
 		deferTime := time.Now().Add(24 * time.Hour) // Defer for 24 hours
 		issue := &types.Issue{
 			Title:      "Issue with both due and defer",

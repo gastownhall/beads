@@ -626,8 +626,8 @@ func GetSyncConfig() SyncConfig {
 
 // ConflictConfig holds the conflict resolution configuration.
 type ConflictConfig struct {
-	Strategy ConflictStrategy          // newest, ours, theirs, manual (default for all fields)
-	Fields   map[string]FieldStrategy  // Per-field strategy overrides
+	Strategy ConflictStrategy         // newest, ours, theirs, manual (default for all fields)
+	Fields   map[string]FieldStrategy // Per-field strategy overrides
 }
 
 // GetConflictConfig returns the current conflict resolution configuration.

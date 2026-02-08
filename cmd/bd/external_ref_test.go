@@ -92,10 +92,10 @@ func TestParseExternalRef(t *testing.T) {
 		{"external:beads:mol-run-assignee", "beads", "mol-run-assignee"},
 		{"external:gastown:cross-project", "gastown", "cross-project"},
 		{"external:a:b", "a", "b"},
-		{"bd-xyz", "", ""},            // not external
-		{"external:", "", ""},          // invalid format
-		{"external:proj", "", ""},      // missing capability
-		{"", "", ""},                   // empty
+		{"bd-xyz", "", ""},        // not external
+		{"external:", "", ""},     // invalid format
+		{"external:proj", "", ""}, // missing capability
+		{"", "", ""},              // empty
 	}
 
 	for _, tt := range tests {

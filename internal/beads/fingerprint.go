@@ -21,18 +21,18 @@ func ComputeRepoID() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("not a git repository")
 		}
-		
+
 		repoPath := strings.TrimSpace(string(output))
 		absPath, err := filepath.Abs(repoPath)
 		if err != nil {
 			absPath = repoPath
 		}
-		
+
 		evalPath, err := filepath.EvalSymlinks(absPath)
 		if err != nil {
 			evalPath = absPath
 		}
-		
+
 		normalized := filepath.ToSlash(evalPath)
 		hash := sha256.Sum256([]byte(normalized))
 		return hex.EncodeToString(hash[:16]), nil
@@ -50,25 +50,25 @@ func ComputeRepoID() (string, error) {
 
 func canonicalizeGitURL(rawURL string) (string, error) {
 	rawURL = strings.TrimSpace(rawURL)
-	
+
 	if strings.Contains(rawURL, "://") {
 		u, err := url.Parse(rawURL)
 		if err != nil {
 			return "", fmt.Errorf("invalid URL: %w", err)
 		}
-		
+
 		host := strings.ToLower(u.Hostname())
 		if port := u.Port(); port != "" && port != "22" && port != "80" && port != "443" {
 			host = host + ":" + port
 		}
-		
+
 		path := strings.TrimRight(u.Path, "/")
 		path = strings.TrimSuffix(path, ".git")
 		path = filepath.ToSlash(path)
-		
+
 		return host + path, nil
 	}
-	
+
 	// Detect scp-style URLs: [user@]host:path
 	// Must contain ":" before any "/" and not be a Windows path
 	colonIdx := strings.Index(rawURL, ":")
@@ -84,32 +84,32 @@ func canonicalizeGitURL(rawURL string) (string, error) {
 			if len(parts) == 2 {
 				hostPart := parts[0]
 				pathPart := parts[1]
-				
+
 				atIdx := strings.LastIndex(hostPart, "@")
 				if atIdx >= 0 {
 					hostPart = hostPart[atIdx+1:]
 				}
-				
+
 				host := strings.ToLower(hostPart)
 				path := strings.TrimRight(pathPart, "/")
 				path = strings.TrimSuffix(path, ".git")
 				path = filepath.ToSlash(path)
-				
+
 				return host + "/" + path, nil
 			}
 		}
 	}
-	
+
 	absPath, err := filepath.Abs(rawURL)
 	if err != nil {
 		absPath = rawURL
 	}
-	
+
 	evalPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		evalPath = absPath
 	}
-	
+
 	return filepath.ToSlash(evalPath), nil
 }
 
@@ -119,24 +119,24 @@ func GetCloneID() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get hostname: %w", err)
 	}
-	
+
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %w", err)
 	}
-	
+
 	repoRoot := strings.TrimSpace(string(output))
 	absPath, err := filepath.Abs(repoRoot)
 	if err != nil {
 		absPath = repoRoot
 	}
-	
+
 	evalPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		evalPath = absPath
 	}
-	
+
 	normalizedPath := filepath.ToSlash(evalPath)
 	hash := sha256.Sum256([]byte(hostname + ":" + normalizedPath))
 	return hex.EncodeToString(hash[:8]), nil

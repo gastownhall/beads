@@ -359,8 +359,8 @@ func TestIsValidSyncMode(t *testing.T) {
 		{"realtime", true},
 		{"dolt-native", true},
 		{"belt-and-suspenders", true},
-		{"Git-Portable", true},  // case insensitive
-		{"  realtime  ", true},  // whitespace trimmed
+		{"Git-Portable", true}, // case insensitive
+		{"  realtime  ", true}, // whitespace trimmed
 		{"invalid", false},
 		{"", false},
 	}
@@ -381,8 +381,8 @@ func TestIsValidConflictStrategy(t *testing.T) {
 		{"ours", true},
 		{"theirs", true},
 		{"manual", true},
-		{"NEWEST", true},       // case insensitive
-		{"  ours  ", true},     // whitespace trimmed
+		{"NEWEST", true},   // case insensitive
+		{"  ours  ", true}, // whitespace trimmed
 		{"invalid", false},
 		{"lww", false},
 		{"", false},
@@ -404,9 +404,9 @@ func TestIsValidSovereignty(t *testing.T) {
 		{"T2", true},
 		{"T3", true},
 		{"T4", true},
-		{"t1", true},       // case insensitive
-		{"  T2  ", true},   // whitespace trimmed
-		{"", true},         // empty is valid (no restriction)
+		{"t1", true},     // case insensitive
+		{"  T2  ", true}, // whitespace trimmed
+		{"", true},       // empty is valid (no restriction)
 		{"T0", false},
 		{"T5", false},
 		{"public", false},
@@ -519,8 +519,8 @@ func TestIsValidFieldStrategy(t *testing.T) {
 		{"max", true},
 		{"union", true},
 		{"manual", true},
-		{"NEWEST", true},      // case insensitive
-		{"  max  ", true},     // whitespace trimmed
+		{"NEWEST", true},  // case insensitive
+		{"  max  ", true}, // whitespace trimmed
 		{"invalid", false},
 		{"lww", false},
 		{"", false},

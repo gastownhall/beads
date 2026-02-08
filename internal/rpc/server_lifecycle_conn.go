@@ -208,8 +208,8 @@ func (s *Server) handleSignals() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	defer func() { 
-		_ = conn.Close() 
+	defer func() {
+		_ = conn.Close()
 	}()
 
 	// Recover from panics to prevent daemon crash (bd-1048)

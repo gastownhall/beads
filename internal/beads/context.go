@@ -174,10 +174,10 @@ func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	// Security: Disable git hooks and templates to prevent code execution
 	// in potentially malicious repositories (SEC-001, SEC-002)
 	cmd.Env = append(os.Environ(),
-		"GIT_HOOKS_PATH=",              // Disable hooks
-		"GIT_TEMPLATE_DIR=",            // Disable templates
-		"GIT_DIR="+gitDir,              // Ensure git uses the correct .git directory
-		"GIT_WORK_TREE="+rc.RepoRoot,   // Ensure git uses the correct work tree
+		"GIT_HOOKS_PATH=",            // Disable hooks
+		"GIT_TEMPLATE_DIR=",          // Disable templates
+		"GIT_DIR="+gitDir,            // Ensure git uses the correct .git directory
+		"GIT_WORK_TREE="+rc.RepoRoot, // Ensure git uses the correct work tree
 	)
 	return cmd
 }

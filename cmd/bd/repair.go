@@ -648,4 +648,3 @@ func findOrphanedEvents(db *sql.DB) ([]orphanedEvent, error) {
 	}
 	return events, rows.Err()
 }
-

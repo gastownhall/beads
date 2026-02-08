@@ -65,7 +65,7 @@ func TestExportImportRace_ConcurrentOperations(t *testing.T) {
 	// Create initial issues (CreateIssue marks them dirty automatically)
 	for i := 0; i < 10; i++ {
 		issue := &types.Issue{
-			ID:        generateUniqueTestID(t,"race", i),
+			ID:        generateUniqueTestID(t, "race", i),
 			Title:     "Race Test Issue",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -177,7 +177,7 @@ func TestExportImportRace_ExportWhileReading(t *testing.T) {
 	// Create issues (CreateIssue marks them dirty automatically)
 	for i := 0; i < 50; i++ {
 		issue := &types.Issue{
-			ID:          generateUniqueTestID(t,"read", i),
+			ID:          generateUniqueTestID(t, "read", i),
 			Title:       "Read Race Test",
 			Description: "This is a test issue for read race testing with some content",
 			Status:      types.StatusOpen,
@@ -295,7 +295,7 @@ func TestExportImportRace_ImportWithDirtyDB(t *testing.T) {
 	initialIssues := make([]*types.Issue, 10)
 	for i := 0; i < 10; i++ {
 		initialIssues[i] = &types.Issue{
-			ID:        generateUniqueTestID(t,"dirty", i),
+			ID:        generateUniqueTestID(t, "dirty", i),
 			Title:     "Initial Issue",
 			Status:    types.StatusOpen,
 			Priority:  1,
@@ -324,7 +324,7 @@ func TestExportImportRace_ImportWithDirtyDB(t *testing.T) {
 		defer wg.Done()
 		for i := 10; i < 30; i++ {
 			issue := &types.Issue{
-				ID:        generateUniqueTestID(t,"dirty", i),
+				ID:        generateUniqueTestID(t, "dirty", i),
 				Title:     "New Local Issue",
 				Status:    types.StatusOpen,
 				Priority:  2,
@@ -377,7 +377,7 @@ func TestExportImportRace_AtomicRename(t *testing.T) {
 		issues := make([]*types.Issue, 100)
 		for i := 0; i < 100; i++ {
 			issues[i] = &types.Issue{
-				ID:          generateUniqueTestID(t,"atomic", i),
+				ID:          generateUniqueTestID(t, "atomic", i),
 				Title:       "Atomic Rename Test",
 				Description: "Test issue for atomic rename testing",
 				Status:      types.StatusOpen,
@@ -465,7 +465,7 @@ func TestExportImportRace_PartialFileRead(t *testing.T) {
 		issues := make([]*types.Issue, 50)
 		for i := 0; i < 50; i++ {
 			issues[i] = &types.Issue{
-				ID:          generateUniqueTestID(t,"partial", i),
+				ID:          generateUniqueTestID(t, "partial", i),
 				Title:       "Partial Read Test Issue",
 				Description: "Content for testing partial read scenarios",
 				Status:      types.StatusOpen,

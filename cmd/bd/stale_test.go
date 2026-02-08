@@ -18,7 +18,7 @@ func TestStaleIssues(t *testing.T) {
 	ctx := context.Background()
 
 	now := time.Now()
-	oldTime := now.Add(-40 * 24 * time.Hour) // 40 days ago
+	oldTime := now.Add(-40 * 24 * time.Hour)    // 40 days ago
 	recentTime := now.Add(-10 * 24 * time.Hour) // 10 days ago
 
 	// Create issues with different update times

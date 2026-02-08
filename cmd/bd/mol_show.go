@@ -151,19 +151,19 @@ func formatBondType(bondType string) string {
 type ParallelInfo struct {
 	StepID        string   `json:"step_id"`
 	Status        string   `json:"status"`
-	IsReady       bool     `json:"is_ready"`        // Can start now (no blocking deps)
-	ParallelGroup string   `json:"parallel_group"`  // Group ID (steps with same group can parallelize)
-	BlockedBy     []string `json:"blocked_by"`      // IDs of open steps blocking this one
-	Blocks        []string `json:"blocks"`          // IDs of steps this one blocks
-	CanParallel   []string `json:"can_parallel"`    // IDs of steps that can run in parallel with this
+	IsReady       bool     `json:"is_ready"`       // Can start now (no blocking deps)
+	ParallelGroup string   `json:"parallel_group"` // Group ID (steps with same group can parallelize)
+	BlockedBy     []string `json:"blocked_by"`     // IDs of open steps blocking this one
+	Blocks        []string `json:"blocks"`         // IDs of steps this one blocks
+	CanParallel   []string `json:"can_parallel"`   // IDs of steps that can run in parallel with this
 }
 
 // ParallelAnalysis holds the complete parallel analysis for a molecule
 type ParallelAnalysis struct {
-	MoleculeID     string                  `json:"molecule_id"`
-	TotalSteps     int                     `json:"total_steps"`
-	ReadySteps     int                     `json:"ready_steps"`
-	ParallelGroups map[string][]string     `json:"parallel_groups"` // group ID -> step IDs
+	MoleculeID     string                   `json:"molecule_id"`
+	TotalSteps     int                      `json:"total_steps"`
+	ReadySteps     int                      `json:"ready_steps"`
+	ParallelGroups map[string][]string      `json:"parallel_groups"` // group ID -> step IDs
 	Steps          map[string]*ParallelInfo `json:"steps"`
 }
 

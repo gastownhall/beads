@@ -490,7 +490,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Ephemeral:        true,
+		Ephemeral:   true,
 		CloseReason: "Completed design",
 	}
 	child2 := &types.Issue{
@@ -499,7 +499,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Ephemeral:        true,
+		Ephemeral:   true,
 		CloseReason: "Code merged",
 	}
 
@@ -596,7 +596,7 @@ func TestSquashMoleculeWithDelete(t *testing.T) {
 		Status:    types.StatusClosed,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Ephemeral:      true,
+		Ephemeral: true,
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
 		t.Fatalf("Failed to create child: %v", err)
@@ -706,7 +706,7 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Ephemeral:        true,
+		Ephemeral:   true,
 		CloseReason: "Done",
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
@@ -1305,14 +1305,14 @@ func TestWispFilteringFromExport(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  1,
 		IssueType: types.TypeTask,
-		Ephemeral:      false,
+		Ephemeral: false,
 	}
 	wispIssue := &types.Issue{
 		Title:     "Wisp Issue",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Ephemeral:      true,
+		Ephemeral: true,
 	}
 
 	if err := s.CreateIssue(ctx, normalIssue, "test"); err != nil {
@@ -2465,17 +2465,17 @@ func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
 
 	// Create a template with a child (IDs will be auto-generated)
 	root := &types.Issue{
-		Title:      "Template Epic",
-		Status:     types.StatusOpen,
-		Priority:   2,
-		IssueType:  types.TypeEpic,
-		Labels:     []string{MoleculeLabel}, // Required for loadTemplateSubgraph
+		Title:     "Template Epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel}, // Required for loadTemplateSubgraph
 	}
 	child := &types.Issue{
-		Title:      "Template Task",
-		Status:     types.StatusOpen,
-		Priority:   2,
-		IssueType:  types.TypeTask,
+		Title:     "Template Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
 	}
 
 	if err := s.CreateIssue(ctx, root, "test"); err != nil {
@@ -2541,22 +2541,22 @@ func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 
 	// Create a minimal in-memory subgraph (simulating cookFormulaToSubgraph output)
 	root := &types.Issue{
-		ID:          "test-formula",
-		Title:       "Test Formula",
-		Status:      types.StatusOpen,
-		Priority:    2,
-		IssueType:   types.TypeEpic,
-		IsTemplate:  true,
+		ID:         "test-formula",
+		Title:      "Test Formula",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeEpic,
+		IsTemplate: true,
 	}
 	step := &types.Issue{
-		ID:          "test-formula.step1",
-		Title:       "Step 1",
-		Status:      types.StatusOpen,
-		Priority:    2,
-		IssueType:   types.TypeTask,
-		IsTemplate:  true,
+		ID:         "test-formula.step1",
+		Title:      "Step 1",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeTask,
+		IsTemplate: true,
 	}
-	
+
 	subgraph := &TemplateSubgraph{
 		Root:   root,
 		Issues: []*types.Issue{root, step},

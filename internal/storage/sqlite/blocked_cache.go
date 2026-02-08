@@ -67,24 +67,24 @@
 // # Edge Cases Handled
 //
 // 1. Parent-child transitive blocking:
-//    - Children of blocked parents are automatically marked as blocked
-//    - Propagates through arbitrary depth hierarchies (limited to depth 50)
+//   - Children of blocked parents are automatically marked as blocked
+//   - Propagates through arbitrary depth hierarchies (limited to depth 50)
 //
 // 2. Multiple blockers:
-//    - Issue blocked by multiple open issues stays blocked until all are closed
-//    - DISTINCT in CTE ensures issue appears once in cache
+//   - Issue blocked by multiple open issues stays blocked until all are closed
+//   - DISTINCT in CTE ensures issue appears once in cache
 //
 // 3. Status changes:
-//    - Closing a blocker removes all blocked descendants from cache
-//    - Reopening a blocker adds them back
+//   - Closing a blocker removes all blocked descendants from cache
+//   - Reopening a blocker adds them back
 //
 // 4. Dependency removal:
-//    - Removing last blocker unblocks the issue
-//    - Removing parent-child link unblocks orphaned subtree
+//   - Removing last blocker unblocks the issue
+//   - Removing parent-child link unblocks orphaned subtree
 //
 // 5. Foreign key cascades:
-//    - Cache entries automatically deleted when issue is deleted (ON DELETE CASCADE)
-//    - No manual cleanup needed
+//   - Cache entries automatically deleted when issue is deleted (ON DELETE CASCADE)
+//   - No manual cleanup needed
 //
 // # Future Optimizations
 //

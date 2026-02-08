@@ -16,18 +16,18 @@ import (
 // setupTestStore creates a test storage with issue_prefix configured
 func setupTestStore(t *testing.T, dbPath string) *sqlite.SQLiteStorage {
 	t.Helper()
-	
+
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
-	
+
 	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
-	
+
 	return store
 }
 

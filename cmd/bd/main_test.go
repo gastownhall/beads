@@ -121,7 +121,6 @@ func TestAutoFlushOnExit(t *testing.T) {
 	}
 }
 
-
 // TestAutoFlushConcurrency tests that concurrent operations don't cause races
 // TestAutoFlushStoreInactive tests that flush doesn't run when store is inactive
 // TestAutoFlushJSONLContent tests that flushed JSONL has correct content

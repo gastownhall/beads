@@ -64,13 +64,13 @@ func (s *Server) checkVersionCompatibility(clientVersion string) error {
 		// Extract minor versions for clearer error message
 		serverMinor := semver.MajorMinor(serverVer)
 		clientMinor := semver.MajorMinor(clientVer)
-		
+
 		if serverMinor != clientMinor {
 			// Minor version mismatch - schema may be incompatible
 			return fmt.Errorf("version mismatch: client v%s requires daemon upgrade (daemon is v%s). The client may expect schema changes not present in this daemon version. Run: bd daemons killall",
 				clientVersion, ServerVersion)
 		}
-		
+
 		// Patch version difference - usually safe but warn
 		return fmt.Errorf("version mismatch: daemon v%s is older than client v%s. Upgrade and restart daemon: bd daemons killall",
 			ServerVersion, clientVersion)
@@ -149,8 +149,8 @@ func (s *Server) handleRequest(req *Request) Response {
 	// Check for stale JSONL and auto-import if needed
 	// Skip for write operations that will trigger export anyway
 	// Skip for import operation itself to avoid recursion
-	if req.Operation != OpPing && req.Operation != OpHealth && req.Operation != OpMetrics && 
-	   req.Operation != OpExport {
+	if req.Operation != OpPing && req.Operation != OpHealth && req.Operation != OpMetrics &&
+		req.Operation != OpExport {
 		if err := s.checkAndAutoImportIfStale(req); err != nil {
 			// Log warning but continue - don't fail the request
 			fmt.Fprintf(os.Stderr, "Warning: staleness check failed: %v\n", err)
@@ -208,7 +208,7 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleCommentAdd(req)
 	case OpBatch:
 		resp = s.handleBatch(req)
-	
+
 	case OpCompact:
 		resp = s.handleCompact(req)
 	case OpCompactStats:
@@ -288,7 +288,7 @@ func (s *Server) handlePing(_ *Request) Response {
 func (s *Server) handleStatus(_ *Request) Response {
 	// Get last activity timestamp
 	lastActivity := s.lastActivityTime.Load().(time.Time)
-	
+
 	// Check for exclusive lock
 	lockActive := false
 	lockHolder := ""
@@ -298,7 +298,7 @@ func (s *Server) handleStatus(_ *Request) Response {
 			lockHolder = holder
 		}
 	}
-	
+
 	// Read config under lock
 	s.mu.RLock()
 	autoCommit := s.autoCommit
@@ -308,7 +308,7 @@ func (s *Server) handleStatus(_ *Request) Response {
 	syncInterval := s.syncInterval
 	daemonMode := s.daemonMode
 	s.mu.RUnlock()
-	
+
 	statusResp := StatusResponse{
 		Version:             ServerVersion,
 		WorkspacePath:       s.workspacePath,
@@ -326,7 +326,7 @@ func (s *Server) handleStatus(_ *Request) Response {
 		SyncInterval:        syncInterval,
 		DaemonMode:          daemonMode,
 	}
-	
+
 	data, _ := json.Marshal(statusResp)
 	return Response{
 		Success: true,

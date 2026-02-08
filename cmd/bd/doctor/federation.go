@@ -572,5 +572,3 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 		Category: CategoryFederation,
 	}
 }
-
-

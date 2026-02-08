@@ -349,7 +349,6 @@ func TestPreemptiveFetchAndFastForward(t *testing.T) {
 	})
 }
 
-
 // Helper: setup a test repo with a (fake) remote
 func setupTestRepoWithRemote(t *testing.T) string {
 	t.Helper()

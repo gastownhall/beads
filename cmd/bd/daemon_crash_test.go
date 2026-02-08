@@ -43,7 +43,7 @@ func TestDaemonPanicRecovery(t *testing.T) {
 	// that causes a panic during startup
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
 	logFile := filepath.Join(beadsDir, "daemon.log")
-	
+
 	// Start daemon in foreground with a goroutine that will panic
 	done := make(chan bool)
 	go func() {
@@ -53,14 +53,14 @@ func TestDaemonPanicRecovery(t *testing.T) {
 				done <- true
 			}
 		}()
-		
+
 		// Simulate a panic in daemon code
 		// In real scenarios, this would be an unexpected panic
 		// For testing, we'll just verify the recovery mechanism exists
 		testPanic := func() {
 			panic("test panic for crash recovery")
 		}
-		
+
 		// This would normally be runDaemonLoop, but we're simulating
 		defer func() {
 			if r := recover(); r != nil {
@@ -70,19 +70,19 @@ func TestDaemonPanicRecovery(t *testing.T) {
 					logF.WriteString("PANIC recovered: " + r.(string) + "\n")
 					logF.Close()
 				}
-				
+
 				// Write daemon-error file
 				errFile := filepath.Join(beadsDir, "daemon-error")
 				crashReport := "Daemon crashed\nPanic: " + r.(string) + "\n"
 				_ = os.WriteFile(errFile, []byte(crashReport), 0644)
-				
+
 				// Clean up PID file
 				_ = os.Remove(pidFile)
-				
+
 				done <- true
 			}
 		}()
-		
+
 		testPanic()
 	}()
 
@@ -158,14 +158,14 @@ func TestStopDaemonSocketCleanup(t *testing.T) {
 	// Note: We can't fully test stopDaemon here without a running process
 	// But we can verify the socket cleanup logic is present
 	t.Log("Socket cleanup logic verified in stopDaemon function")
-	
+
 	// Manual cleanup to verify the pattern
 	if _, err := os.Stat(socketPath); err == nil {
 		if err := os.Remove(socketPath); err != nil {
 			t.Errorf("Failed to remove socket: %v", err)
 		}
 	}
-	
+
 	// Verify socket was removed
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Error("Socket file should be removed after cleanup")

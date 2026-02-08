@@ -820,5 +820,3 @@ func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 
 	return &dep, nil
 }
-
-

@@ -17,7 +17,7 @@ func recordCreatedEvent(ctx context.Context, conn *sql.Conn, issue *types.Issue,
 		eventData = []byte(fmt.Sprintf(`{"id":"%s","title":"%s"}`, issue.ID, issue.Title))
 	}
 	eventDataStr := string(eventData)
-	
+
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, new_value)
 		VALUES (?, ?, ?, ?)

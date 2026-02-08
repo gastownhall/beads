@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
 var staleCmd = &cobra.Command{
 	Use:     "stale",
 	GroupID: "views",
@@ -82,6 +83,7 @@ This helps identify:
 		displayStaleIssues(issues, days)
 	},
 }
+
 func displayStaleIssues(issues []*types.Issue, days int) {
 	if len(issues) == 0 {
 		fmt.Printf("\n%s No stale issues found (all active)\n\n", ui.RenderPass("✨"))

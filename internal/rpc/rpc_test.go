@@ -94,7 +94,7 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to connect client: %v", err)
 	}
-	
+
 	if client == nil {
 		cancel()
 		server.Stop()
@@ -102,7 +102,7 @@ func setupTestServer(t *testing.T) (*Server, *Client, func()) {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Client is nil after connection")
 	}
-	
+
 	// Set the client's dbPath to the test database so it doesn't route to the wrong DB
 	client.dbPath = dbPath
 
@@ -483,7 +483,7 @@ func TestDatabaseHandshake(t *testing.T) {
 	// Test 1: Client with correct ExpectedDB should succeed
 	// Change to tmpDir1 so cwd resolution doesn't find other databases.
 	t.Chdir(tmpDir1)
-	
+
 	client1, err := TryConnect(socketPath1)
 	if err != nil {
 		t.Fatalf("Failed to connect to server 1: %v", err)

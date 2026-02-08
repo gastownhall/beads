@@ -632,12 +632,12 @@ func TestTryResurrectParent_MultipleVersionsInJSONL(t *testing.T) {
 	if retrieved.Title != "Latest Version" {
 		t.Errorf("Expected title 'Latest Version', got '%s' (should use LAST occurrence in JSONL)", retrieved.Title)
 	}
-	
+
 	// CreatedAt should be preserved from original (all versions share this)
 	if !retrieved.CreatedAt.Equal(v1.CreatedAt) {
 		t.Errorf("Expected CreatedAt %v, got %v", v1.CreatedAt, retrieved.CreatedAt)
 	}
-	
+
 	// Note: Priority, Status, and Description are modified by tombstone logic
 	// (Priority=4, Status=Closed, Description="[RESURRECTED]...")
 	// This is expected behavior - the test verifies we read the LAST occurrence

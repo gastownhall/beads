@@ -1166,17 +1166,17 @@ func TestUpsertPreservesGateFields(t *testing.T) {
 
 	// Same ID, different content (to trigger update), no await fields
 	incomingIssue := types.Issue{
-		ID:          "bd-gate1",
-		Title:       "Test Gate Updated", // Different title to trigger update
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   "gate",
-		AwaitType:   "", // Empty - simulating JSONL without await fields
-		AwaitID:     "", // Empty
-		Timeout:     0,
-		Waiters:     nil,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now().Add(time.Second), // Newer timestamp
+		ID:        "bd-gate1",
+		Title:     "Test Gate Updated", // Different title to trigger update
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: "gate",
+		AwaitType: "", // Empty - simulating JSONL without await fields
+		AwaitID:   "", // Empty
+		Timeout:   0,
+		Waiters:   nil,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now().Add(time.Second), // Newer timestamp
 	}
 	incomingIssue.ContentHash = incomingIssue.ComputeContentHash()
 

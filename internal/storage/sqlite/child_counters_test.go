@@ -4,24 +4,24 @@ import (
 	"context"
 	"sync"
 	"testing"
-	
+
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestChildCountersTableExists(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
-	
+
 	ctx := context.Background()
-	
+
 	// Verify table exists by querying it
 	var count int
-	err := store.db.QueryRowContext(ctx, 
+	err := store.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='child_counters'`).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to check for child_counters table: %v", err)
 	}
-	
+
 	if count != 1 {
 		t.Errorf("child_counters table not found, got count %d", count)
 	}
@@ -30,10 +30,10 @@ func TestChildCountersTableExists(t *testing.T) {
 func TestGetNextChildNumber(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
-	
+
 	ctx := context.Background()
 	parentID := "bd-af78e9a2"
-	
+
 	// Create parent issue first (required by foreign key)
 	parent := &types.Issue{
 		ID:          parentID,
@@ -46,7 +46,7 @@ func TestGetNextChildNumber(t *testing.T) {
 	if err := store.CreateIssue(ctx, parent, "test-user"); err != nil {
 		t.Fatalf("failed to create parent issue: %v", err)
 	}
-	
+
 	// First child should be 1
 	child1, err := store.getNextChildNumber(ctx, parentID)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestGetNextChildNumber(t *testing.T) {
 	if child1 != 1 {
 		t.Errorf("expected first child to be 1, got %d", child1)
 	}
-	
+
 	// Second child should be 2
 	child2, err := store.getNextChildNumber(ctx, parentID)
 	if err != nil {
@@ -64,7 +64,7 @@ func TestGetNextChildNumber(t *testing.T) {
 	if child2 != 2 {
 		t.Errorf("expected second child to be 2, got %d", child2)
 	}
-	
+
 	// Third child should be 3
 	child3, err := store.getNextChildNumber(ctx, parentID)
 	if err != nil {
@@ -127,11 +127,11 @@ func TestGetNextChildNumber_DifferentParents(t *testing.T) {
 func TestGetNextChildNumber_Concurrent(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
-	
+
 	ctx := context.Background()
 	parentID := "bd-af78e9a2"
 	numWorkers := 10
-	
+
 	// Create parent issue first
 	parent := &types.Issue{
 		ID:          parentID,
@@ -144,11 +144,11 @@ func TestGetNextChildNumber_Concurrent(t *testing.T) {
 	if err := store.CreateIssue(ctx, parent, "test-user"); err != nil {
 		t.Fatalf("failed to create parent issue: %v", err)
 	}
-	
+
 	// Track all generated child numbers
 	childNumbers := make([]int, numWorkers)
 	var wg sync.WaitGroup
-	
+
 	// Spawn concurrent workers
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
@@ -162,9 +162,9 @@ func TestGetNextChildNumber_Concurrent(t *testing.T) {
 			childNumbers[idx] = child
 		}(i)
 	}
-	
+
 	wg.Wait()
-	
+
 	// Verify all numbers are unique and in range [1, numWorkers]
 	seen := make(map[int]bool)
 	for _, num := range childNumbers {
@@ -176,7 +176,7 @@ func TestGetNextChildNumber_Concurrent(t *testing.T) {
 		}
 		seen[num] = true
 	}
-	
+
 	// Verify we got all numbers from 1 to numWorkers
 	if len(seen) != numWorkers {
 		t.Errorf("expected %d unique child numbers, got %d", numWorkers, len(seen))

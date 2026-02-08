@@ -21,12 +21,13 @@ type AdaptiveIDConfig struct {
 
 // DefaultAdaptiveConfig returns sensible defaults for base36 encoding
 // With base36 (0-9, a-z), we can use shorter IDs than hex:
-//   3 chars: ~46K namespace, good for up to ~160 issues (25% collision prob)
-//   4 chars: ~1.7M namespace, good for up to ~980 issues
-//   5 chars: ~60M namespace, good for up to ~5.9K issues
-//   6 chars: ~2.2B namespace, good for up to ~35K issues
-//   7 chars: ~78B namespace, good for up to ~212K issues
-//   8 chars: ~2.8T namespace, good for up to ~1M+ issues
+//
+//	3 chars: ~46K namespace, good for up to ~160 issues (25% collision prob)
+//	4 chars: ~1.7M namespace, good for up to ~980 issues
+//	5 chars: ~60M namespace, good for up to ~5.9K issues
+//	6 chars: ~2.2B namespace, good for up to ~35K issues
+//	7 chars: ~78B namespace, good for up to ~212K issues
+//	8 chars: ~2.8T namespace, good for up to ~1M+ issues
 func DefaultAdaptiveConfig() AdaptiveIDConfig {
 	return AdaptiveIDConfig{
 		MaxCollisionProbability: 0.25, // 25% threshold
@@ -54,7 +55,7 @@ func computeAdaptiveLength(numIssues int, config AdaptiveIDConfig) int {
 			return length
 		}
 	}
-	
+
 	// If even maxLength doesn't meet threshold, return maxLength anyway
 	return config.MaxLength
 }
@@ -62,7 +63,7 @@ func computeAdaptiveLength(numIssues int, config AdaptiveIDConfig) int {
 // getAdaptiveConfig reads adaptive ID config from database, returns defaults if not set
 func getAdaptiveConfig(ctx context.Context, conn *sql.Conn) AdaptiveIDConfig {
 	config := DefaultAdaptiveConfig()
-	
+
 	// Read max_collision_prob
 	var probStr string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "max_collision_prob").Scan(&probStr)
@@ -71,7 +72,7 @@ func getAdaptiveConfig(ctx context.Context, conn *sql.Conn) AdaptiveIDConfig {
 			config.MaxCollisionProbability = prob
 		}
 	}
-	
+
 	// Read min_hash_length
 	var minLenStr string
 	err = conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "min_hash_length").Scan(&minLenStr)
@@ -80,7 +81,7 @@ func getAdaptiveConfig(ctx context.Context, conn *sql.Conn) AdaptiveIDConfig {
 			config.MinLength = minLen
 		}
 	}
-	
+
 	// Read max_hash_length
 	var maxLenStr string
 	err = conn.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, "max_hash_length").Scan(&maxLenStr)
@@ -89,7 +90,7 @@ func getAdaptiveConfig(ctx context.Context, conn *sql.Conn) AdaptiveIDConfig {
 			config.MaxLength = maxLen
 		}
 	}
-	
+
 	return config
 }
 
@@ -116,12 +117,12 @@ func getAdaptiveIDLength(ctx context.Context, conn *sql.Conn, prefix string) (in
 	if err != nil {
 		return 6, wrapDBErrorf(err, "get adaptive ID length for prefix %s", prefix)
 	}
-	
+
 	// Get adaptive config
 	config := getAdaptiveConfig(ctx, conn)
-	
+
 	// Compute optimal length
 	length := computeAdaptiveLength(numIssues, config)
-	
+
 	return length, nil
 }

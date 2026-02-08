@@ -26,11 +26,11 @@ func TestGetDependenciesWithMetadata_NoResults(t *testing.T) {
 
 	// Create an issue with no dependencies
 	issue := &types.Issue{
-		ID:          "no-deps-issue",
-		Title:       "No Dependencies",
-		Status:      types.StatusOpen,
-		Priority:    2,
-		IssueType:   types.TypeTask,
+		ID:        "no-deps-issue",
+		Title:     "No Dependencies",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
 	}
 	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("failed to create issue: %v", err)
@@ -674,5 +674,3 @@ func TestAddDependency_MultipleExternalReferences(t *testing.T) {
 }
 
 // Note: testContext is already defined in dolt_test.go for this package
-
-

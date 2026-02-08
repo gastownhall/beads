@@ -45,23 +45,23 @@ const (
 
 // Config holds export error handling configuration
 type Config struct {
-	Policy              ErrorPolicy
-	RetryAttempts       int
-	RetryBackoffMS      int
-	SkipEncodingErrors  bool
-	WriteManifest       bool
-	IsAutoExport        bool // If true, may use different policy
+	Policy             ErrorPolicy
+	RetryAttempts      int
+	RetryBackoffMS     int
+	SkipEncodingErrors bool
+	WriteManifest      bool
+	IsAutoExport       bool // If true, may use different policy
 }
 
 // Manifest tracks export completeness and failures
 type Manifest struct {
-	ExportedCount  int           `json:"exported_count"`
-	FailedIssues   []FailedIssue `json:"failed_issues,omitempty"`
-	PartialData    []string      `json:"partial_data,omitempty"` // e.g., ["labels", "comments"]
-	Warnings       []string      `json:"warnings,omitempty"`
-	Complete       bool          `json:"complete"`
-	ExportedAt     time.Time     `json:"exported_at"`
-	ErrorPolicy    string        `json:"error_policy"`
+	ExportedCount int           `json:"exported_count"`
+	FailedIssues  []FailedIssue `json:"failed_issues,omitempty"`
+	PartialData   []string      `json:"partial_data,omitempty"` // e.g., ["labels", "comments"]
+	Warnings      []string      `json:"warnings,omitempty"`
+	Complete      bool          `json:"complete"`
+	ExportedAt    time.Time     `json:"exported_at"`
+	ErrorPolicy   string        `json:"error_policy"`
 }
 
 // FailedIssue tracks a single issue that failed to export

@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-
 // preCommitFrameworkPattern matches pre-commit or prek framework hooks.
 // Uses same patterns as hookManagerPatterns in doctor/fix/hooks.go for consistency.
 // Includes all detection patterns: pre-commit run, prek run/hook-impl, config file refs, and pre-commit env vars.
@@ -106,7 +105,6 @@ func detectExistingHooks() []hookInfo {
 
 	return hooks
 }
-
 
 // installGitHooks installs git hooks inline (no external dependencies)
 func installGitHooks() error {

@@ -13,8 +13,8 @@ import (
 // - original_type: the issue type before deletion (for tombstones)
 func MigrateTombstoneColumns(db *sql.DB) error {
 	columns := []struct {
-		name         string
-		definition   string
+		name       string
+		definition string
 	}{
 		{"deleted_at", "DATETIME"},
 		{"deleted_by", "TEXT DEFAULT ''"},

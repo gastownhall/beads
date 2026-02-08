@@ -16,21 +16,21 @@ import (
 func TestImportTimestampPrecedence(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	
+
 	// Initialize storage
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 	defer store.Close()
-	
+
 	ctx := context.Background()
-	
+
 	// Set up database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
-	
+
 	// Create an issue locally at time T1
 	now := time.Now()
 	closedAt := now
@@ -46,11 +46,11 @@ func TestImportTimestampPrecedence(t *testing.T) {
 		ClosedAt:    &closedAt,
 	}
 	localIssue.ContentHash = localIssue.ComputeContentHash()
-	
+
 	if err := store.CreateIssue(ctx, localIssue, "test"); err != nil {
 		t.Fatalf("Failed to create local issue: %v", err)
 	}
-	
+
 	// Simulate importing an older version from remote (e.g., from git pull)
 	// This represents the scenario in bd-e55c where remote has status=open from yesterday
 	olderRemoteIssue := &types.Issue{
@@ -64,7 +64,7 @@ func TestImportTimestampPrecedence(t *testing.T) {
 		UpdatedAt:   now.Add(-1 * time.Hour), // Older timestamp
 	}
 	olderRemoteIssue.ContentHash = olderRemoteIssue.ComputeContentHash()
-	
+
 	// Import the older remote version
 	result, err := ImportIssues(ctx, dbPath, store, []*types.Issue{olderRemoteIssue}, Options{
 		SkipPrefixValidation: true,
@@ -72,7 +72,7 @@ func TestImportTimestampPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
-	
+
 	// Verify that the import did NOT update the local version
 	// The local version is newer, so it should be preserved
 	if result.Updated > 0 {
@@ -81,20 +81,20 @@ func TestImportTimestampPrecedence(t *testing.T) {
 	if result.Unchanged == 0 {
 		t.Errorf("Expected unchanged count > 0, got %d", result.Unchanged)
 	}
-	
+
 	// Verify the database still has the local (newer) version
 	dbIssue, err := store.GetIssue(ctx, "bd-test123")
 	if err != nil {
 		t.Fatalf("Failed to get issue: %v", err)
 	}
-	
+
 	if dbIssue.Status != types.StatusClosed {
 		t.Errorf("Expected status=closed (local version), got status=%s", dbIssue.Status)
 	}
 	if dbIssue.Description != "Local version" {
 		t.Errorf("Expected description='Local version', got '%s'", dbIssue.Description)
 	}
-	
+
 	// Now test the reverse: importing a NEWER version should update
 	newerRemoteIssue := &types.Issue{
 		ID:          "bd-test123",
@@ -107,24 +107,24 @@ func TestImportTimestampPrecedence(t *testing.T) {
 		UpdatedAt:   now.Add(1 * time.Hour), // Newer than current DB
 	}
 	newerRemoteIssue.ContentHash = newerRemoteIssue.ComputeContentHash()
-	
+
 	result2, err := ImportIssues(ctx, dbPath, store, []*types.Issue{newerRemoteIssue}, Options{
 		SkipPrefixValidation: true,
 	})
 	if err != nil {
 		t.Fatalf("Import of newer version failed: %v", err)
 	}
-	
+
 	if result2.Updated == 0 {
 		t.Errorf("Expected 1 update, got 0 - newer remote should overwrite older local")
 	}
-	
+
 	// Verify the database now has the newer remote version
 	dbIssue2, err := store.GetIssue(ctx, "bd-test123")
 	if err != nil {
 		t.Fatalf("Failed to get issue after second import: %v", err)
 	}
-	
+
 	if dbIssue2.Priority != 2 {
 		t.Errorf("Expected priority=2 (newer remote), got %d", dbIssue2.Priority)
 	}
@@ -137,21 +137,21 @@ func TestImportTimestampPrecedence(t *testing.T) {
 func TestImportSameTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	
+
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 	defer store.Close()
-	
+
 	ctx := context.Background()
-	
+
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
-	
+
 	now := time.Now()
-	
+
 	// Create local issue
 	localIssue := &types.Issue{
 		ID:          "bd-test456",
@@ -164,11 +164,11 @@ func TestImportSameTimestamp(t *testing.T) {
 		UpdatedAt:   now,
 	}
 	localIssue.ContentHash = localIssue.ComputeContentHash()
-	
+
 	if err := store.CreateIssue(ctx, localIssue, "test"); err != nil {
 		t.Fatalf("Failed to create local issue: %v", err)
 	}
-	
+
 	// Import with SAME timestamp but different content
 	remoteIssue := &types.Issue{
 		ID:          "bd-test456",
@@ -181,25 +181,25 @@ func TestImportSameTimestamp(t *testing.T) {
 		UpdatedAt:   now, // Same timestamp
 	}
 	remoteIssue.ContentHash = remoteIssue.ComputeContentHash()
-	
+
 	result, err := ImportIssues(ctx, dbPath, store, []*types.Issue{remoteIssue}, Options{
 		SkipPrefixValidation: true,
 	})
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
-	
+
 	// With equal timestamps, we should NOT update (local wins)
 	if result.Updated > 0 {
 		t.Errorf("Expected 0 updates with equal timestamps, got %d", result.Updated)
 	}
-	
+
 	// Verify local version is preserved
 	dbIssue, err := store.GetIssue(ctx, "bd-test456")
 	if err != nil {
 		t.Fatalf("Failed to get issue: %v", err)
 	}
-	
+
 	if dbIssue.Description != "Local version" {
 		t.Errorf("Expected local version to be preserved, got '%s'", dbIssue.Description)
 	}
@@ -249,7 +249,7 @@ func TestImportTimestampAwareProtection(t *testing.T) {
 		// Expected: Update should proceed (remote is newer)
 
 		snapshotTime := now.Add(-30 * time.Minute) // Local snapshot at 10:00
-		incomingTime := now                         // Incoming at 11:30 (newer)
+		incomingTime := now                        // Incoming at 11:30 (newer)
 		closedAt := incomingTime
 
 		incomingIssue := &types.Issue{
@@ -318,7 +318,7 @@ func TestImportTimestampAwareProtection(t *testing.T) {
 		// Incoming: issue open at T1 (10:00) - OLDER
 		// Expected: Skip update (protect local changes)
 
-		snapshotTime := now                         // Local snapshot at 11:30
+		snapshotTime := now                        // Local snapshot at 11:30
 		incomingTime := now.Add(-30 * time.Minute) // Incoming at 10:00 (older)
 
 		incomingIssue := &types.Issue{

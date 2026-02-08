@@ -117,10 +117,10 @@ func TestParseCondition_AggregateConditions(t *testing.T) {
 
 func TestParseCondition_ExternalConditions(t *testing.T) {
 	tests := []struct {
-		name         string
-		expr         string
-		wantExtType  string
-		wantExtArg   string
+		name        string
+		expr        string
+		wantExtType string
+		wantExtArg  string
 	}{
 		{
 			name:        "file exists single quotes",

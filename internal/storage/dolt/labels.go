@@ -117,5 +117,3 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 	}
 	return issues, rows.Err()
 }
-
-

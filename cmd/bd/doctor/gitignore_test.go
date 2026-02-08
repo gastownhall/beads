@@ -16,14 +16,14 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		setupFunc      func(t *testing.T, tmpDir string) // setup before fix
-		expectedPerms  os.FileMode
-		expectError    bool
+		name          string
+		setupFunc     func(t *testing.T, tmpDir string) // setup before fix
+		expectedPerms os.FileMode
+		expectError   bool
 	}{
 		{
-			name:          "creates new file with 0600 permissions",
-			setupFunc:     func(t *testing.T, tmpDir string) {
+			name: "creates new file with 0600 permissions",
+			setupFunc: func(t *testing.T, tmpDir string) {
 				// Create .beads directory but no .gitignore
 				beadsDir := filepath.Join(tmpDir, ".beads")
 				if err := os.Mkdir(beadsDir, 0750); err != nil {
@@ -762,10 +762,10 @@ beads.right.meta.json
 
 func TestFixGitignore_VeryLongLines(t *testing.T) {
 	tests := []struct {
-		name           string
-		setupFunc      func(t *testing.T, tmpDir string) string
-		description    string
-		expectSuccess  bool
+		name          string
+		setupFunc     func(t *testing.T, tmpDir string) string
+		description   string
+		expectSuccess bool
 	}{
 		{
 			name: "single very long line (10KB)",

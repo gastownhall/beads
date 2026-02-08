@@ -337,5 +337,3 @@ WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
       )
   );
 `
-
-

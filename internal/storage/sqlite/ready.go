@@ -18,7 +18,7 @@ import (
 // Excludes pinned issues which are persistent anchors, not actionable work.
 func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	whereClauses := []string{
-		"i.pinned = 0",                             // Exclude pinned issues
+		"i.pinned = 0", // Exclude pinned issues
 		"(i.ephemeral = 0 OR i.ephemeral IS NULL)", // Exclude wisps by ephemeral flag
 	}
 	args := []interface{}{}

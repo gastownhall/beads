@@ -18,18 +18,18 @@ type collisionResult struct {
 
 // renameDetail captures a rename/remap detected during collision detection
 type renameDetail struct {
-	OldID string        // ID in database (to be deleted)
-	NewID string        // ID in incoming (to be created)
-	Issue *types.Issue  // The issue with new ID
+	OldID string       // ID in database (to be deleted)
+	NewID string       // ID in incoming (to be created)
+	Issue *types.Issue // The issue with new ID
 }
 
 // collisionDetail provides detailed information about a collision
 type collisionDetail struct {
-	ID                string        // The issue ID that collided
-	IncomingIssue     *types.Issue  // The issue from the import file
-	ExistingIssue     *types.Issue  // The issue currently in the database
-	ConflictingFields []string      // List of field names that differ
-	RemapIncoming     bool          // If true, remap incoming; if false, remap existing
+	ID                string       // The issue ID that collided
+	IncomingIssue     *types.Issue // The issue from the import file
+	ExistingIssue     *types.Issue // The issue currently in the database
+	ConflictingFields []string     // List of field names that differ
+	RemapIncoming     bool         // If true, remap incoming; if false, remap existing
 }
 
 // DetectCollisions compares incoming JSONL issues against DB state
@@ -151,9 +151,9 @@ func compareIssues(existing, incoming *types.Issue) []string {
 //   - This is intentional: external_ref is semantically meaningful content
 //
 // Implications:
-//   1. Rename detection won't match issues before/after adding external_ref
-//   2. Content-based collision detection treats external_ref changes as updates
-//   3. Idempotent import only when external_ref is identical
+//  1. Rename detection won't match issues before/after adding external_ref
+//  2. Content-based collision detection treats external_ref changes as updates
+//  3. Idempotent import only when external_ref is identical
 //
 // This design choice ensures external system linkage is tracked as substantive content,
 // not just metadata. See docs/HASH_ID_DESIGN.md for more on content hash philosophy.

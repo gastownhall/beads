@@ -66,7 +66,7 @@ func TestParseIssueID(t *testing.T) {
 func TestResolvePartialID(t *testing.T) {
 	ctx := context.Background()
 	store := memory.New("")
-	
+
 	// Create test issues with sequential IDs (current implementation)
 	// When hash IDs (bd-165) are implemented, these can be hash-based
 	issue1 := &types.Issue{
@@ -105,7 +105,7 @@ func TestResolvePartialID(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
-	
+
 	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestResolvePartialID(t *testing.T) {
 	if err := store.CreateIssue(ctx, childIssue, "test"); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Set config for prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd-"); err != nil {
 		t.Fatal(err)
@@ -166,26 +166,26 @@ func TestResolvePartialID(t *testing.T) {
 			expected: "bd-1",
 		},
 		{
-			name:        "ambiguous partial match",
-			input:       "bd-1",
-			expected:    "bd-1",  // Will match exactly, not ambiguously
+			name:     "ambiguous partial match",
+			input:    "bd-1",
+			expected: "bd-1", // Will match exactly, not ambiguously
 		},
 		{
 			name:     "exact match parent ID with hierarchical child - gh-316",
 			input:    "offlinebrew-3d0",
-			expected: "offlinebrew-3d0",  // Should match exactly, not be ambiguous with offlinebrew-3d0.1
+			expected: "offlinebrew-3d0", // Should match exactly, not be ambiguous with offlinebrew-3d0.1
 		},
 		{
 			name:     "exact match parent without prefix - gh-316",
 			input:    "3d0",
-			expected: "offlinebrew-3d0",  // Should still prefer exact hash match
+			expected: "offlinebrew-3d0", // Should still prefer exact hash match
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := ResolvePartialID(ctx, store, tt.input)
-			
+
 			if tt.shouldError {
 				if err == nil {
 					t.Errorf("ResolvePartialID(%q) expected error containing %q, got nil", tt.input, tt.errorMsg)
@@ -207,7 +207,7 @@ func TestResolvePartialID(t *testing.T) {
 func TestResolvePartialIDs(t *testing.T) {
 	ctx := context.Background()
 	store := memory.New("")
-	
+
 	// Create test issues
 	issue1 := &types.Issue{
 		ID:        "bd-1",
@@ -223,14 +223,14 @@ func TestResolvePartialIDs(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
-	
+
 	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateIssue(ctx, issue2, "test"); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	if err := store.SetConfig(ctx, "issue_prefix", "bd-"); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestResolvePartialIDs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := ResolvePartialIDs(ctx, store, tt.inputs)
-			
+
 			if tt.shouldError {
 				if err == nil {
 					t.Errorf("ResolvePartialIDs(%v) expected error, got nil", tt.inputs)
@@ -291,7 +291,7 @@ func TestResolvePartialIDs(t *testing.T) {
 func TestResolvePartialID_NoConfig(t *testing.T) {
 	ctx := context.Background()
 	store := memory.New("")
-	
+
 	// Create test issue without setting config (test default prefix)
 	issue1 := &types.Issue{
 		ID:        "bd-1",
@@ -300,17 +300,17 @@ func TestResolvePartialID_NoConfig(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
-	
+
 	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Don't set config - should use default "bd" prefix
 	result, err := ResolvePartialID(ctx, store, "1")
 	if err != nil {
 		t.Fatalf("ResolvePartialID failed with default config: %v", err)
 	}
-	
+
 	if result != "bd-1" {
 		t.Errorf("ResolvePartialID(\"1\") with default config = %q; want \"bd-1\"", result)
 	}
@@ -541,7 +541,7 @@ func TestExtractIssueNumber(t *testing.T) {
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
 		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-		findSubstring(s, substr)))
+			findSubstring(s, substr)))
 }
 
 func findSubstring(s, substr string) bool {
@@ -663,17 +663,17 @@ func TestLooksLikePrefixedID(t *testing.T) {
 		{"hq-xyz", true},
 		{"cr-99", true},
 		{"myproj-task1", true},
-		{"a-b", true},       // minimal valid prefix
+		{"a-b", true},        // minimal valid prefix
 		{"abc12345-x", true}, // 8-char prefix (max)
 
 		// Invalid cases
-		{"abc", false},           // no hyphen
-		{"", false},              // empty
-		{"-abc", false},          // hyphen at start
-		{"ABC-123", false},       // uppercase
-		{"abcdefghi-x", false},   // prefix too long (9 chars)
-		{"abc-", false},          // empty suffix
-		{"abc--def", false},      // suffix starts with hyphen
+		{"abc", false},         // no hyphen
+		{"", false},            // empty
+		{"-abc", false},        // hyphen at start
+		{"ABC-123", false},     // uppercase
+		{"abcdefghi-x", false}, // prefix too long (9 chars)
+		{"abc-", false},        // empty suffix
+		{"abc--def", false},    // suffix starts with hyphen
 	}
 
 	for _, tt := range tests {

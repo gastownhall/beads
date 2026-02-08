@@ -261,5 +261,3 @@ func TestAddLabel_Duplicate(t *testing.T) {
 		t.Errorf("expected exactly 1 instance of 'duplicate' label, got %d", count)
 	}
 }
-
-

@@ -34,11 +34,11 @@ func TestScripts(t *testing.T) {
 	timeout := 2 * time.Second
 	engine := script.NewEngine()
 	engine.Cmds["bd"] = script.Program(exe, nil, timeout)
-	
+
 	// Add binDir to PATH so 'sh -c bd ...' works in test scripts
 	currentPath := os.Getenv("PATH")
 	env := []string{"PATH=" + binDir + ":" + currentPath}
-	
+
 	// Run all tests
 	scripttest.Test(t, context.Background(), engine, env, "testdata/*.txt")
 }

@@ -438,11 +438,11 @@ func runWorktreeInfo(cmd *cobra.Command, args []string) error {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"is_worktree":     true,
-			"path":            cwd,
-			"name":            filepath.Base(cwd),
-			"branch":          branch,
-			"main_repo":       mainRepoRoot,
+			"is_worktree":      true,
+			"path":             cwd,
+			"name":             filepath.Base(cwd),
+			"branch":           branch,
+			"main_repo":        mainRepoRoot,
 			"beads_redirected": redirectInfo.IsRedirected,
 		}
 		if redirectInfo.IsRedirected {

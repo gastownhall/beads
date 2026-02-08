@@ -42,24 +42,24 @@ type doctorResult struct {
 }
 
 var (
-	doctorFix            bool
-	doctorYes            bool
-	doctorInteractive    bool   // per-fix confirmation mode
-	doctorDryRun         bool   // preview fixes without applying
-	doctorOutput         string // export diagnostics to file
-	doctorFixChildParent bool   // opt-in fix for child→parent deps
-	doctorVerbose        bool   // show detailed output during fixes
-	doctorForce          bool   // force repair mode, bypass validation where safe
-	doctorSource         string // source of truth selection: auto, jsonl, db
-	perfMode             bool
-	checkHealthMode      bool
-	doctorCheckFlag      string // run specific check (e.g., "pollution")
-	doctorClean          bool   // for pollution check, delete detected issues
-	doctorDeep                  bool   // full graph integrity validation
-	doctorGastown               bool   // running in gastown multi-workspace mode
-	gastownDuplicatesThreshold  int    // duplicate tolerance threshold for gastown mode
-	doctorServer                bool   // run server mode health checks
-	doctorMigration             string // migration validation mode: "pre" or "post"
+	doctorFix                  bool
+	doctorYes                  bool
+	doctorInteractive          bool   // per-fix confirmation mode
+	doctorDryRun               bool   // preview fixes without applying
+	doctorOutput               string // export diagnostics to file
+	doctorFixChildParent       bool   // opt-in fix for child→parent deps
+	doctorVerbose              bool   // show detailed output during fixes
+	doctorForce                bool   // force repair mode, bypass validation where safe
+	doctorSource               string // source of truth selection: auto, jsonl, db
+	perfMode                   bool
+	checkHealthMode            bool
+	doctorCheckFlag            string // run specific check (e.g., "pollution")
+	doctorClean                bool   // for pollution check, delete detected issues
+	doctorDeep                 bool   // full graph integrity validation
+	doctorGastown              bool   // running in gastown multi-workspace mode
+	gastownDuplicatesThreshold int    // duplicate tolerance threshold for gastown mode
+	doctorServer               bool   // run server mode health checks
+	doctorMigration            string // migration validation mode: "pre" or "post"
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -945,10 +945,10 @@ func runMigrationValidation(path string, phase string) {
 	// JSON output for machine consumption
 	if jsonOutput {
 		output := struct {
-			Check      doctorCheck                       `json:"check"`
+			Check      doctorCheck                      `json:"check"`
 			Validation doctor.MigrationValidationResult `json:"validation"`
-			CLIVersion string                            `json:"cli_version"`
-			Timestamp  string                            `json:"timestamp"`
+			CLIVersion string                           `json:"cli_version"`
+			Timestamp  string                           `json:"timestamp"`
 		}{
 			Check:      check,
 			Validation: result,

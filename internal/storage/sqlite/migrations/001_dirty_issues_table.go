@@ -36,11 +36,11 @@ func MigrateDirtyIssuesTable(db *sql.DB) error {
 		SELECT COUNT(*) > 0 FROM pragma_table_info('dirty_issues')
 		WHERE name = 'content_hash'
 	`).Scan(&hasContentHash)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to check for content_hash column: %w", err)
 	}
-	
+
 	if !hasContentHash {
 		_, err = db.Exec(`ALTER TABLE dirty_issues ADD COLUMN content_hash TEXT`)
 		if err != nil {

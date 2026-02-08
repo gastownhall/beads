@@ -72,9 +72,9 @@ func TestComputeDaemonParentPID(t *testing.T) {
 // TestCheckParentProcessAlive tests parent process alive checking
 func TestCheckParentProcessAlive(t *testing.T) {
 	tests := []struct {
-		name       string
-		parentPID  int
-		expected   bool
+		name        string
+		parentPID   int
+		expected    bool
 		description string
 	}{
 		{
@@ -113,7 +113,7 @@ func TestCheckParentProcessAlive_InvalidPID(t *testing.T) {
 	// Use a very high PID that's unlikely to exist
 	invalidPID := 999999
 	result := checkParentProcessAlive(invalidPID)
-	
+
 	// This should return false since the process doesn't exist
 	if result == true {
 		t.Errorf("checkParentProcessAlive(%d) = true, want false (process should not exist)", invalidPID)
@@ -215,9 +215,9 @@ func TestReadPIDFromFile(t *testing.T) {
 // TestIsPIDAlive tests PID alive checking
 func TestIsPIDAlive(t *testing.T) {
 	tests := []struct {
-		name     string
-		pid      int
-		expected bool
+		name        string
+		pid         int
+		expected    bool
 		description string
 	}{
 		{
@@ -260,10 +260,10 @@ func TestIsPIDAlive(t *testing.T) {
 // TestShouldAutoStartDaemon_Disabled tests BEADS_NO_DAEMON environment variable handling
 func TestShouldAutoStartDaemon_Disabled(t *testing.T) {
 	tests := []struct {
-		name           string
-		noDaemonValue  string
-		shouldDisable  bool
-		description    string
+		name          string
+		noDaemonValue string
+		shouldDisable bool
+		description   string
 	}{
 		{
 			name:          "BEADS_NO_DAEMON=1",

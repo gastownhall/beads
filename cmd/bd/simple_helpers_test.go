@@ -6,10 +6,10 @@ import (
 
 func TestParseLabelArgs(t *testing.T) {
 	tests := []struct {
-		name         string
-		args         []string
-		expectIDs    int
-		expectLabel  string
+		name        string
+		args        []string
+		expectIDs   int
+		expectLabel string
 	}{
 		{
 			name:        "single ID single label",

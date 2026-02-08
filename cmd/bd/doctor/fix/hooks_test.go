@@ -391,11 +391,11 @@ func TestCheckHuskyBdIntegration(t *testing.T) {
 
 func TestCheckPrecommitBdIntegration(t *testing.T) {
 	tests := []struct {
-		name                 string
-		configContent        string
-		expectNil            bool
-		expectConfigured     bool
-		expectHooksWithBd    []string
+		name                   string
+		configContent          string
+		expectNil              bool
+		expectConfigured       bool
+		expectHooksWithBd      []string
 		expectHooksNotInConfig []string
 	}{
 		{
@@ -432,8 +432,8 @@ func TestCheckPrecommitBdIntegration(t *testing.T) {
         entry: bd hooks run pre-commit
         language: system
 `,
-			expectConfigured:      true,
-			expectHooksWithBd:     []string{"pre-commit"},
+			expectConfigured:       true,
+			expectHooksWithBd:      []string{"pre-commit"},
 			expectHooksNotInConfig: []string{"post-merge", "pre-push"},
 		},
 		{
@@ -450,8 +450,8 @@ func TestCheckPrecommitBdIntegration(t *testing.T) {
         language: system
         stages: [push]
 `,
-			expectConfigured:      true,
-			expectHooksWithBd:     []string{"pre-commit", "pre-push"},
+			expectConfigured:       true,
+			expectHooksWithBd:      []string{"pre-commit", "pre-push"},
 			expectHooksNotInConfig: []string{"post-merge"},
 		},
 		{
@@ -463,7 +463,7 @@ func TestCheckPrecommitBdIntegration(t *testing.T) {
       - id: trailing-whitespace
       - id: end-of-file-fixer
 `,
-			expectConfigured:      false,
+			expectConfigured:       false,
 			expectHooksNotInConfig: []string{"pre-commit", "post-merge", "pre-push"},
 		},
 		{
@@ -479,15 +479,15 @@ func TestCheckPrecommitBdIntegration(t *testing.T) {
         entry: bd hooks run pre-commit
         language: system
 `,
-			expectConfigured:      true,
-			expectHooksWithBd:     []string{"pre-commit"},
+			expectConfigured:       true,
+			expectHooksWithBd:      []string{"pre-commit"},
 			expectHooksNotInConfig: []string{"post-merge", "pre-push"},
 		},
 		{
 			name: "empty repos list",
 			configContent: `repos: []
 `,
-			expectConfigured:      false,
+			expectConfigured:       false,
 			expectHooksNotInConfig: []string{"pre-commit", "post-merge", "pre-push"},
 		},
 	}

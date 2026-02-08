@@ -77,9 +77,9 @@ func TestRetryWithBackoff(t *testing.T) {
 
 func TestErrorPolicy(t *testing.T) {
 	tests := []struct {
-		name  string
+		name   string
 		policy ErrorPolicy
-		valid bool
+		valid  bool
 	}{
 		{"strict", PolicyStrict, true},
 		{"best-effort", PolicyBestEffort, true},

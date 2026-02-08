@@ -333,7 +333,7 @@ const (
 	StatusOpen       = types.StatusOpen
 	StatusInProgress = types.StatusInProgress
 	StatusBlocked    = types.StatusBlocked
-	StatusClosed = types.StatusClosed
+	StatusClosed     = types.StatusClosed
 )
 
 // IssueType constants (core types only - Gas Town types removed)
@@ -347,12 +347,11 @@ const (
 
 // DependencyType constants
 const (
-	DepBlocks            = types.DepBlocks
-	DepRelated           = types.DepRelated
-	DepParentChild       = types.DepParentChild
-	DepDiscoveredFrom    = types.DepDiscoveredFrom
+	DepBlocks         = types.DepBlocks
+	DepRelated        = types.DepRelated
+	DepParentChild    = types.DepParentChild
+	DepDiscoveredFrom = types.DepDiscoveredFrom
 )
-
 
 // Storage provides the minimal interface for extension orchestration
 type Storage = storage.Storage

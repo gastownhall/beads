@@ -170,7 +170,7 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 			Description: description,
 			IssueType:   string(types.TypeTask), // Use task type; gt:slot label marks it as slot
 			Priority:    0,                      // P0 - system infrastructure
-			Labels:      []string{"gt:slot"},   // Gas Town slot label
+			Labels:      []string{"gt:slot"},    // Gas Town slot label
 		}
 		resp, err := daemonClient.Create(createArgs)
 		if err != nil {

@@ -240,11 +240,11 @@ func TestIsTruthy(t *testing.T) {
 
 func TestFilterStepsByCondition(t *testing.T) {
 	tests := []struct {
-		name     string
-		steps    []*Step
-		vars     map[string]string
-		wantIDs  []string // Expected step IDs in result
-		wantErr  bool
+		name    string
+		steps   []*Step
+		vars    map[string]string
+		wantIDs []string // Expected step IDs in result
+		wantErr bool
 	}{
 		{
 			name: "no conditions - all included",

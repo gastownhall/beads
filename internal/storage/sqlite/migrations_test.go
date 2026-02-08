@@ -664,7 +664,7 @@ func TestMigrateOrphanDetection(t *testing.T) {
 
 		// Insert issues with dotted prefix directly (bypassing prefix validation)
 		testCases := []struct {
-			id          string
+			id           string
 			expectOrphan bool
 		}{
 			// These should NOT be flagged as orphans (dots in prefix)

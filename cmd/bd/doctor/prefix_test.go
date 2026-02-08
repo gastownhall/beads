@@ -110,7 +110,7 @@ func TestPrefixDetection_MultiplePrefixes(t *testing.T) {
 `,
 			expectedCount: 3,
 			expectedPrefixes: map[string]int{
-				"my-project":  2,
+				"my-project": 2,
 				"other-proj": 1,
 			},
 		},
@@ -266,9 +266,9 @@ not-json
 // TestPrefixDetection_MostCommonPrefix tests the logic for detecting the most common prefix
 func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 	tests := []struct {
-		name                 string
-		content              string
-		expectedMostCommon   string
+		name                    string
+		content                 string
+		expectedMostCommon      string
 		expectedMostCommonCount int
 	}{
 		{
@@ -279,7 +279,7 @@ func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 {"id":"bd-4"}
 {"id":"proj-5"}
 `,
-			expectedMostCommon:   "bd",
+			expectedMostCommon:      "bd",
 			expectedMostCommonCount: 4,
 		},
 		{
@@ -289,7 +289,7 @@ func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 {"id":"beta-3"}
 {"id":"beta-4"}
 `,
-			expectedMostCommon:   "alpha",
+			expectedMostCommon:      "alpha",
 			expectedMostCommonCount: 2,
 		},
 		{
@@ -300,7 +300,7 @@ func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 {"id":"secondary-4"}
 {"id":"tertiary-5"}
 `,
-			expectedMostCommon:   "primary",
+			expectedMostCommon:      "primary",
 			expectedMostCommonCount: 3,
 		},
 		{
@@ -314,7 +314,7 @@ func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 {"id":"feature-7"}
 {"id":"hotfix-8"}
 `,
-			expectedMostCommon:   "main",
+			expectedMostCommon:      "main",
 			expectedMostCommonCount: 5,
 		},
 	}
@@ -354,11 +354,11 @@ func TestPrefixDetection_MostCommonPrefix(t *testing.T) {
 // TestPrefixMismatchDetection tests detection of prefix mismatches that should trigger warnings
 func TestPrefixMismatchDetection(t *testing.T) {
 	tests := []struct {
-		name            string
-		jsonlContent    string
-		dbPrefix        string
-		shouldWarn      bool
-		description     string
+		name         string
+		jsonlContent string
+		dbPrefix     string
+		shouldWarn   bool
+		description  string
 	}{
 		{
 			name: "perfect match",

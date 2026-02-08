@@ -58,7 +58,7 @@ type Transaction interface {
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error
-	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                  // For read-your-writes within transaction
+	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                    // For read-your-writes within transaction
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) // For read-your-writes within transaction
 
 	// Dependency operations
@@ -162,7 +162,7 @@ type Storage interface {
 	GetExportHash(ctx context.Context, issueID string) (string, error)
 	SetExportHash(ctx context.Context, issueID, contentHash string) error
 	ClearAllExportHashes(ctx context.Context) error
-	
+
 	// JSONL file integrity (bd-160)
 	GetJSONLFileHash(ctx context.Context) (string, error)
 	SetJSONLFileHash(ctx context.Context, fileHash string) error

@@ -34,10 +34,10 @@ type FlushManager struct {
 	cancel context.CancelFunc
 
 	// Event channels (buffered to prevent blocking)
-	markDirtyCh   chan markDirtyEvent  // Request to mark DB dirty
-	timerFiredCh  chan struct{}        // Debounce timer fired
-	flushNowCh    chan chan error      // Request immediate flush, returns error
-	shutdownCh    chan shutdownRequest // Request shutdown with final flush
+	markDirtyCh  chan markDirtyEvent  // Request to mark DB dirty
+	timerFiredCh chan struct{}        // Debounce timer fired
+	flushNowCh   chan chan error      // Request immediate flush, returns error
+	shutdownCh   chan shutdownRequest // Request shutdown with final flush
 
 	// Background goroutine coordination
 	wg sync.WaitGroup

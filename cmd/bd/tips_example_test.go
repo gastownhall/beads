@@ -14,9 +14,9 @@ func TestExampleTipDefinitions(t *testing.T) {
 		ID:          "example_high_priority",
 		Condition:   func() bool { return true },
 		Message:     "This is an important tip that shows often",
-		Frequency:   24 * time.Hour,  // Show at most once per day
-		Priority:    100,              // Highest priority
-		Probability: 0.8,              // 80% chance when eligible
+		Frequency:   24 * time.Hour, // Show at most once per day
+		Priority:    100,            // Highest priority
+		Probability: 0.8,            // 80% chance when eligible
 	}
 
 	// Example 2: Medium priority, medium probability tip
@@ -26,8 +26,8 @@ func TestExampleTipDefinitions(t *testing.T) {
 		Condition:   func() bool { return true },
 		Message:     "Try using 'bd ready' to see available work",
 		Frequency:   7 * 24 * time.Hour, // Show at most once per week
-		Priority:    50,                  // Medium priority
-		Probability: 0.5,                 // 50% chance when eligible
+		Priority:    50,                 // Medium priority
+		Probability: 0.5,                // 50% chance when eligible
 	}
 
 	// Example 3: Low priority, low probability tip
@@ -37,8 +37,8 @@ func TestExampleTipDefinitions(t *testing.T) {
 		Condition:   func() bool { return true },
 		Message:     "You can filter issues by label with --label flag",
 		Frequency:   30 * 24 * time.Hour, // Show at most once per month
-		Priority:    10,                   // Low priority
-		Probability: 0.2,                  // 20% chance when eligible
+		Priority:    10,                  // Low priority
+		Probability: 0.2,                 // 20% chance when eligible
 	}
 
 	// Example 4: Conditional tip

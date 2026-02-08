@@ -45,9 +45,9 @@ func (op ComparisonOp) String() string {
 
 // ComparisonNode represents a field comparison (e.g., status=open).
 type ComparisonNode struct {
-	Field    string
-	Op       ComparisonOp
-	Value    string
+	Field     string
+	Op        ComparisonOp
+	Value     string
 	ValueType TokenType // TokenIdent, TokenString, TokenNumber, or TokenDuration
 }
 
@@ -315,9 +315,9 @@ var KnownFields = map[string]bool{
 	"owner":       true,
 
 	// Timestamps
-	"created":  true,
-	"updated":  true,
-	"closed":   true,
+	"created":    true,
+	"updated":    true,
+	"closed":     true,
 	"created_at": true, // alias
 	"updated_at": true, // alias
 	"closed_at":  true, // alias

@@ -388,4 +388,3 @@ func TestApplyCompactionNotFound(t *testing.T) {
 		t.Errorf("Expected error to contain %q, got %q", expectedError, err.Error())
 	}
 }
-

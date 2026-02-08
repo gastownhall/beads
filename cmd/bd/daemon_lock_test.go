@@ -296,7 +296,7 @@ func TestMultipleDaemonProcessesRace(t *testing.T) {
 	// At most one should have succeeded in holding the lock
 	// (though timing means even the first might have exited by the time we checked)
 	if alreadyRunning < numAttempts-1 {
-		t.Logf("Warning: Expected at least %d processes to fail with 'already running', got %d", 
+		t.Logf("Warning: Expected at least %d processes to fail with 'already running', got %d",
 			numAttempts-1, alreadyRunning)
 		t.Log("This could indicate a race condition, but may also be timing-related in tests")
 	}

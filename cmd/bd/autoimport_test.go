@@ -467,11 +467,11 @@ func TestIsNoDbModeConfigured(t *testing.T) {
 
 func TestGetLocalSyncBranch(t *testing.T) {
 	tests := []struct {
-		name        string
-		configYAML  string
-		envVar      string
-		want        string
-		createFile  bool
+		name       string
+		configYAML string
+		envVar     string
+		want       string
+		createFile bool
 	}{
 		{
 			name:       "no config.yaml exists",

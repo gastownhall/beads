@@ -88,8 +88,8 @@ func TestShouldUsePager(t *testing.T) {
 
 func TestGetPagerCommand(t *testing.T) {
 	tests := []struct {
-		name     string
-		envVars  map[string]string
+		name      string
+		envVars   map[string]string
 		wantPager string
 	}{
 		{

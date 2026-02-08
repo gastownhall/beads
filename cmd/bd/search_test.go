@@ -303,9 +303,9 @@ func TestSearchWithDateAndPriorityFilters(t *testing.T) {
 		minPrio := 0
 		maxPrio := 2
 		results, err := s.SearchIssues(ctx, "auth", types.IssueFilter{
-			PriorityMin:   &minPrio,
-			PriorityMax:   &maxPrio,
-			CreatedAfter:  &twoDaysAgo,
+			PriorityMin:  &minPrio,
+			PriorityMax:  &maxPrio,
+			CreatedAfter: &twoDaysAgo,
 		})
 		if err != nil {
 			t.Fatalf("Search failed: %v", err)

@@ -62,7 +62,6 @@ func getConflictStrategy(preferLocal, preferGitLab, preferNewer bool) (ConflictS
 	return ConflictStrategyPreferNewer, nil
 }
 
-
 // generateIssueID creates a unique issue ID with the given prefix.
 // Uses atomic counter combined with timestamp and random bytes to ensure uniqueness
 // even when called rapidly or after process restart.
@@ -455,10 +454,10 @@ func doPushToGitLabWithContext(ctx context.Context, syncCtx *SyncContext, client
 // conflicts.
 //
 // Limitations:
-// - Timestamp-based detection may produce false positives if clocks are significantly
-//   out of sync between local machine and GitLab server.
-// - This is a simple heuristic; field-level comparison would be more accurate but
-//   more complex to implement.
+//   - Timestamp-based detection may produce false positives if clocks are significantly
+//     out of sync between local machine and GitLab server.
+//   - This is a simple heuristic; field-level comparison would be more accurate but
+//     more complex to implement.
 func detectGitLabConflictsWithContext(ctx context.Context, _ /* syncCtx */ *SyncContext, client *gitlab.Client, localIssues []*types.Issue) ([]gitlab.Conflict, error) {
 	var conflicts []gitlab.Conflict
 

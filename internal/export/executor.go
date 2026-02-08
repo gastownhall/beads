@@ -10,9 +10,9 @@ import (
 type DataType string
 
 const (
-	DataTypeCore     DataType = "core"       // Issues and dependencies
-	DataTypeLabels   DataType = "labels"     // Issue labels
-	DataTypeComments DataType = "comments"   // Issue comments
+	DataTypeCore     DataType = "core"     // Issues and dependencies
+	DataTypeLabels   DataType = "labels"   // Issue labels
+	DataTypeComments DataType = "comments" // Issue comments
 )
 
 // FetchResult holds the result of a data fetch operation

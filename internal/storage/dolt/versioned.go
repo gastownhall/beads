@@ -265,5 +265,3 @@ func (s *DoltStore) CommitExists(ctx context.Context, commitHash string) (bool, 
 
 	return count > 0, nil
 }
-
-

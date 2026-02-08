@@ -144,9 +144,9 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"duplicate":  duplicateID,
-			"canonical":  canonicalID,
-			"status":     "closed",
+			"duplicate": duplicateID,
+			"canonical": canonicalID,
+			"status":    "closed",
 		}
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
@@ -242,9 +242,9 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"superseded":    oldID,
-			"replacement":   newID,
-			"status":        "closed",
+			"superseded":  oldID,
+			"replacement": newID,
+			"status":      "closed",
 		}
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")

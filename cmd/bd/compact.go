@@ -871,13 +871,13 @@ func runCompactDolt() {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"success":          true,
-			"dolt_path":        doltPath,
-			"size_before":      sizeBefore,
-			"size_after":       sizeAfter,
-			"freed_bytes":      freed,
-			"freed_display":    formatBytes(freed),
-			"elapsed_ms":       elapsed.Milliseconds(),
+			"success":       true,
+			"dolt_path":     doltPath,
+			"size_before":   sizeBefore,
+			"size_after":    sizeAfter,
+			"freed_bytes":   freed,
+			"freed_display": formatBytes(freed),
+			"elapsed_ms":    elapsed.Milliseconds(),
 		}
 		outputJSON(result)
 		return

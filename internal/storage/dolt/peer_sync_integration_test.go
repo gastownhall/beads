@@ -754,13 +754,13 @@ func TestSyncWithCredentials(t *testing.T) {
 
 	// Create issue to sync
 	issue := &types.Issue{
-		ID:          "cred-sync-001",
-		Title:       "Issue synced with credentials",
-		IssueType:   types.TypeTask,
-		Status:      types.StatusOpen,
-		Priority:    1,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        "cred-sync-001",
+		Title:     "Issue synced with credentials",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := alpha.store.CreateIssue(ctx, issue, "alpha"); err != nil {
 		t.Fatalf("failed to create issue: %v", err)
@@ -825,13 +825,13 @@ func TestBidirectionalSync(t *testing.T) {
 
 	// Create issue in Alpha
 	issue := &types.Issue{
-		ID:          "bidir-001",
-		Title:       "Bidirectional sync test",
-		IssueType:   types.TypeTask,
-		Status:      types.StatusOpen,
-		Priority:    1,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        "bidir-001",
+		Title:     "Bidirectional sync test",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := alpha.store.CreateIssue(ctx, issue, "alpha"); err != nil {
 		t.Fatalf("failed to create issue: %v", err)

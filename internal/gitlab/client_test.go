@@ -50,10 +50,10 @@ func TestBuildURL(t *testing.T) {
 	client := NewClient("token", "https://gitlab.example.com", "123")
 
 	tests := []struct {
-		name     string
-		path     string
-		params   map[string]string
-		wantURL  string
+		name    string
+		path    string
+		params  map[string]string
+		wantURL string
 	}{
 		{
 			name:    "issues endpoint",

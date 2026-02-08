@@ -58,8 +58,8 @@ func TestFormatTimeAgo(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name    string
-		t       time.Time
+		name         string
+		t            time.Time
 		wantContains string
 	}{
 		{"just now", now.Add(-30 * time.Second), "just now"},

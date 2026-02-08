@@ -145,7 +145,7 @@ func TestClaimIssueConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(claimerID int) {
 			defer wg.Done()
-			claimer := string(rune('A' + claimerID)) + "-agent"
+			claimer := string(rune('A'+claimerID)) + "-agent"
 			err := store.ClaimIssue(ctx, issue.ID, claimer)
 			if err == nil {
 				successCount.Add(1)

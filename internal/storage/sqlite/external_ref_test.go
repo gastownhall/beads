@@ -95,7 +95,7 @@ func TestDetectCollisionsWithExternalRef(t *testing.T) {
 		Status:      types.StatusInProgress,
 		Priority:    2,
 		IssueType:   types.TypeBug,
-		ExternalRef: &externalRef, // Same external_ref
+		ExternalRef: &externalRef,                  // Same external_ref
 		UpdatedAt:   time.Now().Add(1 * time.Hour), // Newer timestamp
 	}
 
@@ -199,7 +199,7 @@ func TestDetectCollisionsExternalRefPriorityOverID(t *testing.T) {
 	}
 
 	collision := result.Collisions[0]
-	
+
 	// The existing issue matched should be bd-test-1 (by external_ref), not bd-test-2 (by ID)
 	if collision.ExistingIssue.ID != existing.ID {
 		t.Errorf("Expected external_ref match with %s, but got %s", existing.ID, collision.ExistingIssue.ID)
@@ -323,11 +323,11 @@ func TestExternalRefIndexUsage(t *testing.T) {
 			t.Fatalf("Failed to scan query plan row: %v", err)
 		}
 		planFound = true
-		
+
 		if detail == "SEARCH TABLE issues USING INDEX idx_issues_external_ref (external_ref=?)" ||
-		   detail == "SEARCH issues USING INDEX idx_issues_external_ref (external_ref=?)" ||
-		   detail == "SEARCH TABLE issues USING INDEX idx_issues_external_ref_unique (external_ref=?)" ||
-		   detail == "SEARCH issues USING INDEX idx_issues_external_ref_unique (external_ref=?)" {
+			detail == "SEARCH issues USING INDEX idx_issues_external_ref (external_ref=?)" ||
+			detail == "SEARCH TABLE issues USING INDEX idx_issues_external_ref_unique (external_ref=?)" ||
+			detail == "SEARCH issues USING INDEX idx_issues_external_ref_unique (external_ref=?)" {
 			indexUsed = true
 		}
 	}

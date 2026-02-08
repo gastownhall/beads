@@ -583,7 +583,9 @@ func TestGitBranchHasUpstream(t *testing.T) {
 // TestConfigPreservedDuringSync is a regression test for GH#1100.
 // It verifies that config.yaml in .beads/ is not overwritten during sync operations.
 // The bug was caused by restoreBeadsDirFromBranch() which ran:
-//   git checkout HEAD -- .beads/
+//
+//	git checkout HEAD -- .beads/
+//
 // This restored the ENTIRE .beads/ directory, including user's uncommitted config.yaml.
 // The function was removed in PR #918 (pull-first refactor).
 // This test ensures similar restoration logic is never reintroduced.

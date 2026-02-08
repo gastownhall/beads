@@ -32,7 +32,7 @@ func initTestGitRepo(t testing.TB, dir string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to init git repo: %v", err)
 	}
-	
+
 	// Configure git for tests
 	configCmds := [][]string{
 		{"git", "config", "user.email", "test@example.com"},
@@ -695,7 +695,7 @@ func TestMutationToExportLatency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	
+
 	t.Skip("Skipping until event-driven daemon (bd-85) is fully implemented")
 
 	tmpDir := t.TempDir()
@@ -706,10 +706,10 @@ func TestMutationToExportLatency(t *testing.T) {
 
 	testDBPath := filepath.Join(dbDir, "test.db")
 	jsonlPath := filepath.Join(dbDir, "issues.jsonl")
-	
+
 	// Initialize git repo (required for auto-flush)
 	initTestGitRepo(t, tmpDir)
-	
+
 	testStore := newTestStore(t, testDBPath)
 
 	// Configure test environment - save/restore all globals atomically
@@ -728,7 +728,7 @@ func TestMutationToExportLatency(t *testing.T) {
 	autoFlushEnabled = true
 	// Use fast debounce for testing (500ms to match event-driven target)
 	config.Set("flush-debounce", 500*time.Millisecond)
-	
+
 	ctx := context.Background()
 
 	// Get JSONL mod time
@@ -743,7 +743,7 @@ func TestMutationToExportLatency(t *testing.T) {
 	// Test 1: Single mutation latency with markDirtyAndScheduleFlush
 	t.Run("SingleMutationLatency", func(t *testing.T) {
 		initialModTime := getModTime()
-		
+
 		// Create issue through store
 		issue := &types.Issue{
 			Title:       "Latency test issue",
@@ -752,20 +752,20 @@ func TestMutationToExportLatency(t *testing.T) {
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		}
-		
+
 		start := time.Now()
 		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("Failed to create issue: %v", err)
 		}
-		
+
 		// Manually trigger flush (simulating what CLI commands do)
 		markDirtyAndScheduleFlush()
-		
+
 		// Wait for JSONL file to be updated (with timeout)
 		timeout := time.After(2 * time.Second) // 500ms debounce + margin
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
-		
+
 		var updated bool
 		var latency time.Duration
 		for !updated {
@@ -780,9 +780,9 @@ func TestMutationToExportLatency(t *testing.T) {
 				t.Fatal("JSONL file not updated within 2 seconds")
 			}
 		}
-		
+
 		t.Logf("Single mutation export latency: %v", latency)
-		
+
 		// Verify <1s latency (500ms debounce + export time)
 		if latency > 1*time.Second {
 			t.Errorf("Latency %v exceeds 1s threshold", latency)
@@ -792,11 +792,11 @@ func TestMutationToExportLatency(t *testing.T) {
 	// Test 2: Rapid mutations should batch
 	t.Run("RapidMutationBatching", func(t *testing.T) {
 		preTestModTime := getModTime()
-		
+
 		// Create 5 issues rapidly
 		numIssues := 5
 		start := time.Now()
-		
+
 		for i := 0; i < numIssues; i++ {
 			issue := &types.Issue{
 				Title:       fmt.Sprintf("Batch test issue %d", i),
@@ -813,15 +813,15 @@ func TestMutationToExportLatency(t *testing.T) {
 			// Small delay to ensure they're separate operations
 			time.Sleep(100 * time.Millisecond)
 		}
-		
+
 		creationDuration := time.Since(start)
 		t.Logf("Created %d issues in %v", numIssues, creationDuration)
-		
+
 		// Wait for JSONL update
 		timeout := time.After(2 * time.Second) // 500ms debounce + margin
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
-		
+
 		var updated bool
 		for !updated {
 			select {
@@ -834,11 +834,11 @@ func TestMutationToExportLatency(t *testing.T) {
 				t.Fatal("JSONL file not updated within 2 seconds")
 			}
 		}
-		
+
 		totalLatency := time.Since(start)
 		t.Logf("All mutations exported in %v", totalLatency)
-		
-		// Verify batching: rapid calls to markDirty within debounce window 
+
+		// Verify batching: rapid calls to markDirty within debounce window
 		// should result in single flush after ~500ms
 		if totalLatency > 2*time.Second {
 			t.Errorf("Batching failed: total latency %v exceeds 2s", totalLatency)

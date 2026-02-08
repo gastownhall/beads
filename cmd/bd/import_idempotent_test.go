@@ -183,7 +183,7 @@ func TestIssueDataChanged(t *testing.T) {
 				Title: "Test",
 			},
 			updates: map[string]interface{}{
-				"title":        "Test",
+				"title":         "Test",
 				"unknown_field": "value",
 			},
 			want: true,

@@ -1,13 +1,15 @@
 package main
+
 import (
 	"fmt"
-	"os"
-	"regexp"
-	"strings"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"os"
+	"regexp"
+	"strings"
 )
+
 var duplicatesCmd = &cobra.Command{
 	Use:     "duplicates",
 	GroupID: "deps",
@@ -43,18 +45,18 @@ Example:
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching issues: %v\n", err)
-		os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Error fetching issues: %v\n", err)
+			os.Exit(1)
 		}
 		// Filter out closed issues - they're done, no point detecting duplicates
 		openIssues := make([]*types.Issue, 0, len(allIssues))
-	for _, issue := range allIssues {
-		if issue.Status != types.StatusClosed {
-			openIssues = append(openIssues, issue)
+		for _, issue := range allIssues {
+			if issue.Status != types.StatusClosed {
+				openIssues = append(openIssues, issue)
+			}
 		}
-	}
-	// Find duplicates (only among open issues)
-	duplicateGroups := findDuplicateGroups(openIssues)
+		// Find duplicates (only among open issues)
+		duplicateGroups := findDuplicateGroups(openIssues)
 		if len(duplicateGroups) == 0 {
 			if !jsonOutput {
 				fmt.Println("No duplicates found!")
@@ -89,7 +91,7 @@ Example:
 				strings.Join(sources, " "),
 				target.ID)
 			mergeCommands = append(mergeCommands, cmd)
-			
+
 			if autoMerge || dryRun {
 				if !dryRun {
 					result := performMerge(target.ID, sources)
@@ -154,11 +156,13 @@ Example:
 		}
 	},
 }
+
 func init() {
 	duplicatesCmd.Flags().Bool("auto-merge", false, "Automatically merge all duplicates")
 	duplicatesCmd.Flags().Bool("dry-run", false, "Show what would be merged without making changes")
 	rootCmd.AddCommand(duplicatesCmd)
 }
+
 // contentKey represents the fields we use to identify duplicate issues
 type contentKey struct {
 	title              string
@@ -167,6 +171,7 @@ type contentKey struct {
 	acceptanceCriteria string
 	status             string // Only group issues with same status
 }
+
 // findDuplicateGroups groups issues by content hash
 func findDuplicateGroups(issues []*types.Issue) [][]*types.Issue {
 	groups := make(map[contentKey][]*types.Issue)
@@ -189,6 +194,7 @@ func findDuplicateGroups(issues []*types.Issue) [][]*types.Issue {
 	}
 	return duplicates
 }
+
 // issueScore captures all factors used to choose which duplicate to keep
 type issueScore struct {
 	dependentCount int // Issues that depend on this one (children, blocked-by) - highest priority
@@ -250,6 +256,7 @@ func countStructuralRelationships(groups [][]*types.Issue) map[string]*issueScor
 
 	return scores
 }
+
 // chooseMergeTarget selects the best issue to merge into
 // Priority order:
 // 1. Highest structural weight (dependents + dependencies) - most connected issue wins
@@ -305,6 +312,7 @@ func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structura
 	}
 	return target
 }
+
 // formatDuplicateGroupsJSON formats duplicate groups for JSON output
 func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore) []map[string]interface{} {
 	var result []map[string]interface{}

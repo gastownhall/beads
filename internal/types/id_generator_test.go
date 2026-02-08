@@ -7,7 +7,7 @@ import (
 
 func TestGenerateHashID(t *testing.T) {
 	now := time.Date(2025, 10, 30, 12, 0, 0, 0, time.UTC)
-	
+
 	tests := []struct {
 		name        string
 		prefix      string
@@ -36,16 +36,16 @@ func TestGenerateHashID(t *testing.T) {
 			wantLen:     64, // Full SHA256 hex
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hash := GenerateHashID(tt.prefix, tt.title, tt.description, tt.created, tt.workspaceID)
-			
+
 			// Check length (full SHA256 = 64 hex chars)
 			if len(hash) != tt.wantLen {
 				t.Errorf("expected length %d, got %d", tt.wantLen, len(hash))
 			}
-			
+
 			// Check all hex characters
 			for _, ch := range hash {
 				if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
@@ -58,11 +58,11 @@ func TestGenerateHashID(t *testing.T) {
 
 func TestGenerateHashID_Deterministic(t *testing.T) {
 	now := time.Date(2025, 10, 30, 12, 0, 0, 0, time.UTC)
-	
+
 	// Same inputs should produce same hash
 	hash1 := GenerateHashID("bd", "Title", "Desc", now, "ws1")
 	hash2 := GenerateHashID("bd", "Title", "Desc", now, "ws1")
-	
+
 	if hash1 != hash2 {
 		t.Errorf("expected deterministic hash, got %s and %s", hash1, hash2)
 	}
@@ -70,9 +70,9 @@ func TestGenerateHashID_Deterministic(t *testing.T) {
 
 func TestGenerateHashID_DifferentInputs(t *testing.T) {
 	now := time.Date(2025, 10, 30, 12, 0, 0, 0, time.UTC)
-	
+
 	baseHash := GenerateHashID("bd", "Title", "Desc", now, "ws1")
-	
+
 	tests := []struct {
 		name        string
 		title       string
@@ -85,7 +85,7 @@ func TestGenerateHashID_DifferentInputs(t *testing.T) {
 		{"different timestamp", "Title", "Desc", now.Add(time.Nanosecond), "ws1"},
 		{"different workspace", "Title", "Desc", now, "ws2"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hash := GenerateHashID("bd", tt.title, tt.description, tt.created, tt.workspaceID)
@@ -128,7 +128,7 @@ func TestGenerateChildID(t *testing.T) {
 			want:        "bd-af78e9a2.347",
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := GenerateChildID(tt.parentID, tt.childNumber)
@@ -176,11 +176,11 @@ func TestParseHierarchicalID(t *testing.T) {
 			wantDepth:  3,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotRoot, gotParent, gotDepth := ParseHierarchicalID(tt.id)
-			
+
 			if gotRoot != tt.wantRoot {
 				t.Errorf("root: expected %s, got %s", tt.wantRoot, gotRoot)
 			}
@@ -196,7 +196,7 @@ func TestParseHierarchicalID(t *testing.T) {
 
 func BenchmarkGenerateHashID(b *testing.B) {
 	now := time.Now()
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = GenerateHashID("bd", "Fix auth bug", "Users can't log in", now, "workspace-1")

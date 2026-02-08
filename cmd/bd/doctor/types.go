@@ -49,9 +49,9 @@ type DoctorCheck struct {
 // OrphanIssue represents an issue referenced in commits but still open.
 // This is shared between 'bd orphans' and 'bd doctor' commands.
 type OrphanIssue struct {
-	IssueID              string
-	Title                string
-	Status               string
-	LatestCommit         string
-	LatestCommitMessage  string
+	IssueID             string
+	Title               string
+	Status              string
+	LatestCommit        string
+	LatestCommitMessage string
 }

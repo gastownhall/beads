@@ -15,10 +15,10 @@ import (
 
 // MergeResult contains the outcome of a 3-way merge
 type MergeResult struct {
-	Merged          []*beads.Issue      // Final merged state
-	Conflicts       int                 // Number of true conflicts resolved
-	Strategy        map[string]string   // Per-issue: "local", "remote", "merged", "same"
-	ManualConflicts []ManualConflict    // Fields requiring manual resolution
+	Merged          []*beads.Issue    // Final merged state
+	Conflicts       int               // Number of true conflicts resolved
+	Strategy        map[string]string // Per-issue: "local", "remote", "merged", "same"
+	ManualConflicts []ManualConflict  // Fields requiring manual resolution
 }
 
 // ManualConflict represents a field conflict that requires manual user resolution.

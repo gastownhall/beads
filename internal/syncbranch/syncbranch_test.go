@@ -23,7 +23,7 @@ func TestValidateBranchName(t *testing.T) {
 		{"branch with underscore", "feature_branch", false},
 		{"branch with dot", "release-1.0", false},
 		{"complex valid branch", "feature/user-auth_v2.1", false},
-		
+
 		{"invalid: HEAD", "HEAD", true},
 		{"invalid: single dot", ".", true},
 		{"invalid: double dot", "..", true},
@@ -100,7 +100,7 @@ func TestGet(t *testing.T) {
 	t.Run("returns empty when not set", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		branch, err := Get(ctx, store)
 		if err != nil {
 			t.Fatalf("Get() error = %v", err)
@@ -113,11 +113,11 @@ func TestGet(t *testing.T) {
 	t.Run("returns database config value", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		if err := store.SetConfig(ctx, ConfigKey, "beads-metadata"); err != nil {
 			t.Fatalf("SetConfig() error = %v", err)
 		}
-		
+
 		branch, err := Get(ctx, store)
 		if err != nil {
 			t.Fatalf("Get() error = %v", err)
@@ -130,16 +130,16 @@ func TestGet(t *testing.T) {
 	t.Run("environment variable overrides database", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		// Set database config
 		if err := store.SetConfig(ctx, ConfigKey, "beads-metadata"); err != nil {
 			t.Fatalf("SetConfig() error = %v", err)
 		}
-		
+
 		// Set environment variable
 		os.Setenv(EnvVar, "env-branch")
 		defer os.Unsetenv(EnvVar)
-		
+
 		branch, err := Get(ctx, store)
 		if err != nil {
 			t.Fatalf("Get() error = %v", err)
@@ -152,10 +152,10 @@ func TestGet(t *testing.T) {
 	t.Run("returns error for invalid env var", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		os.Setenv(EnvVar, "invalid..branch")
 		defer os.Unsetenv(EnvVar)
-		
+
 		_, err := Get(ctx, store)
 		if err == nil {
 			t.Error("Get() expected error for invalid env var, got nil")
@@ -165,12 +165,12 @@ func TestGet(t *testing.T) {
 	t.Run("returns error for invalid db config", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		// Directly set invalid value (bypassing validation)
 		if err := store.SetConfig(ctx, ConfigKey, "invalid..branch"); err != nil {
 			t.Fatalf("SetConfig() error = %v", err)
 		}
-		
+
 		_, err := Get(ctx, store)
 		if err == nil {
 			t.Error("Get() expected error for invalid db config, got nil")
@@ -184,11 +184,11 @@ func TestSet(t *testing.T) {
 	t.Run("sets valid branch name", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		if err := Set(ctx, store, "beads-metadata"); err != nil {
 			t.Fatalf("Set() error = %v", err)
 		}
-		
+
 		value, err := store.GetConfig(ctx, ConfigKey)
 		if err != nil {
 			t.Fatalf("GetConfig() error = %v", err)
@@ -201,11 +201,11 @@ func TestSet(t *testing.T) {
 	t.Run("allows empty string", func(t *testing.T) {
 		store := newTestStore(t)
 		defer store.Close()
-		
+
 		if err := Set(ctx, store, ""); err != nil {
 			t.Fatalf("Set() error = %v for empty string", err)
 		}
-		
+
 		value, err := store.GetConfig(ctx, ConfigKey)
 		if err != nil {
 			t.Fatalf("GetConfig() error = %v", err)

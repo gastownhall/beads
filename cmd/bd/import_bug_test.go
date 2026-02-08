@@ -43,9 +43,9 @@ func TestImportReturnsCorrectCounts(t *testing.T) {
 	// Import with default options
 	opts := ImportOptions{
 
-		DryRun:            false,
-		SkipUpdate:        false,
-		Strict:            false,
+		DryRun:     false,
+		SkipUpdate: false,
+		Strict:     false,
 	}
 
 	result, err := importIssuesCore(ctx, dbPath, store, issues, opts)
@@ -85,7 +85,7 @@ func TestImportReturnsCorrectCounts(t *testing.T) {
 	if result2.Unchanged != len(issues) {
 		t.Errorf("Second import: expected Unchanged=%d, got %d", len(issues), result2.Unchanged)
 	}
-	
+
 	t.Logf("Second import: Created=%d, Updated=%d, Unchanged=%d, Skipped=%d",
 		result2.Created, result2.Updated, result2.Unchanged, result2.Skipped)
 }

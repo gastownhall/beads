@@ -82,7 +82,7 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 		// Categorize by confidence
 		highConfidence := []pollutionResult{}
 		mediumConfidence := []pollutionResult{}
-		
+
 		for _, p := range polluted {
 			if p.score >= 0.9 {
 				highConfidence = append(highConfidence, p)
@@ -115,7 +115,7 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 
 		// Human-readable output
 		fmt.Printf("Found %d potential test issues:\n\n", len(polluted))
-		
+
 		if len(highConfidence) > 0 {
 			fmt.Printf("High Confidence (score ≥ 0.9):\n")
 			for _, p := range highConfidence {
@@ -126,7 +126,7 @@ NOTE: Review detected issues carefully before using --clean. False positives are
 			}
 			fmt.Printf("  (Total: %d issues)\n\n", len(highConfidence))
 		}
-		
+
 		if len(mediumConfidence) > 0 {
 			fmt.Printf("Medium Confidence (score 0.7-0.9):\n")
 			for _, p := range mediumConfidence {
@@ -191,36 +191,36 @@ type pollutionResult struct {
 
 func detectTestPollution(issues []*types.Issue) []pollutionResult {
 	var results []pollutionResult
-	
+
 	// Patterns for test issue titles
 	testPrefixPattern := regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|debug|dummy)[-_\s]`)
 	sequentialPattern := regexp.MustCompile(`^[a-z]+-\d+$`)
-	
+
 	// Group issues by creation time to detect rapid succession
 	issuesByMinute := make(map[int64][]*types.Issue)
 	for _, issue := range issues {
 		minute := issue.CreatedAt.Unix() / 60
 		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
 	}
-	
+
 	for _, issue := range issues {
 		score := 0.0
 		var reasons []string
-		
+
 		title := strings.ToLower(issue.Title)
-		
+
 		// Check for test prefixes (strong signal)
 		if testPrefixPattern.MatchString(title) {
 			score += 0.7
 			reasons = append(reasons, "Title starts with test prefix")
 		}
-		
+
 		// Check for sequential numbering (medium signal)
 		if sequentialPattern.MatchString(issue.ID) && len(issue.Description) < 20 {
 			score += 0.4
 			reasons = append(reasons, "Sequential ID with minimal description")
 		}
-		
+
 		// Check for generic/empty description (weak signal)
 		if len(strings.TrimSpace(issue.Description)) == 0 {
 			score += 0.2
@@ -229,22 +229,22 @@ func detectTestPollution(issues []*types.Issue) []pollutionResult {
 			score += 0.1
 			reasons = append(reasons, "Very short description")
 		}
-		
+
 		// Check for rapid creation (created with many others in same minute)
 		minute := issue.CreatedAt.Unix() / 60
 		if len(issuesByMinute[minute]) >= 10 {
 			score += 0.3
 			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
 		}
-		
+
 		// Check for generic test titles
 		if strings.Contains(title, "issue for testing") ||
-		   strings.Contains(title, "test issue") ||
-		   strings.Contains(title, "sample issue") {
+			strings.Contains(title, "test issue") ||
+			strings.Contains(title, "sample issue") {
 			score += 0.5
 			reasons = append(reasons, "Generic test title")
 		}
-		
+
 		// Only include if score is above threshold
 		if score >= 0.7 {
 			results = append(results, pollutionResult{
@@ -254,7 +254,7 @@ func detectTestPollution(issues []*types.Issue) []pollutionResult {
 			})
 		}
 	}
-	
+
 	return results
 }
 
@@ -266,19 +266,19 @@ func backupPollutedIssues(polluted []pollutionResult, path string) error {
 		return fmt.Errorf("failed to create backup file: %w", err)
 	}
 	defer file.Close()
-	
+
 	// Write each issue as JSONL
 	for _, p := range polluted {
 		data, err := json.Marshal(p.issue)
 		if err != nil {
 			return fmt.Errorf("failed to marshal issue %s: %w", p.issue.ID, err)
 		}
-		
+
 		if _, err := file.WriteString(string(data) + "\n"); err != nil {
 			return fmt.Errorf("failed to write issue %s: %w", p.issue.ID, err)
 		}
 	}
-	
+
 	return nil
 }
 

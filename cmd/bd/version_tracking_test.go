@@ -12,9 +12,9 @@ import (
 
 func TestGetVersionsSince(t *testing.T) {
 	// Get current version counts dynamically from versionChanges
-	latestVersion := versionChanges[0].Version              // First element is latest
+	latestVersion := versionChanges[0].Version                     // First element is latest
 	oldestVersion := versionChanges[len(versionChanges)-1].Version // Last element is oldest
-	versionsAfterOldest := len(versionChanges) - 1          // All except oldest
+	versionsAfterOldest := len(versionChanges) - 1                 // All except oldest
 
 	tests := []struct {
 		name          string

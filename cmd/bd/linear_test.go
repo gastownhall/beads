@@ -1249,26 +1249,26 @@ func TestDoPushToLinearIncludeEphemeralFlag(t *testing.T) {
 
 	now := time.Now()
 	persistent := &types.Issue{
-		Title:      "Persistent issue",
-		Priority:   2,
-		IssueType:  types.TypeTask,
-		Status:     types.StatusOpen,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Ephemeral:  false,
+		Title:     "Persistent issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Ephemeral: false,
 	}
 	if err := testStore.CreateIssue(ctx, persistent, "test-actor"); err != nil {
 		t.Fatalf("CreateIssue persistent failed: %v", err)
 	}
 
 	ephemeral := &types.Issue{
-		Title:      "Ephemeral wisp",
-		Priority:   2,
-		IssueType:  types.TypeTask,
-		Status:     types.StatusOpen,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Ephemeral:  true,
+		Title:     "Ephemeral wisp",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Ephemeral: true,
 	}
 	if err := testStore.CreateIssue(ctx, ephemeral, "test-actor"); err != nil {
 		t.Fatalf("CreateIssue ephemeral failed: %v", err)

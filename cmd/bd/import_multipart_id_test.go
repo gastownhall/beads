@@ -14,7 +14,7 @@ import (
 func TestImportMultiPartIDs(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	
+
 	// Create database with "vc" prefix
 	st := newTestStoreWithPrefix(t, dbPath, "vc")
 

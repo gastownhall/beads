@@ -107,13 +107,13 @@ func TestEvaluateExpr(t *testing.T) {
 			want: 0, // 0.5 truncated to int
 		},
 		{
-			name: "division by zero",
-			expr: "10/0",
+			name:    "division by zero",
+			expr:    "10/0",
 			wantErr: true,
 		},
 		{
-			name: "invalid expression",
-			expr: "2++3",
+			name:    "invalid expression",
+			expr:    "2++3",
 			wantErr: true,
 		},
 	}

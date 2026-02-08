@@ -20,24 +20,24 @@ import (
 // MigrationValidationResult provides machine-parseable migration validation output.
 // This struct is designed to be consumed by Claude and other automation tools.
 type MigrationValidationResult struct {
-	Phase           string   `json:"phase"`            // "pre-migration" or "post-migration"
-	Ready           bool     `json:"ready"`            // true if migration can proceed/succeeded
-	Backend         string   `json:"backend"`          // current backend: "sqlite", "dolt", or "jsonl-only"
-	JSONLCount      int      `json:"jsonl_count"`      // issue count in JSONL
-	SQLiteCount     int      `json:"sqlite_count"`     // issue count in SQLite (pre-migration)
-	DoltCount       int      `json:"dolt_count"`       // issue count in Dolt (post-migration)
-	MissingInDB     []string `json:"missing_in_db"`    // issue IDs in JSONL but not in DB (sample)
-	MissingInJSONL  []string `json:"missing_in_jsonl"` // issue IDs in DB but not in JSONL (sample)
-	Errors          []string `json:"errors"`           // blocking errors
-	Warnings        []string `json:"warnings"`         // non-blocking warnings
-	JSONLValid      bool     `json:"jsonl_valid"`      // true if JSONL is parseable
-	JSONLMalformed  int      `json:"jsonl_malformed"`  // count of malformed JSONL lines
-	DoltHealthy     bool     `json:"dolt_healthy"`     // true if Dolt DB is healthy
-	DoltLocked         bool            `json:"dolt_locked"`          // true if Dolt has uncommitted changes
-	SchemaValid        bool            `json:"schema_valid"`         // true if schema is complete
-	RecommendedFix     string          `json:"recommended_fix"`      // suggested command to fix issues
-	ForeignPrefixCount int             `json:"foreign_prefix_count"` // count of issues with non-local prefixes (cross-rig contamination)
-	ForeignPrefixes    map[string]int  `json:"foreign_prefixes"`     // prefix -> count for foreign-prefix issues
+	Phase              string         `json:"phase"`                // "pre-migration" or "post-migration"
+	Ready              bool           `json:"ready"`                // true if migration can proceed/succeeded
+	Backend            string         `json:"backend"`              // current backend: "sqlite", "dolt", or "jsonl-only"
+	JSONLCount         int            `json:"jsonl_count"`          // issue count in JSONL
+	SQLiteCount        int            `json:"sqlite_count"`         // issue count in SQLite (pre-migration)
+	DoltCount          int            `json:"dolt_count"`           // issue count in Dolt (post-migration)
+	MissingInDB        []string       `json:"missing_in_db"`        // issue IDs in JSONL but not in DB (sample)
+	MissingInJSONL     []string       `json:"missing_in_jsonl"`     // issue IDs in DB but not in JSONL (sample)
+	Errors             []string       `json:"errors"`               // blocking errors
+	Warnings           []string       `json:"warnings"`             // non-blocking warnings
+	JSONLValid         bool           `json:"jsonl_valid"`          // true if JSONL is parseable
+	JSONLMalformed     int            `json:"jsonl_malformed"`      // count of malformed JSONL lines
+	DoltHealthy        bool           `json:"dolt_healthy"`         // true if Dolt DB is healthy
+	DoltLocked         bool           `json:"dolt_locked"`          // true if Dolt has uncommitted changes
+	SchemaValid        bool           `json:"schema_valid"`         // true if schema is complete
+	RecommendedFix     string         `json:"recommended_fix"`      // suggested command to fix issues
+	ForeignPrefixCount int            `json:"foreign_prefix_count"` // count of issues with non-local prefixes (cross-rig contamination)
+	ForeignPrefixes    map[string]int `json:"foreign_prefixes"`     // prefix -> count for foreign-prefix issues
 }
 
 // CheckMigrationReadiness validates that a beads installation is ready for Dolt migration.

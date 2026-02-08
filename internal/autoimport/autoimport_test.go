@@ -591,4 +591,3 @@ func TestStderrNotifier(t *testing.T) {
 		notify.Infof("test info")
 	})
 }
-

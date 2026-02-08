@@ -295,7 +295,7 @@ func TestRepliesTo(t *testing.T) {
 		IssueType:   "message",
 		Sender:      "alice",
 		Assignee:    "bob",
-		Ephemeral:        true,
+		Ephemeral:   true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -307,7 +307,7 @@ func TestRepliesTo(t *testing.T) {
 		IssueType:   "message",
 		Sender:      "bob",
 		Assignee:    "alice",
-		Ephemeral:        true,
+		Ephemeral:   true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -415,7 +415,7 @@ func TestWispField(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: "message",
-		Ephemeral:      true,
+		Ephemeral: true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -426,7 +426,7 @@ func TestWispField(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Ephemeral:      false,
+		Ephemeral: false,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -468,7 +468,7 @@ func TestWispFilter(t *testing.T) {
 			Status:    types.StatusClosed, // Closed for cleanup test
 			Priority:  2,
 			IssueType: "message",
-			Ephemeral:      true,
+			Ephemeral: true,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -483,7 +483,7 @@ func TestWispFilter(t *testing.T) {
 			Status:    types.StatusClosed,
 			Priority:  2,
 			IssueType: types.TypeTask,
-			Ephemeral:      false,
+			Ephemeral: false,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -496,8 +496,8 @@ func TestWispFilter(t *testing.T) {
 	wispTrue := true
 	closedStatus := types.StatusClosed
 	wispFilter := types.IssueFilter{
-		Status: &closedStatus,
-		Ephemeral:   &wispTrue,
+		Status:    &closedStatus,
+		Ephemeral: &wispTrue,
 	}
 
 	wispIssues, err := store.SearchIssues(ctx, "", wispFilter)
@@ -511,8 +511,8 @@ func TestWispFilter(t *testing.T) {
 	// Filter for non-wisp only
 	wispFalse := false
 	nonWispFilter := types.IssueFilter{
-		Status: &closedStatus,
-		Ephemeral:   &wispFalse,
+		Status:    &closedStatus,
+		Ephemeral: &wispFalse,
 	}
 
 	permanentIssues, err := store.SearchIssues(ctx, "", nonWispFilter)

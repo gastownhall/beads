@@ -13,8 +13,8 @@ import (
 )
 
 var migrateIssuesCmd = &cobra.Command{
-	Use:     "issues",
-	Short:   "Move issues between repositories",
+	Use:   "issues",
+	Short: "Move issues between repositories",
 	Long: `Move issues from one source repository to another with filtering and dependency preservation.
 
 This command updates the source_repo field for selected issues, allowing you to:

@@ -15,13 +15,13 @@ import (
 // This addresses the issue where the daemon's long-lived SQLite connection
 // becomes stale after external file replacement (not just in-place writes).
 type freshnessChecker struct {
-	dbPath       string
-	lastInode    uint64    // File inode (changes when file is replaced)
-	lastMtime    time.Time // File modification time
-	lastSize     int64     // File size
-	mu           sync.Mutex
-	enabled      bool
-	onStale      func() error // Callback to reconnect when staleness detected
+	dbPath    string
+	lastInode uint64    // File inode (changes when file is replaced)
+	lastMtime time.Time // File modification time
+	lastSize  int64     // File size
+	mu        sync.Mutex
+	enabled   bool
+	onStale   func() error // Callback to reconnect when staleness detected
 }
 
 // newFreshnessChecker creates a new freshness checker for the given database path.

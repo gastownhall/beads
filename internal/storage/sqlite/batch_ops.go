@@ -79,7 +79,7 @@ func (s *SQLiteStorage) generateBatchIDs(ctx context.Context, conn *sql.Conn, is
 	if err := ensureIDs(ctx, conn, prefix, issues, actor, orphanHandling, skipPrefixValidation); err != nil {
 		return wrapDBError("ensure IDs", err)
 	}
-	
+
 	// Compute content hashes
 	for i := range issues {
 		if issues[i].ContentHash == "" {
@@ -210,13 +210,15 @@ func checkForExistingIDs(ctx context.Context, conn *sql.Conn, issues []*types.Is
 //   - This reflects that they were created as a single atomic operation
 //
 // Usage:
-//   // Bulk import from external source
-//   issues := []*types.Issue{...}
-//   if err := store.CreateIssues(ctx, issues, "import"); err != nil {
-//       return err
-//   }
 //
-//   // After importing with explicit IDs, sync counters to prevent collisions
+//	// Bulk import from external source
+//	issues := []*types.Issue{...}
+//	if err := store.CreateIssues(ctx, issues, "import"); err != nil {
+//	    return err
+//	}
+//
+//	// After importing with explicit IDs, sync counters to prevent collisions
+//
 // REMOVED: SyncAllCounters example - no longer needed with hash IDs
 //
 // Performance:

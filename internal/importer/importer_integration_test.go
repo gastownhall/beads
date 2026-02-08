@@ -51,7 +51,7 @@ func TestConcurrentExternalRefUpdates(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			
+
 			updated := &types.Issue{
 				ID:          "bd-import-" + string(rune('1'+idx)),
 				Title:       "Updated from worker " + string(rune('A'+idx)),
@@ -171,4 +171,3 @@ func TestLocalUnpushedIssueNotDeleted(t *testing.T) {
 		t.Error("Local issue was incorrectly purged")
 	}
 }
-

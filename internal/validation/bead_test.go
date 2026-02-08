@@ -36,12 +36,12 @@ func TestParsePriority(t *testing.T) {
 		{" P1 ", 1},
 
 		// Invalid cases (returns -1)
-		{"5", -1},      // Out of range
-		{"-1", -1},     // Negative
-		{"P5", -1},     // Out of range with prefix
-		{"abc", -1},    // Not a number
-		{"P", -1},      // Just the prefix
-		{"PP1", -1},    // Double prefix
+		{"5", -1},   // Out of range
+		{"-1", -1},  // Negative
+		{"P5", -1},  // Out of range with prefix
+		{"abc", -1}, // Not a number
+		{"P", -1},   // Just the prefix
+		{"PP1", -1}, // Double prefix
 	}
 
 	for _, tt := range tests {
@@ -97,11 +97,11 @@ func TestValidateIDFormat(t *testing.T) {
 		// Hyphenated prefix support
 		// These test cases verify that ValidateIDFormat correctly extracts
 		// prefixes containing hyphens (e.g., "bead-me-up" not just "bead")
-		{"bead-me-up-3e9", "bead-me-up", false},           // 3-char hash suffix
-		{"bead-me-up-3e9.1", "bead-me-up", false},         // hierarchical child
-		{"bead-me-up-3e9.1.2", "bead-me-up", false},       // deeply nested child
-		{"web-app-a3f8e9", "web-app", false},              // 6-char hash suffix
-		{"my-cool-project-1a2b", "my-cool-project", false}, // 4-char hash suffix
+		{"bead-me-up-3e9", "bead-me-up", false},                       // 3-char hash suffix
+		{"bead-me-up-3e9.1", "bead-me-up", false},                     // hierarchical child
+		{"bead-me-up-3e9.1.2", "bead-me-up", false},                   // deeply nested child
+		{"web-app-a3f8e9", "web-app", false},                          // 6-char hash suffix
+		{"my-cool-project-1a2b", "my-cool-project", false},            // 4-char hash suffix
 		{"document-intelligence-0sa", "document-intelligence", false}, // 3-char hash
 	}
 
@@ -125,12 +125,12 @@ func TestValidateIDFormat(t *testing.T) {
 // not "bead". This test simulates the create.go flow at lines 352-391.
 func TestValidateIDFormat_ParentChildFlow(t *testing.T) {
 	tests := []struct {
-		name         string
-		parentID     string
-		childSuffix  string
-		dbPrefix     string
-		wantPrefix   string
-		shouldMatch  bool
+		name        string
+		parentID    string
+		childSuffix string
+		dbPrefix    string
+		wantPrefix  string
+		shouldMatch bool
 	}{
 		{
 			name:        "simple prefix - child creation works",
@@ -205,10 +205,10 @@ func TestValidateIDFormat_ParentChildFlow(t *testing.T) {
 
 func TestParseIssueType(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		wantType     types.IssueType
-		wantError    bool
+		name          string
+		input         string
+		wantType      types.IssueType
+		wantError     bool
 		errorContains string
 	}{
 		// Core work types (always valid)
@@ -243,20 +243,20 @@ func TestParseIssueType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseIssueType(tt.input)
-			
+
 			// Check error conditions
 			if (err != nil) != tt.wantError {
 				t.Errorf("ParseIssueType(%q) error = %v, wantError %v", tt.input, err, tt.wantError)
 				return
 			}
-			
+
 			if err != nil && tt.errorContains != "" {
 				if !strings.Contains(err.Error(), tt.errorContains) {
 					t.Errorf("ParseIssueType(%q) error message = %q, should contain %q", tt.input, err.Error(), tt.errorContains)
 				}
 				return
 			}
-			
+
 			// Check return value
 			if got != tt.wantType {
 				t.Errorf("ParseIssueType(%q) = %v, want %v", tt.input, got, tt.wantType)
@@ -383,4 +383,3 @@ func TestValidateIDPrefixAllowed(t *testing.T) {
 		})
 	}
 }
-

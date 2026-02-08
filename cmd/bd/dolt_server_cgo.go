@@ -70,5 +70,3 @@ func (h *DoltServerHandle) Host() string {
 func DoltServerAvailable() bool {
 	return true
 }
-
-

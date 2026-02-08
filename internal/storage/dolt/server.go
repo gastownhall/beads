@@ -340,5 +340,3 @@ func isServerListening(host string, port int) bool {
 	_ = conn.Close()
 	return true
 }
-
-

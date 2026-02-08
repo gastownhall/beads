@@ -22,8 +22,8 @@ import (
 )
 
 var migrateHashIDsCmd = &cobra.Command{
-	Use:     "hash-ids",
-	Short:   "Migrate sequential IDs to hash-based IDs (legacy)",
+	Use:   "hash-ids",
+	Short: "Migrate sequential IDs to hash-based IDs (legacy)",
 	Long: `Migrate database from sequential IDs (bd-1, bd-2) to hash-based IDs (bd-a3f8e9a2).
 
 *** LEGACY COMMAND ***
@@ -71,7 +71,7 @@ WARNING: Backup your database before running this command, even though it create
 			}
 			os.Exit(1)
 		}
-		
+
 		// Create backup before migration
 		if !dryRun {
 			backupPath := strings.TrimSuffix(dbPath, ".db") + ".backup-" + time.Now().Format("20060102-150405") + ".db"
@@ -90,7 +90,7 @@ WARNING: Backup your database before running this command, even though it create
 				fmt.Printf("%s\n\n", ui.RenderPass(fmt.Sprintf("✓ Created backup: %s", filepath.Base(backupPath))))
 			}
 		}
-		
+
 		// Open database
 		store, err := sqlite.New(rootCtx, dbPath)
 		if err != nil {
@@ -105,7 +105,7 @@ WARNING: Backup your database before running this command, even though it create
 			os.Exit(1)
 		}
 		defer func() { _ = store.Close() }()
-		
+
 		// Get all issues using SearchIssues with empty query and no filters
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
@@ -119,7 +119,7 @@ WARNING: Backup your database before running this command, even though it create
 			}
 			os.Exit(1)
 		}
-		
+
 		if len(issues) == 0 {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
@@ -131,7 +131,7 @@ WARNING: Backup your database before running this command, even though it create
 			}
 			return
 		}
-		
+
 		// Check if already using hash IDs
 		if isHashID(issues[0].ID) {
 			if jsonOutput {
@@ -144,7 +144,7 @@ WARNING: Backup your database before running this command, even though it create
 			}
 			return
 		}
-		
+
 		// Perform migration
 		mapping, err := migrateToHashIDs(ctx, store, issues, dryRun)
 		if err != nil {
@@ -158,7 +158,7 @@ WARNING: Backup your database before running this command, even though it create
 			}
 			os.Exit(1)
 		}
-		
+
 		// Save mapping to file
 		if !dryRun {
 			mappingPath := filepath.Join(filepath.Dir(dbPath), "hash-id-mapping.json")
@@ -170,14 +170,14 @@ WARNING: Backup your database before running this command, even though it create
 				fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Saved mapping to: %s", filepath.Base(mappingPath))))
 			}
 		}
-		
+
 		// Output results
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
-				"status":        "success",
-				"dry_run":       dryRun,
+				"status":          "success",
+				"dry_run":         dryRun,
 				"issues_migrated": len(mapping),
-				"mapping":       mapping,
+				"mapping":         mapping,
 			})
 		} else {
 			if dryRun {
@@ -209,14 +209,14 @@ WARNING: Backup your database before running this command, even though it create
 func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues []*types.Issue, dryRun bool) (map[string]string, error) {
 	// Build dependency graph to determine top-level vs child issues
 	parentMap := make(map[string]string) // child ID → parent ID
-	
+
 	// Get all dependencies to find parent-child relationships
 	for _, issue := range issues {
 		deps, err := store.GetDependencyRecords(ctx, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get dependencies for %s: %w", issue.ID, err)
 		}
-		
+
 		for _, dep := range deps {
 			if dep.Type == types.DepParentChild {
 				// issue depends on parent
@@ -224,17 +224,17 @@ func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues [
 			}
 		}
 	}
-	
+
 	// Get prefix from config or use default
 	prefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil || prefix == "" {
 		prefix = "bd"
 	}
-	
+
 	// Generate mapping: old ID → new hash ID
 	mapping := make(map[string]string)
 	childCounters := make(map[string]int) // parent hash ID → next child number
-	
+
 	// First pass: generate hash IDs for top-level issues (no parent)
 	for _, issue := range issues {
 		if _, hasParent := parentMap[issue.ID]; !hasParent {
@@ -243,7 +243,7 @@ func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues [
 			mapping[issue.ID] = hashID
 		}
 	}
-	
+
 	// Second pass: assign hierarchical IDs to child issues
 	for _, issue := range issues {
 		if parentID, hasParent := parentMap[issue.ID]; hasParent {
@@ -252,33 +252,33 @@ func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues [
 			if !ok {
 				return nil, fmt.Errorf("parent %s not yet mapped for child %s", parentID, issue.ID)
 			}
-			
+
 			// Get next child number for this parent
 			childNum := childCounters[parentHashID] + 1
 			childCounters[parentHashID] = childNum
-			
+
 			// Assign hierarchical ID
 			mapping[issue.ID] = fmt.Sprintf("%s.%d", parentHashID, childNum)
 		}
 	}
-	
+
 	if dryRun {
 		return mapping, nil
 	}
-	
+
 	// Apply the migration
 	// UpdateIssueID handles updating the issue, dependencies, comments, events, labels, and dirty_issues
 	// We need to also update text references in descriptions, notes, design, acceptance criteria
-	
+
 	// Sort issues by ID to process parents before children
 	slices.SortFunc(issues, func(a, b *types.Issue) int {
 		return cmp.Compare(a.ID, b.ID)
 	})
-	
+
 	// Update all issues
 	for _, issue := range issues {
 		newID := mapping[issue.ID]
-		
+
 		// Update text references in this issue
 		issue.Description = replaceIDReferences(issue.Description, mapping)
 		if issue.Design != "" {
@@ -294,7 +294,7 @@ func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues [
 			updated := replaceIDReferences(*issue.ExternalRef, mapping)
 			issue.ExternalRef = &updated
 		}
-		
+
 		// Use UpdateIssueID to change the primary key and cascade to all foreign keys
 		// This method handles dependencies, comments, events, labels, and dirty_issues
 		oldID := issue.ID
@@ -302,7 +302,7 @@ func migrateToHashIDs(ctx context.Context, store *sqlite.SQLiteStorage, issues [
 			return nil, fmt.Errorf("failed to update issue %s → %s: %w", oldID, newID, err)
 		}
 	}
-	
+
 	return mapping, nil
 }
 
@@ -317,10 +317,10 @@ func generateHashIDForIssue(prefix string, issue *types.Issue) string {
 		issue.CreatedAt.UnixNano(),
 		0, // nonce
 	)
-	
+
 	hash := sha256Hash(content)
 	shortHash := hash[:8] // First 8 hex chars
-	
+
 	return fmt.Sprintf("%s-%s", prefix, shortHash)
 }
 
@@ -334,7 +334,7 @@ func sha256Hash(content string) string {
 func replaceIDReferences(text string, mapping map[string]string) string {
 	// Match patterns like "bd-123" or "bd-123.4"
 	re := regexp.MustCompile(`\bbd-\d+(?:\.\d+)*\b`)
-	
+
 	return re.ReplaceAllStringFunc(text, func(match string) string {
 		if newID, ok := mapping[match]; ok {
 			return newID
@@ -351,26 +351,26 @@ func isHashID(id string) bool {
 	if lastSeperatorIndex == -1 {
 		return false
 	}
-	
+
 	suffix := id[lastSeperatorIndex+1:]
 	// Strip hierarchical suffix like .1 or .1.2
 	baseSuffix := strings.Split(suffix, ".")[0]
-	
+
 	if len(baseSuffix) == 0 {
 		return false
 	}
-	
+
 	// Must be valid Base36 (0-9, a-z)
 	if !regexp.MustCompile(`^[0-9a-z]+$`).MatchString(baseSuffix) {
 		return false
 	}
-	
+
 	// If it's 5+ characters long, it's almost certainly a hash ID
 	// (sequential IDs rarely exceed 9999 = 4 digits)
 	if len(baseSuffix) >= 5 {
 		return true
 	}
-	
+
 	// For shorter IDs, check if it contains any letter (a-z)
 	// Sequential IDs are purely numeric
 	return regexp.MustCompile(`[a-z]`).MatchString(baseSuffix)
@@ -383,7 +383,7 @@ func saveMappingFile(path string, mapping map[string]string) error {
 		OldID string `json:"old_id"`
 		NewID string `json:"new_id"`
 	}
-	
+
 	entries := make([]mappingEntry, 0, len(mapping))
 	for old, new := range mapping {
 		entries = append(entries, mappingEntry{
@@ -391,12 +391,12 @@ func saveMappingFile(path string, mapping map[string]string) error {
 			NewID: new,
 		})
 	}
-	
+
 	// Sort by old ID for readability
 	slices.SortFunc(entries, func(a, b mappingEntry) int {
 		return cmp.Compare(a.OldID, b.OldID)
 	})
-	
+
 	data, err := json.MarshalIndent(map[string]interface{}{
 		"migrated_at": time.Now().Format(time.RFC3339),
 		"count":       len(entries),
@@ -405,7 +405,7 @@ func saveMappingFile(path string, mapping map[string]string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// nolint:gosec // G306: JSONL file needs to be readable by other tools
 	return os.WriteFile(path, data, 0644)
 }

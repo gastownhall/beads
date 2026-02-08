@@ -169,7 +169,7 @@ func showRemapping(allIssues []*types.Issue, idMapping map[string]string, notify
 	for oldID, newID := range idMapping {
 		mappings = append(mappings, mapping{oldID, newID})
 	}
-	
+
 	// Sort by old ID
 	for i := 0; i < len(mappings); i++ {
 		for j := i + 1; j < len(mappings); j++ {
@@ -333,4 +333,3 @@ func CheckStaleness(ctx context.Context, store storage.Storage, dbPath string) (
 
 	return stat.ModTime().After(lastImportTime), nil
 }
-

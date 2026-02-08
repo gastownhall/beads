@@ -70,8 +70,8 @@ func loadLegacyDeletionsCmd(path string) (map[string]legacyDeletionRecordCmd, []
 }
 
 var migrateTombstonesCmd = &cobra.Command{
-	Use:     "tombstones",
-	Short:   "Convert deletions.jsonl entries to inline tombstones",
+	Use:   "tombstones",
+	Short: "Convert deletions.jsonl entries to inline tombstones",
 	Long: `Migrate legacy deletions.jsonl entries to inline tombstones in issues.jsonl.
 
 This command converts existing deletion records from the legacy deletions.jsonl

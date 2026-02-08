@@ -140,13 +140,13 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 
 	// Create initial issue
 	issue := &types.Issue{
-		ID:          "vc-001",
-		Title:       "Version control test",
-		IssueType:   types.TypeTask,
-		Status:      types.StatusOpen,
-		Priority:    1,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        "vc-001",
+		Title:     "Version control test",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("failed to create issue: %v", err)
@@ -266,13 +266,13 @@ func TestFederationHistoryQueries(t *testing.T) {
 
 	// Create issue
 	issue := &types.Issue{
-		ID:          "hist-001",
-		Title:       "History test - v1",
-		IssueType:   types.TypeTask,
-		Status:      types.StatusOpen,
-		Priority:    1,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        "hist-001",
+		Title:     "History test - v1",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("failed to create: %v", err)

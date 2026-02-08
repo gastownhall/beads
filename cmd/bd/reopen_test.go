@@ -84,7 +84,7 @@ func (h *reopenTestHelper) assertCommentEvent(issueID, comment string) {
 	if err != nil {
 		h.t.Fatalf("Failed to get events: %v", err)
 	}
-	
+
 	for _, e := range events {
 		if e.EventType == types.EventCommented && e.Comment != nil && *e.Comment == comment {
 			return

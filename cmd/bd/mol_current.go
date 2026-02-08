@@ -23,14 +23,14 @@ const LargeMoleculeThreshold = 100
 
 // MoleculeProgress holds the progress information for a molecule
 type MoleculeProgress struct {
-	MoleculeID    string         `json:"molecule_id"`
-	MoleculeTitle string         `json:"molecule_title"`
-	Assignee      string         `json:"assignee,omitempty"`
-	CurrentStep   *types.Issue   `json:"current_step,omitempty"`
-	NextStep      *types.Issue   `json:"next_step,omitempty"`
-	Steps         []*StepStatus  `json:"steps"`
-	Completed     int            `json:"completed"`
-	Total         int            `json:"total"`
+	MoleculeID    string        `json:"molecule_id"`
+	MoleculeTitle string        `json:"molecule_title"`
+	Assignee      string        `json:"assignee,omitempty"`
+	CurrentStep   *types.Issue  `json:"current_step,omitempty"`
+	NextStep      *types.Issue  `json:"next_step,omitempty"`
+	Steps         []*StepStatus `json:"steps"`
+	Completed     int           `json:"completed"`
+	Total         int           `json:"total"`
 }
 
 // StepStatus represents the status of a step in a molecule

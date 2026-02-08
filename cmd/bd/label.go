@@ -1,23 +1,26 @@
 // Package main implements the bd CLI label management commands.
 package main
+
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"sort"
-	"strings"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"os"
+	"sort"
+	"strings"
 )
+
 var labelCmd = &cobra.Command{
 	Use:     "label",
 	GroupID: "issues",
 	Short:   "Manage issue labels",
 }
+
 // Helper function to process label operations for multiple issues
 func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
 	daemonFunc func(string, string) error, storeFunc func(context.Context, string, string, string) error) {
@@ -62,6 +65,7 @@ func parseLabelArgs(args []string) (issueIDs []string, label string) {
 	issueIDs = args[:len(args)-1]
 	return
 }
+
 //nolint:dupl // labelAddCmd and labelRemoveCmd are similar but serve different operations
 var labelAddCmd = &cobra.Command{
 	Use:   "add [issue-id...] [label]",
@@ -115,6 +119,7 @@ var labelAddCmd = &cobra.Command{
 			})
 	},
 }
+
 //nolint:dupl // labelRemoveCmd and labelAddCmd are similar but serve different operations
 var labelRemoveCmd = &cobra.Command{
 	Use:   "remove [issue-id...] [label]",
@@ -313,6 +318,7 @@ var labelListAllCmd = &cobra.Command{
 		fmt.Println()
 	},
 }
+
 func init() {
 	// Issue ID completions
 	labelAddCmd.ValidArgsFunction = issueIDCompletion

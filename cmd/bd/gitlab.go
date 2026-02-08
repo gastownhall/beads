@@ -64,12 +64,12 @@ var gitlabProjectsCmd = &cobra.Command{
 }
 
 var (
-	gitlabSyncDryRun     bool
-	gitlabSyncPullOnly   bool
-	gitlabSyncPushOnly   bool
-	gitlabPreferLocal    bool
-	gitlabPreferGitLab   bool
-	gitlabPreferNewer    bool
+	gitlabSyncDryRun   bool
+	gitlabSyncPullOnly bool
+	gitlabSyncPushOnly bool
+	gitlabPreferLocal  bool
+	gitlabPreferGitLab bool
+	gitlabPreferNewer  bool
 )
 
 func init() {

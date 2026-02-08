@@ -84,7 +84,7 @@ func TestPadRight(t *testing.T) {
 			name:  "empty string",
 			s:     "",
 			width: 3,
-			want:   "   ",
+			want:  "   ",
 		},
 		{
 			name:  "unicode safe",
@@ -106,9 +106,9 @@ func TestPadRight(t *testing.T) {
 
 func TestRenderNodeBox(t *testing.T) {
 	tests := []struct {
-		name   string
-		node   *GraphNode
-		width  int
+		name     string
+		node     *GraphNode
+		width    int
 		notEmpty bool
 	}{
 		{
