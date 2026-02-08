@@ -1641,3 +1641,27 @@ func TestRequiredPatterns_ContainsLastTouched(t *testing.T) {
 		t.Error("requiredPatterns should include 'last-touched'")
 	}
 }
+
+// TestGitignoreTemplate_ContainsJSONLLock verifies that the .beads/.gitignore template
+// includes .jsonl.lock to prevent the JSONL coordination lock file from being tracked.
+// The lock file is a runtime artifact in the same category as daemon.lock and .sync.lock.
+func TestGitignoreTemplate_ContainsJSONLLock(t *testing.T) {
+	if !strings.Contains(GitignoreTemplate, ".jsonl.lock") {
+		t.Error("GitignoreTemplate should contain '.jsonl.lock' pattern")
+	}
+}
+
+// TestRequiredPatterns_ContainsJSONLLock verifies that bd doctor validates
+// the presence of the .jsonl.lock pattern in .beads/.gitignore.
+func TestRequiredPatterns_ContainsJSONLLock(t *testing.T) {
+	found := false
+	for _, pattern := range requiredPatterns {
+		if pattern == ".jsonl.lock" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("requiredPatterns should include '.jsonl.lock'")
+	}
+}
