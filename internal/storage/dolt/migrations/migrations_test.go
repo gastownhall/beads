@@ -1,84 +1,69 @@
+//go:build cgo
 package migrations
 
 import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	embedded "github.com/dolthub/driver"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
-// openTestDolt creates a temporary Dolt database via sql-server for testing.
+// openTestDolt creates a temporary embedded Dolt database for testing.
 func openTestDolt(t *testing.T) *sql.DB {
 	t.Helper()
-
-	// Skip if dolt is not available
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping test")
-	}
-
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 	if err := os.MkdirAll(dbPath, 0755); err != nil {
 		t.Fatalf("failed to create db dir: %v", err)
 	}
 
-	// Initialize dolt repo
-	cmd := exec.Command("dolt", "init")
-	cmd.Dir = dbPath
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init dolt repo: %v", err)
-	}
-
-	// Start dolt sql-server on a random-ish port
-	port := 13400 + os.Getpid()%100
-	serverCmd := exec.Command("dolt", "sql-server",
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-		"--no-auto-commit",
-	)
-	serverCmd.Dir = dbPath
-	serverCmd.Stdout = os.Stderr
-	serverCmd.Stderr = os.Stderr
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		if serverCmd.Process != nil {
-			_ = serverCmd.Process.Kill()
-			_ = serverCmd.Wait()
-		}
-	})
-
-	// Wait for server to be ready
-	dsn := fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?parseTime=true", port)
-	var db *sql.DB
-	var err error
-	for i := 0; i < 30; i++ {
-		db, err = sql.Open("mysql", dsn)
-		if err == nil {
-			if pingErr := db.Ping(); pingErr == nil {
-				break
-			}
-			_ = db.Close()
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	absPath, err := filepath.Abs(dbPath)
 	if err != nil {
-		t.Fatalf("failed to connect to dolt sql-server: %v", err)
+		t.Fatalf("failed to get abs path: %v", err)
 	}
 
-	// Create database and schema
-	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads"); err != nil {
+	// First connect without database to create it
+	initDSN := fmt.Sprintf("file://%s?commitname=test&commitemail=test@test.com", absPath)
+	initCfg, err := embedded.ParseDSN(initDSN)
+	if err != nil {
+		t.Fatalf("failed to parse init DSN: %v", err)
+	}
+
+	initConnector, err := embedded.NewConnector(initCfg)
+	if err != nil {
+		t.Fatalf("failed to create init connector: %v", err)
+	}
+
+	initDB := sql.OpenDB(initConnector)
+	_, err = initDB.Exec("CREATE DATABASE IF NOT EXISTS beads")
+	if err != nil {
+		_ = doltutil.CloseWithTimeout("initDB", initDB.Close)
+		_ = doltutil.CloseWithTimeout("initConnector", initConnector.Close)
 		t.Fatalf("failed to create database: %v", err)
 	}
-	if _, err := db.Exec("USE beads"); err != nil {
-		t.Fatalf("failed to use database: %v", err)
+	_ = doltutil.CloseWithTimeout("initDB", initDB.Close)
+	_ = doltutil.CloseWithTimeout("initConnector", initConnector.Close)
+
+	// Now connect with database specified
+	dsn := fmt.Sprintf("file://%s?commitname=test&commitemail=test@test.com&database=beads", absPath)
+	cfg, err := embedded.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("failed to parse DSN: %v", err)
 	}
+
+	connector, err := embedded.NewConnector(cfg)
+	if err != nil {
+		t.Fatalf("failed to create connector: %v", err)
+	}
+	t.Cleanup(func() { _ = doltutil.CloseWithTimeout("connector", connector.Close) })
+
+	db := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = doltutil.CloseWithTimeout("db", db.Close) })
 
 	// Create minimal issues table without wisp_type (simulating old schema)
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS issues (
@@ -91,15 +76,6 @@ func openTestDolt(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to create issues table: %v", err)
 	}
-
-	// Reconnect with database in DSN
-	_ = db.Close()
-	dbDSN := fmt.Sprintf("root:@tcp(127.0.0.1:%d)/beads?parseTime=true", port)
-	db, err = sql.Open("mysql", dbDSN)
-	if err != nil {
-		t.Fatalf("failed to connect to beads database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	return db
 }
@@ -175,3 +151,5 @@ func TestTableExists(t *testing.T) {
 		t.Fatal("nonexistent table should not exist")
 	}
 }
+
+

@@ -9,11 +9,26 @@ BINARY := bd
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
 
+# Dolt backend requires CGO for embedded database support.
+# Without CGO, builds will fail with "dolt backend requires CGO".
+export CGO_ENABLED := 1
+
+# ICU4C is keg-only on macOS (Homebrew doesn't symlink it into /opt/homebrew).
+# Dolt's go-icu-regex dependency needs these paths to compile and link.
+ifeq ($(shell uname),Darwin)
+ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+ifneq ($(ICU_PREFIX),)
+export CGO_CFLAGS   += -I$(ICU_PREFIX)/include
+export CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
+export CGO_LDFLAGS  += -L$(ICU_PREFIX)/lib
+endif
+endif
+
 # Build the bd binary
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
+	go build -tags gms_pure_go -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
 else
 	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
 ifeq ($(shell uname),Darwin)

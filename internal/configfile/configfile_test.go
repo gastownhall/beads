@@ -224,19 +224,19 @@ func TestDoltServerMode(t *testing.T) {
 				want: false,
 			},
 			{
-				name: "dolt always server mode",
-				cfg:  &Config{Backend: BackendDolt},
-				want: true,
-			},
-			{
-				name: "dolt with legacy embedded config still returns true",
+				name: "dolt embedded mode",
 				cfg:  &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded},
-				want: true,
+				want: false,
 			},
 			{
-				name: "dolt explicit server mode",
+				name: "dolt server mode",
 				cfg:  &Config{Backend: BackendDolt, DoltMode: DoltModeServer},
 				want: true,
+			},
+			{
+				name: "dolt default mode",
+				cfg:  &Config{Backend: BackendDolt},
+				want: false, // Default is embedded
 			},
 		}
 
@@ -251,21 +251,20 @@ func TestDoltServerMode(t *testing.T) {
 	})
 
 	t.Run("GetDoltMode", func(t *testing.T) {
-		// GetDoltMode always returns "server" regardless of config
 		tests := []struct {
 			name string
 			cfg  *Config
 			want string
 		}{
 			{
-				name: "empty defaults to server",
+				name: "empty defaults to embedded",
 				cfg:  &Config{},
-				want: DoltModeServer,
+				want: DoltModeEmbedded,
 			},
 			{
-				name: "legacy embedded treated as server",
+				name: "explicit embedded",
 				cfg:  &Config{DoltMode: DoltModeEmbedded},
-				want: DoltModeServer,
+				want: DoltModeEmbedded,
 			},
 			{
 				name: "explicit server",
@@ -369,19 +368,28 @@ func TestDoltServerMode(t *testing.T) {
 	})
 }
 
-// TestIsDoltServerModeAlwaysTrue tests that IsDoltServerMode is always true for Dolt
-func TestIsDoltServerModeAlwaysTrue(t *testing.T) {
-	t.Run("dolt backend always server mode", func(t *testing.T) {
+// TestIsDoltServerModeEnvVar tests env var overrides for IsDoltServerMode
+func TestIsDoltServerModeEnvVar(t *testing.T) {
+	t.Run("env var override with dolt backend", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
 		cfg := &Config{Backend: BackendDolt}
 		if !cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = false, want true for dolt backend")
+			t.Error("IsDoltServerMode() = false, want true when env var set with dolt backend")
 		}
 	})
 
-	t.Run("sqlite backend not server mode", func(t *testing.T) {
+	t.Run("env var ignored for sqlite backend", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
 		cfg := &Config{Backend: BackendSQLite}
 		if cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = true, want false for sqlite backend")
+			t.Error("IsDoltServerMode() = true, want false when env var set but sqlite backend")
+		}
+	})
+
+	t.Run("env var not set", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false when no config or env var")
 		}
 	})
 }
@@ -399,8 +407,18 @@ func TestGetCapabilities(t *testing.T) {
 			wantSingleProc: false,
 		},
 		{
-			name:           "dolt is multi-process (server mode)",
+			name:           "dolt embedded is single-process",
+			cfg:            &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded},
+			wantSingleProc: true,
+		},
+		{
+			name:           "dolt default (empty) is single-process",
 			cfg:            &Config{Backend: BackendDolt},
+			wantSingleProc: true,
+		},
+		{
+			name:           "dolt server mode is multi-process",
+			cfg:            &Config{Backend: BackendDolt, DoltMode: DoltModeServer},
 			wantSingleProc: false,
 		},
 	}

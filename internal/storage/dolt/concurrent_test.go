@@ -1,4 +1,4 @@
-// Package dolt provides concurrency tests for Dolt with multiple writers.
+// Package dolt provides concurrency tests for embedded Dolt with multiple writers.
 //
 // These tests validate that Gas Town can safely run multiple polecats concurrently,
 // all writing to the same Dolt DB for creating issues, updating status,

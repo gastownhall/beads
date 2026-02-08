@@ -366,7 +366,8 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 		backend = configfile.BackendSQLite
 	}
 
-	// Daemon is not supported with single-process backends
+	// Daemon is not supported with single-process backends (e.g., embedded Dolt)
+	// Note: Dolt server mode supports multi-process, so check capabilities not backend type
 	cfg, cfgErr := configfile.Load(beadsDir)
 	if cfgErr == nil && cfg != nil && cfg.GetCapabilities().SingleProcessOnly {
 		errMsg := fmt.Sprintf(`DAEMON NOT SUPPORTED WITH %s BACKEND
@@ -492,7 +493,8 @@ The daemon will now exit.`, strings.ToUpper(backend))
 			"sql_port", doltServer.SQLPort(),
 			"remotesapi_port", doltServer.RemotesAPIPort())
 
-		// Configure factory with server connection details
+		// Configure factory to use server mode
+		factoryOpts.ServerMode = true
 		factoryOpts.ServerHost = doltServer.Host()
 		factoryOpts.ServerPort = doltServer.SQLPort()
 	}
@@ -510,8 +512,10 @@ The daemon will now exit.`, strings.ToUpper(backend))
 	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
 		sqliteStore.EnableFreshnessChecking()
 		log.Info("database opened", "path", store.Path(), "backend", "sqlite", "freshness_checking", true)
+	} else if federation {
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "federation/server")
 	} else {
-		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "server")
+		log.Info("database opened", "path", store.Path(), "backend", "dolt", "mode", "embedded")
 	}
 
 	// Auto-upgrade .beads/.gitignore if outdated

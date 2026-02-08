@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package dolt provides performance benchmarks for the Dolt storage backend.
 // Run with: go test -bench=. -benchmem ./internal/storage/dolt/...
 //
@@ -69,9 +71,9 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 // Bootstrap & Connection Benchmarks
 // =============================================================================
 
-// BenchmarkBootstrap measures store initialization time.
+// BenchmarkBootstrapEmbedded measures store initialization time in embedded mode.
 // This is the critical path for CLI commands that open/close the store each time.
-func BenchmarkBootstrap(b *testing.B) {
+func BenchmarkBootstrapEmbedded(b *testing.B) {
 	if _, err := os.LookupEnv("DOLT_PATH"); err != false {
 		if _, err := os.Stat("/usr/local/bin/dolt"); os.IsNotExist(err) {
 			if _, err := os.Stat("/usr/bin/dolt"); os.IsNotExist(err) {
@@ -94,6 +96,7 @@ func BenchmarkBootstrap(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
+		ServerMode:     false, // Force embedded mode
 	}
 
 	initStore, err := New(ctx, cfg)
@@ -141,6 +144,7 @@ func BenchmarkColdStart(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
+		ServerMode:     false, // Force embedded mode
 	}
 
 	b.ResetTimer()
@@ -224,6 +228,7 @@ func BenchmarkCLIWorkflow(b *testing.B) {
 		CommitterName:  "bench",
 		CommitterEmail: "bench@example.com",
 		Database:       "benchdb",
+		ServerMode:     false,
 	}
 
 	b.ResetTimer()

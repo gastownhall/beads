@@ -233,7 +233,14 @@ func findDatabaseInBeadsDir(beadsDir string, warnOnIssues bool) string {
 		backend := cfg.GetBackend()
 		if backend == configfile.BackendDolt {
 			// For Dolt server mode, database is on the server - no local directory required
-			return cfg.DatabasePath(beadsDir)
+			if cfg.IsDoltServerMode() {
+				return cfg.DatabasePath(beadsDir)
+			}
+			// For embedded Dolt, check if the configured database directory exists
+			doltPath := cfg.DatabasePath(beadsDir)
+			if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+				return doltPath
+			}
 		} else {
 			// For SQLite, check if the .db file exists
 			dbPath := cfg.DatabasePath(beadsDir)

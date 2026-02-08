@@ -1,3 +1,5 @@
+//go:build cgo
+
 package doctor
 
 import (
@@ -9,6 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	// Import Dolt driver for direct connection
+	_ "github.com/dolthub/driver"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -516,15 +521,21 @@ func compareDoltWithJSONL(ctx context.Context, store storage.Storage, jsonlIDs m
 	return missing
 }
 
-// checkDoltLocks checks for uncommitted changes in Dolt via server connection.
+// checkDoltLocks checks for uncommitted changes in Dolt.
 func checkDoltLocks(beadsDir string) (bool, string) {
-	db, err := openDoltServerDB(beadsDir)
+	doltDir := filepath.Join(beadsDir, "dolt")
+	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
+
+	db, err := sql.Open("dolt", connStr)
 	if err != nil {
 		return false, ""
 	}
 	defer db.Close()
 
 	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
+		return false, ""
+	}
 
 	// Check dolt_status for uncommitted changes
 	rows, err := db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")

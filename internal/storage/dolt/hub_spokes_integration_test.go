@@ -489,6 +489,7 @@ func setupHubWithNSpokes(t *testing.T, ctx context.Context, n int) (*HubSpokeSet
 	hubStore, err := New(ctx, &Config{
 		Path:           hubDir,
 		Database:       "beads",
+		ServerMode:     true,
 		ServerHost:     "127.0.0.1",
 		ServerPort:     14307,
 		CommitterName:  "hub-mayor",
@@ -560,6 +561,7 @@ func setupHubWithNSpokes(t *testing.T, ctx context.Context, n int) (*HubSpokeSet
 		spokeStore, err := New(ctx, &Config{
 			Path:           spokeDir,
 			Database:       "beads",
+			ServerMode:     true,
 			ServerHost:     "127.0.0.1",
 			ServerPort:     14308 + i,
 			CommitterName:  spokeName,

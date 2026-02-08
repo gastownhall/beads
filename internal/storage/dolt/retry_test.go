@@ -1,3 +1,4 @@
+//go:build cgo
 package dolt
 
 import (
@@ -69,8 +70,26 @@ func TestIsRetryableError(t *testing.T) {
 	}
 }
 
-func TestWithRetry_Success(t *testing.T) {
-	store := &DoltStore{}
+func TestWithRetry_EmbeddedMode(t *testing.T) {
+	// In embedded mode (serverMode=false), withRetry should just call the operation once
+	store := &DoltStore{serverMode: false}
+
+	callCount := 0
+	err := store.withRetry(context.Background(), func() error {
+		callCount++
+		return errors.New("driver: bad connection")
+	})
+
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call in embedded mode, got %d", callCount)
+	}
+}
+
+func TestWithRetry_ServerMode_Success(t *testing.T) {
+	store := &DoltStore{serverMode: true}
 
 	callCount := 0
 	err := store.withRetry(context.Background(), func() error {
@@ -86,8 +105,8 @@ func TestWithRetry_Success(t *testing.T) {
 	}
 }
 
-func TestWithRetry_RetryOnBadConnection(t *testing.T) {
-	store := &DoltStore{}
+func TestWithRetry_ServerMode_RetryOnBadConnection(t *testing.T) {
+	store := &DoltStore{serverMode: true}
 
 	callCount := 0
 	err := store.withRetry(context.Background(), func() error {
@@ -106,8 +125,8 @@ func TestWithRetry_RetryOnBadConnection(t *testing.T) {
 	}
 }
 
-func TestWithRetry_NonRetryableError(t *testing.T) {
-	store := &DoltStore{}
+func TestWithRetry_ServerMode_NonRetryableError(t *testing.T) {
+	store := &DoltStore{serverMode: true}
 
 	callCount := 0
 	err := store.withRetry(context.Background(), func() error {
