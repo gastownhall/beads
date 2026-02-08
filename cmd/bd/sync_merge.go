@@ -542,6 +542,16 @@ func issueEqual(a, b *beads.Issue) bool {
 		return false
 	}
 
+	// Dependencies (order-independent comparison)
+	if !dependenciesEqual(a.Dependencies, b.Dependencies) {
+		return false
+	}
+
+	// Comments (order-independent comparison)
+	if !commentsEqual(a.Comments, b.Comments) {
+		return false
+	}
+
 	return true
 }
 
@@ -623,6 +633,62 @@ func stringSliceEqual(a, b []string) bool {
 	sort.Strings(bCopy)
 	for i := range aCopy {
 		if aCopy[i] != bCopy[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// dependenciesEqual compares two dependency slices for equality (order-independent).
+// Compares by (depends_on_id, type) pairs which form the logical identity of a dependency.
+func dependenciesEqual(a, b []*beads.Dependency) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	// Build key sets for order-independent comparison
+	aKeys := make([]string, len(a))
+	for i, d := range a {
+		aKeys[i] = fmt.Sprintf("%s:%s", d.DependsOnID, d.Type)
+	}
+	bKeys := make([]string, len(b))
+	for i, d := range b {
+		bKeys[i] = fmt.Sprintf("%s:%s", d.DependsOnID, d.Type)
+	}
+	sort.Strings(aKeys)
+	sort.Strings(bKeys)
+	for i := range aKeys {
+		if aKeys[i] != bKeys[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// commentsEqual compares two comment slices for equality (order-independent).
+// Compares by (author, text, created_at) which identifies a comment's content.
+func commentsEqual(a, b []*beads.Comment) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	// Build key sets for order-independent comparison
+	aKeys := make([]string, len(a))
+	for i, c := range a {
+		aKeys[i] = fmt.Sprintf("%s:%s:%d", c.Author, c.Text, c.CreatedAt.UnixNano())
+	}
+	bKeys := make([]string, len(b))
+	for i, c := range b {
+		bKeys[i] = fmt.Sprintf("%s:%s:%d", c.Author, c.Text, c.CreatedAt.UnixNano())
+	}
+	sort.Strings(aKeys)
+	sort.Strings(bKeys)
+	for i := range aKeys {
+		if aKeys[i] != bKeys[i] {
 			return false
 		}
 	}

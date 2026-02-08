@@ -796,6 +796,60 @@ func TestIssueEqual(t *testing.T) {
 			b:        makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now.Add(time.Hour)),
 			expected: false,
 		},
+		{
+			name: "different dependencies",
+			a: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Dependencies = []*types.Dependency{{DependsOnID: "bd-5678", Type: types.DepBlocks}}
+				return i
+			}(),
+			b:        makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now),
+			expected: false,
+		},
+		{
+			name: "same dependencies different order",
+			a: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Dependencies = []*types.Dependency{
+					{DependsOnID: "bd-5678", Type: types.DepBlocks},
+					{DependsOnID: "bd-9999", Type: types.DepBlocks},
+				}
+				return i
+			}(),
+			b: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Dependencies = []*types.Dependency{
+					{DependsOnID: "bd-9999", Type: types.DepBlocks},
+					{DependsOnID: "bd-5678", Type: types.DepBlocks},
+				}
+				return i
+			}(),
+			expected: true,
+		},
+		{
+			name: "different comments",
+			a: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Comments = []*types.Comment{{Author: "alice", Text: "hello", CreatedAt: now}}
+				return i
+			}(),
+			b:        makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now),
+			expected: false,
+		},
+		{
+			name: "same comments",
+			a: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Comments = []*types.Comment{{Author: "alice", Text: "hello", CreatedAt: now}}
+				return i
+			}(),
+			b: func() *types.Issue {
+				i := makeTestIssue("bd-1234", "Test", types.StatusOpen, 1, now)
+				i.Comments = []*types.Comment{{Author: "alice", Text: "hello", CreatedAt: now}}
+				return i
+			}(),
+			expected: true,
+		},
 	}
 
 	for _, tc := range tests {
