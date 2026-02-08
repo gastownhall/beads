@@ -160,9 +160,10 @@ var showCmd = &cobra.Command{
 				} else {
 					if displayIdx > 0 {
 						fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
+						fmt.Printf("\n%s\n", formatIssueHeader(issue))
+					} else {
+						fmt.Printf("%s\n", formatIssueHeader(issue))
 					}
-					// Tufte-aligned header: STATUS_ICON ID · Title   [Priority · STATUS]
-					fmt.Printf("\n%s\n", formatIssueHeader(issue))
 					// Metadata: Owner · Type | Created · Updated
 					fmt.Println(formatIssueMetadata(issue))
 					if issue.Description != "" {
@@ -217,11 +218,12 @@ var showCmd = &cobra.Command{
 
 					if displayIdx > 0 {
 						fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
+						fmt.Printf("\n%s\n", formatIssueHeader(issue))
+					} else {
+						fmt.Printf("%s\n", formatIssueHeader(issue))
 					}
 					displayIdx++
 
-					// Tufte-aligned header: STATUS_ICON ID · Title   [Priority · STATUS]
-					fmt.Printf("\n%s\n", formatIssueHeader(issue))
 
 					// Metadata: Owner · Type | Created · Updated
 					fmt.Println(formatIssueMetadata(issue))
@@ -425,13 +427,12 @@ var showCmd = &cobra.Command{
 				result.Close() // Close before continuing to next iteration
 				continue
 			}
-
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
+				fmt.Printf("\n%s\n", formatIssueHeader(issue))
+			} else {
+				fmt.Printf("%s\n", formatIssueHeader(issue))
 			}
-
-			// Tufte-aligned header: STATUS_ICON ID · Title   [Priority · STATUS]
-			fmt.Printf("\n%s\n", formatIssueHeader(issue))
 
 			// Metadata: Owner · Type | Created · Updated
 			fmt.Println(formatIssueMetadata(issue))
