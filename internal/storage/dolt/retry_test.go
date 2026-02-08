@@ -43,9 +43,9 @@ func TestIsRetryableError(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "connection refused - not retryable",
+			name:     "connection refused - retryable (server restart)",
 			err:      errors.New("dial tcp: connection refused"),
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "syntax error - not retryable",

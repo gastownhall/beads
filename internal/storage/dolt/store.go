@@ -97,7 +97,12 @@ func isRetryableError(err error) bool {
 	if strings.Contains(errStr, "connection reset") {
 		return true
 	}
-	// Don't retry "connection refused" - that means server is down
+	// Server restart: "connection refused" is transient — the server may
+	// come back within the backoff window (30s). Retrying here prevents
+	// a brief server outage from cascading into permanent failures.
+	if strings.Contains(errStr, "connection refused") {
+		return true
+	}
 	return false
 }
 
