@@ -1,0 +1,13 @@
+# Test bd lint command
+
+bd init --prefix test
+
+# Create a bug without required sections - should have warnings
+bd create 'Bug without sections' --type bug
+
+# Create a chore - no required sections
+bd create 'Simple chore' --type chore
+
+# Lint all issues - bug should have warnings
+! bd lint
+stdout 'Bug without sections'

@@ -1,0 +1,26 @@
+# Test bd config command
+
+bd init --prefix test
+
+# Set a config value
+bd config set jira.url 'https://example.atlassian.net'
+stdout 'Set jira.url'
+
+# Get the config value
+bd config get jira.url
+stdout 'https://example.atlassian.net'
+
+# List all config
+bd config list
+stdout 'jira.url'
+
+# Set another value
+bd config set jira.project 'TEST'
+
+# Unset a value
+bd config unset jira.url
+
+# Verify it's gone - list should not show the URL
+bd config list
+! stdout 'example.atlassian.net'
+stdout 'jira.project'

@@ -1,0 +1,35 @@
+# Test bd label command
+
+bd init --prefix test
+
+# Create an issue
+bd create 'Issue for labels'
+cp stdout issue.txt
+exec sh -c 'grep -oE "test-[a-z0-9]+" issue.txt > id.txt'
+
+# Add a label
+exec sh -c 'bd label add $(cat id.txt) backend'
+stdout 'Added label'
+
+# List labels
+exec sh -c 'bd label list $(cat id.txt)'
+stdout 'backend'
+
+# Add another label
+exec sh -c 'bd label add $(cat id.txt) urgent'
+
+# Verify both labels
+exec sh -c 'bd label list $(cat id.txt)'
+stdout 'backend'
+stdout 'urgent'
+
+# Remove a label
+exec sh -c 'bd label remove $(cat id.txt) urgent'
+
+# Verify removal - should still have backend
+exec sh -c 'bd label list $(cat id.txt)'
+stdout 'backend'
+
+# List all unique labels
+bd label list-all
+stdout 'backend'

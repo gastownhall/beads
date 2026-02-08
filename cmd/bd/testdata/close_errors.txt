@@ -1,0 +1,11 @@
+# Test bd close error cases
+
+bd init --prefix test
+
+# Close nonexistent issue should fail
+! bd close nonexistent-id
+stderr 'no issue found'
+
+# Close with no args and no last-touched should fail
+! bd close
+stderr 'no issue ID provided'

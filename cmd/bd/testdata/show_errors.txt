@@ -1,0 +1,11 @@
+# Test bd show error cases
+
+bd init --prefix test
+
+# Show nonexistent issue prints error to stderr (exits 0 - known issue)
+bd show nonexistent-id
+stderr 'no issue found'
+
+# Show with no args and no last-touched should fail
+! bd show
+stderr 'issue ID is required'

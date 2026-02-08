@@ -1,0 +1,19 @@
+# Test bd dep error cases
+
+bd init --prefix test
+
+bd create 'First issue'
+cp stdout first.txt
+exec sh -c 'grep -oE "test-[a-z0-9]+" first.txt > first_id.txt'
+
+# Add dependency with nonexistent blocker should fail
+! exec sh -c 'bd dep add $(cat first_id.txt) nonexistent-id'
+stderr 'no issue found'
+
+# Add self-dependency should fail
+! exec sh -c 'bd dep add $(cat first_id.txt) $(cat first_id.txt)'
+stderr 'cannot depend on itself'
+
+# dep tree on nonexistent issue should fail
+! bd dep tree nonexistent-id
+stderr 'no issue found'

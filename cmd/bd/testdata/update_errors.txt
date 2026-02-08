@@ -1,0 +1,24 @@
+# Test bd update error cases
+
+bd init --prefix test
+
+# Update nonexistent issue prints error to stderr (exits 0 - known issue)
+bd update nonexistent-id --title 'New title'
+stderr 'no issue found'
+
+# Create a real issue for validation tests
+bd create 'Test issue'
+cp stdout issue.txt
+exec sh -c 'grep -oE "test-[a-z0-9]+" issue.txt > id.txt'
+
+# Update with invalid priority should fail
+! exec sh -c 'bd update $(cat id.txt) --priority 99'
+stderr 'invalid priority'
+
+# Update with negative estimate should fail
+! exec sh -c 'bd update $(cat id.txt) --estimate -5'
+stderr 'estimate must be a non-negative'
+
+# Update with invalid due date should fail
+! exec sh -c 'bd update $(cat id.txt) --due not-a-date'
+stderr 'invalid --due format'

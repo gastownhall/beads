@@ -1,0 +1,19 @@
+# Test bd delete command
+
+bd init --prefix test
+
+# Create an issue
+bd create 'Issue to delete'
+cp stdout issue.txt
+exec sh -c 'grep -oE "test-[a-z0-9]+" issue.txt > id.txt'
+
+# Preview delete (no --force) - should show preview
+exec sh -c 'bd delete $(cat id.txt)'
+stdout 'DELETE PREVIEW'
+
+# Actually delete
+exec sh -c 'bd delete $(cat id.txt) --force'
+
+# Verify it's gone - show should print error to stderr
+exec sh -c 'bd show $(cat id.txt)'
+stderr 'no issue found'

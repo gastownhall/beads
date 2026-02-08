@@ -1,0 +1,11 @@
+# Test bd delete error cases
+
+bd init --prefix test
+
+# Delete with no args should fail
+! bd delete
+stderr 'no issue IDs provided'
+
+# Delete nonexistent issue should fail
+! bd delete nonexistent-id --force
+stderr 'not found'
