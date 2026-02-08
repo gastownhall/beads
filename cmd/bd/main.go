@@ -420,7 +420,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Skip for root command with no subcommand (just shows help)
-		if cmd.Parent() == nil && cmdName == "bd" {
+		if cmd.Parent() == nil && cmdName == cmd.Use {
 			return
 		}
 
@@ -1095,6 +1095,13 @@ func checkBlockedEnvVars() error {
 }
 
 func main() {
+	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
+	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
+	// setups where wrapper scripts set BEADS_DIR for routing.
+	if name := os.Getenv("BD_NAME"); name != "" {
+		rootCmd.Use = name
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
