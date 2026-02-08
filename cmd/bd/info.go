@@ -289,6 +289,31 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.49.5",
+		Date:    "2026-02-08",
+		Changes: []string{
+			"NEW: bd search --has/--no flags for content and null-check filtering",
+			"NEW: bd promote command for wisp-to-bead promotion",
+			"NEW: bd todo command for lightweight task management",
+			"NEW: bd find-duplicates for AI-powered duplicate detection",
+			"NEW: bd validate integrated into bd doctor --check=validate",
+			"NEW: Dolt fail-fast TCP check before MySQL protocol init",
+			"SECURITY: SQL identifier validation prevents injection in dynamic table/db names",
+			"SECURITY: Path traversal fix in export handler; command injection fix in import",
+			"FIX: RPC mutation events now include issueID (was zero-value for label/dep ops)",
+			"FIX: Daemon YAML config recognizes both hyphen and underscore variants",
+			"FIX: Doctor role check falls back to database config",
+			"FIX: SQLite Close() idempotent (WAL retry deadlock fix)",
+			"FIX: SQLITE_BUSY retry for all BEGIN IMMEDIATE calls",
+			"FIX: Dolt cross-rig contamination prevented with prefix-based db names",
+			"FIX: bd list separates parent-child from blocks display",
+			"FIX: Cross-prefix ID resolution in multi-repo scenarios",
+			"CHANGE: Embedded Dolt mode fully removed (server-only connections)",
+			"CHANGE: bd init defaults to chaining hooks (no prompt)",
+			"CHANGE: brew upgrade command corrected to 'brew upgrade beads'",
+		},
+	},
+	{
 		Version: "0.49.4",
 		Date:    "2026-02-05",
 		Changes: []string{
