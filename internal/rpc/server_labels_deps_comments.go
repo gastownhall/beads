@@ -174,6 +174,12 @@ func (s *Server) handleCommentList(req *Request) Response {
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	ctx, cancel := s.reqCtx(req)
 	defer cancel()
@@ -202,6 +208,12 @@ func (s *Server) handleCommentAdd(req *Request) Response {
 	}
 
 	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
 
 	ctx, cancel := s.reqCtx(req)
 	defer cancel()
