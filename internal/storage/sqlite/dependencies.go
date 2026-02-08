@@ -56,8 +56,9 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		// The previous type-based check (Epic can't depend on non-Epic) was removed because
 		// it incorrectly rejected valid hierarchies involving custom types (e.g., theme → epic).
 		// Custom types like "theme" or "shot" are valid parents for built-in types like "epic"
-		// or "task". Cycle detection (below) and the isChildOf check in dep.go already prevent
-		// the actual problematic cases (circular dependencies and duplicate hierarchical links).
+		// or "task". This method's cycle detection (below) prevents circular dependencies; duplicate
+		// hierarchical links are enforced by higher-level validation (e.g., CLI/RPC isChildOf checks),
+		// not by this storage-layer method.
 	}
 
 	if dep.CreatedAt.IsZero() {

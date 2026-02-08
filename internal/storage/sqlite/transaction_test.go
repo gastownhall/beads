@@ -433,6 +433,80 @@ func TestTransactionAddDependency(t *testing.T) {
 	}
 }
 
+// TestTransactionAddDependency_ParentChildCustomTypes tests that parent-child
+// dependencies with custom issue types work in the transaction code path.
+// This mirrors TestParentChildWithCustomTypes in dependencies_test.go to ensure
+// both storage layers (direct and transaction) stay in sync after the type-based
+// validation was removed.
+func TestTransactionAddDependency_ParentChildCustomTypes(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Register custom types
+	if err := store.SetConfig(ctx, "types.custom", "theme,shot"); err != nil {
+		t.Fatalf("SetConfig for custom types failed: %v", err)
+	}
+
+	// Create issues with custom and built-in types
+	theme := &types.Issue{Title: "shooter/ai", Status: types.StatusOpen, Priority: 1, IssueType: types.IssueType("theme")}
+	epic := &types.Issue{Title: "Auth System", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	shot := &types.Issue{Title: "Quick fix", Status: types.StatusOpen, Priority: 1, IssueType: types.IssueType("shot")}
+
+	if err := store.CreateIssue(ctx, theme, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue theme failed: %v", err)
+	}
+	if err := store.CreateIssue(ctx, epic, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue epic failed: %v", err)
+	}
+	if err := store.CreateIssue(ctx, shot, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue shot failed: %v", err)
+	}
+
+	// Add parent-child dependencies in transaction: theme → epic → shot
+	err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		// Epic (child) depends on theme (parent)
+		if err := tx.AddDependency(ctx, &types.Dependency{
+			IssueID:     epic.ID,
+			DependsOnID: theme.ID,
+			Type:        types.DepParentChild,
+		}, "test-actor"); err != nil {
+			return fmt.Errorf("theme→epic parent-child failed: %w", err)
+		}
+
+		// Shot (child) depends on epic (parent)
+		if err := tx.AddDependency(ctx, &types.Dependency{
+			IssueID:     shot.ID,
+			DependsOnID: epic.ID,
+			Type:        types.DepParentChild,
+		}, "test-actor"); err != nil {
+			return fmt.Errorf("epic→shot parent-child failed: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction failed: %v", err)
+	}
+
+	// Verify dependencies
+	epicDeps, err := store.GetDependencies(ctx, epic.ID)
+	if err != nil {
+		t.Fatalf("GetDependencies for epic failed: %v", err)
+	}
+	if len(epicDeps) != 1 || epicDeps[0].ID != theme.ID {
+		t.Errorf("Expected epic to depend on theme, got %v", epicDeps)
+	}
+
+	shotDeps, err := store.GetDependencies(ctx, shot.ID)
+	if err != nil {
+		t.Fatalf("GetDependencies for shot failed: %v", err)
+	}
+	if len(shotDeps) != 1 || shotDeps[0].ID != epic.ID {
+		t.Errorf("Expected shot to depend on epic, got %v", shotDeps)
+	}
+}
+
 // TestTransactionAddDependency_RelatesTo tests that bidirectional relates-to
 // dependencies work in transaction context. This is a regression test for
 // Decision 004 Phase 4 - the cycle detection must exempt relates-to type

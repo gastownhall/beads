@@ -800,8 +800,9 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		// The previous type-based check (Epic can't depend on non-Epic) was removed because
 		// it incorrectly rejected valid hierarchies involving custom types (e.g., theme → epic).
 		// Custom types like "theme" or "shot" are valid parents for built-in types like "epic"
-		// or "task". Cycle detection (below) and the isChildOf check in dep.go already prevent
-		// the actual problematic cases (circular dependencies and duplicate hierarchical links).
+		// or "task". Cycle detection in this function and higher-level relationship constraints
+		// already prevent the actual problematic cases (circular dependencies and duplicate
+		// hierarchical links).
 	}
 
 	if dep.CreatedAt.IsZero() {
