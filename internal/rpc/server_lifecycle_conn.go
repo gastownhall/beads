@@ -249,6 +249,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 			// Connection broken, stop handling this connection
 			return
 		}
+
+		// If shutdown was requested, trigger it now that the response has been written
+		if s.pendingShutdown.Load() {
+			go func() {
+				if err := s.Stop(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error during shutdown: %v\n", err)
+				}
+			}()
+			return
+		}
 	}
 }
 
@@ -274,13 +284,8 @@ func (s *Server) writeResponse(writer *bufio.Writer, resp Response) error {
 }
 
 func (s *Server) handleShutdown(_ *Request) Response {
-	// Schedule shutdown in a goroutine so we can return a response first
-	go func() {
-		time.Sleep(100 * time.Millisecond) // Give time for response to be sent
-		if err := s.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error during shutdown: %v\n", err)
-		}
-	}()
+	// Signal pending shutdown - handleConnection will trigger Stop() after writing the response
+	s.pendingShutdown.Store(true)
 
 	return Response{
 		Success: true,

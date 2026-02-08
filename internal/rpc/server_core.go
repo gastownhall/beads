@@ -49,6 +49,8 @@ type Server struct {
 	readyChan chan struct{}
 	// Auto-import single-flight guard
 	importInProgress atomic.Bool
+	// Pending shutdown: set by handleShutdown, checked by handleConnection after response write
+	pendingShutdown atomic.Bool
 	// Mutation events for event-driven daemon
 	mutationChan    chan MutationEvent
 	droppedEvents   atomic.Int64 // Counter for dropped mutation events
