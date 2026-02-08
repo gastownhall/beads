@@ -14,7 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -118,7 +118,7 @@ create, update, show, or close operation).`,
 		if cmd.Flags().Changed("type") {
 			issueType, _ := cmd.Flags().GetString("type")
 			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
-			issueType = util.NormalizeIssueType(issueType)
+			issueType = utils.NormalizeIssueType(issueType)
 			// In daemon mode, skip client-side type pre-validation.
 			// The daemon validates authoritatively with database access (GH#1499).
 			if daemonClient == nil {

@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/util"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -1119,8 +1118,8 @@ func (s *Server) handleList(req *Request) Response {
 	}
 
 	// Normalize and apply label filters
-	labels := util.NormalizeLabels(listArgs.Labels)
-	labelsAny := util.NormalizeLabels(listArgs.LabelsAny)
+	labels := utils.NormalizeLabels(listArgs.Labels)
+	labelsAny := utils.NormalizeLabels(listArgs.LabelsAny)
 	// Support both old single Label and new Labels array (backward compat)
 	if len(labels) > 0 {
 		filter.Labels = labels
@@ -1137,7 +1136,7 @@ func (s *Server) handleList(req *Request) Response {
 		filter.LabelRegex = listArgs.LabelRegex
 	}
 	if len(listArgs.IDs) > 0 {
-		ids := util.NormalizeLabels(listArgs.IDs)
+		ids := utils.NormalizeLabels(listArgs.IDs)
 		if len(ids) > 0 {
 			filter.IDs = ids
 		}
@@ -1403,8 +1402,8 @@ func (s *Server) handleCount(req *Request) Response {
 	}
 
 	// Normalize and apply label filters
-	labels := util.NormalizeLabels(countArgs.Labels)
-	labelsAny := util.NormalizeLabels(countArgs.LabelsAny)
+	labels := utils.NormalizeLabels(countArgs.Labels)
+	labelsAny := utils.NormalizeLabels(countArgs.LabelsAny)
 	if len(labels) > 0 {
 		filter.Labels = labels
 	}
@@ -1412,7 +1411,7 @@ func (s *Server) handleCount(req *Request) Response {
 		filter.LabelsAny = labelsAny
 	}
 	if len(countArgs.IDs) > 0 {
-		ids := util.NormalizeLabels(countArgs.IDs)
+		ids := utils.NormalizeLabels(countArgs.IDs)
 		if len(ids) > 0 {
 			filter.IDs = ids
 		}
@@ -1713,8 +1712,8 @@ func (s *Server) handleReady(req *Request) Response {
 		Unassigned:      readyArgs.Unassigned,
 		Limit:           readyArgs.Limit,
 		SortPolicy:      types.SortPolicy(readyArgs.SortPolicy),
-		Labels:          util.NormalizeLabels(readyArgs.Labels),
-		LabelsAny:       util.NormalizeLabels(readyArgs.LabelsAny),
+		Labels:          utils.NormalizeLabels(readyArgs.Labels),
+		LabelsAny:       utils.NormalizeLabels(readyArgs.LabelsAny),
 		IncludeDeferred: readyArgs.IncludeDeferred, // GH#820
 	}
 	if readyArgs.Assignee != "" && !readyArgs.Unassigned {

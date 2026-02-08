@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var countCmd = &cobra.Command{
@@ -101,8 +101,8 @@ Examples:
 		}
 
 		// Normalize labels
-		labels = util.NormalizeLabels(labels)
-		labelsAny = util.NormalizeLabels(labelsAny)
+		labels = utils.NormalizeLabels(labels)
+		labelsAny = utils.NormalizeLabels(labelsAny)
 
 		// Check database freshness before reading
 		ctx := rootCtx
@@ -135,7 +135,7 @@ Examples:
 				countArgs.Query = titleSearch
 			}
 			if idFilter != "" {
-				ids := util.NormalizeLabels(strings.Split(idFilter, ","))
+				ids := utils.NormalizeLabels(strings.Split(idFilter, ","))
 				if len(ids) > 0 {
 					countArgs.IDs = ids
 				}
@@ -249,7 +249,7 @@ Examples:
 			filter.TitleSearch = titleSearch
 		}
 		if idFilter != "" {
-			ids := util.NormalizeLabels(strings.Split(idFilter, ","))
+			ids := utils.NormalizeLabels(strings.Split(idFilter, ","))
 			if len(ids) > 0 {
 				filter.IDs = ids
 			}
