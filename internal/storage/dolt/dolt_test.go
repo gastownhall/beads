@@ -2,6 +2,9 @@ package dolt
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -10,27 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// cleanTestTables deletes all data from all tables to ensure test isolation.
-// This is called at the start of each test to avoid duplicate primary key
-// errors from data left over by previous test runs on the shared Dolt server.
-var testTables = []string{
-	"federation_peers", "interactions", "routes", "repo_mtimes",
-	"compaction_snapshots", "issue_snapshots", "child_counters",
-	"export_hashes", "dirty_issues", "metadata", "events", "comments",
-	"labels", "dependencies", "config",
-	"issues", // issues last due to foreign key references
-}
-
-func cleanTestTables(ctx context.Context, store *DoltStore) error {
-	for _, table := range testTables {
-		if _, err := store.db.ExecContext(ctx, "DELETE FROM `"+table+"`"); err != nil {
-			// Table may not exist yet if schema hasn't been fully initialized
-			continue
-		}
-	}
-	return nil
-}
 
 // testTimeout is the maximum time for any single test operation.
 const testTimeout = 30 * time.Second
@@ -49,9 +31,21 @@ func skipIfNoDolt(t *testing.T) {
 	}
 }
 
-// setupTestStore creates a test store connected to the shared Dolt server.
-// It cleans all table data before returning to ensure test isolation and
-// prevent duplicate primary key errors from data left by previous runs.
+// uniqueTestDBName generates a unique database name for test isolation.
+// Each test gets its own database, preventing cross-test interference and
+// avoiding any risk of connecting to production data.
+func uniqueTestDBName(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatalf("failed to generate random bytes: %v", err)
+	}
+	return "testdb_" + hex.EncodeToString(buf)
+}
+
+// setupTestStore creates a test store with its own isolated database.
+// Each test gets a unique database name to prevent cross-test data leakage
+// and avoid any risk of touching production data.
 func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
@@ -64,11 +58,13 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 
+	dbName := uniqueTestDBName(t)
+
 	cfg := &Config{
 		Path:           tmpDir,
 		CommitterName:  "test",
 		CommitterEmail: "test@example.com",
-		Database:       "testdb",
+		Database:       dbName,
 	}
 
 	store, err := New(ctx, cfg)
@@ -76,13 +72,6 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 		os.RemoveAll(tmpDir)
 		// Server mode requires a running Dolt server - skip if unavailable
 		t.Skipf("failed to create Dolt store: %v", err)
-	}
-
-	// Clean all tables to ensure this test starts with a fresh state
-	if err := cleanTestTables(ctx, store); err != nil {
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("failed to clean test tables: %v", err)
 	}
 
 	// Set up issue prefix
@@ -93,6 +82,10 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	}
 
 	cleanup := func() {
+		// Drop the test database to avoid accumulating garbage
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dropCancel()
+		_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
 		store.Close()
 		os.RemoveAll(tmpDir)
 	}
@@ -110,18 +103,22 @@ func TestNewDoltStore(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	dbName := uniqueTestDBName(t)
 	cfg := &Config{
 		Path:           tmpDir,
 		CommitterName:  "test",
 		CommitterEmail: "test@example.com",
-		Database:       "testdb",
+		Database:       dbName,
 	}
 
 	store, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatalf("failed to create Dolt store: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		_, _ = store.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		store.Close()
+	}()
 
 	// Verify store path
 	if store.Path() != tmpDir {
