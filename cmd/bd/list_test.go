@@ -788,7 +788,7 @@ func TestBuildBlockingMaps(t *testing.T) {
 		},
 	}
 
-	blockedByMap, blocksMap := buildBlockingMaps(allDeps)
+	blockedByMap, blocksMap, _ := buildBlockingMaps(allDeps)
 
 	// issue-A is blocked by issue-B
 	if len(blockedByMap["issue-A"]) != 1 || blockedByMap["issue-A"][0] != "issue-B" {
@@ -808,6 +808,32 @@ func TestBuildBlockingMaps(t *testing.T) {
 	// issue-A also blocks issue-C
 	if len(blocksMap["issue-A"]) != 1 || blocksMap["issue-A"][0] != "issue-C" {
 		t.Errorf("issue-A blocks = %v, want [issue-C]", blocksMap["issue-A"])
+	}
+}
+
+func TestBuildBlockingMaps_ParentChildSeparation(t *testing.T) {
+	t.Parallel()
+	allDeps := map[string][]*types.Dependency{
+		"child-1": {
+			{IssueID: "child-1", DependsOnID: "parent-1", Type: types.DepParentChild},
+		},
+		"child-2": {
+			{IssueID: "child-2", DependsOnID: "parent-1", Type: types.DepParentChild},
+		},
+		"issue-X": {
+			{IssueID: "issue-X", DependsOnID: "parent-1", Type: types.DepBlocks},
+		},
+	}
+
+	_, blocksMap, childrenMap := buildBlockingMaps(allDeps)
+
+	// parent-1 should have children, not blocks, for parent-child deps
+	if len(childrenMap["parent-1"]) != 2 {
+		t.Errorf("parent-1 children = %v, want 2 children", childrenMap["parent-1"])
+	}
+	// parent-1 should only block issue-X (not child-1 or child-2)
+	if len(blocksMap["parent-1"]) != 1 || blocksMap["parent-1"][0] != "issue-X" {
+		t.Errorf("parent-1 blocks = %v, want [issue-X]", blocksMap["parent-1"])
 	}
 }
 

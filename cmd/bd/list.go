@@ -527,12 +527,14 @@ func formatDependencyInfo(blockedBy, blocks []string) string {
 }
 
 // buildBlockingMaps builds maps of blocking dependencies from dependency records.
-// Returns two maps: blockedByMap[issueID] = []IDs that block this issue,
-// and blocksMap[issueID] = []IDs that this issue blocks.
+// Returns three maps: blockedByMap[issueID] = []IDs that block this issue,
+// blocksMap[issueID] = []IDs that this issue blocks (excluding parent-child),
+// and childrenMap[issueID] = []IDs that are children of this issue.
 // Only includes dependencies where AffectsReadyWork() is true (blocks, parent-child, etc.)
-func buildBlockingMaps(allDeps map[string][]*types.Dependency) (blockedByMap, blocksMap map[string][]string) {
+func buildBlockingMaps(allDeps map[string][]*types.Dependency) (blockedByMap, blocksMap, childrenMap map[string][]string) {
 	blockedByMap = make(map[string][]string)
 	blocksMap = make(map[string][]string)
+	childrenMap = make(map[string][]string)
 
 	for issueID, deps := range allDeps {
 		for _, dep := range deps {
@@ -542,11 +544,15 @@ func buildBlockingMaps(allDeps map[string][]*types.Dependency) (blockedByMap, bl
 			}
 			// issueID is blocked by dep.DependsOnID
 			blockedByMap[issueID] = append(blockedByMap[issueID], dep.DependsOnID)
-			// dep.DependsOnID blocks issueID
-			blocksMap[dep.DependsOnID] = append(blocksMap[dep.DependsOnID], issueID)
+			// Separate parent-child from blocking relationships
+			if dep.Type == types.DepParentChild {
+				childrenMap[dep.DependsOnID] = append(childrenMap[dep.DependsOnID], issueID)
+			} else {
+				blocksMap[dep.DependsOnID] = append(blocksMap[dep.DependsOnID], issueID)
+			}
 		}
 	}
-	return blockedByMap, blocksMap
+	return blockedByMap, blocksMap, childrenMap
 }
 
 // formatIssueCompact formats a single issue in compact format to a buffer
@@ -1179,7 +1185,7 @@ var listCmd = &cobra.Command{
 					_ = roStore.Close()
 				}
 			}
-			blockedByMap, blocksMap := buildBlockingMaps(allDepsForList)
+			blockedByMap, blocksMap, _ := buildBlockingMaps(allDepsForList)
 
 			// Build output in buffer for pager support (bd-jdz3)
 			var buf strings.Builder
@@ -1334,7 +1340,7 @@ var listCmd = &cobra.Command{
 
 		// Load dependencies for blocking info display
 		allDepsForList, _ := store.GetAllDependencyRecords(ctx)
-		blockedByMap, blocksMap := buildBlockingMaps(allDepsForList)
+		blockedByMap, blocksMap, _ := buildBlockingMaps(allDepsForList)
 
 		// Build output in buffer for pager support (bd-jdz3)
 		var buf strings.Builder
