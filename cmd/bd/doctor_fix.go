@@ -138,6 +138,10 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 		response, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			if len(approvedFixes) > 0 {
+				fmt.Printf("\nApplying %d previously approved fix(es) before exit...\n", len(approvedFixes))
+				applyFixList(path, approvedFixes)
+			}
 			return
 		}
 
