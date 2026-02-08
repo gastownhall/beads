@@ -1328,17 +1328,19 @@ func (s *Server) handleList(req *Request) Response {
 		}
 	}
 
-	// Populate labels for each issue
-	for _, issue := range issues {
-		labels, _ := store.GetLabels(ctx, issue.ID)
-		issue.Labels = labels
-	}
-
-	// Get dependency counts in bulk (single query instead of N queries)
+	// Build issue ID list for batch queries
 	issueIDs := make([]string, len(issues))
 	for i, issue := range issues {
 		issueIDs[i] = issue.ID
 	}
+
+	// Populate labels in bulk (single query instead of N queries)
+	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
+	for _, issue := range issues {
+		issue.Labels = labelsMap[issue.ID]
+	}
+
+	// Get dependency counts in bulk (single query instead of N queries)
 	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
 	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
 
