@@ -50,13 +50,15 @@ func CheckCLIVersion(cliVersion string) DoctorCheck {
 	}
 }
 
+// installScriptCommand is the default upgrade/install command for non-Homebrew installations.
+const installScriptCommand = "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+
 // getUpgradeCommand returns the appropriate upgrade command based on how bd was installed.
 // Detects Homebrew on macOS/Linux, and falls back to the install script on all platforms.
 func getUpgradeCommand() string {
-	// Get the executable path
 	execPath, err := os.Executable()
 	if err != nil {
-		return "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+		return installScriptCommand
 	}
 
 	// Resolve symlinks to get the real path
@@ -65,19 +67,24 @@ func getUpgradeCommand() string {
 		realPath = execPath
 	}
 
-	// Normalize to lowercase for comparison
-	lowerPath := strings.ToLower(realPath)
+	return upgradeCommandForPath(realPath)
+}
 
-	// Check for Homebrew installation (macOS/Linux)
-	// Homebrew paths: /opt/homebrew/Cellar/bd, /usr/local/Cellar/bd, /home/linuxbrew/.linuxbrew/Cellar/bd
-	if strings.Contains(lowerPath, "/cellar/bd/") ||
-		strings.Contains(lowerPath, "/homebrew/") ||
-		strings.Contains(lowerPath, "/linuxbrew/") {
-		return "brew upgrade bd"
+// upgradeCommandForPath returns the upgrade command for a given executable path.
+// The homebrew-core formula is named "beads" (Formula/b/beads.rb), so the correct
+// command is "brew upgrade beads" — even for the legacy tap that used "bd.rb".
+func upgradeCommandForPath(execPath string) string {
+	lowerPath := strings.ToLower(execPath)
+
+	// Check for Homebrew Cellar path (macOS/Linux)
+	// Matches both homebrew-core formula "beads" and legacy tap formula "bd"
+	if strings.Contains(lowerPath, "/cellar/beads/") ||
+		strings.Contains(lowerPath, "/cellar/bd/") {
+		return "brew upgrade beads"
 	}
 
 	// Default to install script (works on all platforms including Windows via WSL/Git Bash)
-	return "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+	return installScriptCommand
 }
 
 // localVersionFile is the gitignored file that stores the last bd version used locally.
