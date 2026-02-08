@@ -13,7 +13,7 @@ INSTALL_DIR := $(HOME)/.local/bin
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags gms_pure_go -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
+	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
 else
 	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
 ifeq ($(shell uname),Darwin)

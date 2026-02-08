@@ -1,5 +1,3 @@
-//go:build cgo
-
 // Package dolt provides performance benchmarks for the Dolt storage backend.
 // Run with: go test -bench=. -benchmem ./internal/storage/dolt/...
 //
@@ -71,9 +69,9 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 // Bootstrap & Connection Benchmarks
 // =============================================================================
 
-// BenchmarkBootstrapEmbedded measures store initialization time in embedded mode.
+// BenchmarkBootstrap measures store initialization time.
 // This is the critical path for CLI commands that open/close the store each time.
-func BenchmarkBootstrapEmbedded(b *testing.B) {
+func BenchmarkBootstrap(b *testing.B) {
 	if _, err := os.LookupEnv("DOLT_PATH"); err != false {
 		if _, err := os.Stat("/usr/local/bin/dolt"); os.IsNotExist(err) {
 			if _, err := os.Stat("/usr/bin/dolt"); os.IsNotExist(err) {
