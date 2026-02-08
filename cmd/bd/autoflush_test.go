@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -280,5 +282,155 @@ func TestFetchAndMergeIssues_IncludesMultipleComments(t *testing.T) {
 	// Verify all comments were populated
 	if len(fetchedIssue.Comments) != 2 {
 		t.Errorf("fetchAndMergeIssues: expected 2 comments, got %d", len(fetchedIssue.Comments))
+	}
+}
+
+// TestFetchAndMergeIssues_IncludesLabels verifies that fetchAndMergeIssues
+// populates labels on issues fetched from the database.
+// Regression test for GH#1584: a future refactor removing label hydration
+// from GetIssue would silently break JSONL label correctness during autoflush.
+func TestFetchAndMergeIssues_IncludesLabels(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+
+	// Create storage
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Set issue_prefix to prevent "database not initialized" errors
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create test issue
+	issue := &types.Issue{
+		ID:        "test-1",
+		Title:     "Test Issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add labels to the issue
+	if err := store.AddLabel(ctx, "test-1", "bug", "tester"); err != nil {
+		t.Fatalf("failed to add label 'bug': %v", err)
+	}
+	if err := store.AddLabel(ctx, "test-1", "critical", "tester"); err != nil {
+		t.Fatalf("failed to add label 'critical': %v", err)
+	}
+
+	// Call fetchAndMergeIssues
+	issueMap := make(map[string]*types.Issue)
+	dirtyIDs := []string{"test-1"}
+	if err := fetchAndMergeIssues(ctx, store, dirtyIDs, issueMap); err != nil {
+		t.Fatalf("fetchAndMergeIssues failed: %v", err)
+	}
+
+	// Verify issue was fetched
+	fetchedIssue, ok := issueMap["test-1"]
+	if !ok {
+		t.Fatal("issue test-1 not found in issueMap")
+	}
+
+	// Verify labels were populated
+	if len(fetchedIssue.Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d: %v", len(fetchedIssue.Labels), fetchedIssue.Labels)
+	}
+
+	sort.Strings(fetchedIssue.Labels)
+	if fetchedIssue.Labels[0] != "bug" || fetchedIssue.Labels[1] != "critical" {
+		t.Errorf("expected labels [bug, critical], got %v", fetchedIssue.Labels)
+	}
+}
+
+// TestAutoflush_LabelsSurviveInJSONL is an end-to-end regression test for GH#1584.
+// It creates an issue, adds labels, flushes to JSONL via performAtomicExport,
+// and verifies the labels survive in the exported JSONL.
+func TestAutoflush_LabelsSurviveInJSONL(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
+
+	// Create storage
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	// Create test issue
+	issue := &types.Issue{
+		ID:        "test-1",
+		Title:     "Test Issue With Labels",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Add labels
+	if err := store.AddLabel(ctx, "test-1", "regression", "tester"); err != nil {
+		t.Fatalf("failed to add label: %v", err)
+	}
+	if err := store.AddLabel(ctx, "test-1", "autoflush", "tester"); err != nil {
+		t.Fatalf("failed to add label: %v", err)
+	}
+
+	// Simulate the autoflush path: fetchAndMergeIssues → performAtomicExport
+	issueMap := make(map[string]*types.Issue)
+	if err := fetchAndMergeIssues(ctx, store, []string{"test-1"}, issueMap); err != nil {
+		t.Fatalf("fetchAndMergeIssues failed: %v", err)
+	}
+
+	// Convert to slice (like filterWisps does)
+	issues := make([]*types.Issue, 0, len(issueMap))
+	for _, iss := range issueMap {
+		issues = append(issues, iss)
+	}
+
+	// Export to JSONL
+	if err := performAtomicExport(ctx, jsonlPath, issues, nil); err != nil {
+		t.Fatalf("performAtomicExport failed: %v", err)
+	}
+
+	// Read JSONL back and verify labels survived
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("failed to read JSONL: %v", err)
+	}
+
+	var exported types.Issue
+	if err := json.Unmarshal(data, &exported); err != nil {
+		t.Fatalf("failed to parse JSONL: %v", err)
+	}
+
+	if len(exported.Labels) != 2 {
+		t.Fatalf("labels lost in JSONL export! expected 2 labels, got %d: %v",
+			len(exported.Labels), exported.Labels)
+	}
+
+	sort.Strings(exported.Labels)
+	if exported.Labels[0] != "autoflush" || exported.Labels[1] != "regression" {
+		t.Errorf("expected labels [autoflush, regression], got %v", exported.Labels)
 	}
 }
