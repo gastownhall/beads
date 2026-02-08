@@ -16,6 +16,9 @@ import (
 //
 // This is intentionally conservative: it will not delete JSONL, and it preserves the
 // original DB as a backup for forensic recovery.
+//
+// For Dolt backends, delegates to doltCorruptionRecovery which removes the corrupted
+// dolt directory and reinitializes from JSONL via bd init --backend dolt.
 func DatabaseIntegrity(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
@@ -27,6 +30,11 @@ func DatabaseIntegrity(path string) error {
 	}
 
 	beadsDir := filepath.Join(absPath, ".beads")
+
+	// Dolt backend: use Dolt-specific recovery
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		return doltCorruptionRecovery(absPath, beadsDir)
+	}
 
 	// Best-effort: stop any running daemon to reduce the chance of DB file locks.
 	_ = Daemon(absPath)

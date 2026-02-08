@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -19,10 +20,9 @@ func databaseCorruptionRecovery(path string) error {
 
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Dolt backend: SQLite-specific corruption recovery doesn't apply
+	// Dolt backend: use Dolt-specific recovery
 	if cfg, _ := configfile.Load(beadsDir); cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
-		fmt.Println("  Database corruption recovery skipped (dolt backend — SQLite-specific)")
-		return nil
+		return doltCorruptionRecovery(path, beadsDir)
 	}
 
 	dbPath := filepath.Join(beadsDir, "beads.db")
@@ -89,6 +89,76 @@ func databaseCorruptionRecovery(path string) error {
 	return nil
 }
 
+// doltCorruptionRecovery recovers a corrupted Dolt database from JSONL backup.
+// The recovery procedure:
+//  1. Verify JSONL backup exists and has issues
+//  2. Back up the corrupted dolt directory
+//  3. Remove the corrupted dolt directory
+//  4. Re-initialize via bd init --backend dolt --force --from-jsonl
+//
+// The Dolt bootstrap in factory_dolt.go will automatically import from JSONL
+// when it finds no existing dolt database, so removing the corrupted directory
+// and reinitializing is sufficient.
+func doltCorruptionRecovery(path, beadsDir string) error {
+	doltPath := filepath.Join(beadsDir, "dolt")
+
+	// Check if dolt directory exists
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		return fmt.Errorf("no Dolt database to recover at %s", doltPath)
+	}
+
+	// Find JSONL file
+	jsonlPath := findJSONLPath(beadsDir)
+	if jsonlPath == "" {
+		return fmt.Errorf("no JSONL backup found - cannot recover Dolt database (try restoring from git history)")
+	}
+
+	// Count issues in JSONL
+	issueCount, err := countJSONLIssues(jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to read JSONL: %w", err)
+	}
+	if issueCount == 0 {
+		return fmt.Errorf("JSONL is empty - cannot recover Dolt database (try restoring from git history)")
+	}
+
+	// Back up corrupted dolt directory
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	backupPath := doltPath + "." + ts + ".corrupt.backup"
+	fmt.Printf("  Backing up corrupted Dolt database to %s\n", filepath.Base(backupPath))
+	if err := os.Rename(doltPath, backupPath); err != nil {
+		return fmt.Errorf("failed to backup corrupted Dolt database: %w", err)
+	}
+
+	// Get bd binary path
+	bdBinary, err := getBdBinary()
+	if err != nil {
+		// Restore corrupted database on failure
+		_ = os.Rename(backupPath, doltPath)
+		return err
+	}
+
+	// Reinitialize: bd init --backend dolt --force --from-jsonl -q
+	// This creates a fresh dolt database and the Dolt bootstrap will import from JSONL.
+	fmt.Printf("  Recovering %d issues from %s into fresh Dolt database\n", issueCount, filepath.Base(jsonlPath))
+	initCmd := newBdCmd(bdBinary, "init", "--backend", "dolt", "--force", "-q", "--skip-hooks", "--skip-merge-driver")
+	initCmd.Dir = path
+	initCmd.Stdout = os.Stdout
+	initCmd.Stderr = os.Stderr
+
+	if err := initCmd.Run(); err != nil {
+		// Restore backup on failure
+		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
+		_ = os.RemoveAll(doltPath) // Remove any partial init
+		_ = os.Rename(backupPath, doltPath)
+		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
+	}
+
+	fmt.Printf("  ✓ Recovered %d issues from JSONL backup into fresh Dolt database\n", issueCount)
+	fmt.Printf("  Corrupted database preserved at: %s\n", filepath.Base(backupPath))
+	return nil
+}
+
 // DatabaseCorruptionRecoveryWithOptions recovers a corrupted database with force and source selection support.
 //
 // Parameters:
@@ -106,10 +176,9 @@ func DatabaseCorruptionRecoveryWithOptions(path string, force bool, source strin
 
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Dolt backend: SQLite-specific corruption recovery doesn't apply
+	// Dolt backend: use Dolt-specific recovery
 	if cfg, _ := configfile.Load(beadsDir); cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
-		fmt.Println("  Database corruption recovery skipped (dolt backend — SQLite-specific)")
-		return nil
+		return doltCorruptionRecoveryWithOptions(path, beadsDir, force, source)
 	}
 
 	dbPath := filepath.Join(beadsDir, "beads.db")
@@ -249,5 +318,111 @@ func DatabaseCorruptionRecoveryWithOptions(path string, force bool, source strin
 	}
 
 	fmt.Printf("  ✓ Recovered %d issues from JSONL backup\n", issueCount)
+	return nil
+}
+
+// doltCorruptionRecoveryWithOptions recovers a corrupted Dolt database with force and source flags.
+func doltCorruptionRecoveryWithOptions(path, beadsDir string, force bool, source string) error {
+	doltPath := filepath.Join(beadsDir, "dolt")
+
+	// Check if dolt directory exists
+	doltExists := false
+	if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+		doltExists = true
+	}
+
+	// Find JSONL file
+	jsonlPath := findJSONLPath(beadsDir)
+	jsonlExists := jsonlPath != ""
+
+	// Check for contradictory flags
+	if force && source == "db" {
+		return fmt.Errorf("--force and --source=db are contradictory: --force implies the database is broken and recovery should use JSONL. Use --source=jsonl or --source=auto with --force")
+	}
+
+	// Determine source of truth
+	var useJSONL bool
+	switch source {
+	case "jsonl":
+		if !jsonlExists {
+			return fmt.Errorf("--source=jsonl specified but no JSONL file found")
+		}
+		useJSONL = true
+		if force {
+			fmt.Println("  Using JSONL as source of truth (--force --source=jsonl)")
+		} else {
+			fmt.Println("  Using JSONL as source of truth (--source=jsonl)")
+		}
+	case "db":
+		if !doltExists {
+			return fmt.Errorf("--source=db specified but no Dolt database found")
+		}
+		useJSONL = false
+		fmt.Println("  Using Dolt database as source of truth (--source=db)")
+	case "auto":
+		if force {
+			if !jsonlExists {
+				return fmt.Errorf("--force requires JSONL for recovery but no JSONL file found")
+			}
+			useJSONL = true
+			fmt.Println("  Using JSONL as source of truth (--force mode)")
+		} else if !doltExists && jsonlExists {
+			useJSONL = true
+			fmt.Println("  Using JSONL as source of truth (Dolt database missing)")
+		} else if doltExists && !jsonlExists {
+			useJSONL = false
+			fmt.Println("  Using Dolt database as source of truth (JSONL missing)")
+		} else if !doltExists && !jsonlExists {
+			return fmt.Errorf("neither Dolt database nor JSONL found - cannot recover")
+		} else {
+			useJSONL = true
+			fmt.Println("  Using JSONL as source of truth (auto-detected, Dolt database appears corrupted)")
+		}
+	default:
+		return fmt.Errorf("invalid --source value: %s (valid values: auto, jsonl, db)", source)
+	}
+
+	if !useJSONL {
+		fmt.Println("  Dolt database is the source of truth - skipping recovery")
+		return nil
+	}
+
+	// Count issues in JSONL
+	issueCount, err := countJSONLIssues(jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to read JSONL: %w", err)
+	}
+	if issueCount == 0 {
+		return fmt.Errorf("JSONL is empty - cannot recover Dolt database (try restoring from git history)")
+	}
+
+	// Backup corrupted dolt directory if it exists
+	if doltExists {
+		ts := time.Now().UTC().Format("20060102T150405Z")
+		backupPath := doltPath + "." + ts + ".corrupt.backup"
+		fmt.Printf("  Backing up Dolt database to %s\n", filepath.Base(backupPath))
+		if err := os.Rename(doltPath, backupPath); err != nil {
+			return fmt.Errorf("failed to backup Dolt database: %w", err)
+		}
+	}
+
+	// Get bd binary path
+	bdBinary, err := getBdBinary()
+	if err != nil {
+		return err
+	}
+
+	// Reinitialize: bd init --backend dolt --force -q
+	fmt.Printf("  Recovering %d issues from %s into fresh Dolt database\n", issueCount, filepath.Base(jsonlPath))
+	initCmd := newBdCmd(bdBinary, "init", "--backend", "dolt", "--force", "-q", "--skip-hooks", "--skip-merge-driver")
+	initCmd.Dir = path
+	initCmd.Stdout = os.Stdout
+	initCmd.Stderr = os.Stderr
+
+	if err := initCmd.Run(); err != nil {
+		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
+	}
+
+	fmt.Printf("  ✓ Recovered %d issues from JSONL backup into fresh Dolt database\n", issueCount)
 	return nil
 }
