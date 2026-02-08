@@ -796,13 +796,13 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 			return fmt.Errorf("issue cannot depend on itself")
 		}
 
-		// Validate parent-child dependency direction (only for local deps)
-		if dep.Type == types.DepParentChild {
-			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
-			}
-		}
+		// Parent-child direction validation note:
+		// The previous type-based check (Epic can't depend on non-Epic) was removed because
+		// it incorrectly rejected valid hierarchies involving custom types (e.g., theme → epic).
+		// Custom types like "theme" or "shot" are valid parents for built-in types like "epic"
+		// or "task". Cycle detection in this function and higher-level relationship constraints
+		// already prevent the actual problematic cases (circular dependencies and duplicate
+		// hierarchical links).
 	}
 
 	if dep.CreatedAt.IsZero() {

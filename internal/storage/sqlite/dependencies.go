@@ -52,20 +52,13 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 			return fmt.Errorf("issue cannot depend on itself")
 		}
 
-		// Validate parent-child dependency direction (only for local deps)
-		// In parent-child relationships: child depends on parent (child is part of parent)
-		// Parent should NOT depend on child (semantically backwards)
-		// Consistent with dependency semantics: IssueID depends on DependsOnID
-		if dep.Type == types.DepParentChild {
-			// issueExists is the dependent (the one that depends on something)
-			// dependsOnExists is what it depends on
-			// Correct: Task (child) depends on Epic (parent) - child belongs to parent
-			// Incorrect: Epic (parent) depends on Task (child) - backwards
-			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
-			}
-		}
+		// Parent-child direction validation note:
+		// The previous type-based check (Epic can't depend on non-Epic) was removed because
+		// it incorrectly rejected valid hierarchies involving custom types (e.g., theme → epic).
+		// Custom types like "theme" or "shot" are valid parents for built-in types like "epic"
+		// or "task". This method's cycle detection (below) prevents circular dependencies; duplicate
+		// hierarchical links are enforced by higher-level validation (e.g., CLI/RPC isChildOf checks),
+		// not by this storage-layer method.
 	}
 
 	if dep.CreatedAt.IsZero() {

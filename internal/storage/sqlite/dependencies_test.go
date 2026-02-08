@@ -99,17 +99,122 @@ func TestParentChildValidation(t *testing.T) {
 		t.Fatalf("RemoveDependency failed: %v", err)
 	}
 
-	// Test 2: Invalid direction - Epic depends on Task (parent depends on child - backwards!)
+	// Test 2: Epic depends on Task - was previously rejected but now allowed
+	// because type-based validation was too restrictive for custom types
 	err = store.AddDependency(ctx, &types.Dependency{
 		IssueID:     epic.ID,
 		DependsOnID: task.ID,
 		Type:        types.DepParentChild,
 	}, "test-user")
-	if err == nil {
-		t.Fatal("Expected error when parent depends on child, but got none")
+	if err != nil {
+		t.Fatalf("Epic depending on Task (parent-child) should be allowed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "child") || !strings.Contains(err.Error(), "parent") {
-		t.Errorf("Expected error message to mention child/parent relationship, got: %v", err)
+}
+
+func TestParentChildWithNonEpicParent(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a non-epic parent (chore) and an epic child
+	// This simulates hierarchies where the parent isn't an epic,
+	// e.g., custom types like "theme" or built-in types used as grouping
+	chore := &types.Issue{Title: "Grouping Chore", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeChore}
+	epic := &types.Issue{Title: "Epic Under Chore", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+
+	store.CreateIssue(ctx, chore, "test-user")
+	store.CreateIssue(ctx, epic, "test-user")
+
+	// Epic (child) depends on chore (parent) - was previously rejected
+	// because the old validation checked: if child is Epic and parent is not Epic → reject
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     epic.ID,
+		DependsOnID: chore.ID,
+		Type:        types.DepParentChild,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("Epic child of non-epic parent should be allowed: %v", err)
+	}
+
+	// Verify the dependency was created
+	deps, err := store.GetDependencies(ctx, epic.ID)
+	if err != nil {
+		t.Fatalf("GetDependencies failed: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("Expected 1 dependency, got %d", len(deps))
+	}
+	if deps[0].ID != chore.ID {
+		t.Errorf("Expected dependency on chore %s, got %s", chore.ID, deps[0].ID)
+	}
+}
+
+func TestParentChildWithCustomTypes(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Register custom types (required for CreateIssue validation)
+	if err := store.SetConfig(ctx, "types.custom", "theme,shot"); err != nil {
+		t.Fatalf("SetConfig for custom types failed: %v", err)
+	}
+
+	// Create issues with custom types that are used in real projects (e.g., shooter)
+	// Custom types like "theme" and "shot" are the primary use case for this fix
+	theme := &types.Issue{Title: "shooter/ai", Status: types.StatusOpen, Priority: 1, IssueType: types.IssueType("theme")}
+	epic := &types.Issue{Title: "Auth System", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	shot := &types.Issue{Title: "Quick fix", Status: types.StatusOpen, Priority: 1, IssueType: types.IssueType("shot")}
+
+	store.CreateIssue(ctx, theme, "test-user")
+	store.CreateIssue(ctx, epic, "test-user")
+	store.CreateIssue(ctx, shot, "test-user")
+
+	// Theme → Epic parent-child (epic depends on theme as parent)
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     epic.ID,
+		DependsOnID: theme.ID,
+		Type:        types.DepParentChild,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("Epic child of custom 'theme' parent should be allowed: %v", err)
+	}
+
+	// Epic → Shot parent-child (shot depends on epic as parent)
+	err = store.AddDependency(ctx, &types.Dependency{
+		IssueID:     shot.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+	}, "test-user")
+	if err != nil {
+		t.Fatalf("Custom 'shot' child of epic parent should be allowed: %v", err)
+	}
+
+	// Verify both dependencies
+	epicDeps, err := store.GetDependencies(ctx, epic.ID)
+	if err != nil {
+		t.Fatalf("GetDependencies for epic failed: %v", err)
+	}
+	if len(epicDeps) != 1 || epicDeps[0].ID != theme.ID {
+		t.Errorf("Expected epic to depend on theme, got %v", epicDeps)
+	}
+
+	shotDeps, err := store.GetDependencies(ctx, shot.ID)
+	if err != nil {
+		t.Fatalf("GetDependencies for shot failed: %v", err)
+	}
+	if len(shotDeps) != 1 || shotDeps[0].ID != epic.ID {
+		t.Errorf("Expected shot to depend on epic, got %v", shotDeps)
+	}
+
+	// Verify children from theme's perspective
+	themeDependents, err := store.GetDependents(ctx, theme.ID)
+	if err != nil {
+		t.Fatalf("GetDependents for theme failed: %v", err)
+	}
+	if len(themeDependents) != 1 || themeDependents[0].ID != epic.ID {
+		t.Errorf("Expected theme to have epic as dependent, got %v", themeDependents)
 	}
 }
 
