@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -230,37 +229,16 @@ func findReplies(ctx context.Context, issueID string, daemonClient *rpc.Client, 
 		return replies
 	}
 	// Direct mode - query storage
-	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
-		deps, err := sqliteStore.GetDependentsWithMetadata(ctx, issueID)
-		if err != nil {
-			return nil
-		}
-		var replies []*types.Issue
-		for _, dep := range deps {
-			if dep.DependencyType == types.DepRepliesTo {
-				issue := dep.Issue // Copy to avoid aliasing
-				replies = append(replies, &issue)
-			}
-		}
-		return replies
-	}
-
-	allDeps, err := store.GetAllDependencyRecords(ctx)
+	deps, err := store.GetDependentsWithMetadata(ctx, issueID)
 	if err != nil {
 		return nil
 	}
-
 	var replies []*types.Issue
-	for childID, deps := range allDeps {
-		for _, dep := range deps {
-			if dep.Type == types.DepRepliesTo && dep.DependsOnID == issueID {
-				issue, _ := store.GetIssue(ctx, childID)
-				if issue != nil {
-					replies = append(replies, issue)
-				}
-			}
+	for _, dep := range deps {
+		if dep.DependencyType == types.DepRepliesTo {
+			issue := dep.Issue // Copy to avoid aliasing
+			replies = append(replies, &issue)
 		}
 	}
-
 	return replies
 }
