@@ -38,7 +38,7 @@ func CheckCLIVersion(cliVersion string) DoctorCheck {
 		return DoctorCheck{
 			Name:    "CLI Version",
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("%s (latest: %s)", cliVersion, latestVersion),
+			Message: fmt.Sprintf("%s (latest: %s; update: %s)", cliVersion, latestVersion, upgradeCmd),
 			Fix:     fmt.Sprintf("Upgrade: %s", upgradeCmd),
 		}
 	}
