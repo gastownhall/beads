@@ -985,8 +985,6 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 }
 
 func TestConcurrentExternalRefImports(t *testing.T) {
-	t.Skip("TODO(bd-gpe7): Test hangs due to database deadlock - needs investigation")
-
 	t.Run("sequential imports with same external_ref are detected as updates", func(t *testing.T) {
 		store, err := sqlite.New(context.Background(), ":memory:")
 		if err != nil {

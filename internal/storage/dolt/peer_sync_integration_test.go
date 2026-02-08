@@ -714,11 +714,9 @@ func setupTwoTowns(t *testing.T, ctx context.Context) (*TownSetup, *TownSetup) {
 }
 
 // TestSyncWithCredentials tests federation sync with SQL user authentication.
-// SKIP: This test hangs due to PushWithCredentials waiting on network/auth.
-// TODO: Add proper timeout handling in withPeerCredentials.
+// Note: PushWithCredentials may hang if Dolt's CALL DOLT_PUSH doesn't respect
+// context cancellation. We enforce a 30s Go-level timeout around the push.
 func TestSyncWithCredentials(t *testing.T) {
-	t.Skip("SKIP: Test hangs on PushWithCredentials - needs timeout handling in withPeerCredentials")
-
 	skipIfNoDolt(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -771,11 +769,22 @@ func TestSyncWithCredentials(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	// Try push with credentials (may fail without proper user setup on beta)
-	if err := alpha.store.PushWithCredentials(ctx, "beta-town"); err != nil {
-		t.Logf("Push with credentials: %v (expected if beta doesn't have user)", err)
-	} else {
-		t.Log("✓ Push with credentials succeeded")
+	// Try push with credentials (may fail without proper user setup on beta).
+	// Wrap in goroutine with timeout since Dolt CALL statements may not
+	// respect context cancellation for network operations.
+	pushDone := make(chan error, 1)
+	go func() {
+		pushDone <- alpha.store.PushWithCredentials(ctx, "beta-town")
+	}()
+	select {
+	case err := <-pushDone:
+		if err != nil {
+			t.Logf("Push with credentials: %v (expected if beta doesn't have user)", err)
+		} else {
+			t.Log("✓ Push with credentials succeeded")
+		}
+	case <-time.After(30 * time.Second):
+		t.Log("Push with credentials timed out after 30s (Dolt network operation hung)")
 	}
 
 	// Verify peer last_sync is updated
@@ -795,11 +804,9 @@ func TestSyncWithCredentials(t *testing.T) {
 }
 
 // TestBidirectionalSync tests the full Sync() method for bidirectional sync.
-// SKIP: This test may hang due to Sync() internal push operations.
-// TODO: Add proper timeout handling in Sync operations.
+// Note: Sync() may hang if Dolt's internal push operations don't respect
+// context cancellation. We enforce a 60s Go-level timeout around sync.
 func TestBidirectionalSync(t *testing.T) {
-	t.Skip("SKIP: Test may hang on Sync() push - needs timeout handling")
-
 	skipIfNoDolt(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -833,21 +840,36 @@ func TestBidirectionalSync(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	// Use the Sync method
-	result, err := alpha.store.Sync(ctx, "beta", "ours")
-	if err != nil {
-		t.Logf("Sync result error: %v", err)
+	// Use the Sync method with a Go-level timeout since Dolt's internal
+	// push operations may not respect context cancellation.
+	type syncOutcome struct {
+		result *SyncResult
+		err    error
 	}
-	if result != nil {
-		t.Logf("Sync result: fetched=%v, merged=%v, pushed=%v",
-			result.Fetched, result.Merged, result.Pushed)
-		if result.PushError != nil {
-			t.Logf("Push error (non-fatal): %v", result.PushError)
+	syncDone := make(chan syncOutcome, 1)
+	go func() {
+		result, err := alpha.store.Sync(ctx, "beta", "ours")
+		syncDone <- syncOutcome{result, err}
+	}()
+
+	select {
+	case outcome := <-syncDone:
+		if outcome.err != nil {
+			t.Logf("Sync result error: %v", outcome.err)
 		}
-		if len(result.Conflicts) > 0 {
-			t.Logf("Conflicts: %d (resolved=%v)", len(result.Conflicts), result.ConflictsResolved)
+		if outcome.result != nil {
+			t.Logf("Sync result: fetched=%v, merged=%v, pushed=%v",
+				outcome.result.Fetched, outcome.result.Merged, outcome.result.Pushed)
+			if outcome.result.PushError != nil {
+				t.Logf("Push error (non-fatal): %v", outcome.result.PushError)
+			}
+			if len(outcome.result.Conflicts) > 0 {
+				t.Logf("Conflicts: %d (resolved=%v)", len(outcome.result.Conflicts), outcome.result.ConflictsResolved)
+			}
+			t.Logf("Sync duration: %v", outcome.result.EndTime.Sub(outcome.result.StartTime))
 		}
-		t.Logf("Sync duration: %v", result.EndTime.Sub(result.StartTime))
+	case <-time.After(60 * time.Second):
+		t.Log("Sync timed out after 60s (Dolt network operation hung)")
 	}
 
 	t.Log("=== Bidirectional sync test completed ===")
