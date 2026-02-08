@@ -139,6 +139,15 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 		exitWithError("import_failed", importErr.Error(), "partial Dolt directory has been cleaned up")
 	}
 
+	// Set sync.mode to dolt-native in the DB so ShouldExportJSONL skips
+	// the expensive JSONL export. Without this, the migrated DB has no
+	// sync.mode set, defaulting to git-portable (10-25s export tax per write).
+	if err := doltStore.SetConfig(ctx, SyncModeConfigKey, SyncModeDoltNative); err != nil {
+		printWarning(fmt.Sprintf("failed to set sync.mode in DB: %v", err))
+	} else {
+		printSuccess("Set sync.mode = dolt-native in database")
+	}
+
 	// Commit the migration
 	commitMsg := fmt.Sprintf("Migrate from SQLite: %d issues imported", imported)
 	if err := doltStore.Commit(ctx, commitMsg); err != nil {
