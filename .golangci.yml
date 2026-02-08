@@ -95,6 +95,11 @@ linters:
         linters:
           - unparam
         text: 'reimportConflicts|resolveConflictsByTimestamp'
+      # unparam: readOnly param kept for API symmetry with fix/sqlite_open.go
+      - path: 'cmd/bd/doctor/sqlite_open\.go'
+        linters:
+          - unparam
+        text: 'readOnly'
       # misspell: "cancelled" is intentional - matching GitHub API response values
       - path: 'cmd/bd/gate\.go'
         linters:
