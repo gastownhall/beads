@@ -718,6 +718,7 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 		}
 
 		// Parent filtering (bd-yqhh): filter children by parent issue
+		// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
 		if filter.ParentID != nil {
 			isChild := false
 			for _, dep := range m.dependencies[issue.ID] {
@@ -725,6 +726,10 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 					isChild = true
 					break
 				}
+			}
+			// Also check dotted-ID naming convention
+			if !isChild && strings.HasPrefix(issue.ID, *filter.ParentID+".") {
+				isChild = true
 			}
 			if !isChild {
 				continue

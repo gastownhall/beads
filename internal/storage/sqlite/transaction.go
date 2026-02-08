@@ -1416,9 +1416,11 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	// Parent filtering: filter children by parent issue
+	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
 	if filter.ParentID != nil {
-		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?)")
-		args = append(args, *filter.ParentID)
+		parentID := *filter.ParentID
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE ? || '.%')")
+		args = append(args, parentID, parentID)
 	}
 
 	whereSQL := ""
