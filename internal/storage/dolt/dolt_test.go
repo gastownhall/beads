@@ -860,6 +860,34 @@ func TestValidateTableName(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseName(t *testing.T) {
+	tests := []struct {
+		name    string
+		dbName  string
+		wantErr bool
+	}{
+		{"valid simple", "beads", false},
+		{"valid with underscore", "beads_test", false},
+		{"valid with hyphen", "beads-test", false},
+		{"valid with numbers", "beads123", false},
+		{"empty", "", true},
+		{"too long", string(make([]byte, 100)), true},
+		{"starts with number", "123beads", true},
+		{"with backtick injection", "beads`; DROP DATABASE beads; --", true},
+		{"with space", "my database", true},
+		{"with semicolon", "beads;evil", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDatabaseName(tt.dbName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateDatabaseName(%q) error = %v, wantErr %v", tt.dbName, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDoltStoreGetReadyWork(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

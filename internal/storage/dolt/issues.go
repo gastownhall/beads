@@ -494,10 +494,15 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 	// Delete related data (foreign keys will cascade, but be explicit)
 	tables := []string{"dependencies", "events", "comments", "labels", "dirty_issues"}
 	for _, table := range tables {
+		// Validate table name to prevent SQL injection (tables are hardcoded above,
+		// but validate defensively in case the list is ever modified)
+		if err := validateTableName(table); err != nil {
+			return fmt.Errorf("invalid table name %q: %w", table, err)
+		}
 		if table == "dependencies" {
-			_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? OR depends_on_id = ?", table), id, id)
+			_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? OR depends_on_id = ?", table), id, id) //nolint:gosec // G201: table validated by validateTableName above
 		} else {
-			_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", table), id)
+			_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", table), id) //nolint:gosec // G201: table validated by validateTableName above
 		}
 		if err != nil {
 			return fmt.Errorf("failed to delete from %s: %w", table, err)
