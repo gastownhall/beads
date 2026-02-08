@@ -666,15 +666,7 @@ The daemon will now exit.`, strings.ToUpper(backend))
 			importCtx, importCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer importCancel()
 
-			// Suppress stderr during initial import to avoid confusing parent process
-			// The import prints "Import complete: no changes" which the parent mistakes for an error
-			oldStderr := os.Stderr
-			os.Stderr, _ = os.Open(os.DevNull)
-
 			err := importToJSONLWithStore(importCtx, store, jsonlPath)
-
-			// Restore stderr
-			os.Stderr = oldStderr
 
 			if err != nil {
 				log.Warn("initial import failed (continuing anyway)", "error", err)
