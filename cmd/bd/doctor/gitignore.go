@@ -49,6 +49,7 @@ beads.right.meta.json
 # Sync state (local-only, per-machine)
 # These files are machine-specific and should not be shared across clones
 .sync.lock
+.jsonl.lock
 sync_base.jsonl
 export-state/
 
@@ -71,6 +72,7 @@ var requiredPatterns = []string{
 	"redirect",
 	"last-touched",
 	".sync.lock",
+	".jsonl.lock",
 	"sync_base.jsonl",
 	"export-state/",
 }
