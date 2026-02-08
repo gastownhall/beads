@@ -48,8 +48,13 @@ var YamlOnlyKeys = map[string]bool{
 	"sync.require_confirmation_on_mass_delete": true,
 
 	// Daemon settings (GH#871: team-wide auto-sync config)
+	"daemon.auto-sync":   true,
+	"daemon.auto_sync":   true,
+	"daemon.auto-commit": true,
 	"daemon.auto_commit": true,
+	"daemon.auto-push":   true,
 	"daemon.auto_push":   true,
+	"daemon.auto-pull":   true,
 	"daemon.auto_pull":   true,
 
 	// Routing settings
