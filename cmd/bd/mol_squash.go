@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -294,16 +293,10 @@ func squashMolecule(ctx context.Context, s storage.Storage, root *types.Issue, c
 
 // deleteWispChildren removes the wisp issues from the database
 func deleteWispChildren(ctx context.Context, s storage.Storage, ids []string) (int, error) {
-	// Type assert to SQLite storage for delete access
-	d, ok := s.(*sqlite.SQLiteStorage)
-	if !ok {
-		return 0, fmt.Errorf("delete not supported by this storage backend")
-	}
-
 	deleted := 0
 	var lastErr error
 	for _, id := range ids {
-		if err := d.DeleteIssue(ctx, id); err != nil {
+		if err := s.DeleteIssue(ctx, id); err != nil {
 			lastErr = err
 			continue
 		}

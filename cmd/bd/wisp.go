@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -638,14 +637,8 @@ func runWispGC(cmd *cobra.Command, args []string) {
 
 	// Delete abandoned wisps
 	var cleanedIDs []string
-	sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Error: wisp gc requires SQLite storage backend\n")
-		os.Exit(1)
-	}
-
 	for _, issue := range abandoned {
-		if err := sqliteStore.DeleteIssue(ctx, issue.ID); err != nil {
+		if err := store.DeleteIssue(ctx, issue.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to delete %s: %v\n", issue.ID, err)
 			continue
 		}
