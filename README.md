@@ -35,6 +35,8 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 * **Zero Conflict:** Hash-based IDs (`bd-a1b2`) prevent merge collisions in multi-agent/multi-branch workflows.
 * **Invisible Infrastructure:** SQLite local cache for speed; background daemon for auto-sync.
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
+* **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
+* **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
 
 ## 📖 Essential Commands
 
