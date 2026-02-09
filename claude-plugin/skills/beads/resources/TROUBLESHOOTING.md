@@ -52,7 +52,7 @@ bd version
 **2. If version < 0.15.0, update bd:**
 ```bash
 # Via Homebrew (macOS/Linux)
-brew upgrade bd
+brew upgrade beads
 
 # Via go install
 go install github.com/steveyegge/beads/cmd/bd@latest

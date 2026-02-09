@@ -381,7 +381,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 4. Push version bump: `git push origin main`
 5. Tag release: `git tag v<version> && git push origin v<version>`
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
-7. Verify: `brew update && brew upgrade bd && bd version`
+7. Verify: `brew update && brew upgrade beads && bd version`
 
 See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
 

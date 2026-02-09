@@ -229,7 +229,7 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 ### Homebrew
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 ### go install

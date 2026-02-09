@@ -62,7 +62,7 @@ The script provides colorful, step-by-step progress output:
 After the script finishes:
 - GitHub Actions builds binaries for all platforms (~5 minutes)
 - PyPI package is published automatically
-- Users can `brew upgrade bd` to get the new version
+- Users can `brew upgrade beads` to get the new version
 - GitHub Release is created with binaries and changelog
 
 ---

@@ -363,7 +363,7 @@ The recommended approach for Claude Code, Cursor, Windsurf, and other editors wi
 
 ```bash
 # 1. Install bd CLI (see Quick Install above)
-brew install bd
+brew install beads
 
 # 2. Initialize in your project
 cd your-project
@@ -449,7 +449,7 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 ### Homebrew
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 ### go install
@@ -646,7 +646,7 @@ bd info --whats-new --json  # Machine-readable
 ### Homebrew
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 ### go install

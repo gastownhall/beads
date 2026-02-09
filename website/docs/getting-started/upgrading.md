@@ -24,7 +24,7 @@ bd info --whats-new --json  # Machine-readable
 ### Homebrew
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 ### go install

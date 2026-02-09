@@ -422,7 +422,7 @@ tar -xzf beads_0.22.0_darwin_arm64.tar.gz
 
 ```bash
 brew update
-brew upgrade bd
+brew upgrade beads
 bd version
 ```
 
