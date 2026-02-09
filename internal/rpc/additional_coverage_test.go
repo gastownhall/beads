@@ -934,3 +934,26 @@ func TestResetDroppedEventsCount(t *testing.T) {
 
 	// No error means success
 }
+
+func TestHealthNilStorage(t *testing.T) {
+	// Create a server with nil storage to test degraded-state robustness
+	srv := NewServer("/tmp/test-nil-storage.sock", nil, t.TempDir(), "")
+	resp := srv.handleHealth(&Request{Operation: OpHealth})
+
+	// Should return unhealthy, not panic
+	if resp.Success {
+		t.Fatal("expected health check to report failure with nil storage")
+	}
+
+	var health HealthResponse
+	if err := json.Unmarshal(resp.Data, &health); err != nil {
+		t.Fatalf("failed to unmarshal health response: %v", err)
+	}
+
+	if health.Status != statusUnhealthy {
+		t.Errorf("expected status %q, got %q", statusUnhealthy, health.Status)
+	}
+	if health.Error == "" {
+		t.Error("expected error message for nil storage")
+	}
+}

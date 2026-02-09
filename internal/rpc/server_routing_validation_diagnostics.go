@@ -367,20 +367,26 @@ func (s *Server) handleHealth(req *Request) Response {
 
 	store := s.storage
 
-	healthCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
 	status := "healthy"
 	dbError := ""
+	dbResponseMs := 0.0
 
-	_, pingErr := store.GetStatistics(healthCtx)
-	dbResponseMs := time.Since(start).Seconds() * 1000
-
-	if pingErr != nil {
+	if store == nil {
 		status = statusUnhealthy
-		dbError = pingErr.Error()
-	} else if dbResponseMs > 500 {
-		status = "degraded"
+		dbError = "storage not initialized"
+	} else {
+		healthCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		_, pingErr := store.GetStatistics(healthCtx)
+		dbResponseMs = time.Since(start).Seconds() * 1000
+
+		if pingErr != nil {
+			status = statusUnhealthy
+			dbError = pingErr.Error()
+		} else if dbResponseMs > 500 {
+			status = "degraded"
+		}
 	}
 
 	// Check version compatibility
