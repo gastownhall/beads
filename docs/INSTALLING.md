@@ -440,10 +440,36 @@ After installation:
 
 ## Updating bd
 
+Use the update command that matches how you installed `bd`.
+
+### Quick Install Script (macOS/Linux/FreeBSD)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+### PowerShell Installer (Windows)
+
+```pwsh
+irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+```
+
 ### Homebrew
 
 ```bash
 brew upgrade bd
+```
+
+### npm
+
+```bash
+npm update -g @beads/bd
+```
+
+### bun
+
+```bash
+bun install -g --trust @beads/bd
 ```
 
 ### go install
@@ -459,6 +485,15 @@ cd beads
 git pull
 go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
+```
+
+## After Upgrading (Recommended)
+
+```bash
+bd info --whats-new
+bd hooks install
+bd daemons killall
+bd version
 ```
 
 ## Uninstalling

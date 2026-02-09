@@ -226,6 +226,18 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 
 ## Updating bd
 
+### Quick install script (macOS/Linux/FreeBSD)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+### PowerShell installer (Windows)
+
+```pwsh
+irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+```
+
 ### Homebrew
 
 ```bash
@@ -237,6 +249,8 @@ brew upgrade bd
 ```bash
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
+
+For post-upgrade steps (hooks, daemons, migrations), see [Upgrading](/getting-started/upgrading).
 
 ## Next Steps
 

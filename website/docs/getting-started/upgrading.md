@@ -21,6 +21,30 @@ bd info --whats-new --json  # Machine-readable
 
 ## Upgrading
 
+Use the command that matches your install method.
+
+| Install method | Platforms | Command |
+|---|---|---|
+| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh \| bash` |
+| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 \| iex` |
+| Homebrew | macOS, Linux | `brew upgrade bd` |
+| go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
+| npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
+| bun | macOS, Linux, Windows | `bun install -g --trust @beads/bd` |
+| From source (Unix shell) | macOS, Linux, FreeBSD | `git pull && go build -o bd ./cmd/bd` |
+
+### Quick install script (macOS/Linux/FreeBSD)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
+
+### PowerShell installer (Windows)
+
+```pwsh
+irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+```
+
 ### Homebrew
 
 ```bash
