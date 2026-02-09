@@ -545,10 +545,10 @@ func setupDaemonIO(cmd *exec.Cmd) {
 		cmd.Stdout = devNull
 		cmd.Stderr = devNull
 		cmd.Stdin = devNull
-		go func() {
-			time.Sleep(1 * time.Second)
-			_ = devNull.Close()
-		}()
+		// Do not close devNull: the daemon process inherits this fd and may
+		// use it beyond the caller's lifetime. Closing on a timer races with
+		// the child process and risks writing to a reused fd number.
+		// A single /dev/null fd is a trivial resource reclaimed at exit.
 	}
 }
 
