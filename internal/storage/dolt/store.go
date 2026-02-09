@@ -127,6 +127,12 @@ func isRetryableError(err error) bool {
 	if strings.Contains(errStr, "connection refused") {
 		return true
 	}
+	// Dolt read-only mode: under load, Dolt may enter read-only mode with
+	// "cannot update manifest: database is read only". This clears after
+	// a server restart, so it's worth retrying.
+	if strings.Contains(errStr, "database is read only") {
+		return true
+	}
 	return false
 }
 

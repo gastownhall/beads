@@ -49,6 +49,16 @@ func TestIsRetryableError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "database is read only - retryable",
+			err:      errors.New("cannot update manifest: database is read only"),
+			expected: true,
+		},
+		{
+			name:     "Database Is Read Only (case insensitive)",
+			err:      errors.New("Database Is Read Only"),
+			expected: true,
+		},
+		{
 			name:     "syntax error - not retryable",
 			err:      errors.New("Error 1064: You have an error in your SQL syntax"),
 			expected: false,
