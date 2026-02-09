@@ -164,6 +164,12 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		args = append(args, filter.SpecIDPrefix+"%")
 	}
 
+	// Source repo filtering
+	if filter.SourceRepo != nil {
+		whereClauses = append(whereClauses, "source_repo = ?")
+		args = append(args, *filter.SourceRepo)
+	}
+
 	// Wisp filtering
 	if filter.Ephemeral != nil {
 		if *filter.Ephemeral {

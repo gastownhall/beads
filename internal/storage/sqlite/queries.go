@@ -804,6 +804,8 @@ var allowedUpdateFields = map[string]bool{
 	"closed_at":           true,
 	"close_reason":        true,
 	"closed_by_session":   true,
+	// Source repo field (for multi-repo migration)
+	"source_repo": true,
 	// Messaging fields
 	"sender": true,
 	"wisp":   true, // Database column is 'ephemeral', mapped in UpdateIssue
@@ -2095,6 +2097,12 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	if filter.SpecIDPrefix != "" {
 		whereClauses = append(whereClauses, "spec_id LIKE ?")
 		args = append(args, filter.SpecIDPrefix+"%")
+	}
+
+	// Source repo filtering
+	if filter.SourceRepo != nil {
+		whereClauses = append(whereClauses, "source_repo = ?")
+		args = append(args, *filter.SourceRepo)
 	}
 
 	// Wisp filtering

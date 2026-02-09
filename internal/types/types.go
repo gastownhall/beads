@@ -990,6 +990,9 @@ type IssueFilter struct {
 	// Tombstone filtering
 	IncludeTombstones bool // If false (default), exclude tombstones from results
 
+	// Source repo filtering (for multi-repo support)
+	SourceRepo *string // Filter by source_repo field (nil = any)
+
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
