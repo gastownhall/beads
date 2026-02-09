@@ -245,6 +245,39 @@ func TestBatch(t *testing.T) {
 	}
 }
 
+func TestBatch_RejectsNestedBatch(t *testing.T) {
+	_, client, cleanup := setupTestServer(t)
+	defer cleanup()
+	defer client.Close()
+
+	// Construct a batch containing a nested batch operation — this should be rejected
+	// to prevent unbounded recursion (stack overflow crash).
+	innerBatchArgs, _ := json.Marshal(BatchArgs{
+		Operations: []BatchOperation{
+			{Operation: "list", Args: json.RawMessage(`{}`)},
+		},
+	})
+	args := &BatchArgs{
+		Operations: []BatchOperation{
+			{
+				Operation: "batch",
+				Args:      innerBatchArgs,
+			},
+		},
+	}
+
+	resp, err := client.Batch(args)
+	if err == nil {
+		t.Fatal("expected nested batch to be rejected, but it succeeded")
+	}
+	if resp == nil || resp.Success {
+		t.Fatal("expected unsuccessful response for nested batch")
+	}
+	if resp.Error != "nested batch operations are not allowed" {
+		t.Errorf("unexpected error message: %s", resp.Error)
+	}
+}
+
 func TestEpicStatus(t *testing.T) {
 	_, client, cleanup := setupTestServer(t)
 	defer cleanup()

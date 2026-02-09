@@ -245,6 +245,18 @@ func (s *Server) handleBatch(req *Request) Response {
 		}
 	}
 
+	// Reject nested batch operations to prevent stack overflow via unbounded recursion.
+	// handleBatch -> handleRequest -> handleBatch would allow a single malicious
+	// request to crash the daemon. There is no legitimate use case for nested batches.
+	for _, op := range batchArgs.Operations {
+		if op.Operation == OpBatch {
+			return Response{
+				Success: false,
+				Error:   "nested batch operations are not allowed",
+			}
+		}
+	}
+
 	results := make([]BatchResult, 0, len(batchArgs.Operations))
 
 	for _, op := range batchArgs.Operations {
