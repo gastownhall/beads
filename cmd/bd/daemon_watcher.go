@@ -198,8 +198,14 @@ func (fw *FileWatcher) Start(ctx context.Context, log *slog.Logger) {
 				if event.Name == fw.jsonlPath && (event.Op&fsnotify.Remove != 0 || event.Op&fsnotify.Rename != 0) {
 					log.Info("JSONL removed/renamed, re-establishing watch")
 					_ = fw.watcher.Remove(fw.jsonlPath)
-					// Retry with exponential backoff
-					fw.reEstablishWatch(ctx, log)
+					// Retry with exponential backoff in a separate goroutine
+					// to avoid blocking the event loop (which could cause
+					// dropped events if the fsnotify buffer fills).
+					fw.wg.Add(1)
+					go func() {
+						defer fw.wg.Done()
+						fw.reEstablishWatch(ctx, log)
+					}()
 					continue
 				}
 
