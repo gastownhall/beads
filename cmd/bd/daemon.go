@@ -305,6 +305,11 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Declare server and socketPath early so panic recovery can access them.
+	// They are assigned later once the socket directory and RPC server are ready.
+	var server *rpc.Server
+	var socketPath string
+
 	// Top-level panic recovery to ensure clean shutdown and diagnostics
 	defer func() {
 		if r := recover(); r != nil {
@@ -327,6 +332,26 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, autoPull, local
 				crashReport := fmt.Sprintf("Daemon crashed at %s\n\nPanic: %v\n\nStack trace:\n%s\n",
 					time.Now().Format(time.RFC3339), r, stackTrace)
 				log.Error("crash report", "report", crashReport)
+			}
+
+			// Stop RPC server (cleans up socket file) with timeout guard
+			if server != nil {
+				done := make(chan struct{})
+				go func() {
+					_ = server.Stop()
+					close(done)
+				}()
+				select {
+				case <-done:
+					log.Info("RPC server stopped during panic recovery")
+				case <-time.After(5 * time.Second):
+					log.Error("timeout waiting for RPC server stop during panic recovery")
+				}
+			}
+
+			// Clean up socket file if server.Stop() didn't handle it
+			if socketPath != "" {
+				_ = os.Remove(socketPath)
 			}
 
 			// Clean up PID file
@@ -651,7 +676,7 @@ The daemon will now exit.`, strings.ToUpper(backend))
 	// Use short socket path to avoid Unix socket path length limits (macOS: 104 chars)
 	// Check BD_SOCKET env var first for custom socket path (e.g., test isolation,
 	// or filesystems that don't support sockets in .beads directory)
-	socketPath := os.Getenv("BD_SOCKET")
+	socketPath = os.Getenv("BD_SOCKET")
 	if socketPath == "" {
 		socketPath = rpc.ShortSocketPath(workspacePath)
 	}
@@ -663,7 +688,8 @@ The daemon will now exit.`, strings.ToUpper(backend))
 	serverCtx, serverCancel := context.WithCancel(ctx)
 	defer serverCancel()
 
-	server, serverErrChan, err := startRPCServer(serverCtx, socketPath, store, workspacePath, daemonDBPath, log)
+	var serverErrChan chan error
+	server, serverErrChan, err = startRPCServer(serverCtx, socketPath, store, workspacePath, daemonDBPath, log)
 	if err != nil {
 		return
 	}
