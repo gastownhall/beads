@@ -2,7 +2,11 @@ package rpc
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/memory"
 )
 
 // TestDepAdd_JSONOutput verifies that handleDepAdd returns JSON data in Response.Data.
@@ -169,4 +173,107 @@ func TestDepRemove_JSONOutput(t *testing.T) {
 
 	// Silence unused variable warning
 	_ = store
+}
+
+// TestHandleSimpleStoreOp_MutationIssueID verifies that handleDepRemove,
+// handleLabelAdd, and handleLabelRemove emit mutation events with the correct
+// (non-empty) issueID. This was broken when the issueID was passed as a string
+// parameter (evaluated before json.Unmarshal) instead of a closure.
+func TestHandleSimpleStoreOp_MutationIssueID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := memory.New(filepath.Join(tmpDir, "test.jsonl"))
+	server := NewServer(filepath.Join(tmpDir, "test.sock"), store, tmpDir, filepath.Join(tmpDir, "test.db"))
+
+	// Create two test issues
+	createJSON1, _ := json.Marshal(CreateArgs{Title: "Issue A", IssueType: "task", Priority: 2})
+	resp1 := server.handleCreate(&Request{Operation: OpCreate, Args: createJSON1, Actor: "test"})
+	if !resp1.Success {
+		t.Fatalf("create issue A failed: %s", resp1.Error)
+	}
+	var issueA struct{ ID string }
+	json.Unmarshal(resp1.Data, &issueA)
+
+	createJSON2, _ := json.Marshal(CreateArgs{Title: "Issue B", IssueType: "task", Priority: 2})
+	resp2 := server.handleCreate(&Request{Operation: OpCreate, Args: createJSON2, Actor: "test"})
+	if !resp2.Success {
+		t.Fatalf("create issue B failed: %s", resp2.Error)
+	}
+	var issueB struct{ ID string }
+	json.Unmarshal(resp2.Data, &issueB)
+
+	t.Run("handleDepRemove emits non-empty issueID", func(t *testing.T) {
+		// Add dependency first
+		addJSON, _ := json.Marshal(DepAddArgs{FromID: issueA.ID, ToID: issueB.ID, DepType: "blocks"})
+		server.handleDepAdd(&Request{Operation: OpDepAdd, Args: addJSON, Actor: "test"})
+
+		time.Sleep(10 * time.Millisecond)
+		checkpoint := time.Now().UnixMilli()
+		time.Sleep(10 * time.Millisecond)
+
+		removeJSON, _ := json.Marshal(DepRemoveArgs{FromID: issueA.ID, ToID: issueB.ID})
+		resp := server.handleDepRemove(&Request{Operation: OpDepRemove, Args: removeJSON, Actor: "test"})
+		if !resp.Success {
+			t.Fatalf("handleDepRemove failed: %s", resp.Error)
+		}
+
+		mutations := server.GetRecentMutations(checkpoint)
+		found := false
+		for _, m := range mutations {
+			if m.Type == MutationUpdate && m.IssueID == issueA.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected mutation event with issueID=%q, got mutations: %+v", issueA.ID, mutations)
+		}
+	})
+
+	t.Run("handleLabelAdd emits non-empty issueID", func(t *testing.T) {
+		time.Sleep(10 * time.Millisecond)
+		checkpoint := time.Now().UnixMilli()
+		time.Sleep(10 * time.Millisecond)
+
+		labelJSON, _ := json.Marshal(LabelAddArgs{ID: issueA.ID, Label: "test-label"})
+		resp := server.handleLabelAdd(&Request{Operation: OpLabelAdd, Args: labelJSON, Actor: "test"})
+		if !resp.Success {
+			t.Fatalf("handleLabelAdd failed: %s", resp.Error)
+		}
+
+		mutations := server.GetRecentMutations(checkpoint)
+		found := false
+		for _, m := range mutations {
+			if m.Type == MutationUpdate && m.IssueID == issueA.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected mutation event with issueID=%q, got mutations: %+v", issueA.ID, mutations)
+		}
+	})
+
+	t.Run("handleLabelRemove emits non-empty issueID", func(t *testing.T) {
+		time.Sleep(10 * time.Millisecond)
+		checkpoint := time.Now().UnixMilli()
+		time.Sleep(10 * time.Millisecond)
+
+		labelJSON, _ := json.Marshal(LabelRemoveArgs{ID: issueA.ID, Label: "test-label"})
+		resp := server.handleLabelRemove(&Request{Operation: OpLabelRemove, Args: labelJSON, Actor: "test"})
+		if !resp.Success {
+			t.Fatalf("handleLabelRemove failed: %s", resp.Error)
+		}
+
+		mutations := server.GetRecentMutations(checkpoint)
+		found := false
+		for _, m := range mutations {
+			if m.Type == MutationUpdate && m.IssueID == issueA.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected mutation event with issueID=%q, got mutations: %+v", issueA.ID, mutations)
+		}
+	})
 }
