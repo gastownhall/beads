@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -220,7 +221,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}()
 
-	reader := bufio.NewReader(conn)
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
+	scanner.Split(scanCompleteLines)
 	writer := bufio.NewWriter(conn)
 
 	for {
@@ -229,10 +232,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
+		if !scanner.Scan() {
 			return
 		}
+		line := scanner.Bytes()
 
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
@@ -289,6 +292,21 @@ func (s *Server) writeResponse(writer *bufio.Writer, resp Response) error {
 	}
 
 	return nil
+}
+
+// scanCompleteLines is a bufio.SplitFunc that only returns complete newline-terminated
+// lines. Unlike bufio.ScanLines, it does NOT return partial data on EOF/timeout,
+// ensuring that read deadline expiry causes the scanner to return false immediately
+// rather than yielding an incomplete message for processing.
+func scanCompleteLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		line := data[0:i]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		return i + 1, line, nil
+	}
+	return 0, nil, nil
 }
 
 func (s *Server) handleShutdown(_ *Request) Response {

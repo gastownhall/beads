@@ -212,11 +212,15 @@ func (c *Client) ExecuteWithCwd(operation string, args interface{}, cwd string) 
 		return nil, fmt.Errorf("failed to flush: %w", err)
 	}
 
-	reader := bufio.NewReader(c.conn)
-	respLine, err := reader.ReadBytes('\n')
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	scanner := bufio.NewScanner(c.conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		return nil, fmt.Errorf("failed to read response: connection closed")
 	}
+	respLine := scanner.Bytes()
 
 	var resp Response
 	if err := json.Unmarshal(respLine, &resp); err != nil {

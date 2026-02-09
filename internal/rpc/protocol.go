@@ -7,6 +7,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// MaxMessageSize is the maximum size of a single RPC message (request or response).
+// This prevents unbounded memory allocation from malicious or malformed messages.
+// 10MB is generous for any legitimate beads operation (issue lists, batch ops, etc.).
+const MaxMessageSize = 10 * 1024 * 1024 // 10MB
+
 // Operation constants for all bd commands
 const (
 	OpPing        = "ping"
