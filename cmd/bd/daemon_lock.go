@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,26 +25,30 @@ type DaemonLockInfo struct {
 
 // DaemonLock represents a held lock on the daemon.lock file
 type DaemonLock struct {
-	file *os.File
-	path string
+	file      *os.File
+	path      string
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// Close releases the daemon lock and removes the lock file
+// Close releases the daemon lock and removes the lock file.
+// It is safe to call concurrently; only the first call performs the close.
 func (l *DaemonLock) Close() error {
-	if l.file == nil {
-		return nil
-	}
-	// Closing the file descriptor automatically releases the flock
-	err := l.file.Close()
-	l.file = nil
+	l.closeOnce.Do(func() {
+		if l.file == nil {
+			return
+		}
+		// Closing the file descriptor automatically releases the flock
+		l.closeErr = l.file.Close()
+		l.file = nil
 
-	// Best-effort removal of lock file on clean shutdown
-	// This prevents stale lock files when daemon exits normally
-	if l.path != "" {
-		_ = os.Remove(l.path)
-	}
-
-	return err
+		// Best-effort removal of lock file on clean shutdown
+		// This prevents stale lock files when daemon exits normally
+		if l.path != "" {
+			_ = os.Remove(l.path)
+		}
+	})
+	return l.closeErr
 }
 
 // acquireDaemonLock attempts to acquire an exclusive lock on daemon.lock
