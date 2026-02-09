@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,59 @@ func TestImportToJSONLWithStore(t *testing.T) {
 
 	if imported.Title != "Test Issue" {
 		t.Errorf("expected title 'Test Issue', got %s", imported.Title)
+	}
+}
+
+func TestImportToJSONLWithStore_LargeDescription(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
+
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(jsonlPath), 0755); err != nil {
+		t.Fatalf("failed to create directory: %v", err)
+	}
+
+	// Create an issue with a description larger than the default 64KB scanner buffer
+	largeDesc := strings.Repeat("x", 100*1024) // 100KB
+	issue := &types.Issue{
+		ID:          "test-large",
+		Title:       "Large Issue",
+		Description: largeDesc,
+		IssueType:   types.TypeBug,
+		Priority:    1,
+		Status:      types.StatusOpen,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	data, _ := json.Marshal(issue)
+	if err := os.WriteFile(jsonlPath, append(data, '\n'), 0644); err != nil {
+		t.Fatalf("failed to write JSONL: %v", err)
+	}
+
+	if err := importToJSONLWithStore(ctx, store, jsonlPath); err != nil {
+		t.Fatalf("importToJSONLWithStore failed on large JSONL line: %v", err)
+	}
+
+	imported, err := store.GetIssue(ctx, "test-large")
+	if err != nil {
+		t.Fatalf("failed to get imported issue: %v", err)
+	}
+
+	if len(imported.Description) != 100*1024 {
+		t.Errorf("expected description length %d, got %d", 100*1024, len(imported.Description))
 	}
 }
 

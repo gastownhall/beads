@@ -217,6 +217,10 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 	// Parse all issues
 	var issues []*types.Issue
 	scanner := bufio.NewScanner(file)
+	// Increase scanner buffer to handle large JSONL lines (e.g., issues with
+	// descriptions exceeding the default 64KB limit).
+	const maxScannerBuffer = 1024 * 1024 // 1MB
+	scanner.Buffer(make([]byte, 0, maxScannerBuffer), maxScannerBuffer)
 	lineNum := 0
 
 	for scanner.Scan() {
