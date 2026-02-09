@@ -48,7 +48,7 @@ irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 ### Homebrew
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 ### go install

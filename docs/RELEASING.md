@@ -190,7 +190,7 @@ The release will appear at: https://github.com/steveyegge/beads/releases
 2. **Verify installations**:
    ```bash
    # Homebrew
-   brew update && brew upgrade bd && bd version
+   brew update && brew upgrade beads && bd version
    
    # PyPI
    pip install --upgrade beads-mcp

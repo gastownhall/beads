@@ -21,7 +21,7 @@ This infrastructure is critical for debugging, auditing, and user support - it a
   - `make install` - Used by developers building from source
   - `go install ./cmd/bd` - Direct Go installation with embedded ldflag injection
   - GitHub releases - Goreleaser-built binaries for all platforms
-  - Homebrew - Pre-built binaries installed via `brew install bd`
+  - Homebrew - Pre-built binaries installed via `brew install beads`
   - npm - Node.js package that downloads pre-built binaries via postinstall hook
   - `./scripts/install.sh` - User-friendly build-from-source helper
 
