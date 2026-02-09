@@ -110,27 +110,19 @@ func GetImportTrigger(ctx context.Context, s storage.Storage) string {
 // In dolt-native mode, JSONL is not used — all sync is via Dolt remotes.
 // Belt-and-suspenders mode uses both Dolt AND JSONL for maximum redundancy.
 //
-// This checks the database config directly rather than going through GetSyncMode
-// (which reads config.yaml via viper). This avoids false positives when config.yaml
-// is loaded from the wrong directory context — matching ShouldImportJSONL's approach.
+// Uses GetSyncMode which checks config.yaml first, then falls back to the database.
+// This ensures that sync.mode set in config.yaml (e.g. during Dolt migration) is
+// respected even if not yet propagated to the database via 'bd sync mode set'.
 func ShouldExportJSONL(ctx context.Context, s storage.Storage) bool {
-	mode, err := s.GetConfig(ctx, SyncModeConfigKey)
-	if err != nil || mode == "" {
-		return true // default (git-portable) uses JSONL
-	}
+	mode := GetSyncMode(ctx, s)
 	return mode != SyncModeDoltNative
 }
 
 // ShouldImportJSONL returns true if the current sync mode uses JSONL import.
 // In dolt-native mode, there is no JSONL to import — all sync is via Dolt remotes.
-// Like ShouldExportJSONL, this checks the database config directly rather than
-// going through GetSyncMode (which reads config.yaml via viper). This avoids false
-// negatives when config.yaml is loaded from the wrong directory context.
+// Uses GetSyncMode which checks config.yaml first, then falls back to the database.
 func ShouldImportJSONL(ctx context.Context, s storage.Storage) bool {
-	mode, err := s.GetConfig(ctx, SyncModeConfigKey)
-	if err != nil || mode == "" {
-		return true // default (git-portable) uses JSONL
-	}
+	mode := GetSyncMode(ctx, s)
 	return mode != SyncModeDoltNative
 }
 
