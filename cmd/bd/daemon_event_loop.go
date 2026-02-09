@@ -125,6 +125,18 @@ func runEventDrivenLoop(
 	droppedEventsTicker := time.NewTicker(1 * time.Second)
 	defer droppedEventsTicker.Stop()
 
+	// Pre-allocate ticker channels to avoid creating new channels on every
+	// select iteration. A nil channel blocks forever in select, which is the
+	// desired behavior when the corresponding ticker is disabled.
+	var remoteSyncChan <-chan time.Time
+	if remoteSyncTicker != nil {
+		remoteSyncChan = remoteSyncTicker.C
+	}
+	var fallbackChan <-chan time.Time
+	if fallbackTicker != nil {
+		fallbackChan = fallbackTicker.C
+	}
+
 	for {
 		select {
 		case <-droppedEventsTicker.C:
@@ -139,13 +151,7 @@ func runEventDrivenLoop(
 			// Periodic health validation (not sync)
 			checkDaemonHealth(ctx, store, log)
 
-		case <-func() <-chan time.Time {
-			if remoteSyncTicker != nil {
-				return remoteSyncTicker.C
-			}
-			// Never fire if auto-pull is disabled
-			return make(chan time.Time)
-		}():
+		case <-remoteSyncChan:
 			// Periodic remote sync to pull updates from other clones
 			// This ensures the daemon sees changes pushed by other clones
 			// even when the local file watcher doesn't trigger
@@ -163,13 +169,7 @@ func runEventDrivenLoop(
 				return
 			}
 
-		case <-func() <-chan time.Time {
-			if fallbackTicker != nil {
-				return fallbackTicker.C
-			}
-			// Never fire if watcher is available
-			return make(chan time.Time)
-		}():
+		case <-fallbackChan:
 			log.Info("Fallback ticker: checking for remote changes")
 			importDebouncer.Trigger()
 
