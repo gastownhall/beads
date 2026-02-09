@@ -123,7 +123,7 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 
 	before := doltHeadCommit(t, tmpDir, env)
 
-	// A write command should create a new Dolt commit (auto-commit default is on).
+	// A write command should create a new Dolt commit (auto-commit default is on in embedded mode).
 	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "create", "Auto-commit test", "--json")
 	if err != nil {
 		t.Fatalf("bd create failed: %v\n%s", err, out)

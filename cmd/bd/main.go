@@ -213,7 +213,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
-	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on). Default from config key dolt.auto-commit")
+	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on). Default: on for embedded, off for server mode. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().DurationVar(&lockTimeout, "lock-timeout", 30*time.Second, "SQLite busy timeout (0 = fail immediately if locked)")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
@@ -874,6 +874,20 @@ var rootCmd = &cobra.Command{
 				opts.ServerPort = cfg.GetDoltServerPort()
 				if cfg.Database != "" {
 					opts.Database = cfg.GetDoltDatabase()
+				}
+			}
+
+			// Apply mode-aware default for dolt-auto-commit if neither flag nor
+			// config explicitly set it. Server mode defaults to OFF because the
+			// server handles commits via its own transaction lifecycle; firing
+			// DOLT_COMMIT after every write under concurrent load causes
+			// 'database is read only' errors. Embedded mode defaults to ON so
+			// each write is durably committed.
+			if strings.TrimSpace(doltAutoCommit) == "" {
+				if opts.ServerMode {
+					doltAutoCommit = string(doltAutoCommitOff)
+				} else {
+					doltAutoCommit = string(doltAutoCommitOn)
 				}
 			}
 

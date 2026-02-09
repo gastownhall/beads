@@ -358,7 +358,7 @@ database: dolt           # sqlite | dolt
 
 # Dolt-specific settings
 dolt:
-  # Auto-commit Dolt history after writes (default: on)
+  # Auto-commit Dolt history after writes (default: on for embedded, off for server)
   auto-commit: on        # on | off
 
   # Server mode settings (when mode: server)
@@ -403,13 +403,17 @@ bd vc commit -m "Checkpoint before refactor"
 
 ### Auto-Commit Behavior
 
-By default, each `bd` write command creates a Dolt commit:
+In **embedded mode** (default), each `bd` write command creates a Dolt commit:
 
 ```bash
 bd create "New issue"    # Creates issue + Dolt commit
 ```
 
-Disable for batch operations:
+In **server mode**, auto-commit defaults to OFF because the server manages its
+own transaction lifecycle. Firing `DOLT_COMMIT` after every write under
+concurrent load causes 'database is read only' errors.
+
+Override for batch operations (embedded) or explicit commits (server):
 
 ```bash
 bd --dolt-auto-commit off create "Issue 1"
