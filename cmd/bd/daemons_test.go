@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -49,6 +51,70 @@ func TestFormatDaemonRelativeTime(t *testing.T) {
 				t.Errorf("formatDaemonRelativeTime(%v) = %q, want %q", testTime, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileRotated_SameFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(path, []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if fileRotated(f, path) {
+		t.Error("fileRotated should return false for the same file")
+	}
+}
+
+func TestFileRotated_DifferentFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(path, []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// Simulate rotation: rename old, create new at same path
+	rotated := filepath.Join(tmp, "test.log.1")
+	if err := os.Rename(path, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !fileRotated(f, path) {
+		t.Error("fileRotated should return true after rotation")
+	}
+}
+
+func TestFileRotated_PathGone(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(path, []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// Remove the file at path
+	os.Remove(path)
+
+	// When path is gone, fileRotated returns false (not rotated yet)
+	if fileRotated(f, path) {
+		t.Error("fileRotated should return false when path is gone")
 	}
 }
 

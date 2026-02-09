@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -18,6 +20,20 @@ import (
 	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// fileRotated checks if the file at path is a different file than f (log rotation).
+// Uses os.SameFile for cross-platform inode/file identity comparison.
+func fileRotated(f *os.File, path string) bool {
+	fInfo, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return false // path gone; not rotated yet
+	}
+	return !os.SameFile(fInfo, pathInfo)
+}
 
 // JSON response types for daemons commands
 
@@ -446,6 +462,11 @@ func tailLines(filePath string, n int) error {
 	return nil
 }
 func tailFollow(filePath string) {
+	// Set up signal handling for graceful exit
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	// #nosec G304 - controlled path from daemon discovery
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -453,15 +474,52 @@ func tailFollow(filePath string) {
 		os.Exit(1)
 	}
 	defer file.Close()
+
 	// Seek to end
 	_, _ = file.Seek(0, io.SeekEnd)
 	reader := bufio.NewReader(file)
+
 	for {
+		// Check for signal before each iteration
+		select {
+		case <-sigCh:
+			return
+		default:
+		}
+
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
-				// Wait for more content
-				time.Sleep(100 * time.Millisecond)
+				// Check for log rotation: file at path is now a different file
+				if fileRotated(file, filePath) {
+					// File rotated — reopen
+					file.Close()
+					// #nosec G304 - controlled path from daemon discovery
+					file, err = os.Open(filePath)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error reopening rotated log file: %v\n", err)
+						os.Exit(1)
+					}
+					reader.Reset(file)
+					continue
+				}
+
+				// Check for truncation: current position > file size
+				if pos, err := file.Seek(0, io.SeekCurrent); err == nil {
+					if info, err := file.Stat(); err == nil && pos > info.Size() {
+						// File was truncated — seek to beginning
+						_, _ = file.Seek(0, io.SeekStart)
+						reader.Reset(file)
+						continue
+					}
+				}
+
+				// Normal EOF — wait for more content, but respect signals
+				select {
+				case <-sigCh:
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "Error reading log file: %v\n", err)
