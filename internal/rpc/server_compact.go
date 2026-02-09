@@ -122,12 +122,18 @@ func (s *Server) handleCompact(req *Request) Response {
 		}
 
 		duration := time.Since(startTime)
+		var reduction string
+		if originalSize > 0 {
+			reduction = fmt.Sprintf("%.1f%%", float64(originalSize-compactedSize)/float64(originalSize)*100)
+		} else {
+			reduction = "0.0%"
+		}
 		result := CompactResponse{
 			Success:       true,
 			IssueID:       args.IssueID,
 			OriginalSize:  originalSize,
 			CompactedSize: compactedSize,
-			Reduction:     fmt.Sprintf("%.1f%%", float64(originalSize-compactedSize)/float64(originalSize)*100),
+			Reduction:     reduction,
 			Duration:      duration.String(),
 		}
 		data, _ := json.Marshal(result)
