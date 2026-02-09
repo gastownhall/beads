@@ -277,3 +277,55 @@ func TestHandleSimpleStoreOp_MutationIssueID(t *testing.T) {
 		}
 	})
 }
+
+// TestDepTree_HandlerReturnsTree verifies that handleDepTree returns a dependency tree via RPC.
+func TestDepTree_HandlerReturnsTree(t *testing.T) {
+	_, client, _, cleanup := setupTestServerWithStore(t)
+	defer cleanup()
+
+	// Create two issues and a dependency between them
+	resp1, err := client.Create(&CreateArgs{Title: "Root issue", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("Failed to create first issue: %v", err)
+	}
+	var issue1 struct{ ID string }
+	if err := json.Unmarshal(resp1.Data, &issue1); err != nil {
+		t.Fatalf("Failed to unmarshal first issue: %v", err)
+	}
+
+	resp2, err := client.Create(&CreateArgs{Title: "Dependency issue", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("Failed to create second issue: %v", err)
+	}
+	var issue2 struct{ ID string }
+	if err := json.Unmarshal(resp2.Data, &issue2); err != nil {
+		t.Fatalf("Failed to unmarshal second issue: %v", err)
+	}
+
+	// issue1 depends on issue2
+	_, err = client.AddDependency(&DepAddArgs{FromID: issue1.ID, ToID: issue2.ID, DepType: "blocks"})
+	if err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	// Get dependency tree via RPC
+	treeResp, err := client.GetDependencyTree(&DepTreeArgs{ID: issue1.ID, MaxDepth: 10})
+	if err != nil {
+		t.Fatalf("GetDependencyTree RPC failed: %v", err)
+	}
+	if !treeResp.Success {
+		t.Fatalf("GetDependencyTree returned error: %s", treeResp.Error)
+	}
+	if treeResp.Data == nil {
+		t.Fatal("GetDependencyTree returned nil data")
+	}
+
+	// Verify we got a non-empty tree
+	var nodes []json.RawMessage
+	if err := json.Unmarshal(treeResp.Data, &nodes); err != nil {
+		t.Fatalf("Failed to unmarshal tree data: %v", err)
+	}
+	if len(nodes) == 0 {
+		t.Fatal("Expected non-empty dependency tree")
+	}
+}
