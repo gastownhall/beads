@@ -19,8 +19,9 @@ import (
 )
 
 // daemonShutdownTimeout is how long to wait for graceful shutdown before force killing.
-// 1 second is sufficient - if daemon hasn't stopped by then, it's likely hung.
-const daemonShutdownTimeout = 1 * time.Second
+// Daemon sync operations may involve git commits or database writes that take several
+// seconds, so we allow enough time for in-flight operations to complete gracefully.
+const daemonShutdownTimeout = 5 * time.Second
 
 // daemonShutdownPollInterval is how often to check if daemon has stopped.
 const daemonShutdownPollInterval = 100 * time.Millisecond
