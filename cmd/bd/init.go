@@ -164,6 +164,23 @@ variable.`,
 			beadsDirForInit = beads.FollowRedirect(localBeadsDir)
 		}
 
+		// Stop any running daemon before reinitializing (bd-7h7).
+		// A running daemon caches the old database in memory. If we create a new
+		// database without stopping it, bd commands routed through the daemon
+		// (e.g., bd stats) will show stale counts from the old cached data.
+		pidFile, pidErr := getPIDFilePath()
+		if pidErr == nil {
+			if isRunning, _ := isDaemonRunning(pidFile); isRunning {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "→ Stopping running daemon before reinitializing...\n")
+				}
+				stopDaemonQuiet(pidFile)
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "✓ Daemon stopped\n")
+				}
+			}
+		}
+
 		// Determine storage path.
 		//
 		// IMPORTANT: In Dolt mode, we must NOT create a SQLite database file.
