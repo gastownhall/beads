@@ -15,7 +15,6 @@
 // Connection modes:
 //   - Embedded: No server required, database/sql interface via dolthub/driver
 //   - Server: Connect to running dolt sql-server for multi-writer scenarios
-//
 package dolt
 
 import (
@@ -350,8 +349,17 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 		if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", bdBranch); err != nil {
-			_ = store.Close()
-			return nil, fmt.Errorf("failed to checkout Dolt branch %s: %w", bdBranch, err)
+			// Branch doesn't exist — auto-create from current branch, then checkout.
+			// This makes polecats self-healing: they create their own branches
+			// if Gas Town hasn't pre-created them (race condition, cleanup, etc.).
+			if _, createErr := db.ExecContext(ctx, "CALL DOLT_BRANCH(?)", bdBranch); createErr != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("failed to create Dolt branch %s: %w (checkout error: %v)", bdBranch, createErr, err)
+			}
+			if _, coErr := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", bdBranch); coErr != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("failed to checkout Dolt branch %s after creation: %w", bdBranch, coErr)
+			}
 		}
 		store.branch = bdBranch
 	}
