@@ -41,7 +41,8 @@ type Server struct {
 	metrics          *Metrics
 	// Connection limiting
 	maxConns      int
-	activeConns   int32 // atomic counter
+	activeConns   int32          // atomic counter (for metrics/diagnostics)
+	connWg        sync.WaitGroup // tracks in-flight connection goroutines for clean drain
 	connSemaphore chan struct{}
 	// Request timeout
 	requestTimeout time.Duration

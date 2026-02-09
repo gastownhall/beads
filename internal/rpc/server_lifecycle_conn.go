@@ -98,7 +98,9 @@ func (s *Server) Start(_ context.Context) error {
 		case s.connSemaphore <- struct{}{}:
 			// Acquired slot, handle connection
 			s.metrics.RecordConnection()
+			s.connWg.Add(1)
 			go func(c net.Conn) {
+				defer s.connWg.Done()
 				defer func() { <-s.connSemaphore }() // Release slot
 				atomic.AddInt32(&s.activeConns, 1)
 				defer atomic.AddInt32(&s.activeConns, -1)
@@ -140,13 +142,17 @@ func (s *Server) Stop() error {
 			}
 		}
 
-		// Wait for in-flight requests to drain (with timeout)
-		drainDeadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(drainDeadline) {
-			if atomic.LoadInt32(&s.activeConns) == 0 {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
+		// Wait for in-flight connection goroutines to drain (with timeout)
+		drainDone := make(chan struct{})
+		go func() {
+			s.connWg.Wait()
+			close(drainDone)
+		}()
+		select {
+		case <-drainDone:
+			// All connections drained cleanly
+		case <-time.After(5 * time.Second):
+			// Timeout waiting for connections to drain - proceed with shutdown
 		}
 
 		// Close storage after in-flight requests complete

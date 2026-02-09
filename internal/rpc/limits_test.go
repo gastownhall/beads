@@ -198,6 +198,90 @@ func TestRequestTimeout(t *testing.T) {
 	}
 }
 
+// TestShutdownDrainsBeforeClosingStorage verifies that Stop() waits for
+// in-flight connections to finish before closing storage (bd-11).
+func TestShutdownDrainsBeforeClosingStorage(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := sqlite.New(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	socketPath := newTestSocketPath(t)
+
+	srv := NewServer(socketPath, store, tmpDir, dbPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := srv.Start(ctx); err != nil && ctx.Err() == nil {
+			t.Logf("server error: %v", err)
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Open several connections and keep them alive with pings
+	const numConns = 3
+	connections := make([]net.Conn, numConns)
+	for i := 0; i < numConns; i++ {
+		conn := dialTestConn(t, socketPath)
+		connections[i] = conn
+
+		// Send a ping to make the connection active in handleConnection
+		req := Request{Operation: OpPing}
+		data, _ := json.Marshal(req)
+		conn.Write(append(data, '\n'))
+
+		reader := bufio.NewReader(conn)
+		_, _ = reader.ReadBytes('\n') // consume response
+	}
+
+	// Verify connections are tracked
+	time.Sleep(50 * time.Millisecond)
+	active := atomic.LoadInt32(&srv.activeConns)
+	if active != numConns {
+		t.Fatalf("expected %d active connections, got %d", numConns, active)
+	}
+
+	// Start Stop() in background - it should block waiting for drain
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- srv.Stop()
+	}()
+
+	// Give Stop() a moment to close the listener and start waiting
+	time.Sleep(100 * time.Millisecond)
+
+	// Close client connections - this lets handleConnection goroutines exit
+	for _, conn := range connections {
+		conn.Close()
+	}
+
+	// Stop should complete quickly now that connections are drained
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Logf("Stop returned error (may be expected): %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop() did not return after connections were drained")
+	}
+
+	// Verify all connections drained
+	final := atomic.LoadInt32(&srv.activeConns)
+	if final != 0 {
+		t.Errorf("expected 0 active connections after Stop, got %d", final)
+	}
+}
+
 func TestHealthResponseIncludesLimits(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
