@@ -365,15 +365,6 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 		return nil, fmt.Errorf("failed to get comment id: %w", err)
 	}
 
-	// mark dirty in tx
-	if _, err := t.tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE marked_at = VALUES(marked_at)
-	`, issueID, time.Now().UTC()); err != nil {
-		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return &types.Comment{ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: createdAt}, nil
 }
 

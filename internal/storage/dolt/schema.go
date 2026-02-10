@@ -156,14 +156,6 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 
--- Dirty issues table (for incremental export)
-CREATE TABLE IF NOT EXISTS dirty_issues (
-    issue_id VARCHAR(255) PRIMARY KEY,
-    marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_dirty_issues_marked_at (marked_at),
-    CONSTRAINT fk_dirty_issue FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-);
-
 -- Export hashes table
 CREATE TABLE IF NOT EXISTS export_hashes (
     issue_id VARCHAR(255) PRIMARY KEY,

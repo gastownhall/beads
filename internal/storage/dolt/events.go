@@ -131,15 +131,6 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 		return nil, fmt.Errorf("failed to get comment id: %w", err)
 	}
 
-	// Mark issue dirty for incremental JSONL export
-	if _, err := s.execContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE marked_at = VALUES(marked_at)
-	`, issueID, time.Now().UTC()); err != nil {
-		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return &types.Comment{
 		ID:        id,
 		IssueID:   issueID,

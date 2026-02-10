@@ -12,7 +12,7 @@ import (
 
 // UpdateIssueID updates an issue ID and all its references.
 // Disables FK checks to allow updating the primary key in issues while
-// child tables (dirty_issues, dependencies, etc.) still reference the old ID.
+// child tables (dependencies, etc.) still reference the old ID.
 func (s *DoltStore) UpdateIssueID(ctx context.Context, oldID, newID string, issue *types.Issue, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -21,7 +21,7 @@ func (s *DoltStore) UpdateIssueID(ctx context.Context, oldID, newID string, issu
 	defer func() { _ = tx.Rollback() }()
 
 	// Disable foreign key checks to allow PK update on issues table
-	// (child tables like dirty_issues, dependencies, etc. reference issues.id)
+	// (child tables like dependencies, events, etc. reference issues.id)
 	_, err = tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 0`)
 	if err != nil {
 		return fmt.Errorf("failed to disable foreign key checks: %w", err)
@@ -74,12 +74,6 @@ func (s *DoltStore) UpdateIssueID(ctx context.Context, oldID, newID string, issu
 		return fmt.Errorf("failed to update comments: %w", err)
 	}
 
-	// Update dirty_issues (rename existing entry, then ensure marked dirty)
-	_, err = tx.ExecContext(ctx, `UPDATE dirty_issues SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
-	if err != nil {
-		return fmt.Errorf("failed to update dirty_issues: %w", err)
-	}
-
 	// Update references in issue_snapshots
 	_, err = tx.ExecContext(ctx, `UPDATE issue_snapshots SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
 	if err != nil {
@@ -102,16 +96,6 @@ func (s *DoltStore) UpdateIssueID(ctx context.Context, oldID, newID string, issu
 	_, err = tx.ExecContext(ctx, `UPDATE child_counters SET parent_id = ? WHERE parent_id = ?`, newID, oldID)
 	if err != nil {
 		return fmt.Errorf("failed to update child_counters: %w", err)
-	}
-
-	// Mark the renamed issue as dirty for export
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE marked_at = VALUES(marked_at)
-	`, newID, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	// Record rename event

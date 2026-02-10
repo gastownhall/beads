@@ -111,11 +111,6 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		return fmt.Errorf("failed to record creation event: %w", err)
 	}
 
-	// Mark issue as dirty
-	if err := markDirty(ctx, tx, issue.ID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return tx.Commit()
 }
 
@@ -232,9 +227,6 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 		if err := recordEvent(ctx, tx, issue.ID, types.EventCreated, actor, "", ""); err != nil {
 			return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
-		}
-		if err := markDirty(ctx, tx, issue.ID); err != nil {
-			return fmt.Errorf("failed to mark dirty %s: %w", issue.ID, err)
 		}
 	}
 
@@ -377,10 +369,6 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	if err := markDirty(ctx, tx, id); err != nil {
-		return fmt.Errorf("failed to mark dirty: %w", err)
-	}
-
 	return tx.Commit()
 }
 
@@ -443,10 +431,6 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		return fmt.Errorf("failed to record claim event: %w", err)
 	}
 
-	if err := markDirty(ctx, tx, id); err != nil {
-		return fmt.Errorf("failed to mark dirty: %w", err)
-	}
-
 	return tx.Commit()
 }
 
@@ -480,10 +464,6 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	if err := markDirty(ctx, tx, id); err != nil {
-		return fmt.Errorf("failed to mark dirty: %w", err)
-	}
-
 	return tx.Commit()
 }
 
@@ -496,7 +476,7 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 	defer func() { _ = tx.Rollback() }()
 
 	// Delete related data (foreign keys will cascade, but be explicit)
-	tables := []string{"dependencies", "events", "comments", "labels", "dirty_issues"}
+	tables := []string{"dependencies", "events", "comments", "labels"}
 	for _, table := range tables {
 		// Validate table name to prevent SQL injection (tables are hardcoded above,
 		// but validate defensively in case the list is ever modified)
@@ -568,11 +548,6 @@ func (s *DoltStore) CreateTombstone(ctx context.Context, id string, actor string
 	// Record tombstone creation event
 	if err := recordEvent(ctx, tx, id, "deleted", actor, "", reason); err != nil {
 		return fmt.Errorf("failed to record tombstone event: %w", err)
-	}
-
-	// Mark issue as dirty for incremental export
-	if err := markDirty(ctx, tx, id); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	return tx.Commit()
@@ -768,10 +743,6 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 			return nil, fmt.Errorf("failed to record tombstone event for %s: %w", id, err)
 		}
 
-		// Mark issue as dirty
-		if err := markDirty(ctx, tx, id); err != nil {
-			return nil, fmt.Errorf("failed to mark issue dirty for %s: %w", id, err)
-		}
 	}
 
 	result.DeletedCount = deletedCount
@@ -1085,15 +1056,6 @@ func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType type
 	return err
 }
 
-func markDirty(ctx context.Context, tx *sql.Tx, issueID string) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE marked_at = VALUES(marked_at)
-	`, issueID, time.Now().UTC())
-	return err
-}
-
 // generateIssueID generates a unique hash-based ID for an issue
 // Uses adaptive length based on database size and tries multiple nonces on collision
 func generateIssueID(ctx context.Context, tx *sql.Tx, prefix string, issue *types.Issue, actor string) (string, error) {
@@ -1290,7 +1252,7 @@ func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo str
 	}
 
 	// Delete related data for all affected issues
-	tables := []string{"dependencies", "events", "comments", "labels", "dirty_issues"}
+	tables := []string{"dependencies", "events", "comments", "labels"}
 	for _, table := range tables {
 		if err := validateTableName(table); err != nil {
 			return 0, fmt.Errorf("invalid table name %q: %w", table, err)
