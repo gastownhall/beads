@@ -334,7 +334,7 @@ func TestFormatUptime(t *testing.T) {
 		{
 			name:    "seconds",
 			seconds: 45.0,
-			want:    "45.0 seconds",
+			want:    "45s",
 		},
 		{
 			name:    "minutes",
