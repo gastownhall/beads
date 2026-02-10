@@ -66,15 +66,8 @@ func showSyncStateStatus(ctx context.Context, jsonlPath string) error {
 		}
 	}
 
-	// Pending changes (dirty issues)
-	dirtyIDs, err := store.GetDirtyIssues(ctx)
-	if err != nil {
-		fmt.Println("Pending changes: unknown (error getting dirty issues)")
-	} else if len(dirtyIDs) == 0 {
-		fmt.Println("Pending changes: none")
-	} else {
-		fmt.Printf("Pending changes: %d issues modified since last export\n", len(dirtyIDs))
-	}
+	// Dirty tracking removed (woho.4) — pending changes not tracked
+	fmt.Println("Pending changes: not tracked (dirty tracking removed)")
 
 	// Import branch (sync branch status)
 	syncBranch, _ := syncbranch.Get(ctx, store)

@@ -13,34 +13,8 @@ import (
 // DeleteIssue permanently deletes a single issue and all its related data
 func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 	return s.withTx(ctx, func(conn *sql.Conn) error {
-		// Mark issues that depend on this one as dirty so they get re-exported
-		// without the stale dependency reference (fixes orphan deps in JSONL)
-		rows, err := conn.QueryContext(ctx, `SELECT issue_id FROM dependencies WHERE depends_on_id = ?`, id)
-		if err != nil {
-			return fmt.Errorf("failed to query dependent issues: %w", err)
-		}
-		var dependentIDs []string
-		for rows.Next() {
-			var depID string
-			if err := rows.Scan(&depID); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("failed to scan dependent issue ID: %w", err)
-			}
-			dependentIDs = append(dependentIDs, depID)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("failed to iterate dependent issues: %w", err)
-		}
-
-		if len(dependentIDs) > 0 {
-			if err := markIssuesDirtyTx(ctx, conn, dependentIDs); err != nil {
-				return fmt.Errorf("failed to mark dependent issues dirty: %w", err)
-			}
-		}
-
 		// Delete dependencies (both directions)
-		_, err = conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
+		_, err := conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
 		if err != nil {
 			return fmt.Errorf("failed to delete dependencies: %w", err)
 		}
@@ -55,12 +29,6 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 		_, err = conn.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id)
 		if err != nil {
 			return fmt.Errorf("failed to delete comments: %w", err)
-		}
-
-		// Delete from dirty_issues
-		_, err = conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
-		if err != nil {
-			return fmt.Errorf("failed to delete dirty marker: %w", err)
 		}
 
 		// Delete the issue itself
