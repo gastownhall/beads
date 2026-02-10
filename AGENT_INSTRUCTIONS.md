@@ -10,7 +10,7 @@ This document contains detailed operational instructions for AI agents working o
 
 - **Go version**: 1.24+
 - **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
-- **Testing**: All new features need tests (`go test -short ./...` for local, full tests run in CI)
+- **Testing**: All new features need tests (`make test` for local baseline, `make test-full-cgo` when validating full CGO paths)
 - **Documentation**: Update relevant .md files
 
 ### File Organization
@@ -56,7 +56,8 @@ func TestMyFeature(t *testing.T) {
 
 ### Before Committing
 
-1. **Run tests**: `go test -short ./...` (full tests run in CI)
+1. **Run tests**: `make test` (or `./scripts/test.sh`)
+   - For full CGO validation: `make test-full-cgo`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
@@ -101,7 +102,7 @@ The 30-second debounce provides a **transaction window** for batch operations - 
 1. **File beads issues for any remaining work** that needs follow-up
 2. **Ensure all quality gates pass** (only if code changes were made):
    - Run `make lint` or `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
-   - Run `make test` or `go test ./...`
+   - Run `make test` (and `make test-full-cgo` when CGO-relevant code changed)
    - File P0 issues if quality gates are broken
 3. **Update beads issues** - close finished work, update status
 4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
@@ -302,10 +303,13 @@ Without the pre-push hook, you can have database changes committed locally but s
 # Build
 go build -o bd ./cmd/bd
 
-# Test (short - for local development)
-go test -short ./...
+# Test (local baseline)
+make test
 
-# Test with coverage (full tests - for CI)
+# Test with full CGO-enabled suite (local/CI parity)
+make test-full-cgo
+
+# Coverage run
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
@@ -377,7 +381,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 
 1. Bump version: `./scripts/bump-version.sh <version> --commit`
 2. Update CHANGELOG.md with release notes
-3. Run tests: `go test -short ./...` (CI runs full suite)
+3. Run tests: `make test` (and `make test-full-cgo` for CGO-related changes)
 4. Push version bump: `git push origin main`
 5. Tag release: `git tag v<version> && git push origin v<version>`
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)

@@ -1,6 +1,6 @@
 # Makefile for beads project
 
-.PHONY: all build test bench bench-quick clean install help check-up-to-date fmt fmt-check
+.PHONY: all build test test-full-cgo bench bench-quick clean install help check-up-to-date fmt fmt-check
 
 # Default target
 all: build
@@ -48,6 +48,12 @@ endif
 test:
 	@echo "Running tests..."
 	@TEST_COVER=1 ./scripts/test.sh
+
+# Run full CGO-enabled test suite (no skip list).
+# On macOS, auto-configures ICU include/link flags.
+test-full-cgo:
+	@echo "Running full CGO-enabled tests..."
+	@./scripts/test-cgo.sh ./...
 
 # Run performance benchmarks (10K and 20K issue databases with automatic CPU profiling)
 # Generates CPU profile: internal/storage/sqlite/bench-cpu-<timestamp>.prof
@@ -124,6 +130,7 @@ help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
 	@echo "  make test         - Run all tests"
+	@echo "  make test-full-cgo - Run full CGO-enabled test suite"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"
