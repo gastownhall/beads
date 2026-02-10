@@ -61,7 +61,7 @@ var addTodoCmd = &cobra.Command{
 		}
 
 		// Generate ID
-		if err := store.CreateIssue(ctx, issue, getActorWithGit()); err != nil {
+		if err := getStore().CreateIssue(ctx, issue, getActorWithGit()); err != nil {
 			FatalError("failed to create TODO: %v", err)
 		}
 
@@ -96,7 +96,7 @@ var listTodosCmd = &cobra.Command{
 			filter.Status = &openStatus
 		}
 
-		issues, err := store.SearchIssues(ctx, "", filter)
+		issues, err := getStore().SearchIssues(ctx, "", filter)
 		if err != nil {
 			FatalError("failed to list TODOs: %v", err)
 		}
@@ -148,7 +148,7 @@ var doneTodoCmd = &cobra.Command{
 		var closedIDs []string
 		for _, issueID := range args {
 			// Verify it exists
-			issue, err := store.GetIssue(ctx, issueID)
+			issue, err := getStore().GetIssue(ctx, issueID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %v\n", issueID, err)
 				continue
@@ -159,7 +159,7 @@ var doneTodoCmd = &cobra.Command{
 			}
 
 			// Close the issue (session is empty string for CLI operations)
-			if err := store.CloseIssue(ctx, issueID, reason, getActorWithGit(), ""); err != nil {
+			if err := getStore().CloseIssue(ctx, issueID, reason, getActorWithGit(), ""); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to close %s: %v\n", issueID, err)
 				continue
 			}
