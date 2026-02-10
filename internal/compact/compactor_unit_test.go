@@ -17,7 +17,6 @@ type stubStore struct {
 	updateIssueFn      func(context.Context, string, map[string]interface{}, string) error
 	applyCompactionFn  func(context.Context, string, int, int, int, string) error
 	addCommentFn       func(context.Context, string, string, string) error
-	markDirtyFn        func(context.Context, string) error
 }
 
 func (s *stubStore) CheckEligibility(ctx context.Context, issueID string, tier int) (bool, string, error) {
@@ -51,13 +50,6 @@ func (s *stubStore) ApplyCompaction(ctx context.Context, issueID string, tier in
 func (s *stubStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	if s.addCommentFn != nil {
 		return s.addCommentFn(ctx, issueID, actor, comment)
-	}
-	return nil
-}
-
-func (s *stubStore) MarkIssueDirty(ctx context.Context, issueID string) error {
-	if s.markDirtyFn != nil {
-		return s.markDirtyFn(ctx, issueID)
 	}
 	return nil
 }
@@ -108,7 +100,6 @@ func TestCompactTier1_Success(t *testing.T) {
 
 	updateCalled := false
 	applyCalled := false
-	markCalled := false
 	store := &stubStore{
 		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
 		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
@@ -135,10 +126,6 @@ func TestCompactTier1_Success(t *testing.T) {
 			}
 			return nil
 		},
-		markDirtyFn: func(context.Context, string) error {
-			markCalled = true
-			return nil
-		},
 	}
 	summary := &stubSummarizer{summary: "short"}
 	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
@@ -149,8 +136,8 @@ func TestCompactTier1_Success(t *testing.T) {
 	if summary.calls != 1 {
 		t.Fatalf("expected summarizer used once, got %d", summary.calls)
 	}
-	if !updateCalled || !applyCalled || !markCalled {
-		t.Fatalf("expected update/apply/mark to be called")
+	if !updateCalled || !applyCalled {
+		t.Fatalf("expected update/apply to be called")
 	}
 }
 
@@ -447,30 +434,6 @@ func TestCompactTier1_AddCommentError(t *testing.T) {
 	}
 }
 
-func TestCompactTier1_MarkDirtyError(t *testing.T) {
-	cleanup := withGitHash(t, "abc\n")
-	t.Cleanup(cleanup)
-
-	store := &stubStore{
-		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
-		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
-		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
-		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return nil },
-		addCommentFn:       func(context.Context, string, string, string) error { return nil },
-		markDirtyFn:        func(context.Context, string) error { return errors.New("mark failed") },
-	}
-	summary := &stubSummarizer{summary: "short"}
-	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
-
-	err := c.CompactTier1(context.Background(), "bd-123")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "failed to mark dirty") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
 func TestCompactTier1_SummaryNotSmaller_CommentError(t *testing.T) {
 	store := &stubStore{
 		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
@@ -501,7 +464,6 @@ func TestCompactTier1Single_Success(t *testing.T) {
 		updateIssueFn:      func(context.Context, string, map[string]interface{}, string) error { return nil },
 		applyCompactionFn:  func(context.Context, string, int, int, int, string) error { return nil },
 		addCommentFn:       func(context.Context, string, string, string) error { return nil },
-		markDirtyFn:        func(context.Context, string) error { return nil },
 	}
 	summary := &stubSummarizer{summary: "short"}
 	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
@@ -564,7 +526,6 @@ func TestCompactTier1Single_CompactError(t *testing.T) {
 
 func TestCompactTier2_Success(t *testing.T) {
 	applyCalled := false
-	markCalled := false
 	store := &stubStore{
 		getIssueFn: func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
 		applyCompactionFn: func(ctx context.Context, id string, tier, original, compacted int, hash string) error {
@@ -577,10 +538,6 @@ func TestCompactTier2_Success(t *testing.T) {
 			}
 			return nil
 		},
-		markDirtyFn: func(context.Context, string) error {
-			markCalled = true
-			return nil
-		},
 	}
 	c := &Compactor{store: store, config: &Config{}}
 
@@ -590,9 +547,6 @@ func TestCompactTier2_Success(t *testing.T) {
 	}
 	if !applyCalled {
 		t.Error("expected ApplyCompaction to be called")
-	}
-	if !markCalled {
-		t.Error("expected MarkIssueDirty to be called")
 	}
 }
 
@@ -625,23 +579,6 @@ func TestCompactTier2_ApplyError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(err.Error(), "failed to apply compaction metadata") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestCompactTier2_MarkDirtyError(t *testing.T) {
-	store := &stubStore{
-		getIssueFn:        func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
-		applyCompactionFn: func(context.Context, string, int, int, int, string) error { return nil },
-		markDirtyFn:       func(context.Context, string) error { return errors.New("mark failed") },
-	}
-	c := &Compactor{store: store, config: &Config{}}
-
-	err := c.CompactTier2(context.Background(), "bd-123")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "failed to mark dirty") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -687,7 +624,6 @@ func TestCompactTier1Batch_MixedResults(t *testing.T) {
 	var mu sync.Mutex
 	updated := make(map[string]int)
 	applied := make(map[string]int)
-	marked := make(map[string]int)
 	store := &stubStore{
 		checkEligibilityFn: func(ctx context.Context, id string, tier int) (bool, string, error) {
 			switch id {
@@ -717,12 +653,6 @@ func TestCompactTier1Batch_MixedResults(t *testing.T) {
 			return nil
 		},
 		addCommentFn: func(context.Context, string, string, string) error { return nil },
-		markDirtyFn: func(ctx context.Context, id string) error {
-			mu.Lock()
-			marked[id]++
-			mu.Unlock()
-			return nil
-		},
 	}
 	summary := &stubSummarizer{summary: "short"}
 	c := &Compactor{store: store, summarizer: summary, config: &Config{Concurrency: 2}}
@@ -745,7 +675,7 @@ func TestCompactTier1Batch_MixedResults(t *testing.T) {
 	if res := resMap["bd-2"]; res == nil || res.Err == nil || !strings.Contains(res.Err.Error(), "not eligible") {
 		t.Fatalf("expected ineligible error for bd-2, got %+v", res)
 	}
-	if updated["bd-1"] != 1 || applied["bd-1"] != 1 || marked["bd-1"] != 1 {
+	if updated["bd-1"] != 1 || applied["bd-1"] != 1 {
 		t.Fatalf("expected store operations for bd-1 exactly once")
 	}
 	if updated["bd-2"] != 0 || applied["bd-2"] != 0 {
