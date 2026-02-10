@@ -21,7 +21,7 @@ var labelCmd = &cobra.Command{
 
 // Helper function to process label operations for multiple issues
 func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
-	daemonFunc func(string, string) error, storeFunc func(context.Context, string, string, string) error) {
+	storeFunc func(context.Context, string, string, string) error) {
 	ctx := rootCtx
 	results := []map[string]interface{}{}
 	for _, issueID := range issueIDs {
@@ -88,7 +88,6 @@ var labelAddCmd = &cobra.Command{
 		}
 
 		processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
-			nil,
 			func(ctx context.Context, issueID, lbl, act string) error {
 				return store.AddLabel(ctx, issueID, lbl, act)
 			})
@@ -119,7 +118,6 @@ var labelRemoveCmd = &cobra.Command{
 		}
 		issueIDs = resolvedIDs
 		processBatchLabelOperation(issueIDs, label, "removed", jsonOutput,
-			nil,
 			func(ctx context.Context, issueID, lbl, act string) error {
 				return store.RemoveLabel(ctx, issueID, lbl, act)
 			})

@@ -1,4 +1,5 @@
 //go:build cgo
+
 package dolt
 
 import (
@@ -47,11 +48,11 @@ func TestBootstrapFromJSONL(t *testing.T) {
 			Labels:      []string{"urgent", "backend"},
 		},
 		{
-			ID:          "test-003",
-			Title:       "Closed issue",
-			Status:      types.StatusClosed,
-			Priority:    3,
-			IssueType:   types.TypeTask,
+			ID:        "test-003",
+			Title:     "Closed issue",
+			Status:    types.StatusClosed,
+			Priority:  3,
+			IssueType: types.TypeTask,
 		},
 	}
 
@@ -714,5 +715,3 @@ func TestBootstrapWithoutOptionalFiles(t *testing.T) {
 		t.Errorf("expected 0 interactions imported, got %d", result.InteractionsImported)
 	}
 }
-
-

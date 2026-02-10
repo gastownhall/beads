@@ -386,6 +386,8 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 }
 
 // burnWisps deletes all wisp issues without creating a digest
+//
+//nolint:unparam // error return kept for future use and consistent API
 func burnWisps(ctx context.Context, s storage.Storage, ids []string) (*BurnResult, error) {
 	result := &BurnResult{
 		DeletedIDs: make([]string, 0, len(ids)),

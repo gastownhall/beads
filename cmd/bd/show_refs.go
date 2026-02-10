@@ -11,7 +11,7 @@ import (
 )
 
 // showIssueRefs displays issues that reference the given issue(s), grouped by relationship type
-func showIssueRefs(ctx context.Context, args []string, resolvedIDs []string, routedArgs []string, jsonOut bool) {
+func showIssueRefs(ctx context.Context, args []string, jsonOut bool) {
 	// Collect all refs for all issues
 	allRefs := make(map[string][]*types.IssueWithDependencyMetadata)
 
@@ -25,31 +25,8 @@ func showIssueRefs(ctx context.Context, args []string, resolvedIDs []string, rou
 		return nil
 	}
 
-	// Handle routed IDs via direct mode
-	for _, id := range routedArgs {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			continue
-		}
-		if result == nil || result.Issue == nil {
-			if result != nil {
-				result.Close()
-			}
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			continue
-		}
-		if err := processIssue(result.ResolvedID, result.Store); err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting refs for %s: %v\n", id, err)
-		}
-		result.Close()
-	}
-
-	// Direct mode - process each arg
+	// Process each arg via routing-aware resolution
 	for _, id := range args {
-		if containsStr(routedArgs, id) {
-			continue // Already processed above
-		}
 		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)

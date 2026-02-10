@@ -12,7 +12,7 @@ import (
 )
 
 // showIssueChildren displays only the children of the specified issue(s)
-func showIssueChildren(ctx context.Context, args []string, resolvedIDs []string, routedArgs []string, jsonOut bool, shortMode bool) {
+func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMode bool) {
 	// Collect all children for all issues
 	allChildren := make(map[string][]*types.IssueWithDependencyMetadata)
 
@@ -37,31 +37,8 @@ func showIssueChildren(ctx context.Context, args []string, resolvedIDs []string,
 		return nil
 	}
 
-	// Handle routed IDs via direct mode
-	for _, id := range routedArgs {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			continue
-		}
-		if result == nil || result.Issue == nil {
-			if result != nil {
-				result.Close()
-			}
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			continue
-		}
-		if err := processIssue(result.ResolvedID, result.Store); err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting children for %s: %v\n", id, err)
-		}
-		result.Close()
-	}
-
-	// Direct mode - process each arg
+	// Process each arg via routing-aware resolution
 	for _, id := range args {
-		if containsStr(routedArgs, id) {
-			continue // Already processed above
-		}
 		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
@@ -103,16 +80,6 @@ func showIssueChildren(ctx context.Context, args []string, resolvedIDs []string,
 		}
 		fmt.Println()
 	}
-}
-
-// containsStr checks if a string slice contains a value
-func containsStr(slice []string, val string) bool {
-	for _, s := range slice {
-		if s == val {
-			return true
-		}
-	}
-	return false
 }
 
 // showIssueAsOf displays issues as they existed at a specific commit or branch ref.

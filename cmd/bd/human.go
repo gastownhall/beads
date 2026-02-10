@@ -392,7 +392,7 @@ func init() {
 	// Add flags for subcommands
 	humanListCmd.Flags().StringP("status", "s", "", "Filter by status (open, closed, etc.)")
 	humanRespondCmd.Flags().StringP("response", "r", "", "Response text (required)")
-	humanRespondCmd.MarkFlagRequired("response")
+	_ = humanRespondCmd.MarkFlagRequired("response")
 	humanDismissCmd.Flags().StringP("reason", "", "", "Reason for dismissal (optional)")
 
 	// Register with root command

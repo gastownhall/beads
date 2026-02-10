@@ -85,13 +85,13 @@ var showCmd = &cobra.Command{
 
 		// Handle --refs flag: show issues that reference this issue
 		if showRefs {
-			showIssueRefs(ctx, args, nil, nil, jsonOutput)
+			showIssueRefs(ctx, args, jsonOutput)
 			return
 		}
 
 		// Handle --children flag: show only children of this issue
 		if showChildren {
-			showIssueChildren(ctx, args, nil, nil, jsonOutput, shortMode)
+			showIssueChildren(ctx, args, jsonOutput, shortMode)
 			return
 		}
 

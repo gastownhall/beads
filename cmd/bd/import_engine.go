@@ -24,7 +24,7 @@ import (
 )
 
 // importIssuesEngine handles the core import logic used by both manual and auto-import.
-func importIssuesEngine(ctx context.Context, dbPathArg string, store storage.Storage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
+func importIssuesEngine(ctx context.Context, _ string, store storage.Storage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
 	result := &ImportResult{
 		IDMapping:        make(map[string]string),
 		MismatchPrefixes: make(map[string]int),
@@ -163,7 +163,7 @@ func importIssuesEngine(ctx context.Context, dbPathArg string, store storage.Sto
 }
 
 // handlePrefixMismatch checks and handles prefix mismatches.
-func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*types.Issue, opts ImportOptions, orphanHandling storage.OrphanHandling, result *ImportResult) ([]*types.Issue, error) {
+func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*types.Issue, opts ImportOptions, _ storage.OrphanHandling, result *ImportResult) ([]*types.Issue, error) {
 	configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configured prefix: %w", err)
@@ -590,7 +590,7 @@ func engineBuildUpdates(incoming *types.Issue) map[string]interface{} {
 	return updates
 }
 
-func engineFilterOrphans(dbIssues []*types.Issue, dbByID map[string]*types.Issue, newIssues []*types.Issue, allIncoming []*types.Issue, store storage.Storage, orphanHandling storage.OrphanHandling, opts ImportOptions, result *ImportResult) []*types.Issue {
+func engineFilterOrphans(dbIssues []*types.Issue, dbByID map[string]*types.Issue, newIssues []*types.Issue, allIncoming []*types.Issue, store storage.Storage, orphanHandling storage.OrphanHandling, _ ImportOptions, result *ImportResult) []*types.Issue {
 	if orphanHandling == storage.OrphanSkip {
 		var filtered []*types.Issue
 		for _, issue := range newIssues {

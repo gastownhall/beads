@@ -1,4 +1,5 @@
 //go:build cgo
+
 package dolt
 
 import (
@@ -319,7 +320,7 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 			parseErrors = append(parseErrors, ParseError{
 				Line:    lineNo,
 				Message: "Git merge conflict marker",
-				Snippet: truncateSnippet(line, 50),
+				Snippet: truncateSnippet(line),
 			})
 			continue
 		}
@@ -329,7 +330,7 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 			parseErrors = append(parseErrors, ParseError{
 				Line:    lineNo,
 				Message: err.Error(),
-				Snippet: truncateSnippet(line, 50),
+				Snippet: truncateSnippet(line),
 			})
 			continue
 		}
@@ -342,7 +343,7 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 			parseErrors = append(parseErrors, ParseError{
 				Line:    lineNo,
 				Message: "issue has empty ID",
-				Snippet: truncateSnippet(line, 50),
+				Snippet: truncateSnippet(line),
 			})
 			continue
 		}
@@ -352,7 +353,7 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 			parseErrors = append(parseErrors, ParseError{
 				Line:    lineNo,
 				Message: fmt.Sprintf("invalid status %q for issue %s", issue.Status, issue.ID),
-				Snippet: truncateSnippet(line, 50),
+				Snippet: truncateSnippet(line),
 			})
 			continue
 		}
@@ -390,10 +391,10 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 	return issues, parseErrors
 }
 
-// truncateSnippet truncates a string for display
-func truncateSnippet(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen] + "..."
+// truncateSnippet truncates a string for display (max 50 chars)
+func truncateSnippet(s string) string {
+	if len(s) > 50 {
+		return s[:50] + "..."
 	}
 	return s
 }
@@ -650,5 +651,3 @@ func importInteractionsBootstrap(ctx context.Context, store *DoltStore, interact
 
 	return imported, nil
 }
-
-

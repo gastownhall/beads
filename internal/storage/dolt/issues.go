@@ -1,4 +1,5 @@
 //go:build cgo
+
 package dolt
 
 import (
@@ -1143,7 +1144,7 @@ func isAllowedUpdateField(key string) bool {
 		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
 		"closed_at": true, "close_reason": true, "closed_by_session": true,
 		"source_repo": true,
-		"sender": true, "wisp": true, "wisp_type": true, "pinned": true,
+		"sender":      true, "wisp": true, "wisp_type": true, "pinned": true,
 		"hook_bead": true, "role_bead": true, "agent_state": true, "last_activity": true,
 		"role_type": true, "rig": true, "mol_type": true,
 		"event_category": true, "event_actor": true, "event_target": true, "event_payload": true,

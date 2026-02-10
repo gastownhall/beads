@@ -212,7 +212,7 @@ func showResetPreview(items []resetItem) {
 	fmt.Printf("To proceed, run: %s\n", ui.RenderWarn("bd reset --force"))
 }
 
-func performReset(items []resetItem, _, beadsDir string) {
+func performReset(items []resetItem, _, _ string) {
 
 	var errors []string
 
