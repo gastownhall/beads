@@ -549,11 +549,24 @@ var rootCmd = &cobra.Command{
 				}
 
 				// Allow read-only commands to auto-bootstrap from JSONL (GH#b09)
-				// This enables `bd --no-daemon show` after cold-start when DB is missing
+				// This enables `bd --no-daemon show` after cold-start when DB is missing.
+				// IMPORTANT: Only auto-bootstrap for SQLite backend. If metadata.json says
+				// the backend is Dolt, we must NOT silently create a SQLite database —
+				// that causes Classic contamination. Error out instead so the user can
+				// fix the Dolt connection. (gt-r1nex)
 				canAutoBootstrap := false
 				if isReadOnlyCommand(cmd.Name()) && beadsDir != "" {
 					jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 					if _, err := os.Stat(jsonlPath); err == nil {
+						configuredBackend := factory.GetBackendFromConfig(beadsDir)
+						if configuredBackend == configfile.BackendDolt {
+							// Dolt backend configured but database not found — don't create SQLite
+							fmt.Fprintf(os.Stderr, "Error: Dolt backend configured but database not found\n")
+							fmt.Fprintf(os.Stderr, "The .beads/metadata.json specifies backend: dolt\n")
+							fmt.Fprintf(os.Stderr, "but no Dolt database was found. Check that the Dolt server is running.\n")
+							fmt.Fprintf(os.Stderr, "\nHint: run 'bd doctor --fix' to diagnose and repair\n")
+							os.Exit(1)
+						}
 						canAutoBootstrap = true
 						debug.Logf("cold-start bootstrap: JSONL exists, allowing auto-create for %s", cmd.Name())
 					}
