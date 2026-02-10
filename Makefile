@@ -5,7 +5,6 @@
 # Default target
 all: build
 
-BINARY := bd
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
 
@@ -35,12 +34,12 @@ endif
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags gms_pure_go -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
+	go build -tags gms_pure_go -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
 else
-	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY) ./cmd/bd
+	go build -ldflags="-X main.Build=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)
-	@codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null || true
-	@echo "Signed $(BINARY) for macOS"
+	@codesign -s - -f $(BUILD_DIR)/bd 2>/dev/null || true
+	@echo "Signed bd for macOS"
 endif
 endif
 
@@ -86,12 +85,18 @@ endif
 # Also creates 'beads' symlink as an alias for bd
 install: check-up-to-date build
 	@mkdir -p $(INSTALL_DIR)
-	@rm -f $(INSTALL_DIR)/$(BINARY)
-	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+ifeq ($(OS),Windows_NT)
+	@rm -f $(INSTALL_DIR)/bd.exe
+	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
+	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
+else
+	@rm -f $(INSTALL_DIR)/bd
+	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/bd
+	@echo "Installed bd to $(INSTALL_DIR)/bd"
 	@rm -f $(INSTALL_DIR)/beads
-	@ln -s $(BINARY) $(INSTALL_DIR)/beads
-	@echo "Created 'beads' alias -> $(BINARY)"
+	@ln -s bd $(INSTALL_DIR)/beads
+	@echo "Created 'beads' alias -> bd"
+endif
 
 # Format all Go files
 fmt:
@@ -116,6 +121,7 @@ fmt-check:
 clean:
 	@echo "Cleaning..."
 	rm -f bd
+	rm -f bd.exe
 	rm -f internal/storage/sqlite/bench-cpu-*.prof
 	rm -f beads-perf-*.prof
 
