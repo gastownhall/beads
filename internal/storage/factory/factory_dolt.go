@@ -79,6 +79,7 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, opts Options) error
 		BeadsDir:    beadsDir,
 		DoltPath:    path,
 		LockTimeout: opts.LockTimeout,
+		Database:    opts.Database,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
