@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -12,45 +11,6 @@ import (
 )
 
 // TestWatchIssueInitialization tests that watchIssue sets up correctly
-func TestWatchIssueInitialization(t *testing.T) {
-	// Create a temporary .beads directory
-	tempDir := t.TempDir()
-	beadsDir := filepath.Join(tempDir, ".beads")
-
-	// Change to temp directory (must succeed for test validity)
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
-
-	if err := os.Mkdir(beadsDir, 0755); err != nil {
-		t.Fatalf("Failed to create .beads directory: %v", err)
-	}
-
-	// Create a test issue file
-	issuesFile := filepath.Join(beadsDir, "issues.jsonl")
-	f, err := os.Create(issuesFile)
-	if err != nil {
-		t.Fatalf("Failed to create issues file: %v", err)
-	}
-	f.Close()
-
-	// Test that the directory exists
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		t.Error(".beads directory should exist")
-	}
-
-	// Test that issues file can be watched
-	if _, err := os.Stat(issuesFile); err != nil {
-		t.Errorf("Issues file should exist: %v", err)
-	}
-
-	// Verify we're in the right directory
-	cwd, _ := os.Getwd()
-	if cwd != tempDir {
-		t.Errorf("Working directory should be tempDir, got %s", cwd)
-	}
-}
-
 // TestWatchIssueDebounceTimer tests debounce delay constant
 func TestWatchIssueDebounceTimer(t *testing.T) {
 	// Verify debounce delay is reasonable (500ms as defined)

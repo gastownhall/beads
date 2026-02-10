@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -680,14 +681,16 @@ func TestConfigPreservedDuringSync(t *testing.T) {
 }
 
 // getProjectRoot returns the project root directory for test file access.
+// Uses runtime.Caller to find the source file location, which is immune to
+// os.Chdir side effects from other subtests.
 func getProjectRoot(t *testing.T) string {
 	t.Helper()
-	// Find project root by looking for go.mod
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to get current file path via runtime.Caller")
 	}
-
+	// thisFile is cmd/bd/sync_git_test.go; walk up to find go.mod
+	dir := filepath.Dir(thisFile)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir

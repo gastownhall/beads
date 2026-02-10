@@ -654,7 +654,7 @@ func TestInitNoDbMode(t *testing.T) {
 	}()
 
 	// Initialize with --no-db flag
-	rootCmd.SetArgs([]string{"init", "--no-db", "--no-daemon", "--prefix", "test", "--quiet"})
+	rootCmd.SetArgs([]string{"init", "--no-db", "--prefix", "test", "--quiet"})
 
 	t.Logf("DEBUG: noDb before Execute=%v", noDb)
 

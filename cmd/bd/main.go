@@ -212,6 +212,11 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 
+	// Deprecated: --no-daemon is a no-op (daemon was removed). Kept as hidden flag
+	// for backward compatibility with scripts, hooks, and tests that still pass it.
+	rootCmd.PersistentFlags().BoolVar(&noDaemon, "no-daemon", false, "Deprecated: no-op (daemon has been removed)")
+	rootCmd.PersistentFlags().MarkHidden("no-daemon")
+
 	// Add --version flag to root command (same behavior as version subcommand)
 	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
 

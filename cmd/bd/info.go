@@ -213,9 +213,12 @@ type VersionChange struct {
 var versionChanges = []VersionChange{
 	{
 		Version: "0.49.6",
-		Date:    "2026-02-08",
+		Date:    "2026-02-09",
 		Changes: []string{
 			"REVERT: Embedded Dolt mode restored (removal was only intended for Gas Town, not Beads)",
+			"REMOVED: Daemon subsystem fully removed from bd CLI (Dolt replaces daemon-based sync)",
+			"REMOVED: JSONL flush/sync machinery deleted (-7,634 lines); JSONL functions are now no-ops",
+			"CLEANUP: Removed 171 dead daemonClient branches and 46 markDirtyAndScheduleFlush no-op calls",
 		},
 	},
 	{
