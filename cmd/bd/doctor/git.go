@@ -36,7 +36,7 @@ const bdInlineHookMarker = "# bd (beads)"
 var bdHooksRunPattern = regexp.MustCompile(`\bbd\s+hooks\s+run\b`)
 
 // CheckGitHooks verifies that recommended git hooks are installed.
-func CheckGitHooks() DoctorCheck {
+func CheckGitHooks(cliVersion string) DoctorCheck {
 	// Check if we're in a git repository using worktree-aware detection
 	hooksDir, err := git.GetGitHooksDir()
 	if err != nil {
@@ -75,6 +75,20 @@ func CheckGitHooks() DoctorCheck {
 		// If the actual hooks are bd shims, they're calling bd regardless of what
 		// the external manager config says (user may have leftover config files)
 		if hasBdShims, bdHooks := areBdShimsInstalled(hooksDir); hasBdShims {
+			if outdated, oldest := findOutdatedBDHookVersions(hooksDir, bdHooks, cliVersion); len(outdated) > 0 {
+				return DoctorCheck{
+					Name:    "Git Hooks",
+					Status:  StatusWarning,
+					Message: "Installed bd hooks are outdated",
+					Detail: fmt.Sprintf(
+						"Outdated: %s (oldest: %s, current: %s)",
+						strings.Join(outdated, ", "),
+						oldest,
+						cliVersion,
+					),
+					Fix: "Run 'bd hooks install --force' to update hooks",
+				}
+			}
 			return DoctorCheck{
 				Name:    "Git Hooks",
 				Status:  StatusOK,
@@ -129,6 +143,20 @@ func CheckGitHooks() DoctorCheck {
 	}
 
 	if len(missingHooks) == 0 {
+		if outdated, oldest := findOutdatedBDHookVersions(hooksDir, installedHooks, cliVersion); len(outdated) > 0 {
+			return DoctorCheck{
+				Name:    "Git Hooks",
+				Status:  StatusWarning,
+				Message: "Installed bd hooks are outdated",
+				Detail: fmt.Sprintf(
+					"Outdated: %s (oldest: %s, current: %s)",
+					strings.Join(outdated, ", "),
+					oldest,
+					cliVersion,
+				),
+				Fix: "Run 'bd hooks install --force' to update hooks",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Git Hooks",
 			Status:  StatusOK,
@@ -156,6 +184,57 @@ func CheckGitHooks() DoctorCheck {
 		Detail:  fmt.Sprintf("Recommended: %s", strings.Join([]string{"pre-commit", "post-merge", "pre-push"}, ", ")),
 		Fix:     hookInstallMsg,
 	}
+}
+
+func findOutdatedBDHookVersions(
+	hooksDir string,
+	hookNames []string,
+	cliVersion string,
+) ([]string, string) {
+	if !IsValidSemver(cliVersion) {
+		return nil, ""
+	}
+	var outdated []string
+	var oldest string
+	for _, hookName := range hookNames {
+		hookPath := filepath.Join(hooksDir, hookName)
+		content, err := os.ReadFile(hookPath)
+		if err != nil {
+			continue
+		}
+		hookVersion, ok := parseBDHookVersion(string(content))
+		if !ok || !IsValidSemver(hookVersion) {
+			continue
+		}
+		if CompareVersions(hookVersion, cliVersion) < 0 {
+			outdated = append(outdated, fmt.Sprintf("%s@%s", hookName, hookVersion))
+			if oldest == "" || CompareVersions(hookVersion, oldest) < 0 {
+				oldest = hookVersion
+			}
+		}
+	}
+	return outdated, oldest
+}
+
+func parseBDHookVersion(content string) (string, bool) {
+	if !strings.Contains(content, "bd-hooks-version:") {
+		return "", false
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if !strings.Contains(line, "bd-hooks-version:") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			return "", false
+		}
+		version := strings.TrimSpace(parts[1])
+		if version == "" {
+			return "", false
+		}
+		return version, true
+	}
+	return "", false
 }
 
 // areBdShimsInstalled checks if the installed hooks are bd shims, call bd hooks run,

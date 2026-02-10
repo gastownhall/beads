@@ -48,7 +48,7 @@ func TestCheckGitHooks(t *testing.T) {
 	t.Run("not in git repo returns N/A", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		runInDir(t, tmpDir, func() {
-			check := CheckGitHooks()
+			check := CheckGitHooks("0.49.6")
 
 			if check.Status != StatusOK {
 				t.Errorf("expected status %q, got %q", StatusOK, check.Status)
@@ -353,6 +353,36 @@ func TestCheckGitHooks_CorruptedHookFiles(t *testing.T) {
 			expectedStatus: "ok",
 			expectInMsg:    "All recommended hooks installed",
 		},
+		{
+			name: "outdated bd hook versions are flagged",
+			setup: func(t *testing.T, dir string) {
+				setupGitRepoInDir(t, dir)
+				gitDir := filepath.Join(dir, ".git")
+				hooksDir := filepath.Join(gitDir, "hooks")
+				os.MkdirAll(hooksDir, 0755)
+				oldHook := "#!/bin/sh\n# bd-hooks-version: 0.49.1\nbd hooks run pre-push\n"
+				os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(oldHook), 0755)
+				os.WriteFile(filepath.Join(hooksDir, "post-merge"), []byte(oldHook), 0755)
+				os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(oldHook), 0755)
+			},
+			expectedStatus: "warning",
+			expectInMsg:    "outdated",
+		},
+		{
+			name: "current bd hook versions are accepted",
+			setup: func(t *testing.T, dir string) {
+				setupGitRepoInDir(t, dir)
+				gitDir := filepath.Join(dir, ".git")
+				hooksDir := filepath.Join(gitDir, "hooks")
+				os.MkdirAll(hooksDir, 0755)
+				currentHook := "#!/bin/sh\n# bd-hooks-version: 0.49.6\nbd hooks run pre-push\n"
+				os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(currentHook), 0755)
+				os.WriteFile(filepath.Join(hooksDir, "post-merge"), []byte(currentHook), 0755)
+				os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(currentHook), 0755)
+			},
+			expectedStatus: "ok",
+			expectInMsg:    "All recommended hooks installed",
+		},
 	}
 
 	for _, tt := range tests {
@@ -361,7 +391,7 @@ func TestCheckGitHooks_CorruptedHookFiles(t *testing.T) {
 			tt.setup(t, tmpDir)
 
 			runInDir(t, tmpDir, func() {
-				check := CheckGitHooks()
+				check := CheckGitHooks("0.49.6")
 
 				if check.Status != tt.expectedStatus {
 					t.Errorf("expected status %q, got %q (message: %s)", tt.expectedStatus, check.Status, check.Message)

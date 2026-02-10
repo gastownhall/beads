@@ -315,7 +315,7 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check Git Hooks early (even if .beads/ doesn't exist yet)
-	hooksCheck := convertWithCategory(doctor.CheckGitHooks(), doctor.CategoryGit)
+	hooksCheck := convertWithCategory(doctor.CheckGitHooks(Version), doctor.CategoryGit)
 	result.Checks = append(result.Checks, hooksCheck)
 	// Don't fail overall check for missing hooks, just warn
 
@@ -451,8 +451,6 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-
-
 	// Federation health checks (bd-wkumz.6)
 	// Check 8d: Federation remotesapi port accessibility
 	remotesAPICheck := convertWithCategory(doctor.CheckFederationRemotesAPI(path), doctor.CategoryFederation)
@@ -477,7 +475,6 @@ func runDiagnostics(path string) doctorResult {
 	// Check 8h: Dolt init vs embedded mode mismatch
 	doltModeCheck := convertWithCategory(doctor.CheckDoltServerModeMismatch(path), doctor.CategoryFederation)
 	result.Checks = append(result.Checks, doltModeCheck)
-
 
 	// Check 9: Database-JSONL sync
 	syncCheck := convertWithCategory(doctor.CheckDatabaseJSONLSync(path), doctor.CategoryData)

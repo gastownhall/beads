@@ -22,6 +22,9 @@ make test
 # Or directly:
 ./scripts/test.sh
 
+# Run full CGO-enabled suite (no skip list)
+make test-full-cgo
+
 # Run specific package
 ./scripts/test.sh ./cmd/bd/...
 
@@ -77,6 +80,7 @@ When running tests during development:
    - Automatically skips known broken tests
    - Uses appropriate timeouts
    - Consistent with CI/CD
+   - For full CGO validation, use `./scripts/test-cgo.sh` (or `make test-full-cgo`)
 
 2. **Target specific tests when possible:**
    ```bash
