@@ -510,3 +510,284 @@ func TestHasBeadsHooksWithoutBdPrime(t *testing.T) {
 		t.Error("Expected false for settings file without bd prime hook")
 	}
 }
+
+func TestHasBeadsHooksWithStealthMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+
+	settingsContent := `{
+		"hooks": {
+			"SessionStart": [
+				{
+					"matcher": "",
+					"hooks": [
+						{
+							"type": "command",
+							"command": "bd prime --stealth"
+						}
+					]
+				}
+			]
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(settingsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := hasBeadsHooks(settingsPath)
+
+	if result != true {
+		t.Error("Expected true for settings file with bd prime --stealth hook")
+	}
+}
+
+func TestCheckClaudeSettingsHealth(t *testing.T) {
+	setTempHome := func(t *testing.T, dir string) {
+		t.Helper()
+		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
+	}
+
+	t.Run("no settings files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		check := CheckClaudeSettingsHealth()
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for no settings files, got %s", check.Status)
+		}
+		if check.Message != "No Claude Code settings files found" {
+			t.Errorf("Expected 'No Claude Code settings files found', got %s", check.Message)
+		}
+	})
+
+	t.Run("valid settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeSettingsHealth()
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for valid settings, got %s: %s", check.Status, check.Message)
+		}
+	})
+
+	t.Run("malformed settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(`{bad json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeSettingsHealth()
+		if check.Status != StatusError {
+			t.Errorf("Expected error for malformed settings, got %s", check.Status)
+		}
+		if check.Fix == "" {
+			t.Error("Expected fix message for malformed settings")
+		}
+	})
+
+	t.Run("project-level malformed settings", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(".claude", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(".claude", "settings.local.json"), []byte(`not json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeSettingsHealth()
+		if check.Status != StatusError {
+			t.Errorf("Expected error for malformed project settings, got %s", check.Status)
+		}
+	})
+}
+
+func TestCheckClaudeHookCompleteness(t *testing.T) {
+	setTempHome := func(t *testing.T, dir string) {
+		t.Helper()
+		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
+	}
+
+	t.Run("no hooks at all", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		check := CheckClaudeHookCompleteness()
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for no hooks, got %s", check.Status)
+		}
+	})
+
+	t.Run("both hooks present", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := `{
+			"hooks": {
+				"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}],
+				"PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeHookCompleteness()
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for both hooks, got %s: %s", check.Status, check.Message)
+		}
+	})
+
+	t.Run("only SessionStart hook", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := `{
+			"hooks": {
+				"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeHookCompleteness()
+		if check.Status != StatusWarning {
+			t.Errorf("Expected warning for missing PreCompact, got %s", check.Status)
+		}
+	})
+
+	t.Run("only PreCompact hook", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := `{
+			"hooks": {
+				"PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeHookCompleteness()
+		if check.Status != StatusWarning {
+			t.Errorf("Expected warning for missing SessionStart, got %s", check.Status)
+		}
+	})
+
+	t.Run("stealth mode hooks detected", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		setTempHome(t, tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := `{
+			"hooks": {
+				"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bd prime --stealth"}]}],
+				"PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"bd prime --stealth"}]}]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckClaudeHookCompleteness()
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for stealth mode hooks, got %s: %s", check.Status, check.Message)
+		}
+	})
+}
+
+func TestCheckHookEvents(t *testing.T) {
+	t.Run("nonexistent file", func(t *testing.T) {
+		ss, pc := checkHookEvents("/nonexistent/settings.json")
+		if ss || pc {
+			t.Error("Expected false for nonexistent file")
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "settings.json")
+		if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ss, pc := checkHookEvents(path)
+		if ss || pc {
+			t.Error("Expected false for invalid JSON")
+		}
+	})
+
+	t.Run("both events present", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "settings.json")
+		content := `{
+			"hooks": {
+				"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}],
+				"PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]
+			}
+		}`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ss, pc := checkHookEvents(path)
+		if !ss || !pc {
+			t.Errorf("Expected both true, got SessionStart=%v PreCompact=%v", ss, pc)
+		}
+	})
+
+	t.Run("only SessionStart", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "settings.json")
+		content := `{
+			"hooks": {
+				"SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]
+			}
+		}`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ss, pc := checkHookEvents(path)
+		if !ss {
+			t.Error("Expected SessionStart=true")
+		}
+		if pc {
+			t.Error("Expected PreCompact=false")
+		}
+	})
+}
