@@ -129,10 +129,6 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), fullID, reasonMsg)
 			}
 		}
-		// Schedule auto-flush if any issues were reopened
-		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
 		if jsonOutput && len(reopenedIssues) > 0 {
 			outputJSON(reopenedIssues)
 		}

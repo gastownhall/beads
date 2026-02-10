@@ -341,9 +341,6 @@ Example:
 			os.Exit(1)
 		}
 
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
-
 		if jsonOutput {
 			outputJSON(result)
 			return

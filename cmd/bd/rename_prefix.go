@@ -236,8 +236,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				}
 			}
 		}
-		// Also schedule for flush manager if available
-		markDirtyAndScheduleFullExport()
 
 		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix))
 
@@ -465,8 +463,6 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 			}
 		}
 	}
-	// Also schedule for flush manager if available
-	markDirtyAndScheduleFullExport()
 
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))

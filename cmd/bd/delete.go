@@ -314,8 +314,6 @@ the issues will not resurrect from remote branches.`,
 			os.Exit(1)
 		}
 		// Note: No longer call removeIssueFromJSONL - tombstone will be exported to JSONL
-		// Schedule auto-flush to update neighbors
-		markDirtyAndScheduleFlush()
 		totalDepsRemoved := outgoingRemoved + inboundRemoved
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -545,8 +543,6 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// Update text references in connected issues (using pre-collected issues)
 	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
 	// Note: No longer remove from JSONL - tombstones will be exported to JSONL
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
 	// Output results
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
@@ -689,9 +685,6 @@ func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade boo
 			_ = removeIssueFromJSONL(id)
 		}
 	}
-
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
 
 	// Output results
 	if jsonOutput {

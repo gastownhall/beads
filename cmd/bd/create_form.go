@@ -379,9 +379,6 @@ func runCreateForm(cmd *cobra.Command) {
 		FatalError("%v", err)
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	if jsonOutput {
 		outputJSON(issue)
 	} else {

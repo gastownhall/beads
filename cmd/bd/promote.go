@@ -145,8 +145,6 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", fullID, err)
 		}
 
-		markDirtyAndScheduleFlush()
-
 		if jsonOutput {
 			updated, _ := store.GetIssue(ctx, fullID)
 			if updated != nil {

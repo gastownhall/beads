@@ -353,9 +353,6 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store s
 		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
-
-	// Schedule auto-flush to export changes
-	markDirtyAndScheduleFlush()
 }
 
 func runCompactAll(ctx context.Context, compactor *compact.Compactor, store storage.CompactableStorage) {
@@ -484,11 +481,6 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 	} else if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
 		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
-	}
-
-	// Schedule auto-flush to export changes
-	if successCount > 0 {
-		markDirtyAndScheduleFlush()
 	}
 }
 
@@ -782,9 +774,6 @@ func runCompactApply(ctx context.Context, store storage.CompactableStorage) {
 		fmt.Printf("\nTombstones pruned: %d expired tombstones (older than %d days) removed\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
-
-	// Schedule auto-flush to export changes
-	markDirtyAndScheduleFlush()
 }
 
 // runCompactDolt runs Dolt garbage collection on the .beads/dolt directory

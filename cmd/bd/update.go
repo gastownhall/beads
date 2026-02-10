@@ -682,11 +682,6 @@ create, update, show, or close operation).`,
 			SetLastTouchedID(firstUpdatedID)
 		}
 
-		// Schedule auto-flush if any issues were updated
-		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
-
 		if jsonOutput && len(updatedIssues) > 0 {
 			outputJSON(updatedIssues)
 		}

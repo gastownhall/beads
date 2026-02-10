@@ -331,9 +331,6 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 		return fmt.Errorf("cooking formula: %w", err)
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	if jsonOutput {
 		outputJSON(cookResult{
 			ProtoID:    result.ProtoID,

@@ -135,10 +135,6 @@ Examples:
 			if err := result.Store.CloseIssue(ctx, resolvedSourceID, closeReason, actor, ""); err != nil {
 				WarnError("failed to close source issue: %v", err)
 			}
-			// Schedule auto-flush if source was local store
-			if !result.Routed {
-				markDirtyAndScheduleFlush()
-			}
 		}
 
 		// Output

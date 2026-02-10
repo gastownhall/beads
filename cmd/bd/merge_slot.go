@@ -196,7 +196,6 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 			// Non-fatal: log warning but don't fail creation
 			fmt.Fprintf(os.Stderr, "warning: failed to add gt:slot label: %v\n", err)
 		}
-		markDirtyAndScheduleFlush()
 	}
 
 	if jsonOutput {
@@ -374,7 +373,6 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 					if err := store.UpdateIssue(ctx, slot.ID, updates, actor); err != nil {
 						return fmt.Errorf("failed to add waiter: %w", err)
 					}
-					markDirtyAndScheduleFlush()
 				}
 			}
 
@@ -432,7 +430,6 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 		if err := store.UpdateIssue(ctx, slot.ID, updates, actor); err != nil {
 			return fmt.Errorf("failed to acquire slot: %w", err)
 		}
-		markDirtyAndScheduleFlush()
 	}
 
 	if jsonOutput {
@@ -522,7 +519,6 @@ func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
 		if err := store.UpdateIssue(ctx, slot.ID, updates, actor); err != nil {
 			return fmt.Errorf("failed to release slot: %w", err)
 		}
-		markDirtyAndScheduleFlush()
 	}
 
 	if jsonOutput {

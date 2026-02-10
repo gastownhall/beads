@@ -53,9 +53,6 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 			fmt.Printf("%s %s label '%s' %s %s\n", ui.RenderPass("✓"), verb, label, prep, issueID)
 		}
 	}
-	if len(issueIDs) > 0 && daemonClient == nil {
-		markDirtyAndScheduleFlush()
-	}
 	if jsonOut && len(results) > 0 {
 		outputJSON(results)
 	}

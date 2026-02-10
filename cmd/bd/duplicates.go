@@ -99,10 +99,6 @@ Example:
 				}
 			}
 		}
-		// Mark dirty if we performed merges
-		if autoMerge && !dryRun && len(mergeCommands) > 0 {
-			markDirtyAndScheduleFlush()
-		}
 		// Output results
 		if jsonOutput {
 			output := map[string]interface{}{

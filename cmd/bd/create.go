@@ -741,9 +741,6 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
-
 		// If issue was routed to a different repo, flush its JSONL immediately
 		// so the issue appears in bd list when hydration is enabled (bd-fix-routing)
 		if repoPath != "." {

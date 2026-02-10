@@ -79,9 +79,6 @@ Example:
 			_ = store.AddLabel(ctx, issue.ID, label, actor)
 		}
 
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
-
 		// Output only the ID
 		fmt.Println(issue.ID)
 	},

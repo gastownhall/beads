@@ -193,7 +193,6 @@ Examples:
 			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
 				FatalErrorRespectJSON("updating issue: %v", err)
 			}
-			markDirtyAndScheduleFlush()
 		}
 
 		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")

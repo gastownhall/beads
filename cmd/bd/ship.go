@@ -159,7 +159,6 @@ func runShip(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error adding label: %v\n", err)
 		os.Exit(1)
 	}
-	markDirtyAndScheduleFlush()
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{

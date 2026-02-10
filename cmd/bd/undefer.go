@@ -123,11 +123,6 @@ Examples:
 			}
 		}
 
-		// Schedule auto-flush if any issues were undeferred
-		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
-
 		if jsonOutput && len(undeferredIssues) > 0 {
 			outputJSON(undeferredIssues)
 		}

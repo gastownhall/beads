@@ -253,9 +253,6 @@ func runPour(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	if jsonOutput {
 		type pourResult struct {
 			*InstantiateResult

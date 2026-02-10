@@ -177,9 +177,6 @@ Examples:
 				if err := store.AddDependency(ctx, dep, actor); err != nil {
 					FatalErrorRespectJSON("%v", err)
 				}
-
-				// Schedule auto-flush
-				markDirtyAndScheduleFlush()
 			}
 
 			// Check for cycles after adding dependency (both daemon and direct mode)
@@ -378,9 +375,6 @@ Examples:
 		if err := store.AddDependency(ctx, dep, actor); err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
 
 		// Check for cycles after adding dependency
 		warnIfCyclesExist(store)
@@ -643,9 +637,6 @@ var depRemoveCmd = &cobra.Command{
 		if err := store.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{

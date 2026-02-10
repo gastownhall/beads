@@ -406,11 +406,6 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 		createdIssues = append(createdIssues, issue)
 	}
 
-	// Schedule auto-flush
-	if len(createdIssues) > 0 {
-		markDirtyAndScheduleFlush()
-	}
-
 	// Report failures if any
 	if len(failedIssues) > 0 {
 		fmt.Fprintf(os.Stderr, "\n%s Failed to create %d issues:\n", ui.RenderFail("✗"), len(failedIssues))

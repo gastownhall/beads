@@ -144,9 +144,6 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	if jsonOutput {
 		outputJSON(result)
 		return

@@ -138,9 +138,6 @@ func runPollutionCheck(_ string, clean bool, yes bool) {
 		deleted++
 	}
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	fmt.Printf("%s Deleted %d test issues\n", ui.RenderPass("✓"), deleted)
 	fmt.Printf("\nCleanup complete. To restore, run: bd import %s\n", backupPath)
 }

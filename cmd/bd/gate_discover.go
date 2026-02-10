@@ -411,7 +411,6 @@ func updateGateAwaitID(_ interface{}, gateID, runID string) error {
 		if err := store.UpdateIssue(rootCtx, gateID, updates, actor); err != nil {
 			return err
 		}
-		markDirtyAndScheduleFlush()
 	}
 
 	return nil

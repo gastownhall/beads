@@ -88,9 +88,6 @@ func runRename(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 
-	// Schedule auto-flush
-	markDirtyAndScheduleFlush()
-
 	return nil
 }
 

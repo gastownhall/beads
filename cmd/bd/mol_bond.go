@@ -261,9 +261,6 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Schedule auto-flush - wisps are in main DB now, but JSONL export skips them
-	markDirtyAndScheduleFlush()
-
 	if jsonOutput {
 		outputJSON(result)
 		return

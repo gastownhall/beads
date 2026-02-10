@@ -285,7 +285,6 @@ This is used by 'gt done --phase-complete' to register for gate wake notificatio
 				fmt.Fprintf(os.Stderr, "Error updating gate: %v\n", err)
 				os.Exit(1)
 			}
-			markDirtyAndScheduleFlush()
 		}
 
 		fmt.Printf("%s Added waiter to gate %s: %s\n", ui.RenderPass("✓"), gateID, waiter)
@@ -438,7 +437,6 @@ Use --reason to provide context for why the gate was resolved.`,
 				fmt.Fprintf(os.Stderr, "Error closing gate: %v\n", err)
 				os.Exit(1)
 			}
-			markDirtyAndScheduleFlush()
 		}
 
 		fmt.Printf("%s Gate resolved: %s\n", ui.RenderPass("✓"), gateID)
@@ -947,7 +945,6 @@ func closeGate(_ interface{}, gateID, reason string) error {
 	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
 		return err
 	}
-	markDirtyAndScheduleFlush()
 	return nil
 }
 

@@ -306,11 +306,6 @@ The --reason flag provides context for the event bead (recommended).`,
 			}
 		}
 
-		// Schedule auto-flush if in direct mode
-		if daemonClient == nil {
-			markDirtyAndScheduleFlush()
-		}
-
 		if jsonOutput {
 			result := map[string]interface{}{
 				"issue_id":  fullID,

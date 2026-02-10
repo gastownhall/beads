@@ -408,11 +408,6 @@ create, update, show, or close operation).`,
 			}
 		}
 
-		// Schedule auto-flush if any issues were closed
-		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
-
 		// Handle --continue flag
 		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
