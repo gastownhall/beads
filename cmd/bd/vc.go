@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
@@ -109,6 +112,7 @@ Examples:
 }
 
 var vcCommitMessage string
+var vcCommitStdin bool
 
 var vcCommitCmd = &cobra.Command{
 	Use:   "commit",
@@ -117,12 +121,24 @@ var vcCommitCmd = &cobra.Command{
 
 Examples:
   bd vc commit -m "Added new feature issues"
-  bd vc commit --message "Fixed priority on several issues"`,
+  bd vc commit --message "Fixed priority on several issues"
+  echo "Multi-line message" | bd vc commit --stdin`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := rootCtx
 
+		if vcCommitStdin {
+			if vcCommitMessage != "" {
+				FatalErrorRespectJSON("cannot specify both --stdin and -m/--message")
+			}
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				FatalErrorRespectJSON("failed to read commit message from stdin: %v", err)
+			}
+			vcCommitMessage = strings.TrimRight(string(b), "\n")
+		}
+
 		if vcCommitMessage == "" {
-			FatalErrorRespectJSON("commit message is required (use -m or --message)")
+			FatalErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
 		// Check if storage supports versioning
@@ -200,6 +216,7 @@ Examples:
 func init() {
 	vcMergeCmd.Flags().StringVar(&vcMergeStrategy, "strategy", "", "Conflict resolution strategy: 'ours' or 'theirs'")
 	vcCommitCmd.Flags().StringVarP(&vcCommitMessage, "message", "m", "", "Commit message")
+	vcCommitCmd.Flags().BoolVar(&vcCommitStdin, "stdin", false, "Read commit message from stdin")
 
 	vcCmd.AddCommand(vcMergeCmd)
 	vcCmd.AddCommand(vcCommitCmd)
