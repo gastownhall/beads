@@ -19,6 +19,32 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		metadata = "{}"
 	}
 
+	// Cycle detection for blocking dependency types: check if adding this edge
+	// would create a cycle by seeing if depends_on_id can already reach issue_id.
+	if dep.Type == types.DepBlocks {
+		var reachable int
+		err := s.queryRowContext(ctx, func(row *sql.Row) error {
+			return row.Scan(&reachable)
+		}, `
+			WITH RECURSIVE reachable AS (
+				SELECT ? AS node, 0 AS depth
+				UNION ALL
+				SELECT d.depends_on_id, r.depth + 1
+				FROM reachable r
+				JOIN dependencies d ON d.issue_id = r.node
+				WHERE d.type = 'blocks'
+				  AND r.depth < 100
+			)
+			SELECT COUNT(*) FROM reachable WHERE node = ?
+		`, dep.DependsOnID, dep.IssueID)
+		if err != nil {
+			return fmt.Errorf("failed to check for dependency cycle: %w", err)
+		}
+		if reachable > 0 {
+			return fmt.Errorf("adding dependency would create a cycle")
+		}
+	}
+
 	_, err := s.execContext(ctx, `
 		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?, ?)
