@@ -29,10 +29,10 @@ Modes:
   mechanical (default)  Uses deterministic merge rules (updated_at wins, etc.)
   interactive           Prompts for each conflict (not yet implemented)
 
-The file defaults to .beads/beads.jsonl if not specified.
+The file defaults to .beads/issues.jsonl if not specified.
 
 Examples:
-  bd resolve-conflicts                    # Resolve conflicts in .beads/beads.jsonl
+  bd resolve-conflicts                    # Resolve conflicts in .beads/issues.jsonl
   bd resolve-conflicts --dry-run          # Show what would be resolved
   bd resolve-conflicts custom.jsonl       # Resolve conflicts in custom file
   bd resolve-conflicts --json             # Output results as JSON`,
@@ -94,7 +94,7 @@ func runResolveConflicts(cmd *cobra.Command, args []string) {
 	if len(args) > 0 {
 		filePath = args[0]
 	} else {
-		filePath = filepath.Join(resolveConflictsPath, ".beads", "beads.jsonl")
+		filePath = defaultResolveConflictsFilePath(resolveConflictsPath)
 	}
 
 	// Validate mode
@@ -217,6 +217,10 @@ func runResolveConflicts(cmd *cobra.Command, args []string) {
 		fmt.Printf("%s Resolved %d conflict(s) in %s\n", ui.RenderPass("✓"), len(conflicts), filepath.Base(filePath))
 		fmt.Printf("Backup preserved at: %s\n", filepath.Base(backupPath))
 	}
+}
+
+func defaultResolveConflictsFilePath(rootPath string) string {
+	return filepath.Join(rootPath, ".beads", "issues.jsonl")
 }
 
 // parseConflicts extracts conflict regions and non-conflicted lines from content

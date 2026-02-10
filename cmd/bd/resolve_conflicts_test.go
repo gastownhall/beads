@@ -31,6 +31,26 @@ func testMergeIssue(jsonStr string) merge.Issue {
 	return issue
 }
 
+func TestDefaultResolveConflictsFilePath(t *testing.T) {
+	tests := []struct {
+		name string
+		root string
+	}{
+		{name: "relative root", root: "."},
+		{name: "absolute root", root: "/tmp/workspace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultResolveConflictsFilePath(tt.root)
+			want := filepath.Join(tt.root, ".beads", "issues.jsonl")
+			if got != want {
+				t.Fatalf("defaultResolveConflictsFilePath(%q) = %q, want %q", tt.root, got, want)
+			}
+		})
+	}
+}
+
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
 		name           string
