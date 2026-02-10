@@ -11,7 +11,7 @@ This guide covers advanced features for power users and specific use cases.
 - [Handling Import Collisions](#handling-import-collisions)
 - [Custom Git Hooks](#custom-git-hooks)
 - [Extensible Database](#extensible-database)
-- [Architecture: Daemon vs MCP vs Beads](#architecture-daemon-vs-mcp-vs-beads)
+- [Architecture: Storage, RPC, and MCP](#architecture-storage-rpc-and-mcp)
 
 ## Renaming Prefix
 
@@ -150,8 +150,6 @@ bd dep tree bd-41  # Shows unified dependency tree
 - All dependencies pointing to source issues are redirected to target
 - Text references like "see bd-42" are automatically rewritten to "see bd-41"
 - Operation cannot be undone (but git history preserves the original state)
-- Not yet supported in daemon mode (use `--no-daemon` flag)
-
 **AI Agent Workflow:**
 
 When agents discover duplicate issues, they should:
@@ -162,41 +160,11 @@ When agents discover duplicate issues, they should:
 
 ## Git Worktrees
 
-**⚠️ Important Limitation:** Daemon mode does not work correctly with `git worktree`.
+Git worktrees work with bd. Each worktree can have its own `.beads` directory, or worktrees can share a database via redirects (see [Database Redirects](#database-redirects)).
 
-**The Problem:**
-Git worktrees share the same `.git` directory and thus share the same `.beads` database. The daemon doesn't know which branch each worktree has checked out, which can cause it to commit/push to the wrong branch.
+**With Dolt backend:** Each worktree operates directly on the database — no daemon coordination needed. Use `bd sync` to synchronize JSONL with git when ready.
 
-**What you lose without daemon mode:**
-- **Auto-sync** - No automatic commit/push of changes (use `bd sync` manually)
-- **MCP server** - The beads-mcp server requires daemon mode for multi-repo support
-- **Background watching** - No automatic detection of remote changes
-
-**Solutions for Worktree Users:**
-
-1. **Use `--no-daemon` flag** (recommended):
-   ```bash
-   bd --no-daemon ready
-   bd --no-daemon create "Fix bug" -p 1
-   bd --no-daemon update bd-42 --status in_progress
-   ```
-
-2. **Disable daemon via environment variable** (for entire worktree session):
-   ```bash
-   export BEADS_NO_DAEMON=1
-   bd ready  # All commands use direct mode
-   ```
-
-3. **Disable auto-start** (less safe, still warns):
-   ```bash
-   export BEADS_AUTO_START_DAEMON=false
-   ```
-
-**Automatic Detection:**
-bd automatically detects when you're in a worktree and shows a prominent warning if daemon mode is active. The `--no-daemon` mode works correctly with worktrees since it operates directly on the database without shared state.
-
-**Why It Matters:**
-The daemon maintains its own view of the current working directory and git state. When multiple worktrees share the same `.beads` database, the daemon may commit changes intended for one branch to a different branch, leading to confusion and incorrect git history.
+**With Dolt server mode:** Multiple worktrees can connect to the same Dolt server for concurrent access without conflicts.
 
 ## Database Redirects
 
@@ -253,7 +221,6 @@ bd where --json
 
 - **Single-level redirects only**: Redirect chains are not followed (A → B → C won't work)
 - **Target must exist**: The redirect target directory must exist and contain a valid database
-- **Daemon coordination**: All clones share the same daemon when using redirects
 
 ### When to Use Redirects
 
@@ -265,7 +232,7 @@ bd where --json
 **Not recommended for:**
 - Separate projects (use separate databases)
 - Long-lived forks (they should have their own issues)
-- Git worktrees (use `--no-daemon` instead, see above)
+- Git worktrees (each should have its own `.beads` directory)
 
 ## Handling Git Merge Conflicts
 
@@ -328,14 +295,18 @@ After using beads-merge to resolve the git conflict, just run `bd import` to upd
 
 ## Custom Git Hooks
 
-For immediate export (no 5-second wait) and guaranteed import after git operations, install the git hooks:
+Git hooks keep the JSONL file in sync with the Dolt database for git portability:
 
-### Using the Installer
+### Using the Installer (Recommended)
 
 ```bash
-cd examples/git-hooks
-./install.sh
+bd hooks install
 ```
+
+This installs:
+- **pre-commit** — Exports Dolt changes to JSONL and stages it
+- **post-merge** — Imports pulled JSONL changes into Dolt (using branch-then-merge for cell-level conflict resolution)
+- **post-checkout** — Imports JSONL after branch checkout
 
 ### Manual Setup
 
@@ -352,86 +323,51 @@ Create `.git/hooks/post-merge`:
 bd import -i .beads/issues.jsonl
 ```
 
-Create `.git/hooks/post-checkout`:
-```bash
-#!/bin/bash
-bd import -i .beads/issues.jsonl
-```
-
 Make hooks executable:
 ```bash
-chmod +x .git/hooks/pre-commit .git/hooks/post-merge .git/hooks/post-checkout
+chmod +x .git/hooks/pre-commit .git/hooks/post-merge
 ```
 
-**Note:** Auto-sync is already enabled by default, so git hooks are optional. They're useful if you need immediate export or guaranteed import after git operations.
+See [DOLT.md](DOLT.md) for details on how hooks work with the Dolt backend.
 
 ## Extensible Database
 
-bd uses SQLite, which you can extend with your own tables and queries. This allows you to:
+> **Note:** Custom table extensions via `UnderlyingDB()` are a **SQLite-only** pattern.
+> With the Dolt backend, build standalone integration tools using bd's CLI with `--json`
+> flags, or use the JSONL files directly. See [EXTENDING.md](EXTENDING.md) for details.
+
+For SQLite-backend users, you can extend bd with your own tables and queries:
 
 - Add custom metadata to issues
 - Build integrations with other tools
 - Implement custom workflows
 - Create reports and analytics
 
-**See [EXTENDING.md](EXTENDING.md) for complete documentation:**
-- Database schema and structure
-- Adding custom tables
-- Joining with issue data
-- Example integrations
-- Best practices
+**See [EXTENDING.md](EXTENDING.md) for complete documentation.**
 
-**Example use case:**
-```sql
--- Add time tracking table
-CREATE TABLE time_entries (
-    id INTEGER PRIMARY KEY,
-    issue_id TEXT NOT NULL,
-    duration_minutes INTEGER NOT NULL,
-    recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(issue_id) REFERENCES issues(id)
-);
-
--- Query total time per issue
-SELECT i.id, i.title, SUM(t.duration_minutes) as total_minutes
-FROM issues i
-LEFT JOIN time_entries t ON i.id = t.issue_id
-GROUP BY i.id;
-```
-
-## Architecture: Daemon vs MCP vs Beads
+## Architecture: Storage, RPC, and MCP
 
 Understanding the role of each component:
 
 ### Beads (Core)
-- **SQLite database** - The source of truth for all issues, dependencies, labels
-- **Storage layer** - CRUD operations, dependency resolution, collision detection
-- **Business logic** - Ready work calculation, merge operations, import/export
-- **CLI commands** - Direct database access via `bd` command
+- **Dolt database** (primary) — Version-controlled SQL, the source of truth for all issues, dependencies, labels
+- **SQLite database** (legacy) — Still supported for simple single-user setups
+- **Storage layer** — Interface-based CRUD operations, dependency resolution, collision detection
+- **Business logic** — Ready work calculation, merge operations, import/export
+- **CLI commands** — Direct database access via `bd` command
 
-### Local Daemon (Per-Project)
-- **Lightweight RPC server** - Runs at `.beads/bd.sock` in each project
-- **Auto-sync coordination** - Debounced export (5s), git integration, import detection
-- **Process isolation** - Each project gets its own daemon for database safety
-- **LSP model** - Similar to language servers, one daemon per workspace
-- **No global daemon** - Removed in v0.16.0 to prevent cross-project pollution
-- **Exclusive lock support** - External tools can prevent daemon interference (see [EXCLUSIVE_LOCK.md](EXCLUSIVE_LOCK.md))
+### RPC Layer (Dolt Server Mode)
+- **Multi-writer access** — Connects to a running `dolt sql-server` for concurrent clients
+- **Used in multi-agent setups** — Gas Town and similar environments where multiple agents write simultaneously
+- **Not needed for single-user** — Dolt embedded mode works directly without a server
 
 ### MCP Server (Optional)
-- **Protocol adapter** - Translates MCP calls to daemon RPC or direct CLI
-- **Workspace routing** - Finds correct `.beads/bd.sock` based on working directory
-- **Stateless** - Doesn't cache or store any issue data itself
-- **Editor integration** - Makes bd available to Claude, Cursor, and other MCP clients
-- **Single instance** - One MCP server can route to multiple project daemons
+- **Protocol adapter** — Translates MCP calls to direct CLI invocations
+- **Workspace routing** — Finds correct `.beads` directory based on working directory
+- **Stateless** — Doesn't cache or store any issue data itself
+- **Editor integration** — Makes bd available to Claude, Cursor, and other MCP clients
 
-**Key principle**: The daemon and MCP server are thin layers. All heavy lifting (dependency graphs, collision resolution, merge logic) happens in the core bd storage layer.
-
-**Why per-project daemons?**
-- Complete database isolation between projects
-- Git worktree safety (each worktree can disable daemon independently)
-- No risk of committing changes to wrong branch
-- Simpler mental model - one project, one database, one daemon
-- Follows LSP/language server architecture patterns
+**Key principle**: All heavy lifting (dependency graphs, collision resolution, merge logic) happens in the core bd storage layer. The RPC and MCP layers are thin adapters.
 
 ## Next Steps
 

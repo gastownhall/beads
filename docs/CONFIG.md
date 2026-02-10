@@ -12,8 +12,8 @@ bd has two complementary configuration systems:
 Tool preferences control how `bd` behaves globally or per-user. These are stored in config files or environment variables and managed by [Viper](https://github.com/spf13/viper).
 
 **Configuration precedence** (highest to lowest):
-1. Command-line flags (`--json`, `--no-daemon`, etc.)
-2. Environment variables (`BD_JSON`, `BD_NO_DAEMON`, etc.)
+1. Command-line flags (`--json`, `--dolt-auto-commit`, etc.)
+2. Environment variables (`BD_JSON`, `BD_DOLT_AUTO_COMMIT`, etc.)
 3. Config file (`~/.config/bd/config.yaml` or `.beads/config.yaml`)
 4. Defaults
 
@@ -31,9 +31,6 @@ Tool-level settings you can configure:
 | Setting | Flag | Environment Variable | Default | Description |
 |---------|------|---------------------|---------|-------------|
 | `json` | `--json` | `BD_JSON` | `false` | Output in JSON format |
-| `no-daemon` | `--no-daemon` | `BD_NO_DAEMON` | `false` | Force direct mode, bypass daemon |
-| `no-auto-flush` | `--no-auto-flush` | `BD_NO_AUTO_FLUSH` | `false` | Disable auto JSONL export |
-| `no-auto-import` | `--no-auto-import` | `BD_NO_AUTO_IMPORT` | `false` | Disable auto JSONL import |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to remote in bd sync |
 | `sync.mode` | - | `BD_SYNC_MODE` | `git-portable` | Sync mode (see below) |
 | `sync.export_on` | - | `BD_SYNC_EXPORT_ON` | `push` | When to export: `push`, `change` |
@@ -51,16 +48,8 @@ Tool-level settings you can configure:
 | `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BD_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
-| `flush-debounce` | - | `BEADS_FLUSH_DEBOUNCE` | `5s` | Debounce time for auto-flush |
-| `auto-start-daemon` | - | `BEADS_AUTO_START_DAEMON` | `true` | Auto-start daemon if not running |
-| `daemon-log-max-size` | - | `BEADS_DAEMON_LOG_MAX_SIZE` | `50` | Max daemon log size in MB before rotation |
-| `daemon-log-max-backups` | - | `BEADS_DAEMON_LOG_MAX_BACKUPS` | `7` | Max number of old log files to keep |
-| `daemon-log-max-age` | - | `BEADS_DAEMON_LOG_MAX_AGE` | `30` | Max days to keep old log files |
-| `daemon-log-compress` | - | `BEADS_DAEMON_LOG_COMPRESS` | `true` | Compress rotated log files |
 
-**Backend note (SQLite vs Dolt):**
-- **SQLite** supports daemon mode and auto-start.
-- **Dolt (embedded)** is treated as **single-process-only**. Daemon mode and auto-start are disabled; `auto-start-daemon` has no effect. If you need daemon mode, use the SQLite backend (`bd init --backend sqlite`).
+**Backend note:** Dolt is the primary storage backend. SQLite remains supported for simple single-user setups. See [DOLT.md](DOLT.md) for Dolt-specific configuration.
 
 ### Dolt Auto-Commit (SQL commit vs Dolt commit)
 
@@ -179,27 +168,13 @@ federation:
 # Default to JSON output for scripting
 json: true
 
-# Disable daemon for single-user workflows
-no-daemon: true
-
-# Custom debounce for auto-flush (default 5s)
-flush-debounce: 10s
-
-# Auto-start daemon (default true)
-auto-start-daemon: true
-
-# Daemon log rotation settings
-daemon-log-max-size: 50      # MB per file (default 50)
-daemon-log-max-backups: 7    # Number of old logs to keep (default 7)
-daemon-log-max-age: 30       # Days to keep old logs (default 30)
-daemon-log-compress: true    # Compress rotated logs (default true)
+# Dolt auto-commit (creates Dolt history commit after each write)
+dolt:
+  auto-commit: on
 ```
 
 `.beads/config.yaml` (project-specific):
 ```yaml
-# Project team prefers longer flush delay
-flush-debounce: 15s
-
 # Require descriptions on all issues (enforces context for future work)
 create:
   require-description: true
@@ -238,7 +213,7 @@ external_projects:
 
 **Tool settings (Viper)** are user preferences:
 - How should I see output? (`--json`)
-- Should I use the daemon? (`--no-daemon`)
+- Should Dolt auto-commit? (`--dolt-auto-commit`)
 - How should the CLI behave?
 
 **Project config (`bd config`)** is project data:
@@ -255,8 +230,8 @@ Agents benefit from `bd config`'s structured CLI interface over manual YAML edit
 ### Overview
 
 Project configuration is:
-- **Per-project**: Isolated to each `.beads/*.db` database
-- **Version-control-friendly**: Stored in SQLite, queryable and scriptable
+- **Per-project**: Isolated to each `.beads/` database
+- **Version-control-friendly**: Stored in the database, queryable and scriptable
 - **Machine-readable**: JSON output for automation
 - **Namespace-based**: Organized by integration or purpose
 
@@ -430,7 +405,7 @@ bd config set auto_export.error_policy "best-effort"
 
 User-initiated exports (`bd sync`, manual export commands) use `export.error_policy` (default: `strict`).
 
-Auto-exports (daemon background sync) use `auto_export.error_policy` (default: `best-effort`), falling back to `export.error_policy` if not set.
+Auto-exports (git hook sync) use `auto_export.error_policy` (default: `best-effort`), falling back to `export.error_policy` if not set.
 
 **Example: Different policies for different contexts:**
 
@@ -699,7 +674,7 @@ jira_project = get_config("jira.project")
 1. **Use namespaces**: Prefix keys with integration name (e.g., `jira.*`, `linear.*`)
 2. **Hierarchical keys**: Use dots for structure (e.g., `jira.status_map.open`)
 3. **Document your keys**: Add comments in integration scripts
-4. **Security**: Store tokens in config, but add `.beads/*.db` to `.gitignore` (bd does this automatically)
+4. **Security**: Store tokens in config, but ensure `.beads/dolt/` and `.beads/*.db` are in `.gitignore` (bd does this automatically)
 5. **Per-project**: Configuration is project-specific, so each repo can have different settings
 
 ## Integration with bd Commands

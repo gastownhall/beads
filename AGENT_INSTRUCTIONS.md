@@ -21,7 +21,8 @@ beads/
 ├── internal/
 │   ├── types/           # Core data types
 │   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
+│       ├── dolt/        # Dolt implementation (primary)
+│       └── sqlite/      # SQLite implementation (legacy)
 ├── examples/            # Integration examples
 └── *.md                 # Documentation
 ```
@@ -59,7 +60,7 @@ func TestMyFeature(t *testing.T) {
 1. **Run tests**: `go test -short ./...` (full tests run in CI)
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
-4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
+4. **Commit**: With git hooks installed (`bd hooks install`), JSONL is auto-exported on commit
 
 ### Commit Message Convention
 
@@ -74,23 +75,24 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 ### Git Workflow
 
-**Auto-sync provides batching!** bd automatically:
+bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command). JSONL is maintained for git portability via hooks.
 
-- **Exports** to JSONL after CRUD operations (30-second debounce for batching)
-- **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
-- **Daemon commits/pushes** every 5 seconds (if `--auto-commit` / `--auto-push` enabled)
+**Install git hooks** for automatic JSONL sync:
+```bash
+bd hooks install
+```
 
-The 30-second debounce provides a **transaction window** for batch operations - multiple issue changes within 30 seconds get flushed together, avoiding commit spam.
+This ensures JSONL is exported on commit and imported after pull/merge.
 
 ### Git Integration
 
-**Auto-sync**: bd automatically exports to JSONL (30s debounce), imports after `git pull`, and optionally commits/pushes.
+**JSONL portability**: JSONL is exported via git hooks for sharing through git. The Dolt database is the source of truth.
 
 **Protected branches**: Use `bd init --branch beads-metadata` to commit to separate branch. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
-**Git worktrees**: Enhanced support with shared database architecture. Use `bd --no-daemon` if daemon warnings appear. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
+**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
 
-**Merge conflicts**: Rare with hash IDs. If conflicts occur, use `git checkout --theirs/.beads/issues.jsonl` and `bd import`. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
+**Merge conflicts**: Rare with hash IDs. If conflicts occur in JSONL, use `git checkout --theirs .beads/issues.jsonl` and `bd import`. Dolt uses cell-level 3-way merge for better conflict resolution.
 
 ## Landing the Plane
 
@@ -206,36 +208,24 @@ bd update <id> --acceptance "acceptance criteria"
 bd sync
 ```
 
-This immediately:
-
-1. Exports pending changes to JSONL (no 30s wait)
-2. Commits to git
-3. Pulls from remote
-4. Imports any updates
-5. Pushes to remote
+This immediately syncs the database with git — exporting JSONL, committing, pulling remote changes, and pushing.
 
 **Example agent session:**
 
 ```bash
-# Make multiple changes (batched in 30-second window)
+# Make changes (each write auto-commits to Dolt history)
 bd create "Fix bug" -p 1
 bd create "Add tests" -p 1
 bd update bd-42 --status in_progress
 bd close bd-40 --reason "Completed"
 
-# Force immediate sync at end of session
+# Sync at end of session
 bd sync
 
 # Now safe to end session - everything is committed and pushed
 ```
 
-**Why this matters:**
-
-- Without `bd sync`, changes sit in 30-second debounce window
-- User might think you pushed but JSONL is still dirty
-- `bd sync` forces immediate flush/commit/push
-
-**STRONGLY RECOMMENDED: Install git hooks for automatic sync** (prevents stale JSONL problems):
+**RECOMMENDED: Install git hooks for automatic JSONL sync:**
 
 ```bash
 # One-time setup - run this in each beads workspace
@@ -244,13 +234,8 @@ bd hooks install
 
 This installs:
 
-- **pre-commit** - Flushes pending changes immediately before commit (bypasses 30s debounce)
-- **post-merge** - Imports updated JSONL after pull/merge (guaranteed sync)
-- **pre-push** - Exports database to JSONL before push (prevents stale JSONL from reaching remote)
-- **post-checkout** - Imports JSONL after branch checkout (ensures consistency)
-
-**Why git hooks matter:**
-Without the pre-push hook, you can have database changes committed locally but stale JSONL pushed to remote, causing multi-workspace divergence. The hooks guarantee DB ↔ JSONL consistency.
+- **pre-commit** — Exports Dolt changes to JSONL and stages it
+- **post-merge** — Imports pulled JSONL changes into Dolt
 
 **Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
 
@@ -264,7 +249,7 @@ Without the pre-push hook, you can have database changes committed locally but s
 
 2. **Prefer flags on existing commands**: Before creating a new command, ask: "Can this be a flag on an existing command?" Example: `bd list --stale` instead of `bd stale`.
 
-3. **Consolidate related operations**: Related operations should live together. Daemon management uses `bd daemons {list,health,killall}`, not separate top-level commands.
+3. **Consolidate related operations**: Related operations should live together. Version control uses `bd vc {log,diff,commit}`, not separate top-level commands.
 
 4. **Count the commands**: Run `bd --help` and count. If we're approaching 30+ commands, we have a discoverability problem. Consider subcommand grouping.
 

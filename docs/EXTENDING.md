@@ -11,7 +11,7 @@
 > **For orchestration layers**, consider using a separate database that references
 > bd issue IDs, or wait for the forthcoming plugin architecture.
 
-bd is designed to be extended by applications that need more than basic issue tracking. The recommended pattern is to add your own tables to the same SQLite database that bd uses.
+For SQLite-backend users, bd can be extended by applications that need more than basic issue tracking. The pattern below adds custom tables to the same SQLite database that bd uses. **This does not apply to the Dolt backend.**
 
 ## Philosophy
 
