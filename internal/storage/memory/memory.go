@@ -721,6 +721,38 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 			}
 		}
 
+		// Date range filters
+		if filter.CreatedAfter != nil && !issue.CreatedAt.After(*filter.CreatedAfter) {
+			continue
+		}
+		if filter.CreatedBefore != nil && !issue.CreatedAt.Before(*filter.CreatedBefore) {
+			continue
+		}
+		if filter.UpdatedAfter != nil && !issue.UpdatedAt.After(*filter.UpdatedAfter) {
+			continue
+		}
+		if filter.UpdatedBefore != nil && !issue.UpdatedAt.Before(*filter.UpdatedBefore) {
+			continue
+		}
+		if filter.ClosedAfter != nil && (issue.ClosedAt == nil || !issue.ClosedAt.After(*filter.ClosedAfter)) {
+			continue
+		}
+		if filter.ClosedBefore != nil && (issue.ClosedAt == nil || !issue.ClosedAt.Before(*filter.ClosedBefore)) {
+			continue
+		}
+		if filter.DeferAfter != nil && (issue.DeferUntil == nil || !issue.DeferUntil.After(*filter.DeferAfter)) {
+			continue
+		}
+		if filter.DeferBefore != nil && (issue.DeferUntil == nil || !issue.DeferUntil.Before(*filter.DeferBefore)) {
+			continue
+		}
+		if filter.DueAfter != nil && (issue.DueAt == nil || !issue.DueAt.After(*filter.DueAfter)) {
+			continue
+		}
+		if filter.DueBefore != nil && (issue.DueAt == nil || !issue.DueAt.Before(*filter.DueBefore)) {
+			continue
+		}
+
 		// Copy issue and attach metadata
 		issueCopy := *issue
 		if deps, ok := m.dependencies[issue.ID]; ok {
@@ -1024,6 +1056,15 @@ func (m *MemoryStorage) AddLabel(ctx context.Context, issueID, label, actor stri
 
 	m.labels[issueID] = append(m.labels[issueID], label)
 
+	comment := "Added label: " + label
+	m.events[issueID] = append(m.events[issueID], &types.Event{
+		IssueID:   issueID,
+		EventType: types.EventLabelAdded,
+		Actor:     actor,
+		Comment:   &comment,
+		CreatedAt: time.Now(),
+	})
+
 	return nil
 }
 
@@ -1041,6 +1082,15 @@ func (m *MemoryStorage) RemoveLabel(ctx context.Context, issueID, label, actor s
 	}
 
 	m.labels[issueID] = newLabels
+
+	comment := "Removed label: " + label
+	m.events[issueID] = append(m.events[issueID], &types.Event{
+		IssueID:   issueID,
+		EventType: types.EventLabelRemoved,
+		Actor:     actor,
+		Comment:   &comment,
+		CreatedAt: time.Now(),
+	})
 
 	return nil
 }

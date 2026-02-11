@@ -267,7 +267,7 @@ func TestCheckIDFormat(t *testing.T) {
 			name:           "sequential IDs",
 			issueIDs:       []string{"bd-1", "bd-2", "bd-3", "bd-4"},
 			createTable:    false,
-			expectedStatus: doctor.StatusWarning,
+			expectedStatus: doctor.StatusOK, // Dolt backend always returns OK (hash-ID migration is SQLite-only)
 		},
 		{
 			name:           "mixed: mostly hash IDs",

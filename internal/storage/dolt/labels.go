@@ -18,6 +18,14 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 	if err != nil {
 		return fmt.Errorf("failed to add label: %w", err)
 	}
+	comment := "Added label: " + label
+	_, err = s.execContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?)
+	`, issueID, types.EventLabelAdded, actor, comment)
+	if err != nil {
+		return fmt.Errorf("failed to record label event: %w", err)
+	}
 	return nil
 }
 
@@ -28,6 +36,14 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 	`, issueID, label)
 	if err != nil {
 		return fmt.Errorf("failed to remove label: %w", err)
+	}
+	comment := "Removed label: " + label
+	_, err = s.execContext(ctx, `
+		INSERT INTO events (issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?)
+	`, issueID, types.EventLabelRemoved, actor, comment)
+	if err != nil {
+		return fmt.Errorf("failed to record label event: %w", err)
 	}
 	return nil
 }

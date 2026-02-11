@@ -5,40 +5,5 @@
 # Subtests also fail with "database not initialized" after init (routing issue).
 TestShow
 
-# TestLabelCommands: event assertion uses parent t instead of subtest t.
-# AddLabel/RemoveLabel don't emit events in Dolt storage layer.
-TestLabelCommands
-
-# TestListQueryCapabilitiesSuite: date_range_-_closed_after expects 1 but gets 3.
-# Pre-existing query bug in closed_after date filtering.
-TestListQueryCapabilitiesSuite
-
-# TestCheckIDFormat/sequential_IDs: pre-existing ID format assertion failure.
-TestCheckIDFormat
-
-# TestMigrateCommand: migration subtests fail (single_old_database, version_detection).
-TestMigrateCommand
-
-# TestRemapDependencies_PreservesMetadata: pre-existing failure.
-TestRemapDependencies_PreservesMetadata
-
-# TestRepairMultiplePrefixes, TestRepairDeps_*: pre-existing repair test failures.
+# TestRepairMultiplePrefixes: test itself skips on Dolt backend (needs rewrite for Dolt rename semantics).
 TestRepairMultiplePrefixes
-TestRepairDeps_FindOrphans
-TestRepairDeps_FixOrphans
-TestRepairDeps_MultipleTypes
-
-# TestExportToMultiRepoCWDInvariant: export path resolution failures.
-TestExportToMultiRepoCWDInvariant
-
-# TestSyncModePathResolution: sync mode path failures.
-TestSyncModePathResolution
-
-# TestGetSyncBranch_EnvOverridesDB: env variable sync branch test.
-TestGetSyncBranch_EnvOverridesDB
-
-# TestSearchWithDateAndPriorityFilters: search_with_closed_after subtest fails.
-TestSearchWithDateAndPriorityFilters
-
-# TestListTimeBasedFilters: defer/due date filter assertions fail.
-TestListTimeBasedFilters
