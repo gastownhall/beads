@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 #
 # The CLI handles validation of these values against the configured options.
 # Built-in statuses: open, in_progress, blocked, deferred, closed
-# Built-in types: bug, feature, task, epic, chore
+# Built-in types: bug, feature, task, epic, chore, decision
 IssueStatus = str
 IssueType = str
 DependencyType = Literal["blocks", "related", "parent-child", "discovered-from"]

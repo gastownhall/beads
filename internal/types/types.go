@@ -501,11 +501,12 @@ type IssueType string
 // Core work type constants - these are the built-in types that beads validates.
 // All other types require configuration via types.custom in config.yaml.
 const (
-	TypeBug     IssueType = "bug"
-	TypeFeature IssueType = "feature"
-	TypeTask    IssueType = "task"
-	TypeEpic    IssueType = "epic"
-	TypeChore   IssueType = "chore"
+	TypeBug      IssueType = "bug"
+	TypeFeature  IssueType = "feature"
+	TypeTask     IssueType = "task"
+	TypeEpic     IssueType = "epic"
+	TypeChore    IssueType = "chore"
+	TypeDecision IssueType = "decision"
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
@@ -520,11 +521,11 @@ const TypeEvent IssueType = "event"
 // (event was also a Gas Town type but was promoted to a built-in internal type above.)
 
 // IsValid checks if the issue type is a core work type.
-// Only core work types (bug, feature, task, epic, chore) are built-in.
+// Only core work types (bug, feature, task, epic, chore, decision) are built-in.
 // Other types (molecule, gate, convoy, etc.) require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision:
 		return true
 	}
 	return false
@@ -560,6 +561,8 @@ func (t IssueType) Normalize() IssueType {
 	switch strings.ToLower(string(t)) {
 	case "enhancement", "feat":
 		return TypeFeature
+	case "dec", "adr":
+		return TypeDecision
 	default:
 		return t
 	}
@@ -588,6 +591,12 @@ func (t IssueType) RequiredSections() []RequiredSection {
 	case TypeEpic:
 		return []RequiredSection{
 			{Heading: "## Success Criteria", Hint: "Define high-level success criteria"},
+		}
+	case TypeDecision:
+		return []RequiredSection{
+			{Heading: "## Decision", Hint: "Summarize what was decided"},
+			{Heading: "## Rationale", Hint: "Explain why this option was chosen"},
+			{Heading: "## Alternatives Considered", Hint: "List alternatives and why they were rejected"},
 		}
 	default:
 		// Chore and custom types have no required sections

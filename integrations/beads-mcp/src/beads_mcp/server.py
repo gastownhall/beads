@@ -385,7 +385,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "status": "open|in_progress|blocked|deferred|closed or custom (optional)",
                 "priority": "int 0-4 (optional)",
-                "issue_type": "bug|feature|task|epic|chore or custom (optional)",
+                "issue_type": "bug|feature|task|epic|chore|decision or custom (optional)",
                 "assignee": "str (optional)",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -421,7 +421,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "title": "str (required)",
                 "description": "str (default '')",
                 "priority": "int 0-4 (default 2)",
-                "issue_type": "bug|feature|task|epic|chore or custom (default task)",
+                "issue_type": "bug|feature|task|epic|chore|decision or custom (default task)",
                 "assignee": "str (optional)",
                 "labels": "list[str] (optional)",
                 "deps": "list[str] (optional) - dependency IDs",
@@ -862,7 +862,7 @@ async def list_issues(
     Args:
         status: Filter by status (open, in_progress, blocked, closed)
         priority: Filter by priority level (0-4)
-        issue_type: Filter by type (bug, feature, task, epic, chore)
+        issue_type: Filter by type (bug, feature, task, epic, chore, decision)
         assignee: Filter by assignee
         labels: Filter by labels (AND: must have ALL specified labels)
         labels_any: Filter by labels (OR: must have at least one)
@@ -964,7 +964,7 @@ async def show_issue(
 
 @mcp.tool(
     name="create",
-    description="""Create a new issue (bug, feature, task, epic, or chore) with optional design,
+    description="""Create a new issue (bug, feature, task, epic, chore, or decision) with optional design,
 acceptance criteria, and dependencies.""",
 )
 @with_workspace

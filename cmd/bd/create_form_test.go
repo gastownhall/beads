@@ -393,13 +393,14 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 	})
 
 	t.Run("AllIssueTypes", func(t *testing.T) {
-		issueTypes := []string{"bug", "feature", "task", "epic", "chore"}
+		issueTypes := []string{"bug", "feature", "task", "epic", "chore", "decision"}
 		expectedTypes := []types.IssueType{
 			types.TypeBug,
 			types.TypeFeature,
 			types.TypeTask,
 			types.TypeEpic,
 			types.TypeChore,
+			types.TypeDecision,
 		}
 
 		for i, issueType := range issueTypes {

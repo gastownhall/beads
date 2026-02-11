@@ -656,7 +656,7 @@ func init() {
 	migrateIssuesCmd.Flags().String("to", "", "Destination repository (required)")
 	migrateIssuesCmd.Flags().String("status", "", "Filter by status (open/closed/all)")
 	migrateIssuesCmd.Flags().Int("priority", -1, "Filter by priority (0-4)")
-	migrateIssuesCmd.Flags().String("type", "", "Filter by issue type (bug/feature/task/epic/chore)")
+	migrateIssuesCmd.Flags().String("type", "", "Filter by issue type (bug/feature/task/epic/chore/decision)")
 	migrateIssuesCmd.Flags().StringSlice("label", nil, "Filter by labels (can specify multiple)")
 	migrateIssuesCmd.Flags().StringSlice("id", nil, "Specific issue IDs to migrate (can specify multiple)")
 	migrateIssuesCmd.Flags().String("ids-file", "", "File containing issue IDs (one per line)")

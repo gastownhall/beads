@@ -545,6 +545,7 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeTask, true},
 		{TypeEpic, true},
 		{TypeChore, true},
+		{TypeDecision, true},
 		// Gas Town types are now custom types (not built-in)
 		{IssueType("message"), false},
 		{IssueType("merge-request"), false},
@@ -621,6 +622,14 @@ func TestEventTypeValidation(t *testing.T) {
 	if TypeEvent.Normalize() != TypeEvent {
 		t.Errorf("TypeEvent.Normalize() = %q, want %q", TypeEvent.Normalize(), TypeEvent)
 	}
+
+	// decision aliases
+	if IssueType("dec").Normalize() != TypeDecision {
+		t.Errorf("IssueType(dec).Normalize() = %q, want %q", IssueType("dec").Normalize(), TypeDecision)
+	}
+	if IssueType("adr").Normalize() != TypeDecision {
+		t.Errorf("IssueType(adr).Normalize() = %q, want %q", IssueType("adr").Normalize(), TypeDecision)
+	}
 }
 
 func TestIssueTypeRequiredSections(t *testing.T) {
@@ -633,6 +642,7 @@ func TestIssueTypeRequiredSections(t *testing.T) {
 		{TypeFeature, 1, "## Acceptance Criteria"},
 		{TypeTask, 1, "## Acceptance Criteria"},
 		{TypeEpic, 1, "## Success Criteria"},
+		{TypeDecision, 3, "## Decision"},
 		{TypeChore, 0, ""},
 		// Gas Town types are now custom and have no required sections
 		{IssueType("message"), 0, ""},

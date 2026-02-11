@@ -39,7 +39,7 @@ Boolean operators (case-insensitive):
 Supported fields:
   status            Issue status (open, in_progress, blocked, deferred, closed)
   priority          Priority level (0-4)
-  type              Issue type (bug, feature, task, epic, chore)
+  type              Issue type (bug, feature, task, epic, chore, decision)
   assignee          Assigned user (use "none" for unassigned)
   owner             Issue owner
   label             Issue label (use "none" for unlabeled)
