@@ -293,6 +293,35 @@ func engineBuildIDMap(issues []*types.Issue) map[string]*types.Issue {
 	return result
 }
 
+func engineIsBusyLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
+}
+
+func engineWithBusyRetry(op func() error) error {
+	const maxAttempts = 6
+	backoff := 10 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := op()
+		if err == nil {
+			return nil
+		}
+		if !engineIsBusyLockError(err) {
+			return err
+		}
+		lastErr = err
+		if attempt < maxAttempts {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return lastErr
+}
+
 func engineHandleRename(ctx context.Context, s storage.Storage, existing *types.Issue, incoming *types.Issue) (string, error) {
 	targetIssue, err := s.GetIssue(ctx, incoming.ID)
 	if err == nil && targetIssue != nil {
@@ -300,7 +329,7 @@ func engineHandleRename(ctx context.Context, s storage.Storage, existing *types.
 			deletedID := ""
 			existingCheck, checkErr := s.GetIssue(ctx, existing.ID)
 			if checkErr == nil && existingCheck != nil {
-				if err := s.DeleteIssue(ctx, existing.ID); err != nil {
+				if err := engineWithBusyRetry(func() error { return s.DeleteIssue(ctx, existing.ID) }); err != nil {
 					return "", fmt.Errorf("failed to delete old ID %s: %w", existing.ID, err)
 				}
 				deletedID = existing.ID
@@ -332,10 +361,10 @@ func engineHandleRename(ctx context.Context, s storage.Storage, existing *types.
 	}
 
 	oldID := existing.ID
-	if err := s.DeleteIssue(ctx, oldID); err != nil {
+	if err := engineWithBusyRetry(func() error { return s.DeleteIssue(ctx, oldID) }); err != nil {
 		return "", fmt.Errorf("failed to delete old ID %s: %w", oldID, err)
 	}
-	if err := s.CreateIssue(ctx, incoming, "import-rename"); err != nil {
+	if err := engineWithBusyRetry(func() error { return s.CreateIssue(ctx, incoming, "import-rename") }); err != nil {
 		targetIssue, getErr := s.GetIssue(ctx, incoming.ID)
 		if getErr == nil && targetIssue != nil && targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
 			return oldID, nil
@@ -352,7 +381,7 @@ func engineHandleRenameTx(ctx context.Context, tx storage.Transaction, existing 
 			deletedID := ""
 			existingCheck, checkErr := tx.GetIssue(ctx, existing.ID)
 			if checkErr == nil && existingCheck != nil {
-				if err := tx.DeleteIssue(ctx, existing.ID); err != nil {
+				if err := engineWithBusyRetry(func() error { return tx.DeleteIssue(ctx, existing.ID) }); err != nil {
 					return "", fmt.Errorf("failed to delete old ID %s: %w", existing.ID, err)
 				}
 				deletedID = existing.ID
@@ -384,10 +413,10 @@ func engineHandleRenameTx(ctx context.Context, tx storage.Transaction, existing 
 	}
 
 	oldID := existing.ID
-	if err := tx.DeleteIssue(ctx, oldID); err != nil {
+	if err := engineWithBusyRetry(func() error { return tx.DeleteIssue(ctx, oldID) }); err != nil {
 		return "", fmt.Errorf("failed to delete old ID %s: %w", oldID, err)
 	}
-	if err := tx.CreateIssue(ctx, incoming, "import-rename"); err != nil {
+	if err := engineWithBusyRetry(func() error { return tx.CreateIssue(ctx, incoming, "import-rename") }); err != nil {
 		targetIssue, getErr := tx.GetIssue(ctx, incoming.ID)
 		if getErr == nil && targetIssue != nil && targetIssue.ComputeContentHash() == incoming.ComputeContentHash() {
 			return oldID, nil
