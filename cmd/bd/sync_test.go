@@ -285,8 +285,8 @@ func TestGetSyncBranch_EnvOverridesDB(t *testing.T) {
 	storeMutex.Unlock()
 	oldDBPath := dbPath
 
-	// Use an in-memory SQLite store for testing
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: "file::memory:?mode=memory&cache=private"})
+	// Use a temp dir for Dolt store (Dolt doesn't support :memory:)
+	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

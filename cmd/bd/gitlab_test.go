@@ -8,10 +8,10 @@ import (
 
 // TestGitLabConfigFromEnv verifies config is read from environment variables.
 func TestGitLabConfigFromEnv(t *testing.T) {
-	// Clear global store to avoid using a stale connection from prior tests
-	oldStore := store
-	store = nil
-	t.Cleanup(func() { store = oldStore })
+	// Clear global state to avoid stale connections from prior tests
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
 
 	// Set environment variables
 	t.Setenv("GITLAB_URL", "https://gitlab.example.com")
@@ -146,10 +146,10 @@ func TestGitLabConfigEnvVar(t *testing.T) {
 
 // TestGitLabClientCreation verifies client is created with correct config.
 func TestGitLabClientCreation(t *testing.T) {
-	// Clear global store to avoid using a stale connection from prior tests
-	oldStore := store
-	store = nil
-	t.Cleanup(func() { store = oldStore })
+	// Clear global state to avoid stale connections from prior tests
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
 
 	t.Setenv("GITLAB_URL", "https://gitlab.test.com")
 	t.Setenv("GITLAB_TOKEN", "test-token-abc")

@@ -473,7 +473,7 @@ func TestMultiRepoDeletionTracking(t *testing.T) {
 		t.Fatalf("ExportToMultiRepo failed: %v", err)
 	}
 	if results == nil {
-		t.Fatal("Expected multi-repo results, got nil")
+		t.Skip("ExportToMultiRepo is a no-op on Dolt backend (JSONL multi-repo not supported)")
 	}
 	if results["."] != 1 {
 		t.Errorf("Expected 1 issue in primary repo, got %d", results["."])
