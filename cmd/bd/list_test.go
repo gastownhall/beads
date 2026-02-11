@@ -790,7 +790,7 @@ func TestBuildBlockingMaps(t *testing.T) {
 		},
 	}
 
-	blockedByMap, blocksMap, _ := buildBlockingMaps(allDeps)
+	blockedByMap, blocksMap, _ := buildBlockingMaps(allDeps, nil)
 
 	// issue-A is blocked by issue-B
 	if len(blockedByMap["issue-A"]) != 1 || blockedByMap["issue-A"][0] != "issue-B" {
@@ -827,7 +827,7 @@ func TestBuildBlockingMaps_ParentChildSeparation(t *testing.T) {
 		},
 	}
 
-	_, blocksMap, childrenMap := buildBlockingMaps(allDeps)
+	_, blocksMap, childrenMap := buildBlockingMaps(allDeps, nil)
 
 	// parent-1 should have children, not blocks, for parent-child deps
 	if len(childrenMap["parent-1"]) != 2 {
@@ -836,6 +836,63 @@ func TestBuildBlockingMaps_ParentChildSeparation(t *testing.T) {
 	// parent-1 should only block issue-X (not child-1 or child-2)
 	if len(blocksMap["parent-1"]) != 1 || blocksMap["parent-1"][0] != "issue-X" {
 		t.Errorf("parent-1 blocks = %v, want [issue-X]", blocksMap["parent-1"])
+	}
+}
+
+func TestBuildBlockingMaps_ClosedBlockersFiltered(t *testing.T) {
+	t.Parallel()
+	// issue-A is blocked by issue-B (open) and issue-C (closed)
+	// issue-D is blocked by issue-C (closed) only
+	allDeps := map[string][]*types.Dependency{
+		"issue-A": {
+			{IssueID: "issue-A", DependsOnID: "issue-B", Type: types.DepBlocks},
+			{IssueID: "issue-A", DependsOnID: "issue-C", Type: types.DepBlocks},
+		},
+		"issue-D": {
+			{IssueID: "issue-D", DependsOnID: "issue-C", Type: types.DepBlocks},
+		},
+	}
+
+	closedIDs := map[string]bool{"issue-C": true}
+	blockedByMap, blocksMap, _ := buildBlockingMaps(allDeps, closedIDs)
+
+	// issue-A should only show issue-B as blocker (issue-C is closed)
+	if len(blockedByMap["issue-A"]) != 1 || blockedByMap["issue-A"][0] != "issue-B" {
+		t.Errorf("issue-A blockedBy = %v, want [issue-B]", blockedByMap["issue-A"])
+	}
+
+	// issue-D should have no blockers (issue-C is closed)
+	if len(blockedByMap["issue-D"]) != 0 {
+		t.Errorf("issue-D blockedBy = %v, want []", blockedByMap["issue-D"])
+	}
+
+	// issue-B should still show as blocking issue-A
+	if len(blocksMap["issue-B"]) != 1 || blocksMap["issue-B"][0] != "issue-A" {
+		t.Errorf("issue-B blocks = %v, want [issue-A]", blocksMap["issue-B"])
+	}
+
+	// issue-C should NOT show as blocking anything (it's closed)
+	if len(blocksMap["issue-C"]) != 0 {
+		t.Errorf("issue-C blocks = %v, want [] (closed blocker)", blocksMap["issue-C"])
+	}
+}
+
+func TestBuildBlockingMaps_NilClosedIDs(t *testing.T) {
+	t.Parallel()
+	// When closedIDs is nil, all blockers should be included (backward compat)
+	allDeps := map[string][]*types.Dependency{
+		"issue-A": {
+			{IssueID: "issue-A", DependsOnID: "issue-B", Type: types.DepBlocks},
+		},
+	}
+
+	blockedByMap, blocksMap, _ := buildBlockingMaps(allDeps, nil)
+
+	if len(blockedByMap["issue-A"]) != 1 || blockedByMap["issue-A"][0] != "issue-B" {
+		t.Errorf("issue-A blockedBy = %v, want [issue-B]", blockedByMap["issue-A"])
+	}
+	if len(blocksMap["issue-B"]) != 1 || blocksMap["issue-B"][0] != "issue-A" {
+		t.Errorf("issue-B blocks = %v, want [issue-A]", blocksMap["issue-B"])
 	}
 }
 

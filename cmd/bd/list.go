@@ -739,7 +739,8 @@ var listCmd = &cobra.Command{
 
 		// Load dependencies for blocking info display
 		allDepsForList, _ := activeStore.GetAllDependencyRecords(ctx)
-		blockedByMap, blocksMap, _ := buildBlockingMaps(allDepsForList)
+		closedIDs := getClosedBlockerIDs(ctx, activeStore, allDepsForList)
+		blockedByMap, blocksMap, _ := buildBlockingMaps(allDepsForList, closedIDs)
 
 		// Build output in buffer for pager support (bd-jdz3)
 		var buf strings.Builder
