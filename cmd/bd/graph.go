@@ -50,7 +50,8 @@ For regular issues, shows the issue and its direct dependencies.
 With --all, shows all open issues grouped by connected component.
 
 Display formats:
-  --box (default)  ASCII boxes showing layers, more detailed
+  (default)        DAG with columns and box-drawing edges (terminal-native)
+  --box            ASCII boxes showing layers, more detailed
   --compact        Tree format, one line per issue, more scannable
   --dot            Graphviz DOT format (pipe to dot -Tsvg > graph.svg)
   --html           Self-contained interactive HTML with D3.js visualization
@@ -63,7 +64,8 @@ The graph shows execution order:
 Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 
 Examples:
-  bd graph issue-id              # ASCII box visualization
+  bd graph issue-id              # Terminal DAG visualization (default)
+  bd graph --box issue-id        # ASCII boxes with layer grouping
   bd graph --dot issue-id | dot -Tsvg > graph.svg  # SVG via Graphviz
   bd graph --dot issue-id | dot -Tpng > graph.png  # PNG via Graphviz
   bd graph --html issue-id > graph.html  # Interactive browser view
@@ -116,8 +118,10 @@ Examples:
 					renderGraphHTML(layout, subgraph)
 				} else if graphCompact {
 					renderGraphCompact(layout, subgraph)
-				} else {
+				} else if graphBox {
 					renderGraph(layout, subgraph)
+				} else {
+					renderGraphVisual(layout, subgraph)
 				}
 				if !graphDOT && !graphHTML && i < len(subgraphs)-1 {
 					fmt.Println(strings.Repeat("─", 60))
@@ -159,8 +163,10 @@ Examples:
 			renderGraphHTML(layout, subgraph)
 		} else if graphCompact {
 			renderGraphCompact(layout, subgraph)
-		} else {
+		} else if graphBox {
 			renderGraph(layout, subgraph)
+		} else {
+			renderGraphVisual(layout, subgraph)
 		}
 	},
 }
@@ -168,7 +174,7 @@ Examples:
 func init() {
 	graphCmd.Flags().BoolVar(&graphAll, "all", false, "Show graph for all open issues")
 	graphCmd.Flags().BoolVar(&graphCompact, "compact", false, "Tree format, one line per issue, more scannable")
-	graphCmd.Flags().BoolVar(&graphBox, "box", true, "ASCII boxes showing layers (default)")
+	graphCmd.Flags().BoolVar(&graphBox, "box", false, "ASCII boxes showing layers")
 	graphCmd.Flags().BoolVar(&graphDOT, "dot", false, "Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)")
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
 	graphCmd.ValidArgsFunction = issueIDCompletion
