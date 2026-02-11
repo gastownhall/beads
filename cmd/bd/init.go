@@ -352,9 +352,53 @@ variable.`,
 			store, err = factory.NewWithOptions(ctx, backend, storagePath, factory.Options{Database: dbName})
 		} else {
 			storagePath = initDBPath
-			store, err = factory.New(ctx, configfile.BackendDolt, storagePath)
+			store, err = factory.New(ctx, backend, storagePath)
 		}
 		if err != nil {
+			// If the backend requires CGO but this is a nocgo build, fall back to JSONL-only mode.
+			// This enables Windows CI (CGO_ENABLED=0) and other pure-Go builds to use bd init.
+			if strings.Contains(err.Error(), "requires CGO") {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "Note: %s backend requires CGO (not available in this build).\n", backend)
+					fmt.Fprintf(os.Stderr, "Falling back to JSONL-only mode.\n\n")
+				}
+
+				// Create issues.jsonl
+				jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+				if _, statErr := os.Stat(jsonlPath); os.IsNotExist(statErr) {
+					// nolint:gosec // G306: JSONL file needs to be readable by other tools
+					if writeErr := os.WriteFile(jsonlPath, []byte{}, 0644); writeErr != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to create issues.jsonl: %v\n", writeErr)
+						os.Exit(1)
+					}
+				}
+
+				// Create metadata.json
+				metaCfg := configfile.DefaultConfig()
+				if saveErr := metaCfg.Save(beadsDir); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", saveErr)
+				}
+
+				// Create config.yaml with no-db: true and the prefix
+				if cfgErr := createConfigYaml(beadsDir, true, prefix); cfgErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", cfgErr)
+				}
+
+				// Create README.md
+				if readmeErr := createReadme(beadsDir); readmeErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", readmeErr)
+				}
+
+				if !quiet {
+					fmt.Printf("\n%s bd initialized in JSONL-only mode (CGO not available)\n\n", ui.RenderPass("✓"))
+					fmt.Printf("  Mode: %s\n", ui.RenderAccent("no-db (JSONL-only)"))
+					fmt.Printf("  Issues file: %s\n", ui.RenderAccent(jsonlPath))
+					fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
+					fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
+				}
+				return
+			}
+
 			fmt.Fprintf(os.Stderr, "Error: failed to create %s database: %v\n", backend, err)
 			os.Exit(1)
 		}

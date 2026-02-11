@@ -12,8 +12,7 @@
 // - JSON output mode
 // - Last-touched implicit ID
 
-//go:build integration
-// +build integration
+//go:build cgo && integration
 
 package main
 

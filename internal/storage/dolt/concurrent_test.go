@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package dolt provides concurrency tests for embedded Dolt with multiple writers.
 //
 // These tests validate that Gas Town can safely run multiple polecats concurrently,

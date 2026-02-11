@@ -1,5 +1,4 @@
-//go:build integration
-// +build integration
+//go:build cgo && integration
 
 package main
 

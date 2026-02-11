@@ -13,8 +13,7 @@
 // Solution: In daemon mode, trust the daemon to validate. The daemon has
 // database access and validates via internal/storage/dolt/validators.go.
 
-//go:build integration
-// +build integration
+//go:build cgo && integration
 
 package main
 
