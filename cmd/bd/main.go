@@ -628,14 +628,17 @@ var rootCmd = &cobra.Command{
 			// For Dolt, use the dolt subdirectory
 			doltPath := filepath.Join(beadsDir, "dolt")
 
-			// Check if server mode is configured in metadata.json
+			// Load config to get database name and server mode settings
 			cfg, cfgErr := configfile.Load(beadsDir)
-			if cfgErr == nil && cfg != nil && cfg.IsDoltServerMode() {
-				opts.ServerMode = true
-				opts.ServerHost = cfg.GetDoltServerHost()
-				opts.ServerPort = cfg.GetDoltServerPort()
-				if cfg.Database != "" {
-					opts.Database = cfg.GetDoltDatabase()
+			if cfgErr == nil && cfg != nil {
+				// Always set database name (needed for bootstrap to find
+				// prefix-based databases like "beads_hq"; see #1669)
+				opts.Database = cfg.GetDoltDatabase()
+
+				if cfg.IsDoltServerMode() {
+					opts.ServerMode = true
+					opts.ServerHost = cfg.GetDoltServerHost()
+					opts.ServerPort = cfg.GetDoltServerPort()
 				}
 			}
 

@@ -663,6 +663,71 @@ func TestBootstrapDuplicateExternalRef(t *testing.T) {
 	}
 }
 
+func TestBootstrapRecognizesPrefixDatabase(t *testing.T) {
+	// When a prefix-based database exists (e.g. "beads_hq" from `bd migrate --to-dolt`),
+	// Bootstrap() should recognize it and NOT re-bootstrap from JSONL.
+	// This is the regression test for issue #1669.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+
+	// Create a Dolt store with a prefix-based database name
+	ctx := context.Background()
+	store, err := New(ctx, &Config{Path: doltDir, Database: "beads_hq"})
+	if err != nil {
+		t.Fatalf("failed to create store with prefix db: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "hq"); err != nil {
+		t.Fatalf("failed to set config: %v", err)
+	}
+	store.Close()
+
+	// Create JSONL file that would trigger a bootstrap if the DB is not detected
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	issue := types.Issue{
+		ID:     "hq-001",
+		Title:  "Should not be imported",
+		Status: types.StatusOpen,
+	}
+	data, _ := json.Marshal(issue)
+	if err := os.WriteFile(jsonlPath, append(data, '\n'), 0644); err != nil {
+		t.Fatalf("failed to write JSONL: %v", err)
+	}
+
+	// Attempt bootstrap with the correct database name - should be no-op
+	bootstrapped, result, err := Bootstrap(ctx, BootstrapConfig{
+		BeadsDir:    beadsDir,
+		DoltPath:    doltDir,
+		LockTimeout: 10 * time.Second,
+		Database:    "beads_hq",
+	})
+
+	if err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+	if bootstrapped {
+		t.Error("expected no bootstrap when prefix-named Dolt DB already exists")
+	}
+	if result != nil {
+		t.Error("expected nil result when no bootstrap performed")
+	}
+
+	// Verify original config is preserved (not overwritten by re-bootstrap)
+	store, err = New(ctx, &Config{Path: doltDir, Database: "beads_hq"})
+	if err != nil {
+		t.Fatalf("failed to reopen store: %v", err)
+	}
+	defer store.Close()
+
+	prefix, _ := store.GetConfig(ctx, "issue_prefix")
+	if prefix != "hq" {
+		t.Errorf("expected prefix 'hq', got '%s'", prefix)
+	}
+}
+
 func TestBootstrapWithoutOptionalFiles(t *testing.T) {
 	// Test that bootstrap succeeds when routes.jsonl and interactions.jsonl don't exist
 	tmpDir := t.TempDir()

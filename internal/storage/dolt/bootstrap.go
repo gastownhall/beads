@@ -41,6 +41,7 @@ type BootstrapConfig struct {
 	BeadsDir    string        // Path to .beads directory
 	DoltPath    string        // Path to dolt subdirectory
 	LockTimeout time.Duration // Timeout waiting for bootstrap lock
+	Database    string        // Database name (e.g. "beads_hq"); defaults to "beads"
 }
 
 // Bootstrap checks if Dolt DB needs bootstrapping from JSONL and performs it if needed.
@@ -57,7 +58,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) (bool, *BootstrapResult
 	}
 
 	// Check if Dolt database already exists and is ready
-	if doltExists(cfg.DoltPath) && schemaReady(ctx, cfg.DoltPath) {
+	if doltExists(cfg.DoltPath) && schemaReady(ctx, cfg.DoltPath, cfg.Database) {
 		return false, nil, nil
 	}
 
@@ -77,7 +78,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) (bool, *BootstrapResult
 	defer releaseBootstrapLock(lockFile, lockPath)
 
 	// Double-check after acquiring lock - another process may have bootstrapped
-	if doltExists(cfg.DoltPath) && schemaReady(ctx, cfg.DoltPath) {
+	if doltExists(cfg.DoltPath) && schemaReady(ctx, cfg.DoltPath, cfg.Database) {
 		return false, nil, nil
 	}
 
@@ -120,11 +121,14 @@ func doltExists(doltPath string) bool {
 // schemaReady checks if the Dolt database has the required schema
 // This is a simple check based on the existence of expected files.
 // We avoid opening a connection here since the caller will do that.
-func schemaReady(_ context.Context, doltPath string) bool {
+func schemaReady(_ context.Context, doltPath string, dbName string) bool {
+	if dbName == "" {
+		dbName = "beads"
+	}
 	// The embedded Dolt driver stores databases in subdirectories.
 	// Check for the expected database name's config.json which indicates
 	// the database was initialized.
-	configPath := filepath.Join(doltPath, "beads", ".dolt", "config.json")
+	configPath := filepath.Join(doltPath, dbName, ".dolt", "config.json")
 	_, err := os.Stat(configPath)
 	return err == nil
 }
