@@ -91,7 +91,7 @@ func TestImportEngineRename_NoDatabaseLockUnderConcurrentLoad(t *testing.T) {
 
 	const workers = 12
 	start := make(chan struct{})
-	errCh := make(chan error, workers)
+	resultCh := make(chan error, workers)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
@@ -100,21 +100,43 @@ func TestImportEngineRename_NoDatabaseLockUnderConcurrentLoad(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_, importErr := importIssuesEngine(ctx, "", store, []*types.Issue{buildRenamed()}, ImportOptions{})
-			if importErr != nil {
-				errCh <- importErr
-			}
+			resultCh <- importErr
 		}()
 	}
 
 	close(start)
 	wg.Wait()
-	close(errCh)
+	close(resultCh)
 
-	for importErr := range errCh {
-		if strings.Contains(strings.ToLower(importErr.Error()), "database is locked") {
-			t.Fatalf("rename import should not fail with database lock: %v", importErr)
+	successes := 0
+	var lockErrs []error
+	var unexpectedErrs []error
+
+	for importErr := range resultCh {
+		if importErr == nil {
+			successes++
+			continue
 		}
-		t.Fatalf("unexpected import error: %v", importErr)
+		lower := strings.ToLower(importErr.Error())
+		if strings.Contains(lower, "database is locked") || strings.Contains(lower, "sqlite_busy") {
+			lockErrs = append(lockErrs, importErr)
+			continue
+		}
+		// Under concurrent import load, losing workers can observe target-ID already exists.
+		if strings.Contains(lower, "already exists") {
+			continue
+		}
+		unexpectedErrs = append(unexpectedErrs, importErr)
+	}
+
+	if len(lockErrs) > 0 {
+		t.Fatalf("rename import should not fail with database lock, got: %v", lockErrs)
+	}
+	if len(unexpectedErrs) > 0 {
+		t.Fatalf("unexpected import errors: %v", unexpectedErrs)
+	}
+	if successes == 0 {
+		t.Fatalf("expected at least one successful import under concurrent load, got %d", successes)
 	}
 
 	renamed, err := store.GetIssue(ctx, "tt-trd.4")
@@ -136,6 +158,6 @@ func TestImportEngineRename_NoDatabaseLockUnderConcurrentLoad(t *testing.T) {
 		t.Fatalf("expected retry path to consume busy failures, remaining delete=%d create=%d", remainingDeleteFailures, remainingCreateFailures)
 	}
 	if deletes <= 6 || creates <= 6 {
-		t.Fatalf("expected retries to perform additional calls, deleteCalls=%d createCalls=%d", deletes, creates)
+		t.Fatalf("expected retries to perform additional calls, got deleteCalls=%d createCalls=%d", deletes, creates)
 	}
 }
