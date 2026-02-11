@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -287,8 +288,15 @@ func TestCheckIDFormat(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Create Dolt database
-			dbPath := filepath.Join(beadsDir, "beads.db")
+			// Save metadata.json so factory knows to use Dolt backend
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatalf("Failed to save config: %v", err)
+			}
+
+			// Create Dolt database at the canonical path the factory expects
+			dbPath := filepath.Join(beadsDir, "dolt")
 			store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 			if err != nil {
 				t.Fatalf("Failed to create Dolt store: %v", err)

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -24,7 +24,14 @@ func setupValidateTestDB(t *testing.T, prefix string) (tmpDir string, store stor
 		t.Fatal(err)
 	}
 
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	// Save metadata.json so factory knows to use Dolt backend
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "dolt")
 	ctx := context.Background()
 
 	var err error
