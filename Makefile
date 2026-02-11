@@ -18,6 +18,15 @@ INSTALL_DIR := $(HOME)/.local/bin
 #   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
 export CGO_ENABLED := 1
 
+# When go.mod requires a newer Go version than the locally installed one,
+# GOTOOLCHAIN=auto downloads the right compiler but coverage instrumentation
+# may still use the local toolchain's compile tool, causing version mismatch.
+# Force the go.mod version to ensure all tools match.
+GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+ifneq ($(GO_VERSION),)
+export GOTOOLCHAIN := go$(GO_VERSION)
+endif
+
 # ICU4C is keg-only on macOS (Homebrew doesn't symlink it into /opt/homebrew).
 # Dolt's go-icu-regex dependency needs these paths to compile and link.
 # On Windows, ICU is not needed (pure-Go regex via gms_pure_go + regex_windows.go).
