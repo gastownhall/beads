@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -128,7 +130,12 @@ func formatDependencyInfo(blockedBy, blocks []string) string {
 // blocksMap[issueID] = []IDs that this issue blocks (excluding parent-child),
 // and childrenMap[issueID] = []IDs that are children of this issue.
 // Only includes dependencies where AffectsReadyWork() is true (blocks, parent-child, etc.)
-func buildBlockingMaps(allDeps map[string][]*types.Dependency) (blockedByMap, blocksMap, childrenMap map[string][]string) {
+//
+// closedIDs is an optional set of issue IDs known to be closed. When provided,
+// closed blockers are excluded from blockedByMap so that "blocked by" annotations
+// only show active (open) blockers. This prevents stale annotations like
+// "(blocked by: X)" when X has already been closed.
+func buildBlockingMaps(allDeps map[string][]*types.Dependency, closedIDs map[string]bool) (blockedByMap, blocksMap, childrenMap map[string][]string) {
 	blockedByMap = make(map[string][]string)
 	blocksMap = make(map[string][]string)
 	childrenMap = make(map[string][]string)
@@ -139,17 +146,48 @@ func buildBlockingMaps(allDeps map[string][]*types.Dependency) (blockedByMap, bl
 			if !dep.Type.AffectsReadyWork() {
 				continue
 			}
-			// issueID is blocked by dep.DependsOnID
-			blockedByMap[issueID] = append(blockedByMap[issueID], dep.DependsOnID)
+			// Skip closed blockers in "blocked by" annotations — the dependency
+			// record is preserved, but a closed blocker no longer blocks work.
+			isClosed := closedIDs != nil && closedIDs[dep.DependsOnID]
+			if !isClosed {
+				blockedByMap[issueID] = append(blockedByMap[issueID], dep.DependsOnID)
+			}
 			// Separate parent-child from blocking relationships
 			if dep.Type == types.DepParentChild {
 				childrenMap[dep.DependsOnID] = append(childrenMap[dep.DependsOnID], issueID)
-			} else {
+			} else if !isClosed {
 				blocksMap[dep.DependsOnID] = append(blocksMap[dep.DependsOnID], issueID)
 			}
 		}
 	}
 	return blockedByMap, blocksMap, childrenMap
+}
+
+// getClosedBlockerIDs collects all unique blocker IDs from dependency records
+// and returns the subset that are closed. This is used to filter stale "blocked by"
+// annotations in bd list output.
+func getClosedBlockerIDs(ctx context.Context, s storage.Storage, allDeps map[string][]*types.Dependency) map[string]bool {
+	// Collect unique blocker IDs
+	blockerIDs := make(map[string]bool)
+	for _, deps := range allDeps {
+		for _, dep := range deps {
+			if dep.Type.AffectsReadyWork() {
+				blockerIDs[dep.DependsOnID] = true
+			}
+		}
+	}
+
+	closedIDs := make(map[string]bool)
+	for id := range blockerIDs {
+		issue, err := s.GetIssue(ctx, id)
+		if err != nil || issue == nil {
+			continue
+		}
+		if issue.Status == types.StatusClosed {
+			closedIDs[id] = true
+		}
+	}
+	return closedIDs
 }
 
 // formatIssueCompact formats a single issue in compact format to a buffer
