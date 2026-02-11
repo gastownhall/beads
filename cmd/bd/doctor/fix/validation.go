@@ -10,7 +10,6 @@ import (
 
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // MergeArtifacts removes temporary git merge files from .beads directory.
@@ -108,17 +107,14 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Dolt backend: this fix uses raw SQL queries against SQLite, skip for now
-	backend := configfile.BackendDolt
-	if cfg, _ := configfile.Load(beadsDir); cfg != nil {
-		backend = cfg.GetBackend()
-	}
-	if backend == "" || backend == configfile.BackendDolt {
-		fmt.Println("  Orphaned dependencies fix skipped (dolt backend — uses raw SQL)")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+
+	// Only operate on SQLite databases (regular files). Dolt databases are
+	// stored as directories and use a different SQL engine.
+	if info, err := os.Stat(dbPath); err != nil || info.IsDir() {
+		fmt.Println("  Orphaned dependencies fix skipped (no SQLite database found)")
 		return nil
 	}
-
-	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	// Open database
 	db, err := openDB(dbPath)
@@ -192,17 +188,14 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Dolt backend: this fix uses raw SQL queries against SQLite, skip for now
-	cpBackend := configfile.BackendDolt
-	if cfg, _ := configfile.Load(beadsDir); cfg != nil {
-		cpBackend = cfg.GetBackend()
-	}
-	if cpBackend == "" || cpBackend == configfile.BackendDolt {
-		fmt.Println("  Child-parent dependencies fix skipped (dolt backend — uses raw SQL)")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+
+	// Only operate on SQLite databases (regular files). Dolt databases are
+	// stored as directories and use a different SQL engine.
+	if info, err := os.Stat(dbPath); err != nil || info.IsDir() {
+		fmt.Println("  Child-parent dependencies fix skipped (no SQLite database found)")
 		return nil
 	}
-
-	dbPath := filepath.Join(beadsDir, "beads.db")
 
 	// Open database
 	db, err := openDB(dbPath)

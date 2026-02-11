@@ -401,6 +401,7 @@ func TestSnapshotManagement(t *testing.T) {
 // TestMultiRepoDeletionTracking tests deletion tracking with multi-repo mode
 // This is the test for bd-4oob: snapshot files need to be created per-JSONL file
 func TestMultiRepoDeletionTracking(t *testing.T) {
+	t.Skip("JSONL multi-repo sync removed in Phase 2: ExportToMultiRepo is a no-op on Dolt backend")
 	initConfigForTest(t)
 	// Setup workspace directories
 	primaryDir := t.TempDir()
