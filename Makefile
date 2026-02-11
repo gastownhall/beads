@@ -27,15 +27,20 @@ ifneq ($(GO_VERSION),)
 export GOTOOLCHAIN := go$(GO_VERSION)
 endif
 
-# ICU4C is keg-only on macOS (Homebrew doesn't symlink it into /opt/homebrew).
+# ICU4C is keg-only in Homebrew (not symlinked into the prefix).
 # Dolt's go-icu-regex dependency needs these paths to compile and link.
+# This handles both macOS (brew --prefix icu4c) and Linux/Linuxbrew.
 # On Windows, ICU is not needed (pure-Go regex via gms_pure_go + regex_windows.go).
-ifeq ($(shell uname),Darwin)
+ifneq ($(OS),Windows_NT)
 ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
 ifneq ($(ICU_PREFIX),)
 export CGO_CFLAGS   += -I$(ICU_PREFIX)/include
 export CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 export CGO_LDFLAGS  += -L$(ICU_PREFIX)/lib
+# Linuxbrew gcc doesn't install a 'c++' symlink; point CGO at g++
+ifeq ($(shell uname),Linux)
+export CXX ?= g++
+endif
 endif
 endif
 
