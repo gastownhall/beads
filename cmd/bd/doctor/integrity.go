@@ -119,9 +119,13 @@ func CheckIDFormat(path string) DoctorCheck {
 
 // CheckDependencyCycles checks for circular dependencies in the issue graph
 func CheckDependencyCycles(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	// Determine database path
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbPath = cfg.DatabasePath(beadsDir)
+	}
 
 	// If no database, skip this check
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -132,8 +136,9 @@ func CheckDependencyCycles(path string) DoctorCheck {
 		}
 	}
 
-	// Open database to check for cycles
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	// Open the configured backend in read-only mode (works for both SQLite and Dolt)
+	ctx := context.Background()
+	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -142,16 +147,17 @@ func CheckDependencyCycles(path string) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
+	db := store.UnderlyingDB()
 
-	// Query for cycles using simplified SQL
+	// Query for cycles using simplified SQL (CONCAT for Dolt/MySQL compatibility)
 	query := `
 		WITH RECURSIVE paths AS (
 			SELECT
 				issue_id,
 				depends_on_id,
 				issue_id as start_id,
-				issue_id || '→' || depends_on_id as path,
+				CONCAT(issue_id, '→', depends_on_id) as path,
 				0 as depth
 			FROM dependencies
 
@@ -161,12 +167,12 @@ func CheckDependencyCycles(path string) DoctorCheck {
 				d.issue_id,
 				d.depends_on_id,
 				p.start_id,
-				p.path || '→' || d.depends_on_id,
+				CONCAT(p.path, '→', d.depends_on_id),
 				p.depth + 1
 			FROM dependencies d
 			JOIN paths p ON d.issue_id = p.depends_on_id
 			WHERE p.depth < 100
-			  AND p.path NOT LIKE '%' || d.depends_on_id || '→%'
+			  AND p.path NOT LIKE CONCAT('%', d.depends_on_id, '→%')
 		)
 		SELECT DISTINCT start_id
 		FROM paths
@@ -216,9 +222,13 @@ func CheckDependencyCycles(path string) DoctorCheck {
 // CheckTombstones checks the health of tombstone records
 // Reports: total tombstones, expiring soon (within 7 days), already expired
 func CheckTombstones(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	// Determine database path
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbPath = cfg.DatabasePath(beadsDir)
+	}
 
 	// Skip if database doesn't exist
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -229,7 +239,9 @@ func CheckTombstones(path string) DoctorCheck {
 		}
 	}
 
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	// Open the configured backend in read-only mode (works for both SQLite and Dolt)
+	ctx := context.Background()
+	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Tombstones",
@@ -238,7 +250,8 @@ func CheckTombstones(path string) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
+	db := store.UnderlyingDB()
 
 	// Query tombstone statistics
 	var totalTombstones int
@@ -610,11 +623,9 @@ func FixMigrateTombstones(path string) error {
 // This is more robust than checking a single ID's format, since base36 hash IDs can be all-numeric.
 func DetectHashBasedIDs(db *sql.DB, sampleIDs []string) bool {
 	// Heuristic 1: Check for child_counters table (added for hash ID support)
-	var tableName string
-	err := db.QueryRow(`
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name='child_counters'
-	`).Scan(&tableName)
+	// Use a direct query instead of sqlite_master so this works with both SQLite and Dolt.
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM child_counters").Scan(&count)
 	if err == nil {
 		// child_counters table exists - this is a strong indicator of hash IDs
 		return true
