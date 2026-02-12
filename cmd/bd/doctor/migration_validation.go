@@ -12,9 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	// Import Dolt driver for direct connection
-	_ "github.com/dolthub/driver"
-
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
@@ -522,20 +519,16 @@ func compareDoltWithJSONL(ctx context.Context, store storage.Storage, jsonlIDs m
 }
 
 // checkDoltLocks checks for uncommitted changes in Dolt.
+// Respects dolt_mode configuration: uses MySQL driver for server mode,
+// embedded driver for embedded mode.
 func checkDoltLocks(beadsDir string) (bool, string) {
-	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
-
-	db, err := sql.Open("dolt", connStr)
+	db, serverMode, err := openDoltDB(beadsDir)
 	if err != nil {
 		return false, ""
 	}
-	defer db.Close()
+	defer closeDoltDB(db, serverMode)
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return false, ""
-	}
 
 	// Check dolt_status for uncommitted changes
 	rows, err := db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
