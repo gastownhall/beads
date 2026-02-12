@@ -9,7 +9,7 @@ List beads issues with optional filtering.
 
 - **--status, -s**: Filter by status (open, in_progress, blocked, closed)
 - **--priority, -p**: Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
-- **--type, -t**: Filter by type (bug, feature, task, epic, chore)
+- **--type, -t**: Filter by type (bug, feature, task, epic, chore, decision)
 - **--assignee, -a**: Filter by assignee
 - **--label, -l**: Filter by labels (comma-separated, must have ALL labels)
 - **--label-any**: Filter by labels (OR semantics, must have AT LEAST ONE)

@@ -164,6 +164,26 @@ func TestNormalizeIssueType(t *testing.T) {
 			input:    "task",
 			expected: "task",
 		},
+		{
+			name:     "dec alias",
+			input:    "dec",
+			expected: "decision",
+		},
+		{
+			name:     "adr alias",
+			input:    "adr",
+			expected: "decision",
+		},
+		{
+			name:     "ADR uppercase",
+			input:    "ADR",
+			expected: "decision",
+		},
+		{
+			name:     "decision unchanged",
+			input:    "decision",
+			expected: "decision",
+		},
 	}
 
 	for _, tt := range tests {

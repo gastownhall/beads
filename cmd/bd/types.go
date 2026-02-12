@@ -19,6 +19,7 @@ var coreWorkTypes = []struct {
 	{types.TypeFeature, "New feature or enhancement"},
 	{types.TypeChore, "Maintenance or housekeeping"},
 	{types.TypeEpic, "Large body of work spanning multiple issues"},
+	{types.TypeDecision, "Architecture decision record (ADR)"},
 }
 
 var typesCmd = &cobra.Command{
@@ -27,7 +28,7 @@ var typesCmd = &cobra.Command{
 	Short:   "List valid issue types",
 	Long: `List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic) are always valid.
+Core work types (bug, task, feature, chore, epic, decision) are always valid.
 Additional types require configuration via types.custom in .beads/config.yaml.
 
 Examples:

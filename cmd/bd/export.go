@@ -658,7 +658,7 @@ func init() {
 	// Filter flags
 	registerPriorityFlag(exportCmd, "")
 	exportCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate). Aliases: mr→merge-request, feat→feature, mol→molecule")
+	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	exportCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	exportCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 

@@ -29,7 +29,7 @@ Unlike `bd list`, which requires you to specify which field to search, `bd searc
 
 - **--status, -s**: Filter by status (open, in_progress, blocked, closed)
 - **--assignee, -a**: Filter by assignee
-- **--type, -t**: Filter by type (bug, feature, task, epic, chore)
+- **--type, -t**: Filter by type (bug, feature, task, epic, chore, decision)
 - **--label, -l**: Filter by labels (must have ALL specified labels)
 - **--label-any**: Filter by labels (must have AT LEAST ONE)
 - **--limit, -n**: Limit number of results (default: 50)

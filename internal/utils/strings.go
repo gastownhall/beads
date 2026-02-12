@@ -8,6 +8,8 @@ var issueTypeAliases = map[string]string{
 	"feat":        "feature",
 	"mol":         "molecule",
 	"enhancement": "feature",
+	"dec":         "decision",
+	"adr":         "decision",
 }
 
 // NormalizeIssueType expands type aliases to their canonical forms.
