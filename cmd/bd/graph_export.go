@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"os"
 	"strings"
 
@@ -100,9 +101,11 @@ func dotEdgeStyle(depType types.DependencyType) string {
 	}
 }
 
-// dotEscapeID escapes an ID for DOT format (handles dots and dashes)
+// dotEscapeID escapes an ID for DOT format by replacing characters
+// that could break quoted strings (backslash, double-quote).
 func dotEscapeID(id string) string {
-	return id // IDs are already quoted in the output
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return r.Replace(id)
 }
 
 // statusPlainIcon returns a plain text status icon (no ANSI colors) for export formats
@@ -128,15 +131,23 @@ func renderGraphHTML(layout *GraphLayout, subgraph *TemplateSubgraph) {
 	nodes := buildHTMLGraphData(layout, subgraph)
 	edges := buildHTMLEdgeData(layout, subgraph)
 
-	nodesJSON, _ := json.Marshal(nodes)
-	edgesJSON, _ := json.Marshal(edges)
+	nodesJSON, err := json.Marshal(nodes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling nodes: %v\n", err)
+		return
+	}
+	edgesJSON, err := json.Marshal(edges)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling edges: %v\n", err)
+		return
+	}
 
 	title := "Beads Dependency Graph"
 	if subgraph.Root != nil {
 		title = fmt.Sprintf("Beads: %s (%s)", subgraph.Root.Title, subgraph.Root.ID)
 	}
 
-	fmt.Fprintf(os.Stdout, htmlTemplate, title, string(nodesJSON), string(edgesJSON))
+	fmt.Fprintf(os.Stdout, htmlTemplate, html.EscapeString(title), string(nodesJSON), string(edgesJSON))
 }
 
 // HTMLNode is the JSON structure for a node in the HTML visualization
@@ -285,14 +296,19 @@ node.append("text").attr("class","id-text").attr("text-anchor","middle").attr("d
 
 const tooltip = d3.select("#tooltip");
 node.on("mouseover", (e, d) => {
-  let html = '<span class="tt-id">' + d.id + '</span>';
-  html += '<span class="tt-status" style="background:' + (statusColors[d.status]||"#555") + '">' + d.status + '</span>';
-  html += '<br/><strong>' + d.title + '</strong>';
-  html += '<br/>Priority: P' + d.priority + ' | Type: ' + d.type;
-  if (d.assignee) html += '<br/>Assignee: ' + d.assignee;
-  html += '<br/>Layer: ' + d.layer;
-  tooltip.html(html).style("opacity", 1).style("left", (e.pageX+12)+"px").style("top", (e.pageY-10)+"px");
-}).on("mouseout", () => tooltip.style("opacity", 0));
+  tooltip.selectAll("*").remove();
+  tooltip.text("");
+  const idSpan = tooltip.append("span").attr("class","tt-id").text(d.id);
+  tooltip.append("span").attr("class","tt-status").style("background", statusColors[d.status]||"#555").text(d.status);
+  tooltip.append("br");
+  tooltip.append("strong").text(d.title);
+  tooltip.append("br");
+  tooltip.append("span").text("Priority: P" + d.priority + " | Type: " + d.type);
+  if (d.assignee) { tooltip.append("br"); tooltip.append("span").text("Assignee: " + d.assignee); }
+  tooltip.append("br");
+  tooltip.append("span").text("Layer: " + d.layer);
+  tooltip.style("opacity", 1).style("left", (e.pageX+12)+"px").style("top", (e.pageY-10)+"px");
+}).on("mouseout", () => { tooltip.style("opacity", 0); tooltip.selectAll("*").remove(); });
 
 simulation.on("tick", () => {
   link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
