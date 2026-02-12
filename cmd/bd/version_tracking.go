@@ -34,11 +34,13 @@ func trackBdVersion() {
 	localVersionPath := filepath.Join(beadsDir, localVersionFile)
 	lastVersion := readLocalVersion(localVersionPath)
 
-	// Check if version changed
+	// Check if version changed (only flag actual upgrades, not downgrades)
 	if lastVersion != "" && lastVersion != Version {
-		// Version upgrade detected!
-		versionUpgradeDetected = true
-		previousVersion = lastVersion
+		if doctor.CompareVersions(Version, lastVersion) > 0 {
+			// Version upgrade detected!
+			versionUpgradeDetected = true
+			previousVersion = lastVersion
+		}
 	}
 
 	// Update local version file (best effort)
