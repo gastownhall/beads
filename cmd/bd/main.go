@@ -836,6 +836,12 @@ func main() {
 		rootCmd.Use = name
 	}
 
+	// Register --all flag on Cobra's auto-generated help command.
+	// Must be called after init() so all subcommands are registered and
+	// Cobra has created its default help command.
+	rootCmd.InitDefaultHelpCmd()
+	registerHelpAllFlag()
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
