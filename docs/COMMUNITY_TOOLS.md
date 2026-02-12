@@ -35,6 +35,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Beadspace](https://github.com/cameronsjo/beadspace)** - Drop-in GitHub Pages dashboard with triage suggestions, priority/status breakdowns, and searchable issue table. Single HTML file, zero build dependencies, auto-deploys via GitHub Action. Built by [@cameronsjo](https://github.com/cameronsjo). (HTML/CSS/JS)
 
+- **[beadsmap](https://github.com/dariye/beadsmap)** - Interactive roadmap visualization with timeline (Gantt), list, and table views. Multi-source support, dependency arrows, milestone grouping, GitHub integration via OAuth device flow, and light/dark/system themes. Ships as a single `index.html`. Built by [@dariye](https://github.com/dariye). (Svelte/TypeScript)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and daemon management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
