@@ -147,7 +147,9 @@ func renderGraphHTML(layout *GraphLayout, subgraph *TemplateSubgraph) {
 		title = fmt.Sprintf("Beads: %s (%s)", subgraph.Root.Title, subgraph.Root.ID)
 	}
 
-	fmt.Fprintf(os.Stdout, htmlTemplate, html.EscapeString(title), string(nodesJSON), string(edgesJSON))
+	if _, err := fmt.Fprintf(os.Stdout, htmlTemplate, html.EscapeString(title), string(nodesJSON), string(edgesJSON)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing HTML output: %v\n", err)
+	}
 }
 
 // HTMLNode is the JSON structure for a node in the HTML visualization

@@ -9,9 +9,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/factory"
 )
 
 const (
@@ -175,19 +174,14 @@ func getConfigFromDB(beadsDir string, key string) string {
 		return ""
 	}
 
-	// Determine database path from config
-	cfg, _ := configfile.Load(beadsDir)
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-	dbPath := cfg.DatabasePath(beadsDir)
-
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
 	if err != nil {
 		return ""
 	}
-	defer store.Close()
+	defer func() {
+		_ = store.Close()
+	}()
 
 	value, err := store.GetConfig(ctx, key)
 	if err != nil {

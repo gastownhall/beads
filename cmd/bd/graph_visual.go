@@ -131,7 +131,7 @@ func computeDAGNodeWidth(layout *GraphLayout) int {
 	maxW := 0
 	for _, node := range layout.Nodes {
 		titleLen := len([]rune(truncateTitle(node.Issue.Title, 22)))
-		contentW := titleLen + 3 // icon(1) + space(1) + trailing(1)
+		contentW := titleLen + 3      // icon(1) + space(1) + trailing(1)
 		idW := len(node.Issue.ID) + 4 // space + ID + "  Pn"
 		if idW > contentW {
 			contentW = idW

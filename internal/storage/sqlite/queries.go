@@ -1478,4 +1478,3 @@ func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor st
 		return nil
 	})
 }
-

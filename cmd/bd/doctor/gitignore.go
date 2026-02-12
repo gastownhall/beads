@@ -83,7 +83,8 @@ func CheckGitignore() DoctorCheck {
 
 	// If a redirect exists, check the gitignore at the redirect target instead
 	redirectPath := filepath.Join(".beads", "redirect")
-	if data, err := os.ReadFile(redirectPath); err == nil { // #nosec G304 -- path is hardcoded
+	// #nosec G304 -- redirect path is fixed to .beads/redirect
+	if data, err := os.ReadFile(redirectPath); err == nil {
 		target := strings.TrimSpace(string(data))
 		if target != "" {
 			cwd, _ := os.Getwd()

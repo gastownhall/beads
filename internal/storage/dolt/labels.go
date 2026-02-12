@@ -124,16 +124,16 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("failed to scan issue id: %w", err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var issues []*types.Issue
 	for _, id := range ids {
