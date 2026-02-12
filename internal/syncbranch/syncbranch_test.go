@@ -520,11 +520,17 @@ func TestGetConfigFromDB(t *testing.T) {
 }
 
 // setupTestBeadsDir creates a temporary .beads directory for testing.
+// Includes metadata.json with dolt backend so factory.NewFromConfigWithOptions
+// correctly opens the Dolt database created by the tests.
 func setupTestBeadsDir(t *testing.T) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db","backend":"dolt"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return beadsDir
