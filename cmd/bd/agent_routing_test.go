@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -120,6 +121,110 @@ func TestAgentStateWithRouting(t *testing.T) {
 	}
 
 	t.Logf("Successfully resolved agent %s via routing", result.Issue.ID)
+}
+
+// TestUpdateClaimUsesCASOnRoutedIssue verifies routed-ID update --claim follows
+// storage CAS semantics (first claim succeeds, second claim fails).
+//
+// Regression coverage for GH#1522.
+func TestUpdateClaimUsesCASOnRoutedIssue(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0o755); err != nil {
+		t.Fatalf("create town beads dir: %v", err)
+	}
+	rigBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0o755); err != nil {
+		t.Fatalf("create rig beads dir: %v", err)
+	}
+
+	townDBPath := filepath.Join(townBeadsDir, "beads.db")
+	_ = newTestStoreWithPrefix(t, townDBPath, "hq")
+
+	rigDBPath := filepath.Join(rigBeadsDir, "beads.db")
+	rigStore := newTestStoreWithPrefix(t, rigDBPath, "gt")
+	issue := &types.Issue{
+		ID:        "gt-claim-cas-1",
+		Title:     "Claim CAS routed issue",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := rigStore.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("create routed issue: %v", err)
+	}
+	if closer, ok := rigStore.(io.Closer); ok {
+		_ = closer.Close()
+	}
+
+	routesPath := filepath.Join(townBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte(`{"prefix":"gt-","path":"rig"}`), 0o644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	oldDbPath := dbPath
+	dbPath = townDBPath
+	t.Cleanup(func() { dbPath = oldDbPath })
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir tmp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	routed, err := resolveAndGetIssueWithRouting(ctx, newTestStoreWithPrefix(t, townDBPath, "hq"), issue.ID)
+	if err != nil {
+		t.Fatalf("resolve routed issue: %v", err)
+	}
+	if routed == nil {
+		t.Fatalf("expected routed result for %s", issue.ID)
+	}
+	defer routed.Close()
+	if !routed.Routed {
+		t.Fatalf("expected routed lookup for %s", issue.ID)
+	}
+
+	if err := routed.Store.ClaimIssue(ctx, routed.ResolvedID, "actor-a"); err != nil {
+		t.Fatalf("first ClaimIssue failed: %v", err)
+	}
+
+	firstClaimed, err := routed.Store.GetIssue(ctx, routed.ResolvedID)
+	if err != nil {
+		t.Fatalf("get issue after first claim: %v", err)
+	}
+	if firstClaimed == nil {
+		t.Fatalf("issue %s not found after first claim", issue.ID)
+	}
+	if firstClaimed.Assignee == "" {
+		t.Fatalf("expected assignee to be set after first claim")
+	}
+	if firstClaimed.Status != types.StatusInProgress {
+		t.Fatalf("status after first claim = %q, want %q", firstClaimed.Status, types.StatusInProgress)
+	}
+	initialAssignee := firstClaimed.Assignee
+	err = routed.Store.ClaimIssue(ctx, routed.ResolvedID, "actor-b")
+	if err == nil {
+		t.Fatalf("second ClaimIssue should fail for already-claimed issue")
+	}
+	if !strings.Contains(err.Error(), "already claimed") {
+		t.Fatalf("second claim error = %q, want contains %q", err.Error(), "already claimed")
+	}
+
+	secondClaimed, err := routed.Store.GetIssue(ctx, routed.ResolvedID)
+	if err != nil {
+		t.Fatalf("get issue after second claim: %v", err)
+	}
+	if secondClaimed == nil {
+		t.Fatalf("issue %s not found after second claim", issue.ID)
+	}
+	if secondClaimed.Assignee != initialAssignee {
+		t.Fatalf("assignee after failed second claim = %q, want %q", secondClaimed.Assignee, initialAssignee)
+	}
 }
 
 // TestNeedsRoutingFunction tests the needsRouting function
