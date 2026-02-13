@@ -165,7 +165,7 @@ func checkJSONLGitDivergence(path, beadsDir string) *SyncDivergenceIssue {
 }
 
 // checkSQLiteMtimeDivergence checks if SQLite last_import_time matches JSONL mtime.
-func checkSQLiteMtimeDivergence(_, beadsDir string) *SyncDivergenceIssue { //nolint:unparam // path reserved for future use
+func checkSQLiteMtimeDivergence(path, beadsDir string) *SyncDivergenceIssue {
 	// Get database path
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
@@ -177,8 +177,8 @@ func checkSQLiteMtimeDivergence(_, beadsDir string) *SyncDivergenceIssue { //nol
 		return nil // No database
 	}
 
-	// Find JSONL file
-	jsonlPath := findJSONLFile(beadsDir)
+	// Find JSONL file. In sync-branch mode prefer the sync worktree JSONL path.
+	jsonlPath := findJSONLFileWithSyncWorktree(path, beadsDir)
 	if jsonlPath == "" {
 		return nil // No JSONL file
 	}
