@@ -110,8 +110,8 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		}
 	}()
 
-	// Get database name from config (default: "beads")
-	database := "beads" // Default database name for Dolt server mode
+	// Get database name from config (uses dolt_database field, default: "beads")
+	database := cfg.GetDoltDatabase()
 
 	// Check 3: Database exists and is queryable
 	dbExistsCheck := checkDatabaseExists(db, database)
