@@ -292,7 +292,7 @@ Subcommands:
 			// Clean up WAL files before opening to avoid "disk I/O error"
 			cleanupWALFiles(currentDB.path)
 
-			store, err := storagefactory.New(rootCtx, configfile.BackendDolt, currentDB.path)
+			store, err := storagefactory.NewFromConfigWithOptions(rootCtx, beadsDir, storagefactory.Options{})
 			if err != nil {
 				if jsonOutput {
 					outputJSON(map[string]interface{}{
