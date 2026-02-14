@@ -77,7 +77,7 @@ func TestInitCommand(t *testing.T) {
 			}()
 
 			// Build command arguments
-			args := []string{"init", "--backend", "sqlite"}
+			args := []string{"init"}
 			if tt.prefix != "" {
 				args = append(args, "--prefix", tt.prefix)
 			}
@@ -218,7 +218,7 @@ func TestInitSyncBranch(t *testing.T) {
 			t.Fatalf("Failed to init git: %v", err)
 		}
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--branch", "beads-sync", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--branch", "beads-sync", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with --branch failed: %v", err)
 		}
@@ -254,7 +254,7 @@ func TestInitSyncBranch(t *testing.T) {
 		_ = runCommandInDir(tmpDir, "git", "config", "user.email", "test@test.com")
 		_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test")
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--branch", "beads-sync", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--branch", "beads-sync", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with --branch failed: %v", err)
 		}
@@ -298,7 +298,7 @@ func TestInitSyncBranch(t *testing.T) {
 			t.Fatalf("Failed to write interactions.jsonl: %v", err)
 		}
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet", "--force"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -327,7 +327,7 @@ func TestInitSyncBranch(t *testing.T) {
 			t.Fatalf("Failed to init git: %v", err)
 		}
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -360,7 +360,7 @@ func TestInitSyncBranch(t *testing.T) {
 			t.Fatalf("Failed to init git: %v", err)
 		}
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--branch", "beads-sync", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--branch", "beads-sync", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with --branch failed: %v", err)
 		}
@@ -397,7 +397,7 @@ func TestInitSyncBranch(t *testing.T) {
 		}
 
 		// First init WITHOUT --branch
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("First init failed: %v", err)
 		}
@@ -416,7 +416,7 @@ func TestInitSyncBranch(t *testing.T) {
 		initCmd.Flags().Set("force", "false")
 
 		// Reinit WITH --branch
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--branch", "beads-sync", "--force", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--branch", "beads-sync", "--force", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Reinit with --branch failed: %v", err)
 		}
@@ -443,7 +443,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize once
-	rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("First init failed: %v", err)
@@ -451,7 +451,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 
 	// Initialize again with same prefix and --force flag (bd-emg: safety guard)
 	// Without --force, init should refuse when database already exists
-	rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet", "--force"})
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Second init with --force failed: %v", err)
@@ -500,7 +500,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		os.Setenv("BEADS_DB", customDBPath)
 		defer os.Unsetenv("BEADS_DB")
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "custom", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "custom", "--quiet"})
 
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DB failed: %v", err)
@@ -541,7 +541,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		os.Setenv("BEADS_DB", envDBPath)
 		defer os.Unsetenv("BEADS_DB")
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "envtest", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "envtest", "--quiet"})
 
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DB failed: %v", err)
@@ -578,7 +578,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		os.Setenv("BEADS_DB", customPath)
 		defer os.Unsetenv("BEADS_DB")
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "beadstest", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "beadstest", "--quiet"})
 
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with custom .beads path failed: %v", err)
@@ -603,7 +603,7 @@ func TestInitWithCustomDBPath(t *testing.T) {
 		os.Setenv("BEADS_DB", envPath)
 		defer os.Unsetenv("BEADS_DB")
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "envtest2", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "envtest2", "--quiet"})
 
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DB subdirs failed: %v", err)
@@ -656,7 +656,7 @@ func TestInitNoDbMode(t *testing.T) {
 	}()
 
 	// Initialize with --no-db flag
-	rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--no-db", "--prefix", "test", "--quiet"})
+	rootCmd.SetArgs([]string{"init", "--no-db", "--prefix", "test", "--quiet"})
 
 	t.Logf("DEBUG: noDb before Execute=%v", noDb)
 
@@ -746,7 +746,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init with quiet mode
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -786,7 +786,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init with --skip-merge-driver
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--skip-merge-driver", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--skip-merge-driver", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -816,7 +816,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		// DON'T initialize git repo
 
 		// Run bd init - should succeed even without git
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init should succeed in non-git directory: %v", err)
 		}
@@ -855,7 +855,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init - should detect existing config
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -913,7 +913,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -965,7 +965,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -1019,7 +1019,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init - should detect stale config and repair it
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -1067,7 +1067,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Run bd init - should detect existing correct config and NOT reinstall
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -1535,7 +1535,7 @@ func TestInitPromptSkippedWithFlags(t *testing.T) {
 		// Run bd init with --contributor flag (quiet to suppress wizard output)
 		// The wizard will fail because there's no planning repo, but that's OK
 		// We just want to verify the flag bypasses the prompt
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--contributor", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--contributor", "--quiet"})
 		_ = rootCmd.Execute() // Ignore error - wizard may fail
 
 		// The --contributor flag should NOT set beads.role (that's done by prompt, not flag)
@@ -1574,7 +1574,7 @@ func TestInitPromptSkippedWithFlags(t *testing.T) {
 		}
 
 		// Run bd init with --team flag
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--team", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--team", "--quiet"})
 		_ = rootCmd.Execute() // Ignore error - wizard may fail
 
 		// The --team flag should not set beads.role
@@ -1626,7 +1626,7 @@ func TestInitPromptNonGitRepo(t *testing.T) {
 	// DON'T initialize git repo
 
 	// Run bd init - should succeed without prompting (no git repo)
-	rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Init should succeed in non-git directory: %v", err)
 	}
@@ -1673,7 +1673,7 @@ func TestInitPromptExistingRole(t *testing.T) {
 		}
 
 		// Run bd init (non-interactive, so prompt is skipped)
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init failed: %v", err)
 		}
@@ -1691,7 +1691,7 @@ func TestInitPromptExistingRole(t *testing.T) {
 		initCmd.Flags().Set("force", "false")
 
 		// Reinit with --force (non-interactive)
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "test", "--quiet", "--force"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Reinit failed: %v", err)
 		}
@@ -1757,7 +1757,7 @@ func TestInitRedirect(t *testing.T) {
 
 		t.Chdir(projectDir)
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "redirect-test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "redirect-test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with redirect failed: %v", err)
 		}
@@ -1982,7 +1982,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		os.MkdirAll(cwdPath, 0755)
 		t.Chdir(cwdPath)
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "beadsdir-test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "beadsdir-test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DIR failed: %v", err)
 		}
@@ -2024,7 +2024,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "no-beadsdir", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "no-beadsdir", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init without BEADS_DIR failed: %v", err)
 		}
@@ -2070,7 +2070,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
 
-		rootCmd.SetArgs([]string{"init", "--backend", "sqlite","--prefix", "precedence", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--prefix", "precedence", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DB + BEADS_DIR failed: %v", err)
 		}
