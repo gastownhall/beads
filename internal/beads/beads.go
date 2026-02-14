@@ -520,6 +520,7 @@ func FindBeadsDir() string {
 
 	// Find git root to limit the search
 	gitRoot := findGitRoot()
+	worktreeRoot := gitRoot // save worktree-specific boundary
 	if git.IsWorktree() && mainRepoRoot != "" {
 		// For worktrees, extend search boundary to include main repo
 		gitRoot = mainRepoRoot
@@ -539,6 +540,12 @@ func FindBeadsDir() string {
 
 		// Stop at git root to avoid finding unrelated directories
 		if gitRoot != "" && dir == gitRoot {
+			break
+		}
+
+		// Also stop at worktree root when it differs from main repo root
+		// This prevents escaping the worktree boundary into unrelated directories
+		if worktreeRoot != "" && worktreeRoot != gitRoot && dir == worktreeRoot {
 			break
 		}
 
