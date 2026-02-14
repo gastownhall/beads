@@ -15,8 +15,8 @@ var availableBackends = []struct {
 	Name        string
 	Description string
 }{
-	{"sqlite", "SQLite database (default) - single file, portable, no dependencies"},
-	{"dolt", "Dolt database - Git-like versioning for data, SQL interface"},
+	{"sqlite", "SQLite database - single file, portable, no dependencies"},
+	{"dolt", "Dolt database (default) - Git-like versioning for data, SQL interface"},
 	{"jsonl", "JSONL only (--no-db mode) - plain text, no database required"},
 }
 
@@ -27,8 +27,8 @@ var backendCmd = &cobra.Command{
 	Long: `Manage storage backend configuration.
 
 The backend determines how beads stores issue data:
-  - sqlite: Default SQLite database (single file, portable)
-  - dolt:   Dolt database (Git-like versioning, SQL interface)
+  - dolt:   Dolt database (default, Git-like versioning, SQL interface)
+  - sqlite: SQLite database (single file, portable)
   - jsonl:  JSONL only mode (plain text, use with --no-db flag)
 
 The backend is set at initialization time with 'bd init --backend <type>'.
@@ -45,13 +45,13 @@ var backendListCmd = &cobra.Command{
 	Long: `List all available storage backends and their descriptions.
 
 Available backends:
-  sqlite  SQLite database (default) - single file, portable, no dependencies
-  dolt    Dolt database - Git-like versioning for data, SQL interface
+  dolt    Dolt database (default) - Git-like versioning for data, SQL interface
+  sqlite  SQLite database - single file, portable, no dependencies
   jsonl   JSONL only (--no-db mode) - plain text, no database required
 
 The backend is chosen at initialization time:
-  bd init                    # Uses sqlite (default)
-  bd init --backend dolt     # Uses dolt
+  bd init                    # Uses dolt (default)
+  bd init --backend sqlite   # Uses sqlite
   bd init --no-db            # Uses jsonl only`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if jsonOutput {

@@ -424,7 +424,7 @@ var rootCmd = &cobra.Command{
 		// Protect forks from accidentally committing upstream issue database
 		ensureForkProtection()
 
-		// Show migration hint if SQLite + prefer-dolt configured (rate-limited, non-blocking)
+		// Show migration hint for SQLite users (rate-limited to once per 24h, non-blocking)
 		if hintDir := beads.FindBeadsDir(); hintDir != "" {
 			maybeShowMigrationHint(hintDir)
 		}
