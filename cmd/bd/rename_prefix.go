@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -294,13 +293,6 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 		)
 	})
 
-	// Get a database connection for ID generation
-	conn, err := st.UnderlyingConn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get database connection: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
 	// Build a map of all renames for text replacement using hash IDs
 	// Track used IDs to avoid collisions within the batch
 	renameMap := make(map[string]string)
@@ -313,7 +305,7 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 
 	// Generate hash IDs for all incorrect issues
 	for _, is := range incorrectIssues {
-		newID, err := generateRepairHashID(ctx, conn, targetPrefix, is.issue, actorName, usedIDs)
+		newID, err := generateRepairHashID(targetPrefix, is.issue, actorName, usedIDs)
 		if err != nil {
 			return fmt.Errorf("failed to generate hash ID for %s: %w", is.issue.ID, err)
 		}
@@ -496,7 +488,7 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 
 // generateRepairHashID generates a hash-based ID for an issue during repair.
 // Uses content hashing and checks usedIDs for batch collision avoidance.
-func generateRepairHashID(_ context.Context, _ *sql.Conn, prefix string, issue *types.Issue, actor string, usedIDs map[string]bool) (string, error) {
+func generateRepairHashID(prefix string, issue *types.Issue, actor string, usedIDs map[string]bool) (string, error) {
 	// Generate a hash ID from issue content (same approach as generateHashIDForIssue)
 	content := fmt.Sprintf("%s|%s|%s|%d|%d",
 		issue.Title,

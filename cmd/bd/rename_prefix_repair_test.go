@@ -4,70 +4,58 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestRepairMultiplePrefixes(t *testing.T) {
-	// repairPrefixes hangs on Dolt backend (issue rename uses CreateIssue+DeleteIssue
-	// which triggers Dolt auto-commit cycles causing deadlock)
-	t.Skip("repairPrefixes hangs on Dolt backend — needs rewrite for Dolt rename semantics")
+	tmpDir := t.TempDir()
+	testDBPath := filepath.Join(tmpDir, "test.db")
 
-	// Create a temporary database with .beads directory structure
-	tempDir := t.TempDir()
-	testDBPath := filepath.Join(tempDir, ".beads", "beads.db")
+	ctx := context.Background()
 
-	// Create .beads directory
-	if err := os.MkdirAll(filepath.Dir(testDBPath), 0750); err != nil {
-		t.Fatalf("failed to create .beads dir: %v", err)
-	}
-
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: testDBPath})
+	testStore, err := dolt.New(ctx, &dolt.Config{Path: testDBPath})
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
 	defer testStore.Close()
 
-	// Set global dbPath so findJSONLPath() finds the right location
+	// Set globals following TestRenamePrefixCommand pattern
+	oldStore := store
+	oldActor := actor
 	oldDBPath := dbPath
+	store = testStore
+	actor = "test"
 	dbPath = testDBPath
-	defer func() { dbPath = oldDBPath }()
-
-	ctx := context.Background()
+	defer func() {
+		store = oldStore
+		actor = oldActor
+		dbPath = oldDBPath
+	}()
 
 	// Set initial prefix
 	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		t.Fatalf("failed to set prefix: %v", err)
 	}
 
-	// Create issues with multiple prefixes (simulating corruption)
-	// We need to directly insert into the database to bypass prefix validation
-	db := testStore.UnderlyingDB()
-
-	now := time.Now()
-	issues := []struct {
-		ID    string
-		Title string
-	}{
-		{"test-1", "Test issue 1"},
-		{"test-2", "Test issue 2"},
-		{"old-1", "Old issue 1"},
-		{"old-2", "Old issue 2"},
-		{"another-1", "Another issue 1"},
+	// Create issues with multiple prefixes (simulating corruption).
+	// CreateIssue accepts explicit IDs without prefix validation,
+	// so we can create issues with different prefixes to simulate
+	// a corrupted database state.
+	testIssues := []types.Issue{
+		{ID: "test-1", Title: "Test issue 1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-2", Title: "Test issue 2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "old-1", Title: "Old issue 1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "old-2", Title: "Old issue 2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "another-1", Title: "Another issue 1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	}
 
-	for _, issue := range issues {
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
-			VALUES (?, ?, '', '', '', '', 'open', 2, 'task', ?, ?)
-		`, issue.ID, issue.Title, now, now)
-		if err != nil {
-			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+	for i := range testIssues {
+		if err := testStore.CreateIssue(ctx, &testIssues[i], "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", testIssues[i].ID, err)
 		}
 	}
 
@@ -82,7 +70,8 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 		t.Fatalf("expected 3 prefixes, got %d: %v", len(prefixes), prefixes)
 	}
 
-	// Test repair
+	// Test repair — now uses UpdateIssueID (Dolt rename semantics)
+	// instead of the old CreateIssue+DeleteIssue approach that caused deadlocks
 	if err := repairPrefixes(ctx, testStore, "test", "test", allIssues, prefixes, false); err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
@@ -113,13 +102,12 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 		}
 	}
 
-	// Verify the others were renamed with hash IDs (not sequential)
-	// We have 5 total issues, 2 original (test-1, test-2), 3 renamed
+	// Verify total count: 2 original (test-1, test-2) + 3 renamed = 5
 	if len(allIssues) != 5 {
 		t.Fatalf("expected 5 issues total, got %d", len(allIssues))
 	}
 
-	// Count issues with correct prefix and verify old IDs no longer exist
+	// Count issues with correct prefix
 	testPrefixCount := 0
 	for _, issue := range allIssues {
 		if len(issue.ID) > 5 && issue.ID[:5] == "test-" {

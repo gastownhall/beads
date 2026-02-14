@@ -1,5 +1,2 @@
 # Tests to skip due to known issues
 # Format: one test name per line (regex patterns supported)
-
-# TestRepairMultiplePrefixes: test itself skips on Dolt backend (needs rewrite for Dolt rename semantics).
-TestRepairMultiplePrefixes
