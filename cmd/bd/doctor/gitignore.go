@@ -54,6 +54,10 @@ beads.right.meta.json
 sync_base.jsonl
 export-state/
 
+# Dolt database (managed by Dolt remotes, not git)
+dolt/
+dolt-access.lock
+
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
 # contributors to accidentally commit upstream issue databases.
@@ -76,6 +80,8 @@ var requiredPatterns = []string{
 	".jsonl.lock",
 	"sync_base.jsonl",
 	"export-state/",
+	"dolt/",
+	"dolt-access.lock",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date

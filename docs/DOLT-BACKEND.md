@@ -194,6 +194,15 @@ bd import issues.jsonl
 
 ## Troubleshooting
 
+### Already Committed dolt/ to Git
+
+If you committed `.beads/dolt/` before this fix:
+
+1. Update gitignore: `bd doctor --fix`
+2. Remove from git tracking: `git rm --cached -r .beads/dolt/ .beads/dolt-access.lock`
+3. Commit the removal: `git commit -m "fix: remove accidentally committed dolt data"`
+4. To purge from history (optional): use [BFG Repo-Cleaner](https://rtyley.github.io/bfg-repo-cleaner/) or `git filter-repo`
+
 ### Server Won't Start
 
 ```bash
