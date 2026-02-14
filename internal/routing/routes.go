@@ -384,9 +384,12 @@ func resolveRedirect(beadsDir string) string {
 		return beadsDir
 	}
 
-	// Handle relative paths
+	// Handle relative paths - resolve from parent of .beads dir (project root),
+	// consistent with FollowRedirect() in beads.go which uses filepath.Dir(beadsDir).
+	// The redirect file is written relative to the directory *containing* .beads/,
+	// not relative to .beads/ itself.
 	if !filepath.IsAbs(redirectPath) {
-		redirectPath = filepath.Join(beadsDir, redirectPath)
+		redirectPath = filepath.Join(filepath.Dir(beadsDir), redirectPath)
 	}
 
 	// Clean and resolve the path
