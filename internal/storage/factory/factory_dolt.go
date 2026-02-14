@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -35,25 +34,6 @@ func init() {
 			ServerUser:  opts.ServerUser,
 		})
 		if err != nil {
-			// If server mode failed with a connection error, fall back to embedded mode.
-			// This preserves the 2-tier architecture: server when available, embedded when not.
-			if opts.ServerMode && isServerConnectionError(err) {
-				fmt.Fprintf(os.Stderr, "Warning: Dolt server at %s:%d is not reachable, falling back to embedded mode\n",
-					opts.ServerHost, opts.ServerPort)
-
-				// Run bootstrap for embedded mode (JSONL import if needed)
-				if berr := bootstrapEmbeddedDolt(ctx, path, opts); berr != nil {
-					return nil, berr
-				}
-
-				return dolt.New(ctx, &dolt.Config{
-					Path:        path,
-					Database:    opts.Database,
-					ReadOnly:    opts.ReadOnly,
-					OpenTimeout: opts.OpenTimeout,
-					ServerMode:  false, // Fall back to embedded
-				})
-			}
 			return nil, err
 		}
 		return store, nil
@@ -116,18 +96,4 @@ func hasDoltSubdir(basePath string) bool {
 		}
 	}
 	return false
-}
-
-// isServerConnectionError returns true if the error indicates the Dolt server
-// is unreachable (connection refused, timeout, DNS failure, etc.).
-func isServerConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errLower := strings.ToLower(err.Error())
-	return strings.Contains(errLower, "connection refused") ||
-		strings.Contains(errLower, "no such host") ||
-		strings.Contains(errLower, "i/o timeout") ||
-		strings.Contains(errLower, "connection reset") ||
-		strings.Contains(errLower, "network is unreachable")
 }
