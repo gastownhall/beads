@@ -18,8 +18,13 @@ func mkTmpDirInTmp(t *testing.T, prefix string) string {
 			t.Fatalf("failed to create temp dir: %v", err)
 		}
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	// Resolve symlinks so paths match what git reports (e.g. macOS /tmp -> /private/tmp)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resolved = dir
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(resolved) })
+	return resolved
 }
 
 func runGit(t *testing.T, dir string, args ...string) string {
