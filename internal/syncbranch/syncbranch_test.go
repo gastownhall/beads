@@ -479,8 +479,8 @@ func TestGetConfigFromDB(t *testing.T) {
 		beadsDir := setupTestBeadsDir(t)
 		ctx := context.Background()
 
-		// Use beads.db as the Dolt directory (matches DefaultConfig().DatabasePath)
-		store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(beadsDir, "beads.db")})
+		// Use "dolt" as the DB directory (matches configfile.DatabasePath() for Dolt backends)
+		store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(beadsDir, "dolt")})
 		if err != nil {
 			t.Fatalf("Failed to create test database: %v", err)
 		}
@@ -496,8 +496,8 @@ func TestGetConfigFromDB(t *testing.T) {
 		beadsDir := setupTestBeadsDir(t)
 		ctx := context.Background()
 
-		// Use beads.db as the Dolt directory (matches DefaultConfig().DatabasePath)
-		dbPath := filepath.Join(beadsDir, "beads.db")
+		// Use "dolt" as the DB directory (matches configfile.DatabasePath() for Dolt backends)
+		dbPath := filepath.Join(beadsDir, "dolt")
 		store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 		if err != nil {
 			t.Fatalf("Failed to create test database: %v", err)
@@ -530,7 +530,7 @@ func setupTestBeadsDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db","backend":"dolt"}`), 0644); err != nil {
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"dolt","backend":"dolt"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return beadsDir
