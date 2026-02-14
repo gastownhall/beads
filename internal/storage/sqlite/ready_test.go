@@ -2030,3 +2030,95 @@ func TestGetReadyWorkExcludeIDPatternsConfig(t *testing.T) {
 	}
 	// Note: wisp step is excluded by ephemeral flag, not pattern, so it stays excluded
 }
+
+// TestDeferredParentExcludesChildren tests that children of deferred parents
+// are excluded from ready work (GH#1190)
+func TestDeferredParentExcludesChildren(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create parent issue with future defer_until
+	parent := &types.Issue{
+		Title:     "Deferred Parent",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	store.CreateIssue(ctx, parent, "test-user")
+
+	// Set defer_until to future (1 year from now)
+	store.UpdateIssue(ctx, parent.ID, map[string]interface{}{
+		"defer_until": "2099-01-01T00:00:00Z",
+	}, "test-user")
+
+	// Create child of deferred parent
+	child := &types.Issue{
+		Title:     "Child of Deferred",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	store.CreateIssue(ctx, child, "test-user")
+
+	// Add parent-child dependency
+	store.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepParentChild,
+	}, "test-user")
+
+	// Create unrelated ready issue
+	unrelated := &types.Issue{
+		Title:     "Unrelated Ready",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	store.CreateIssue(ctx, unrelated, "test-user")
+
+	// Get ready work
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+
+	readyIDs := make(map[string]bool)
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+
+	// Parent should be excluded (it's deferred)
+	if readyIDs[parent.ID] {
+		t.Errorf("Expected deferred parent %s to NOT be in ready work", parent.ID)
+	}
+
+	// Child should be excluded (parent is deferred) — this is the GH#1190 fix
+	if readyIDs[child.ID] {
+		t.Errorf("Expected child %s of deferred parent to NOT be in ready work", child.ID)
+	}
+
+	// Unrelated should be ready
+	if !readyIDs[unrelated.ID] {
+		t.Errorf("Expected unrelated issue %s to be in ready work", unrelated.ID)
+	}
+
+	// With IncludeDeferred, both parent and child should appear
+	readyAll, err := store.GetReadyWork(ctx, types.WorkFilter{IncludeDeferred: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork with IncludeDeferred failed: %v", err)
+	}
+
+	readyAllIDs := make(map[string]bool)
+	for _, issue := range readyAll {
+		readyAllIDs[issue.ID] = true
+	}
+
+	if !readyAllIDs[parent.ID] {
+		t.Errorf("Expected deferred parent %s to be in ready work with IncludeDeferred", parent.ID)
+	}
+	if !readyAllIDs[child.ID] {
+		t.Errorf("Expected child %s to be in ready work with IncludeDeferred", child.ID)
+	}
+}

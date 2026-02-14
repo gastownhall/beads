@@ -256,6 +256,15 @@ WHERE i.status = 'open'
   AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND NOT EXISTS (
     SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
+  )
+  AND (i.defer_until IS NULL OR datetime(i.defer_until) <= datetime('now'))
+  AND NOT EXISTS (
+    SELECT 1 FROM dependencies d_parent
+    JOIN issues parent ON parent.id = d_parent.depends_on_id
+    WHERE d_parent.issue_id = i.id
+      AND d_parent.type = 'parent-child'
+      AND parent.defer_until IS NOT NULL
+      AND datetime(parent.defer_until) > datetime('now')
   );
 
 -- Blocked issues view

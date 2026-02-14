@@ -152,6 +152,19 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	if !filter.IncludeDeferred {
 		whereClauses = append(whereClauses, "(i.defer_until IS NULL OR datetime(i.defer_until) <= datetime('now'))")
 	}
+	// Exclude children of future-deferred parents (GH#1190)
+	if !filter.IncludeDeferred {
+		whereClauses = append(whereClauses, `
+			NOT EXISTS (
+				SELECT 1 FROM dependencies d_parent
+				JOIN issues parent ON parent.id = d_parent.depends_on_id
+				WHERE d_parent.issue_id = i.id
+				  AND d_parent.type = 'parent-child'
+				  AND parent.defer_until IS NOT NULL
+				  AND datetime(parent.defer_until) > datetime('now')
+			)
+		`)
+	}
 
 	// Build WHERE clause properly
 	whereSQL := strings.Join(whereClauses, " AND ")

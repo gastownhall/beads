@@ -317,6 +317,19 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	if !filter.IncludeDeferred {
 		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= NOW())")
 	}
+	// Exclude children of future-deferred parents (GH#1190)
+	if !filter.IncludeDeferred {
+		whereClauses = append(whereClauses, `
+			NOT EXISTS (
+				SELECT 1 FROM dependencies d_parent
+				JOIN issues parent ON parent.id = d_parent.depends_on_id
+				WHERE d_parent.issue_id = issues.id
+				  AND d_parent.type = 'parent-child'
+				  AND parent.defer_until IS NOT NULL
+				  AND parent.defer_until > NOW()
+			)
+		`)
+	}
 	if len(filter.Labels) > 0 {
 		for _, label := range filter.Labels {
 			whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label = ?)")
