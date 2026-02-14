@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/factory"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // openStoreDB opens the beads database via the storage factory (backend-aware)
@@ -196,10 +195,11 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Open store using factory in read-only mode to avoid creating new database.
-	// ReadOnly mode fails if database doesn't exist.
-	ctx := context.Background()
-	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
+	// Use SQL aggregation to find duplicates without loading all issues into memory.
+	// The old approach loaded every issue via SearchIssues which was O(n) in both
+	// time and memory — catastrophically slow on large databases (e.g., 23k+ issues
+	// took 66 seconds over MySQL wire protocol).
+	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
@@ -209,8 +209,21 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	}
 	defer func() { _ = store.Close() }()
 
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
+	// Count duplicate groups and total duplicates using SQL GROUP BY.
+	// This matches the original algorithm: group by title|description|design|acceptance_criteria|status,
+	// only for non-closed, non-tombstone issues.
+	query := `
+		SELECT COUNT(*) as group_count, SUM(cnt - 1) as dup_count
+		FROM (
+			SELECT COUNT(*) as cnt
+			FROM issues
+			WHERE status NOT IN ('closed', 'tombstone')
+			GROUP BY title, description, design, acceptance_criteria, status
+			HAVING COUNT(*) > 1
+		) dups
+	`
+	var groupCount, dupCount sql.NullInt64
+	if err := db.QueryRow(query).Scan(&groupCount, &dupCount); err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
 			Status:  "ok",
@@ -218,26 +231,8 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 		}
 	}
 
-	// Find duplicates by content hash (matching bd duplicates algorithm)
-	// Only check open issues - closed issues are done, no point flagging duplicates
-	seen := make(map[string][]string) // hash -> list of IDs
-	for _, issue := range issues {
-		if issue.Status == types.StatusTombstone || issue.Status == types.StatusClosed {
-			continue
-		}
-		// Content key matches bd duplicates: title + description + design + acceptanceCriteria + status
-		key := issue.Title + "|" + issue.Description + "|" + issue.Design + "|" + issue.AcceptanceCriteria + "|" + string(issue.Status)
-		seen[key] = append(seen[key], issue.ID)
-	}
-
-	var duplicateGroups int
-	var totalDuplicates int
-	for _, ids := range seen {
-		if len(ids) > 1 {
-			duplicateGroups++
-			totalDuplicates += len(ids) - 1 // exclude the canonical one
-		}
-	}
+	duplicateGroups := int(groupCount.Int64)
+	totalDuplicates := int(dupCount.Int64)
 
 	// Apply threshold based on mode
 	threshold := 0 // Default: any duplicates are warnings

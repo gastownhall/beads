@@ -50,9 +50,11 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 		thresholdDays = cfg.GetStaleClosedIssuesDays()
 	}
 
-	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
-	ctx := context.Background()
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	// Use SQL COUNT queries instead of loading all issues into memory.
+	// The old approach loaded every closed issue via SearchIssues which was
+	// catastrophically slow on large databases (57 seconds for ~23k issues
+	// over MySQL wire protocol).
+	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Stale Closed Issues",
@@ -65,10 +67,9 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 
 	// If disabled (0), check for large closed issue count and warn if appropriate
 	if thresholdDays == 0 {
-		statusClosed := types.StatusClosed
-		filter := types.IssueFilter{Status: &statusClosed}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err != nil || len(issues) < largeClosedIssuesThreshold {
+		var closedCount int
+		err := db.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'closed'").Scan(&closedCount)
+		if err != nil || closedCount < largeClosedIssuesThreshold {
 			return DoctorCheck{
 				Name:     "Stale Closed Issues",
 				Status:   StatusOK,
@@ -80,36 +81,26 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Stale Closed Issues",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Disabled but %d closed issues exist", len(issues)),
+			Message:  fmt.Sprintf("Disabled but %d closed issues exist", closedCount),
 			Detail:   "Consider enabling stale_closed_issues_days to manage database size",
 			Fix:      "Add \"stale_closed_issues_days\": 30 to .beads/metadata.json",
 			Category: CategoryMaintenance,
 		}
 	}
 
-	// Find closed issues older than configured threshold
-	cutoff := time.Now().AddDate(0, 0, -thresholdDays)
-	statusClosed := types.StatusClosed
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		ClosedBefore: &cutoff,
-	}
-
-	issues, err := store.SearchIssues(ctx, "", filter)
+	// Find closed issues older than configured threshold, excluding pinned
+	cutoff := time.Now().AddDate(0, 0, -thresholdDays).Format(time.RFC3339)
+	var cleanable int
+	err = db.QueryRow(
+		"SELECT COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL)",
+		cutoff,
+	).Scan(&cleanable)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Stale Closed Issues",
 			Status:   StatusOK,
 			Message:  "N/A (query failed)",
 			Category: CategoryMaintenance,
-		}
-	}
-
-	// Filter out pinned issues
-	var cleanable int
-	for _, issue := range issues {
-		if !issue.Pinned {
-			cleanable++
 		}
 	}
 

@@ -489,3 +489,116 @@ func TestCheckDuplicateIssues_NonGastownMode(t *testing.T) {
 		t.Errorf("Message = %q, want '50 duplicate issue(s) in 1 group(s)'", check.Message)
 	}
 }
+
+// TestCheckDuplicateIssues_MultipleDuplicateGroups verifies correct counting
+// when there are multiple distinct groups of duplicates.
+// groupCount should reflect the number of groups, dupCount the total extras.
+func TestCheckDuplicateIssues_MultipleDuplicateGroups(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := setupDoltTestDir(t, beadsDir)
+	ctx := context.Background()
+
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Group A: 3 identical issues (2 duplicates)
+	for i := 0; i < 3; i++ {
+		issue := &types.Issue{
+			Title:       "Auth bug",
+			Description: "Login fails",
+			Status:      types.StatusOpen,
+			Priority:    1,
+			IssueType:   types.TypeBug,
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+
+	// Group B: 2 identical issues (1 duplicate), different content from A
+	for i := 0; i < 2; i++ {
+		issue := &types.Issue{
+			Title:       "Add dark mode",
+			Description: "Users want dark mode",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeFeature,
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+
+	store.Close()
+
+	check := CheckDuplicateIssues(tmpDir, false, 1000)
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	// 2 groups, 3 total duplicates (2 from group A + 1 from group B)
+	if check.Message != "3 duplicate issue(s) in 2 group(s)" {
+		t.Errorf("Message = %q, want '3 duplicate issue(s) in 2 group(s)'", check.Message)
+	}
+}
+
+// TestCheckDuplicateIssues_ZeroDuplicatesNullHandling verifies that when no
+// duplicates exist, the SQL SUM() returning NULL is handled correctly via
+// sql.NullInt64 defaulting to 0.
+func TestCheckDuplicateIssues_ZeroDuplicatesNullHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := setupDoltTestDir(t, beadsDir)
+	ctx := context.Background()
+
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	// Create unique issues — no duplicates
+	issues := []*types.Issue{
+		{Title: "Issue A", Description: "Unique A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Issue B", Description: "Unique B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{Title: "Issue C", Description: "Unique C", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	}
+
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+
+	store.Close()
+
+	check := CheckDuplicateIssues(tmpDir, false, 1000)
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q (no duplicates should be OK)", check.Status, StatusOK)
+		t.Logf("Message: %s", check.Message)
+	}
+	if check.Message != "No duplicate issues" {
+		t.Errorf("Message = %q, want 'No duplicate issues'", check.Message)
+	}
+}

@@ -87,16 +87,18 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		return issues[0].ID, nil
 	}
 
-	// If exact match failed, try substring search
-	filter := types.IssueFilter{}
+	// If exact match failed, try substring search.
+	// Use the hash part as a search query to leverage SQL-level filtering
+	// (id LIKE %hash%) instead of loading ALL issues into memory.
+	// On large databases (23k+ issues over MySQL wire protocol), loading all
+	// issues took 60+ seconds; with SQL filtering it's near-instant.
+	hashPart := strings.TrimPrefix(normalizedID, prefixWithHyphen)
 
-	issues, err := store.SearchIssues(ctx, "", filter)
+	filter := types.IssueFilter{}
+	issues, err := store.SearchIssues(ctx, hashPart, filter)
 	if err != nil {
 		return "", fmt.Errorf("failed to search issues: %w", err)
 	}
-
-	// Extract the hash part for substring matching
-	hashPart := strings.TrimPrefix(normalizedID, prefixWithHyphen)
 
 	var matches []string
 	var exactMatch string
