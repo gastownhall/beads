@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -221,4 +222,106 @@ func needsRouting(id string) bool {
 
 	// Check if the routed directory is different from the current one
 	return targetDir != beadsDir
+}
+
+// resolveExternalDepsViaRouting resolves external dependency references by following
+// prefix routes to locate and query the target database.
+//
+// GetDependenciesWithMetadata uses a JOIN between dependencies and issues tables,
+// so external refs (e.g., "external:gastown:gt-42zaq") that don't exist in the local
+// issues table are silently dropped. This function fills in those gaps by:
+// 1. Getting raw dependency records
+// 2. Filtering for external refs
+// 3. Extracting the issue ID from each ref
+// 4. Using routing to look up the issue in the target database
+//
+// Returns a slice of IssueWithDependencyMetadata for resolved external deps.
+func resolveExternalDepsViaRouting(ctx context.Context, issueStore storage.Storage, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	// Get raw dependency records to find external refs
+	deps, err := issueStore.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter for external refs
+	var externalDeps []*types.Dependency
+	for _, dep := range deps {
+		if strings.HasPrefix(dep.DependsOnID, "external:") {
+			externalDeps = append(externalDeps, dep)
+		}
+	}
+
+	if len(externalDeps) == 0 {
+		return nil, nil
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+
+	for _, dep := range externalDeps {
+		// Parse external:project:id — the third part is the actual issue ID
+		parts := strings.SplitN(dep.DependsOnID, ":", 3)
+		if len(parts) != 3 || parts[2] == "" {
+			continue
+		}
+		targetID := parts[2]
+
+		// Use routing to resolve the target issue
+		result, routeErr := resolveAndGetIssueWithRouting(ctx, store, targetID)
+		if routeErr != nil || result == nil || result.Issue == nil {
+			// Can't resolve — create a placeholder with the external ref as ID
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue: types.Issue{
+					ID:     dep.DependsOnID,
+					Title:  "(unresolved external dependency)",
+					Status: types.StatusOpen,
+				},
+				DependencyType: dep.Type,
+			})
+			if result != nil {
+				result.Close()
+			}
+			continue
+		}
+
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *result.Issue,
+			DependencyType: dep.Type,
+		})
+		result.Close()
+	}
+
+	return results, nil
+}
+
+// resolveBlockedByRefs takes a list of blocker IDs (which may include external refs
+// like "external:gastown:gt-42zaq") and resolves them to human-readable strings.
+// Local IDs pass through unchanged. External refs are resolved via routing to show
+// the actual issue ID and title from the target database.
+func resolveBlockedByRefs(ctx context.Context, refs []string) []string {
+	resolved := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if !strings.HasPrefix(ref, "external:") {
+			resolved = append(resolved, ref)
+			continue
+		}
+		// Parse external:project:id
+		parts := strings.SplitN(ref, ":", 3)
+		if len(parts) != 3 || parts[2] == "" {
+			resolved = append(resolved, ref)
+			continue
+		}
+		targetID := parts[2]
+		result, err := resolveAndGetIssueWithRouting(ctx, store, targetID)
+		if err != nil || result == nil || result.Issue == nil {
+			// Can't resolve — show the raw issue ID from the ref
+			resolved = append(resolved, targetID)
+			if result != nil {
+				result.Close()
+			}
+			continue
+		}
+		resolved = append(resolved, fmt.Sprintf("%s: %s", result.Issue.ID, result.Issue.Title))
+		result.Close()
+	}
+	return resolved
 }

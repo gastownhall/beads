@@ -239,8 +239,10 @@ var blockedCmd = &cobra.Command{
 			if blockedBy == nil {
 				blockedBy = []string{}
 			}
+			// Resolve external refs to show real issue info (bd-k0pfm)
+			resolved := resolveBlockedByRefs(ctx, blockedBy)
 			fmt.Printf("  Blocked by %d open dependencies: %v\n",
-				issue.BlockedByCount, blockedBy)
+				issue.BlockedByCount, resolved)
 			fmt.Println()
 		}
 	},
