@@ -30,6 +30,8 @@ linters:
         - (os).Chdir
         - (os).MkdirAll
         - (fmt).Sscanf
+        - (fmt).Fprintf
+        - (fmt).Fprintln
     misspell:
       locale: US
 
@@ -46,7 +48,7 @@ linters:
           - gosec
         text: "G306"
       # G304: Safe file reads from known JSONL and error paths
-      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon_autostart\.go|cmd/bd/doctor/fix/sync_branch\.go|cmd/bd/doctor/git\.go|cmd/bd/rename_prefix\.go|cmd/bd/sync_merge\.go|internal/beads/beads\.go|internal/daemon/discovery\.go|internal/daemonrunner/sync\.go|internal/syncbranch/worktree\.go'
+      - path: 'cmd/bd/autoflush\.go|cmd/bd/daemon_autostart\.go|cmd/bd/doctor/fix/sync_branch\.go|cmd/bd/doctor/git\.go|cmd/bd/doctor/sync_branch_jsonl\.go|cmd/bd/rename_prefix\.go|cmd/bd/sync_merge\.go|internal/beads/beads\.go|internal/daemon/discovery\.go|internal/daemonrunner/sync\.go|internal/syncbranch/worktree\.go'
         linters:
           - gosec
         text: "G304"
@@ -69,11 +71,11 @@ linters:
         linters:
           - gosec
         text: 'G204'
-      # G104: Deferred file closes - errors are non-critical
-      - path: 'cmd/bd/show\.go'
+      # G104: Deferred file/db closes - errors are non-critical
+      - path: 'cmd/bd/show\.go|cmd/bd/doctor/dolt\.go'
         linters:
           - gosec
-        text: "G104.*Close"
+        text: "G104"
       # G115: Safe integer conversions in backoff calculations
       - path: 'cmd/bd/daemon_autostart\.go'
         linters:

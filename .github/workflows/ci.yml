@@ -150,15 +150,22 @@ jobs:
 
       - name: Smoke test - init and CRUD
         run: |
-          ./bd.exe init --quiet --prefix smoke
-          $output = ./bd.exe create --title "Windows smoke test" --type task
-          $id = ($output | Select-String -Pattern "smoke-\w+").Matches.Value
-          echo "Created issue: $id"
-          ./bd.exe list
-          ./bd.exe show $id
-          ./bd.exe update $id --status in_progress
-          ./bd.exe close $id
-          echo "All smoke tests passed!"
+          $tmpDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+          Push-Location $tmpDir
+          try {
+            & "$env:GITHUB_WORKSPACE/bd.exe" init --backend sqlite --quiet --prefix smoke
+            $output = & "$env:GITHUB_WORKSPACE/bd.exe" create --title "Windows smoke test" --type task
+            $id = ($output | Select-String -Pattern "smoke-\w+").Matches.Value
+            echo "Created issue: $id"
+            & "$env:GITHUB_WORKSPACE/bd.exe" list
+            & "$env:GITHUB_WORKSPACE/bd.exe" show $id
+            & "$env:GITHUB_WORKSPACE/bd.exe" update $id --status in_progress
+            & "$env:GITHUB_WORKSPACE/bd.exe" close $id
+            echo "All smoke tests passed!"
+          } finally {
+            Pop-Location
+            Remove-Item -Recurse -Force $tmpDir
+          }
 
   fmt-check:
     name: Check formatting
