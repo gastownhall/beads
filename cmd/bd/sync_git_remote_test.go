@@ -36,8 +36,8 @@ type mockRemoteStore struct {
 	pullCount  atomic.Int32
 	commitMsgs []string
 
-	pushErr  error // inject Push error
-	pullErr  error // inject Pull error
+	pushErr error // inject Push error
+	pullErr error // inject Pull error
 }
 
 // Compile-time check: mockRemoteStore implements RemoteStorage.
