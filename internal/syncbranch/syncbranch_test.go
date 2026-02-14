@@ -479,7 +479,7 @@ func TestGetConfigFromDB(t *testing.T) {
 		beadsDir := setupTestBeadsDir(t)
 		ctx := context.Background()
 
-		// Use "dolt" as the DB directory (matches configfile.DatabasePath() for Dolt backends)
+		// Dolt backend always uses .beads/dolt/ as DB directory (configfile.DatabasePath)
 		store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(beadsDir, "dolt")})
 		if err != nil {
 			t.Fatalf("Failed to create test database: %v", err)
@@ -496,7 +496,7 @@ func TestGetConfigFromDB(t *testing.T) {
 		beadsDir := setupTestBeadsDir(t)
 		ctx := context.Background()
 
-		// Use "dolt" as the DB directory (matches configfile.DatabasePath() for Dolt backends)
+		// Dolt backend always uses .beads/dolt/ as DB directory (configfile.DatabasePath)
 		dbPath := filepath.Join(beadsDir, "dolt")
 		store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 		if err != nil {

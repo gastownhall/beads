@@ -43,7 +43,15 @@ func resolveSyncWorktreeJSONLPath(repoPath, beadsDir, mainJSONLPath string) stri
 		return ""
 	}
 
-	relPath, err := filepath.Rel(repoRoot, mainJSONLPath)
+	// Resolve symlinks so that mainJSONLPath and repoRoot use canonical paths.
+	// git rev-parse --show-toplevel resolves symlinks (e.g. /tmp → /private/tmp on macOS),
+	// but Go paths from beadsDir may still use the symlinked form.
+	realMainJSONL, err := filepath.EvalSymlinks(mainJSONLPath)
+	if err != nil {
+		realMainJSONL = mainJSONLPath
+	}
+
+	relPath, err := filepath.Rel(repoRoot, realMainJSONL)
 	if err != nil {
 		return ""
 	}
