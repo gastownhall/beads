@@ -324,19 +324,18 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		}
 	}
 
-	// Exclude blocked issues using nested EXISTS to avoid Dolt mergeJoinIter panic
-	whereClauses = append(whereClauses, `
-		NOT EXISTS (
-			SELECT 1 FROM dependencies d
-			WHERE d.issue_id = issues.id
-			  AND d.type = 'blocks'
-			  AND EXISTS (
-			    SELECT 1 FROM issues blocker
-			    WHERE blocker.id = d.depends_on_id
-			      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-			  )
-		)
-	`)
+	// Exclude blocked issues: pre-compute blocked set using separate single-table
+	// queries to avoid Dolt's joinIter panic (join_iters.go:192).
+	// Correlated EXISTS/NOT EXISTS subqueries across tables trigger the same panic.
+	blockedIDs, err := s.computeBlockedIDs(ctx)
+	if err == nil && len(blockedIDs) > 0 {
+		placeholders := make([]string, len(blockedIDs))
+		for i, id := range blockedIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", strings.Join(placeholders, ", ")))
+	}
 
 	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
 
@@ -448,55 +447,88 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 
 // GetEpicsEligibleForClosure returns epics whose children are all closed
 func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
-	rows, err := s.queryContext(ctx, `
-		SELECT e.id,
-		       COUNT(d.issue_id) as total_children,
-		       COUNT(CASE WHEN c.status = 'closed' THEN 1 END) as closed_children
-		FROM issues e
-		LEFT JOIN dependencies d ON d.depends_on_id = e.id AND d.type = 'parent-child'
-		LEFT JOIN issues c ON d.issue_id = c.id
-		WHERE e.issue_type = 'epic'
-		  AND e.status != 'closed'
-		  AND e.status != 'tombstone'
-		GROUP BY e.id
-		HAVING total_children > 0
+	// Use separate single-table queries to avoid Dolt's joinIter panic
+	// (join_iters.go:192) which triggers on multi-table JOINs.
+
+	// Step 1: Get open epic IDs (single-table scan)
+	epicRows, err := s.queryContext(ctx, `
+		SELECT id FROM issues
+		WHERE issue_type = 'epic'
+		  AND status != 'closed'
+		  AND status != 'tombstone'
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get epics eligible for closure: %w", err)
+		return nil, fmt.Errorf("failed to get epics: %w", err)
 	}
-	defer rows.Close()
-
-	// Collect IDs first, then close rows before fetching full issues.
-	// This avoids connection pool deadlock when MaxOpenConns=1 (embedded dolt).
-	type epicInfo struct {
-		id            string
-		total, closed int
-	}
-	var epics []epicInfo
-	for rows.Next() {
-		var info epicInfo
-		if err := rows.Scan(&info.id, &info.total, &info.closed); err != nil {
+	var epicIDs []string
+	for epicRows.Next() {
+		var id string
+		if err := epicRows.Scan(&id); err != nil {
+			_ = epicRows.Close()
 			return nil, err
 		}
-		epics = append(epics, info)
+		epicIDs = append(epicIDs, id)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	_ = rows.Close()
+	_ = epicRows.Close()
 
+	if len(epicIDs) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Get parent-child dependencies (single-table scan)
+	depRows, err := s.queryContext(ctx, `
+		SELECT depends_on_id, issue_id FROM dependencies
+		WHERE type = 'parent-child'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent-child deps: %w", err)
+	}
+	// Map: parent_id -> list of child IDs
+	epicChildMap := make(map[string][]string)
+	epicSet := make(map[string]bool, len(epicIDs))
+	for _, id := range epicIDs {
+		epicSet[id] = true
+	}
+	for depRows.Next() {
+		var parentID, childID string
+		if err := depRows.Scan(&parentID, &childID); err != nil {
+			_ = depRows.Close()
+			return nil, err
+		}
+		if epicSet[parentID] {
+			epicChildMap[parentID] = append(epicChildMap[parentID], childID)
+		}
+	}
+	_ = depRows.Close()
+
+	// Step 3: For each epic with children, check child statuses
 	var results []*types.EpicStatus
-	for _, info := range epics {
-		issue, err := s.GetIssue(ctx, info.id)
+	for _, epicID := range epicIDs {
+		children := epicChildMap[epicID]
+		if len(children) == 0 {
+			continue
+		}
+
+		totalChildren := len(children)
+		closedChildren := 0
+		for _, childID := range children {
+			var status string
+			err := s.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", childID).Scan(&status)
+			if err == nil && types.Status(status) == types.StatusClosed {
+				closedChildren++
+			}
+		}
+
+		issue, err := s.GetIssue(ctx, epicID)
 		if err != nil || issue == nil {
 			continue
 		}
 
 		results = append(results, &types.EpicStatus{
 			Epic:             issue,
-			TotalChildren:    info.total,
-			ClosedChildren:   info.closed,
-			EligibleForClose: info.total > 0 && info.total == info.closed,
+			TotalChildren:    totalChildren,
+			ClosedChildren:   closedChildren,
+			EligibleForClose: totalChildren > 0 && totalChildren == closedChildren,
 		})
 	}
 
@@ -567,31 +599,46 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
 
-	// Blocked count: use two separate queries to avoid multi-table joins
-	// that trigger Dolt's mergeJoinIter panic (slice bounds out of range).
-	// Step 1: Get IDs of open blockers
-	// Step 2: Count distinct blocked issues from those blockers
+	// Blocked count: use separate single-table queries with Go-level filtering
+	// to avoid Dolt's joinIter panic (slice bounds out of range at join_iters.go:192).
+	// Even IN (SELECT ...) subqueries across tables can trigger this panic because
+	// Dolt's optimizer converts them to join plans internally.
+	// Same fix pattern as GetBlockedIssues (57e25f69).
 	var blockedCount int
-	blockerRows, err := s.queryContext(ctx, `
-		SELECT DISTINCT d.issue_id
-		FROM dependencies d
-		WHERE d.type = 'blocks'
-		  AND d.depends_on_id IN (
-		    SELECT id FROM issues
-		    WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		  )
-		  AND d.issue_id IN (
-		    SELECT id FROM issues
-		    WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		  )
+
+	// Step 1: Get all active issue IDs (single-table scan)
+	activeIDs := make(map[string]bool)
+	activeRows, err := s.queryContext(ctx, `
+		SELECT id FROM issues
+		WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
 	`)
 	if err == nil {
-		defer blockerRows.Close()
-		for blockerRows.Next() {
+		for activeRows.Next() {
 			var id string
-			if err := blockerRows.Scan(&id); err == nil {
-				blockedCount++
+			if err := activeRows.Scan(&id); err == nil {
+				activeIDs[id] = true
 			}
+		}
+		_ = activeRows.Close()
+
+		// Step 2: Get all blocking dependencies (single-table scan)
+		depRows, err := s.queryContext(ctx, `
+			SELECT issue_id, depends_on_id FROM dependencies
+			WHERE type = 'blocks'
+		`)
+		if err == nil {
+			blockedSet := make(map[string]bool)
+			for depRows.Next() {
+				var issueID, blockerID string
+				if err := depRows.Scan(&issueID, &blockerID); err == nil {
+					// Step 3: Filter in Go — both sides must be active
+					if activeIDs[issueID] && activeIDs[blockerID] {
+						blockedSet[issueID] = true
+					}
+				}
+			}
+			_ = depRows.Close()
+			blockedCount = len(blockedSet)
 		}
 	}
 	stats.BlockedIssues = blockedCount
@@ -607,6 +654,66 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 	return stats, nil
 }
 
+// computeBlockedIDs returns the set of issue IDs that are blocked by active issues.
+// Uses separate single-table queries with Go-level filtering to avoid Dolt's
+// joinIter panic (slice bounds out of range at join_iters.go:192).
+// Caller must hold s.mu (at least RLock).
+func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
+	// Step 1: Get all active issue IDs (single-table scan)
+	activeIDs := make(map[string]bool)
+	activeRows, err := s.queryContext(ctx, `
+		SELECT id FROM issues
+		WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
+	`)
+	if err != nil {
+		return nil, err
+	}
+	for activeRows.Next() {
+		var id string
+		if err := activeRows.Scan(&id); err != nil {
+			_ = activeRows.Close()
+			return nil, err
+		}
+		activeIDs[id] = true
+	}
+	_ = activeRows.Close()
+	if err := activeRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Step 2: Get all blocking dependencies (single-table scan)
+	depRows, err := s.queryContext(ctx, `
+		SELECT issue_id, depends_on_id FROM dependencies
+		WHERE type = 'blocks'
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 3: Filter in Go — both sides must be active
+	blockedSet := make(map[string]bool)
+	for depRows.Next() {
+		var issueID, blockerID string
+		if err := depRows.Scan(&issueID, &blockerID); err != nil {
+			_ = depRows.Close()
+			return nil, err
+		}
+		if activeIDs[issueID] && activeIDs[blockerID] {
+			blockedSet[issueID] = true
+		}
+	}
+	_ = depRows.Close()
+	if err := depRows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]string, 0, len(blockedSet))
+	for id := range blockedSet {
+		result = append(result, id)
+	}
+	return result, nil
+}
+
 // GetMoleculeProgress returns progress stats for a molecule
 func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
 	stats := &types.MoleculeProgressStats{
@@ -620,34 +727,46 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		stats.MoleculeTitle = title.String
 	}
 
-	err = s.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*) as total,
-			SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as completed,
-			SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress
-		FROM issues i
-		JOIN dependencies d ON i.id = d.issue_id
-		WHERE d.depends_on_id = ?
-		  AND d.type = 'parent-child'
-	`, moleculeID).Scan(&stats.Total, &stats.Completed, &stats.InProgress)
+	// Use separate single-table queries to avoid Dolt's joinIter panic
+	// (join_iters.go:192) which triggers on JOIN between issues and dependencies.
 
+	// Step 1: Get child issue IDs from dependencies table (single-table scan)
+	depRows, err := s.queryContext(ctx, `
+		SELECT issue_id FROM dependencies
+		WHERE depends_on_id = ? AND type = 'parent-child'
+	`, moleculeID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule progress: %w", err)
+		return nil, fmt.Errorf("failed to get molecule children: %w", err)
 	}
+	var childIDs []string
+	for depRows.Next() {
+		var id string
+		if err := depRows.Scan(&id); err != nil {
+			_ = depRows.Close()
+			return nil, err
+		}
+		childIDs = append(childIDs, id)
+	}
+	_ = depRows.Close()
 
-	// Get first in_progress step ID
-	var stepID sql.NullString
-	_ = s.db.QueryRowContext(ctx, `
-		SELECT i.id FROM issues i
-		JOIN dependencies d ON i.id = d.issue_id
-		WHERE d.depends_on_id = ?
-		  AND d.type = 'parent-child'
-		  AND i.status = 'in_progress'
-		ORDER BY i.created_at ASC
-		LIMIT 1
-	`, moleculeID).Scan(&stepID)
-	if stepID.Valid {
-		stats.CurrentStepID = stepID.String
+	// Step 2: Get status for each child (single-table lookups)
+	for _, childID := range childIDs {
+		var status string
+		var createdAt sql.NullString
+		err := s.db.QueryRowContext(ctx, "SELECT status, created_at FROM issues WHERE id = ?", childID).Scan(&status, &createdAt)
+		if err != nil {
+			continue
+		}
+		stats.Total++
+		switch types.Status(status) {
+		case types.StatusClosed:
+			stats.Completed++
+		case types.StatusInProgress:
+			stats.InProgress++
+			if stats.CurrentStepID == "" {
+				stats.CurrentStepID = childID
+			}
+		}
 	}
 
 	return stats, nil
