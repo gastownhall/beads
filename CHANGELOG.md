@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.1] - 2026-02-14
+
+### Fixed
+
+- **CI: goreleaser failure** — removed dead `internal/rpc` import from test stubs that broke `go mod tidy`
+- **CI: Windows smoke test** — use `--backend sqlite` and temp dir to avoid Dolt dependency and repo `.beads/` conflicts
+- **CI: lint errors** — updated golangci-lint v2 exclusions for fmt.Fprintf errcheck, gosec G104/G304
+- **CI: gofmt** — fixed formatting in init_test.go, main.go, sync_git_remote_test.go
+
+### Added
+
+- **Plugin-based issue tracker framework** with Linear and GitLab adapters (#1150)
+
 ## [0.50.0] - 2026-02-14
 
 ### Added

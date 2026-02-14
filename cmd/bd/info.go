@@ -212,7 +212,7 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
-		Version: "0.50.0",
+		Version: "0.50.1",
 		Date:    "2026-02-14",
 		Changes: []string{
 			"CHANGED: Default backend is now Dolt for new bd init projects (existing SQLite projects unaffected)",

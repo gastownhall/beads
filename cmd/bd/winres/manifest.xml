@@ -3,7 +3,7 @@
   <assemblyIdentity
     type="win32"
     name="beads.bd"
-    version="0.50.0.0"
+    version="0.50.1.0"
     processorArchitecture="*"/>
   <description>beads - AI-supervised issue tracker</description>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
