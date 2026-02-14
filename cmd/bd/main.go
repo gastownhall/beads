@@ -383,6 +383,7 @@ var rootCmd = &cobra.Command{
 			"human",
 			"init",
 			"merge",
+			"migrate", // manages its own store lifecycle; double-open deadlocks embedded Dolt (#1668)
 			"onboard",
 			"powershell",
 			"prime",
