@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/linear"
 	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -155,7 +156,6 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	preferLocal, _ := cmd.Flags().GetBool("prefer-local")
 	preferLinear, _ := cmd.Flags().GetBool("prefer-linear")
 	createOnly, _ := cmd.Flags().GetBool("create-only")
-	updateRefs, _ := cmd.Flags().GetBool("update-refs")
 	state, _ := cmd.Flags().GetString("state")
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
@@ -180,190 +180,82 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	if !pull && !push {
-		pull = true
-		push = true
-	}
-
 	ctx := rootCtx
-	result := &linear.SyncResult{Success: true}
-	var forceUpdateIDs map[string]bool
-	var skipUpdateIDs map[string]bool
-	var prePullConflicts []linear.Conflict
-	var prePullSkipLinearIDs map[string]bool
 
-	if pull {
-		if preferLocal || preferLinear {
-			conflicts, err := detectLinearConflicts(ctx)
-			if err != nil {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("conflict detection failed: %v", err))
-			} else if len(conflicts) > 0 {
-				prePullConflicts = conflicts
-				if preferLocal {
-					prePullSkipLinearIDs = make(map[string]bool, len(conflicts))
-					forceUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						prePullSkipLinearIDs[conflict.LinearIdentifier] = true
-						forceUpdateIDs[conflict.IssueID] = true
-					}
-				} else if preferLinear {
-					skipUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						skipUpdateIDs[conflict.IssueID] = true
-					}
-				}
-			}
-		}
+	// Create and initialize the Linear tracker
+	lt := &linear.Tracker{}
+	if err := lt.Init(ctx, store); err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing Linear tracker: %v\n", err)
+		os.Exit(1)
+	}
 
-		if dryRun {
-			fmt.Println("→ [DRY RUN] Would pull issues from Linear")
+	// Create the sync engine
+	engine := tracker.NewEngine(lt, store, actor)
+	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+
+	// Set up Linear-specific pull hooks
+	engine.PullHooks = buildLinearPullHooks(ctx)
+
+	// Set up Linear-specific push hooks
+	engine.PushHooks = buildLinearPushHooks(ctx, lt)
+
+	// Build sync options from CLI flags
+	opts := tracker.SyncOptions{
+		Pull:       pull,
+		Push:       push,
+		DryRun:     dryRun,
+		CreateOnly: createOnly,
+		State:      state,
+	}
+
+	// Convert type filters
+	for _, t := range typeFilters {
+		opts.TypeFilter = append(opts.TypeFilter, types.IssueType(strings.ToLower(t)))
+	}
+	for _, t := range excludeTypes {
+		opts.ExcludeTypes = append(opts.ExcludeTypes, types.IssueType(strings.ToLower(t)))
+	}
+	if !includeEphemeral {
+		opts.ExcludeEphemeral = true
+	}
+
+	// Map conflict resolution
+	if preferLocal {
+		opts.ConflictResolution = tracker.ConflictLocal
+	} else if preferLinear {
+		opts.ConflictResolution = tracker.ConflictExternal
+	} else {
+		opts.ConflictResolution = tracker.ConflictTimestamp
+	}
+
+	// Run sync
+	result, err := engine.Sync(ctx, opts)
+	if err != nil {
+		if jsonOutput {
+			outputJSON(result)
 		} else {
-			fmt.Println("→ Pulling issues from Linear...")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-
-		pullStats, err := doPullFromLinear(ctx, dryRun, state, prePullSkipLinearIDs)
-		if err != nil {
-			result.Success = false
-			result.Error = err.Error()
-			if jsonOutput {
-				outputJSON(result)
-			} else {
-				fmt.Fprintf(os.Stderr, "Error pulling from Linear: %v\n", err)
-			}
-			os.Exit(1)
-		}
-
-		result.Stats.Pulled = pullStats.Created + pullStats.Updated
-		result.Stats.Created += pullStats.Created
-		result.Stats.Updated += pullStats.Updated
-		result.Stats.Skipped += pullStats.Skipped
-
-		if !dryRun {
-			fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
-				result.Stats.Pulled, pullStats.Created, pullStats.Updated)
-		}
+		os.Exit(1)
 	}
 
-	if pull && push {
-		conflicts := prePullConflicts
-		var err error
-		if conflicts == nil {
-			conflicts, err = detectLinearConflicts(ctx)
-		}
-		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("conflict detection failed: %v", err))
-		} else if len(conflicts) > 0 {
-			result.Stats.Conflicts = len(conflicts)
-			if dryRun {
-				if preferLocal {
-					fmt.Printf("→ [DRY RUN] Would resolve %d conflicts (preferring local)\n", len(conflicts))
-					forceUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						forceUpdateIDs[conflict.IssueID] = true
-					}
-				} else if preferLinear {
-					fmt.Printf("→ [DRY RUN] Would resolve %d conflicts (preferring Linear)\n", len(conflicts))
-					skipUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						skipUpdateIDs[conflict.IssueID] = true
-					}
-				} else {
-					fmt.Printf("→ [DRY RUN] Would resolve %d conflicts (newer wins)\n", len(conflicts))
-					var linearWins []linear.Conflict
-					var localWins []linear.Conflict
-					for _, conflict := range conflicts {
-						if conflict.LinearUpdated.After(conflict.LocalUpdated) {
-							linearWins = append(linearWins, conflict)
-						} else {
-							localWins = append(localWins, conflict)
-						}
-					}
-					if len(localWins) > 0 {
-						forceUpdateIDs = make(map[string]bool, len(localWins))
-						for _, conflict := range localWins {
-							forceUpdateIDs[conflict.IssueID] = true
-						}
-					}
-					if len(linearWins) > 0 {
-						skipUpdateIDs = make(map[string]bool, len(linearWins))
-						for _, conflict := range linearWins {
-							skipUpdateIDs[conflict.IssueID] = true
-						}
-					}
-				}
-			} else if preferLocal {
-				fmt.Printf("→ Resolving %d conflicts (preferring local)\n", len(conflicts))
-				if forceUpdateIDs == nil {
-					forceUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						forceUpdateIDs[conflict.IssueID] = true
-					}
-				}
-			} else if preferLinear {
-				fmt.Printf("→ Resolving %d conflicts (preferring Linear)\n", len(conflicts))
-				if skipUpdateIDs == nil {
-					skipUpdateIDs = make(map[string]bool, len(conflicts))
-					for _, conflict := range conflicts {
-						skipUpdateIDs[conflict.IssueID] = true
-					}
-				}
-				if prePullConflicts == nil {
-					if err := reimportLinearConflicts(ctx, conflicts); err != nil {
-						result.Warnings = append(result.Warnings, fmt.Sprintf("conflict resolution failed: %v", err))
-					}
-				}
-			} else {
-				fmt.Printf("→ Resolving %d conflicts (newer wins)\n", len(conflicts))
-				if err := resolveLinearConflictsByTimestamp(ctx, conflicts); err != nil {
-					result.Warnings = append(result.Warnings, fmt.Sprintf("conflict resolution failed: %v", err))
-				}
-			}
-		}
-	}
-
-	if push {
-		if dryRun {
-			fmt.Println("→ [DRY RUN] Would push issues to Linear")
-		} else {
-			fmt.Println("→ Pushing issues to Linear...")
-		}
-
-		pushStats, err := doPushToLinear(ctx, dryRun, createOnly, updateRefs, forceUpdateIDs, skipUpdateIDs, typeFilters, excludeTypes, includeEphemeral)
-		if err != nil {
-			result.Success = false
-			result.Error = err.Error()
-			if jsonOutput {
-				outputJSON(result)
-			} else {
-				fmt.Fprintf(os.Stderr, "Error pushing to Linear: %v\n", err)
-			}
-			os.Exit(1)
-		}
-
-		result.Stats.Pushed = pushStats.Created + pushStats.Updated
-		result.Stats.Created += pushStats.Created
-		result.Stats.Updated += pushStats.Updated
-		result.Stats.Skipped += pushStats.Skipped
-		result.Stats.Errors += pushStats.Errors
-
-		if !dryRun {
-			fmt.Printf("✓ Pushed %d issues (%d created, %d updated)\n",
-				result.Stats.Pushed, pushStats.Created, pushStats.Updated)
-		}
-	}
-
-	if !dryRun && result.Success {
-		result.LastSync = time.Now().Format(time.RFC3339)
-		if err := store.SetConfig(ctx, "linear.last_sync", result.LastSync); err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("failed to update last_sync: %v", err))
-		}
-	}
-
+	// Output results
 	if jsonOutput {
 		outputJSON(result)
 	} else if dryRun {
 		fmt.Println("\n✓ Dry run complete (no changes made)")
 	} else {
+		if result.Stats.Pulled > 0 {
+			fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
+				result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
+		}
+		if result.Stats.Pushed > 0 {
+			fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
+		}
+		if result.Stats.Conflicts > 0 {
+			fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)
+		}
 		fmt.Println("\n✓ Linear sync complete")
 		if len(result.Warnings) > 0 {
 			fmt.Println("\nWarnings:")
@@ -371,6 +263,92 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 				fmt.Printf("  - %s\n", w)
 			}
 		}
+	}
+}
+
+// buildLinearPullHooks creates PullHooks for Linear-specific pull behavior.
+func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
+	idMode := getLinearIDMode(ctx)
+	hashLength := getLinearHashLength(ctx)
+
+	hooks := &tracker.PullHooks{}
+
+	if idMode == "hash" {
+		// Pre-load existing IDs for collision avoidance
+		existingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+		usedIDs := make(map[string]bool)
+		if err == nil {
+			for _, issue := range existingIssues {
+				if issue.ID != "" {
+					usedIDs[issue.ID] = true
+				}
+			}
+		}
+
+		prefix, err := store.GetConfig(ctx, "issue_prefix")
+		if err != nil || prefix == "" {
+			prefix = "bd"
+		}
+
+		hooks.GenerateID = func(_ context.Context, issue *types.Issue) error {
+			ids := []*types.Issue{issue}
+			idOpts := linear.IDGenerationOptions{
+				BaseLength: hashLength,
+				MaxLength:  8,
+				UsedIDs:    usedIDs,
+			}
+			if err := linear.GenerateIssueIDs(ids, prefix, "linear-import", idOpts); err != nil {
+				return err
+			}
+			// Track the newly generated ID for future collision avoidance
+			usedIDs[issue.ID] = true
+			return nil
+		}
+	}
+
+	return hooks
+}
+
+// buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
+func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker) *tracker.PushHooks {
+	return &tracker.PushHooks{
+		FormatDescription: func(issue *types.Issue) string {
+			return linear.BuildLinearDescription(issue)
+		},
+		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+			localComparable := linear.NormalizeIssueForLinearHash(local)
+			remoteConv := lt.FieldMapper().IssueToBeads(remote)
+			if remoteConv == nil || remoteConv.Issue == nil {
+				return false
+			}
+			return localComparable.ComputeContentHash() == remoteConv.Issue.ComputeContentHash()
+		},
+		BuildStateCache: func(ctx context.Context) (interface{}, error) {
+			return linear.BuildStateCacheFromTracker(ctx, lt)
+		},
+		ResolveState: func(cache interface{}, status types.Status) (string, bool) {
+			sc, ok := cache.(*linear.StateCache)
+			if !ok || sc == nil {
+				return "", false
+			}
+			id := sc.FindStateForBeadsStatus(status)
+			return id, id != ""
+		},
+		ShouldPush: func(issue *types.Issue) bool {
+			// Apply push prefix filtering if configured
+			pushPrefix, _ := store.GetConfig(ctx, "linear.push_prefix")
+			if pushPrefix == "" {
+				return true
+			}
+			for _, prefix := range strings.Split(pushPrefix, ",") {
+				prefix = strings.TrimSpace(prefix)
+				prefix = strings.TrimSuffix(prefix, "-")
+				if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
+					return true
+				}
+			}
+			return false
+		},
 	}
 }
 

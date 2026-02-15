@@ -218,10 +218,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 
 	// Determine if incremental sync is possible
 	fetchOpts := FetchOptions{State: opts.State}
+	var lastSync *time.Time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetConfig(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := time.Parse(time.RFC3339, lastSyncStr); err == nil {
 			fetchOpts.Since = &t
+			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr
 		}
@@ -278,6 +280,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		}
 
 		if existing != nil {
+			// Conflict-aware pull: when prefer-local, skip updating issues
+			// that were locally modified since last sync to preserve local changes.
+			if opts.ConflictResolution == ConflictLocal && lastSync != nil {
+				if existing.UpdatedAt.After(*lastSync) {
+					stats.Skipped++
+					continue
+				}
+			}
+
 			// Update existing issue
 			updates := make(map[string]interface{})
 			updates["title"] = conv.Issue.Title

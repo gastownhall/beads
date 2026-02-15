@@ -3,15 +3,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -72,6 +76,85 @@ var (
 	gitlabPreferGitLab bool
 	gitlabPreferNewer  bool
 )
+
+// issueIDCounter is used to generate unique issue IDs.
+var issueIDCounter uint64
+
+// ConflictStrategy defines how to resolve conflicts between local and GitLab versions.
+type ConflictStrategy string
+
+const (
+	// ConflictStrategyPreferNewer uses the most recently updated version (default).
+	ConflictStrategyPreferNewer ConflictStrategy = "prefer-newer"
+	// ConflictStrategyPreferLocal always keeps the local beads version.
+	ConflictStrategyPreferLocal ConflictStrategy = "prefer-local"
+	// ConflictStrategyPreferGitLab always uses the GitLab version.
+	ConflictStrategyPreferGitLab ConflictStrategy = "prefer-gitlab"
+)
+
+// getConflictStrategy determines the conflict strategy from flag values.
+// Returns error if multiple conflicting flags are set.
+func getConflictStrategy(preferLocal, preferGitLab, preferNewer bool) (ConflictStrategy, error) {
+	flagsSet := 0
+	if preferLocal {
+		flagsSet++
+	}
+	if preferGitLab {
+		flagsSet++
+	}
+	if preferNewer {
+		flagsSet++
+	}
+	if flagsSet > 1 {
+		return "", fmt.Errorf("cannot use multiple conflict resolution flags")
+	}
+
+	if preferLocal {
+		return ConflictStrategyPreferLocal, nil
+	}
+	if preferGitLab {
+		return ConflictStrategyPreferGitLab, nil
+	}
+	return ConflictStrategyPreferNewer, nil
+}
+
+// generateIssueID creates a unique issue ID with the given prefix.
+// Uses atomic counter combined with timestamp and random bytes to ensure uniqueness
+// even when called rapidly or after process restart.
+func generateIssueID(prefix string) string {
+	counter := atomic.AddUint64(&issueIDCounter, 1)
+	timestamp := time.Now().UnixNano() / 1000000 // milliseconds
+	// Add random bytes to prevent collision on restart
+	randBytes := make([]byte, 4)
+	_, _ = rand.Read(randBytes)
+	return fmt.Sprintf("%s-%d-%d-%x", prefix, timestamp, counter, randBytes)
+}
+
+// parseGitLabSourceSystem parses a source system string like "gitlab:123:42"
+// Returns projectID, iid, and ok (whether it's a valid GitLab source).
+func parseGitLabSourceSystem(sourceSystem string) (projectID, iid int, ok bool) {
+	if !strings.HasPrefix(sourceSystem, "gitlab:") {
+		return 0, 0, false
+	}
+
+	parts := strings.Split(sourceSystem, ":")
+	if len(parts) != 3 {
+		return 0, 0, false
+	}
+
+	var err error
+	projectID, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	iid, err = strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	return projectID, iid, true
+}
 
 func init() {
 	// Add subcommands to gitlab
@@ -244,7 +327,7 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 }
 
 // runGitLabSync implements the gitlab sync command.
-// Uses SyncContext for thread-safe operations instead of global variables.
+// Uses the tracker.Engine for all sync operations.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
 	config := getGitLabConfig()
 	if err := validateGitLabConfig(config); err != nil {
@@ -259,7 +342,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot use both --pull-only and --push-only")
 	}
 
-	// Determine conflict strategy from flags
+	// Validate conflict flags
 	conflictStrategy, err := getConflictStrategy(gitlabPreferLocal, gitlabPreferGitLab, gitlabPreferNewer)
 	if err != nil {
 		return fmt.Errorf("%w (--prefer-local, --prefer-gitlab, --prefer-newer)", err)
@@ -270,157 +353,66 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitLabClient(config)
 	ctx := context.Background()
-	mappingConfig := gitlab.DefaultMappingConfig()
 
-	// Create SyncContext from globals for thread-safe operations
-	syncCtx := NewSyncContext()
-	syncCtx.SetStore(store)
-	syncCtx.SetActor(actor)
-	syncCtx.SetDBPath(dbPath)
+	// Create and initialize the GitLab tracker
+	gt := &gitlab.Tracker{}
+	if err := gt.Init(ctx, store); err != nil {
+		return fmt.Errorf("initializing GitLab tracker: %w", err)
+	}
+
+	// Create the sync engine
+	engine := tracker.NewEngine(gt, store, actor)
+	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
+	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+
+	// Set up GitLab-specific pull hooks
+	engine.PullHooks = buildGitLabPullHooks(ctx)
+
+	// Build sync options from CLI flags
+	pull := !gitlabSyncPushOnly
+	push := !gitlabSyncPullOnly
+
+	opts := tracker.SyncOptions{
+		Pull:   pull,
+		Push:   push,
+		DryRun: gitlabSyncDryRun,
+	}
+
+	// Map conflict resolution
+	switch conflictStrategy {
+	case ConflictStrategyPreferLocal:
+		opts.ConflictResolution = tracker.ConflictLocal
+	case ConflictStrategyPreferGitLab:
+		opts.ConflictResolution = tracker.ConflictExternal
+	default:
+		opts.ConflictResolution = tracker.ConflictTimestamp
+	}
 
 	if gitlabSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Dry run mode - no changes will be made")
 		_, _ = fmt.Fprintln(out)
 	}
 
-	// Default: both pull and push
-	pull := !gitlabSyncPushOnly
-	push := !gitlabSyncPullOnly
+	// Run sync
+	result, err := engine.Sync(ctx, opts)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return err
+	}
 
-	result := &gitlab.SyncResult{Success: true}
-
-	// Pull from GitLab
-	if pull {
-		if gitlabSyncDryRun {
-			_, _ = fmt.Fprintln(out, "→ [DRY RUN] Would pull issues from GitLab")
-		} else {
-			_, _ = fmt.Fprintln(out, "→ Pulling issues from GitLab...")
-		}
-
-		pullStats, err := doPullFromGitLabWithContext(ctx, syncCtx, client, mappingConfig, gitlabSyncDryRun, "all", nil)
-		if err != nil {
-			result.Success = false
-			result.Error = err.Error()
-			_, _ = fmt.Fprintf(out, "Error pulling from GitLab: %v\n", err)
-			return err
-		}
-
-		result.Stats.Pulled = pullStats.Created + pullStats.Updated
-		result.Stats.Created += pullStats.Created
-		result.Stats.Updated += pullStats.Updated
-		result.Stats.Skipped += pullStats.Skipped
-
-		if !gitlabSyncDryRun {
+	// Output results
+	if !gitlabSyncDryRun {
+		if result.Stats.Pulled > 0 {
 			_, _ = fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n",
-				result.Stats.Pulled, pullStats.Created, pullStats.Updated)
+				result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
 		}
-	}
-
-	// Detect conflicts BEFORE push to prevent data loss.
-	// Conflict handling depends on strategy:
-	// - prefer-local: force push conflicting issues (local wins)
-	// - prefer-gitlab: skip conflicting issues, then update local from GitLab
-	// - prefer-newer: compare timestamps, force push if local newer, else skip
-	var conflicts []gitlab.Conflict
-	skipUpdateIDs := make(map[string]bool)
-	forceUpdateIDs := make(map[string]bool)
-
-	if pull && push && !gitlabSyncDryRun {
-		var localIssues []*types.Issue
-		if syncCtx.Store() != nil {
-			var err error
-			localIssues, err = syncCtx.Store().SearchIssues(ctx, "", types.IssueFilter{})
-			if err != nil {
-				_, _ = fmt.Fprintf(out, "Warning: failed to get local issues for conflict detection: %v\n", err)
-			} else {
-				conflicts, err = detectGitLabConflictsWithContext(ctx, syncCtx, client, localIssues)
-				if err != nil {
-					_, _ = fmt.Fprintf(out, "Warning: failed to detect conflicts: %v\n", err)
-				} else if len(conflicts) > 0 {
-					// Handle conflicts based on strategy
-					for _, c := range conflicts {
-						switch conflictStrategy {
-						case ConflictStrategyPreferLocal:
-							// Local wins: force push to GitLab
-							forceUpdateIDs[c.IssueID] = true
-						case ConflictStrategyPreferGitLab:
-							// GitLab wins: skip push, will update local in resolution
-							skipUpdateIDs[c.IssueID] = true
-						case ConflictStrategyPreferNewer:
-							// Use newer version
-							if c.LocalUpdated.After(c.GitLabUpdated) {
-								// Local is newer: force push
-								forceUpdateIDs[c.IssueID] = true
-							} else {
-								// GitLab is newer: skip push, will update local
-								skipUpdateIDs[c.IssueID] = true
-							}
-						}
-					}
-					_, _ = fmt.Fprintf(out, "→ Detected %d conflicts (strategy: %s)\n", len(conflicts), conflictStrategy)
-				}
-			}
+		if result.Stats.Pushed > 0 {
+			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
 		}
-	}
-
-	// Push to GitLab
-	if push {
-		if gitlabSyncDryRun {
-			_, _ = fmt.Fprintln(out, "→ [DRY RUN] Would push issues to GitLab")
-		} else {
-			_, _ = fmt.Fprintln(out, "→ Pushing issues to GitLab...")
+		if result.Stats.Conflicts > 0 {
+			_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
 		}
-
-		// Get local issues to push
-		var localIssues []*types.Issue
-		if syncCtx.Store() != nil {
-			var err error
-			localIssues, err = syncCtx.Store().SearchIssues(ctx, "", types.IssueFilter{})
-			if err != nil {
-				return fmt.Errorf("failed to get local issues: %w", err)
-			}
-		}
-
-		// Pass both forceUpdateIDs (for prefer-local) and skipUpdateIDs (for prefer-gitlab)
-		pushStats, err := doPushToGitLabWithContext(ctx, syncCtx, client, mappingConfig, localIssues, gitlabSyncDryRun, false, forceUpdateIDs, skipUpdateIDs)
-		if err != nil {
-			result.Success = false
-			result.Error = err.Error()
-			_, _ = fmt.Fprintf(out, "Error pushing to GitLab: %v\n", err)
-			return err
-		}
-
-		result.Stats.Pushed = pushStats.Created + pushStats.Updated
-		result.Stats.Created += pushStats.Created
-		result.Stats.Updated += pushStats.Updated
-		result.Stats.Skipped += pushStats.Skipped
-
-		if !gitlabSyncDryRun {
-			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues (%d created, %d updated)\n",
-				result.Stats.Pushed, pushStats.Created, pushStats.Updated)
-		}
-	}
-
-	// Resolve conflicts: update local from GitLab for issues where GitLab won
-	// (prefer-gitlab always, prefer-newer when GitLab was newer)
-	// For prefer-local, conflicts were force-pushed so no local update needed.
-	if len(skipUpdateIDs) > 0 && !gitlabSyncDryRun {
-		_, _ = fmt.Fprintf(out, "→ Updating %d local issues from GitLab...\n", len(skipUpdateIDs))
-		// Filter conflicts to only those where GitLab version should be applied locally
-		var conflictsToResolve []gitlab.Conflict
-		for _, c := range conflicts {
-			if skipUpdateIDs[c.IssueID] {
-				conflictsToResolve = append(conflictsToResolve, c)
-			}
-		}
-		if err := resolveGitLabConflictsWithContext(ctx, syncCtx, client, mappingConfig, conflictsToResolve, conflictStrategy); err != nil {
-			_, _ = fmt.Fprintf(out, "Warning: failed to resolve some conflicts: %v\n", err)
-		} else {
-			_, _ = fmt.Fprintf(out, "✓ Updated %d local issues\n", len(conflictsToResolve))
-		}
-		result.Stats.Conflicts = len(conflicts)
 	}
 
 	if gitlabSyncDryRun {
@@ -429,4 +421,23 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// buildGitLabPullHooks creates PullHooks for GitLab-specific pull behavior.
+func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
+	prefix := "bd"
+	if store != nil {
+		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
+			prefix = p
+		}
+	}
+
+	return &tracker.PullHooks{
+		GenerateID: func(_ context.Context, issue *types.Issue) error {
+			if issue.ID == "" {
+				issue.ID = generateIssueID(prefix)
+			}
+			return nil
+		},
+	}
 }

@@ -241,6 +241,15 @@ func linearToTrackerIssue(li *Issue) tracker.TrackerIssue {
 	return ti
 }
 
+// BuildStateCacheFromTracker builds a StateCache using the tracker's internal client.
+// This allows CLI code to set up PushHooks.BuildStateCache without accessing the client directly.
+func BuildStateCacheFromTracker(ctx context.Context, t *Tracker) (*StateCache, error) {
+	if t.client == nil {
+		return nil, fmt.Errorf("Linear tracker not initialized")
+	}
+	return BuildStateCache(ctx, t.client)
+}
+
 // configLoaderAdapter wraps storage.Storage to implement linear.ConfigLoader.
 type configLoaderAdapter struct {
 	ctx   context.Context
