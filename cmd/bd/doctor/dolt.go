@@ -116,7 +116,7 @@ func closeDoltDB(db *sql.DB, serverMode bool) {
 
 // GetBackend returns the configured backend type from configuration.
 // It checks config.yaml first (storage-backend key), then falls back to metadata.json.
-// Returns "sqlite" (default) or "dolt".
+// Returns "dolt" (default) or "sqlite" (legacy).
 // hq-3446fc.17: Use factory.GetBackendFromConfig for consistent backend detection.
 func GetBackend(beadsDir string) string {
 	return factory.GetBackendFromConfig(beadsDir)
@@ -136,7 +136,7 @@ func CheckDoltConnection(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (not using Dolt backend)",
 			Category: CategoryCore,
 		}
 	}
@@ -208,7 +208,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (not using Dolt backend)",
 			Category: CategoryCore,
 		}
 	}
@@ -266,7 +266,7 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt-JSONL Sync",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (not using Dolt backend)",
 			Category: CategoryData,
 		}
 	}
@@ -342,7 +342,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Status",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (not using Dolt backend)",
 			Category: CategoryData,
 		}
 	}

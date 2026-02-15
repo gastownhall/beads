@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,12 +10,10 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/routing"
+	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -754,39 +751,25 @@ func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 		return false, fmt.Sprintf("rig %q not found: %v", rigName, err)
 	}
 
-	// Load config to get database path
-	cfg, err := configfile.Load(targetBeadsDir)
-	if err != nil {
-		return false, fmt.Sprintf("failed to load config for rig %q: %v", rigName, err)
-	}
-
-	dbPath := cfg.DatabasePath(targetBeadsDir)
-
-	// Open the target database (read-only)
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	// Open the target database (read-only) using storage factory
+	// This supports both Dolt and legacy SQLite backends in the target rig.
+	targetStore, err := storagefactory.NewFromConfigWithOptions(ctx, targetBeadsDir, storagefactory.Options{ReadOnly: true})
 	if err != nil {
 		return false, fmt.Sprintf("failed to open database for rig %q: %v", rigName, err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = targetStore.Close() }()
 
 	// Check if the target bead exists and is closed
-	var status string
-	err = db.QueryRowContext(ctx, `
-		SELECT status FROM issues WHERE id = ?
-	`, beadID).Scan(&status)
-
+	issue, err := targetStore.GetIssue(ctx, beadID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, fmt.Sprintf("bead %s not found in rig %s", beadID, rigName)
-		}
-		return false, fmt.Sprintf("database query failed: %v", err)
+		return false, fmt.Sprintf("bead %s not found in rig %s: %v", beadID, rigName, err)
 	}
 
-	if status == string(types.StatusClosed) {
+	if issue.Status == types.StatusClosed {
 		return true, fmt.Sprintf("target bead %s is closed", beadID)
 	}
 
-	return false, fmt.Sprintf("target bead %s status is %q (waiting for closed)", beadID, status)
+	return false, fmt.Sprintf("target bead %s status is %q (waiting for closed)", beadID, string(issue.Status))
 }
 
 // closeGate closes a gate issue with the given reason

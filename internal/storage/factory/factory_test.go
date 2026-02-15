@@ -11,33 +11,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-func TestNew_SQLiteBackend(t *testing.T) {
+func TestNew_SQLiteBackendReturnsError(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	store, err := New(ctx, configfile.BackendSQLite, dbPath)
-	if err != nil {
-		t.Fatalf("New(sqlite) failed: %v", err)
+	_, err := New(ctx, configfile.BackendSQLite, dbPath)
+	if err == nil {
+		t.Fatal("New(sqlite) should return error since SQLite backend was removed")
 	}
-	defer store.Close()
-
-	if store == nil {
-		t.Fatal("New(sqlite) returned nil store")
-	}
-}
-
-func TestNew_EmptyBackendDefaultsToSQLite(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	store, err := New(ctx, "", dbPath)
-	if err != nil {
-		t.Fatalf("New('') failed: %v", err)
-	}
-	defer store.Close()
-
-	if store == nil {
-		t.Fatal("New('') returned nil store")
+	if !strings.Contains(err.Error(), "removed") {
+		t.Errorf("error should mention removed, got: %v", err)
 	}
 }
 
@@ -50,28 +33,6 @@ func TestNew_UnknownBackend(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown storage backend") {
 		t.Errorf("error should mention unknown backend, got: %v", err)
-	}
-}
-
-func TestNewWithOptions_ReadOnly(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	// Create a DB first so read-only can open it
-	store, err := New(ctx, configfile.BackendSQLite, dbPath)
-	if err != nil {
-		t.Fatalf("creating DB: %v", err)
-	}
-	store.Close()
-
-	roStore, err := NewWithOptions(ctx, configfile.BackendSQLite, dbPath, Options{ReadOnly: true})
-	if err != nil {
-		t.Fatalf("NewWithOptions(ReadOnly) failed: %v", err)
-	}
-	defer roStore.Close()
-
-	if roStore == nil {
-		t.Fatal("NewWithOptions(ReadOnly) returned nil store")
 	}
 }
 
@@ -92,17 +53,33 @@ func TestRegisterBackend(t *testing.T) {
 }
 
 func TestGetBackendFromConfig_NoConfig(t *testing.T) {
-	// Non-existent directory should default to SQLite
+	// Non-existent directory should default to Dolt
 	backend := GetBackendFromConfig("/nonexistent/path")
-	if backend != configfile.BackendSQLite {
-		t.Errorf("GetBackendFromConfig(missing) = %q, want %q", backend, configfile.BackendSQLite)
+	if backend != configfile.BackendDolt {
+		t.Errorf("GetBackendFromConfig(missing) = %q, want %q", backend, configfile.BackendDolt)
 	}
 }
 
 func TestGetBackendFromConfig_WithConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Write a minimal metadata.json
+	// Write a metadata.json with dolt backend
+	metadataPath := filepath.Join(tmpDir, "metadata.json")
+	err := os.WriteFile(metadataPath, []byte(`{"backend": "dolt"}`), 0644)
+	if err != nil {
+		t.Fatalf("writing metadata.json: %v", err)
+	}
+
+	backend := GetBackendFromConfig(tmpDir)
+	if backend != configfile.BackendDolt {
+		t.Errorf("GetBackendFromConfig() = %q, want %q", backend, configfile.BackendDolt)
+	}
+}
+
+func TestGetBackendFromConfig_LegacySQLite(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Write a metadata.json with legacy sqlite backend
 	metadataPath := filepath.Join(tmpDir, "metadata.json")
 	err := os.WriteFile(metadataPath, []byte(`{"backend": "sqlite"}`), 0644)
 	if err != nil {
@@ -111,7 +88,7 @@ func TestGetBackendFromConfig_WithConfig(t *testing.T) {
 
 	backend := GetBackendFromConfig(tmpDir)
 	if backend != configfile.BackendSQLite {
-		t.Errorf("GetBackendFromConfig() = %q, want %q", backend, configfile.BackendSQLite)
+		t.Errorf("GetBackendFromConfig(sqlite) = %q, want %q", backend, configfile.BackendSQLite)
 	}
 }
 

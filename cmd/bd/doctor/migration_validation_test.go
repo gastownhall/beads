@@ -1,5 +1,3 @@
-//go:build cgo
-
 package doctor
 
 import (
@@ -8,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -22,16 +20,13 @@ func newTestIssue(id string) *types.Issue {
 	}
 }
 
-// insertIssueDirectly inserts an issue via raw SQL, bypassing prefix validation.
-// This simulates cross-rig contamination where foreign-prefix issues end up in the DB.
-func insertIssueDirectly(t *testing.T, store *sqlite.SQLiteStorage, id string) {
+// insertIssueDirectly inserts an issue with a pre-set ID into the memory store.
+// This simulates cross-rig contamination where foreign-prefix issues end up in the store.
+func insertIssueDirectly(t *testing.T, store *memory.MemoryStorage, id string) {
 	t.Helper()
-	db := store.UnderlyingDB()
-	_, err := db.Exec(
-		"INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, 'open', 2, 'task', datetime('now'), datetime('now'))",
-		id, "Test issue "+id,
-	)
-	if err != nil {
+	ctx := context.Background()
+	issue := newTestIssue(id)
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("failed to insert issue %s: %v", id, err)
 	}
 }
@@ -346,11 +341,8 @@ func TestCategorizeDoltExtras_AllForeign(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	store := memory.New(jsonlPath)
 	defer store.Close()
 
 	// Set local prefix to "bd"
@@ -396,11 +388,8 @@ func TestCategorizeDoltExtras_MixedEphemeralAndForeign(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	store := memory.New(jsonlPath)
 	defer store.Close()
 
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
@@ -439,11 +428,8 @@ func TestCategorizeDoltExtras_AllEphemeral(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	store := memory.New(jsonlPath)
 	defer store.Close()
 
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
@@ -477,11 +463,8 @@ func TestCategorizeDoltExtras_NoExtras(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store, err := sqlite.New(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+	store := memory.New(jsonlPath)
 	defer store.Close()
 
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {

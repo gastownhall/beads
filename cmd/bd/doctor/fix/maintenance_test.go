@@ -30,4 +30,3 @@ func TestStaleClosedIssues_NoBeadsDir(t *testing.T) {
 		t.Error("expected error for missing .beads directory")
 	}
 }
-

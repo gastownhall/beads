@@ -34,8 +34,8 @@ func DetectPendingMigrations(path string) []PendingMigration {
 		return pending
 	}
 
-	// Detect backend — SQLite-specific migration checks don't apply to Dolt (bd-k1noz)
-	backend := configfile.BackendSQLite
+	// Detect backend — SQLite-specific migration checks don't apply to Dolt
+	backend := configfile.BackendDolt
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		backend = cfg.GetBackend()
 	}
@@ -60,7 +60,7 @@ func DetectPendingMigrations(path string) []PendingMigration {
 		})
 	}
 
-	// Check for database version mismatch (main migrate command) — SQLite only (bd-k1noz)
+	// Check for database version mismatch (main migrate command) — SQLite only
 	if backend == configfile.BackendSQLite {
 		if versionMismatch := checkDatabaseVersionMismatch(beadsDir); versionMismatch != "" {
 			pending = append(pending, PendingMigration{

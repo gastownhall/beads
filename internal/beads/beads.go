@@ -381,13 +381,14 @@ func NewStorage(ctx context.Context, dbPath string) (Storage, error) {
 
 // GetConfiguredBackend returns the backend type from the beads directory config.
 // Returns "dolt" if no config exists or backend is not specified.
+// If backend is explicitly "sqlite", returns "sqlite" so migration tooling can detect it.
 func GetConfiguredBackend(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return configfile.BackendDolt
 	}
 	backend := cfg.GetBackend()
-	if backend == "" || backend == configfile.BackendSQLite {
+	if backend == "" {
 		return configfile.BackendDolt
 	}
 	return backend

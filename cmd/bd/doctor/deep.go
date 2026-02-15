@@ -77,8 +77,8 @@ func RunDeepValidation(path string) DeepValidationResult {
 	defer db.Close()
 
 	// Get counts for progress reporting
-	_ = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&result.TotalIssues) // Best effort: zero counts are safe defaults for diagnostic display
-	_ = db.QueryRow("SELECT COUNT(*) FROM dependencies").Scan(&result.TotalDependencies)                 // Best effort: zero counts are safe defaults for diagnostic display
+	_ = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&result.TotalIssues)             // Best effort: zero counts are safe defaults for diagnostic display
+	_ = db.QueryRow("SELECT COUNT(*) FROM dependencies").Scan(&result.TotalDependencies) // Best effort: zero counts are safe defaults for diagnostic display
 
 	// Run all deep checks
 	result.ParentConsistency = checkParentConsistency(db)

@@ -194,19 +194,8 @@ func CheckStaleMolecules(path string) DoctorCheck {
 func CheckCompactionCandidates(path string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(path)
 
-	// Dolt backend: this check uses SQLite-specific queries, skip for now
-	if backend == configfile.BackendDolt {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "N/A (dolt backend)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Check if backend is SQLite - compaction only applies to SQLite
-	cfg, _ := configfile.Load(beadsDir) // Best effort: nil config means no maintenance settings to check
-	if cfg != nil && cfg.GetBackend() != configfile.BackendSQLite {
+	// Compaction only applies to SQLite backend; skip for Dolt and any other backend
+	if backend != configfile.BackendSQLite {
 		return DoctorCheck{
 			Name:     "Compaction Candidates",
 			Status:   StatusOK,

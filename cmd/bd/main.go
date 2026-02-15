@@ -190,7 +190,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on). Default: on for embedded, off for server mode. Override via config key dolt.auto-commit")
-	rootCmd.PersistentFlags().DurationVar(&lockTimeout, "lock-timeout", 30*time.Second, "SQLite busy timeout (0 = fail immediately if locked)")
+	rootCmd.PersistentFlags().DurationVar(&lockTimeout, "lock-timeout", 30*time.Second, "Database busy timeout (0 = fail immediately if locked)")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
@@ -424,7 +424,7 @@ var rootCmd = &cobra.Command{
 			// Set actor for audit trail
 			actor = getActorWithGit()
 
-			// Skip SQLite initialization - we're in memory mode
+			// Skip database initialization - we're in memory mode
 			return
 		}
 
@@ -474,17 +474,16 @@ var rootCmd = &cobra.Command{
 
 				// Allow read-only commands to auto-bootstrap from JSONL (GH#b09)
 				// This enables `bd show` after cold-start when DB is missing.
-				// IMPORTANT: Only auto-bootstrap for SQLite backend. If metadata.json says
-				// the backend is Dolt, we must NOT silently create a SQLite database —
-				// that causes Classic contamination. Error out instead so the user can
-				// fix the Dolt connection. (gt-r1nex)
+				// IMPORTANT: If metadata.json says the backend is Dolt, we must NOT
+				// silently create a different database — that causes contamination.
+				// Error out instead so the user can fix the Dolt connection. (gt-r1nex)
 				canAutoBootstrap := false
 				if isReadOnlyCommand(cmd.Name()) && beadsDir != "" {
 					jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 					if _, err := os.Stat(jsonlPath); err == nil {
 						configuredBackend := factory.GetBackendFromConfig(beadsDir)
 						if configuredBackend == configfile.BackendDolt {
-							// Dolt backend configured but database not found — don't create SQLite
+							// Dolt backend configured but database not found — don't auto-bootstrap
 							fmt.Fprintf(os.Stderr, "Error: Dolt backend configured but database not found\n")
 							fmt.Fprintf(os.Stderr, "The .beads/metadata.json specifies backend: dolt\n")
 							fmt.Fprintf(os.Stderr, "but no Dolt database was found. Check that the Dolt server is running.\n")
@@ -517,7 +516,7 @@ var rootCmd = &cobra.Command{
 
 					// Generic error - no beads directory or JSONL found
 					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
-					fmt.Fprintf(os.Stderr, "      or use 'bd --no-db' to work with JSONL only (no SQLite)\n")
+					fmt.Fprintf(os.Stderr, "      or use 'bd --no-db' to work with JSONL only (no database)\n")
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
 					os.Exit(1)
 				}
@@ -772,7 +771,7 @@ func checkBlockedEnvVars() error {
 	for _, name := range blockedEnvVars {
 		if os.Getenv(name) != "" {
 			return fmt.Errorf("%s env var is not supported and has been removed to prevent data fragmentation.\n"+
-				"The storage backend is set in .beads/metadata.json. To change it, use: bd migrate dolt (or bd migrate sqlite)", name)
+				"The storage backend is set in .beads/metadata.json. To change it, use: bd migrate dolt", name)
 		}
 	}
 	return nil

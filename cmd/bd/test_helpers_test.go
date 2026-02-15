@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,9 +17,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage/memory"
 )
 
 // testIDCounter ensures unique IDs across all test runs
@@ -108,71 +108,14 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 	return saved
 }
 
-// failIfProductionDatabase checks if the database path is in a production directory
-// and fails the test to prevent test pollution (bd-2c5a)
-func failIfProductionDatabase(t *testing.T, dbPath string) {
-	t.Helper()
-
-	// CRITICAL (bd-2c5a): Set test mode flag
-	ensureTestMode(t)
-
-	// Get absolute path for comparison
-	absPath, err := filepath.Abs(dbPath)
-	if err != nil {
-		t.Logf("Warning: Could not get absolute path for %s: %v", dbPath, err)
-		return
-	}
-
-	// Use worktree-aware git directory detection
-	gitDir, err := git.GetGitDir()
-	if err != nil {
-		// Not a git repository, no pollution risk
-		return
-	}
-
-	// Check if database is in .beads/ directory of this git repository
-	beadsPath := ""
-	gitDirAbs, err := filepath.Abs(gitDir)
-	if err != nil {
-		t.Logf("Warning: Could not get absolute path for git dir %s: %v", gitDir, err)
-		return
-	}
-
-	// The .beads directory should be at the root of the git repository
-	// For worktrees, gitDir points to the main repo's .git directory
-	repoRoot := filepath.Dir(gitDirAbs)
-	beadsPath = filepath.Join(repoRoot, ".beads")
-
-	if strings.HasPrefix(absPath, beadsPath) {
-		// Database is in .beads/ directory of a git repository
-		// This is ONLY allowed if we're in a temp directory
-		if !strings.Contains(absPath, os.TempDir()) {
-			t.Fatalf("PRODUCTION DATABASE POLLUTION DETECTED (bd-2c5a):\n"+
-				"  Database: %s\n"+
-				"  Git repo: %s\n"+
-				"  Tests MUST use t.TempDir() or tempfile to create isolated databases.\n"+
-				"  This prevents test issues from polluting the production database.",
-				absPath, repoRoot)
-		}
-	}
-}
-
-// newTestStore creates a SQLite store with issue_prefix configured (bd-166)
+// newTestStore creates a memory store with issue_prefix configured (bd-166)
 // This prevents "database not initialized" errors in tests
 func newTestStore(t *testing.T, dbPath string) storage.Storage {
 	t.Helper()
 
-	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
-	failIfProductionDatabase(t, dbPath)
+	ensureTestMode(t)
 
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatalf("Failed to create database directory: %v", err)
-	}
-
-	store, err := sqlite.New(context.Background(), dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	store := memory.New(filepath.Join(filepath.Dir(dbPath), "issues.jsonl"))
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
 	ctx := context.Background()
@@ -191,21 +134,13 @@ func newTestStore(t *testing.T, dbPath string) storage.Storage {
 	return store
 }
 
-// newTestStoreWithPrefix creates a SQLite store with custom issue_prefix configured
+// newTestStoreWithPrefix creates a memory store with custom issue_prefix configured
 func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) storage.Storage {
 	t.Helper()
 
-	// CRITICAL (bd-2c5a): Ensure we're not polluting production database
-	failIfProductionDatabase(t, dbPath)
+	ensureTestMode(t)
 
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		t.Fatalf("Failed to create database directory: %v", err)
-	}
-
-	store, err := sqlite.New(context.Background(), dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
+	store := memory.New(filepath.Join(filepath.Dir(dbPath), "issues.jsonl"))
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
 	ctx := context.Background()
@@ -224,11 +159,11 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) storage.
 	return store
 }
 
-// openExistingTestDB opens an existing database without modifying it.
-// Used in tests where the database was already created by the code under test.
+// openExistingTestDB is not supported with the memory backend since memory stores
+// cannot be "reopened" from a previous state.
 func openExistingTestDB(t *testing.T, dbPath string) (storage.Storage, error) {
 	t.Helper()
-	return sqlite.New(context.Background(), dbPath)
+	return nil, fmt.Errorf("openExistingTestDB not supported with memory backend")
 }
 
 // runCommandInDir runs a command in the specified directory

@@ -298,34 +298,33 @@ func (m *mockTransaction) GetIssueComments(ctx context.Context, issueID string) 
 
 // TestConfig verifies the Config struct has expected fields.
 func TestConfig(t *testing.T) {
-	t.Run("sqlite config", func(t *testing.T) {
+	t.Run("dolt config", func(t *testing.T) {
 		cfg := Config{
-			Backend: "sqlite",
-			Path:    "/tmp/test.db",
+			Backend: "dolt",
+			Path:    "/tmp/dolt",
 		}
-		if cfg.Backend != "sqlite" {
-			t.Errorf("expected backend 'sqlite', got %q", cfg.Backend)
+		if cfg.Backend != "dolt" {
+			t.Errorf("expected backend 'dolt', got %q", cfg.Backend)
 		}
-		if cfg.Path != "/tmp/test.db" {
-			t.Errorf("expected path '/tmp/test.db', got %q", cfg.Path)
+		if cfg.Path != "/tmp/dolt" {
+			t.Errorf("expected path '/tmp/dolt', got %q", cfg.Path)
 		}
 	})
 
-	t.Run("postgres config", func(t *testing.T) {
+	t.Run("server mode config", func(t *testing.T) {
 		cfg := Config{
-			Backend:  "postgres",
+			Backend:  "dolt",
 			Host:     "localhost",
-			Port:     5432,
+			Port:     3306,
 			Database: "beads",
 			User:     "test",
 			Password: "secret",
-			SSLMode:  "disable",
 		}
-		if cfg.Backend != "postgres" {
-			t.Errorf("expected backend 'postgres', got %q", cfg.Backend)
+		if cfg.Backend != "dolt" {
+			t.Errorf("expected backend 'dolt', got %q", cfg.Backend)
 		}
-		if cfg.Port != 5432 {
-			t.Errorf("expected port 5432, got %d", cfg.Port)
+		if cfg.Port != 3306 {
+			t.Errorf("expected port 3306, got %d", cfg.Port)
 		}
 	})
 }

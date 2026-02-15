@@ -55,7 +55,7 @@ func CheckSyncDivergence(path string) DoctorCheck {
 		}
 	}
 
-	backend := configfile.BackendSQLite
+	backend := configfile.BackendDolt
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		backend = cfg.GetBackend()
 	}
@@ -84,9 +84,9 @@ func CheckSyncDivergence(path string) DoctorCheck {
 	}
 
 	if len(issues) == 0 {
-		msg := "JSONL, SQLite, and git are in sync"
-		if backend == configfile.BackendDolt {
-			msg = "JSONL, Dolt, and git are in sync"
+		msg := "JSONL, Dolt, and git are in sync"
+		if backend == configfile.BackendSQLite {
+			msg = "JSONL, SQLite, and git are in sync"
 		}
 		return DoctorCheck{
 			Name:     "Sync Divergence",

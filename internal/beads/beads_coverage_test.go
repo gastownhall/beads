@@ -156,15 +156,15 @@ func TestGetConfiguredBackend(t *testing.T) {
 		}
 	})
 
-	t.Run("sqlite config returns dolt", func(t *testing.T) {
+	t.Run("sqlite config returns sqlite for migration detection", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		metadataContent := `{"backend": "sqlite"}`
 		if err := os.WriteFile(filepath.Join(tmpDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
 			t.Fatal(err)
 		}
 		result := GetConfiguredBackend(tmpDir)
-		if result != "dolt" {
-			t.Errorf("GetConfiguredBackend() = %q, want %q", result, "dolt")
+		if result != "sqlite" {
+			t.Errorf("GetConfiguredBackend() = %q, want %q", result, "sqlite")
 		}
 	})
 

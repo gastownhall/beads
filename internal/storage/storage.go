@@ -218,12 +218,12 @@ type Storage interface {
 
 // Config holds database configuration
 type Config struct {
-	Backend string // "sqlite" or "postgres"
+	Backend string // "dolt", "sqlite" (legacy), or "postgres"
 
-	// SQLite config
-	Path string // database file path
+	// Database file path (SQLite legacy or Dolt embedded)
+	Path string
 
-	// PostgreSQL config
+	// Server mode config (Dolt server or PostgreSQL)
 	Host     string
 	Port     int
 	Database string
@@ -254,7 +254,6 @@ type CompactableStorage interface {
 	// ApplyCompaction updates the compaction metadata for an issue after compaction.
 	// Sets compaction_level, compacted_at, compacted_at_commit, and original_size fields.
 	ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int, compressedSize int, commitHash string) error
-
 }
 
 // MultiRepoStorage extends Storage with multi-repo sync capabilities.
