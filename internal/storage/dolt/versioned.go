@@ -10,11 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Ensure DoltStore implements VersionedStorage at compile time.
-var _ storage.VersionedStorage = (*DoltStore)(nil)
-
 // History returns the complete version history for an issue.
-// Implements storage.VersionedStorage.
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
 	internal, err := s.GetIssueHistory(ctx, issueID)
 	if err != nil {

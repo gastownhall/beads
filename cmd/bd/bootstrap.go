@@ -1,6 +1,6 @@
 //go:build cgo
 
-package factory
+package main
 
 import (
 	"context"
@@ -9,39 +9,11 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-func init() {
-	RegisterBackend(configfile.BackendDolt, func(ctx context.Context, path string, opts Options) (storage.Storage, error) {
-		// Only bootstrap in embedded mode - server mode has database on server
-		if !opts.ServerMode {
-			if err := bootstrapEmbeddedDolt(ctx, path, opts); err != nil {
-				return nil, err
-			}
-		}
-
-		store, err := dolt.New(ctx, &dolt.Config{
-			Path:        path,
-			Database:    opts.Database,
-			ReadOnly:    opts.ReadOnly,
-			OpenTimeout: opts.OpenTimeout,
-			ServerMode:  opts.ServerMode,
-			ServerHost:  opts.ServerHost,
-			ServerPort:  opts.ServerPort,
-			ServerUser:  opts.ServerUser,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return store, nil
-	})
-}
-
 // bootstrapEmbeddedDolt checks if a JSONL-to-Dolt bootstrap is needed and runs it if so.
-func bootstrapEmbeddedDolt(ctx context.Context, path string, opts Options) error {
+func bootstrapEmbeddedDolt(ctx context.Context, path string, cfg *dolt.Config) error {
 	// Path is the dolt subdirectory, parent is .beads directory
 	beadsDir := filepath.Dir(path)
 
@@ -59,8 +31,8 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, opts Options) error
 	bootstrapped, result, err := dolt.Bootstrap(ctx, dolt.BootstrapConfig{
 		BeadsDir:    beadsDir,
 		DoltPath:    path,
-		LockTimeout: opts.LockTimeout,
-		Database:    opts.Database,
+		LockTimeout: cfg.OpenTimeout,
+		Database:    cfg.Database,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)

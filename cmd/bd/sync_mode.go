@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // Sync mode constants - re-exported from internal/config for backward compatibility.
@@ -50,7 +50,7 @@ const (
 
 // GetSyncMode returns the configured sync mode, checking config.yaml first (where bd config set writes),
 // then falling back to database. This fixes GH#1277 where yaml and database were inconsistent.
-func GetSyncMode(ctx context.Context, s storage.Storage) string {
+func GetSyncMode(ctx context.Context, s *dolt.DoltStore) string {
 	// First check config.yaml (where bd config set writes for sync.* keys)
 	yamlMode := config.GetSyncMode()
 	if yamlMode != "" && yamlMode != config.SyncModeGitPortable {
@@ -73,7 +73,7 @@ func GetSyncMode(ctx context.Context, s storage.Storage) string {
 }
 
 // SetSyncMode sets the sync mode configuration in the database.
-func SetSyncMode(ctx context.Context, s storage.Storage, mode string) error {
+func SetSyncMode(ctx context.Context, s *dolt.DoltStore, mode string) error {
 	// Validate mode using the shared validation
 	if !config.IsValidSyncMode(mode) {
 		return fmt.Errorf("invalid sync mode: %s (valid: %s)",
@@ -84,7 +84,7 @@ func SetSyncMode(ctx context.Context, s storage.Storage, mode string) error {
 }
 
 // GetExportTrigger returns when JSONL export should happen.
-func GetExportTrigger(ctx context.Context, s storage.Storage) string {
+func GetExportTrigger(ctx context.Context, s *dolt.DoltStore) string {
 	trigger, err := s.GetConfig(ctx, SyncExportOnConfigKey)
 	if err != nil || trigger == "" {
 		// Default based on sync mode
@@ -98,7 +98,7 @@ func GetExportTrigger(ctx context.Context, s storage.Storage) string {
 }
 
 // GetImportTrigger returns when JSONL import should happen.
-func GetImportTrigger(ctx context.Context, s storage.Storage) string {
+func GetImportTrigger(ctx context.Context, s *dolt.DoltStore) string {
 	trigger, err := s.GetConfig(ctx, SyncImportOnConfigKey)
 	if err != nil || trigger == "" {
 		return TriggerPull
@@ -113,7 +113,7 @@ func GetImportTrigger(ctx context.Context, s storage.Storage) string {
 // Uses GetSyncMode which checks config.yaml first, then falls back to the database.
 // This ensures that sync.mode set in config.yaml (e.g. during Dolt migration) is
 // respected even if not yet propagated to the database via 'bd sync mode set'.
-func ShouldExportJSONL(ctx context.Context, s storage.Storage) bool {
+func ShouldExportJSONL(ctx context.Context, s *dolt.DoltStore) bool {
 	mode := GetSyncMode(ctx, s)
 	return mode != SyncModeDoltNative
 }
@@ -121,13 +121,13 @@ func ShouldExportJSONL(ctx context.Context, s storage.Storage) bool {
 // ShouldImportJSONL returns true if the current sync mode uses JSONL import.
 // In dolt-native mode, there is no JSONL to import — all sync is via Dolt remotes.
 // Uses GetSyncMode which checks config.yaml first, then falls back to the database.
-func ShouldImportJSONL(ctx context.Context, s storage.Storage) bool {
+func ShouldImportJSONL(ctx context.Context, s *dolt.DoltStore) bool {
 	mode := GetSyncMode(ctx, s)
 	return mode != SyncModeDoltNative
 }
 
 // ShouldUseDoltRemote returns true if the current sync mode uses Dolt remotes.
-func ShouldUseDoltRemote(ctx context.Context, s storage.Storage) bool {
+func ShouldUseDoltRemote(ctx context.Context, s *dolt.DoltStore) bool {
 	mode := GetSyncMode(ctx, s)
 	return mode == SyncModeDoltNative || mode == SyncModeBeltAndSuspenders
 }

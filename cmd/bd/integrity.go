@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -31,7 +31,7 @@ func isJSONLNewer(jsonlPath string) bool {
 
 // isJSONLNewerWithStore is like isJSONLNewer but accepts an optional store parameter.
 // If st is nil, it will try to use the global store.
-func isJSONLNewerWithStore(jsonlPath string, st storage.Storage) bool {
+func isJSONLNewerWithStore(jsonlPath string, st *dolt.DoltStore) bool {
 	jsonlInfo, jsonlStatErr := os.Stat(jsonlPath)
 	if jsonlStatErr != nil {
 		return false
@@ -98,7 +98,7 @@ func computeJSONLHash(jsonlPath string) (string, error) {
 //
 // In multi-repo mode, keySuffix should be the stable repo identifier (e.g., ".", "../frontend").
 // The keySuffix must not contain the ':' separator character.
-func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath string, keySuffix string) bool {
+func hasJSONLChanged(ctx context.Context, store *dolt.DoltStore, jsonlPath string, keySuffix string) bool {
 	// Validate keySuffix doesn't contain the separator character
 	if keySuffix != "" && strings.Contains(keySuffix, ":") {
 		// Invalid keySuffix - treat as changed to trigger proper error handling
@@ -143,7 +143,7 @@ func hasJSONLChanged(ctx context.Context, store storage.Storage, jsonlPath strin
 
 // validatePreExport performs integrity checks before exporting database to JSONL.
 // Returns error if critical issues found that would cause data loss.
-func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath string) error {
+func validatePreExport(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
 	// Check if JSONL content has changed since last import - if so, must import first
 	// Uses content-based detection instead of mtime-based to avoid false positives from git operations
 	// Use getRepoKeyForPath to get stable repo identifier for multi-repo support
@@ -189,7 +189,7 @@ func validatePreExport(ctx context.Context, store storage.Storage, jsonlPath str
 
 // checkDuplicateIDs detects duplicate issue IDs in the database.
 // Returns error if duplicates are found (indicates database corruption).
-func checkDuplicateIDs(ctx context.Context, store storage.Storage) error {
+func checkDuplicateIDs(ctx context.Context, store *dolt.DoltStore) error {
 	// Get access to underlying database
 	// This is a hack - we need to add a proper interface method for this
 	// For now, we'll use a type assertion to access the underlying *sql.DB
@@ -243,7 +243,7 @@ func checkDuplicateIDs(ctx context.Context, store storage.Storage) error {
 
 // checkOrphanedDeps finds dependencies pointing to or from non-existent issues.
 // Returns list of orphaned dependency IDs and any error encountered.
-func checkOrphanedDeps(ctx context.Context, store storage.Storage) ([]string, error) {
+func checkOrphanedDeps(ctx context.Context, store *dolt.DoltStore) ([]string, error) {
 	// Get access to underlying database
 	type dbGetter interface {
 		GetDB() interface{}
@@ -343,14 +343,14 @@ func validatePostImportWithExpectedDeletions(before, after, expectedDeletions in
 
 // countDBIssues returns the total number of issues in the database.
 // This is the legacy interface kept for compatibility.
-func countDBIssues(ctx context.Context, store storage.Storage) (int, error) {
+func countDBIssues(ctx context.Context, store *dolt.DoltStore) (int, error) {
 	return countDBIssuesFast(ctx, store)
 }
 
 // countDBIssuesFast uses COUNT(*) if possible, falls back to SearchIssues.
-func countDBIssuesFast(ctx context.Context, store storage.Storage) (int, error) {
+func countDBIssuesFast(ctx context.Context, store *dolt.DoltStore) (int, error) {
 	// Try fast path with COUNT(*) using direct SQL
-	// This is a hack until we add a proper CountIssues method to storage.Storage
+	// This is a hack until we add a proper CountIssues method to *dolt.DoltStore
 	type dbGetter interface {
 		GetDB() interface{}
 	}
@@ -376,7 +376,7 @@ func countDBIssuesFast(ctx context.Context, store storage.Storage) (int, error) 
 
 // dbNeedsExport checks if the database has changes that differ from JSONL.
 // Returns true if export is needed, false if DB and JSONL are already in sync.
-func dbNeedsExport(ctx context.Context, store storage.Storage, jsonlPath string) (bool, error) {
+func dbNeedsExport(ctx context.Context, store *dolt.DoltStore, jsonlPath string) (bool, error) {
 	// Check if JSONL exists
 	jsonlInfo, err := os.Stat(jsonlPath)
 	if os.IsNotExist(err) {
@@ -422,7 +422,7 @@ func dbNeedsExport(ctx context.Context, store storage.Storage, jsonlPath string)
 
 // computeDBHash computes a content hash of the database by exporting to memory.
 // This is used to compare DB content with JSONL content without relying on timestamps.
-func computeDBHash(ctx context.Context, store storage.Storage) (string, error) {
+func computeDBHash(ctx context.Context, store *dolt.DoltStore) (string, error) {
 	// Get all issues from DB
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {

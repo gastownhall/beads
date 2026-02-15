@@ -131,16 +131,10 @@ func init() {
 }
 
 func getFederatedStore() (*dolt.DoltStore, error) {
-	fs, ok := storage.AsFederated(store)
-	if !ok {
-		return nil, fmt.Errorf("federation requires Dolt backend (current backend does not support federation)")
+	if store == nil {
+		return nil, fmt.Errorf("no store available")
 	}
-	// Type assert to get the concrete DoltStore for Sync method
-	ds, ok := fs.(*dolt.DoltStore)
-	if !ok {
-		return nil, fmt.Errorf("internal error: federated storage is not DoltStore")
-	}
-	return ds, nil
+	return store, nil
 }
 
 func runFederationSync(cmd *cobra.Command, args []string) {
@@ -366,11 +360,6 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) {
 	name := args[0]
 	url := args[1]
 
-	fs, ok := storage.AsFederated(store)
-	if !ok {
-		FatalErrorRespectJSON("federation requires Dolt backend")
-	}
-
 	// If user is provided but password is not, prompt for it
 	password := federationPassword
 	if federationUser != "" && password == "" {
@@ -401,12 +390,12 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) {
 			Password:    password,
 			Sovereignty: sov,
 		}
-		if err := fs.AddFederationPeer(ctx, peer); err != nil {
+		if err := store.AddFederationPeer(ctx, peer); err != nil {
 			FatalErrorRespectJSON("failed to add peer: %v", err)
 		}
 	} else {
 		// No credentials, just add the remote
-		if err := fs.AddRemote(ctx, name, url); err != nil {
+		if err := store.AddRemote(ctx, name, url); err != nil {
 			FatalErrorRespectJSON("failed to add peer: %v", err)
 		}
 	}
@@ -435,12 +424,7 @@ func runFederationRemovePeer(cmd *cobra.Command, args []string) {
 
 	name := args[0]
 
-	fs, ok := storage.AsFederated(store)
-	if !ok {
-		FatalErrorRespectJSON("federation requires Dolt backend")
-	}
-
-	if err := fs.RemoveRemote(ctx, name); err != nil {
+	if err := store.RemoveRemote(ctx, name); err != nil {
 		FatalErrorRespectJSON("failed to remove peer: %v", err)
 	}
 
@@ -457,12 +441,7 @@ func runFederationRemovePeer(cmd *cobra.Command, args []string) {
 func runFederationListPeers(cmd *cobra.Command, args []string) {
 	ctx := rootCtx
 
-	fs, ok := storage.AsFederated(store)
-	if !ok {
-		FatalErrorRespectJSON("federation requires Dolt backend")
-	}
-
-	remotes, err := fs.ListRemotes(ctx)
+	remotes, err := store.ListRemotes(ctx)
 	if err != nil {
 		FatalErrorRespectJSON("failed to list peers: %v", err)
 	}

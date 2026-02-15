@@ -9,12 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func setupTestStorage(t *testing.T) storage.Storage {
+func setupTestStorage(t *testing.T) *dolt.DoltStore {
 	t.Helper()
 
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
@@ -38,7 +37,7 @@ func setupTestStorage(t *testing.T) storage.Storage {
 	return store
 }
 
-func createClosedIssue(t *testing.T, store storage.Storage, id string) *types.Issue {
+func createClosedIssue(t *testing.T, store *dolt.DoltStore, id string) *types.Issue {
 	t.Helper()
 
 	ctx := context.Background()

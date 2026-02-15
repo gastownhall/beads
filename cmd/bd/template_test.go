@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -152,7 +152,7 @@ func TestSubstituteVariables(t *testing.T) {
 
 // templateTestHelper provides helpers for Beads template tests
 type templateTestHelper struct {
-	s   storage.Storage
+	s   *dolt.DoltStore
 	ctx context.Context
 	t   *testing.T
 }

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -19,11 +19,11 @@ import (
 type listTestHelper struct {
 	t      *testing.T
 	ctx    context.Context
-	store  storage.Storage
+	store  *dolt.DoltStore
 	issues []*types.Issue
 }
 
-func newListTestHelper(t *testing.T, store storage.Storage) *listTestHelper {
+func newListTestHelper(t *testing.T, store *dolt.DoltStore) *listTestHelper {
 	return &listTestHelper{t: t, ctx: context.Background(), store: store}
 }
 

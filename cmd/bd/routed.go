@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -25,7 +25,7 @@ func beadsDirOverride() bool {
 // RoutedResult contains the result of a routed issue lookup
 type RoutedResult struct {
 	Issue      *types.Issue
-	Store      storage.Storage // The store that contains this issue (may be routed)
+	Store      *dolt.DoltStore // The store that contains this issue (may be routed)
 	Routed     bool            // true if the issue was found via routing
 	ResolvedID string          // The resolved (full) issue ID
 	closeFn    func()          // Function to close routed storage (if any)
@@ -45,7 +45,7 @@ func (r *RoutedResult) Close() {
 // The resolution happens in the correct store based on the ID prefix.
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
-func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.Storage, id string) (*RoutedResult, error) {
+func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
 	// Step 1: Check if routing is needed based on ID prefix
 	if dbPath == "" {
 		// No routing without a database path - use local store
@@ -83,7 +83,7 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.Stora
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
-func resolveAndGetFromStore(ctx context.Context, s storage.Storage, id string, routed bool) (*RoutedResult, error) {
+func resolveAndGetFromStore(ctx context.Context, s *dolt.DoltStore, id string, routed bool) (*RoutedResult, error) {
 	// First, resolve the partial ID
 	resolvedID, err := utils.ResolvePartialID(ctx, s, id)
 	if err != nil {
@@ -110,7 +110,7 @@ func resolveAndGetFromStore(ctx context.Context, s storage.Storage, id string, r
 // openStoreForRig opens a read-only storage connection to a different rig's database.
 // The rigOrPrefix parameter accepts any format: "beads", "bd-", "bd", etc.
 // Returns the opened storage (caller must close) or an error.
-func openStoreForRig(ctx context.Context, rigOrPrefix string) (storage.Storage, error) {
+func openStoreForRig(ctx context.Context, rigOrPrefix string) (*dolt.DoltStore, error) {
 	townBeadsDir, err := findTownBeadsDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve rig: %v", err)
@@ -135,7 +135,7 @@ func openStoreForRig(ctx context.Context, rigOrPrefix string) (storage.Storage, 
 //
 // Returns a RoutedResult containing the issue and the store to use for related queries.
 // The caller MUST call result.Close() when done to release any routed storage.
-func getIssueWithRouting(ctx context.Context, localStore storage.Storage, id string) (*RoutedResult, error) {
+func getIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
 	// Step 1: Try local store first (current behavior)
 	issue, err := localStore.GetIssue(ctx, id)
 	if err == nil && issue != nil {
@@ -236,7 +236,7 @@ func needsRouting(id string) bool {
 // 4. Using routing to look up the issue in the target database
 //
 // Returns a slice of IssueWithDependencyMetadata for resolved external deps.
-func resolveExternalDepsViaRouting(ctx context.Context, issueStore storage.Storage, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+func resolveExternalDepsViaRouting(ctx context.Context, issueStore *dolt.DoltStore, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	// Get raw dependency records to find external refs
 	deps, err := issueStore.GetDependencyRecords(ctx, issueID)
 	if err != nil {

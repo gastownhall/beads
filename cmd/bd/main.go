@@ -23,16 +23,14 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/molecules"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
-	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var (
 	dbPath     string
 	actor      string
-	store      storage.Storage
+	store      *dolt.DoltStore
 	jsonOutput bool
 
 	// Signal-aware context for graceful cancellation
@@ -558,72 +556,62 @@ var rootCmd = &cobra.Command{
 		var err error
 		beadsDir := filepath.Dir(dbPath)
 
-		// Detect backend from metadata.json
-		backend := factory.GetBackendFromConfig(beadsDir)
-
-		// Create storage with appropriate options
-		opts := factory.Options{
-			ReadOnly:    useReadOnly,
-			LockTimeout: lockTimeout,
+		// Create Dolt storage config
+		doltPath := filepath.Join(beadsDir, "dolt")
+		doltCfg := &dolt.Config{
+			ReadOnly: useReadOnly,
 		}
 
-		if backend == configfile.BackendDolt {
-			// Set advisory lock timeout for dolt embedded mode.
-			// Reads get a shorter timeout (shared lock, less contention expected).
-			// Writes get a longer timeout (exclusive lock, may need to wait for readers).
-			if useReadOnly {
-				opts.OpenTimeout = 5 * time.Second
-			} else {
-				opts.OpenTimeout = 15 * time.Second
-			}
-
-			// For Dolt, use the dolt subdirectory
-			doltPath := filepath.Join(beadsDir, "dolt")
-
-			// Load config to get database name and server mode settings
-			cfg, cfgErr := configfile.Load(beadsDir)
-			if cfgErr == nil && cfg != nil {
-				// Always set database name (needed for bootstrap to find
-				// prefix-based databases like "beads_hq"; see #1669)
-				opts.Database = cfg.GetDoltDatabase()
-
-				if cfg.IsDoltServerMode() {
-					opts.ServerMode = true
-					opts.ServerHost = cfg.GetDoltServerHost()
-					opts.ServerPort = cfg.GetDoltServerPort()
-				}
-			}
-
-			// Apply mode-aware default for dolt-auto-commit if neither flag nor
-			// config explicitly set it. Server mode defaults to OFF because the
-			// server handles commits via its own transaction lifecycle; firing
-			// DOLT_COMMIT after every write under concurrent load causes
-			// 'database is read only' errors. Embedded mode defaults to ON so
-			// each write is durably committed.
-			if strings.TrimSpace(doltAutoCommit) == "" {
-				if opts.ServerMode {
-					doltAutoCommit = string(doltAutoCommitOff)
-				} else {
-					doltAutoCommit = string(doltAutoCommitOn)
-				}
-			}
-
-			store, err = factory.NewWithOptions(rootCtx, backend, doltPath, opts)
+		// Set advisory lock timeout for dolt embedded mode.
+		// Reads get a shorter timeout (shared lock, less contention expected).
+		// Writes get a longer timeout (exclusive lock, may need to wait for readers).
+		if useReadOnly {
+			doltCfg.OpenTimeout = 5 * time.Second
 		} else {
-			// SQLite backend
-			store, err = factory.NewWithOptions(rootCtx, backend, dbPath, opts)
-			if err != nil && useReadOnly {
-				// If read-only fails (e.g., DB doesn't exist), fall back to read-write
-				// This handles the case where user runs "bd list" before "bd init"
-				debug.Logf("read-only open failed, falling back to read-write: %v", err)
-				opts.ReadOnly = false
-				store, err = factory.NewWithOptions(rootCtx, backend, dbPath, opts)
+			doltCfg.OpenTimeout = 15 * time.Second
+		}
+
+		// Load config to get database name and server mode settings
+		cfg, cfgErr := configfile.Load(beadsDir)
+		if cfgErr == nil && cfg != nil {
+			// Always set database name (needed for bootstrap to find
+			// prefix-based databases like "beads_hq"; see #1669)
+			doltCfg.Database = cfg.GetDoltDatabase()
+
+			if cfg.IsDoltServerMode() {
+				doltCfg.ServerMode = true
+				doltCfg.ServerHost = cfg.GetDoltServerHost()
+				doltCfg.ServerPort = cfg.GetDoltServerPort()
 			}
 		}
+
+		// Apply mode-aware default for dolt-auto-commit if neither flag nor
+		// config explicitly set it. Server mode defaults to OFF because the
+		// server handles commits via its own transaction lifecycle; firing
+		// DOLT_COMMIT after every write under concurrent load causes
+		// 'database is read only' errors. Embedded mode defaults to ON so
+		// each write is durably committed.
+		if strings.TrimSpace(doltAutoCommit) == "" {
+			if doltCfg.ServerMode {
+				doltAutoCommit = string(doltAutoCommitOff)
+			} else {
+				doltAutoCommit = string(doltAutoCommitOn)
+			}
+		}
+
+		// Bootstrap embedded dolt if needed
+		if !doltCfg.ServerMode {
+			if bErr := bootstrapEmbeddedDolt(rootCtx, doltPath, doltCfg); bErr != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", bErr)
+				os.Exit(1)
+			}
+		}
+
+		doltCfg.Path = doltPath
+		store, err = dolt.New(rootCtx, doltCfg)
 
 		// Track final read-only state for staleness checks (GH#1089)
-		// opts.ReadOnly may have changed if read-only open failed and fell back
-		storeIsReadOnly = opts.ReadOnly
+		storeIsReadOnly = doltCfg.ReadOnly
 
 		if err != nil {
 			// Check for fresh clone scenario
@@ -669,31 +657,8 @@ var rootCmd = &cobra.Command{
 		syncCommandContext()
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		// Handle --no-db mode: write memory storage back to JSONL
+		// --no-db mode has been removed (memory backend removed)
 		if noDb {
-			if store != nil {
-				// Determine beads directory (respect BEADS_DIR)
-				var beadsDir string
-				if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
-					// Canonicalize the path
-					beadsDir = utils.CanonicalizePath(envDir)
-				} else {
-					// Fall back to current directory
-					cwd, err := os.Getwd()
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error: failed to get current directory: %v\n", err)
-						os.Exit(1)
-					}
-					beadsDir = filepath.Join(cwd, ".beads")
-				}
-
-				if memStore, ok := store.(*memory.MemoryStorage); ok {
-					if err := writeIssuesToJSONL(memStore, beadsDir); err != nil {
-						fmt.Fprintf(os.Stderr, "Error: failed to write JSONL: %v\n", err)
-						os.Exit(1)
-					}
-				}
-			}
 			return
 		}
 

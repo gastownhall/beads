@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"text/template"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // outputDotFormat outputs issues in Graphviz DOT format
-func outputDotFormat(ctx context.Context, store storage.Storage, issues []*types.Issue) error {
+func outputDotFormat(ctx context.Context, store *dolt.DoltStore, issues []*types.Issue) error {
 	fmt.Println("digraph dependencies {")
 	fmt.Println("  rankdir=TB;")
 	fmt.Println("  node [shape=box, style=rounded];")
@@ -88,7 +88,7 @@ func outputDotFormat(ctx context.Context, store storage.Storage, issues []*types
 }
 
 // outputFormattedList outputs issues in a custom format (preset or Go template)
-func outputFormattedList(ctx context.Context, store storage.Storage, issues []*types.Issue, formatStr string) error {
+func outputFormattedList(ctx context.Context, store *dolt.DoltStore, issues []*types.Issue, formatStr string) error {
 	// Handle special 'dot' format (Graphviz output)
 	if formatStr == "dot" {
 		return outputDotFormat(ctx, store, issues)

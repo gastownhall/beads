@@ -10,8 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -43,7 +42,7 @@ func isChildOf(childID, parentID string) bool {
 }
 
 // warnIfCyclesExist checks for dependency cycles and prints a warning if found.
-func warnIfCyclesExist(s storage.Storage) {
+func warnIfCyclesExist(s *dolt.DoltStore) {
 	if s == nil {
 		return // Skip cycle check in daemon mode (daemon handles it)
 	}
@@ -318,7 +317,7 @@ Examples:
 
 		// Resolve partial ID with cross-rig routing support
 		var fullID string
-		var depStore storage.Storage // store to query dependencies from
+		var depStore *dolt.DoltStore // store to query dependencies from
 		var routedResult *RoutedResult
 		defer func() {
 			if routedResult != nil {
@@ -982,7 +981,7 @@ func ParseExternalRef(ref string) (project, capability string) {
 
 // resolveExternalDependencies fetches issue metadata for external (cross-rig) dependencies.
 // It queries raw dependency records, finds external refs, and resolves them via routing.
-func resolveExternalDependencies(ctx context.Context, depStore storage.Storage, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
+func resolveExternalDependencies(ctx context.Context, depStore *dolt.DoltStore, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
 	if depStore == nil {
 		return nil
 	}

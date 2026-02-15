@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -138,7 +138,7 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 
 // findRepliesTo finds the parent ID that this issue replies to via replies-to dependency.
 // Returns empty string if no parent found.
-func findRepliesTo(ctx context.Context, issueID string, store storage.Storage) string {
+func findRepliesTo(ctx context.Context, issueID string, store *dolt.DoltStore) string {
 	deps, err := store.GetDependencyRecords(ctx, issueID)
 	if err != nil {
 		return ""
@@ -152,7 +152,7 @@ func findRepliesTo(ctx context.Context, issueID string, store storage.Storage) s
 }
 
 // findReplies finds all issues that reply to this issue via replies-to dependency.
-func findReplies(ctx context.Context, issueID string, store storage.Storage) []*types.Issue {
+func findReplies(ctx context.Context, issueID string, store *dolt.DoltStore) []*types.Issue {
 	deps, err := store.GetDependentsWithMetadata(ctx, issueID)
 	if err != nil {
 		return nil

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -211,7 +212,7 @@ func generateDigest(root *types.Issue, children []*types.Issue) string {
 // If summary is provided (non-empty), it's used as the digest content.
 // Otherwise, generateDigest() creates a basic concatenation.
 // This enables agents to provide AI-generated summaries while keeping bd as a pure tool.
-func squashMolecule(ctx context.Context, s storage.Storage, root *types.Issue, children []*types.Issue, keepChildren bool, summary string, actorName string) (*SquashResult, error) {
+func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, children []*types.Issue, keepChildren bool, summary string, actorName string) (*SquashResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -289,7 +290,7 @@ func squashMolecule(ctx context.Context, s storage.Storage, root *types.Issue, c
 }
 
 // deleteWispChildren removes the wisp issues from the database
-func deleteWispChildren(ctx context.Context, s storage.Storage, ids []string) (int, error) {
+func deleteWispChildren(ctx context.Context, s *dolt.DoltStore, ids []string) (int, error) {
 	deleted := 0
 	var lastErr error
 	for _, id := range ids {

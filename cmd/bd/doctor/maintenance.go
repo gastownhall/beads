@@ -1,3 +1,5 @@
+//go:build cgo
+
 package doctor
 
 import (
@@ -11,8 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -128,9 +129,10 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 func CheckStaleMolecules(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
+	// Open database using Dolt
 	ctx := context.Background()
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	doltPath := filepath.Join(beadsDir, "dolt")
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Stale Molecules",
@@ -192,73 +194,12 @@ func CheckStaleMolecules(path string) DoctorCheck {
 // Note: Compaction is a SQLite-specific optimization. Dolt backends don't need compaction
 // as Dolt handles data management differently.
 func CheckCompactionCandidates(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	// Compaction only applies to SQLite backend; skip for Dolt and any other backend
-	if backend != configfile.BackendSQLite {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "N/A (compaction only applies to SQLite backend)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Open database using factory
-	ctx := context.Background()
-	store, err := factory.NewFromConfig(ctx, beadsDir)
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "N/A (unable to open database)",
-			Category: CategoryMaintenance,
-		}
-	}
-	defer func() { _ = store.Close() }()
-
-	// Type assert to CompactableStorage for compaction methods
-	compactStore, ok := store.(storage.CompactableStorage)
-	if !ok {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "N/A (backend does not support compaction)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	tier1, err := compactStore.GetTier1Candidates(ctx)
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "N/A (query failed)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	if len(tier1) == 0 {
-		return DoctorCheck{
-			Name:     "Compaction Candidates",
-			Status:   StatusOK,
-			Message:  "No compaction candidates",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Calculate total size
-	var totalSize int
-	for _, c := range tier1 {
-		totalSize += c.OriginalSize
-	}
-
+	// Compaction was a SQLite-specific optimization. Dolt (the only backend)
+	// handles data management differently and doesn't need compaction.
 	return DoctorCheck{
 		Name:     "Compaction Candidates",
-		Status:   StatusOK, // Info only, not a warning
-		Message:  fmt.Sprintf("%d issue(s) eligible for compaction (%d bytes)", len(tier1), totalSize),
-		Detail:   "Compaction requires agent review; not auto-fixable",
-		Fix:      "Run 'bd compact --analyze' to review candidates",
+		Status:   StatusOK,
+		Message:  "N/A (compaction only applies to SQLite backend)",
 		Category: CategoryMaintenance,
 	}
 }

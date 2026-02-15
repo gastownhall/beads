@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -244,18 +243,9 @@ Force: Delete and orphan dependents
 	},
 }
 
-// deleteIssue removes an issue from the database
-// Note: This is a direct database operation since Storage interface doesn't have Delete
+// deleteIssue removes an issue from the database.
 func deleteIssue(ctx context.Context, issueID string) error {
-	// We need to access the SQLite storage directly
-	// Check if store is SQLite storage
-	type deleter interface {
-		DeleteIssue(ctx context.Context, id string) error
-	}
-	if d, ok := store.(deleter); ok {
-		return d.DeleteIssue(ctx, issueID)
-	}
-	return fmt.Errorf("delete operation not supported by this storage backend")
+	return store.DeleteIssue(ctx, issueID)
 }
 
 // removeIssueFromJSONL removes a deleted issue from the JSONL file
@@ -336,18 +326,11 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		}
 	}
 	ctx := rootCtx
-	// Type assert to BatchDeleter interface (supported by SQLite and Dolt backends)
-	d, ok := store.(storage.BatchDeleter)
-	if !ok {
-		// Fallback for storage that doesn't implement BatchDeleter (e.g., MemoryStorage in --no-db mode)
-		deleteBatchFallback(issueIDs, force, dryRun, cascade, jsonOutput)
-		return
-	}
 	// Verify all issues exist
 	issues := make(map[string]*types.Issue)
 	notFound := []string{}
 	for _, id := range issueIDs {
-		issue, err := d.GetIssue(ctx, id)
+		issue, err := store.GetIssue(ctx, id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting issue %s: %v\n", id, err)
 			os.Exit(1)
@@ -364,7 +347,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	}
 	// Dry-run or preview mode
 	if dryRun || !force {
-		result, err := d.DeleteIssues(ctx, issueIDs, cascade, false, true)
+		result, err := store.DeleteIssues(ctx, issueIDs, cascade, false, true)
 		if err != nil {
 			// Try to show preview even if there are dependency issues
 			showDeletionPreview(issueIDs, issues, cascade, err)
@@ -418,7 +401,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		}
 	}
 	// Actually delete
-	result, err := d.DeleteIssues(ctx, issueIDs, cascade, force, false)
+	result, err := store.DeleteIssues(ctx, issueIDs, cascade, force, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

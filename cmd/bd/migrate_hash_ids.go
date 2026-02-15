@@ -16,9 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -94,7 +92,7 @@ WARNING: Backup your database before running this command, even though it create
 		}
 
 		// Open database
-		store, err := factory.New(rootCtx, configfile.BackendDolt, dbPath)
+		store, err := dolt.New(rootCtx, &dolt.Config{Path: dbPath})
 		if err != nil {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
@@ -208,7 +206,7 @@ WARNING: Backup your database before running this command, even though it create
 }
 
 // migrateToHashIDs performs the actual migration
-func migrateToHashIDs(ctx context.Context, store storage.Storage, issues []*types.Issue, dryRun bool) (map[string]string, error) {
+func migrateToHashIDs(ctx context.Context, store *dolt.DoltStore, issues []*types.Issue, dryRun bool) (map[string]string, error) {
 	// Build dependency graph to determine top-level vs child issues
 	parentMap := make(map[string]string) // child ID → parent ID
 

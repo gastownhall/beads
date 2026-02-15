@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -66,17 +66,15 @@ func getDebounceDuration() time.Duration {
 // exportToJSONLWithStore exports issues to JSONL using the provided store.
 // If multi-repo mode is configured, routes issues to their respective JSONL files.
 // Otherwise, exports to a single JSONL file.
-func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
+func exportToJSONLWithStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
 	// Try multi-repo export first
-	if mrStore, ok := store.(storage.MultiRepoStorage); ok {
-		results, err := mrStore.ExportToMultiRepo(ctx)
-		if err != nil {
-			return fmt.Errorf("multi-repo export failed: %w", err)
-		}
-		if results != nil {
-			// Multi-repo mode active - export succeeded
-			return nil
-		}
+	results, err := store.ExportToMultiRepo(ctx)
+	if err != nil {
+		return fmt.Errorf("multi-repo export failed: %w", err)
+	}
+	if results != nil {
+		// Multi-repo mode active - export succeeded
+		return nil
 	}
 
 	// Single-repo mode - use existing logic
@@ -181,17 +179,15 @@ func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 }
 
 // importToJSONLWithStore imports issues from JSONL using the provided store.
-func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPath string) error {
+func importToJSONLWithStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
 	// Try multi-repo import first
-	if mrStore, ok := store.(storage.MultiRepoStorage); ok {
-		results, err := mrStore.HydrateFromMultiRepo(ctx)
-		if err != nil {
-			return fmt.Errorf("multi-repo import failed: %w", err)
-		}
-		if results != nil {
-			// Multi-repo mode active - import succeeded
-			return nil
-		}
+	results, err := store.HydrateFromMultiRepo(ctx)
+	if err != nil {
+		return fmt.Errorf("multi-repo import failed: %w", err)
+	}
+	if results != nil {
+		// Multi-repo mode active - import succeeded
+		return nil
 	}
 
 	// Single-repo mode - use existing logic
@@ -245,7 +241,7 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 }
 
 // updateExportMetadata updates jsonl_content_hash and related metadata after a successful export.
-func updateExportMetadata(ctx context.Context, store storage.Storage, jsonlPath string, log *slog.Logger, keySuffix string) {
+func updateExportMetadata(ctx context.Context, store *dolt.DoltStore, jsonlPath string, log *slog.Logger, keySuffix string) {
 	if keySuffix != "" {
 		keySuffix = sanitizeMetadataKey(keySuffix)
 	}

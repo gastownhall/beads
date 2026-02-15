@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -17,7 +17,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 	allChildren := make(map[string][]*types.IssueWithDependencyMetadata)
 
 	// Process each issue to get its children
-	processIssue := func(issueID string, issueStore storage.Storage) error {
+	processIssue := func(issueID string, issueStore *dolt.DoltStore) error {
 		// Initialize entry so "no children" message can be shown
 		if _, exists := allChildren[issueID]; !exists {
 			allChildren[issueID] = []*types.IssueWithDependencyMetadata{}
@@ -85,15 +85,9 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 // showIssueAsOf displays issues as they existed at a specific commit or branch ref.
 // This requires a versioned storage backend (e.g., Dolt).
 func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode bool) {
-	// Check if storage supports versioning
-	vs, ok := storage.AsVersioned(store)
-	if !ok {
-		FatalErrorRespectJSON("--as-of requires Dolt backend (current backend does not support versioning)")
-	}
-
 	var allIssues []*types.Issue
 	for idx, id := range args {
-		issue, err := vs.AsOf(ctx, id, ref)
+		issue, err := store.AsOf(ctx, id, ref)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching %s as of %s: %v\n", id, ref, err)
 			continue

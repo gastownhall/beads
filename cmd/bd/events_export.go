@@ -7,13 +7,13 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // exportEventsToJSONL appends new events to the events JSONL file.
 // It reads the last exported event ID from metadata, fetches all events since then,
 // appends them as JSON lines, and updates the metadata with the new high-water mark.
-func exportEventsToJSONL(ctx context.Context, store storage.Storage, eventsPath string) error {
+func exportEventsToJSONL(ctx context.Context, store *dolt.DoltStore, eventsPath string) error {
 	// Read last exported event ID from metadata
 	var sinceID int64
 	lastIDStr, err := store.GetMetadata(ctx, "events_last_exported_id")
@@ -64,7 +64,7 @@ func exportEventsToJSONL(ctx context.Context, store storage.Storage, eventsPath 
 
 // resetEventsExport resets the events export state by clearing the metadata
 // and truncating the events JSONL file. Used with --events-reset flag.
-func resetEventsExport(ctx context.Context, store storage.Storage, eventsPath string) error {
+func resetEventsExport(ctx context.Context, store *dolt.DoltStore, eventsPath string) error {
 	// Clear the high-water mark
 	if err := store.SetMetadata(ctx, "events_last_exported_id", ""); err != nil {
 		return fmt.Errorf("failed to clear events_last_exported_id: %w", err)

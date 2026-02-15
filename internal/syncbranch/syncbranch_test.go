@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -83,7 +82,7 @@ func TestValidateSyncBranchName(t *testing.T) {
 	}
 }
 
-func newTestStore(t *testing.T) storage.Storage {
+func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {

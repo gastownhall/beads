@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // isIssueNotFoundError checks if the error indicates the issue doesn't exist in the database.
@@ -50,7 +50,7 @@ func updateBaseSnapshot(jsonlPath string) error {
 // merge3WayAndPruneDeletions was the 3-way JSONL merge for deletion tracking.
 // The 3-way merge engine has been removed (Dolt handles sync natively).
 // This stub preserves the function signature for callers until JSONL sync is fully removed.
-func merge3WayAndPruneDeletions(_ context.Context, _ storage.Storage, _ string) (bool, error) {
+func merge3WayAndPruneDeletions(_ context.Context, _ *dolt.DoltStore, _ string) (bool, error) {
 	return false, nil
 }
 
@@ -113,7 +113,7 @@ func getMultiRepoJSONLPaths() []string {
 
 // applyDeletionsFromMerge applies deletions discovered during 3-way merge
 // This is the main entry point for deletion tracking during sync
-func applyDeletionsFromMerge(ctx context.Context, store storage.Storage, jsonlPath string) error {
+func applyDeletionsFromMerge(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
 	merged, err := merge3WayAndPruneDeletions(ctx, store, jsonlPath)
 	if err != nil {
 		return err

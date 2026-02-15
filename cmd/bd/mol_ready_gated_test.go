@@ -10,13 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // setupGatedTestDB creates a temporary file-based test database
-func setupGatedTestDB(t *testing.T) (storage.Storage, func()) {
+func setupGatedTestDB(t *testing.T) (*dolt.DoltStore, func()) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "bd-test-gated-*")
 	if err != nil {

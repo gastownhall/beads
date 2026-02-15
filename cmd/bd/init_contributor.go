@@ -10,12 +10,12 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 // runContributorWizard guides the user through OSS contributor setup
-func runContributorWizard(ctx context.Context, store storage.Storage) error {
+func runContributorWizard(ctx context.Context, store *dolt.DoltStore) error {
 	fmt.Printf("\n%s %s\n\n", ui.RenderBold("bd"), ui.RenderBold("Contributor Workflow Setup Wizard"))
 	fmt.Println("This wizard will configure beads for OSS contribution.")
 	fmt.Println()

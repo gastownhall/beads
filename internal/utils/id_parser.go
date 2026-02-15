@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -36,7 +36,7 @@ func parseIssueID(input string, prefix string) string {
 // Returns an error if:
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
-func ResolvePartialID(ctx context.Context, store storage.Storage, input string) (string, error) {
+func ResolvePartialID(ctx context.Context, store *dolt.DoltStore, input string) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
 	}
@@ -149,7 +149,7 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 
 // ResolvePartialIDs resolves multiple potentially partial issue IDs.
 // Returns the resolved IDs and any errors encountered.
-func ResolvePartialIDs(ctx context.Context, store storage.Storage, inputs []string) ([]string, error) {
+func ResolvePartialIDs(ctx context.Context, store *dolt.DoltStore, inputs []string) ([]string, error) {
 	var resolved []string
 	for _, input := range inputs {
 		fullID, err := ResolvePartialID(ctx, store, input)

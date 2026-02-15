@@ -5,14 +5,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"gopkg.in/yaml.v3"
 )
 
 // checkAndAutoImport is a no-op now that JSONL sync has been removed.
 // Dolt-native mode uses Dolt as the source of truth — no JSONL auto-import needed.
 // Retained as a no-op to avoid touching all read command call sites.
-func checkAndAutoImport(_ context.Context, _ storage.Storage) bool {
+func checkAndAutoImport(_ context.Context, _ *dolt.DoltStore) bool {
 	return false
 }
 
@@ -23,7 +23,7 @@ func checkGitForIssues() (int, string, string) {
 }
 
 // importFromGit is a no-op now that JSONL sync has been removed.
-func importFromGit(_ context.Context, _ string, _ storage.Storage, _, _ string) error {
+func importFromGit(_ context.Context, _ string, _ *dolt.DoltStore, _, _ string) error {
 	return nil
 }
 

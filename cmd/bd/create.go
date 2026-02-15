@@ -15,8 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -383,7 +382,7 @@ var createCmd = &cobra.Command{
 
 		// Switch to target repo for multi-repo support (bd-6x6g)
 		// When routing to a different repo, we bypass daemon mode and use direct storage
-		var targetStore storage.Storage
+		var targetStore *dolt.DoltStore
 		if repoPath != "." {
 			targetBeadsDir := routing.ExpandPath(repoPath)
 			debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
@@ -690,7 +689,7 @@ var createCmd = &cobra.Command{
 // flushRoutedRepo ensures the target repo's JSONL is updated after routing an issue.
 // This is critical for multi-repo hydration to work correctly (bd-fix-routing).
 // Always writes local JSONL as a safety net (even in dolt-native mode).
-func flushRoutedRepo(targetStore storage.Storage, repoPath string) {
+func flushRoutedRepo(targetStore *dolt.DoltStore, repoPath string) {
 	ctx := context.Background()
 
 	// Expand the repo path and construct the .beads directory path
@@ -727,7 +726,7 @@ func flushRoutedRepo(targetStore storage.Storage, repoPath string) {
 }
 
 // performAtomicExport writes issues to JSONL using atomic temp file + rename
-func performAtomicExport(_ context.Context, jsonlPath string, issues []*types.Issue, _ storage.Storage) error {
+func performAtomicExport(_ context.Context, jsonlPath string, issues []*types.Issue, _ *dolt.DoltStore) error {
 	// Create temp file with PID suffix for atomic write
 	tempPath := fmt.Sprintf("%s.tmp.%d", jsonlPath, os.Getpid())
 
@@ -1002,7 +1001,7 @@ func formatTimeForRPC(t *time.Time) string {
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.Storage) error {
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *dolt.DoltStore) error {
 	beadsDir := filepath.Join(targetPath, ".beads")
 	dbPath := filepath.Join(beadsDir, "beads.db")
 

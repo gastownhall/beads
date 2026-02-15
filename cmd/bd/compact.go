@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -86,12 +86,7 @@ Examples:
 
 		// Handle compact stats first
 		if compactStats {
-			compactStore, ok := store.(storage.CompactableStorage)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires CompactableStorage (not supported by current backend)\n")
-				os.Exit(1)
-			}
-			runCompactStats(ctx, compactStore)
+			runCompactStats(ctx, store)
 			return
 		}
 
@@ -130,12 +125,7 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Hint: Ensure a beads database is initialized (run 'bd init')\n")
 				os.Exit(1)
 			}
-			compactStore, ok := store.(storage.CompactableStorage)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact --analyze requires CompactableStorage (not supported by current backend)\n")
-				os.Exit(1)
-			}
-			runCompactAnalyze(ctx, compactStore)
+			runCompactAnalyze(ctx, store)
 			return
 		}
 
@@ -154,12 +144,7 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error: --apply requires --summary\n")
 				os.Exit(1)
 			}
-			compactStore, ok := store.(storage.CompactableStorage)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact --apply requires CompactableStorage (not supported by current backend)\n")
-				os.Exit(1)
-			}
-			runCompactApply(ctx, compactStore)
+			runCompactApply(ctx, store)
 			return
 		}
 
@@ -186,35 +171,29 @@ Examples:
 				os.Exit(1)
 			}
 
-			compactStore, ok := store.(storage.CompactableStorage)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires CompactableStorage (not supported by current backend)\n")
-				os.Exit(1)
-			}
-
 			config := &compact.Config{
 				APIKey:      apiKey,
 				Concurrency: compactWorkers,
 				DryRun:      compactDryRun,
 			}
 
-			compactor, err := compact.New(compactStore, apiKey, config)
+			compactor, err := compact.New(store, apiKey, config)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to create compactor: %v\n", err)
 				os.Exit(1)
 			}
 
 			if compactID != "" {
-				runCompactSingle(ctx, compactor, compactStore, compactID)
+				runCompactSingle(ctx, compactor, store, compactID)
 				return
 			}
 
-			runCompactAll(ctx, compactor, compactStore)
+			runCompactAll(ctx, compactor, store)
 		}
 	},
 }
 
-func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store storage.CompactableStorage, issueID string) {
+func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *dolt.DoltStore, issueID string) {
 	start := time.Now()
 
 	if !compactForce {
@@ -302,7 +281,7 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store s
 	fmt.Printf("  Time: %v\n", elapsed)
 }
 
-func runCompactAll(ctx context.Context, compactor *compact.Compactor, store storage.CompactableStorage) {
+func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *dolt.DoltStore) {
 	start := time.Now()
 
 	var candidates []string
@@ -423,7 +402,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 	}
 }
 
-func runCompactStats(ctx context.Context, store storage.CompactableStorage) {
+func runCompactStats(ctx context.Context, store *dolt.DoltStore) {
 	tier1, err := store.GetTier1Candidates(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 1 candidates: %v\n", err)
@@ -477,7 +456,7 @@ func runCompactStats(ctx context.Context, store storage.CompactableStorage) {
 	}
 }
 
-func runCompactAnalyze(ctx context.Context, store storage.CompactableStorage) {
+func runCompactAnalyze(ctx context.Context, store *dolt.DoltStore) {
 	type Candidate struct {
 		ID                 string `json:"id"`
 		Title              string `json:"title"`
@@ -582,7 +561,7 @@ func runCompactAnalyze(ctx context.Context, store storage.CompactableStorage) {
 	fmt.Printf("Total: %d candidates\n", len(candidates))
 }
 
-func runCompactApply(ctx context.Context, store storage.CompactableStorage) {
+func runCompactApply(ctx context.Context, store *dolt.DoltStore) {
 	start := time.Now()
 
 	// Read summary

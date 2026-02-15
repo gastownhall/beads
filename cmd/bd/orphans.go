@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 
+	"context"
+
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -107,25 +108,37 @@ type orphanIssueOutput struct {
 	LatestCommitMessage string `json:"latest_commit_message,omitempty"`
 }
 
-// getIssueProvider returns an IssueProvider based on the current configuration.
-// If --db flag is set, it creates a provider from that database path.
-// Otherwise, it uses the global store (already opened in PersistentPreRun).
+// doltStoreProvider wraps *dolt.DoltStore to implement types.IssueProvider.
+type doltStoreProvider struct{}
+
+func (p *doltStoreProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, error) {
+	openStatus := types.StatusOpen
+	openIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &openStatus})
+	if err != nil {
+		return nil, err
+	}
+	inProgressStatus := types.StatusInProgress
+	inProgressIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &inProgressStatus})
+	if err != nil {
+		return nil, err
+	}
+	return append(openIssues, inProgressIssues...), nil
+}
+
+func (p *doltStoreProvider) GetIssuePrefix() string {
+	ctx := context.Background()
+	prefix, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix == "" {
+		return "bd"
+	}
+	return prefix
+}
+
+// getIssueProvider returns an IssueProvider backed by the global Dolt store.
 func getIssueProvider() (types.IssueProvider, func(), error) {
-	// If --db flag is set and we have a dbPath, create a provider from that path
-	if dbPath != "" {
-		provider, err := storage.NewLocalProvider(dbPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to open database at %s: %w", dbPath, err)
-		}
-		return provider, func() { _ = provider.Close() }, nil
-	}
-
-	// Use the global store (already opened by PersistentPreRun)
 	if store != nil {
-		provider := storage.NewStorageProvider(store)
-		return provider, func() {}, nil // No cleanup needed for global store
+		return &doltStoreProvider{}, func() {}, nil
 	}
-
 	return nil, nil, fmt.Errorf("no database available")
 }
 

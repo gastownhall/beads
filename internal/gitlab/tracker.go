@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -26,14 +26,14 @@ var issueIIDPattern = regexp.MustCompile(`/issues/(\d+)`)
 type Tracker struct {
 	client *Client
 	config *MappingConfig
-	store  storage.Storage
+	store  *dolt.DoltStore
 }
 
 func (t *Tracker) Name() string         { return "gitlab" }
 func (t *Tracker) DisplayName() string  { return "GitLab" }
 func (t *Tracker) ConfigPrefix() string { return "gitlab" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store *dolt.DoltStore) error {
 	t.store = store
 
 	token, err := t.getConfig(ctx, "gitlab.token", "GITLAB_TOKEN")

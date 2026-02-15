@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -119,7 +119,7 @@ func runMolStale(cmd *cobra.Command, args []string) {
 }
 
 // findStaleMolecules queries the database for stale molecules
-func findStaleMolecules(ctx context.Context, s storage.Storage, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
+func findStaleMolecules(ctx context.Context, s *dolt.DoltStore, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
 	// Get all epics eligible for closure (complete but unclosed)
 	epicStatuses, err := s.GetEpicsEligibleForClosure(ctx)
 	if err != nil {

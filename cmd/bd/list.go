@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -25,10 +25,10 @@ import (
 )
 
 // storageExecutor handles operations that need to work with both direct store and daemon mode
-type storageExecutor func(store storage.Storage) error
+type storageExecutor func(store *dolt.DoltStore) error
 
 // withStorage executes an operation with either the direct store or a read-only store in daemon mode
-func withStorage(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, fn storageExecutor) error {
+func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, fn storageExecutor) error {
 	if store != nil {
 		return fn(store)
 	} else if dbPath != "" {
@@ -44,10 +44,10 @@ func withStorage(ctx context.Context, store storage.Storage, dbPath string, lock
 }
 
 // getHierarchicalChildren handles the --tree --parent combination logic
-func getHierarchicalChildren(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, parentID string) ([]*types.Issue, error) {
+func getHierarchicalChildren(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, parentID string) ([]*types.Issue, error) {
 	// First verify that the parent issue exists
 	var parentIssue *types.Issue
-	err := withStorage(ctx, store, dbPath, lockTimeout, func(s storage.Storage) error {
+	err := withStorage(ctx, store, dbPath, lockTimeout, func(s *dolt.DoltStore) error {
 		var err error
 		parentIssue, err = s.GetIssue(ctx, parentID)
 		return err
@@ -82,14 +82,14 @@ func getHierarchicalChildren(ctx context.Context, store storage.Storage, dbPath 
 }
 
 // findAllDescendants recursively finds all descendants using parent filtering
-func findAllDescendants(ctx context.Context, store storage.Storage, dbPath string, lockTimeout time.Duration, parentID string, result map[string]*types.Issue, currentDepth, maxDepth int) error {
+func findAllDescendants(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, parentID string, result map[string]*types.Issue, currentDepth, maxDepth int) error {
 	if currentDepth >= maxDepth {
 		return nil // Prevent infinite recursion
 	}
 
 	// Get direct children using the same filter logic as regular --parent
 	var children []*types.Issue
-	err := withStorage(ctx, store, dbPath, lockTimeout, func(s storage.Storage) error {
+	err := withStorage(ctx, store, dbPath, lockTimeout, func(s *dolt.DoltStore) error {
 		filter := types.IssueFilter{
 			ParentID: &parentID,
 		}
@@ -117,7 +117,7 @@ func findAllDescendants(ctx context.Context, store storage.Storage, dbPath strin
 }
 
 // watchIssues starts watching for changes and re-displays (GH#654)
-func watchIssues(ctx context.Context, store storage.Storage, filter types.IssueFilter, sortBy string, reverse bool) {
+func watchIssues(ctx context.Context, store *dolt.DoltStore, filter types.IssueFilter, sortBy string, reverse bool) {
 	// Find .beads directory
 	beadsDir := ".beads"
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {

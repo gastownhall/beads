@@ -11,13 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // setupTestStore creates a test storage with issue_prefix configured
-func setupTestStore(t *testing.T, dbPath string) storage.Storage {
+func setupTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 	t.Helper()
 
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})

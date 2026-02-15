@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -264,7 +264,7 @@ type issueSort struct {
 // repairPrefixes consolidates multiple prefixes into a single target prefix
 // Issues with the correct prefix are left unchanged.
 // Issues with incorrect prefixes get new hash-based IDs.
-func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
+func repairPrefixes(ctx context.Context, st *dolt.DoltStore, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
 
 	// Separate issues into correct and incorrect prefix groups
 	var correctIssues []*types.Issue

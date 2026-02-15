@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -201,7 +200,7 @@ func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
 }
 
 // setupTestDB creates a temporary test database
-func setupTestDB(t *testing.T) (storage.Storage, func()) {
+func setupTestDB(t *testing.T) (*dolt.DoltStore, func()) {
 	tmpDir, err := os.MkdirTemp("", "bd-test-config-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)

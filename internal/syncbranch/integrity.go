@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // Config keys for sync branch integrity tracking
@@ -53,7 +53,7 @@ type forcePushStatus struct {
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
 // Returns forcePushStatus with details about the check.
-func checkForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) (*forcePushStatus, error) {
+func checkForcePush(ctx context.Context, store *dolt.DoltStore, repoRoot, syncBranch string) (*forcePushStatus, error) {
 	status := &forcePushStatus{
 		Detected: false,
 		Branch:   syncBranch,
@@ -143,7 +143,7 @@ func checkForcePush(ctx context.Context, store storage.Storage, repoRoot, syncBr
 //   - syncBranch: Name of the sync branch (e.g., "beads-sync")
 //
 // Returns error if the update fails.
-func updateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot, syncBranch string) error {
+func updateStoredRemoteSHA(ctx context.Context, store *dolt.DoltStore, repoRoot, syncBranch string) error {
 	// Get worktree path for git operations
 	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
@@ -175,11 +175,11 @@ func updateStoredRemoteSHA(ctx context.Context, store storage.Storage, repoRoot,
 
 // clearStoredRemoteSHA removes the stored remote SHA.
 // Use this when resetting the sync state (e.g., after accepting a rebase).
-func clearStoredRemoteSHA(ctx context.Context, store storage.Storage) error {
+func clearStoredRemoteSHA(ctx context.Context, store *dolt.DoltStore) error {
 	return store.DeleteConfig(ctx, RemoteSHAConfigKey)
 }
 
 // getStoredRemoteSHA returns the stored remote sync branch SHA.
-func getStoredRemoteSHA(ctx context.Context, store storage.Storage) (string, error) {
+func getStoredRemoteSHA(ctx context.Context, store *dolt.DoltStore) (string, error) {
 	return store.GetConfig(ctx, RemoteSHAConfigKey)
 }

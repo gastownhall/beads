@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -292,7 +293,7 @@ func operandType(isProtoIssue bool) string {
 }
 
 // bondProtoProto bonds two protos to create a compound proto
-func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *types.Issue, bondType, customTitle, actorName string) (*BondResult, error) {
+func bondProtoProto(ctx context.Context, s *dolt.DoltStore, protoA, protoB *types.Issue, bondType, customTitle, actorName string) (*BondResult, error) {
 	// Create compound proto: a new root that references both protos as children
 	// The compound root will be a new issue that ties them together
 	compoundTitle := fmt.Sprintf("Compound: %s + %s", protoA.Title, protoB.Title)
@@ -379,12 +380,12 @@ func bondProtoProto(ctx context.Context, s storage.Storage, protoA, protoB *type
 // bondProtoMol bonds a proto to an existing molecule by spawning the proto.
 // If childRef is provided, generates custom IDs like "parent.childref" (dynamic bonding).
 // protoSubgraph can be nil if proto is from DB (will be loaded), or pre-loaded for formulas.
-func bondProtoMol(ctx context.Context, s storage.Storage, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondProtoMol(ctx context.Context, s *dolt.DoltStore, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	return bondProtoMolWithSubgraph(ctx, s, nil, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
 // bondProtoMolWithSubgraph is the internal implementation that accepts a pre-loaded subgraph.
-func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondProtoMolWithSubgraph(ctx context.Context, s *dolt.DoltStore, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	// Use provided subgraph or load from DB
 	subgraph := protoSubgraph
 	if subgraph == nil {
@@ -475,13 +476,13 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.Storage, protoSubgr
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)
-func bondMolProto(ctx context.Context, s storage.Storage, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+func bondMolProto(ctx context.Context, s *dolt.DoltStore, mol, proto *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	// Same as bondProtoMol but with arguments swapped
 	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
 // bondMolMol bonds two molecules together
-func bondMolMol(ctx context.Context, s storage.Storage, molA, molB *types.Issue, bondType, actorName string) (*BondResult, error) {
+func bondMolMol(ctx context.Context, s *dolt.DoltStore, molA, molB *types.Issue, bondType, actorName string) (*BondResult, error) {
 	err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
 		// Add dependency: B links to A
 		// Sequential: use blocks (B runs after A completes)
@@ -533,7 +534,7 @@ func minPriority(a, b int) int {
 // resolveOrDescribe checks if an operand is an issue or formula without cooking.
 // Used for dry-run mode. Returns (issue, formulaName, error).
 // If it's an issue, issue is set. If it's a formula, formulaName is set.
-func resolveOrDescribe(ctx context.Context, s storage.Storage, operand string) (*types.Issue, string, error) {
+func resolveOrDescribe(ctx context.Context, s *dolt.DoltStore, operand string) (*types.Issue, string, error) {
 	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {
@@ -564,7 +565,7 @@ func resolveOrDescribe(ctx context.Context, s storage.Storage, operand string) (
 //
 // The vars parameter is used for step condition filtering (bd-7zka.1).
 // This implements gt-4v1eo: formulas are cooked to in-memory subgraphs (no DB storage).
-func resolveOrCookToSubgraph(ctx context.Context, s storage.Storage, operand string, vars map[string]string) (*TemplateSubgraph, bool, error) {
+func resolveOrCookToSubgraph(ctx context.Context, s *dolt.DoltStore, operand string, vars map[string]string) (*TemplateSubgraph, bool, error) {
 	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {

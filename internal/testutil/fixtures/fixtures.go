@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -135,33 +135,33 @@ func DefaultXLargeConfig() DataConfig {
 }
 
 // LargeSQLite creates a 10K issue database with realistic patterns
-func LargeSQLite(ctx context.Context, store storage.Storage) error {
+func LargeSQLite(ctx context.Context, store *dolt.DoltStore) error {
 	cfg := DefaultLargeConfig()
 	return generateIssuesWithConfig(ctx, store, cfg)
 }
 
 // XLargeSQLite creates a 20K issue database with realistic patterns
-func XLargeSQLite(ctx context.Context, store storage.Storage) error {
+func XLargeSQLite(ctx context.Context, store *dolt.DoltStore) error {
 	cfg := DefaultXLargeConfig()
 	return generateIssuesWithConfig(ctx, store, cfg)
 }
 
 // LargeFromJSONL creates a 10K issue database by exporting to JSONL and reimporting
-func LargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string) error {
+func LargeFromJSONL(ctx context.Context, store *dolt.DoltStore, tempDir string) error {
 	cfg := DefaultLargeConfig()
 	cfg.RandSeed = 44 // different seed for JSONL path
 	return generateFromJSONL(ctx, store, tempDir, cfg)
 }
 
 // xLargeFromJSONL creates a 20K issue database by exporting to JSONL and reimporting
-func xLargeFromJSONL(ctx context.Context, store storage.Storage, tempDir string) error {
+func xLargeFromJSONL(ctx context.Context, store *dolt.DoltStore, tempDir string) error {
 	cfg := DefaultXLargeConfig()
 	cfg.RandSeed = 45 // different seed for JSONL path
 	return generateFromJSONL(ctx, store, tempDir, cfg)
 }
 
 // generateIssuesWithConfig creates issues with realistic epic hierarchies and cross-links using provided configuration
-func generateIssuesWithConfig(ctx context.Context, store storage.Storage, cfg DataConfig) error {
+func generateIssuesWithConfig(ctx context.Context, store *dolt.DoltStore, cfg DataConfig) error {
 	rng := rand.New(rand.NewSource(cfg.RandSeed)) // #nosec G404 -- deterministic math/rand used for repeatable fixture data
 
 	// Calculate breakdown using configuration ratios
@@ -346,7 +346,7 @@ func generateIssuesWithConfig(ctx context.Context, store storage.Storage, cfg Da
 }
 
 // generateFromJSONL creates issues, exports to JSONL, clears DB, and reimports
-func generateFromJSONL(ctx context.Context, store storage.Storage, tempDir string, cfg DataConfig) error {
+func generateFromJSONL(ctx context.Context, store *dolt.DoltStore, tempDir string, cfg DataConfig) error {
 	// First generate issues normally
 	if err := generateIssuesWithConfig(ctx, store, cfg); err != nil {
 		return fmt.Errorf("failed to generate issues: %w", err)
@@ -379,7 +379,7 @@ func generateFromJSONL(ctx context.Context, store storage.Storage, tempDir strin
 }
 
 // exportToJSONL exports all issues to a JSONL file
-func exportToJSONL(ctx context.Context, store storage.Storage, path string) error {
+func exportToJSONL(ctx context.Context, store *dolt.DoltStore, path string) error {
 	// Get all issues
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -421,7 +421,7 @@ func exportToJSONL(ctx context.Context, store storage.Storage, path string) erro
 }
 
 // importFromJSONL imports issues from a JSONL file
-func importFromJSONL(ctx context.Context, store storage.Storage, path string) error {
+func importFromJSONL(ctx context.Context, store *dolt.DoltStore, path string) error {
 	// Read JSONL file
 	// #nosec G304 -- fixture imports from deterministic file created earlier in test
 	data, err := os.ReadFile(path)

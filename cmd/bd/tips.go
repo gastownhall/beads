@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // Tip represents a contextual hint that can be shown to users after successful commands
@@ -61,7 +61,7 @@ func initTipRand() {
 
 // maybeShowTip selects and displays an eligible tip based on priority and probability
 // Respects --json and --quiet flags
-func maybeShowTip(store storage.Storage) {
+func maybeShowTip(store *dolt.DoltStore) {
 	// Skip tips in JSON output mode or quiet mode
 	if jsonOutput || quietFlag {
 		return
@@ -85,7 +85,7 @@ func maybeShowTip(store storage.Storage) {
 
 // selectNextTip finds the next tip to show based on conditions, frequency, priority, and probability
 // Returns nil if no tip should be shown
-func selectNextTip(store storage.Storage) *Tip {
+func selectNextTip(store *dolt.DoltStore) *Tip {
 	if store == nil {
 		return nil
 	}
@@ -135,7 +135,7 @@ func selectNextTip(store storage.Storage) *Tip {
 
 // getLastShown retrieves the timestamp when a tip was last shown
 // Returns zero time if never shown
-func getLastShown(store storage.Storage, tipID string) time.Time {
+func getLastShown(store *dolt.DoltStore, tipID string) time.Time {
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)
 	value, err := store.GetMetadata(context.Background(), key)
 	if err != nil || value == "" {
@@ -152,23 +152,21 @@ func getLastShown(store storage.Storage, tipID string) time.Time {
 }
 
 // recordTipShown records the timestamp when a tip was shown
-func recordTipShown(store storage.Storage, tipID string) {
+func recordTipShown(store *dolt.DoltStore, tipID string) {
 	if store == nil || tipID == "" {
 		return
 	}
 
-	// If we're on a versioned store (Dolt) and dolt auto-commit is enabled, defer the
-	// metadata write so it can be committed as a separate Dolt commit in PostRun.
+	// If dolt auto-commit is enabled, defer the metadata write so it can be
+	// committed as a separate Dolt commit in PostRun.
 	// This avoids tip metadata getting bundled into the main command commit.
-	if _, ok := storage.AsVersioned(store); ok {
-		if mode, err := getDoltAutoCommitMode(); err == nil && mode == doltAutoCommitOn {
-			commandDidWriteTipMetadata = true
-			if commandTipIDsShown == nil {
-				commandTipIDsShown = make(map[string]struct{})
-			}
-			commandTipIDsShown[tipID] = struct{}{}
-			return
+	if mode, err := getDoltAutoCommitMode(); err == nil && mode == doltAutoCommitOn {
+		commandDidWriteTipMetadata = true
+		if commandTipIDsShown == nil {
+			commandTipIDsShown = make(map[string]struct{})
 		}
+		commandTipIDsShown[tipID] = struct{}{}
+		return
 	}
 
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)

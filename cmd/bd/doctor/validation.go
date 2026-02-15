@@ -1,3 +1,5 @@
+//go:build cgo
+
 package doctor
 
 import (
@@ -11,16 +13,15 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// openStoreDB opens the beads database via the storage factory (backend-aware)
-// and returns the underlying *sql.DB for raw queries. The caller must close the
-// returned store when done.
-func openStoreDB(beadsDir string) (*sql.DB, storage.Storage, error) {
+// openStoreDB opens the beads database and returns the underlying *sql.DB for
+// raw queries. The caller must close the returned store when done.
+func openStoreDB(beadsDir string) (*sql.DB, *dolt.DoltStore, error) {
 	ctx := context.Background()
-	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
+	doltPath := filepath.Join(beadsDir, "dolt")
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		return nil, nil, err
 	}

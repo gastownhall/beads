@@ -17,8 +17,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // testIDCounter ensures unique IDs across all test runs
@@ -72,7 +71,7 @@ func ensureCleanGlobalState(t *testing.T) {
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {
 	dbPath      string
-	store       storage.Storage
+	store       *dolt.DoltStore
 	storeActive bool
 }
 
@@ -108,17 +107,20 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 	return saved
 }
 
-// newTestStore creates a memory store with issue_prefix configured (bd-166)
+// newTestStore creates a dolt store with issue_prefix configured (bd-166)
 // This prevents "database not initialized" errors in tests
-func newTestStore(t *testing.T, dbPath string) storage.Storage {
+func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 	t.Helper()
 
 	ensureTestMode(t)
 
-	store := memory.New(filepath.Join(filepath.Dir(dbPath), "issues.jsonl"))
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
@@ -134,16 +136,19 @@ func newTestStore(t *testing.T, dbPath string) storage.Storage {
 	return store
 }
 
-// newTestStoreWithPrefix creates a memory store with custom issue_prefix configured
-func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) storage.Storage {
+// newTestStoreWithPrefix creates a dolt store with custom issue_prefix configured
+func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.DoltStore {
 	t.Helper()
 
 	ensureTestMode(t)
 
-	store := memory.New(filepath.Join(filepath.Dir(dbPath), "issues.jsonl"))
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
@@ -161,7 +166,7 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) storage.
 
 // openExistingTestDB is not supported with the memory backend since memory stores
 // cannot be "reopened" from a previous state.
-func openExistingTestDB(t *testing.T, dbPath string) (storage.Storage, error) {
+func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 	t.Helper()
 	return nil, fmt.Errorf("openExistingTestDB not supported with memory backend")
 }

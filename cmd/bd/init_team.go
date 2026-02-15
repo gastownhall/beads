@@ -9,13 +9,13 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 // runTeamWizard guides the user through team workflow setup
-func runTeamWizard(ctx context.Context, store storage.Storage) error {
+func runTeamWizard(ctx context.Context, store *dolt.DoltStore) error {
 	fmt.Printf("\n%s %s\n\n", ui.RenderBold("bd"), ui.RenderBold("Team Workflow Setup Wizard"))
 	fmt.Println("This wizard will configure beads for team collaboration.")
 	fmt.Println()

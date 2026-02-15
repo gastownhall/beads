@@ -9,14 +9,13 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // setupValidateTestDB creates a temp .beads workspace with a configured database.
 // The caller must call store.Close() when done inserting test data.
-func setupValidateTestDB(t *testing.T, prefix string) (tmpDir string, store storage.Storage) {
+func setupValidateTestDB(t *testing.T, prefix string) (tmpDir string, store *dolt.DoltStore) {
 	t.Helper()
 	tmpDir = t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

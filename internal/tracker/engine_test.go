@@ -1,3 +1,5 @@
+//go:build cgo
+
 package tracker
 
 import (
@@ -7,10 +9,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// newTestStore creates a dolt store for engine tests with issue_prefix configured
+func newTestStore(t *testing.T) *dolt.DoltStore {
+	t.Helper()
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
 
 // mockTracker implements IssueTracker for testing.
 type mockTracker struct {
@@ -35,7 +52,7 @@ func newMockTracker(name string) *mockTracker {
 func (m *mockTracker) Name() string                                    { return m.name }
 func (m *mockTracker) DisplayName() string                             { return m.name }
 func (m *mockTracker) ConfigPrefix() string                            { return m.name }
-func (m *mockTracker) Init(_ context.Context, _ storage.Storage) error { return nil }
+func (m *mockTracker) Init(_ context.Context, _ *dolt.DoltStore) error { return nil }
 func (m *mockTracker) Validate() error                                 { return nil }
 func (m *mockTracker) Close() error                                    { return nil }
 func (m *mockTracker) FieldMapper() FieldMapper                        { return m.fieldMapper }
@@ -130,7 +147,7 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 
 func TestEnginePullOnly(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -164,7 +181,7 @@ func TestEnginePullOnly(t *testing.T) {
 
 func TestEnginePushOnly(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Create a local issue
@@ -199,7 +216,7 @@ func TestEnginePushOnly(t *testing.T) {
 
 func TestEngineDryRun(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -232,7 +249,7 @@ func TestEngineDryRun(t *testing.T) {
 
 func TestEngineExcludeTypes(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Create issues of different types
@@ -274,7 +291,7 @@ func TestEngineExcludeTypes(t *testing.T) {
 
 func TestEngineConflictResolution(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Set up last_sync
@@ -325,7 +342,7 @@ func TestEngineConflictResolution(t *testing.T) {
 
 func TestEnginePullWithShouldImport(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -361,7 +378,7 @@ func TestEnginePullWithShouldImport(t *testing.T) {
 
 func TestEnginePullWithTransformHook(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -395,7 +412,7 @@ func TestEnginePullWithTransformHook(t *testing.T) {
 
 func TestEnginePullWithGenerateID(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -431,7 +448,7 @@ func TestEnginePullWithGenerateID(t *testing.T) {
 
 func TestEnginePullWithGenerateIDError(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	tracker := newMockTracker("test")
@@ -465,7 +482,7 @@ func TestEnginePullWithGenerateIDError(t *testing.T) {
 
 func TestEnginePushWithFormatDescription(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	issue := &types.Issue{
@@ -513,7 +530,7 @@ func TestEnginePushWithFormatDescription(t *testing.T) {
 
 func TestEnginePushWithShouldPush(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Create two local issues
@@ -558,7 +575,7 @@ func TestEnginePushWithShouldPush(t *testing.T) {
 
 func TestEnginePushWithContentEqual(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Create a local issue that already exists externally
@@ -607,7 +624,7 @@ func TestEnginePushWithContentEqual(t *testing.T) {
 
 func TestEnginePushExcludeEphemeral(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	// Create a normal issue and an ephemeral one
@@ -654,7 +671,7 @@ func TestEnginePushExcludeEphemeral(t *testing.T) {
 
 func TestEnginePushWithStateCache(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 	defer store.Close()
 
 	issue := &types.Issue{

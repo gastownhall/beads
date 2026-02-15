@@ -9,7 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 )
 
@@ -84,7 +84,7 @@ func ValidateSyncBranchName(name string) error {
 // 2. sync-branch from config.yaml (version controlled, shared across clones)
 // 3. sync.branch from database config (legacy, for backward compatibility)
 // 4. Empty string (meaning use current branch)
-func Get(ctx context.Context, store storage.Storage) (string, error) {
+func Get(ctx context.Context, store *dolt.DoltStore) (string, error) {
 	// Check environment variable first (highest priority)
 	if envBranch := os.Getenv(EnvVar); envBranch != "" {
 		if err := ValidateBranchName(envBranch); err != nil {
@@ -198,7 +198,7 @@ func getConfigFromDB(beadsDir string, key string) string {
 //  1. BEADS_SYNC_BRANCH env var
 //  2. sync-branch in config.yaml (recommended, version controlled)
 //  3. sync.branch in database (legacy, for backward compatibility)
-func Set(ctx context.Context, store storage.Storage, branch string) error {
+func Set(ctx context.Context, store *dolt.DoltStore, branch string) error {
 	// GH#807: Use sync-specific validation that rejects main/master
 	if err := ValidateSyncBranchName(branch); err != nil {
 		return err
@@ -218,6 +218,6 @@ func Set(ctx context.Context, store storage.Storage, branch string) error {
 }
 
 // Unset removes the sync branch configuration from the database
-func Unset(ctx context.Context, store storage.Storage) error {
+func Unset(ctx context.Context, store *dolt.DoltStore) error {
 	return store.DeleteConfig(ctx, ConfigKey)
 }

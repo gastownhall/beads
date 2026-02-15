@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1028,31 +1027,11 @@ func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanI
 }
 
 // findOrphanedIssuesFromPath is a convenience function for callers that don't have a provider.
-// It creates a local provider from the given path's .beads/ directory.
-// This preserves backward compatibility for CheckOrphanedIssues and similar callers.
+// Note: Cross-repo orphan detection via local database provider has been removed
+// along with the SQLite backend. This function now returns an error; callers
+// should use FindOrphanedIssues with an explicit IssueProvider instead.
 func findOrphanedIssuesFromPath(path string) ([]OrphanIssue, error) {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Skip if no .beads directory
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return []OrphanIssue{}, nil
-	}
-
-	// Get database path
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return []OrphanIssue{}, nil
-	}
-
-	// Create a local provider from the database
-	provider, err := storage.NewLocalProvider(dbPath)
-	if err != nil {
-		return []OrphanIssue{}, nil
-	}
-	defer func() { _ = provider.Close() }()
-
-	return FindOrphanedIssues(path, provider)
+	return nil, fmt.Errorf("cross-repo orphan detection requires an explicit IssueProvider (local database provider removed)")
 }
 
 // CheckOrphanedIssues detects issues referenced in git commits but still open.

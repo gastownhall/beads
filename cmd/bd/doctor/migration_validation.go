@@ -14,8 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -230,7 +229,8 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 
 	// Check Dolt database health
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	doltPath := filepath.Join(beadsDir, "dolt")
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		result.Ready = false
 		result.DoltHealthy = false
@@ -502,7 +502,7 @@ func compareSQLiteWithJSONL(dbPath string, jsonlIDs map[string]bool) (int, []str
 
 // compareDoltWithJSONL compares Dolt database with JSONL IDs.
 // Returns IDs in JSONL but not in Dolt (sample first 100).
-func compareDoltWithJSONL(ctx context.Context, store storage.Storage, jsonlIDs map[string]bool) []string {
+func compareDoltWithJSONL(ctx context.Context, store *dolt.DoltStore, jsonlIDs map[string]bool) []string {
 	var missing []string
 
 	for id := range jsonlIDs {
@@ -562,7 +562,7 @@ func checkDoltLocks(beadsDir string) (bool, string) {
 // categorizeDoltExtras finds issues in Dolt that aren't in JSONL and categorizes them
 // as either foreign-prefix (cross-rig contamination) or ephemeral (same-prefix).
 // Returns: foreignCount, foreignPrefixes map, ephemeralCount.
-func categorizeDoltExtras(ctx context.Context, store storage.Storage, jsonlIDs map[string]bool) (int, map[string]int, int) {
+func categorizeDoltExtras(ctx context.Context, store *dolt.DoltStore, jsonlIDs map[string]bool) (int, map[string]int, int) {
 	// Get the configured prefix for this rig
 	localPrefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix means no prefix-based validation
 

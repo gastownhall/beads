@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -166,7 +166,7 @@ func buildBlockingMaps(allDeps map[string][]*types.Dependency, closedIDs map[str
 // getClosedBlockerIDs collects all unique blocker IDs from dependency records
 // and returns the subset that are closed. This is used to filter stale "blocked by"
 // annotations in bd list output.
-func getClosedBlockerIDs(ctx context.Context, s storage.Storage, allDeps map[string][]*types.Dependency) map[string]bool {
+func getClosedBlockerIDs(ctx context.Context, s *dolt.DoltStore, allDeps map[string][]*types.Dependency) map[string]bool {
 	// Collect unique blocker IDs
 	blockerIDs := make(map[string]bool)
 	for _, deps := range allDeps {

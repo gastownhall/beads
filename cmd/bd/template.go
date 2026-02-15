@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -314,7 +315,7 @@ func init() {
 // =============================================================================
 
 // loadTemplateSubgraph loads a template epic and all its descendants
-func loadTemplateSubgraph(ctx context.Context, s storage.Storage, templateID string) (*TemplateSubgraph, error) {
+func loadTemplateSubgraph(ctx context.Context, s *dolt.DoltStore, templateID string) (*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -360,7 +361,7 @@ func loadTemplateSubgraph(ctx context.Context, s storage.Storage, templateID str
 // It uses two strategies to find children:
 // 1. Check dependency records for parent-child relationships
 // 2. Check for hierarchical IDs (parent.N) to catch children with missing/wrong deps
-func loadDescendants(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, parentID string) error {
+func loadDescendants(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateSubgraph, parentID string) error {
 	// Track children we've already added to avoid duplicates
 	addedChildren := make(map[string]bool)
 
@@ -438,7 +439,7 @@ func loadDescendants(ctx context.Context, s storage.Storage, subgraph *TemplateS
 
 // findHierarchicalChildren finds issues with IDs that match the pattern parentID.N
 // This catches hierarchical children that may be missing parent-child dependencies.
-func findHierarchicalChildren(ctx context.Context, s storage.Storage, parentID string) ([]*types.Issue, error) {
+func findHierarchicalChildren(ctx context.Context, s *dolt.DoltStore, parentID string) ([]*types.Issue, error) {
 	// Look for issues with IDs starting with "parentID."
 	// We need to query by ID pattern, which requires listing issues
 	pattern := parentID + "."
@@ -473,7 +474,7 @@ func findHierarchicalChildren(ctx context.Context, s storage.Storage, parentID s
 // It first tries to resolve as an ID (via ResolvePartialID).
 // If that fails, it searches for protos with matching titles.
 // Returns the proto ID if found, or an error if not found or ambiguous.
-func resolveProtoIDOrTitle(ctx context.Context, s storage.Storage, input string) (string, error) {
+func resolveProtoIDOrTitle(ctx context.Context, s *dolt.DoltStore, input string) (string, error) {
 	// Strategy 1: Try to resolve as an ID
 	protoID, err := utils.ResolvePartialID(ctx, s, input)
 	if err == nil {
@@ -714,7 +715,7 @@ func getRelativeID(oldID, rootID string) string {
 
 // cloneSubgraph creates new issues from the template with variable substitution.
 // Uses CloneOptions to control all spawn/bond behavior including dynamic bonding.
-func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
+func cloneSubgraph(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}

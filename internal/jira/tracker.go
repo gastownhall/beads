@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -20,7 +20,7 @@ func init() {
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
 	client     *Client
-	store      storage.Storage
+	store      *dolt.DoltStore
 	jiraURL    string
 	projectKey string
 }
@@ -29,7 +29,7 @@ func (t *Tracker) Name() string         { return "jira" }
 func (t *Tracker) DisplayName() string  { return "Jira" }
 func (t *Tracker) ConfigPrefix() string { return "jira" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store *dolt.DoltStore) error {
 	t.store = store
 
 	jiraURL, err := t.getConfig(ctx, "jira.url", "JIRA_URL")

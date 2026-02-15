@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -32,14 +31,8 @@ Examples:
 
 		requireFreshDB(ctx)
 
-		// Check if storage supports versioning
-		vs, ok := storage.AsVersioned(store)
-		if !ok {
-			FatalErrorRespectJSON("history requires Dolt backend (current backend does not support versioning)")
-		}
-
 		// Get issue history
-		history, err := vs.History(ctx, issueID)
+		history, err := store.History(ctx, issueID)
 		if err != nil {
 			FatalErrorRespectJSON("failed to get history: %v", err)
 		}

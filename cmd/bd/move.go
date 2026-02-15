@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -197,7 +197,7 @@ Examples:
 // converted to external references. Dependencies FROM the old ID are removed since they
 // can't be recreated in the source store.
 // Returns the number of dependencies remapped.
-func remapDependencies(ctx context.Context, s storage.Storage, oldID, newID, targetRig, actor string) (int, error) {
+func remapDependencies(ctx context.Context, s *dolt.DoltStore, oldID, newID, targetRig, actor string) (int, error) {
 	count := 0
 
 	// Get dependencies where oldID is the issue (oldID depends on something)

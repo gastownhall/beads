@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // ConfigStore defines the minimal storage interface needed for config
@@ -77,7 +77,7 @@ func LoadConfig(ctx context.Context, store ConfigStore, isAutoExport bool) (*Con
 }
 
 // SetPolicy sets the error policy for exports
-func SetPolicy(ctx context.Context, store storage.Storage, policy ErrorPolicy, autoExport bool) error {
+func SetPolicy(ctx context.Context, store *dolt.DoltStore, policy ErrorPolicy, autoExport bool) error {
 	if !policy.IsValid() {
 		return fmt.Errorf("invalid error policy: %s (valid: strict, best-effort, partial, required-core)", policy)
 	}
@@ -91,7 +91,7 @@ func SetPolicy(ctx context.Context, store storage.Storage, policy ErrorPolicy, a
 }
 
 // SetRetryAttempts sets the number of retry attempts
-func SetRetryAttempts(ctx context.Context, store storage.Storage, attempts int) error {
+func SetRetryAttempts(ctx context.Context, store *dolt.DoltStore, attempts int) error {
 	if attempts < 0 {
 		return fmt.Errorf("retry attempts must be non-negative")
 	}
@@ -99,7 +99,7 @@ func SetRetryAttempts(ctx context.Context, store storage.Storage, attempts int) 
 }
 
 // SetRetryBackoff sets the initial retry backoff in milliseconds
-func SetRetryBackoff(ctx context.Context, store storage.Storage, backoffMS int) error {
+func SetRetryBackoff(ctx context.Context, store *dolt.DoltStore, backoffMS int) error {
 	if backoffMS <= 0 {
 		return fmt.Errorf("retry backoff must be positive")
 	}
@@ -107,11 +107,11 @@ func SetRetryBackoff(ctx context.Context, store storage.Storage, backoffMS int) 
 }
 
 // SetSkipEncodingErrors sets whether to skip issues with encoding errors
-func SetSkipEncodingErrors(ctx context.Context, store storage.Storage, skip bool) error {
+func SetSkipEncodingErrors(ctx context.Context, store *dolt.DoltStore, skip bool) error {
 	return store.SetConfig(ctx, ConfigKeySkipEncodingErrors, strconv.FormatBool(skip))
 }
 
 // SetWriteManifest sets whether to write export manifests
-func SetWriteManifest(ctx context.Context, store storage.Storage, write bool) error {
+func SetWriteManifest(ctx context.Context, store *dolt.DoltStore, write bool) error {
 	return store.SetConfig(ctx, ConfigKeyWriteManifest, strconv.FormatBool(write))
 }

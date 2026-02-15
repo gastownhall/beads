@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -307,7 +306,7 @@ func (env *contributorRoutingEnv) cleanup() {
 }
 
 // initProjectStore initializes the project store with routing config
-func (env *contributorRoutingEnv) initProjectStore(syncMode string) storage.Storage {
+func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltStore {
 	env.t.Helper()
 	projectDBPath := filepath.Join(env.projectDir, ".beads", "beads.db")
 	store, err := dolt.New(env.ctx, &dolt.Config{Path: projectDBPath})
@@ -348,7 +347,7 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) storage.Stor
 }
 
 // initPlanningStore initializes the planning store
-func (env *contributorRoutingEnv) initPlanningStore() storage.Storage {
+func (env *contributorRoutingEnv) initPlanningStore() *dolt.DoltStore {
 	env.t.Helper()
 	planningDBPath := filepath.Join(env.planningDir, ".beads", "beads.db")
 	store, err := dolt.New(env.ctx, &dolt.Config{Path: planningDBPath})
@@ -369,8 +368,8 @@ func verifyIssueRouting(
 	ctx context.Context,
 	routingConfig *routing.RoutingConfig,
 	userRole routing.UserRole,
-	targetStore storage.Storage,
-	otherStore storage.Storage,
+	targetStore *dolt.DoltStore,
+	otherStore *dolt.DoltStore,
 	expectedRepoPath string,
 	description string,
 ) {
@@ -852,7 +851,7 @@ func TestRoutingWithAllSyncModes(t *testing.T) {
 		mode       string
 		configKey  string
 		configVal  string
-		extraCheck func(t *testing.T, store storage.Storage, ctx context.Context)
+		extraCheck func(t *testing.T, store *dolt.DoltStore, ctx context.Context)
 	}{
 		{
 			name:      "direct",
@@ -865,7 +864,7 @@ func TestRoutingWithAllSyncModes(t *testing.T) {
 			mode:      "sync-branch",
 			configKey: "sync.branch",
 			configVal: "beads-sync",
-			extraCheck: func(t *testing.T, store storage.Storage, ctx context.Context) {
+			extraCheck: func(t *testing.T, store *dolt.DoltStore, ctx context.Context) {
 				val, _ := store.GetConfig(ctx, "sync.branch")
 				if val != "beads-sync" {
 					t.Errorf("sync.branch = %q, want %q", val, "beads-sync")

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -168,7 +168,7 @@ Use --limit or --range to view specific steps:
 }
 
 // getMoleculeProgress loads a molecule and computes progress
-func getMoleculeProgress(ctx context.Context, s storage.Storage, moleculeID string) (*MoleculeProgress, error) {
+func getMoleculeProgress(ctx context.Context, s *dolt.DoltStore, moleculeID string) (*MoleculeProgress, error) {
 	subgraph, err := loadTemplateSubgraph(ctx, s, moleculeID)
 	if err != nil {
 		return nil, err
@@ -245,7 +245,7 @@ func getMoleculeProgress(ctx context.Context, s storage.Storage, moleculeID stri
 }
 
 // findInProgressMolecules finds molecules with in_progress steps for an agent
-func findInProgressMolecules(ctx context.Context, s storage.Storage, agent string) []*MoleculeProgress {
+func findInProgressMolecules(ctx context.Context, s *dolt.DoltStore, agent string) []*MoleculeProgress {
 	var inProgressIssues []*types.Issue
 
 	status := types.StatusInProgress
@@ -296,7 +296,7 @@ func findInProgressMolecules(ctx context.Context, s storage.Storage, agent strin
 // findHookedMolecules finds molecules bonded to hooked issues for an agent.
 // This is a fallback when no in_progress steps exist but a molecule is attached
 // to the agent's hooked work via a "blocks" dependency.
-func findHookedMolecules(ctx context.Context, s storage.Storage, agent string) []*MoleculeProgress {
+func findHookedMolecules(ctx context.Context, s *dolt.DoltStore, agent string) []*MoleculeProgress {
 	// Query for hooked issues assigned to the agent
 	status := types.StatusHooked
 	filter := types.IssueFilter{Status: &status}
@@ -364,7 +364,7 @@ func findHookedMolecules(ctx context.Context, s storage.Storage, agent string) [
 }
 
 // findParentMolecule walks up parent-child chain to find the root molecule
-func findParentMolecule(ctx context.Context, s storage.Storage, issueID string) string {
+func findParentMolecule(ctx context.Context, s *dolt.DoltStore, issueID string) string {
 	visited := make(map[string]bool)
 	currentID := issueID
 
@@ -503,7 +503,7 @@ type ContinueResult struct {
 // AdvanceToNextStep finds the next ready step in a molecule after closing a step
 // If autoClaim is true, it marks the next step as in_progress
 // Returns nil if the issue is not part of a molecule
-func AdvanceToNextStep(ctx context.Context, s storage.Storage, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
+func AdvanceToNextStep(ctx context.Context, s *dolt.DoltStore, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}

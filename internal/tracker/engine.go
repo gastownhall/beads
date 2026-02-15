@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -61,7 +61,7 @@ type PushHooks struct {
 // integrations follow, eliminating duplication between Linear, GitLab, etc.
 type Engine struct {
 	Tracker   IssueTracker
-	Store     storage.Storage
+	Store     *dolt.DoltStore
 	Actor     string
 	PullHooks *PullHooks
 	PushHooks *PushHooks
@@ -76,7 +76,7 @@ type Engine struct {
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
-func NewEngine(tracker IssueTracker, store storage.Storage, actor string) *Engine {
+func NewEngine(tracker IssueTracker, store *dolt.DoltStore, actor string) *Engine {
 	return &Engine{
 		Tracker: tracker,
 		Store:   store,

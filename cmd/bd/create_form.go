@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -93,7 +93,7 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 // CreateIssueFromFormValues creates an issue from the given form values.
 // It returns the created issue and any error that occurred.
 // This function handles labels, dependencies, and source_repo inheritance.
-func CreateIssueFromFormValues(ctx context.Context, s storage.Storage, fv *createFormValues, actor string) (*types.Issue, error) {
+func CreateIssueFromFormValues(ctx context.Context, s *dolt.DoltStore, fv *createFormValues, actor string) (*types.Issue, error) {
 	var externalRefPtr *string
 	if fv.ExternalRef != "" {
 		externalRefPtr = &fv.ExternalRef

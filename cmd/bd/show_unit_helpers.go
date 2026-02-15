@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -27,7 +27,7 @@ func validateIssueClosable(id string, issue *types.Issue, force bool) error {
 	)(id, issue)
 }
 
-func applyLabelUpdates(ctx context.Context, st storage.Storage, issueID, actor string, setLabels, addLabels, removeLabels []string) error {
+func applyLabelUpdates(ctx context.Context, st *dolt.DoltStore, issueID, actor string, setLabels, addLabels, removeLabels []string) error {
 	// Set labels (replaces all existing labels)
 	if len(setLabels) > 0 {
 		currentLabels, err := st.GetLabels(ctx, issueID)

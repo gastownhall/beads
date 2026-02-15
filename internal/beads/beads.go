@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -364,7 +365,7 @@ const (
 )
 
 // Storage provides the minimal interface for extension orchestration
-type Storage = storage.Storage
+type Storage = *dolt.DoltStore
 
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.

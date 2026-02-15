@@ -18,7 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
@@ -352,7 +352,7 @@ enable server mode, or set connection details with --server-host, --server-port,
 		if prefix != "" {
 			dbName = "beads_" + prefix
 		}
-		var store storage.Storage
+		var store *dolt.DoltStore
 		store, err = factory.NewWithOptions(ctx, backend, storagePath, factory.Options{Database: dbName})
 		if err != nil {
 			// If the backend requires CGO but this is a nocgo build, fall back to JSONL-only mode.
@@ -1155,7 +1155,7 @@ func promptContributorMode() (isContributor bool, err error) {
 
 // verifyMetadata writes a metadata field and verifies the write succeeded.
 // Returns true if write+verify succeeded, false with warning if either failed.
-func verifyMetadata(ctx context.Context, store storage.Storage, key, value string) bool {
+func verifyMetadata(ctx context.Context, store *dolt.DoltStore, key, value string) bool {
 	if err := store.SetMetadata(ctx, key, value); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write %s metadata: %v\n", key, err)
 		fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")

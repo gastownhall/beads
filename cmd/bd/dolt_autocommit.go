@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
 )
 
 type doltAutoCommitParams struct {
@@ -34,8 +33,7 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 	}
 
 	st := getStore()
-	vs, ok := storage.AsVersioned(st)
-	if !ok {
+	if st == nil {
 		return nil
 	}
 
@@ -44,7 +42,7 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 		msg = formatDoltAutoCommitMessage(p.Command, getActor(), p.IssueIDs)
 	}
 
-	if err := vs.Commit(ctx, msg); err != nil {
+	if err := st.Commit(ctx, msg); err != nil {
 		if isDoltNothingToCommit(err) {
 			return nil
 		}

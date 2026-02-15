@@ -12,9 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
 )
 
 // CheckFederationRemotesAPI checks if the remotesapi port is accessible for federation.
@@ -50,7 +48,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	if serverPID == 0 {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -61,17 +59,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 		defer func() { _ = store.Close() }()
 
-		fedStore, ok := storage.AsFederated(store)
-		if !ok {
-			return DoctorCheck{
-				Name:     "Federation remotesapi",
-				Status:   StatusOK,
-				Message:  "N/A (storage does not support federation)",
-				Category: CategoryFederation,
-			}
-		}
-
-		remotes, err := fedStore.ListRemotes(ctx)
+		remotes, err := store.ListRemotes(ctx)
 		if err != nil || len(remotes) == 0 {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -145,7 +133,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
@@ -157,17 +145,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	fedStore, ok := storage.AsFederated(store)
-	if !ok {
-		return DoctorCheck{
-			Name:     "Peer Connectivity",
-			Status:   StatusOK,
-			Message:  "N/A (storage does not support federation)",
-			Category: CategoryFederation,
-		}
-	}
-
-	remotes, err := fedStore.ListRemotes(ctx)
+	remotes, err := store.ListRemotes(ctx)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
@@ -197,7 +175,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 			continue
 		}
 
-		status, err := fedStore.SyncStatus(ctx, remote.Name)
+		status, err := store.SyncStatus(ctx, remote.Name)
 		if err != nil {
 			unreachable = append(unreachable, remote.Name)
 			statusDetails = append(statusDetails, fmt.Sprintf("%s: %v", remote.Name, err))
@@ -272,7 +250,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
@@ -284,17 +262,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	fedStore, ok := storage.AsFederated(store)
-	if !ok {
-		return DoctorCheck{
-			Name:     "Sync Staleness",
-			Status:   StatusOK,
-			Message:  "N/A (storage does not support federation)",
-			Category: CategoryFederation,
-		}
-	}
-
-	remotes, err := fedStore.ListRemotes(ctx)
+	remotes, err := store.ListRemotes(ctx)
 	if err != nil || len(remotes) == 0 {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
@@ -314,7 +282,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 			continue
 		}
 
-		status, err := fedStore.SyncStatus(ctx, remote.Name)
+		status, err := store.SyncStatus(ctx, remote.Name)
 		if err != nil {
 			continue // Already handled in peer connectivity check
 		}
@@ -375,7 +343,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Federation Conflicts",
@@ -387,18 +355,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Check if storage supports versioning (needed for conflict detection)
-	verStore, ok := storage.AsVersioned(store)
-	if !ok {
-		return DoctorCheck{
-			Name:     "Federation Conflicts",
-			Status:   StatusOK,
-			Message:  "N/A (storage does not support versioning)",
-			Category: CategoryFederation,
-		}
-	}
-
-	conflicts, err := verStore.GetConflicts(ctx)
+	conflicts, err := store.GetConflicts(ctx)
 	if err != nil {
 		// Some errors are expected (e.g., no conflicts table)
 		if strings.Contains(err.Error(), "no such table") || strings.Contains(err.Error(), "doesn't exist") {
@@ -481,7 +438,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 
 	// Open storage to check for remotes
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
 	if err != nil {
 		// If we can't open the store, check if there's a lock file indicating embedded mode
 		lockFile := filepath.Join(doltPath, ".dolt", "lock")
@@ -505,27 +462,8 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Check if storage supports federation
-	fedStore, isFederated := storage.AsFederated(store)
-	if !isFederated {
-		if serverPID > 0 {
-			return DoctorCheck{
-				Name:     "Dolt Mode",
-				Status:   StatusOK,
-				Message:  "Server mode (no federation)",
-				Category: CategoryFederation,
-			}
-		}
-		return DoctorCheck{
-			Name:     "Dolt Mode",
-			Status:   StatusOK,
-			Message:  "Embedded mode",
-			Category: CategoryFederation,
-		}
-	}
-
 	// Check for configured remotes
-	remotes, err := fedStore.ListRemotes(ctx)
+	remotes, err := store.ListRemotes(ctx)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Mode",

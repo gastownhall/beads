@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
@@ -484,22 +484,17 @@ func doPullFirstSync(ctx context.Context, jsonlPath string, renameOnImport, noGi
 	shouldUseDolt := ShouldUseDoltRemote(ctx, store)
 
 	if shouldUseDolt {
-		// Try Dolt pull for dolt-native and belt-and-suspenders modes
-		rs, ok := storage.AsRemote(store)
-		if ok {
-			fmt.Println("→ Pulling from Dolt remote...")
-			if err := rs.Pull(ctx); err != nil {
-				// Don't fail if no remote configured
-				if strings.Contains(err.Error(), "remote") {
-					fmt.Println("⚠ No Dolt remote configured, skipping Dolt pull")
-				} else {
-					return fmt.Errorf("dolt pull failed: %w", err)
-				}
+		// Dolt pull for dolt-native and belt-and-suspenders modes
+		fmt.Println("→ Pulling from Dolt remote...")
+		if err := store.Pull(ctx); err != nil {
+			// Don't fail if no remote configured
+			if strings.Contains(err.Error(), "remote") {
+				fmt.Println("⚠ No Dolt remote configured, skipping Dolt pull")
 			} else {
-				fmt.Println("✓ Pulled from Dolt remote")
+				return fmt.Errorf("dolt pull failed: %w", err)
 			}
-		} else if syncMode == SyncModeDoltNative {
-			return fmt.Errorf("dolt-native sync mode requires Dolt backend")
+		} else {
+			fmt.Println("✓ Pulled from Dolt remote")
 		}
 		// For belt-and-suspenders, continue with git pull even if Dolt pull failed
 	}
@@ -735,34 +730,25 @@ func doExportSync(ctx context.Context, jsonlPath string, _, dryRun bool) error {
 
 	// Handle Dolt remote operations for dolt-native and belt-and-suspenders modes
 	if shouldUseDolt {
-		rs, ok := storage.AsRemote(store)
-		if !ok {
-			if syncMode == SyncModeDoltNative {
-				return fmt.Errorf("dolt-native sync mode requires Dolt backend (current backend doesn't support remote operations)")
+		fmt.Println("→ Committing to Dolt...")
+		// We are explicitly creating a Dolt commit inside sync; avoid redundant auto-commit in PersistentPostRun.
+		commandDidExplicitDoltCommit = true
+		if err := store.Commit(ctx, "bd sync: auto-commit"); err != nil {
+			// Ignore "nothing to commit" errors
+			if !strings.Contains(err.Error(), "nothing to commit") {
+				return fmt.Errorf("dolt commit failed: %w", err)
 			}
-			// belt-and-suspenders: warn but continue with JSONL
-			fmt.Println("⚠ Dolt remote not available, falling back to JSONL-only")
-		} else {
-			fmt.Println("→ Committing to Dolt...")
-			// We are explicitly creating a Dolt commit inside sync; avoid redundant auto-commit in PersistentPostRun.
-			commandDidExplicitDoltCommit = true
-			if err := rs.Commit(ctx, "bd sync: auto-commit"); err != nil {
-				// Ignore "nothing to commit" errors
-				if !strings.Contains(err.Error(), "nothing to commit") {
-					return fmt.Errorf("dolt commit failed: %w", err)
-				}
-			}
+		}
 
-			fmt.Println("→ Pushing to Dolt remote...")
-			if err := rs.Push(ctx); err != nil {
-				// Don't fail if no remote configured
-				if !strings.Contains(err.Error(), "remote") {
-					return fmt.Errorf("dolt push failed: %w", err)
-				}
-				fmt.Println("⚠ No Dolt remote configured, skipping push")
-			} else {
-				fmt.Println("✓ Pushed to Dolt remote")
+		fmt.Println("→ Pushing to Dolt remote...")
+		if err := store.Push(ctx); err != nil {
+			// Don't fail if no remote configured
+			if !strings.Contains(err.Error(), "remote") {
+				return fmt.Errorf("dolt push failed: %w", err)
 			}
+			fmt.Println("⚠ No Dolt remote configured, skipping push")
+		} else {
+			fmt.Println("✓ Pushed to Dolt remote")
 		}
 	}
 
