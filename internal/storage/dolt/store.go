@@ -507,6 +507,14 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 
 // initSchema creates all tables if they don't exist
 func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
+	// Fast path: if schema is already at current version, skip initialization.
+	// This avoids ~20 DDL statements per bd invocation when schema is current.
+	var version int
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
+	if err == nil && version >= currentSchemaVersion {
+		return nil
+	}
+
 	// Execute schema creation - split into individual statements
 	// because MySQL/Dolt doesn't support multiple statements in one Exec
 	for _, stmt := range splitStatements(schema) {
@@ -553,7 +561,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	// Remove FK constraint on depends_on_id to allow external references.
 	// See SQLite migration 025_remove_depends_on_fk.go for design context.
 	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
-	_, err := db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
+	_, err = db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
 	if err == nil {
 		// DDL change succeeded - commit it so it persists (required for Dolt server mode)
 		_, _ = db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'migration: remove fk_dep_depends_on for external references')") // Best effort: migration commit is advisory; schema change already applied
@@ -576,6 +584,12 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	if err := RunMigrations(db); err != nil {
 		return fmt.Errorf("failed to run dolt migrations: %w", err)
 	}
+
+	// Mark schema as current so subsequent invocations skip initialization
+	_, _ = db.ExecContext(ctx,
+		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
+			"ON DUPLICATE KEY UPDATE `value` = ?",
+		currentSchemaVersion, currentSchemaVersion)
 
 	return nil
 }

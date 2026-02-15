@@ -2,6 +2,11 @@
 
 package dolt
 
+// currentSchemaVersion is bumped whenever the schema or migrations change.
+// initSchemaOnDB checks this against the stored version and skips re-initialization
+// when they match, avoiding ~20 DDL statements per bd invocation.
+const currentSchemaVersion = 3
+
 // schema defines the MySQL-compatible database schema for Dolt.
 // This mirrors the SQLite schema but uses MySQL syntax.
 const schema = `
