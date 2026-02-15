@@ -120,11 +120,21 @@ func closeDoltDB(db *sql.DB, serverMode bool) {
 type doltConn struct {
 	db         *sql.DB
 	serverMode bool
-	lock       *dolt.AccessLock // nil in server mode
+	cfg        *configfile.Config // config for server mode detail (host:port)
+	lock       *dolt.AccessLock   // nil in server mode
 }
 
 // Close releases the database connection and advisory lock.
 // Releases DB first (may take time for embedded mode), then lock.
+//
+// Note on CloseWithTimeout behavior: In embedded mode, closeDoltDB uses
+// doltutil.CloseWithTimeout which runs db.Close() in a goroutine with a 5s
+// timeout. If the timeout fires, the goroutine keeps running in the background
+// and may leave a noms LOCK file behind (.beads/dolt/beads/.dolt/noms/LOCK).
+// We intentionally do NOT clean up noms LOCK files here because:
+//   - Doctor holds a shared AccessLock, not exclusive — other processes may be active
+//   - The noms LOCK is managed by the Dolt storage engine — external removal risks corruption
+//   - LOCK file cleanup belongs in doctor --fix, not in connection teardown
 func (c *doltConn) Close() {
 	closeDoltDB(c.db, c.serverMode)
 	if c.lock != nil {
@@ -136,6 +146,11 @@ func (c *doltConn) Close() {
 // In embedded mode, acquires a shared AccessLock before opening the database
 // to prevent contention with daemons and other bd processes.
 // In server mode, skips lock acquisition (server handles its own locking).
+//
+// Note: This does NOT honor the BD_SKIP_ACCESS_LOCK env var that DoltStore
+// checks (store.go:265). Doctor is read-only and short-lived, so the shared
+// lock is always appropriate. The env var is a debugging escape hatch for
+// write-path operations where lock contention is more disruptive.
 func openDoltDBWithLock(beadsDir string) (*doltConn, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -165,7 +180,7 @@ func openDoltDBWithLock(beadsDir string) (*doltConn, error) {
 		return nil, err
 	}
 
-	return &doltConn{db: db, serverMode: serverMode, lock: lock}, nil
+	return &doltConn{db: db, serverMode: serverMode, cfg: cfg, lock: lock}, nil
 }
 
 // GetBackend returns the configured backend type from configuration.
@@ -233,7 +248,10 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 	}
 
 	storageDetail := "Storage: Dolt"
-	if conn.serverMode {
+	if conn.serverMode && conn.cfg != nil {
+		storageDetail = fmt.Sprintf("Storage: Dolt (server %s:%d)",
+			conn.cfg.GetDoltServerHost(), conn.cfg.GetDoltServerPort())
+	} else if conn.serverMode {
 		storageDetail = "Storage: Dolt (server mode)"
 	}
 

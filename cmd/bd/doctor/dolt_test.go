@@ -5,6 +5,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func TestAccessLock_ReleaseIdempotent(t *testing.T) {
 	lock.Release()
 }
 
-func TestDoltConn_CloseReleasesLock(t *testing.T) {
+func TestAccessLock_ReleaseAllowsReacquisition(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
@@ -65,11 +66,6 @@ func TestDoltConn_CloseReleasesLock(t *testing.T) {
 		t.Fatalf("failed to acquire lock: %v", err)
 	}
 
-	// Create a doltConn with nil db (we're only testing lock release)
-	// We can't create a real db without a Dolt database, but we can test
-	// that Close() handles the lock release path.
-	// Note: calling closeDoltDB with nil would panic, so we test lock
-	// behavior separately.
 	lock.Release()
 
 	// After release, another exclusive lock should succeed immediately
@@ -183,5 +179,109 @@ func TestRunDoltHealthChecks_CheckNameAndCategory(t *testing.T) {
 	check := checks[0]
 	if check.Category != CategoryCore {
 		t.Errorf("expected CategoryCore, got %q", check.Category)
+	}
+}
+
+func TestLockContention(t *testing.T) {
+	// Verifies that RunDoltHealthChecks returns a StatusError with proper
+	// error messages when an exclusive lock is already held (simulating
+	// another process). The 15s lock timeout in openDoltDBWithLock is
+	// hardcoded, so this test takes ~15s to complete.
+	if testing.Short() {
+		t.Skip("skipping lock contention test in short mode (takes ~15s)")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("failed to create dolt dir: %v", err)
+	}
+
+	// Write metadata.json marking this as dolt backend
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Acquire an EXCLUSIVE lock to block shared acquisition by RunDoltHealthChecks.
+	// openDoltDBWithLock tries shared lock with 15s timeout; it will fail because
+	// exclusive lock is held.
+	exLock, err := dolt.AcquireAccessLock(doltDir, true, 5*time.Second)
+	if err != nil {
+		t.Fatalf("failed to acquire exclusive lock: %v", err)
+	}
+	defer exLock.Release()
+
+	checks := RunDoltHealthChecks(tmpDir)
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check on lock contention, got %d", len(checks))
+	}
+
+	check := checks[0]
+
+	// Verify error status and check name
+	if check.Status != StatusError {
+		t.Errorf("expected StatusError, got %s", check.Status)
+	}
+	if check.Name != "Dolt Connection" {
+		t.Errorf("expected check name %q, got %q", "Dolt Connection", check.Name)
+	}
+
+	// The error wraps as "acquire access lock: dolt access lock timeout ..."
+	if !strings.Contains(check.Detail, "access lock") {
+		t.Errorf("expected Detail to contain %q, got %q", "access lock", check.Detail)
+	}
+
+	// Fix suggestion mentions LOCK files
+	if !strings.Contains(check.Fix, "LOCK") {
+		t.Errorf("expected Fix to contain %q, got %q", "LOCK", check.Fix)
+	}
+}
+
+func TestServerMode_NoLockAcquired(t *testing.T) {
+	// Verifies that server mode skips lock acquisition entirely.
+	// BEADS_DOLT_SERVER_MODE=1 triggers server mode, which attempts MySQL
+	// connection instead of embedded Dolt. The MySQL connection will fail
+	// (no server running), but the important assertions are:
+	// 1. Error does NOT contain "access lock" (lock was skipped)
+	// 2. No lock file was created
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("failed to create dolt dir: %v", err)
+	}
+
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Enable server mode via env var
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+
+	checks := RunDoltHealthChecks(tmpDir)
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check (connection error), got %d", len(checks))
+	}
+
+	check := checks[0]
+
+	// Server mode should fail with a connection error, NOT a lock error
+	if check.Status != StatusError {
+		t.Errorf("expected StatusError (server unreachable), got %s", check.Status)
+	}
+
+	// The error should NOT be about lock acquisition — server mode skips locking
+	if strings.Contains(check.Detail, "access lock") {
+		t.Errorf("server mode should not attempt lock acquisition, but Detail contains %q: %s",
+			"access lock", check.Detail)
+	}
+
+	// Verify no lock file was created at .beads/dolt-access.lock
+	lockPath := filepath.Join(beadsDir, "dolt-access.lock")
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("lock file should not exist in server mode, but found at %s", lockPath)
 	}
 }
