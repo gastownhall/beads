@@ -95,17 +95,34 @@ func TestRunDoltHealthChecks_NonDoltBackend(t *testing.T) {
 	}
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) != 1 {
-		t.Fatalf("expected 1 check for non-dolt backend, got %d", len(checks))
+	if len(checks) != 4 {
+		t.Fatalf("expected 4 checks for non-dolt backend, got %d", len(checks))
 	}
-	if checks[0].Status != StatusOK {
-		t.Errorf("expected StatusOK for non-dolt backend, got %s", checks[0].Status)
+
+	// Validate all 4 N/A checks
+	expectedChecks := []struct {
+		name     string
+		category string
+	}{
+		{"Dolt Connection", CategoryCore},
+		{"Dolt Schema", CategoryCore},
+		{"Dolt-JSONL Sync", CategoryData},
+		{"Dolt Status", CategoryData},
 	}
-	if checks[0].Name != "Dolt Connection" {
-		t.Errorf("expected check name 'Dolt Connection', got %q", checks[0].Name)
-	}
-	if checks[0].Message != "N/A (SQLite backend)" {
-		t.Errorf("expected 'N/A (SQLite backend)' message, got %q", checks[0].Message)
+
+	for i, expected := range expectedChecks {
+		if checks[i].Status != StatusOK {
+			t.Errorf("check[%d] %q: expected StatusOK, got %s", i, expected.name, checks[i].Status)
+		}
+		if checks[i].Name != expected.name {
+			t.Errorf("check[%d]: expected name %q, got %q", i, expected.name, checks[i].Name)
+		}
+		if checks[i].Message != "N/A (SQLite backend)" {
+			t.Errorf("check[%d] %q: expected 'N/A (SQLite backend)' message, got %q", i, expected.name, checks[i].Message)
+		}
+		if checks[i].Category != expected.category {
+			t.Errorf("check[%d] %q: expected category %q, got %q", i, expected.name, expected.category, checks[i].Category)
+		}
 	}
 }
 

@@ -183,16 +183,16 @@ func IsDoltBackend(beadsDir string) bool {
 
 // RunDoltHealthChecks runs all Dolt-specific health checks using a single
 // shared connection with AccessLock coordination. Returns one check per
-// health dimension. Non-Dolt backends get a single N/A result.
-//
-// Phase 1 (tracer): only checkConnectionWithDB.
-// Phase 2 will add checkSchemaWithDB, checkIssueCountWithDB, checkStatusWithDB.
+// health dimension. Non-Dolt backends get N/A results for all dimensions.
 func RunDoltHealthChecks(path string) []DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	if !IsDoltBackend(beadsDir) {
 		return []DoctorCheck{
 			{Name: "Dolt Connection", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryCore},
+			{Name: "Dolt Schema", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryCore},
+			{Name: "Dolt-JSONL Sync", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
+			{Name: "Dolt Status", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
 		}
 	}
 
@@ -212,6 +212,9 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 
 	return []DoctorCheck{
 		checkConnectionWithDB(conn),
+		checkSchemaWithDB(conn),
+		checkIssueCountWithDB(conn, beadsDir),
+		checkStatusWithDB(conn),
 	}
 }
 
@@ -294,32 +297,9 @@ func CheckDoltConnection(path string) DoctorCheck {
 	return checkConnectionWithDB(conn)
 }
 
-// CheckDoltSchema verifies the Dolt database has required tables.
-func CheckDoltSchema(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Only run for Dolt backend
-	if !IsDoltBackend(beadsDir) {
-		return DoctorCheck{
-			Name:     "Dolt Schema",
-			Status:   StatusOK,
-			Message:  "N/A (not using Dolt backend)",
-			Category: CategoryCore,
-		}
-	}
-
-	db, serverMode, err := openDoltDB(beadsDir)
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Dolt Schema",
-			Status:   StatusError,
-			Message:  "Failed to open database",
-			Detail:   err.Error(),
-			Category: CategoryCore,
-		}
-	}
-	defer closeDoltDB(db, serverMode)
-
+// checkSchemaWithDB verifies the Dolt database has required tables using an existing connection.
+// Separated from CheckDoltSchema to allow connection reuse across checks.
+func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 	ctx := context.Background()
 
 	// Check required tables
@@ -328,7 +308,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 
 	for _, table := range requiredTables {
 		var count int
-		err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s LIMIT 1", table)).Scan(&count)
+		err := conn.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s LIMIT 1", table)).Scan(&count)
 		if err != nil {
 			missingTables = append(missingTables, table)
 		}
@@ -352,21 +332,42 @@ func CheckDoltSchema(path string) DoctorCheck {
 	}
 }
 
-// CheckDoltIssueCount compares issue count in Dolt vs JSONL.
-func CheckDoltIssueCount(path string) DoctorCheck {
+// CheckDoltSchema verifies the Dolt database has required tables.
+// This is the standalone entry point; RunDoltHealthChecks is preferred
+// for coordinated access with AccessLock.
+func CheckDoltSchema(path string) DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
-			Name:     "Dolt-JSONL Sync",
+			Name:     "Dolt Schema",
 			Status:   StatusOK,
 			Message:  "N/A (not using Dolt backend)",
-			Category: CategoryData,
+			Category: CategoryCore,
 		}
 	}
 
-	// Get JSONL count
+	conn, err := openDoltDBWithLock(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Dolt Schema",
+			Status:   StatusError,
+			Message:  "Failed to open database",
+			Detail:   err.Error(),
+			Category: CategoryCore,
+		}
+	}
+	defer conn.Close()
+
+	return checkSchemaWithDB(conn)
+}
+
+// checkIssueCountWithDB compares issue count in Dolt vs JSONL using an existing connection.
+// Separated from CheckDoltIssueCount to allow connection reuse across checks.
+// Requires beadsDir to locate JSONL files.
+func checkIssueCountWithDB(conn *doltConn, beadsDir string) DoctorCheck {
+	// Get JSONL count (before DB query — keep original order)
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 	jsonlCount, _, err := CountJSONLIssues(jsonlPath)
 	if err != nil {
@@ -385,21 +386,9 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 	}
 
 	// Get Dolt count
-	db, serverMode, err := openDoltDB(beadsDir)
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Dolt-JSONL Sync",
-			Status:   StatusError,
-			Message:  "Failed to open Dolt database",
-			Detail:   err.Error(),
-			Category: CategoryData,
-		}
-	}
-	defer closeDoltDB(db, serverMode)
-
 	ctx := context.Background()
 	var doltCount int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&doltCount)
+	err = conn.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&doltCount)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt-JSONL Sync",
@@ -428,36 +417,44 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 	}
 }
 
-// CheckDoltStatus reports uncommitted changes in Dolt.
-func CheckDoltStatus(path string) DoctorCheck {
+// CheckDoltIssueCount compares issue count in Dolt vs JSONL.
+// This is the standalone entry point; RunDoltHealthChecks is preferred
+// for coordinated access with AccessLock.
+func CheckDoltIssueCount(path string) DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
-			Name:     "Dolt Status",
+			Name:     "Dolt-JSONL Sync",
 			Status:   StatusOK,
 			Message:  "N/A (not using Dolt backend)",
 			Category: CategoryData,
 		}
 	}
 
-	db, serverMode, err := openDoltDB(beadsDir)
+	conn, err := openDoltDBWithLock(beadsDir)
 	if err != nil {
 		return DoctorCheck{
-			Name:     "Dolt Status",
-			Status:   StatusWarning,
-			Message:  "Could not check Dolt status",
+			Name:     "Dolt-JSONL Sync",
+			Status:   StatusError,
+			Message:  "Failed to open Dolt database",
 			Detail:   err.Error(),
 			Category: CategoryData,
 		}
 	}
-	defer closeDoltDB(db, serverMode)
+	defer conn.Close()
 
+	return checkIssueCountWithDB(conn, beadsDir)
+}
+
+// checkStatusWithDB reports uncommitted changes in Dolt using an existing connection.
+// Separated from CheckDoltStatus to allow connection reuse across checks.
+func checkStatusWithDB(conn *doltConn) DoctorCheck {
 	ctx := context.Background()
 
 	// Check dolt_status for uncommitted changes
-	rows, err := db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
+	rows, err := conn.db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",
@@ -501,4 +498,35 @@ func CheckDoltStatus(path string) DoctorCheck {
 		Message:  "Clean working set",
 		Category: CategoryData,
 	}
+}
+
+// CheckDoltStatus reports uncommitted changes in Dolt.
+// This is the standalone entry point; RunDoltHealthChecks is preferred
+// for coordinated access with AccessLock.
+func CheckDoltStatus(path string) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	// Only run for Dolt backend
+	if !IsDoltBackend(beadsDir) {
+		return DoctorCheck{
+			Name:     "Dolt Status",
+			Status:   StatusOK,
+			Message:  "N/A (not using Dolt backend)",
+			Category: CategoryData,
+		}
+	}
+
+	conn, err := openDoltDBWithLock(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Dolt Status",
+			Status:   StatusWarning,
+			Message:  "Could not check Dolt status",
+			Detail:   err.Error(),
+			Category: CategoryData,
+		}
+	}
+	defer conn.Close()
+
+	return checkStatusWithDB(conn)
 }

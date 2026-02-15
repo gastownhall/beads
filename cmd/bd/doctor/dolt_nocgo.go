@@ -6,6 +6,9 @@ package doctor
 func RunDoltHealthChecks(path string) []DoctorCheck {
 	return []DoctorCheck{
 		{Name: "Dolt Connection", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryCore},
+		{Name: "Dolt Schema", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryCore},
+		{Name: "Dolt-JSONL Sync", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryData},
+		{Name: "Dolt Status", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryData},
 	}
 }
 
