@@ -723,6 +723,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, kvSyncCheck)
 	// Don't fail overall check for KV sync warning, just inform
 
+	// Dolt health checks (connection, schema, sync, status via AccessLock)
+	for _, dc := range doctor.RunDoltHealthChecks(path) {
+		result.Checks = append(result.Checks, convertDoctorCheck(dc))
+	}
+
 	// Check 32: Dolt locks (uncommitted changes)
 	doltLocksCheck := convertDoctorCheck(doctor.CheckDoltLocks(path))
 	result.Checks = append(result.Checks, doltLocksCheck)
