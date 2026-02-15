@@ -1,3 +1,5 @@
+//go:build cgo
+
 package doctor
 
 import (
@@ -6,9 +8,25 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// newTestDoltStore creates a DoltStore in a temp directory with the given issue prefix.
+func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
+	t.Helper()
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
 
 func newTestIssue(id string) *types.Issue {
 	return &types.Issue{
@@ -20,9 +38,9 @@ func newTestIssue(id string) *types.Issue {
 	}
 }
 
-// insertIssueDirectly inserts an issue with a pre-set ID into the memory store.
+// insertIssueDirectly inserts an issue with a pre-set ID into the dolt store.
 // This simulates cross-rig contamination where foreign-prefix issues end up in the store.
-func insertIssueDirectly(t *testing.T, store *memory.MemoryStorage, id string) {
+func insertIssueDirectly(t *testing.T, store *dolt.DoltStore, id string) {
 	t.Helper()
 	ctx := context.Background()
 	issue := newTestIssue(id)
@@ -335,20 +353,7 @@ func TestMigrationValidationResult_JSONSerialization(t *testing.T) {
 
 func TestCategorizeDoltExtras_AllForeign(t *testing.T) {
 	ctx := context.Background()
-	tmpDir, err := os.MkdirTemp("", "bd-categorize-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
-	store := memory.New(jsonlPath)
-	defer store.Close()
-
-	// Set local prefix to "bd"
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
+	store := newTestDoltStore(t, "bd")
 
 	// Create local issues via store
 	for _, id := range []string{"bd-001", "bd-002"} {
@@ -382,19 +387,7 @@ func TestCategorizeDoltExtras_AllForeign(t *testing.T) {
 
 func TestCategorizeDoltExtras_MixedEphemeralAndForeign(t *testing.T) {
 	ctx := context.Background()
-	tmpDir, err := os.MkdirTemp("", "bd-categorize-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
-	store := memory.New(jsonlPath)
-	defer store.Close()
-
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
+	store := newTestDoltStore(t, "bd")
 
 	// Create local issues via store
 	for _, id := range []string{"bd-001", "bd-003"} {
@@ -422,19 +415,7 @@ func TestCategorizeDoltExtras_MixedEphemeralAndForeign(t *testing.T) {
 
 func TestCategorizeDoltExtras_AllEphemeral(t *testing.T) {
 	ctx := context.Background()
-	tmpDir, err := os.MkdirTemp("", "bd-categorize-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
-	store := memory.New(jsonlPath)
-	defer store.Close()
-
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
+	store := newTestDoltStore(t, "bd")
 
 	// All extras are same-prefix (ephemeral)
 	for _, id := range []string{"bd-001", "bd-002", "bd-003"} {
@@ -457,19 +438,7 @@ func TestCategorizeDoltExtras_AllEphemeral(t *testing.T) {
 
 func TestCategorizeDoltExtras_NoExtras(t *testing.T) {
 	ctx := context.Background()
-	tmpDir, err := os.MkdirTemp("", "bd-categorize-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
-	store := memory.New(jsonlPath)
-	defer store.Close()
-
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
+	store := newTestDoltStore(t, "bd")
 
 	for _, id := range []string{"bd-001", "bd-002"} {
 		if err := store.CreateIssue(ctx, newTestIssue(id), "test"); err != nil {

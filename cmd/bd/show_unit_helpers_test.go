@@ -1,10 +1,12 @@
+//go:build cgo
+
 package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -37,10 +39,7 @@ func TestValidateIssueClosable(t *testing.T) {
 
 func TestApplyLabelUpdates_SetAddRemove(t *testing.T) {
 	ctx := context.Background()
-	st := memory.New("")
-	if err := st.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
+	st := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	issue := &types.Issue{Title: "x", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 	if err := st.CreateIssue(ctx, issue, "tester"); err != nil {
@@ -78,7 +77,7 @@ func TestApplyLabelUpdates_SetAddRemove(t *testing.T) {
 
 func TestApplyLabelUpdates_AddRemoveOnly(t *testing.T) {
 	ctx := context.Background()
-	st := memory.New("")
+	st := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 	issue := &types.Issue{Title: "x", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 	if err := st.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -94,16 +93,9 @@ func TestApplyLabelUpdates_AddRemoveOnly(t *testing.T) {
 	}
 }
 
-func TestFindRepliesToAndReplies_WorksWithMemoryStorage(t *testing.T) {
+func TestFindRepliesToAndReplies_WorksWithDoltStorage(t *testing.T) {
 	ctx := context.Background()
-	st := memory.New("")
-	if err := st.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
-	// Configure Gas Town custom types for test compatibility (bd-find4)
-	if err := st.SetConfig(ctx, "types.custom", "message"); err != nil {
-		t.Fatalf("SetConfig types.custom: %v", err)
-	}
+	st := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	root := &types.Issue{Title: "root", Status: types.StatusOpen, Priority: 2, IssueType: "message", Sender: "a", Assignee: "b"}
 	reply1 := &types.Issue{Title: "r1", Status: types.StatusOpen, Priority: 2, IssueType: "message", Sender: "b", Assignee: "a"}

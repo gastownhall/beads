@@ -17,7 +17,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,7 +60,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 		}
 
 		ctx := context.Background()
-		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 		if err != nil {
 			return DoctorCheck{
 				Name:    "Database",
@@ -230,7 +230,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 		}
 
 		ctx := context.Background()
-		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 		if err != nil {
 			return DoctorCheck{
 				Name:    "Schema Compatibility",
@@ -361,7 +361,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		}
 
 		ctx := context.Background()
-		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 		if err != nil {
 			return DoctorCheck{
 				Name:    "Database Integrity",

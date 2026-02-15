@@ -8,7 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // FixMissingMetadata checks and repairs missing metadata fields in a Dolt database.
@@ -36,7 +36,7 @@ func FixMissingMetadata(path string, bdVersion string) error {
 
 	ctx := context.Background()
 
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open store: %w", err)
 	}

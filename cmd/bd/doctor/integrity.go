@@ -15,7 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // CheckIDFormat checks whether issues use hash-based or sequential IDs
@@ -50,7 +50,7 @@ func CheckIDFormat(path string) DoctorCheck {
 	// Open the configured backend in read-only mode.
 	// This must work for both SQLite and Dolt.
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
@@ -136,7 +136,7 @@ func CheckDependencyCycles(path string) DoctorCheck {
 
 	// Open the configured backend in read-only mode (works for both SQLite and Dolt)
 	ctx := context.Background()
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -349,7 +349,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	// For Dolt, read fingerprint from storage metadata (no sqlite assumptions).
 	if backend == configfile.BackendDolt {
 		ctx := context.Background()
-		store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{ReadOnly: true})
+		store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 		if err != nil {
 			return DoctorCheck{
 				Name:    "Repo Fingerprint",

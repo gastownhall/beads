@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // setupDoltWorkspace creates a temp beads workspace with a Dolt database.
@@ -49,7 +49,8 @@ func setupDoltWorkspace(t *testing.T) string {
 	// Create the Dolt store via factory (which bootstraps the database)
 	ctx := context.Background()
 	doltPath := filepath.Join(beadsDir, "dolt")
-	store, err := factory.NewWithOptions(ctx, configfile.BackendDolt, doltPath, factory.Options{
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:     doltPath,
 		Database: "beads",
 	})
 	if err != nil {
@@ -77,7 +78,7 @@ func TestFixMissingMetadata_DoltRepair(t *testing.T) {
 	// Verify metadata was written by opening the store
 	ctx := context.Background()
 	beadsDir := filepath.Join(dir, ".beads")
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		t.Fatalf("failed to reopen store for verification: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestFixMissingMetadata_DoltIdempotent(t *testing.T) {
 	// Read the values that were set
 	ctx := context.Background()
 	beadsDir := filepath.Join(dir, ".beads")
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		t.Fatalf("failed to open store: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestFixMissingMetadata_DoltIdempotent(t *testing.T) {
 	}
 
 	// Verify values did not change (version should remain 0.49.6, not 0.50.0)
-	store2, err := factory.NewFromConfig(ctx, beadsDir)
+	store2, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		t.Fatalf("failed to reopen store: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestFixMissingMetadata_DoltPartialRepair(t *testing.T) {
 	// Pre-set only bd_version
 	ctx := context.Background()
 	beadsDir := filepath.Join(dir, ".beads")
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		t.Fatalf("failed to open store: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestFixMissingMetadata_DoltPartialRepair(t *testing.T) {
 	}
 
 	// Verify: bd_version should remain 0.48.0 (not overwritten)
-	store2, err := factory.NewFromConfig(ctx, beadsDir)
+	store2, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		t.Fatalf("failed to reopen store: %v", err)
 	}

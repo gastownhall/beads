@@ -1,12 +1,26 @@
+//go:build cgo
+
 package utils
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/memory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func newTestStore(t *testing.T) *dolt.DoltStore {
+	t.Helper()
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
 
 func TestParseIssueID(t *testing.T) {
 	tests := []struct {
@@ -65,7 +79,7 @@ func TestParseIssueID(t *testing.T) {
 
 func TestResolvePartialID(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 
 	// Create test issues with sequential IDs (current implementation)
 	// When hash IDs (bd-165) are implemented, these can be hash-based
@@ -206,7 +220,7 @@ func TestResolvePartialID(t *testing.T) {
 
 func TestResolvePartialIDs(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 
 	// Create test issues
 	issue1 := &types.Issue{
@@ -290,7 +304,7 @@ func TestResolvePartialIDs(t *testing.T) {
 
 func TestResolvePartialID_NoConfig(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 
 	// Create test issue without setting config (test default prefix)
 	issue1 := &types.Issue{
@@ -559,7 +573,7 @@ func findSubstring(s, substr string) bool {
 // a single database.
 func TestResolvePartialID_CrossPrefix(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 
 	// Create issues with different prefixes (simulating multi-repo hydration)
 	hqIssue := &types.Issue{
@@ -658,7 +672,7 @@ func TestResolvePartialID_CrossPrefix(t *testing.T) {
 // the search query (matching title/description/ID) instead of loading all issues.
 func TestResolvePartialID_TitleFalsePositive(t *testing.T) {
 	ctx := context.Background()
-	store := memory.New("")
+	store := newTestStore(t)
 
 	// Issue whose title contains "abc12" but ID does NOT
 	decoy := &types.Issue{

@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // DBJSONLSync fixes database-JSONL sync issues by running the appropriate sync command.
@@ -159,7 +159,7 @@ func DBJSONLSync(path string) error {
 // storage factory for backend-agnostic access (bd-lftxx).
 func countDatabaseIssues(beadsDir string) (int, error) {
 	ctx := context.Background()
-	store, err := factory.NewFromConfigWithOptions(ctx, beadsDir, factory.Options{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return 0, fmt.Errorf("failed to open database: %w", err)
 	}

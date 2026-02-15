@@ -395,7 +395,7 @@ var createCmd = &cobra.Command{
 			// Open new store for target repo using factory to respect backend config
 			targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
 			var err error
-			targetStore, err = factory.NewFromConfig(rootCtx, targetBeadsDirPath)
+			targetStore, err = dolt.NewFromConfig(rootCtx, targetBeadsDirPath)
 			if err != nil {
 				FatalError("failed to open target store: %v", err)
 			}
@@ -846,7 +846,7 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	}
 
 	// Open storage for the target rig using factory to respect backend config
-	targetStore, err := factory.NewFromConfig(ctx, targetBeadsDir)
+	targetStore, err := dolt.NewFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		FatalError("failed to open rig %q database: %v", rigName, err)
 	}
@@ -1038,13 +1038,13 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *
 		}
 	}
 
-	// Initialize database - it will be created when factory.New is called
+	// Initialize database - it will be created when dolt.New is called
 	// But we need to set the prefix if source store has one (T012: prefix inheritance)
 	if sourceStore != nil {
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
 			// Open target store temporarily to set prefix
-			tempStore, err := factory.New(ctx, configfile.BackendDolt, dbPath)
+			tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 			if err != nil {
 				return fmt.Errorf("failed to initialize target database: %w", err)
 			}

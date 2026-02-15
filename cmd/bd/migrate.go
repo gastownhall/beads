@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -292,7 +292,7 @@ Subcommands:
 			// Clean up WAL files before opening to avoid "disk I/O error"
 			cleanupWALFiles(currentDB.path)
 
-			store, err := storagefactory.NewFromConfigWithOptions(rootCtx, beadsDir, storagefactory.Options{})
+			store, err := dolt.NewFromConfig(rootCtx, beadsDir)
 			if err != nil {
 				if jsonOutput {
 					outputJSON(map[string]interface{}{
@@ -452,7 +452,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bo
 
 	// Open database using storage factory
 	ctx := rootCtx
-	store, err := storagefactory.NewFromConfigWithOptions(ctx, beadsDir, storagefactory.Options{})
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -738,7 +738,7 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 	}
 
 	// Open database using storage factory (supports both SQLite and Dolt backends)
-	store, err := storagefactory.NewFromConfigWithOptions(rootCtx, beadsDir, storagefactory.Options{})
+	store, err := dolt.NewFromConfig(rootCtx, beadsDir)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -938,7 +938,7 @@ func handleInspect() {
 	}
 
 	// Open database in read-only mode for inspection (supports both SQLite and Dolt)
-	store, err := storagefactory.NewFromConfigWithOptions(rootCtx, beadsDir, storagefactory.Options{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithOptions(rootCtx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -1107,7 +1107,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	}
 
 	// Open database (supports both SQLite and Dolt backends)
-	store, err := storagefactory.NewFromConfigWithOptions(rootCtx, beadsDir, storagefactory.Options{})
+	store, err := dolt.NewFromConfig(rootCtx, beadsDir)
 	if err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{

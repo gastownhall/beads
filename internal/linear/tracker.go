@@ -250,7 +250,7 @@ func BuildStateCacheFromTracker(ctx context.Context, t *Tracker) (*StateCache, e
 	return BuildStateCache(ctx, t.client)
 }
 
-// configLoaderAdapter wraps storage.Storage to implement linear.ConfigLoader.
+// configLoaderAdapter wraps *dolt.DoltStore to implement linear.ConfigLoader.
 type configLoaderAdapter struct {
 	ctx   context.Context
 	store *dolt.DoltStore

@@ -625,7 +625,7 @@ func TestFindBeadsDir_BEADS_DIR_WithProjectFiles(t *testing.T) {
 	}
 }
 
-// TestNewStorage_Unit tests that deprecated NewStorage returns an error directing callers to factory.New
+// TestNewStorage_Unit tests that deprecated NewStorage creates a dolt store
 func TestNewStorage_Unit(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

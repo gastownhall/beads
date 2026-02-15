@@ -372,12 +372,10 @@ type Storage = *dolt.DoltStore
 type Transaction = storage.Transaction
 
 // NewStorage opens a bd database for programmatic access.
-// Deprecated: callers should use storage/factory package to respect backend configuration.
+// Deprecated: callers should use dolt.New() or dolt.NewFromConfig() directly.
 // This function is retained for backward compatibility but will be removed in a future release.
 func NewStorage(ctx context.Context, dbPath string) (Storage, error) {
-	// Cannot use factory here due to import cycle (beads -> factory -> beads).
-	// Callers should use storage/factory.New() directly instead.
-	return nil, fmt.Errorf("NewStorage is deprecated: use storage/factory.New() to create storage backends")
+	return dolt.New(ctx, &dolt.Config{Path: dbPath})
 }
 
 // GetConfiguredBackend returns the backend type from the beads directory config.
@@ -728,9 +726,8 @@ func FindAllDatabases() []DatabaseInfo {
 				// Don't fail if we can't open/query the database - it might be locked
 				// or corrupted, but we still want to detect and warn about it
 				//
-				// Note: Issue counting requires storage/factory which cannot be imported
-				// here due to import cycle constraints. Callers needing issue counts
-				// should use storage/factory directly.
+				// Note: Issue counting requires opening a dolt store which is already
+				// imported here. Callers needing issue counts can use dolt.New() directly.
 
 				databases = append(databases, DatabaseInfo{
 					Path:       dbPath,

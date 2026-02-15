@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/routing"
-	storagefactory "github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -753,7 +753,7 @@ func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 
 	// Open the target database (read-only) using storage factory
 	// This supports both Dolt and legacy SQLite backends in the target rig.
-	targetStore, err := storagefactory.NewFromConfigWithOptions(ctx, targetBeadsDir, storagefactory.Options{ReadOnly: true})
+	targetStore, err := dolt.NewFromConfigWithOptions(ctx, targetBeadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return false, fmt.Sprintf("failed to open database for rig %q: %v", rigName, err)
 	}

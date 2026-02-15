@@ -15,7 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // closeDoltDBWithTimeout closes a sql.DB with a timeout to prevent indefinite hangs.
@@ -117,9 +117,9 @@ func closeDoltDB(db *sql.DB, serverMode bool) {
 // GetBackend returns the configured backend type from configuration.
 // It checks config.yaml first (storage-backend key), then falls back to metadata.json.
 // Returns "dolt" (default) or "sqlite" (legacy).
-// hq-3446fc.17: Use factory.GetBackendFromConfig for consistent backend detection.
+// hq-3446fc.17: Use dolt.GetBackendFromConfig for consistent backend detection.
 func GetBackend(beadsDir string) string {
-	return factory.GetBackendFromConfig(beadsDir)
+	return dolt.GetBackendFromConfig(beadsDir)
 }
 
 // IsDoltBackend returns true if the configured backend is Dolt.

@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -5,21 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestRepairDeps_NoOrphans(t *testing.T) {
-	dir := t.TempDir()
-	jsonlPath := filepath.Join(dir, "issues.jsonl")
-
-	store := memory.New(jsonlPath)
-	defer store.Close()
-
 	ctx := context.Background()
-
-	// Initialize store
-	store.SetConfig(ctx, "issue_prefix", "test")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Create two issues with valid dependency
 	i1 := &types.Issue{Title: "Issue 1", Priority: 1, Status: "open", IssueType: "task"}

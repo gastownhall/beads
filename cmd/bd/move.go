@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -98,7 +97,7 @@ Examples:
 
 		// Step 4: Open storage for the target rig
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
-		targetStore, err := factory.NewFromConfig(ctx, targetBeadsDir)
+		targetStore, err := dolt.NewFromConfig(ctx, targetBeadsDir)
 		if err != nil {
 			FatalError("failed to open target rig database: %v", err)
 		}

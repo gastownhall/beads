@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -58,8 +57,8 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltSto
 	}
 
 	beadsDir := filepath.Dir(dbPath)
-	// Use factory.NewFromConfig as the storage opener to respect backend configuration
-	routedStorage, err := routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, factory.NewFromConfig)
+	// Use dolt.NewFromConfig as the storage opener to respect backend configuration
+	routedStorage, err := routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, dolt.NewFromConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +120,7 @@ func openStoreForRig(ctx context.Context, rigOrPrefix string) (*dolt.DoltStore, 
 		return nil, err
 	}
 
-	targetStore, err := factory.NewFromConfigWithOptions(ctx, targetBeadsDir, factory.Options{ReadOnly: true})
+	targetStore, err := dolt.NewFromConfigWithOptions(ctx, targetBeadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open rig %q database: %v", rigOrPrefix, err)
 	}
@@ -159,8 +158,8 @@ func getIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id str
 	}
 
 	beadsDir := filepath.Dir(dbPath)
-	// Use GetRoutedStorageWithOpener with factory to respect backend configuration (bd-m2jr)
-	routedStorage, routeErr := routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, factory.NewFromConfig)
+	// Use GetRoutedStorageWithOpener with dolt to respect backend configuration (bd-m2jr)
+	routedStorage, routeErr := routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, dolt.NewFromConfig)
 	if routeErr != nil || routedStorage == nil {
 		// No routing found or error - return original result
 		return &RoutedResult{
@@ -203,8 +202,8 @@ func getRoutedStoreForID(ctx context.Context, id string) (*routing.RoutedStorage
 	}
 
 	beadsDir := filepath.Dir(dbPath)
-	// Use GetRoutedStorageWithOpener with factory to respect backend configuration (bd-m2jr)
-	return routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, factory.NewFromConfig)
+	// Use GetRoutedStorageWithOpener with dolt to respect backend configuration (bd-m2jr)
+	return routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, dolt.NewFromConfig)
 }
 
 // needsRouting checks if an ID would be routed to a different beads directory.

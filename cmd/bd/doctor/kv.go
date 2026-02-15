@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // kvPrefix matches the prefix used in cmd/bd/kv.go
@@ -18,7 +18,7 @@ func CheckKVSyncStatus(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
 	ctx := context.Background()
-	store, err := factory.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "KV Store Sync",

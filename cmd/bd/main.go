@@ -479,7 +479,7 @@ var rootCmd = &cobra.Command{
 				if isReadOnlyCommand(cmd.Name()) && beadsDir != "" {
 					jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 					if _, err := os.Stat(jsonlPath); err == nil {
-						configuredBackend := factory.GetBackendFromConfig(beadsDir)
+						configuredBackend := dolt.GetBackendFromConfig(beadsDir)
 						if configuredBackend == configfile.BackendDolt {
 							// Dolt backend configured but database not found — don't auto-bootstrap
 							fmt.Fprintf(os.Stderr, "Error: Dolt backend configured but database not found\n")

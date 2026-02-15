@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -353,7 +352,7 @@ enable server mode, or set connection details with --server-host, --server-port,
 			dbName = "beads_" + prefix
 		}
 		var store *dolt.DoltStore
-		store, err = factory.NewWithOptions(ctx, backend, storagePath, factory.Options{Database: dbName})
+		store, err = dolt.New(ctx, &dolt.Config{Path: storagePath, Database: dbName})
 		if err != nil {
 			// If the backend requires CGO but this is a nocgo build, fall back to JSONL-only mode.
 			// This enables Windows CI (CGO_ENABLED=0) and other pure-Go builds to use bd init.

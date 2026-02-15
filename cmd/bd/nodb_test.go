@@ -6,10 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/memory"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestExtractIssuePrefix(t *testing.T) {
@@ -97,124 +93,7 @@ func TestLoadIssuesFromJSONL_NonExistent(t *testing.T) {
 	}
 }
 
-func TestDetectPrefix(t *testing.T) {
-	tempDir := t.TempDir()
-	beadsDir := filepath.Join(tempDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-
-	t.Run("from existing issues", func(t *testing.T) {
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-
-		// Add issues with common prefix
-		issues := []*types.Issue{
-			{ID: "myapp-1", Title: "Issue 1"},
-			{ID: "myapp-2", Title: "Issue 2"},
-		}
-		if err := memStore.LoadFromIssues(issues); err != nil {
-			t.Fatalf("Failed to load issues: %v", err)
-		}
-
-		prefix, err := detectPrefix(beadsDir, memStore)
-		if err != nil {
-			t.Fatalf("detectPrefix failed: %v", err)
-		}
-		if prefix != "myapp" {
-			t.Errorf("Expected prefix 'myapp', got '%s'", prefix)
-		}
-	})
-
-	t.Run("mixed prefixes error", func(t *testing.T) {
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-
-		issues := []*types.Issue{
-			{ID: "app1-1", Title: "Issue 1"},
-			{ID: "app2-2", Title: "Issue 2"},
-		}
-		if err := memStore.LoadFromIssues(issues); err != nil {
-			t.Fatalf("Failed to load issues: %v", err)
-		}
-
-		_, err := detectPrefix(beadsDir, memStore)
-		if err == nil {
-			t.Error("Expected error for mixed prefixes, got nil")
-		}
-	})
-
-	t.Run("empty database defaults to dir name", func(t *testing.T) {
-		// Change to temp dir so we can control directory name
-		namedDir := filepath.Join(tempDir, "myproject")
-		if err := os.MkdirAll(namedDir, 0o755); err != nil {
-			t.Fatalf("Failed to create named dir: %v", err)
-		}
-		t.Chdir(namedDir)
-
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-		prefix, err := detectPrefix(beadsDir, memStore)
-		if err != nil {
-			t.Fatalf("detectPrefix failed: %v", err)
-		}
-		if prefix != "myproject" {
-			t.Errorf("Expected prefix 'myproject', got '%s'", prefix)
-		}
-	})
-
-	t.Run("config override", func(t *testing.T) {
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-		prev := config.GetString("issue-prefix")
-		config.Set("issue-prefix", "custom-prefix")
-		t.Cleanup(func() { config.Set("issue-prefix", prev) })
-
-		prefix, err := detectPrefix(beadsDir, memStore)
-		if err != nil {
-			t.Fatalf("detectPrefix failed: %v", err)
-		}
-		if prefix != "custom-prefix" {
-			t.Errorf("Expected config override prefix, got %q", prefix)
-		}
-	})
-
-	t.Run("sanitizes directory names", func(t *testing.T) {
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-		weirdDir := filepath.Join(tempDir, "My Project!!!")
-		if err := os.MkdirAll(weirdDir, 0o755); err != nil {
-			t.Fatalf("Failed to create dir: %v", err)
-		}
-		t.Chdir(weirdDir)
-		prev := config.GetString("issue-prefix")
-		config.Set("issue-prefix", "")
-		t.Cleanup(func() { config.Set("issue-prefix", prev) })
-
-		prefix, err := detectPrefix(beadsDir, memStore)
-		if err != nil {
-			t.Fatalf("detectPrefix failed: %v", err)
-		}
-		if prefix != "myproject" {
-			t.Errorf("Expected sanitized prefix 'myproject', got %q", prefix)
-		}
-	})
-
-	t.Run("invalid directory falls back to bd", func(t *testing.T) {
-		memStore := memory.New(filepath.Join(beadsDir, "issues.jsonl"))
-		emptyDir := filepath.Join(tempDir, "!!!")
-		if err := os.MkdirAll(emptyDir, 0o755); err != nil {
-			t.Fatalf("Failed to create dir: %v", err)
-		}
-		t.Chdir(emptyDir)
-		prev := config.GetString("issue-prefix")
-		config.Set("issue-prefix", "")
-		t.Cleanup(func() { config.Set("issue-prefix", prev) })
-
-		prefix, err := detectPrefix(beadsDir, memStore)
-		if err != nil {
-			t.Fatalf("detectPrefix failed: %v", err)
-		}
-		if prefix != "bd" {
-			t.Errorf("Expected fallback prefix 'bd', got %q", prefix)
-		}
-	})
-}
+// NOTE: TestDetectPrefix was removed because it referenced the deleted memory backend and the detectPrefix function which no longer exists.
 
 func TestInitializeNoDbMode_SetsStoreActive(t *testing.T) {
 	// This test verifies the fix for bd comment --no-db not working.

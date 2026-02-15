@@ -8,7 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
@@ -54,9 +54,9 @@ func ensureStoreActive() error {
 		}
 	}
 
-	// Use factory to create the appropriate backend (SQLite, Dolt embedded, or Dolt server)
+	// Use dolt.NewFromConfig to create the appropriate backend
 	// based on metadata.json configuration
-	store, err := factory.NewFromConfig(getRootContext(), beadsDir)
+	store, err := dolt.NewFromConfig(getRootContext(), beadsDir)
 	if err != nil {
 		// Check for fresh clone scenario (JSONL exists but no database)
 		if _, statErr := os.Stat(jsonlPath); statErr == nil {

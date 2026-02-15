@@ -1,13 +1,14 @@
+//go:build cgo
+
 package main
 
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/beads/internal/storage/memory"
 )
 
 func TestTipSelection(t *testing.T) {
@@ -24,7 +25,7 @@ func TestTipSelection(t *testing.T) {
 	tips = []Tip{}
 	tipsMutex.Unlock()
 
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Test 1: No tips registered
 	tip := selectNextTip(store)
@@ -131,7 +132,7 @@ func TestTipProbability(t *testing.T) {
 	}
 	tipsMutex.Unlock()
 
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Run selection multiple times
 	shownCount := 0
@@ -153,7 +154,7 @@ func TestTipProbability(t *testing.T) {
 }
 
 func TestGetLastShown(t *testing.T) {
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Test 1: Never shown
 	lastShown := getLastShown(store, "never_shown")
@@ -181,7 +182,7 @@ func TestGetLastShown(t *testing.T) {
 }
 
 func TestRecordTipShown(t *testing.T) {
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	recordTipShown(store, "test_tip")
 
@@ -215,7 +216,7 @@ func TestMaybeShowTip_RespectsFlags(t *testing.T) {
 	}
 	tipsMutex.Unlock()
 
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Test 1: Should not show in JSON mode
 	jsonOutput = true
@@ -232,7 +233,7 @@ func TestMaybeShowTip_RespectsFlags(t *testing.T) {
 }
 
 func TestTipFrequency(t *testing.T) {
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	tipsMutex.Lock()
 	tips = []Tip{
@@ -279,7 +280,7 @@ func TestInjectTip(t *testing.T) {
 	tips = []Tip{}
 	tipsMutex.Unlock()
 
-	store := memory.New("")
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
 
 	// Set deterministic seed for testing
 	os.Setenv("BEADS_TIP_SEED", "11111")

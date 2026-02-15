@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -28,11 +29,24 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, cfg *dolt.Config) e
 		return nil // Dolt exists, no bootstrap needed
 	}
 
+	// Load routes from routes.jsonl for bootstrap import.
+	// Routes are passed to Bootstrap to avoid import cycles (routing → dolt → routing).
+	var bootstrapRoutes []dolt.BootstrapRoute
+	if routes, err := routing.LoadRoutes(beadsDir); err == nil {
+		for _, r := range routes {
+			bootstrapRoutes = append(bootstrapRoutes, dolt.BootstrapRoute{
+				Prefix: r.Prefix,
+				Path:   r.Path,
+			})
+		}
+	}
+
 	bootstrapped, result, err := dolt.Bootstrap(ctx, dolt.BootstrapConfig{
 		BeadsDir:    beadsDir,
 		DoltPath:    path,
 		LockTimeout: cfg.OpenTimeout,
 		Database:    cfg.Database,
+		Routes:      bootstrapRoutes,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)

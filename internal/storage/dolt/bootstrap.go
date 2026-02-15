@@ -12,11 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 // BootstrapResult contains statistics about the bootstrap operation
@@ -36,12 +33,43 @@ type ParseError struct {
 	Snippet string
 }
 
+// BootstrapRoute holds route data for bootstrap import.
+// This is a local type to avoid importing internal/routing (which imports dolt, causing a cycle).
+type BootstrapRoute struct {
+	Prefix string
+	Path   string
+}
+
+// bootstrapInteractionEntry is a local type for deserializing interactions.jsonl entries.
+// Avoids importing internal/audit (which imports internal/beads → dolt, causing a cycle).
+type bootstrapInteractionEntry struct {
+	ID        string         `json:"id"`
+	Kind      string         `json:"kind"`
+	CreatedAt time.Time      `json:"created_at"`
+	Actor     string         `json:"actor,omitempty"`
+	IssueID   string         `json:"issue_id,omitempty"`
+	Model     string         `json:"model,omitempty"`
+	Prompt    string         `json:"prompt,omitempty"`
+	Response  string         `json:"response,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	ExitCode  *int           `json:"exit_code,omitempty"`
+	ParentID  string         `json:"parent_id,omitempty"`
+	Label     string         `json:"label,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	Extra     map[string]any `json:"extra,omitempty"`
+}
+
 // BootstrapConfig controls bootstrap behavior
 type BootstrapConfig struct {
 	BeadsDir    string        // Path to .beads directory
 	DoltPath    string        // Path to dolt subdirectory
 	LockTimeout time.Duration // Timeout waiting for bootstrap lock
 	Database    string        // Database name (e.g. "beads_hq"); defaults to "beads"
+
+	// Routes to import during bootstrap (loaded by caller from routes.jsonl).
+	// If nil, route import is skipped.
+	Routes []BootstrapRoute
 }
 
 // Bootstrap checks if Dolt DB needs bootstrapping from JSONL and performs it if needed.
@@ -259,9 +287,9 @@ func performBootstrap(ctx context.Context, cfg BootstrapConfig, jsonlPath string
 	}
 
 	// Import routes first (no dependencies)
-	routesImported, err := importRoutesBootstrap(ctx, store, cfg.BeadsDir)
+	routesImported, err := importRoutesBootstrap(ctx, store, cfg.Routes)
 	if err != nil {
-		// Non-fatal - routes.jsonl may not exist
+		// Non-fatal - routes may not exist
 		fmt.Fprintf(os.Stderr, "Bootstrap: warning: failed to import routes: %v\n", err)
 	}
 	result.RoutesImported = routesImported
@@ -394,7 +422,8 @@ func truncateSnippet(s string) string {
 	return s
 }
 
-// detectPrefixFromIssues detects the most common prefix from issues
+// detectPrefixFromIssues detects the most common prefix from issues.
+// Uses a simple first-hyphen extraction to avoid importing internal/utils (cycle).
 func detectPrefixFromIssues(issues []*types.Issue) string {
 	prefixCounts := make(map[string]int)
 
@@ -402,9 +431,11 @@ func detectPrefixFromIssues(issues []*types.Issue) string {
 		if issue.ID == "" {
 			continue
 		}
-		prefix := utils.ExtractIssuePrefix(issue.ID)
-		if prefix != "" {
-			prefixCounts[prefix]++
+		// Simple prefix extraction: take everything before the first hyphen.
+		// For bootstrap purposes this is sufficient (e.g., "bd-abc" → "bd").
+		idx := strings.Index(issue.ID, "-")
+		if idx > 0 {
+			prefixCounts[issue.ID[:idx]]++
 		}
 	}
 
@@ -528,13 +559,9 @@ func importIssuesBootstrap(ctx context.Context, store *DoltStore, issues []*type
 	return imported, skipped, nil
 }
 
-// importRoutesBootstrap imports routes from routes.jsonl during bootstrap
-// Returns the number of routes imported
-func importRoutesBootstrap(ctx context.Context, store *DoltStore, beadsDir string) (int, error) {
-	routes, err := routing.LoadRoutes(beadsDir)
-	if err != nil {
-		return 0, err
-	}
+// importRoutesBootstrap imports routes during bootstrap.
+// Routes are passed via BootstrapConfig to avoid importing internal/routing (cycle).
+func importRoutesBootstrap(ctx context.Context, store *DoltStore, routes []BootstrapRoute) (int, error) {
 	if len(routes) == 0 {
 		return 0, nil // No routes to import
 	}
@@ -594,7 +621,7 @@ func importInteractionsBootstrap(ctx context.Context, store *DoltStore, interact
 			continue
 		}
 
-		var entry audit.Entry
+		var entry bootstrapInteractionEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			// Skip malformed lines during bootstrap
 			continue

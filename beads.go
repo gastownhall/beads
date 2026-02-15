@@ -11,8 +11,7 @@ import (
 	"context"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/factory"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -31,7 +30,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
 
 // NewStorage creates a new storage instance at the given path using the Dolt backend.
 func NewStorage(ctx context.Context, dbPath string) (Storage, error) {
-	return factory.New(ctx, configfile.BackendDolt, dbPath)
+	return dolt.New(ctx, &dolt.Config{Path: dbPath})
 }
 
 // GetConfiguredBackend returns the backend type from the beads directory config.

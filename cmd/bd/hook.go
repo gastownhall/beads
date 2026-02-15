@@ -18,7 +18,6 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -362,7 +361,7 @@ func hookPreCommit() int {
 	}
 
 	// Check if we're using Dolt backend - use branch-then-merge pattern
-	backend := factory.GetBackendFromConfig(beadsDir)
+	backend := dolt.GetBackendFromConfig(beadsDir)
 	if backend == configfile.BackendDolt {
 		exitCode := hookPreCommitDolt(beadsDir, worktreeRoot)
 		if cfg.ChainStrategy == ChainAfter && exitCode == 0 {
@@ -582,7 +581,7 @@ func hookPostMerge(args []string) int {
 	}
 
 	// Check if we're using Dolt backend - use branch-then-merge pattern
-	backend := factory.GetBackendFromConfig(beadsDir)
+	backend := dolt.GetBackendFromConfig(beadsDir)
 	if backend == configfile.BackendDolt {
 		exitCode := hookPostMergeDolt(beadsDir)
 		if cfg.ChainStrategy == ChainAfter && exitCode == 0 {
@@ -771,7 +770,7 @@ func hookPostCheckout(args []string) int {
 	}
 
 	// Check if we're using Dolt backend
-	backend := factory.GetBackendFromConfig(beadsDir)
+	backend := dolt.GetBackendFromConfig(beadsDir)
 	if backend == configfile.BackendDolt {
 		exitCode := hookPostMergeDolt(beadsDir) // Same as post-merge for Dolt
 		// Update state after import

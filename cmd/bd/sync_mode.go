@@ -9,7 +9,7 @@ import (
 )
 
 // Sync mode constants - re-exported from internal/config for backward compatibility.
-// These are used with storage.Storage (database) while config.SyncMode* are used
+// These are used with *dolt.DoltStore (database) while config.SyncMode* are used
 // with viper (config.yaml).
 const (
 	// SyncModeGitPortable exports to JSONL on push, imports on pull.

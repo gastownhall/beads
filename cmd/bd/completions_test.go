@@ -1,13 +1,15 @@
+//go:build cgo
+
 package main
 
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage/memory"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -24,11 +26,14 @@ func TestIssueIDCompletion(t *testing.T) {
 	ctx := context.Background()
 	rootCtx = ctx
 
-	// Create in-memory store for testing
-	memStore := memory.New("")
-	store = memStore
+	// Create dolt store for testing
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, "test.db")
+	testStore := newTestStoreWithPrefix(t, testDB, "bd")
+	store = testStore
 
 	// Create test issues
+	now := time.Now()
 	testIssues := []*types.Issue{
 		{
 			ID:        "bd-abc1",
@@ -57,12 +62,12 @@ func TestIssueIDCompletion(t *testing.T) {
 			Status:    types.StatusClosed,
 			Priority:  3,
 			IssueType: types.TypeTask,
-			ClosedAt:  &[]time.Time{time.Now()}[0],
+			ClosedAt:  &now,
 		},
 	}
 
 	for _, issue := range testIssues {
-		if err := memStore.CreateIssue(ctx, issue, "test"); err != nil {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("Failed to create test issue: %v", err)
 		}
 	}
@@ -342,9 +347,11 @@ func TestIssueIDCompletion_EmptyDatabase(t *testing.T) {
 	ctx := context.Background()
 	rootCtx = ctx
 
-	// Create empty in-memory store
-	memStore := memory.New("")
-	store = memStore
+	// Create empty dolt store
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, "test.db")
+	testStore := newTestStoreWithPrefix(t, testDB, "bd")
+	store = testStore
 
 	cmd := &cobra.Command{}
 	args := []string{}

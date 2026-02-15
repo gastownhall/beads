@@ -1047,7 +1047,7 @@ func resolveExternalDependencies(ctx context.Context, depStore *dolt.DoltStore, 
 		}
 
 		// Open storage for the target rig (auto-detect backend from metadata.json)
-		targetStore, err := factory.NewFromConfig(ctx, targetBeadsDir)
+		targetStore, err := dolt.NewFromConfig(ctx, targetBeadsDir)
 		if err != nil {
 			if isVerbose() {
 				fmt.Fprintf(os.Stderr, "[external-deps] failed to open target db %s: %v\n", targetBeadsDir, err)

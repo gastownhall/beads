@@ -82,18 +82,3 @@ type Transaction interface {
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
 }
 
-// Config holds database configuration
-type Config struct {
-	Backend string // "dolt" (only supported backend)
-
-	// Database file path (Dolt embedded)
-	Path string
-
-	// Server mode config (Dolt server)
-	Host     string
-	Port     int
-	Database string
-	User     string
-	Password string
-	SSLMode  string
-}
