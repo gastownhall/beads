@@ -274,7 +274,7 @@ func setFederationCredentials(username, password string) func() {
 	}
 	return func() {
 		// Best-effort cleanup.
-		_ = os.Unsetenv("DOLT_REMOTE_USER")    // Best effort cleanup of auth env vars
+		_ = os.Unsetenv("DOLT_REMOTE_USER")     // Best effort cleanup of auth env vars
 		_ = os.Unsetenv("DOLT_REMOTE_PASSWORD") // Best effort cleanup of auth env vars
 	}
 }

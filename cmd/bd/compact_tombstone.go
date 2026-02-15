@@ -88,7 +88,7 @@ func pruneExpiredTombstones(customTTL time.Duration) (*TombstonePruneResult, err
 	encoder := json.NewEncoder(tempFile)
 	for _, issue := range kept {
 		if err := encoder.Encode(issue); err != nil {
-			_ = tempFile.Close() // Best effort cleanup
+			_ = tempFile.Close()    // Best effort cleanup
 			_ = os.Remove(tempPath) // Best effort cleanup of temp file
 			return nil, fmt.Errorf("failed to write issue %s: %w", issue.ID, err)
 		}
@@ -413,7 +413,7 @@ func purgeTombstonesByDependency(dryRun bool) (*PurgeTombstonesResult, error) {
 	encoder := json.NewEncoder(tempFile)
 	for _, issue := range kept {
 		if err := encoder.Encode(issue); err != nil {
-			_ = tempFile.Close() // Best effort cleanup
+			_ = tempFile.Close()    // Best effort cleanup
 			_ = os.Remove(tempPath) // Best effort cleanup of temp file
 			return nil, fmt.Errorf("failed to write issue %s: %w", issue.ID, err)
 		}

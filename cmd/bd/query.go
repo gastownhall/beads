@@ -200,7 +200,7 @@ Examples:
 				for i, issue := range issues {
 					issueIDs[i] = issue.ID
 				}
-				labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)    // Best effort: display gracefully degrades with empty data
+				labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)   // Best effort: display gracefully degrades with empty data
 				depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)  // Best effort: display gracefully degrades with empty data
 				commentCounts, _ := store.GetCommentCounts(ctx, issueIDs) // Best effort: display gracefully degrades with empty data
 

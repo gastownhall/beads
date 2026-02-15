@@ -250,7 +250,7 @@ func findWritableFormulaDir(formulaName string) string {
 			// Check if we can write to it
 			testPath := filepath.Join(dir, ".write-test")
 			if f, err := os.Create(testPath); err == nil { //nolint:gosec // testPath is constructed from known search paths
-				_ = f.Close() // Best effort cleanup
+				_ = f.Close()           // Best effort cleanup
 				_ = os.Remove(testPath) // Best effort cleanup of temp file
 				return filepath.Join(dir, formulaName+formula.FormulaExt)
 			}

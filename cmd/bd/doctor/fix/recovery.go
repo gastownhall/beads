@@ -149,7 +149,7 @@ func doltCorruptionRecovery(path, beadsDir string) error {
 	if err := initCmd.Run(); err != nil {
 		// Restore backup on failure
 		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
-		_ = os.RemoveAll(doltPath) // Best effort cleanup before restore attempt
+		_ = os.RemoveAll(doltPath)          // Best effort cleanup before restore attempt
 		_ = os.Rename(backupPath, doltPath) // Last resort: attempt to restore backup on error; if this also fails, manual recovery needed
 		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
 	}

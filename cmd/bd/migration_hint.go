@@ -52,4 +52,3 @@ func maybeShowMigrationHint(beadsDir string) {
 		debug.Logf("warning: failed to write migration hint timestamp: %v", err)
 	}
 }
-

@@ -28,4 +28,3 @@ func CheckBackendMigration(path string) DoctorCheck {
 		Category: CategoryCore,
 	}
 }
-

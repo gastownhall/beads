@@ -74,8 +74,8 @@ func TestBuildExternalRef(t *testing.T) {
 
 func TestJiraToTrackerIssue(t *testing.T) {
 	ji := &Issue{
-		ID:  "10001",
-		Key: "PROJ-42",
+		ID:   "10001",
+		Key:  "PROJ-42",
 		Self: "https://company.atlassian.net/rest/api/3/issue/10001",
 		Fields: IssueFields{
 			Summary:     "Fix login bug",

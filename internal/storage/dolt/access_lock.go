@@ -92,6 +92,6 @@ func (l *AccessLock) Release() {
 		return
 	}
 	_ = lockfile.FlockUnlock(l.file) // Best effort: unlock may fail if fd already closed
-	_ = l.file.Close()              // Best effort cleanup
+	_ = l.file.Close()               // Best effort cleanup
 	l.file = nil
 }

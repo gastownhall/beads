@@ -23,16 +23,16 @@ type Issue struct {
 
 // IssueFields contains the fields of a Jira issue.
 type IssueFields struct {
-	Summary     string          `json:"summary"`
-	Description json.RawMessage `json:"description"` // ADF (Atlassian Document Format) or plain text
-	Status      *StatusField    `json:"status"`
-	Priority    *PriorityField  `json:"priority"`
-	IssueType   *IssueTypeField `json:"issuetype"`
-	Project     *ProjectField   `json:"project"`
-	Assignee    *UserField      `json:"assignee"`
-	Labels      []string        `json:"labels"`
-	Created     string          `json:"created"`
-	Updated     string          `json:"updated"`
+	Summary     string           `json:"summary"`
+	Description json.RawMessage  `json:"description"` // ADF (Atlassian Document Format) or plain text
+	Status      *StatusField     `json:"status"`
+	Priority    *PriorityField   `json:"priority"`
+	IssueType   *IssueTypeField  `json:"issuetype"`
+	Project     *ProjectField    `json:"project"`
+	Assignee    *UserField       `json:"assignee"`
+	Labels      []string         `json:"labels"`
+	Created     string           `json:"created"`
+	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
 }
 

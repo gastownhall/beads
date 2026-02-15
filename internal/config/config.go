@@ -126,9 +126,9 @@ func Initialize() error {
 
 	// Additional environment variables (not prefixed with BD_)
 	// These are bound explicitly for backward compatibility
-	_ = v.BindEnv("flush-debounce", "BEADS_FLUSH_DEBOUNCE")           // BindEnv only fails with zero args, which can't happen here
-	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")     // BindEnv only fails with zero args, which can't happen here
-	_ = v.BindEnv("identity", "BEADS_IDENTITY")                       // BindEnv only fails with zero args, which can't happen here
+	_ = v.BindEnv("flush-debounce", "BEADS_FLUSH_DEBOUNCE")             // BindEnv only fails with zero args, which can't happen here
+	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")       // BindEnv only fails with zero args, which can't happen here
+	_ = v.BindEnv("identity", "BEADS_IDENTITY")                         // BindEnv only fails with zero args, which can't happen here
 	_ = v.BindEnv("remote-sync-interval", "BEADS_REMOTE_SYNC_INTERVAL") // BindEnv only fails with zero args, which can't happen here
 
 	// Set defaults for additional settings

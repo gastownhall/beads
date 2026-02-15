@@ -288,7 +288,7 @@ func handleToSQLiteMigration(dryRun bool, autoYes bool) {
 	if importErr != nil {
 		_ = sqliteStore.Close() // Best effort cleanup on error path
 		// Cleanup partial SQLite database
-		_ = os.Remove(sqlitePath)        // Best effort cleanup of SQLite files
+		_ = os.Remove(sqlitePath)          // Best effort cleanup of SQLite files
 		_ = os.Remove(sqlitePath + "-wal") // Best effort cleanup of SQLite files
 		_ = os.Remove(sqlitePath + "-shm") // Best effort cleanup of SQLite files
 		exitWithError("import_failed", importErr.Error(), "partial SQLite database has been cleaned up")
