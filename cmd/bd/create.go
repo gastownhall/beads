@@ -601,6 +601,10 @@ var createCmd = &cobra.Command{
 					continue
 				}
 				depType = types.DependencyType(strings.TrimSpace(parts[0]))
+				// "depends-on" is an alias — keep default direction (new issue depends on target)
+				if depType == "depends-on" {
+					depType = types.DepBlocks
+				}
 				dependsOnID = strings.TrimSpace(parts[1])
 			} else {
 				// Default to "blocks" if no type specified
@@ -619,6 +623,12 @@ var createCmd = &cobra.Command{
 				IssueID:     issue.ID,
 				DependsOnID: dependsOnID,
 				Type:        depType,
+			}
+			// When user explicitly says "blocks:X", they mean "new issue blocks X"
+			// So X depends on the new issue — swap direction
+			if depType == types.DepBlocks && strings.Contains(depSpec, ":") {
+				dep.IssueID = dependsOnID
+				dep.DependsOnID = issue.ID
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
 				WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)

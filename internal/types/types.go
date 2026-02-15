@@ -432,6 +432,7 @@ const (
 	TypeEpic     IssueType = "epic"
 	TypeChore    IssueType = "chore"
 	TypeDecision IssueType = "decision"
+	TypeMessage  IssueType = "message"
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
@@ -440,17 +441,18 @@ const (
 // ValidateWithCustom and treated as built-in for hydration trust (GH#1356).
 const TypeEvent IssueType = "event"
 
-// Note: Gas Town types (molecule, gate, convoy, merge-request, slot, agent, role, rig, message)
+// Note: Gas Town types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
 // were removed from beads core. They are now purely custom types with no built-in constants.
 // Use string literals like types.IssueType("molecule") if needed, and configure types.custom.
 // (event was also a Gas Town type but was promoted to a built-in internal type above.)
+// (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
 // Only core work types (bug, feature, task, epic, chore, decision) are built-in.
 // Other types (molecule, gate, convoy, etc.) require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage:
 		return true
 	}
 	return false
