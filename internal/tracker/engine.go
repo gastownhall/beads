@@ -10,17 +10,69 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// PullHooks contains optional callbacks that customize pull (import) behavior.
+// Trackers opt into behaviors by setting the hooks they need.
+type PullHooks struct {
+	// GenerateID assigns an ID to a newly-pulled issue before import.
+	// If nil, issues keep whatever ID the storage layer assigns.
+	// The hook receives the issue (with converted fields) and should set issue.ID.
+	// Callers typically pre-load used IDs into the closure for collision avoidance.
+	GenerateID func(ctx context.Context, issue *types.Issue) error
+
+	// TransformIssue is called after FieldMapper.IssueToBeads() and before storage.
+	// Use for description formatting, field normalization, etc.
+	TransformIssue func(issue *types.Issue)
+
+	// ShouldImport filters issues during pull. Return false to skip.
+	// Called on the raw TrackerIssue before conversion to beads format.
+	// If nil, all issues are imported.
+	ShouldImport func(issue *TrackerIssue) bool
+}
+
+// PushHooks contains optional callbacks that customize push (export) behavior.
+// Trackers opt into behaviors by setting the hooks they need.
+type PushHooks struct {
+	// FormatDescription transforms the description before sending to tracker.
+	// Linear uses this for BuildLinearDescription (merging structured fields).
+	// If nil, issue.Description is used as-is.
+	FormatDescription func(issue *types.Issue) string
+
+	// ContentEqual compares local and remote issues to skip unnecessary API calls.
+	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
+	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
+
+	// ShouldPush filters issues during push. Return false to skip.
+	// Called in addition to type/state/ephemeral filters. Use for prefix filtering, etc.
+	// If nil, all issues (matching other filters) are pushed.
+	ShouldPush func(issue *types.Issue) bool
+
+	// BuildStateCache is called once before the push loop to pre-cache workflow states.
+	// Returns an opaque cache value passed to ResolveState on each issue.
+	// If nil, no caching is done.
+	BuildStateCache func(ctx context.Context) (interface{}, error)
+
+	// ResolveState maps a beads status to a tracker state ID using the cached state.
+	// Only called if BuildStateCache is set. Returns (stateID, ok).
+	ResolveState func(cache interface{}, status types.Status) (string, bool)
+}
+
 // Engine orchestrates synchronization between beads and an external tracker.
 // It implements the shared Pull→Detect→Resolve→Push pattern that all tracker
 // integrations follow, eliminating duplication between Linear, GitLab, etc.
 type Engine struct {
-	Tracker IssueTracker
-	Store   storage.Storage
-	Actor   string
+	Tracker   IssueTracker
+	Store     storage.Storage
+	Actor     string
+	PullHooks *PullHooks
+	PushHooks *PushHooks
 
 	// Callbacks for UI feedback (optional).
 	OnMessage func(msg string)
 	OnWarning func(msg string)
+
+	// stateCache holds the opaque value from PushHooks.BuildStateCache during a push.
+	// Tracker adapters access it via ResolveState().
+	stateCache interface{}
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
@@ -187,6 +239,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 	var pendingDeps []DependencyInfo
 
 	for _, extIssue := range extIssues {
+		// ShouldImport hook: filter before conversion
+		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
+			if !e.PullHooks.ShouldImport(&extIssue) {
+				stats.Skipped++
+				continue
+			}
+		}
+
 		if opts.DryRun {
 			e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
 			stats.Created++
@@ -201,6 +261,20 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		if conv == nil || conv.Issue == nil {
 			stats.Skipped++
 			continue
+		}
+
+		// TransformIssue hook: description formatting, field normalization
+		if e.PullHooks != nil && e.PullHooks.TransformIssue != nil {
+			e.PullHooks.TransformIssue(conv.Issue)
+		}
+
+		// GenerateID hook: hash-based ID generation
+		if e.PullHooks != nil && e.PullHooks.GenerateID != nil {
+			if err := e.PullHooks.GenerateID(ctx, conv.Issue); err != nil {
+				e.warn("Failed to generate ID for %s: %v", extIssue.Identifier, err)
+				stats.Skipped++
+				continue
+			}
 		}
 
 		if existing != nil {
@@ -251,6 +325,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	stats := &PushStats{}
 
+	// BuildStateCache hook: pre-cache workflow states once before the loop.
+	// Stored on Engine so tracker adapters can call ResolveState() during push.
+	e.stateCache = nil
+	if e.PushHooks != nil && e.PushHooks.BuildStateCache != nil {
+		var err error
+		e.stateCache, err = e.PushHooks.BuildStateCache(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("building state cache: %w", err)
+		}
+	}
+
 	// Fetch local issues
 	filter := types.IssueFilter{}
 	issues, err := e.Store.SearchIssues(ctx, "", filter)
@@ -259,10 +344,18 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	}
 
 	for _, issue := range issues {
-		// Skip filtered types
+		// Skip filtered types/states/ephemeral
 		if !e.shouldPushIssue(issue, opts) {
 			stats.Skipped++
 			continue
+		}
+
+		// ShouldPush hook: custom filtering (prefix filtering, etc.)
+		if e.PushHooks != nil && e.PushHooks.ShouldPush != nil {
+			if !e.PushHooks.ShouldPush(issue) {
+				stats.Skipped++
+				continue
+			}
 		}
 
 		// Skip conflict-excluded issues
@@ -308,12 +401,20 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				continue
 			}
 
-			// Fetch external version to check if update needed
+			// Check if update is needed
 			if !forceIDs[issue.ID] {
 				extIssue, err := e.Tracker.FetchIssue(ctx, extID)
-				if err == nil && extIssue != nil && !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
-					stats.Skipped++ // External is same or newer
-					continue
+				if err == nil && extIssue != nil {
+					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
+					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
+						if e.PushHooks.ContentEqual(issue, extIssue) {
+							stats.Skipped++
+							continue
+						}
+					} else if !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
+						stats.Skipped++ // Default: external is same or newer
+						continue
+					}
 				}
 			}
 
@@ -415,6 +516,11 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 
 // shouldPushIssue checks if an issue should be included in push based on filters.
 func (e *Engine) shouldPushIssue(issue *types.Issue, opts SyncOptions) bool {
+	// Skip ephemeral issues (wisps, etc.) if requested
+	if opts.ExcludeEphemeral && issue.Ephemeral {
+		return false
+	}
+
 	if len(opts.TypeFilter) > 0 {
 		found := false
 		for _, t := range opts.TypeFilter {
@@ -439,6 +545,15 @@ func (e *Engine) shouldPushIssue(issue *types.Issue, opts SyncOptions) bool {
 	}
 
 	return true
+}
+
+// ResolveState maps a beads status to a tracker state ID using the push state cache.
+// Returns (stateID, ok). Only usable during a push operation after BuildStateCache has run.
+func (e *Engine) ResolveState(status types.Status) (string, bool) {
+	if e.PushHooks == nil || e.PushHooks.ResolveState == nil || e.stateCache == nil {
+		return "", false
+	}
+	return e.PushHooks.ResolveState(e.stateCache, status)
 }
 
 // strPtr returns a pointer to the given string.

@@ -322,3 +322,271 @@ func TestEngineConflictResolution(t *testing.T) {
 		t.Errorf("conflict issue ID = %q, want %q", conflicts[0].IssueID, "bd-conflict1")
 	}
 }
+
+func TestEnginePullWithShouldImport(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "1", Identifier: "TEST-1", Title: "Keep this", UpdatedAt: time.Now()},
+		{ID: "2", Identifier: "TEST-2", Title: "Skip this", UpdatedAt: time.Now()},
+		{ID: "3", Identifier: "TEST-3", Title: "Keep this too", UpdatedAt: time.Now()},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PullHooks = &PullHooks{
+		ShouldImport: func(issue *TrackerIssue) bool {
+			return issue.Title != "Skip this"
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 2 {
+		t.Errorf("Stats.Created = %d, want 2", result.Stats.Created)
+	}
+	if result.Stats.Skipped != 1 {
+		t.Errorf("Stats.Skipped = %d, want 1", result.Stats.Skipped)
+	}
+
+	issues, _ := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if len(issues) != 2 {
+		t.Errorf("stored %d issues, want 2", len(issues))
+	}
+}
+
+func TestEnginePullWithTransformHook(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "1", Identifier: "TEST-1", Title: "Issue one", Description: "raw desc", UpdatedAt: time.Now()},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PullHooks = &PullHooks{
+		TransformIssue: func(issue *types.Issue) {
+			issue.Description = "transformed: " + issue.Description
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	issues, _ := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if len(issues) != 1 {
+		t.Fatalf("stored %d issues, want 1", len(issues))
+	}
+	if issues[0].Description != "transformed: raw desc" {
+		t.Errorf("description = %q, want %q", issues[0].Description, "transformed: raw desc")
+	}
+}
+
+func TestEnginePushWithShouldPush(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	// Create two local issues
+	for _, tc := range []struct {
+		id    string
+		title string
+	}{
+		{"bd-push1", "Push this"},
+		{"bd-skip1", "Skip this"},
+	} {
+		issue := &types.Issue{
+			ID:        tc.id,
+			Title:     tc.title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", tc.id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			return !strings.HasPrefix(issue.ID, "bd-skip")
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if len(tracker.created) != 1 {
+		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
+	}
+}
+
+func TestEnginePushWithContentEqual(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	// Create a local issue that already exists externally
+	issue := &types.Issue{
+		ID:          "bd-eq1",
+		Title:       "Identical content",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-EQ1"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:         "EXT-EQ1",
+			Identifier: "EXT-EQ1",
+			Title:      "Identical content",
+			UpdatedAt:  time.Now().Add(-1 * time.Hour), // older, would normally trigger update
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ContentEqual: func(local *types.Issue, remote *TrackerIssue) bool {
+			// Content-hash dedup: titles match = identical
+			return local.Title == remote.Title
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	// Should be skipped because ContentEqual returns true
+	if result.Stats.Updated != 0 {
+		t.Errorf("Stats.Updated = %d, want 0 (content equal should skip)", result.Stats.Updated)
+	}
+	if len(tracker.updated) != 0 {
+		t.Errorf("tracker.updated = %d, want 0", len(tracker.updated))
+	}
+}
+
+func TestEnginePushExcludeEphemeral(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	// Create a normal issue and an ephemeral one
+	normal := &types.Issue{
+		ID:        "bd-normal1",
+		Title:     "Normal issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	ephemeral := &types.Issue{
+		ID:        "bd-wisp-eph1",
+		Title:     "Ephemeral wisp",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, normal, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue(normal) error: %v", err)
+	}
+	if err := store.CreateIssue(ctx, ephemeral, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue(ephemeral) error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	// With ExcludeEphemeral: only the normal issue should be pushed
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ExcludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if len(tracker.created) != 1 {
+		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
+	}
+	if tracker.created[0].Title != "Normal issue" {
+		t.Errorf("pushed issue title = %q, want %q", tracker.created[0].Title, "Normal issue")
+	}
+}
+
+func TestEnginePushWithStateCache(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:        "bd-state1",
+		Title:     "Issue with state",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	buildCacheCalled := false
+	engine.PushHooks = &PushHooks{
+		BuildStateCache: func(ctx context.Context) (interface{}, error) {
+			buildCacheCalled = true
+			return map[types.Status]string{
+				types.StatusOpen:   "state-open-id",
+				types.StatusClosed: "state-closed-id",
+			}, nil
+		},
+		ResolveState: func(cache interface{}, status types.Status) (string, bool) {
+			m := cache.(map[types.Status]string)
+			id, ok := m[status]
+			return id, ok
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !buildCacheCalled {
+		t.Error("BuildStateCache was not called")
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	// Verify ResolveState works via the Engine method
+	stateID, ok := engine.ResolveState(types.StatusOpen)
+	if !ok || stateID != "state-open-id" {
+		t.Errorf("ResolveState(Open) = (%q, %v), want (%q, true)", stateID, ok, "state-open-id")
+	}
+	stateID, ok = engine.ResolveState(types.StatusClosed)
+	if !ok || stateID != "state-closed-id" {
+		t.Errorf("ResolveState(Closed) = (%q, %v), want (%q, true)", stateID, ok, "state-closed-id")
+	}
+}

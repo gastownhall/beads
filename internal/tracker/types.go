@@ -82,6 +82,8 @@ type SyncOptions struct {
 	TypeFilter []types.IssueType
 	// ExcludeTypes excludes specific issue types from sync.
 	ExcludeTypes []types.IssueType
+	// ExcludeEphemeral skips ephemeral/wisp issues from push (default behavior in CLI).
+	ExcludeEphemeral bool
 }
 
 // SyncResult is the complete result of a sync operation.
