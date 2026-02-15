@@ -377,9 +377,17 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			continue
 		}
 
+		// FormatDescription hook: apply to a copy so we don't mutate local data.
+		pushIssue := issue
+		if e.PushHooks != nil && e.PushHooks.FormatDescription != nil {
+			copy := *issue
+			copy.Description = e.PushHooks.FormatDescription(issue)
+			pushIssue = &copy
+		}
+
 		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
 			// Create in external tracker
-			created, err := e.Tracker.CreateIssue(ctx, issue)
+			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
 				e.warn("Failed to create %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
@@ -418,7 +426,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 			}
 
-			if _, err := e.Tracker.UpdateIssue(ctx, extID, issue); err != nil {
+			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
 				e.warn("Failed to update %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
 				continue

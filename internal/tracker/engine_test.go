@@ -393,6 +393,124 @@ func TestEnginePullWithTransformHook(t *testing.T) {
 	}
 }
 
+func TestEnginePullWithGenerateID(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "1", Identifier: "TEST-1", Title: "Issue one", UpdatedAt: time.Now()},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PullHooks = &PullHooks{
+		GenerateID: func(_ context.Context, issue *types.Issue) error {
+			issue.ID = "bd-custom-id-123"
+			return nil
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	// Verify the custom ID was used
+	issues, _ := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if len(issues) != 1 {
+		t.Fatalf("stored %d issues, want 1", len(issues))
+	}
+	if issues[0].ID != "bd-custom-id-123" {
+		t.Errorf("issue ID = %q, want %q", issues[0].ID, "bd-custom-id-123")
+	}
+}
+
+func TestEnginePullWithGenerateIDError(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "1", Identifier: "TEST-1", Title: "Good issue", UpdatedAt: time.Now()},
+		{ID: "2", Identifier: "TEST-2", Title: "Bad issue", UpdatedAt: time.Now()},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PullHooks = &PullHooks{
+		GenerateID: func(_ context.Context, issue *types.Issue) error {
+			if issue.Title == "Bad issue" {
+				return fmt.Errorf("collision detected")
+			}
+			issue.ID = "bd-good-1"
+			return nil
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if result.Stats.Skipped != 1 {
+		t.Errorf("Stats.Skipped = %d, want 1 (GenerateID error should skip)", result.Stats.Skipped)
+	}
+}
+
+func TestEnginePushWithFormatDescription(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New("")
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-fmt1",
+		Title:       "Issue with design",
+		Description: "Base description",
+		Design:      "Some design notes",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		FormatDescription: func(issue *types.Issue) string {
+			return issue.Description + "\n\n## Design\n" + issue.Design
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if len(tracker.created) != 1 {
+		t.Fatalf("tracker.created = %d, want 1", len(tracker.created))
+	}
+	// The issue sent to the tracker should have the formatted description
+	if tracker.created[0].Description != "Base description\n\n## Design\nSome design notes" {
+		t.Errorf("pushed description = %q, want formatted version", tracker.created[0].Description)
+	}
+
+	// Verify the local issue was NOT mutated
+	localIssue, _ := store.GetIssue(ctx, "bd-fmt1")
+	if localIssue.Description != "Base description" {
+		t.Errorf("local description was mutated to %q, should still be %q", localIssue.Description, "Base description")
+	}
+}
+
 func TestEnginePushWithShouldPush(t *testing.T) {
 	ctx := context.Background()
 	store := memory.New("")
