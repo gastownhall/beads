@@ -212,6 +212,19 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.50.3",
+		Date:    "2026-02-15",
+		Changes: []string{
+			"REFACTOR: All tracker CLIs (Linear, GitLab, Jira) now use shared SyncEngine — eliminates ~800 lines of duplicated sync code",
+			"NEW: SyncEngine PullHooks/PushHooks for tracker-specific behaviors (GenerateID, FormatDescription, ContentEqual, etc.)",
+			"NEW: Jira native integration in internal/jira/ with REST API v3, ADF conversion, field mapping",
+			"NEW: Tracker plugin registry with auto-discovery (tracker.Register + init())",
+			"FIX: Jira State mapping bug — stale pointer assignment could cause incorrect status mapping",
+			"FIX: CI Windows build — test helper file renamed to _test.go suffix",
+			"PERF: Test suite — cached git template replaces ~60 subprocess calls",
+		},
+	},
+	{
 		Version: "0.50.1",
 		Date:    "2026-02-14",
 		Changes: []string{
