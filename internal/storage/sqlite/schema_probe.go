@@ -32,8 +32,6 @@ var expectedSchema = map[string][]string{
 	"events":               {"id", "issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at"},
 	"config":               {"key", "value"},
 	"metadata":             {"key", "value"},
-	"dirty_issues":         {"issue_id", "marked_at"},
-	"export_hashes":        {"issue_id", "content_hash", "exported_at"},
 	"child_counters":       {"parent_id", "last_child"},
 	"issue_snapshots":      {"id", "issue_id", "snapshot_time", "compaction_level", "original_size", "compressed_size", "original_content", "archived_events"},
 	"compaction_snapshots": {"id", "issue_id", "compaction_level", "snapshot_json", "created_at"},

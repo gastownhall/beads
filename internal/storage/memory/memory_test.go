@@ -678,48 +678,6 @@ func TestGetAllIssues(t *testing.T) {
 	}
 }
 
-func TestDirtyTracking(t *testing.T) {
-	store := setupTestMemory(t)
-	defer store.Close()
-
-	ctx := context.Background()
-
-	// Create an issue
-	issue := &types.Issue{
-		Title:     "Test",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeTask,
-	}
-	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
-		t.Fatalf("CreateIssue failed: %v", err)
-	}
-
-	// Should be dirty
-	dirty, err := store.GetDirtyIssues(ctx)
-	if err != nil {
-		t.Fatalf("GetDirtyIssues failed: %v", err)
-	}
-
-	if len(dirty) != 1 {
-		t.Errorf("Expected 1 dirty issue, got %d", len(dirty))
-	}
-
-	// Clear dirty
-	if err := store.ClearDirtyIssuesByID(ctx, dirty); err != nil {
-		t.Fatalf("ClearDirtyIssuesByID failed: %v", err)
-	}
-
-	dirty, err = store.GetDirtyIssues(ctx)
-	if err != nil {
-		t.Fatalf("GetDirtyIssues failed: %v", err)
-	}
-
-	if len(dirty) != 0 {
-		t.Errorf("Expected 0 dirty issues after clear, got %d", len(dirty))
-	}
-}
-
 func TestStatistics(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()

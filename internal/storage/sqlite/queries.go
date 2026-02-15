@@ -182,11 +182,6 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 	// NOTE: Graph edges (replies-to, relates-to, duplicates, supersedes) are now
 	// managed via AddDependency() per Decision 004 Phase 4.
 
-	// Mark issue as dirty for incremental export
-	if err := markDirty(ctx, conn, issue.ID); err != nil {
-		return wrapDBError("mark issue dirty", err)
-	}
-
 	// Commit the transaction
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -949,11 +944,6 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 
 		// NOTE: Graph edges now managed via AddDependency() per Decision 004 Phase 4.
 
-		// Mark issue as dirty for incremental export
-		if err := markDirty(ctx, conn, id); err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
-		}
-
 		// Invalidate blocked issues cache if status changed
 		// Status changes affect which issues are blocked (blockers must be open/in_progress/blocked)
 		if statusChanged {
@@ -1048,11 +1038,6 @@ func (s *SQLiteStorage) ClaimIssue(ctx context.Context, id string, actor string)
 			return fmt.Errorf("failed to record claim event: %w", err)
 		}
 
-		// Mark issue as dirty for incremental export
-		if err := markDirty(ctx, conn, id); err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
-		}
-
 		// Invalidate blocked issues cache since status changed
 		if err := s.invalidateBlockedCache(ctx, conn); err != nil {
 			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
@@ -1134,13 +1119,6 @@ func (s *SQLiteStorage) UpdateIssueID(ctx context.Context, oldID, newID string, 
 		return fmt.Errorf("failed to update comments: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE dirty_issues SET issue_id = ? WHERE issue_id = ?
-	`, newID, oldID)
-	if err != nil {
-		return fmt.Errorf("failed to update dirty_issues: %w", err)
-	}
-
 	_, err = tx.ExecContext(ctx, `UPDATE issue_snapshots SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
 	if err != nil {
 		return fmt.Errorf("failed to update issue_snapshots: %w", err)
@@ -1149,15 +1127,6 @@ func (s *SQLiteStorage) UpdateIssueID(ctx context.Context, oldID, newID string, 
 	_, err = tx.ExecContext(ctx, `UPDATE compaction_snapshots SET issue_id = ? WHERE issue_id = ?`, newID, oldID)
 	if err != nil {
 		return fmt.Errorf("failed to update compaction_snapshots: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO dirty_issues (issue_id, marked_at)
-		VALUES (?, ?)
-		ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-	`, newID, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -1252,11 +1221,6 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 			return fmt.Errorf("failed to record event: %w", err)
 		}
 
-		// Mark issue as dirty for incremental export
-		if err := markDirty(ctx, conn, id); err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
-		}
-
 		// Invalidate blocked issues cache since status changed to closed
 		// Closed issues don't block others, so this affects blocking calculations
 		if err := s.invalidateBlockedCache(ctx, conn); err != nil {
@@ -1328,14 +1292,9 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 					return fmt.Errorf("failed to record convoy close event: %w", err)
 				}
 
-				// Mark convoy as dirty
-				if err := markDirty(ctx, conn, convoyID); err != nil {
-					return fmt.Errorf("failed to mark convoy dirty: %w", err)
-				}
 			}
 		}
 
 		return nil
 	})
 }
-

@@ -45,11 +45,6 @@ func (s *SQLiteStorage) AddIssueComment(ctx context.Context, issueID, author, te
 		return nil, fmt.Errorf("failed to fetch comment: %w", err)
 	}
 
-	// Mark issue as dirty for JSONL export
-	if err := s.MarkIssueDirty(ctx, issueID); err != nil {
-		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return comment, nil
 }
 
@@ -92,11 +87,6 @@ func (s *SQLiteStorage) ImportIssueComment(ctx context.Context, issueID, author,
 	`, commentID).Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch comment: %w", err)
-	}
-
-	// Mark issue as dirty for JSONL export
-	if err := s.MarkIssueDirty(ctx, issueID); err != nil {
-		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	return comment, nil

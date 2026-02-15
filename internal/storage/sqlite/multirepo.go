@@ -474,14 +474,6 @@ func (s *SQLiteStorage) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo
 		}
 	}
 
-	// Delete dirty markers for all affected issues
-	for _, id := range issueIDs {
-		_, err = tx.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
-		if err != nil {
-			return 0, fmt.Errorf("failed to delete dirty marker for %s: %w", id, err)
-		}
-	}
-
 	// Delete the issues themselves
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {

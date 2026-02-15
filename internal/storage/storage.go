@@ -153,20 +153,6 @@ type Storage interface {
 	// Molecule progress (efficient for large molecules)
 	GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error)
 
-	// Dirty tracking (for incremental JSONL export)
-	GetDirtyIssues(ctx context.Context) ([]string, error)
-	GetDirtyIssueHash(ctx context.Context, issueID string) (string, error) // For timestamp-only dedup (bd-164)
-	ClearDirtyIssuesByID(ctx context.Context, issueIDs []string) error
-
-	// Export hash tracking (for timestamp-only dedup, bd-164)
-	GetExportHash(ctx context.Context, issueID string) (string, error)
-	SetExportHash(ctx context.Context, issueID, contentHash string) error
-	ClearAllExportHashes(ctx context.Context) error
-
-	// JSONL file integrity (bd-160)
-	GetJSONLFileHash(ctx context.Context) (string, error)
-	SetJSONLFileHash(ctx context.Context, fileHash string) error
-
 	// ID Generation
 	GetNextChildID(ctx context.Context, parentID string) (string, error)
 
@@ -269,8 +255,6 @@ type CompactableStorage interface {
 	// Sets compaction_level, compacted_at, compacted_at_commit, and original_size fields.
 	ApplyCompaction(ctx context.Context, issueID string, level int, originalSize int, compressedSize int, commitHash string) error
 
-	// MarkIssueDirty marks an issue as needing export to JSONL.
-	MarkIssueDirty(ctx context.Context, issueID string) error
 }
 
 // MultiRepoStorage extends Storage with multi-repo sync capabilities.

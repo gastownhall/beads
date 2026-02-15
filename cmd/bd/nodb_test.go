@@ -304,7 +304,7 @@ func TestInitializeNoDbMode_SetsStoreActive(t *testing.T) {
 }
 
 func TestInitializeNoDbMode_SetsCmdCtxStoreActive(t *testing.T) {
-	// GH#897: Verify that initializeNoDbMode sets cmdCtx.StoreActive, not just the global.
+	// GH#897: Verify that initializeNoDbMode sets storeActive global.
 	// This is critical for commands like `comments add` that call ensureStoreActive().
 	ensureCleanGlobalState(t)
 
@@ -341,16 +341,15 @@ func TestInitializeNoDbMode_SetsCmdCtxStoreActive(t *testing.T) {
 		t.Fatalf("initializeNoDbMode failed: %v", err)
 	}
 
-	// Verify cmdCtx.StoreActive is true (this was the bug - it was only setting globals)
-	ctx := GetCommandContext()
-	if ctx == nil {
-		t.Fatal("cmdCtx should not be nil after initCommandContext")
+	// Verify storeActive global is true
+	storeMutex.Lock()
+	active := storeActive
+	storeMutex.Unlock()
+	if !active {
+		t.Error("storeActive should be true after initializeNoDbMode (GH#897)")
 	}
-	if !ctx.StoreActive {
-		t.Error("cmdCtx.StoreActive should be true after initializeNoDbMode (GH#897)")
-	}
-	if ctx.Store == nil {
-		t.Error("cmdCtx.Store should not be nil after initializeNoDbMode")
+	if store == nil {
+		t.Error("store should not be nil after initializeNoDbMode")
 	}
 
 	// ensureStoreActive should succeed
@@ -359,7 +358,7 @@ func TestInitializeNoDbMode_SetsCmdCtxStoreActive(t *testing.T) {
 	}
 
 	// Comments should work
-	comment, err := ctx.Store.AddIssueComment(rootCtx, "mmm-155", "testuser", "Test comment")
+	comment, err := store.AddIssueComment(rootCtx, "mmm-155", "testuser", "Test comment")
 	if err != nil {
 		t.Fatalf("AddIssueComment failed: %v", err)
 	}

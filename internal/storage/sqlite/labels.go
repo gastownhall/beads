@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
-
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -40,16 +38,6 @@ func (s *SQLiteStorage) executeLabelOperation(
 		`, issueID, eventType, actor, eventComment)
 		if err != nil {
 			return fmt.Errorf("failed to record event: %w", err)
-		}
-
-		// Mark issue as dirty for incremental export
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO dirty_issues (issue_id, marked_at)
-			VALUES (?, ?)
-			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-		`, issueID, time.Now())
-		if err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
 		}
 
 		return nil

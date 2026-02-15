@@ -10,68 +10,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestMigrateDirtyIssuesTable(t *testing.T) {
-	t.Run("creates dirty_issues table if not exists", func(t *testing.T) {
-		store, cleanup := setupTestDB(t)
-		defer cleanup()
-		db := store.db
-
-		// Drop table if exists
-		_, _ = db.Exec("DROP TABLE IF EXISTS dirty_issues")
-
-		// Run migration
-		if err := migrations.MigrateDirtyIssuesTable(db); err != nil {
-			t.Fatalf("failed to migrate dirty_issues table: %v", err)
-		}
-
-		// Verify table exists
-		var tableName string
-		err := db.QueryRow(`
-			SELECT name FROM sqlite_master
-			WHERE type='table' AND name='dirty_issues'
-		`).Scan(&tableName)
-		if err != nil {
-			t.Fatalf("dirty_issues table not found: %v", err)
-		}
-	})
-
-	t.Run("adds content_hash column to existing table", func(t *testing.T) {
-		store, cleanup := setupTestDB(t)
-		defer cleanup()
-		db := store.db
-
-		// Drop and create table without content_hash
-		_, _ = db.Exec("DROP TABLE IF EXISTS dirty_issues")
-		_, err := db.Exec(`
-			CREATE TABLE dirty_issues (
-				issue_id TEXT PRIMARY KEY,
-				marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-			)
-		`)
-		if err != nil {
-			t.Fatalf("failed to create table: %v", err)
-		}
-
-		// Run migration
-		if err := migrations.MigrateDirtyIssuesTable(db); err != nil {
-			t.Fatalf("failed to migrate dirty_issues table: %v", err)
-		}
-
-		// Verify content_hash column exists
-		var hasContentHash bool
-		err = db.QueryRow(`
-			SELECT COUNT(*) > 0 FROM pragma_table_info('dirty_issues')
-			WHERE name = 'content_hash'
-		`).Scan(&hasContentHash)
-		if err != nil {
-			t.Fatalf("failed to check for content_hash column: %v", err)
-		}
-		if !hasContentHash {
-			t.Error("content_hash column was not added")
-		}
-	})
-}
-
 func TestMigrateExternalRefColumn(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()

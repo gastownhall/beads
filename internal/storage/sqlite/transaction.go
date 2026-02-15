@@ -249,11 +249,6 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("failed to record creation event: %w", err)
 	}
 
-	// Mark issue as dirty for incremental export
-	if err := markDirty(ctx, t.conn, issue.ID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return nil
 }
 
@@ -352,11 +347,6 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 	// Record creation events
 	if err := recordCreatedEvents(ctx, t.conn, issues, actor); err != nil {
 		return fmt.Errorf("failed to record creation events: %w", err)
-	}
-
-	// Mark all issues as dirty
-	if err := markDirtyBatch(ctx, t.conn, issues); err != nil {
-		return fmt.Errorf("failed to mark issues dirty: %w", err)
 	}
 
 	return nil
@@ -508,11 +498,6 @@ func (t *sqliteTxStorage) UpdateIssue(ctx context.Context, id string, updates ma
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark issue as dirty
-	if err := markDirty(ctx, t.conn, id); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	// Invalidate blocked issues cache if status changed
 	// Status changes affect which issues are blocked (blockers must be open/in_progress/blocked)
 	if _, statusChanged := updates["status"]; statusChanged {
@@ -615,11 +600,6 @@ func (t *sqliteTxStorage) CloseIssue(ctx context.Context, id string, reason stri
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark issue as dirty
-	if err := markDirty(ctx, t.conn, id); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	// Invalidate blocked issues cache since status changed to closed
 	// Closed issues don't block others, so this affects blocking calculations
 	if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
@@ -691,10 +671,6 @@ func (t *sqliteTxStorage) CloseIssue(ctx context.Context, id string, reason stri
 				return fmt.Errorf("failed to record convoy close event: %w", err)
 			}
 
-			// Mark convoy as dirty
-			if err := markDirty(ctx, t.conn, convoyID); err != nil {
-				return fmt.Errorf("failed to mark convoy dirty: %w", err)
-			}
 		}
 	}
 
@@ -713,12 +689,6 @@ func (t *sqliteTxStorage) DeleteIssue(ctx context.Context, id string) error {
 	_, err = t.conn.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete events: %w", err)
-	}
-
-	// Delete from dirty_issues
-	_, err = t.conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete dirty marker: %w", err)
 	}
 
 	// Delete the issue itself
@@ -847,16 +817,6 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark issues as dirty - for external refs, only mark the source issue
-	if err := markDirty(ctx, t.conn, dep.IssueID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-	if !isExternalRef {
-		if err := markDirty(ctx, t.conn, dep.DependsOnID); err != nil {
-			return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
-		}
-	}
-
 	// Invalidate blocked cache for blocking dependencies
 	if dep.Type.AffectsReadyWork() {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
@@ -937,14 +897,6 @@ func (t *sqliteTxStorage) RemoveDependency(ctx context.Context, issueID, depends
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark both issues as dirty
-	if err := markDirty(ctx, t.conn, issueID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-	if err := markDirty(ctx, t.conn, dependsOnID); err != nil {
-		return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
-	}
-
 	// Invalidate blocked cache if this was a blocking dependency
 	if needsCacheInvalidation {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
@@ -982,11 +934,6 @@ func (t *sqliteTxStorage) AddLabel(ctx context.Context, issueID, label, actor st
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark issue as dirty
-	if err := markDirty(ctx, t.conn, issueID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return nil
 }
 
@@ -1020,11 +967,6 @@ func (t *sqliteTxStorage) RemoveLabel(ctx context.Context, issueID, label, actor
 	`, issueID, types.EventLabelRemoved, actor, fmt.Sprintf("Removed label: %s", label))
 	if err != nil {
 		return fmt.Errorf("failed to record event: %w", err)
-	}
-
-	// Mark issue as dirty
-	if err := markDirty(ctx, t.conn, issueID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	return nil
@@ -1134,11 +1076,6 @@ func (t *sqliteTxStorage) AddComment(ctx context.Context, issueID, actor, commen
 		return fmt.Errorf("failed to add comment: %w", err)
 	}
 
-	// Mark issue as dirty for incremental export
-	if err := markDirty(ctx, t.conn, issueID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
-
 	return nil
 }
 
@@ -1164,11 +1101,6 @@ func (t *sqliteTxStorage) ImportIssueComment(ctx context.Context, issueID, autho
 	commentID, err := res.LastInsertId()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get comment ID: %w", err)
-	}
-
-	// Mark issue dirty
-	if err := markDirty(ctx, t.conn, issueID); err != nil {
-		return nil, fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
 
 	return &types.Comment{

@@ -1107,7 +1107,7 @@ func parseJSONStringArray(s string) []string {
 
 // DeleteIssuesBySourceRepo permanently removes all issues from a specific source repository.
 // This is used when a repo is removed from the multi-repo configuration.
-// It also cleans up related data: dependencies, labels, comments, events, and dirty markers.
+// It also cleans up related data: dependencies, labels, comments, and events.
 // Returns the number of issues deleted.
 func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)

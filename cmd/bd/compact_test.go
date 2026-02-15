@@ -353,4 +353,3 @@ func TestCompactInitCommand(t *testing.T) {
 		t.Error("compact command should have --json flag")
 	}
 }
-

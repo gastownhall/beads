@@ -787,7 +787,7 @@ func TestValidateTableName(t *testing.T) {
 		wantErr   bool
 	}{
 		{"valid table", "issues", false},
-		{"valid with underscore", "dirty_issues", false},
+		{"valid with underscore", "child_counters", false},
 		{"valid with numbers", "table123", false},
 		{"empty", "", true},
 		{"too long", string(make([]byte, 100)), true},

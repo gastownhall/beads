@@ -645,7 +645,6 @@ func attemptAutoMerge(_ string) error {
 	return fmt.Errorf("3-way JSONL merge engine removed (Dolt handles sync natively); resolve conflicts manually")
 }
 
-
 // detectPrefixFromIssues extracts the common prefix from issue IDs
 // Uses utils.ExtractIssuePrefix which handles multi-part prefixes correctly
 func detectPrefixFromIssues(issues []*types.Issue) string {

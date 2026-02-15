@@ -240,31 +240,6 @@ func TestMemoryStorage_DependencyCounts_Records_Tree_Cycles(t *testing.T) {
 	}
 }
 
-func TestMemoryStorage_HashTracking_NoOps(t *testing.T) {
-	store := setupTestMemory(t)
-	defer store.Close()
-	ctx := context.Background()
-
-	if hash, err := store.GetDirtyIssueHash(ctx, "bd-1"); err != nil || hash != "" {
-		t.Fatalf("GetDirtyIssueHash: hash=%q err=%v", hash, err)
-	}
-	if hash, err := store.GetExportHash(ctx, "bd-1"); err != nil || hash != "" {
-		t.Fatalf("GetExportHash: hash=%q err=%v", hash, err)
-	}
-	if err := store.SetExportHash(ctx, "bd-1", "h"); err != nil {
-		t.Fatalf("SetExportHash: %v", err)
-	}
-	if err := store.ClearAllExportHashes(ctx); err != nil {
-		t.Fatalf("ClearAllExportHashes: %v", err)
-	}
-	if hash, err := store.GetJSONLFileHash(ctx); err != nil || hash != "" {
-		t.Fatalf("GetJSONLFileHash: hash=%q err=%v", hash, err)
-	}
-	if err := store.SetJSONLFileHash(ctx, "h"); err != nil {
-		t.Fatalf("SetJSONLFileHash: %v", err)
-	}
-}
-
 func TestMemoryStorage_LabelsAndCommentsHelpers(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()
@@ -358,9 +333,6 @@ func TestMemoryStorage_StaleEventsCustomStatusAndLifecycleHelpers(t *testing.T) 
 
 	if err := store.AddComment(ctx, a.ID, "actor", "c"); err != nil {
 		t.Fatalf("AddComment: %v", err)
-	}
-	if err := store.MarkIssueDirty(ctx, a.ID); err != nil {
-		t.Fatalf("MarkIssueDirty: %v", err)
 	}
 
 	// Generate multiple events and ensure limiting returns the last N.

@@ -151,15 +151,6 @@ CREATE TABLE IF NOT EXISTS metadata (
     ` + "`key`" + ` VARCHAR(255) PRIMARY KEY,
     value TEXT NOT NULL
 );
-
--- Export hashes table
-CREATE TABLE IF NOT EXISTS export_hashes (
-    issue_id VARCHAR(255) PRIMARY KEY,
-    content_hash VARCHAR(64) NOT NULL,
-    exported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_export_issue FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-);
-
 -- Child counters table
 CREATE TABLE IF NOT EXISTS child_counters (
     parent_id VARCHAR(255) PRIMARY KEY,

@@ -39,26 +39,15 @@ var (
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	// Auto-flush state
-	autoFlushEnabled  = true // Can be disabled with --no-auto-flush
-	flushMutex        sync.Mutex
-	storeMutex        sync.Mutex // Protects store access from background goroutine
-	storeActive       = false    // Tracks if store is available
-	flushFailureCount = 0        // Consecutive flush failures
-	lastFlushError    error      // Last flush error for debugging
-
-	// Auto-flush manager (event-driven, fixes race condition)
-	flushManager *FlushManager
-
 	// Hook runner for extensibility
 	hookRunner *hooks.Runner
 
-	// skipFinalFlush is set by sync command when sync.branch mode completes successfully.
-	// This prevents PersistentPostRun from re-exporting and dirtying the working directory.
-	skipFinalFlush = false
+	// Store concurrency protection
+	storeMutex  sync.Mutex // Protects store access from background goroutine
+	storeActive = false    // Tracks if store is available
 
-	// Auto-import state
-	autoImportEnabled = true // Can be disabled with --no-auto-import
+	// No-db mode
+	noDb bool // Use --no-db mode: load from JSONL, write back after each command
 
 	// Version upgrade tracking
 	versionUpgradeDetected = false // Set to true if bd version changed since last run
@@ -66,11 +55,8 @@ var (
 	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
 var (
-	noAutoFlush     bool
-	noAutoImport    bool
 	sandboxMode     bool
 	allowStale      bool          // Use --allow-stale: skip staleness check (emergency escape hatch)
-	noDb            bool          // Use --no-db mode: load from JSONL, write back after each command
 	readonlyMode    bool          // Read-only mode: block write operations (for worker sandboxes)
 	storeIsReadOnly bool          // Track if store was opened read-only (for staleness checks)
 	lockTimeout     time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
@@ -200,11 +186,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BD_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
-	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
-	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables auto-sync")
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
-	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on). Default: on for embedded, off for server mode. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().DurationVar(&lockTimeout, "lock-timeout", 30*time.Second, "SQLite busy timeout (0 = fail immediately if locked)")
@@ -286,30 +269,6 @@ var rootCmd = &cobra.Command{
 				Value  interface{}
 				WasSet bool
 			}{jsonOutput, true}
-		}
-		if !cmd.Flags().Changed("no-auto-flush") {
-			noAutoFlush = config.GetBool("no-auto-flush")
-		} else {
-			flagOverrides["no-auto-flush"] = struct {
-				Value  interface{}
-				WasSet bool
-			}{noAutoFlush, true}
-		}
-		if !cmd.Flags().Changed("no-auto-import") {
-			noAutoImport = config.GetBool("no-auto-import")
-		} else {
-			flagOverrides["no-auto-import"] = struct {
-				Value  interface{}
-				WasSet bool
-			}{noAutoImport, true}
-		}
-		if !cmd.Flags().Changed("no-db") {
-			noDb = config.GetBool("no-db")
-		} else {
-			flagOverrides["no-db"] = struct {
-				Value  interface{}
-				WasSet bool
-			}{noDb, true}
 		}
 		if !cmd.Flags().Changed("readonly") {
 			readonlyMode = config.GetBool("readonly")
@@ -448,21 +407,12 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// If sandbox mode is set, enable all sandbox flags
+		// If sandbox mode is set, use shorter lock timeout unless explicitly set
 		if sandboxMode {
-			noAutoFlush = true
-			noAutoImport = true
-			// Use shorter lock timeout in sandbox mode unless explicitly set
 			if !cmd.Flags().Changed("lock-timeout") {
 				lockTimeout = 100 * time.Millisecond
 			}
 		}
-
-		// Set auto-flush based on flag (invert no-auto-flush)
-		autoFlushEnabled = !noAutoFlush
-
-		// Set auto-import based on flag (invert no-auto-import)
-		autoImportEnabled = !noAutoImport
 
 		// Handle --no-db mode: load from JSONL, use in-memory storage
 		if noDb {

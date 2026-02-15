@@ -40,16 +40,6 @@ func (s *SQLiteStorage) AddComment(ctx context.Context, issueID, actor, comment 
 			return fmt.Errorf("failed to add comment: %w", err)
 		}
 
-		// Mark issue as dirty for incremental export
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO dirty_issues (issue_id, marked_at)
-			VALUES (?, ?)
-			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-		`, issueID, now)
-		if err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
-		}
-
 		return nil
 	})
 }

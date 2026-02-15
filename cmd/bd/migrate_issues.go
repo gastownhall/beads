@@ -233,8 +233,8 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 func validateRepos(ctx context.Context, s storage.Storage, from, to string, strict bool) error {
 	// Check if source repo has any issues
 	fromIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		SourceRepo:        &from,
-		Limit:             1,
+		SourceRepo: &from,
+		Limit:      1,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check source repository: %w", err)
@@ -252,8 +252,8 @@ func validateRepos(ctx context.Context, s storage.Storage, from, to string, stri
 
 	// Check if destination repo exists (just a warning)
 	toIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		SourceRepo:        &to,
-		Limit:             1,
+		SourceRepo: &to,
+		Limit:      1,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check destination repository: %w", err)
@@ -269,7 +269,7 @@ func validateRepos(ctx context.Context, s storage.Storage, from, to string, stri
 func findCandidateIssues(ctx context.Context, s storage.Storage, p migrateIssuesParams) ([]string, error) {
 	// Build filter from params
 	filter := types.IssueFilter{
-		SourceRepo:        &p.from,
+		SourceRepo: &p.from,
 	}
 
 	// Filter by status
@@ -511,7 +511,7 @@ func checkOrphanedDependencies(ctx context.Context, s storage.Storage) ([]string
 	}
 
 	existingIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		IDs:               idList,
+		IDs: idList,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to check issue existence: %w", err)

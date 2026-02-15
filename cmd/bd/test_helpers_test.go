@@ -71,10 +71,9 @@ func ensureCleanGlobalState(t *testing.T) {
 // savedGlobals holds a snapshot of package-level globals for safe restoration.
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {
-	dbPath           string
-	store            storage.Storage
-	storeActive      bool
-	autoFlushEnabled bool
+	dbPath      string
+	store       storage.Storage
+	storeActive bool
 }
 
 // saveAndRestoreGlobals snapshots all commonly-mutated package-level globals
@@ -95,10 +94,9 @@ type savedGlobals struct {
 func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 	t.Helper()
 	saved := &savedGlobals{
-		dbPath:           dbPath,
-		store:            store,
-		storeActive:      storeActive,
-		autoFlushEnabled: autoFlushEnabled,
+		dbPath:      dbPath,
+		store:       store,
+		storeActive: storeActive,
 	}
 	t.Cleanup(func() {
 		dbPath = saved.dbPath
@@ -106,7 +104,6 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 		storeMutex.Lock()
 		storeActive = saved.storeActive
 		storeMutex.Unlock()
-		autoFlushEnabled = saved.autoFlushEnabled
 	})
 	return saved
 }

@@ -152,16 +152,6 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 			return fmt.Errorf("failed to record event: %w", err)
 		}
 
-		// Mark issues as dirty for incremental export
-		// For external refs, only mark the source issue (target doesn't exist locally)
-		issueIDsToMark := []string{dep.IssueID}
-		if !isExternalRef {
-			issueIDsToMark = append(issueIDsToMark, dep.DependsOnID)
-		}
-		if err := markIssuesDirtyTx(ctx, conn, issueIDsToMark); err != nil {
-			return wrapDBError("mark issues dirty after adding dependency", err)
-		}
-
 		// Invalidate blocked issues cache since dependencies changed
 		// Only invalidate for types that affect ready work calculation
 		if dep.Type.AffectsReadyWork() {
@@ -212,16 +202,6 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 			fmt.Sprintf("Removed dependency on %s", dependsOnID))
 		if err != nil {
 			return fmt.Errorf("failed to record event: %w", err)
-		}
-
-		// Mark issues as dirty for incremental export
-		// For external refs, only mark the source issue (target doesn't exist locally)
-		issueIDsToMark := []string{issueID}
-		if !strings.HasPrefix(dependsOnID, "external:") {
-			issueIDsToMark = append(issueIDsToMark, dependsOnID)
-		}
-		if err := markIssuesDirtyTx(ctx, conn, issueIDsToMark); err != nil {
-			return wrapDBError("mark issues dirty after removing dependency", err)
 		}
 
 		// Invalidate blocked issues cache if this was a blocking dependency

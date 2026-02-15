@@ -132,8 +132,6 @@ func TestProbeSchema_MissingColumn(t *testing.T) {
 		CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, event_type TEXT NOT NULL, actor TEXT NOT NULL, old_value TEXT, new_value TEXT, comment TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 		CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-		CREATE TABLE dirty_issues (issue_id TEXT PRIMARY KEY, marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-		CREATE TABLE export_hashes (issue_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, exported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 		CREATE TABLE child_counters (parent_id TEXT PRIMARY KEY, last_child INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE issue_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, snapshot_time DATETIME NOT NULL, compaction_level INTEGER NOT NULL, original_size INTEGER NOT NULL, compressed_size INTEGER NOT NULL, original_content TEXT NOT NULL, archived_events TEXT);
 		CREATE TABLE compaction_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, compaction_level INTEGER NOT NULL, snapshot_json BLOB NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);

@@ -159,24 +159,6 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 
--- Dirty issues table (for incremental JSONL export)
--- Tracks which issues have changed since last export
-CREATE TABLE IF NOT EXISTS dirty_issues (
-    issue_id TEXT PRIMARY KEY,
-    marked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_dirty_issues_marked_at ON dirty_issues(marked_at);
-
--- Tracks content hash of last export for each issue (for timestamp-only dedup, bd-164)
-CREATE TABLE IF NOT EXISTS export_hashes (
-    issue_id TEXT PRIMARY KEY,
-    content_hash TEXT NOT NULL,
-    exported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-);
-
 -- Child counters table (for hierarchical ID generation)
 -- Tracks sequential child numbers per parent issue
 CREATE TABLE IF NOT EXISTS child_counters (

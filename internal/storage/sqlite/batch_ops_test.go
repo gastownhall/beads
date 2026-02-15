@@ -211,27 +211,6 @@ func TestBatchCreateIssues(t *testing.T) {
 		}
 	})
 
-	t.Run("marks issues dirty", func(t *testing.T) {
-		issues := []*types.Issue{
-			{Title: "Dirty test", Priority: 1, IssueType: "task", Status: "open"},
-		}
-
-		err := s.CreateIssues(ctx, issues, "test-actor")
-		if err != nil {
-			t.Fatalf("failed to create issue: %v", err)
-		}
-
-		// Verify issue is marked dirty
-		var count int
-		err = s.db.QueryRow(`SELECT COUNT(*) FROM dirty_issues WHERE issue_id = ?`, issues[0].ID).Scan(&count)
-		if err != nil {
-			t.Fatalf("failed to check dirty status: %v", err)
-		}
-		if count != 1 {
-			t.Error("issue should be marked dirty")
-		}
-	})
-
 	t.Run("sets content hash", func(t *testing.T) {
 		issues := []*types.Issue{
 			{Title: "Hash test", Description: "Test content hash", Priority: 1, IssueType: "task", Status: "open"},
@@ -435,51 +414,6 @@ func TestBulkOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("bulkMarkDirty", func(t *testing.T) {
-		conn, err := s.db.Conn(ctx)
-		if err != nil {
-			t.Fatalf("failed to get connection: %v", err)
-		}
-		defer conn.Close()
-
-		// Create test issues
-		issue1 := &types.Issue{Title: "dirty-test-1", Priority: 1, IssueType: "task", Status: "open"}
-		err = s.CreateIssue(ctx, issue1, "test")
-		if err != nil {
-			t.Fatalf("failed to create issue1: %v", err)
-		}
-		issue2 := &types.Issue{Title: "dirty-test-2", Priority: 1, IssueType: "task", Status: "open"}
-		err = s.CreateIssue(ctx, issue2, "test")
-		if err != nil {
-			t.Fatalf("failed to create issue2: %v", err)
-		}
-
-		issues := []*types.Issue{issue1, issue2}
-
-		if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-			t.Fatalf("failed to begin transaction: %v", err)
-		}
-		defer conn.ExecContext(context.Background(), "ROLLBACK")
-
-		err = bulkMarkDirty(ctx, conn, issues)
-		if err != nil {
-			t.Fatalf("failed to bulk mark dirty: %v", err)
-		}
-
-		conn.ExecContext(ctx, "COMMIT")
-
-		// Verify issues are marked dirty
-		for _, issue := range issues {
-			var count int
-			err := s.db.QueryRow(`SELECT COUNT(*) FROM dirty_issues WHERE issue_id = ?`, issue.ID).Scan(&count)
-			if err != nil {
-				t.Fatalf("failed to check dirty status: %v", err)
-			}
-			if count != 1 {
-				t.Errorf("issue %s should be marked dirty", issue.ID)
-			}
-		}
-	})
 }
 
 // TestDefensiveClosedAtFix tests GH#523 - closed issues without closed_at timestamp

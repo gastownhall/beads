@@ -149,16 +149,13 @@ func TestBulkDeleteNoResurrection(t *testing.T) {
 
 	oldStore := store
 	oldDbPath := dbPath
-	oldAutoImportEnabled := autoImportEnabled
 	defer func() {
 		store = oldStore
 		dbPath = oldDbPath
-		autoImportEnabled = oldAutoImportEnabled
 	}()
 
 	store = s
 	dbPath = testDB
-	autoImportEnabled = true
 
 	result, err := s.DeleteIssues(ctx, toDelete, false, true, false)
 	if err != nil {

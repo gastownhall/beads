@@ -90,11 +90,6 @@ func bulkRecordEvents(ctx context.Context, conn *sql.Conn, issues []*types.Issue
 	return recordCreatedEvents(ctx, conn, issues, actor)
 }
 
-// bulkMarkDirty delegates to markDirtyBatch helper
-func bulkMarkDirty(ctx context.Context, conn *sql.Conn, issues []*types.Issue) error {
-	return markDirtyBatch(ctx, conn, issues)
-}
-
 // updateChildCountersForHierarchicalIDs updates child_counters for all hierarchical IDs in the batch.
 // This is called AFTER issues are inserted so that parents exist for the foreign key constraint.
 // (GH#728 fix)
@@ -305,12 +300,7 @@ func (s *SQLiteStorage) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		return wrapDBError("record creation events", err)
 	}
 
-	// Phase 6: Mark issues dirty for incremental export
-	if err := bulkMarkDirty(ctx, conn, issues); err != nil {
-		return wrapDBError("mark issues dirty", err)
-	}
-
-	// Phase 7: Commit transaction
+	// Phase 6: Commit transaction
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}

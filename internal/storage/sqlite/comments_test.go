@@ -253,47 +253,6 @@ func TestAddIssueCommentEmptyText(t *testing.T) {
 	}
 }
 
-// TestAddIssueCommentMarksDirty tests that adding a comment marks the issue dirty
-func TestAddIssueCommentMarksDirty(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Create an issue
-	issue := &types.Issue{
-		Title:     "Test issue",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeTask,
-	}
-	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
-		t.Fatalf("CreateIssue failed: %v", err)
-	}
-
-	// Clear dirty flag (simulating after export)
-	if err := store.ClearDirtyIssuesByID(ctx, []string{issue.ID}); err != nil {
-		t.Fatalf("ClearDirtyIssuesByID failed: %v", err)
-	}
-
-	// Add a comment
-	_, err := store.AddIssueComment(ctx, issue.ID, "alice", "test comment")
-	if err != nil {
-		t.Fatalf("AddIssueComment failed: %v", err)
-	}
-
-	// Verify issue is marked dirty
-	var exists bool
-	err = store.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM dirty_issues WHERE issue_id = ?)`, issue.ID).Scan(&exists)
-	if err != nil {
-		t.Fatalf("Failed to check dirty flag: %v", err)
-	}
-
-	if !exists {
-		t.Error("Expected issue to be marked dirty after adding comment")
-	}
-}
-
 // TestGetIssueCommentsMultipleIssues tests that comments are properly isolated per issue
 func TestGetIssueCommentsMultipleIssues(t *testing.T) {
 	store, cleanup := setupTestDB(t)

@@ -32,12 +32,6 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 			return fmt.Errorf("failed to iterate dependent issues: %w", err)
 		}
 
-		if len(dependentIDs) > 0 {
-			if err := markIssuesDirtyTx(ctx, conn, dependentIDs); err != nil {
-				return fmt.Errorf("failed to mark dependent issues dirty: %w", err)
-			}
-		}
-
 		// Delete dependencies (both directions)
 		_, err = conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id)
 		if err != nil {
@@ -54,12 +48,6 @@ func (s *SQLiteStorage) DeleteIssue(ctx context.Context, id string) error {
 		_, err = conn.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id)
 		if err != nil {
 			return fmt.Errorf("failed to delete comments: %w", err)
-		}
-
-		// Delete from dirty_issues
-		_, err = conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, id)
-		if err != nil {
-			return fmt.Errorf("failed to delete dirty marker: %w", err)
 		}
 
 		// Delete the issue itself
@@ -298,13 +286,6 @@ func (s *SQLiteStorage) executeDelete(ctx context.Context, exec dbExecutor, inCl
 		args...)
 	if err != nil {
 		return fmt.Errorf("failed to delete comments: %w", err)
-	}
-
-	_, err = exec.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM dirty_issues WHERE issue_id IN (%s)`, inClause),
-		args...)
-	if err != nil {
-		return fmt.Errorf("failed to delete dirty markers: %w", err)
 	}
 
 	// 3. Hard delete the issues

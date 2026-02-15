@@ -97,9 +97,5 @@ func (t *sqliteTxStorage) CreateIssueImport(ctx context.Context, issue *types.Is
 	if err := recordCreatedEvent(ctx, t.conn, issue, actor); err != nil {
 		return fmt.Errorf("failed to record creation event: %w", err)
 	}
-	// Mark dirty
-	if err := markDirty(ctx, t.conn, issue.ID); err != nil {
-		return fmt.Errorf("failed to mark issue dirty: %w", err)
-	}
 	return nil
 }

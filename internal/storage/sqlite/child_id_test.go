@@ -279,7 +279,6 @@ func TestCreateIssue_HierarchicalID_ParentNotExists(t *testing.T) {
 	}
 }
 
-
 // TestGetNextChildID_ConfigurableMaxDepth tests that hierarchy.max-depth config is respected (GH#995)
 func TestGetNextChildID_ConfigurableMaxDepth(t *testing.T) {
 	// Initialize config for testing
@@ -354,4 +353,3 @@ func TestGetNextChildID_ConfigurableMaxDepth(t *testing.T) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
-
