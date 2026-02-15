@@ -617,11 +617,13 @@ func TestDetectActiveHookManager(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 
-			// Initialize real git repo
-			cmd := exec.Command("git", "init")
-			cmd.Dir = dir
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("failed to init git repo: %v", err)
+			// Initialize real git repo from cached template
+			initGitTemplate()
+			if gitTemplateErr != nil {
+				t.Fatalf("git template init failed: %v", gitTemplateErr)
+			}
+			if err := copyGitDir(gitTemplateDir, dir); err != nil {
+				t.Fatalf("failed to copy git template: %v", err)
 			}
 
 			// Write hook file
@@ -644,11 +646,13 @@ func TestDetectActiveHookManager(t *testing.T) {
 func TestDetectActiveHookManager_CustomHooksPath(t *testing.T) {
 	dir := t.TempDir()
 
-	// Initialize real git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Initialize real git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	// Create custom hooks directory outside .git

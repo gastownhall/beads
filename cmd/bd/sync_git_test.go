@@ -18,7 +18,7 @@ import (
 func setupGitRepoWithBeads(t *testing.T) (repoPath string, cleanup func()) {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	originalWd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("failed to get working directory: %v", err)
@@ -30,18 +30,6 @@ func setupGitRepoWithBeads(t *testing.T) (repoPath string, cleanup func()) {
 
 	git.ResetCaches()
 	beads.ResetCaches()
-
-	// Initialize git repo
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
-		_ = os.Chdir(originalWd)
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-	git.ResetCaches()
-	beads.ResetCaches()
-
-	// Configure git
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Create .beads directory with issues.jsonl
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -94,20 +82,14 @@ func setupRedirectedBeadsRepo(t *testing.T) (sourcePath, targetPath string, clea
 		t.Fatalf("failed to create target .beads directory: %v", err)
 	}
 
-	// Initialize target as git repo
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = targetPath
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init target git repo: %v", err)
+	// Copy cached git template into target (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = targetPath
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = targetPath
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, targetPath); err != nil {
+		t.Fatalf("failed to copy git template to target: %v", err)
+	}
 
 	// Write issues.jsonl in target
 	jsonlPath := filepath.Join(targetBeadsDir, "issues.jsonl")
@@ -116,7 +98,7 @@ func setupRedirectedBeadsRepo(t *testing.T) (sourcePath, targetPath string, clea
 	}
 
 	// Commit in target
-	cmd = exec.Command("git", "add", ".beads")
+	cmd := exec.Command("git", "add", ".beads")
 	cmd.Dir = targetPath
 	_ = cmd.Run()
 
@@ -144,20 +126,10 @@ func setupRedirectedBeadsRepo(t *testing.T) (sourcePath, targetPath string, clea
 		t.Fatalf("failed to write redirect file: %v", err)
 	}
 
-	// Initialize source as git repo
-	cmd = exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = sourcePath
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init source git repo: %v", err)
+	// Copy cached git template into source (bd-ktng optimization)
+	if err := copyGitDir(gitTemplateDir, sourcePath); err != nil {
+		t.Fatalf("failed to copy git template to source: %v", err)
 	}
-
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = sourcePath
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = sourcePath
-	_ = cmd.Run()
 
 	// Commit redirect in source
 	cmd = exec.Command("git", "add", ".beads")
@@ -455,17 +427,19 @@ func TestGitBranchHasUpstream(t *testing.T) {
 		t.Fatalf("Failed to create bare repo: %v", err)
 	}
 
-	// Create local repo
+	// Create local repo using cached git template (bd-ktng optimization)
 	localDir := filepath.Join(tmpDir, "local")
 	if err := os.MkdirAll(localDir, 0755); err != nil {
 		t.Fatalf("Failed to create local dir: %v", err)
 	}
-
-	// Initialize and configure local repo
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, localDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 	cmds := [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
 		{"git", "remote", "add", "origin", remoteDir},
 	}
 	for _, args := range cmds {

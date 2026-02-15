@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -690,11 +689,13 @@ func TestCheckGitHooks(t *testing.T) {
 
 			runInDir(t, tmpDir, func() {
 				if tc.hasGitDir {
-					// Initialize a real git repository in the test directory
-					cmd := exec.Command("git", "init")
-					cmd.Dir = tmpDir
-					if err := cmd.Run(); err != nil {
-						t.Skipf("Skipping test: git init failed: %v", err)
+					// Copy cached git template (bd-ktng optimization)
+					initGitTemplate()
+					if gitTemplateErr != nil {
+						t.Fatalf("git template init failed: %v", gitTemplateErr)
+					}
+					if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+						t.Fatalf("failed to copy git template: %v", err)
 					}
 
 					gitDir, err := git.GetGitDir()
@@ -1073,11 +1074,13 @@ func TestCheckSyncBranchConfig(t *testing.T) {
 		{
 			name: "sync.branch configured via env var",
 			setupFunc: func(t *testing.T, tmpDir string) {
-				// Initialize git repo
-				cmd := exec.Command("git", "init")
-				cmd.Dir = tmpDir
-				if err := cmd.Run(); err != nil {
-					t.Fatal(err)
+				// Copy cached git template (bd-ktng optimization)
+				initGitTemplate()
+				if gitTemplateErr != nil {
+					t.Fatalf("git template init failed: %v", gitTemplateErr)
+				}
+				if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+					t.Fatalf("failed to copy git template: %v", err)
 				}
 
 				// Create .beads directory
@@ -1300,11 +1303,13 @@ func TestCheckSyncBranchHookCompatibility(t *testing.T) {
 			t.Setenv("BEADS_SYNC_BRANCH", tc.syncBranchEnv)
 
 			if tc.hasGitDir {
-				// Initialize a real git repo (git rev-parse needs this)
-				cmd := exec.Command("git", "init")
-				cmd.Dir = tmpDir
-				if err := cmd.Run(); err != nil {
-					t.Fatal(err)
+				// Copy cached git template (bd-ktng optimization)
+				initGitTemplate()
+				if gitTemplateErr != nil {
+					t.Fatalf("git template init failed: %v", gitTemplateErr)
+				}
+				if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+					t.Fatalf("failed to copy git template: %v", err)
 				}
 
 				// Create pre-push hook if specified
@@ -1372,11 +1377,13 @@ func TestCheckSyncBranchHookQuick(t *testing.T) {
 			t.Setenv("BEADS_SYNC_BRANCH", tc.syncBranchEnv)
 
 			if tc.hasGitDir {
-				// Initialize a real git repo (git rev-parse needs this)
-				cmd := exec.Command("git", "init")
-				cmd.Dir = tmpDir
-				if err := cmd.Run(); err != nil {
-					t.Fatal(err)
+				// Copy cached git template (bd-ktng optimization)
+				initGitTemplate()
+				if gitTemplateErr != nil {
+					t.Fatalf("git template init failed: %v", gitTemplateErr)
+				}
+				if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+					t.Fatalf("failed to copy git template: %v", err)
 				}
 
 				if tc.hookVersion != "" {

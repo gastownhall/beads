@@ -11,29 +11,13 @@ import (
 // setupGitRepoForForkTest creates a temporary git repository for testing
 func setupGitRepoForForkTest(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := newGitRepo(t)
 
 	// Create .beads directory
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
 
 	return dir
 }

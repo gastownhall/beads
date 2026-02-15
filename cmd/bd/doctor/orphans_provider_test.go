@@ -45,21 +45,14 @@ func setupTestGitRepo(t *testing.T, commits []string) string {
 	t.Helper()
 	dir := t.TempDir()
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create commits
 	for i, msg := range commits {
@@ -68,7 +61,7 @@ func setupTestGitRepo(t *testing.T, commits []string) string {
 		if err := os.WriteFile(testFile, content, 0644); err != nil {
 			t.Fatalf("failed to write test file: %v", err)
 		}
-		cmd = exec.Command("git", "add", "file.txt")
+		cmd := exec.Command("git", "add", "file.txt")
 		cmd.Dir = dir
 		_ = cmd.Run()
 		cmd = exec.Command("git", "commit", "-m", msg)
@@ -277,21 +270,14 @@ func TestFindOrphanedIssues_CrossRepo(t *testing.T) {
 func TestFindOrphanedIssues_LocalProvider(t *testing.T) {
 	dir := t.TempDir()
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create .beads directory and database
 	beadsDir := filepath.Join(dir, ".beads")
@@ -321,7 +307,7 @@ func TestFindOrphanedIssues_LocalProvider(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.Command("git", "add", "test.txt")
+	cmd := exec.Command("git", "add", "test.txt")
 	cmd.Dir = dir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "Fix (bd-local)")
@@ -416,27 +402,21 @@ func TestFindOrphanedIssues_IntegrationCrossRepo(t *testing.T) {
 	}
 	planningDB.Close()
 
-	// Setup code repo with git
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = codeDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Setup code repo with git (from cached template)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = codeDir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = codeDir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, codeDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create commits referencing planning issues
 	testFile := filepath.Join(codeDir, "main.go")
 	if err := os.WriteFile(testFile, []byte("package main"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.Command("git", "add", "main.go")
+	cmd := exec.Command("git", "add", "main.go")
 	cmd.Dir = codeDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "Implement (PLAN-001)")

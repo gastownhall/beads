@@ -747,15 +747,8 @@ func TestIsExternalBeadsDir(t *testing.T) {
 // - 3-way merge detects conflict and resolves using LWW (remote wins)
 func TestConcurrentEdit(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
-
-	// Setup: Initialize git repo
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Setup: Create beads directory with JSONL (base state)
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -855,15 +848,8 @@ func TestConcurrentEdit(t *testing.T) {
 // from multiple terminals simultaneously.
 func TestConcurrentSyncBlocked(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
-
-	// Setup: Initialize git repo
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Setup: Create beads directory with JSONL
 	beadsDir := filepath.Join(tmpDir, ".beads")

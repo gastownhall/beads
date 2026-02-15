@@ -23,21 +23,14 @@ func setupGitRepo(t *testing.T) string {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Use cached git template instead of spawning git init per test
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	return dir
 }
@@ -264,21 +257,14 @@ func setupGitRepoInDir(t *testing.T, dir string) {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+	// Use cached git template instead of spawning git init per test
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 }
 
 // Edge case tests for CheckGitHooks
@@ -837,10 +823,12 @@ func TestCheckOrphanedIssues_NoBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Initialize git repo WITHOUT creating .beads
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	check := CheckOrphanedIssues(tmpDir)

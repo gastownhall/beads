@@ -233,18 +233,7 @@ func setupTestDB(t *testing.T) (storage.Storage, func()) {
 // TestBeadsRoleGitConfig verifies that beads.role is stored in git config,
 // not SQLite, so that bd doctor can find it (GH#1531).
 func TestBeadsRoleGitConfig(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-test-beads-role-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Initialize a git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	tmpDir := newGitRepo(t)
 
 	t.Run("set contributor role writes to git config", func(t *testing.T) {
 		cmd := exec.Command("git", "config", "beads.role", "contributor")

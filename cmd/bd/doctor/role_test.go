@@ -9,18 +9,7 @@ import (
 
 func TestCheckBeadsRole_NotConfigured(t *testing.T) {
 	// Create a temp directory with git init but no beads.role config
-	tmpDir, err := os.MkdirTemp("", "beads-role-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	tmpDir := newGitRepo(t)
 
 	// Check role - should return warning since not configured
 	check := CheckBeadsRole(tmpDir)
@@ -37,21 +26,10 @@ func TestCheckBeadsRole_NotConfigured(t *testing.T) {
 }
 
 func TestCheckBeadsRole_Maintainer(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "beads-role-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	tmpDir := newGitRepo(t)
 
 	// Set beads.role to maintainer
-	cmd = exec.Command("git", "config", "beads.role", "maintainer")
+	cmd := exec.Command("git", "config", "beads.role", "maintainer")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)
@@ -68,21 +46,10 @@ func TestCheckBeadsRole_Maintainer(t *testing.T) {
 }
 
 func TestCheckBeadsRole_Contributor(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "beads-role-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	tmpDir := newGitRepo(t)
 
 	// Set beads.role to contributor
-	cmd = exec.Command("git", "config", "beads.role", "contributor")
+	cmd := exec.Command("git", "config", "beads.role", "contributor")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)
@@ -99,21 +66,10 @@ func TestCheckBeadsRole_Contributor(t *testing.T) {
 }
 
 func TestCheckBeadsRole_InvalidValue(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "beads-role-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	tmpDir := newGitRepo(t)
 
 	// Set beads.role to an invalid value
-	cmd = exec.Command("git", "config", "beads.role", "admin")
+	cmd := exec.Command("git", "config", "beads.role", "admin")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)

@@ -13,29 +13,14 @@ import (
 // This is the fix for GH#1053.
 func TestSetupGitExclude_Worktree(t *testing.T) {
 	// Create main repo
-	mainDir := t.TempDir()
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = mainDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init main repo: %v", err)
-	}
-
-	// Configure git user
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = mainDir
-		_ = cmd.Run()
-	}
+	mainDir := newGitRepo(t)
 
 	// Create initial commit (required for worktree)
 	dummyFile := filepath.Join(mainDir, "README.md")
 	if err := os.WriteFile(dummyFile, []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("failed to create dummy file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
@@ -97,29 +82,14 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 // repo's .git/info/exclude, not the worktree's path. This is part of GH#1053.
 func TestSetupForkExclude_Worktree(t *testing.T) {
 	// Create main repo
-	mainDir := t.TempDir()
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = mainDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init main repo: %v", err)
-	}
-
-	// Configure git user
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = mainDir
-		_ = cmd.Run()
-	}
+	mainDir := newGitRepo(t)
 
 	// Create initial commit (required for worktree)
 	dummyFile := filepath.Join(mainDir, "README.md")
 	if err := os.WriteFile(dummyFile, []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("failed to create dummy file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
@@ -176,12 +146,7 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 // TestSetupGitExclude_RegularRepo verifies that setupGitExclude still works
 // correctly in a regular (non-worktree) repo.
 func TestSetupGitExclude_RegularRepo(t *testing.T) {
-	dir := t.TempDir()
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	dir := newGitRepo(t)
 
 	origDir, _ := os.Getwd()
 	if err := os.Chdir(dir); err != nil {

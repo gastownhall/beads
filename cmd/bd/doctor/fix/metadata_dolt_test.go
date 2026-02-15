@@ -25,19 +25,15 @@ func setupDoltWorkspace(t *testing.T) string {
 		t.Fatalf("failed to create .beads directory: %v", err)
 	}
 
-	// Set up git repo for repo_id computation
-	cmd := exec.Command("git", "init")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
+	// Set up git repo for repo_id computation (from cached template)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "remote.origin.url", "https://github.com/test/dolt-metadata-fix.git")
+	if err := copyGitDir(gitTemplateDir, dir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
+	cmd := exec.Command("git", "config", "remote.origin.url", "https://github.com/test/dolt-metadata-fix.git")
 	cmd.Dir = dir
 	_ = cmd.Run()
 

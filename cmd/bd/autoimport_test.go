@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -260,11 +259,14 @@ func TestCheckGitForIssues_ParentHubNotInherited(t *testing.T) {
 		t.Fatalf("Failed to create newproject: %v", err)
 	}
 
-	// Initialize git repo in newproject
+	// Copy cached git template into newproject (bd-ktng optimization)
 	t.Chdir(newProject)
-	cmd := exec.Command("git", "init")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Failed to git init: %v", err)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, newProject); err != nil {
+		t.Fatalf("Failed to copy git template: %v", err)
 	}
 
 	// Reset git context cache (important for test isolation)

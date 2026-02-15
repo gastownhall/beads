@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -34,12 +33,8 @@ func TestGetEmbeddedHooks(t *testing.T) {
 }
 
 func TestInstallHooks(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
-
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
 			t.Fatalf("git.GetGitDir() failed: %v", err)
@@ -77,12 +72,8 @@ func TestInstallHooks(t *testing.T) {
 }
 
 func TestInstallHooksBackup(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
-
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
 			t.Fatalf("git.GetGitDir() failed: %v", err)
@@ -123,11 +114,8 @@ func TestInstallHooksBackup(t *testing.T) {
 }
 
 func TestInstallHooksForce(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -160,11 +148,8 @@ func TestInstallHooksForce(t *testing.T) {
 }
 
 func TestUninstallHooks(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -194,11 +179,8 @@ func TestUninstallHooks(t *testing.T) {
 }
 
 func TestHooksCheckGitHooks(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		statuses := CheckGitHooks()
 		for _, status := range statuses {
@@ -234,11 +216,8 @@ func TestHooksCheckGitHooks(t *testing.T) {
 }
 
 func TestInstallHooksShared(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed (git may not be available): %v", err)
-		}
 
 		hooks, err := getEmbeddedHooks()
 		if err != nil {
@@ -284,11 +263,8 @@ func TestInstallHooksShared(t *testing.T) {
 }
 
 func TestInstallHooksChaining(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -464,11 +440,8 @@ func TestHasBeadsJSONL(t *testing.T) {
 // does NOT rename existing bd shims to .old (which would cause infinite recursion).
 // See: https://github.com/steveyegge/beads/issues/843
 func TestInstallHooksChainingSkipsBdShim(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -513,11 +486,8 @@ func TestInstallHooksChainingSkipsBdShim(t *testing.T) {
 // .old hooks that are bd shims (to prevent infinite recursion).
 // See: https://github.com/steveyegge/beads/issues/843
 func TestRunChainedHookSkipsBdShim(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -620,11 +590,8 @@ bd sync --flush-only
 // does NOT rename existing inline bd hooks to .old (which would destroy user's original).
 // See: https://github.com/steveyegge/beads/issues/1120
 func TestInstallHooksChainingSkipsInlineHook(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -674,11 +641,8 @@ bd sync --flush-only
 // does NOT overwrite an existing .old file (which would destroy user's original hook).
 // See: https://github.com/steveyegge/beads/issues/1120
 func TestInstallHooksChainingPreservesExistingOld(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {
@@ -733,11 +697,8 @@ func TestInstallHooksChainingPreservesExistingOld(t *testing.T) {
 // .old hooks that are inline bd hooks (to prevent recursion).
 // See: https://github.com/steveyegge/beads/issues/1120
 func TestRunChainedHookSkipsInlineHook(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		if err := exec.Command("git", "init").Run(); err != nil {
-			t.Skipf("Skipping test: git init failed: %v", err)
-		}
 
 		gitDirPath, err := git.GetGitDir()
 		if err != nil {

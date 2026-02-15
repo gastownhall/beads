@@ -72,28 +72,13 @@ func TestGitRevParse(t *testing.T) {
 // worktrees by name (basename) when they're in subdirectories like .worktrees/
 func TestResolveWorktreePathByName(t *testing.T) {
 	// Create a temp directory for the main repo
-	mainDir := t.TempDir()
-
-	// Initialize git repo
-	cmd := exec.Command("git", "init", "--initial-branch=main")
-	cmd.Dir = mainDir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("Failed to init git repo: %v\n%s", err, output)
-	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = mainDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = mainDir
-	_ = cmd.Run()
+	mainDir := newGitRepo(t)
 
 	// Create initial commit (required for worktrees)
 	if err := os.WriteFile(filepath.Join(mainDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "Initial commit")

@@ -45,17 +45,18 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 	git.ResetCaches()
 	beads.ResetCaches()
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
+	// Copy cached git template instead of running git init (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
 		_ = os.Chdir(originalWd)
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 	git.ResetCaches()
 	beads.ResetCaches()
-
-	// Configure git
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Create .beads directory with minimal issues.jsonl (required for RepoContext)
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -107,17 +108,25 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 	git.ResetCaches()
 	beads.ResetCaches()
 
-	// Initialize git repo with specific branch
-	if err := exec.Command("git", "init", "-b", branch).Run(); err != nil {
+	// Copy cached git template instead of running git init (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
 		_ = os.Chdir(originalWd)
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to copy git template: %v", err)
+	}
+	// Switch to requested branch if different from template default
+	if branch != "main" {
+		if err := exec.Command("git", "checkout", "-b", branch).Run(); err != nil {
+			_ = os.Chdir(originalWd)
+			t.Fatalf("failed to switch to branch %s: %v", branch, err)
+		}
 	}
 	git.ResetCaches()
 	beads.ResetCaches()
-
-	// Configure git
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 
 	// Create .beads directory with minimal issues.jsonl (required for RepoContext)
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -169,15 +178,16 @@ func setupMinimalGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 	git.ResetCaches()
 	beads.ResetCaches()
 
-	// Initialize git repo with 'main' as default branch (modern git convention)
-	if err := exec.Command("git", "init", "--initial-branch=main").Run(); err != nil {
+	// Copy cached git template instead of running git init (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
 		_ = os.Chdir(originalWd)
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git
-	_ = exec.Command("git", "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "config", "user.name", "Test User").Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		_ = os.Chdir(originalWd)
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	cleanup = func() {
 		_ = os.Chdir(originalWd)

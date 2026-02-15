@@ -1190,10 +1190,13 @@ func TestCheckRedirectNotTracked_FileExistsNotTracked(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	// Create .beads directory with redirect file
@@ -1237,15 +1240,14 @@ func TestCheckRedirectNotTracked_FileTracked(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test").Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create .beads directory with redirect file
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -1297,15 +1299,14 @@ func TestFixRedirectTracking(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test").Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create .beads directory with redirect file
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -1472,10 +1473,13 @@ func TestCheckLastTouchedNotTracked_FileExistsNotTracked(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
+	}
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	// Create .beads directory with last-touched file
@@ -1519,15 +1523,14 @@ func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test").Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create .beads directory with last-touched file
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -1579,15 +1582,14 @@ func TestFixLastTouchedTracking(t *testing.T) {
 		}
 	}()
 
-	// Initialize git repo
-	gitInit := exec.Command("git", "init")
-	if err := gitInit.Run(); err != nil {
-		t.Skipf("git init failed: %v", err)
+	// Initialize git repo from cached template
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test").Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create .beads directory with last-touched file
 	beadsDir := filepath.Join(tmpDir, ".beads")

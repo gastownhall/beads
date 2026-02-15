@@ -49,23 +49,13 @@ func TestMigrateSyncDryRun(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to config git email: %v", err)
-	}
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to config git name: %v", err)
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	// Create initial commit
@@ -73,7 +63,7 @@ func TestMigrateSyncDryRun(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to git add: %v", err)
@@ -133,23 +123,13 @@ func TestMigrateSyncOrphan(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to config git email: %v", err)
-	}
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to config git name: %v", err)
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
 	}
 
 	// Create initial commit on main branch
@@ -157,7 +137,7 @@ func TestMigrateSyncOrphan(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to git add: %v", err)
@@ -289,27 +269,21 @@ func TestMigrateSyncOrphanWorktree(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create initial commit on main
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("main content"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
@@ -410,27 +384,21 @@ func TestMigrateSyncExistingBranchPreserved(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create initial commit on main
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("main content"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
@@ -491,27 +459,21 @@ func TestMigrateSyncOrphanMigration(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create initial commit on main
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("main content"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
@@ -612,27 +574,21 @@ func TestHasChangesInWorktreeDir(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git: %v", err)
+	// Copy cached git template (bd-ktng optimization)
+	initGitTemplate()
+	if gitTemplateErr != nil {
+		t.Fatalf("git template init failed: %v", gitTemplateErr)
 	}
-
-	// Configure git user
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	_ = cmd.Run()
+	if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+		t.Fatalf("failed to copy git template: %v", err)
+	}
 
 	// Create and commit initial file
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
-	cmd = exec.Command("git", "add", ".")
+	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
 	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "initial")
