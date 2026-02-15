@@ -61,7 +61,7 @@ var configSetCmd = &cobra.Command{
 		key := args[0]
 		value := args[1]
 
-		// Check if this is a yaml-only key (startup settings like no-db, no-daemon, etc.)
+		// Check if this is a yaml-only key (startup settings like no-db, etc.)
 		// These must be written to config.yaml, not SQLite, because they're read
 		// before the database is opened. (GH#536)
 		if config.IsYamlOnlyKey(key) {

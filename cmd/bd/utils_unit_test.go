@@ -5,33 +5,6 @@ import (
 	"time"
 )
 
-func TestTruncateString(t *testing.T) {
-	tests := []struct {
-		name   string
-		input  string
-		maxLen int
-		want   string
-	}{
-		{"no truncation needed", "hello", 10, "hello"},
-		{"exact length", "hello", 5, "hello"},
-		{"truncate", "hello world", 8, "hello wo"},
-		{"very short max", "hello", 3, "hel"},
-		{"max of 4", "hello world", 4, "hell"},
-		{"empty string", "", 5, ""},
-		// Note: truncateString operates on bytes, not runes
-		{"unicode", "hello\u4e16\u754c", 15, "hello\u4e16\u754c"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := truncateString(tt.input, tt.maxLen)
-			if got != tt.want {
-				t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestPluralize(t *testing.T) {
 	tests := []struct {
 		count int

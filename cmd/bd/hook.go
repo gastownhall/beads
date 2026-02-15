@@ -372,7 +372,7 @@ func hookPreCommit() int {
 	}
 
 	// SQLite backend: Use existing sync --flush-only
-	cmd := exec.Command("bd", "sync", "--flush-only", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--flush-only")
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to flush bd changes to JSONL")
 		fmt.Fprintln(os.Stderr, "Run 'bd sync --flush-only' manually to diagnose")
@@ -531,7 +531,7 @@ func updateExportStateCommit(beadsDir, worktreeRoot, doltCommit string) {
 
 // runJSONLExport runs the actual JSONL export via bd sync.
 func runJSONLExport() error {
-	cmd := exec.Command("bd", "sync", "--flush-only", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--flush-only")
 	return cmd.Run()
 }
 
@@ -599,7 +599,7 @@ func hookPostMerge(args []string) int {
 	}
 
 	// SQLite backend: Use existing sync --import-only
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after merge")
@@ -645,7 +645,7 @@ func hookPostMergeDolt(beadsDir string) int {
 	})
 	if !ok {
 		// Not a Dolt store with version control, use regular import
-		cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history", "--no-daemon")
+		cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
 		_ = cmd.Run() // Best effort: import is supplementary to the main sync
 		return 0
 	}
@@ -814,7 +814,7 @@ func hookPostCheckout(args []string) int {
 	}
 
 	// SQLite backend: Use existing sync --import-only
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after checkout")

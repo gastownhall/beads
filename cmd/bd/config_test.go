@@ -155,7 +155,7 @@ func TestConfigNamespaces(t *testing.T) {
 }
 
 // TestYamlOnlyConfigWithoutDatabase verifies that yaml-only config keys
-// (like no-db, no-daemon) can be set/get without requiring a SQLite database.
+// (like no-db) can be set/get without requiring a SQLite database.
 // This is the fix for GH#536 - the chicken-and-egg problem where you couldn't
 // run `bd config set no-db true` without first having a database.
 func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
@@ -184,7 +184,7 @@ func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
 	}
 
 	// Test that IsYamlOnlyKey correctly identifies yaml-only keys
-	yamlOnlyKeys := []string{"no-db", "no-daemon", "no-auto-flush", "json", "sync.branch", "routing.mode"}
+	yamlOnlyKeys := []string{"no-db", "no-auto-flush", "json", "sync.branch", "routing.mode"}
 	for _, key := range yamlOnlyKeys {
 		if !config.IsYamlOnlyKey(key) {
 			t.Errorf("Expected %q to be a yaml-only key", key)

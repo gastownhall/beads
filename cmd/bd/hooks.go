@@ -563,8 +563,7 @@ func runPreCommitHook() int {
 
 	// Flush pending changes to JSONL
 	// Use --flush-only to skip git operations (we're already in a git hook)
-	// Use --no-daemon to ensure direct mode (inline import requires local store)
-	cmd := exec.Command("bd", "sync", "--flush-only", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--flush-only")
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to flush bd changes to JSONL")
 		fmt.Fprintln(os.Stderr, "Run 'bd sync --flush-only' manually to diagnose")
@@ -643,8 +642,7 @@ func runPostMergeHook() int {
 	}
 
 	// Run bd sync --import-only --no-git-history
-	// Use --no-daemon to ensure direct mode (inline import requires local store)
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after merge")
@@ -813,8 +811,7 @@ func runPostCheckoutHook(args []string) int {
 	}
 
 	// Run bd sync --import-only --no-git-history
-	// Use --no-daemon to ensure direct mode (inline import requires local store)
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history", "--no-daemon")
+	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after checkout")

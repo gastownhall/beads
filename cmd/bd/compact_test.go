@@ -332,44 +332,6 @@ func TestCompactProgressBar(t *testing.T) {
 	}
 }
 
-func TestFormatUptime(t *testing.T) {
-	tests := []struct {
-		name    string
-		seconds float64
-		want    string
-	}{
-		{
-			name:    "seconds",
-			seconds: 45.0,
-			want:    "45s",
-		},
-		{
-			name:    "minutes",
-			seconds: 300.0,
-			want:    "5m 0s",
-		},
-		{
-			name:    "hours",
-			seconds: 7200.0,
-			want:    "2h 0m",
-		},
-		{
-			name:    "days",
-			seconds: 90000.0,
-			want:    "1d 1h",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := formatUptime(tt.seconds)
-			if got != tt.want {
-				t.Errorf("formatUptime(%v) = %q, want %q", tt.seconds, got, tt.want)
-			}
-		})
-	}
-}
-
 func ptrTime(t time.Time) *time.Time {
 	return &t
 }

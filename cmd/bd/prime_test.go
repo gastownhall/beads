@@ -129,7 +129,6 @@ func TestOutputContextFunction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer stubIsEphemeralBranch(tt.ephemeralMode)()
-			defer stubIsDaemonAutoSyncing(false)()           // Default: no auto-sync in tests
 			defer stubPrimeHasGitRemote(!tt.localOnlyMode)() // localOnly = !primeHasGitRemote
 
 			var buf bytes.Buffer
@@ -169,18 +168,6 @@ func stubIsEphemeralBranch(isEphem bool) func() {
 	}
 	return func() {
 		isEphemeralBranch = original
-	}
-}
-
-// stubIsDaemonAutoSyncing temporarily replaces isDaemonAutoSyncing
-// with a stub returning returnValue.
-func stubIsDaemonAutoSyncing(isAutoSync bool) func() {
-	original := isDaemonAutoSyncing
-	isDaemonAutoSyncing = func() bool {
-		return isAutoSync
-	}
-	return func() {
-		isDaemonAutoSyncing = original
 	}
 }
 

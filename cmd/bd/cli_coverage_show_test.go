@@ -128,7 +128,6 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 	dbPath = ""
 	actor = ""
 	jsonOutput = false
-	noDaemon = false
 	noAutoFlush = false
 	noAutoImport = false
 	sandboxMode = false
