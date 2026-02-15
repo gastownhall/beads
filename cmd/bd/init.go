@@ -37,8 +37,8 @@ and database file. Optionally specify a custom issue prefix.
 With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite database.
 
 With --from-jsonl: imports from the current .beads/issues.jsonl file on disk instead
-of scanning git history. Use this after manual JSONL cleanup (e.g., bd compact --purge-tombstones)
-to prevent deleted issues from being resurrected during re-initialization.
+of scanning git history. Use this after manual JSONL cleanup
+to prevent deleted issues from reappearing during re-initialization.
 
 With --stealth: configures per-repository git settings for invisible beads usage:
   • .git/info/exclude to prevent beads files from being committed

@@ -41,7 +41,7 @@ Subcommands:
   hash-ids    Migrate sequential IDs to hash-based IDs (legacy)
   issues      Move issues between repositories
   sync        Set up sync.branch workflow for multi-clone setups
-  tombstones  Convert deletions.jsonl to inline tombstones`,
+`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		cleanup, _ := cmd.Flags().GetBool("cleanup")

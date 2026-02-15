@@ -48,9 +48,6 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
-	} else if !filter.IncludeTombstones {
-		whereClauses = append(whereClauses, "status != ?")
-		args = append(args, types.StatusTombstone)
 	}
 
 	if len(filter.ExcludeStatus) > 0 {
@@ -468,7 +465,6 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 		SELECT id FROM issues
 		WHERE issue_type = 'epic'
 		  AND status != 'closed'
-		  AND status != 'tombstone'
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get epics: %w", err)
@@ -587,16 +583,15 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 
-	// Get counts (mirror SQLite semantics: exclude tombstones from TotalIssues, report separately).
+	// Get counts per status.
 	// Important: COALESCE to avoid NULL scans when the table is empty.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN status != 'tombstone' THEN 1 ELSE 0 END), 0) as total,
+			COUNT(*) as total,
 			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) as open_count,
 			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress,
 			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed,
 			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0) as deferred,
-			COALESCE(SUM(CASE WHEN status = 'tombstone' THEN 1 ELSE 0 END), 0) as tombstone,
 			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) as pinned
 		FROM issues
 	`).Scan(
@@ -605,7 +600,6 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 		&stats.InProgressIssues,
 		&stats.ClosedIssues,
 		&stats.DeferredIssues,
-		&stats.TombstoneIssues,
 		&stats.PinnedIssues,
 	)
 	if err != nil {

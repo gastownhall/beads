@@ -313,7 +313,7 @@ func importFromJSONLData(ctx context.Context, dbFilePath string, store storage.S
 
 // importFromLocalJSONL imports issues from a local JSONL file on disk.
 // Unlike importFromGit, this reads from the current working tree, preserving
-// any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
+// any manual cleanup done to the JSONL file.
 // Returns the number of issues imported and any error.
 func importFromLocalJSONL(ctx context.Context, dbFilePath string, store storage.Storage, localPath string) (int, error) {
 	// #nosec G304 -- path provided by bd init command

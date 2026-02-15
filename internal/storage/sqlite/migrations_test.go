@@ -465,7 +465,7 @@ func TestMigrateContentHashColumn(t *testing.T) {
 				design TEXT NOT NULL DEFAULT '',
 				acceptance_criteria TEXT NOT NULL DEFAULT '',
 				notes TEXT NOT NULL DEFAULT '',
-				status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'blocked', 'closed', 'tombstone')),
+				status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'blocked', 'closed')),
 				priority INTEGER NOT NULL,
 				issue_type TEXT NOT NULL CHECK (issue_type IN ('bug', 'feature', 'task', 'epic', 'chore', 'message', 'agent', 'role')),
 				assignee TEXT,

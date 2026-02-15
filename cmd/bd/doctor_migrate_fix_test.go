@@ -56,8 +56,7 @@ CREATE TABLE issues (
     payload TEXT DEFAULT '',
     CHECK (
         (status = 'closed' AND closed_at IS NOT NULL) OR
-        (status = 'tombstone') OR
-        (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL)
+        (status NOT IN ('closed') AND closed_at IS NULL)
     )
 );
 `

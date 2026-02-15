@@ -46,16 +46,6 @@ func validateBatchIssuesWithCustom(issues []*types.Issue, customStatuses, custom
 			issue.ClosedAt = &closedAt
 		}
 
-		// Defensive fix for deleted_at invariant: tombstones must have deleted_at
-		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-			maxTime := issue.CreatedAt
-			if issue.UpdatedAt.After(maxTime) {
-				maxTime = issue.UpdatedAt
-			}
-			deletedAt := maxTime.Add(time.Second)
-			issue.DeletedAt = &deletedAt
-		}
-
 		if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
 			return fmt.Errorf("validation failed for issue %d: %w", i, err)
 		}

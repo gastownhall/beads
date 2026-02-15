@@ -5,12 +5,9 @@ import (
 	"fmt"
 )
 
-// MigrateTombstoneColumns adds tombstone support columns to the issues table.
-// These columns support inline soft-delete, replacing deletions.jsonl:
-// - deleted_at: when the issue was deleted
-// - deleted_by: who deleted the issue
-// - delete_reason: why the issue was deleted
-// - original_type: the issue type before deletion (for tombstones)
+// MigrateTombstoneColumns is a legacy migration that adds soft-delete columns.
+// These columns are no longer used (Dolt handles delete propagation natively)
+// but must remain for existing databases that already have this migration recorded.
 func MigrateTombstoneColumns(db *sql.DB) error {
 	columns := []struct {
 		name       string
@@ -44,7 +41,7 @@ func MigrateTombstoneColumns(db *sql.DB) error {
 	}
 
 	// Add partial index on deleted_at for efficient TTL queries
-	// Only indexes non-NULL values, making it very efficient for tombstone filtering
+	// Only indexes non-NULL values (legacy, no longer used)
 	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_deleted_at ON issues(deleted_at) WHERE deleted_at IS NOT NULL`)
 	if err != nil {
 		return fmt.Errorf("failed to create deleted_at index: %w", err)

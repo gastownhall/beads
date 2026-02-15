@@ -101,7 +101,7 @@ func getMigrationDescription(name string) string {
 		"blocked_issues_cache":       "Adds blocked_issues_cache table for GetReadyWork performance optimization",
 		"orphan_detection":           "Detects orphaned child issues and logs them for user action",
 		"close_reason_column":        "Adds close_reason column to issues table for storing closure explanations",
-		"tombstone_columns":          "Adds tombstone columns (deleted_at, deleted_by, delete_reason, original_type) for inline soft-delete",
+		"tombstone_columns":          "Legacy: adds soft-delete columns (deleted_at, deleted_by, delete_reason, original_type) - no longer used",
 		"messaging_fields":           "Adds messaging fields (sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by) for inter-agent communication",
 		"edge_consolidation":         "Adds metadata and thread_id columns to dependencies table for edge schema consolidation (Decision 004)",
 		"migrate_edge_fields":        "Migrates existing issue fields (replies_to, relates_to, duplicate_of, superseded_by) to dependency edges (Decision 004 Phase 3)",
@@ -111,7 +111,7 @@ func getMigrationDescription(name string) string {
 		"remove_depends_on_fk":       "Removes FK constraint on depends_on_id to allow external references",
 		"additional_indexes":         "Adds performance optimization indexes for common query patterns",
 		"gate_columns":               "Adds gate columns (await_type, await_id, timeout_ns, waiters) for async coordination",
-		"tombstone_closed_at":        "Preserves closed_at timestamp when issues become tombstones",
+		"tombstone_closed_at":        "Legacy: relaxes closed_at constraint for soft-deleted issues - no longer used",
 		"created_by_column":          "Adds created_by column to track issue creator",
 		"agent_fields":               "Adds agent identity fields (hook_bead, role_bead, agent_state, etc.) for agent-as-bead pattern",
 		"mol_type_column":            "Adds mol_type column for molecule type classification (swarm/patrol/work)",
@@ -167,7 +167,7 @@ func RunMigrations(db *sql.DB) error {
 
 	// Pre-migration cleanup: remove orphaned refs that would fail invariant checks.
 	// This prevents the chicken-and-egg problem where the database can't open
-	// due to orphans left behind by tombstone deletion (see bd-eko4).
+	// due to orphans left behind by issue deletion (see bd-eko4).
 	if _, _, err := cleanOrphanedRefs(db); err != nil {
 		return fmt.Errorf("pre-migration orphan cleanup failed: %w", err)
 	}

@@ -329,11 +329,6 @@ func checkOrphanedChildrenInJSONL(jsonlPath string) (*OrphanedChildren, error) {
 			continue
 		}
 
-		// Skip tombstones
-		if issue.Status == string(types.StatusTombstone) {
-			continue
-		}
-
 		existingIDs[issue.ID] = true
 		if issue.Parent != "" {
 			parentRefs[issue.ID] = issue.Parent

@@ -50,7 +50,6 @@ func init() {
 	cleanupAliasCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
 	cleanupAliasCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
 	cleanupAliasCmd.Flags().Int("older-than", 0, "Only delete issues closed more than N days ago (0 = all closed issues)")
-	cleanupAliasCmd.Flags().Bool("hard", false, "Bypass tombstone TTL safety; use --older-than days as cutoff")
 	cleanupAliasCmd.Flags().Bool("ephemeral", false, "Only delete closed wisps (transient molecules)")
 
 	// Compact alias flags - must bind to same global variables as compactCmd
@@ -66,8 +65,6 @@ func init() {
 	compactAliasCmd.Flags().BoolVar(&compactAnalyze, "analyze", false, "Analyze mode: export candidates for agent review")
 	compactAliasCmd.Flags().BoolVar(&compactApply, "apply", false, "Apply mode: accept agent-provided summary")
 	compactAliasCmd.Flags().BoolVar(&compactAuto, "auto", false, "Auto mode: AI-powered compaction (legacy)")
-	compactAliasCmd.Flags().BoolVar(&compactPrune, "prune", false, "Prune mode: remove expired tombstones from issues.jsonl")
-	compactAliasCmd.Flags().IntVar(&compactOlderThan, "older-than", 0, "Prune tombstones older than N days (default: 30)")
 	compactAliasCmd.Flags().StringVar(&compactSummary, "summary", "", "Path to summary file (use '-' for stdin)")
 	compactAliasCmd.Flags().StringVar(&compactActor, "actor", "agent", "Actor name for audit trail")
 	compactAliasCmd.Flags().IntVar(&compactLimit, "limit", 0, "Limit number of candidates (0 = no limit)")

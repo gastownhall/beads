@@ -275,7 +275,7 @@ func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
 
 	if idMode == "hash" {
 		// Pre-load existing IDs for collision avoidance
-		existingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+		existingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		usedIDs := make(map[string]bool)
 		if err == nil {
 			for _, issue := range existingIssues {

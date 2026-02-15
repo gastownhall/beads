@@ -38,7 +38,7 @@ func TestOrphanHandling_Strict(t *testing.T) {
 	}
 }
 
-// TestOrphanHandling_Resurrect tests that resurrect mode auto-creates parent tombstones
+// TestOrphanHandling_Resurrect tests that resurrect mode auto-creates closed parent placeholders
 func TestOrphanHandling_Resurrect(t *testing.T) {
 	ctx := context.Background()
 	store, cleanup := setupTestDB(t)
@@ -85,7 +85,7 @@ func TestOrphanHandling_Resurrect(t *testing.T) {
 		t.Fatalf("Expected 2 issues (parent + child), got %d", len(issues))
 	}
 
-	// Check parent was created as tombstone (closed, low priority)
+	// Check parent was created as closed placeholder (closed, low priority)
 	var foundParent, foundChild bool
 	for _, issue := range issues {
 		if issue.ID == "test-abc" {

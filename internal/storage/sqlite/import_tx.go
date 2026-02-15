@@ -41,16 +41,6 @@ func (t *sqliteTxStorage) CreateIssueImport(ctx context.Context, issue *types.Is
 		closedAt := maxTime.Add(time.Second)
 		issue.ClosedAt = &closedAt
 	}
-	// Defensive fix for tombstone invariant
-	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		deletedAt := maxTime.Add(time.Second)
-		issue.DeletedAt = &deletedAt
-	}
-
 	// Validate issue before creating
 	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
 		return fmt.Errorf("validation failed: %w", err)

@@ -23,8 +23,8 @@ completely removes the molecule with no trace. Use this for:
   - Test/debug molecules you don't want to preserve
 
 The burn operation differs based on molecule phase:
-  - Wisp (ephemeral): Direct delete, no tombstones
-  - Mol (persistent): Cascade delete with tombstones (syncs to remotes)
+  - Wisp (ephemeral): Direct delete
+  - Mol (persistent): Cascade delete (syncs to remotes)
 
 CAUTION: This is a destructive operation. The molecule's data will be
 permanently lost. If you want to preserve a summary, use 'bd mol squash'.
@@ -95,10 +95,10 @@ func burnSingleMolecule(ctx context.Context, moleculeID string, dryRun, force bo
 
 	// Branch based on molecule phase
 	if rootIssue.Ephemeral {
-		// Wisp: direct delete without tombstones
+		// Wisp: direct delete
 		burnWispMolecule(ctx, resolvedID, dryRun, force)
 	} else {
-		// Mol: cascade delete with tombstones
+		// Mol: cascade delete
 		burnPersistentMolecule(ctx, resolvedID, dryRun, force)
 	}
 }
@@ -155,7 +155,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 				}
 			}
 			if len(persistentIDs) > 0 {
-				fmt.Printf("\nPersistent molecules to delete (will create tombstones):\n")
+				fmt.Printf("\nPersistent molecules to delete:\n")
 				for _, id := range persistentIDs {
 					fmt.Printf("  - %s\n", id)
 				}
@@ -239,7 +239,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 	}
 }
 
-// burnWispMolecule handles wisp deletion (no tombstones, ephemeral-only)
+// burnWispMolecule handles wisp deletion (ephemeral-only)
 func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool) {
 	// Load the molecule subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, store, resolvedID)
@@ -320,7 +320,7 @@ func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool
 	fmt.Printf("  No digest created.\n")
 }
 
-// burnPersistentMolecule handles mol deletion (with tombstones, cascade delete)
+// burnPersistentMolecule handles mol deletion (cascade delete)
 func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, force bool) {
 	// Load the molecule subgraph to show what will be deleted
 	subgraph, err := loadTemplateSubgraph(ctx, store, resolvedID)
@@ -359,7 +359,7 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 				fmt.Printf("  - [%s] %s (%s)\n", status, issue.Title, issue.ID)
 			}
 		}
-		fmt.Printf("\nNote: Persistent mol - will create tombstones (syncs to remotes).\n")
+		fmt.Printf("\nNote: Persistent mol - deletions sync to remotes.\n")
 		fmt.Printf("No digest will be created (use 'bd mol squash' to create one).\n")
 		return
 	}
@@ -368,7 +368,7 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 	if !force && !jsonOutput {
 		fmt.Printf("About to burn mol %s (%d issues)\n", resolvedID, len(issueIDs))
 		fmt.Printf("This will permanently delete all molecule data with no digest.\n")
-		fmt.Printf("Note: Persistent mol - tombstones will sync to remotes.\n")
+		fmt.Printf("Note: Persistent mol - deletions sync to remotes.\n")
 		fmt.Printf("Use 'bd mol squash' instead if you want to preserve a summary.\n")
 		fmt.Printf("\nContinue? [y/N] ")
 
@@ -381,7 +381,7 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 	}
 
 	// Use deleteBatch with cascade=false (we already have all IDs from subgraph)
-	// force=true, hardDelete=false (keep tombstones for sync)
+	// force=true, hardDelete=false (Dolt handles sync)
 	deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, "mol burn")
 }
 

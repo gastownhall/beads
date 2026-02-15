@@ -267,16 +267,6 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 		issue.ClosedAt = &closedAt
 	}
 
-	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
-	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		deletedAt := maxTime.Add(time.Second)
-		issue.DeletedAt = &deletedAt
-	}
-
 	// Validate issue using federation trust model (bd-9ji4z):
 	// - Built-in types are validated (catch typos)
 	// - Non-built-in types are trusted (child repo already validated them)
@@ -308,17 +298,15 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 				id, content_hash, title, description, design, acceptance_criteria, notes,
 				status, priority, issue_type, assignee, estimated_minutes,
 				created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
-				deleted_at, deleted_by, delete_reason, original_type,
 				sender, ephemeral, pinned, is_template,
 				await_type, await_id, timeout_ns, waiters
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 			issue.AcceptanceCriteria, issue.Notes, issue.Status,
 			issue.Priority, issue.IssueType, issue.Assignee,
 			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, issue.SourceRepo, issue.CloseReason,
-			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, wisp, pinned, isTemplate,
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		)
@@ -360,7 +348,6 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 					acceptance_criteria = ?, notes = ?, status = ?, priority = ?,
 					issue_type = ?, assignee = ?, estimated_minutes = ?,
 					updated_at = ?, closed_at = ?, external_ref = ?, source_repo = ?,
-					deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?,
 					sender = ?, ephemeral = ?, pinned = COALESCE(NULLIF(?, 0), pinned), is_template = ?,
 					await_type = COALESCE(NULLIF(?, ''), await_type),
 					await_id = COALESCE(NULLIF(?, ''), await_id),
@@ -372,7 +359,6 @@ func (s *SQLiteStorage) upsertIssueInTx(ctx context.Context, tx *sql.Tx, issue *
 				issue.AcceptanceCriteria, issue.Notes, issue.Status, issue.Priority,
 				issue.IssueType, issue.Assignee, issue.EstimatedMinutes,
 				issue.UpdatedAt, issue.ClosedAt, issue.ExternalRef, issue.SourceRepo,
-				issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 				issue.Sender, wisp, pinned, isTemplate,
 				issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 				issue.ID,

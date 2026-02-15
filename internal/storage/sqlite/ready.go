@@ -199,7 +199,6 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.spec_id, i.source_repo, i.close_reason,
-		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,
@@ -388,7 +387,6 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, pinned, is_template,
 			await_type, await_id, timeout_ns, waiters
 		FROM issues
@@ -434,10 +432,6 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var compactedAtCommit sql.NullString
 		var originalSize sql.NullInt64
 		var closeReason sql.NullString
-		var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
-		var deletedBy sql.NullString
-		var deleteReason sql.NullString
-		var originalType sql.NullString
 		// Messaging fields
 		var sender sql.NullString
 		var ephemeral sql.NullInt64
@@ -457,7 +451,6 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&createdAtStr, &updatedAtStr, &closedAt, &externalRef, &sourceRepo,
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
-			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &ephemeral, &pinned, &isTemplate,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
 		)
@@ -506,16 +499,6 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		}
 		if closeReason.Valid {
 			issue.CloseReason = closeReason.String
-		}
-		issue.DeletedAt = parseNullableTimeString(deletedAt)
-		if deletedBy.Valid {
-			issue.DeletedBy = deletedBy.String
-		}
-		if deleteReason.Valid {
-			issue.DeleteReason = deleteReason.String
-		}
-		if originalType.Valid {
-			issue.OriginalType = originalType.String
 		}
 		// Messaging fields
 		if sender.Valid {
@@ -845,7 +828,6 @@ func (s *SQLiteStorage) GetNewlyUnblockedByClose(ctx context.Context, closedIssu
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.created_by, i.owner, i.updated_at, i.closed_at, i.external_ref, i.spec_id, i.source_repo, i.close_reason,
-		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
 		       i.sender, i.ephemeral, i.pinned, i.is_template, i.crystallizes,
 		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       i.hook_bead, i.role_bead, i.agent_state, i.last_activity, i.role_type, i.rig, i.mol_type,

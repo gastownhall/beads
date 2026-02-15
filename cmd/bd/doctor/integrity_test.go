@@ -16,7 +16,6 @@ func TestIntegrityChecks_NoBeadsDir(t *testing.T) {
 	}{
 		{"IDFormat", CheckIDFormat, "Issue IDs"},
 		{"DependencyCycles", CheckDependencyCycles, "Dependency Cycles"},
-		{"Tombstones", CheckTombstones, "Tombstones"},
 		{"DeletionsManifest", CheckDeletionsManifest, "Deletions Manifest"},
 	}
 
@@ -41,7 +40,6 @@ func TestIntegrityChecks_EmptyBeadsDir(t *testing.T) {
 	}{
 		{"IDFormat", CheckIDFormat},
 		{"DependencyCycles", CheckDependencyCycles},
-		{"Tombstones", CheckTombstones},
 		{"DeletionsManifest", CheckDeletionsManifest},
 	}
 

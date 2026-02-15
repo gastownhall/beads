@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"bufio"
 	"database/sql"
 	"fmt"
 	"os"
@@ -17,7 +16,7 @@ import (
 
 // PendingMigration represents a single pending migration
 type PendingMigration struct {
-	Name        string // e.g., "hash-ids", "tombstones", "sync"
+	Name        string // e.g., "hash-ids", "sync"
 	Description string // e.g., "Convert sequential IDs to hash-based IDs"
 	Command     string // e.g., "bd migrate hash-ids"
 	Priority    int    // 1 = critical, 2 = recommended, 3 = optional
@@ -47,16 +46,6 @@ func DetectPendingMigrations(path string) []PendingMigration {
 			Name:        "hash-ids",
 			Description: "Convert sequential IDs to hash-based IDs",
 			Command:     "bd migrate hash-ids",
-			Priority:    2,
-		})
-	}
-
-	// Check for legacy deletions.jsonl (tombstones migration)
-	if needsTombstonesMigration(beadsDir) {
-		pending = append(pending, PendingMigration{
-			Name:        "tombstones",
-			Description: "Convert deletions.jsonl to inline tombstones",
-			Command:     "bd migrate tombstones",
 			Priority:    2,
 		})
 	}
@@ -181,36 +170,6 @@ func needsHashIDsMigration(beadsDir string) bool {
 
 	// Returns true if NOT using hash-based IDs (i.e., using sequential)
 	return !DetectHashBasedIDs(db, issueIDs)
-}
-
-// needsTombstonesMigration checks if deletions.jsonl exists with entries
-func needsTombstonesMigration(beadsDir string) bool {
-	deletionsPath := filepath.Join(beadsDir, "deletions.jsonl")
-
-	info, err := os.Stat(deletionsPath)
-	if err != nil {
-		return false // File doesn't exist
-	}
-
-	if info.Size() == 0 {
-		return false // Empty file
-	}
-
-	// Count non-empty lines
-	file, err := os.Open(deletionsPath) //nolint:gosec
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if len(scanner.Bytes()) > 0 {
-			return true // Has at least one entry
-		}
-	}
-
-	return false
 }
 
 // needsSyncMigration checks if sync-branch should be configured

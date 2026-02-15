@@ -77,7 +77,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 	defer db.Close()
 
 	// Get counts for progress reporting
-	_ = db.QueryRow("SELECT COUNT(*) FROM issues WHERE status != 'tombstone'").Scan(&result.TotalIssues) // Best effort: zero counts are safe defaults for diagnostic display
+	_ = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&result.TotalIssues) // Best effort: zero counts are safe defaults for diagnostic display
 	_ = db.QueryRow("SELECT COUNT(*) FROM dependencies").Scan(&result.TotalDependencies)                 // Best effort: zero counts are safe defaults for diagnostic display
 
 	// Run all deep checks
@@ -127,14 +127,14 @@ func checkParentConsistency(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Find parent-child deps where either side doesn't exist or is a tombstone
+	// Find parent-child deps where either side doesn't exist
 	query := `
 		SELECT d.issue_id, d.depends_on_id
 		FROM dependencies d
 		WHERE d.type = 'parent-child'
 		  AND (
-		    NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id AND status != 'tombstone')
-		    OR NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id AND status != 'tombstone')
+		    NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
+		    OR NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
 		  )
 		LIMIT 10`
 
@@ -175,7 +175,7 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Find any deps where either side is missing (excluding tombstones from check)
+	// Find any deps where either side is missing
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
 		FROM dependencies d
@@ -229,9 +229,9 @@ func checkEpicCompleteness(db *sql.DB) DoctorCheck {
 		       SUM(CASE WHEN c.status = 'closed' THEN 1 ELSE 0 END) as closed_children
 		FROM issues e
 		JOIN dependencies d ON d.depends_on_id = e.id AND d.type = 'parent-child'
-		JOIN issues c ON c.id = d.issue_id AND c.status != 'tombstone'
+		JOIN issues c ON c.id = d.issue_id
 		WHERE e.issue_type = 'epic'
-		  AND e.status NOT IN ('closed', 'tombstone')
+		  AND e.status != 'closed'
 		GROUP BY e.id
 		HAVING total_children > 0 AND total_children = closed_children
 		LIMIT 20`
@@ -304,7 +304,6 @@ func checkAgentBeadIntegrity(db *sql.DB) DoctorCheck {
 		       COALESCE(json_extract(notes, '$.role_type'), '') as role_type
 		FROM issues
 		WHERE issue_type = 'agent'
-		  AND status != 'tombstone'
 		LIMIT 100`
 
 	rows, err := db.Query(query)
@@ -314,7 +313,6 @@ func checkAgentBeadIntegrity(db *sql.DB) DoctorCheck {
 			SELECT id, title, '', '', ''
 			FROM issues
 			WHERE issue_type = 'agent'
-			  AND status != 'tombstone'
 			LIMIT 100`
 		rows, err = db.Query(query)
 		if err != nil {
@@ -447,7 +445,6 @@ func checkMoleculeIntegrity(db *sql.DB) DoctorCheck {
 		FROM issues i
 		LEFT JOIN labels l ON l.issue_id = i.id
 		WHERE (i.issue_type = 'molecule' OR l.label = 'beads:template')
-		  AND i.status != 'tombstone'
 		LIMIT 100`
 
 	rows, err := db.Query(query)
@@ -483,7 +480,7 @@ func checkMoleculeIntegrity(db *sql.DB) DoctorCheck {
 			FROM dependencies d
 			WHERE d.depends_on_id = ?
 			  AND d.type = 'parent-child'
-			  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id AND status != 'tombstone')
+			  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
 		`, mol.ID).Scan(&orphanCount)
 		if err == nil && orphanCount > 0 {
 			brokenMolecules = append(brokenMolecules, fmt.Sprintf("%s (%d missing children)", mol.ID, orphanCount))

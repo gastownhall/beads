@@ -553,40 +553,6 @@ func (m *MemoryStorage) ClaimIssue(ctx context.Context, id string, actor string)
 	return nil
 }
 
-// CreateTombstone converts an existing issue to a tombstone record.
-// This is a soft-delete that preserves the issue with status="tombstone".
-func (m *MemoryStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	issue, ok := m.issues[id]
-	if !ok {
-		return fmt.Errorf("issue not found: %s", id)
-	}
-
-	now := time.Now()
-	issue.OriginalType = string(issue.IssueType)
-	issue.Status = types.StatusTombstone
-	issue.DeletedAt = &now
-	issue.DeletedBy = actor
-	issue.DeleteReason = reason
-	issue.UpdatedAt = now
-
-	// Mark as dirty for export
-	m.dirty[id] = true
-
-	// Record tombstone creation event
-	event := &types.Event{
-		IssueID:   id,
-		EventType: "deleted",
-		Actor:     actor,
-		Comment:   &reason,
-		CreatedAt: now,
-	}
-	m.events[id] = append(m.events[id], event)
-
-	return nil
-}
 
 // DeleteIssue permanently deletes an issue and all associated data
 func (m *MemoryStorage) DeleteIssue(ctx context.Context, id string) error {
@@ -1343,8 +1309,8 @@ func (m *MemoryStorage) GetBlockedIssues(ctx context.Context, filter types.WorkF
 	var results []*types.BlockedIssue
 
 	for _, issue := range m.issues {
-		// Only consider non-closed, non-tombstone issues
-		if issue.Status == types.StatusClosed || issue.Status == types.StatusTombstone {
+		// Only consider non-closed issues
+		if issue.Status == types.StatusClosed {
 			continue
 		}
 
@@ -1639,21 +1605,18 @@ func (m *MemoryStorage) GetStatistics(ctx context.Context) (*types.Statistics, e
 			stats.ClosedIssues++
 		case types.StatusDeferred:
 			stats.DeferredIssues++
-		case types.StatusTombstone:
-			stats.TombstoneIssues++
 		case types.StatusPinned:
 			stats.PinnedIssues++
 		}
 	}
 
-	// TotalIssues excludes tombstones (matches SQLite behavior)
 	stats.TotalIssues = stats.OpenIssues + stats.InProgressIssues + stats.ClosedIssues + stats.DeferredIssues + stats.PinnedIssues
 
 	// Second pass: calculate blocked and ready issues based on dependencies
 	// An issue is blocked if it has open blockers (uses same logic as GetBlockedIssues)
 	for id, issue := range m.issues {
-		// Only consider non-closed, non-tombstone issues for blocking
-		if issue.Status == types.StatusClosed || issue.Status == types.StatusTombstone {
+		// Only consider non-closed issues for blocking
+		if issue.Status == types.StatusClosed {
 			continue
 		}
 

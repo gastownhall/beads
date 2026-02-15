@@ -532,7 +532,7 @@ func TestImportWithDeletedParent(t *testing.T) {
 		t.Errorf("Expected child title 'Child Task', got %s", retrievedChild.Title)
 	}
 
-	// Verify parent was resurrected as tombstone
+	// Verify parent was resurrected as a closed placeholder
 	retrievedParent, err := store.GetIssue(ctx, "bd-parent")
 	if err != nil {
 		t.Fatalf("Failed to retrieve parent: %v", err)
@@ -550,10 +550,10 @@ func TestImportWithDeletedParent(t *testing.T) {
 		t.Errorf("Expected original title preserved, got %s", retrievedParent.Title)
 	}
 	if retrievedParent.Description == "" {
-		t.Error("Expected tombstone description to be set")
+		t.Error("Expected resurrected parent description to be set")
 	}
 	if retrievedParent.ClosedAt == nil {
-		t.Error("Expected tombstone to have ClosedAt set")
+		t.Error("Expected resurrected parent to have ClosedAt set")
 	}
 
 	// Verify description contains resurrection marker
@@ -561,6 +561,6 @@ func TestImportWithDeletedParent(t *testing.T) {
 		t.Errorf("Expected [RESURRECTED] prefix in description, got: %s", retrievedParent.Description)
 	}
 
-	t.Logf("✓ Parent %s successfully resurrected as tombstone", "bd-parent")
-	t.Logf("✓ Child %s created successfully with resurrected parent", "bd-parent.1")
+	t.Logf("Parent %s successfully resurrected as closed placeholder", "bd-parent")
+	t.Logf("Child %s created successfully with resurrected parent", "bd-parent.1")
 }

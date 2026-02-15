@@ -173,16 +173,6 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		issue.ClosedAt = &closedAt
 	}
 
-	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
-	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		deletedAt := maxTime.Add(time.Second)
-		issue.DeletedAt = &deletedAt
-	}
-
 	// Validate issue before creating (with custom status and type support)
 	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -236,14 +226,13 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
 		// Use isHierarchicalID to correctly handle prefixes with dots (GH#508)
 		if isHierarchical, parentID := isHierarchicalID(issue.ID); isHierarchical {
-			// Try to resurrect entire parent chain if any parents are missing
-			resurrected, err := t.parent.tryResurrectParentChainWithConn(ctx, t.conn, issue.ID)
-			if err != nil {
-				return fmt.Errorf("failed to resurrect parent chain for %s: %w", issue.ID, err)
+			// Check that parent exists
+			var parentCount int
+			if err := t.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&parentCount); err != nil {
+				return fmt.Errorf("failed to check parent existence: %w", err)
 			}
-			if !resurrected {
-				// Parent(s) not found in JSONL history - cannot proceed
-				return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
+			if parentCount == 0 {
+				return fmt.Errorf("parent issue %s does not exist", parentID)
 			}
 		}
 	}
@@ -304,16 +293,6 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 			}
 			closedAt := maxTime.Add(time.Second)
 			issue.ClosedAt = &closedAt
-		}
-
-		// Defensive fix for deleted_at invariant: tombstones must have deleted_at
-		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-			maxTime := issue.CreatedAt
-			if issue.UpdatedAt.After(maxTime) {
-				maxTime = issue.UpdatedAt
-			}
-			deletedAt := maxTime.Add(time.Second)
-			issue.DeletedAt = &deletedAt
 		}
 
 		if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
@@ -391,7 +370,6 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       spec_id, compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
@@ -688,8 +666,7 @@ func (t *sqliteTxStorage) CloseIssue(ctx context.Context, id string, reason stri
 			WHERE d.issue_id = ?
 			  AND d.type = ?
 			  AND i.status != ?
-			  AND i.status != ?
-		`, convoyID, types.DepTracks, types.StatusClosed, types.StatusTombstone).Scan(&openCount)
+		`, convoyID, types.DepTracks, types.StatusClosed).Scan(&openCount)
 		if err != nil {
 			return fmt.Errorf("failed to count open tracked issues for convoy %s: %w", convoyID, err)
 		}
@@ -1262,10 +1239,6 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
-	} else if !filter.IncludeTombstones {
-		// Exclude tombstones by default unless explicitly filtering for them
-		whereClauses = append(whereClauses, "status != ?")
-		args = append(args, types.StatusTombstone)
 	}
 
 	// Status exclusion (for default non-closed behavior, GH#788)
@@ -1440,7 +1413,6 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       spec_id, compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
@@ -1498,10 +1470,6 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var sourceRepo sql.NullString
 	var compactedAtCommit sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
-	var deletedBy sql.NullString
-	var deleteReason sql.NullString
-	var originalType sql.NullString
 	// Messaging fields
 	var sender sql.NullString
 	var wisp sql.NullInt64
@@ -1536,7 +1504,6 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef,
 		&specID, &issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
@@ -1590,16 +1557,6 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
-	}
-	issue.DeletedAt = parseNullableTimeString(deletedAt)
-	if deletedBy.Valid {
-		issue.DeletedBy = deletedBy.String
-	}
-	if deleteReason.Valid {
-		issue.DeleteReason = deleteReason.String
-	}
-	if originalType.Valid {
-		issue.OriginalType = originalType.String
 	}
 	// Messaging fields
 	if sender.Valid {

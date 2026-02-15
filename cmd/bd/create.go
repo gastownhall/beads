@@ -712,7 +712,7 @@ func flushRoutedRepo(targetStore storage.Storage, repoPath string) {
 	debug.Logf("attempting to flush routed repo at %s", targetBeadsDir)
 
 	// Export directly to JSONL
-	issues, err := targetStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	issues, err := targetStore.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		WarnError("failed to query issues for export: %v", err)
 		return

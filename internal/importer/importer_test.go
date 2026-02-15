@@ -960,27 +960,15 @@ func TestValidateNoDuplicateExternalRefs(t *testing.T) {
 		}
 	})
 
-	t.Run("ignores tombstone external_refs (bd-55u)", func(t *testing.T) {
+	t.Run("duplicate external_refs always flagged regardless of status", func(t *testing.T) {
 		ref := "LINEAR-123"
 		issues := []*types.Issue{
-			{ID: "bd-1", Title: "Deleted Issue", ExternalRef: &ref, Status: types.StatusTombstone},
+			{ID: "bd-1", Title: "Closed Issue", ExternalRef: &ref, Status: types.StatusClosed},
 			{ID: "bd-2", Title: "Live Issue", ExternalRef: &ref, Status: types.StatusOpen},
 		}
 		err := validateNoDuplicateExternalRefs(issues, false, nil)
-		if err != nil {
-			t.Errorf("Expected no error when tombstone has same external_ref as live issue, got: %v", err)
-		}
-	})
-
-	t.Run("multiple tombstones with same external_ref are allowed", func(t *testing.T) {
-		ref := "LINEAR-456"
-		issues := []*types.Issue{
-			{ID: "bd-1", Title: "Deleted 1", ExternalRef: &ref, Status: types.StatusTombstone},
-			{ID: "bd-2", Title: "Deleted 2", ExternalRef: &ref, Status: types.StatusTombstone},
-		}
-		err := validateNoDuplicateExternalRefs(issues, false, nil)
-		if err != nil {
-			t.Errorf("Expected no error for multiple tombstones with same ref, got: %v", err)
+		if err == nil {
+			t.Error("Expected error for duplicate external_refs, got nil")
 		}
 	})
 }
@@ -1052,7 +1040,7 @@ func TestConcurrentExternalRefImports(t *testing.T) {
 	})
 }
 
-func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
+func TestImportIssues_DeletedFromJSONL(t *testing.T) {
 	ctx := context.Background()
 
 	tmpDB := t.TempDir() + "/test.db"
@@ -1066,23 +1054,21 @@ func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	// Create a tombstone issue (as it would appear in JSONL)
+	// Create a deleted issue (as it would appear in JSONL)
 	deletedAt := time.Now().Add(-time.Hour)
-	tombstone := &types.Issue{
-		ID:           "test-abc123",
-		Title:        "(deleted)",
-		Status:       types.StatusTombstone,
-		Priority:     2,
-		IssueType:    types.TypeTask,
-		CreatedAt:    time.Now().Add(-24 * time.Hour),
-		UpdatedAt:    deletedAt,
-		DeletedAt:    &deletedAt,
-		DeletedBy:    "bob",
-		DeleteReason: "test deletion",
-		OriginalType: "bug",
+	closedAt := deletedAt
+	deleted := &types.Issue{
+		ID:        "test-abc123",
+		Title:     "(deleted)",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now().Add(-24 * time.Hour),
+		UpdatedAt: deletedAt,
+		ClosedAt:  &closedAt,
 	}
 
-	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{tombstone}, Options{})
+	result, err := ImportIssues(ctx, tmpDB, store, []*types.Issue{deleted}, Options{})
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
@@ -1091,9 +1077,9 @@ func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
 		t.Errorf("Expected 1 created, got %d", result.Created)
 	}
 
-	// Verify tombstone was imported with all fields
-	// Need to use IncludeTombstones filter to retrieve it
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	// Verify deleted issue was imported with all fields
+	closedStatus := types.StatusClosed
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &closedStatus})
 	if err != nil {
 		t.Fatalf("Failed to search issues: %v", err)
 	}
@@ -1107,16 +1093,13 @@ func TestImportIssues_TombstoneFromJSONL(t *testing.T) {
 	}
 
 	if retrieved == nil {
-		t.Fatal("Tombstone issue not found after import")
+		t.Fatal("Deleted issue not found after import")
 	}
-	if retrieved.Status != types.StatusTombstone {
-		t.Errorf("Expected status 'tombstone', got %q", retrieved.Status)
+	if retrieved.Status != types.StatusClosed {
+		t.Errorf("Expected status 'closed', got %q", retrieved.Status)
 	}
-	if retrieved.DeletedBy != "bob" {
-		t.Errorf("Expected DeletedBy 'bob', got %q", retrieved.DeletedBy)
-	}
-	if retrieved.DeleteReason != "test deletion" {
-		t.Errorf("Expected DeleteReason 'test deletion', got %q", retrieved.DeleteReason)
+	if retrieved.ClosedAt == nil {
+		t.Error("Expected ClosedAt to be set for closed issue")
 	}
 }
 
@@ -1316,10 +1299,10 @@ func TestImportCrossPrefixContentMatch(t *testing.T) {
 	}
 }
 
-// TestImportTombstonePrefixMismatch tests that tombstoned issues with different prefixes
-// don't block import (bd-6pni). This handles pollution from contributor PRs that used
-// different test prefixes - these tombstones are safe to ignore.
-func TestImportTombstonePrefixMismatch(t *testing.T) {
+// TestImportDeletedPrefixMismatch tests that deleted issues with different prefixes
+// are handled during import (bd-6pni). This handles pollution from contributor PRs that
+// used different test prefixes.
+func TestImportDeletedPrefixMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	tmpDB := t.TempDir() + "/test.db"
@@ -1334,7 +1317,7 @@ func TestImportTombstonePrefixMismatch(t *testing.T) {
 		t.Fatalf("Failed to set prefix: %v", err)
 	}
 
-	// Create tombstoned issues with WRONG prefixes (simulating pollution)
+	// Create deleted issues with WRONG prefixes (simulating pollution)
 	deletedAt := time.Now().Add(-time.Hour)
 	issues := []*types.Issue{
 		// Normal issue with correct prefix
@@ -1345,45 +1328,35 @@ func TestImportTombstonePrefixMismatch(t *testing.T) {
 			Priority:  2,
 			IssueType: types.TypeTask,
 		},
-		// Tombstone with wrong prefix "beads"
+		// Deleted issue with wrong prefix "beads"
 		{
 			ID:           "beads-old1",
 			Title:        "(deleted)",
-			Status:       types.StatusTombstone,
+			Status:       types.StatusClosed,
 			Priority:     2,
 			IssueType:    types.TypeTask,
-			DeletedAt:    &deletedAt,
-			DeletedBy:    "cleanup",
-			DeleteReason: "test cleanup",
+			ClosedAt:     &deletedAt,
 		},
-		// Tombstone with wrong prefix "test"
+		// Deleted issue with wrong prefix "test"
 		{
 			ID:           "test-old2",
 			Title:        "(deleted)",
-			Status:       types.StatusTombstone,
+			Status:       types.StatusClosed,
 			Priority:     2,
 			IssueType:    types.TypeTask,
-			DeletedAt:    &deletedAt,
-			DeletedBy:    "cleanup",
-			DeleteReason: "test cleanup",
+			ClosedAt:     &deletedAt,
 		},
 	}
 
-	// Import should succeed - tombstones with wrong prefixes should be ignored
-	result, err := ImportIssues(ctx, tmpDB, store, issues, Options{})
+	// Import with SkipPrefixValidation since deleted cross-prefix issues are present
+	result, err := ImportIssues(ctx, tmpDB, store, issues, Options{SkipPrefixValidation: true})
 	if err != nil {
-		t.Fatalf("Import should succeed when all mismatched prefixes are tombstones: %v", err)
+		t.Fatalf("Import should succeed with prefix validation skipped: %v", err)
 	}
 
-	// Should have created the good issue
-	// Tombstones with wrong prefixes are skipped (cross-prefix content match logic)
+	// Should have created at least the good issue
 	if result.Created < 1 {
 		t.Errorf("Expected at least 1 created issue, got %d", result.Created)
-	}
-
-	// PrefixMismatch should be false because all mismatches were tombstones
-	if result.PrefixMismatch {
-		t.Error("PrefixMismatch should be false when all mismatched prefixes are tombstones")
 	}
 
 	// Verify the good issue was imported
@@ -1396,8 +1369,8 @@ func TestImportTombstonePrefixMismatch(t *testing.T) {
 	}
 }
 
-// TestImportMixedPrefixMismatch tests that import fails when there are non-tombstone
-// issues with wrong prefixes, even if some tombstones also have wrong prefixes.
+// TestImportMixedPrefixMismatch tests that import fails when there are
+// issues with wrong prefixes, even if some deleted issues also have wrong prefixes.
 func TestImportMixedPrefixMismatch(t *testing.T) {
 	ctx := context.Background()
 
@@ -1423,18 +1396,16 @@ func TestImportMixedPrefixMismatch(t *testing.T) {
 			Priority:  2,
 			IssueType: types.TypeTask,
 		},
-		// Tombstone with wrong prefix (should be ignored)
+		// Deleted issue with wrong prefix
 		{
 			ID:           "beads-old1",
 			Title:        "(deleted)",
-			Status:       types.StatusTombstone,
+			Status:       types.StatusClosed,
 			Priority:     2,
 			IssueType:    types.TypeTask,
-			DeletedAt:    &deletedAt,
-			DeletedBy:    "cleanup",
-			DeleteReason: "test cleanup",
+			ClosedAt:     &deletedAt,
 		},
-		// NON-tombstone with wrong prefix (should cause error)
+		// Non-deleted issue with wrong prefix (should cause error)
 		{
 			ID:        "other-bad1",
 			Title:     "Bad issue with wrong prefix",
@@ -1444,10 +1415,10 @@ func TestImportMixedPrefixMismatch(t *testing.T) {
 		},
 	}
 
-	// Import should fail due to the non-tombstone with wrong prefix
+	// Import should fail due to the non-deleted issue with wrong prefix
 	_, err = ImportIssues(ctx, tmpDB, store, issues, Options{})
 	if err == nil {
-		t.Fatal("Import should fail when there are non-tombstone issues with wrong prefixes")
+		t.Fatal("Import should fail when there are non-deleted issues with wrong prefixes")
 	}
 
 	// Error message should mention prefix mismatch

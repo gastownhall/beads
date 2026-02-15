@@ -80,8 +80,8 @@ func exportToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 	}
 
 	// Single-repo mode - use existing logic
-	// Get all issues including tombstones for sync propagation
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	// Get all issues for sync propagation
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get issues: %w", err)
 	}
@@ -221,25 +221,9 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 		}
 		issue.SetDefaults()
 
-		// Migrate old JSONL format: auto-correct deleted status to tombstone
-		if issue.Status == types.Status("deleted") && issue.DeletedAt != nil {
-			issue.Status = types.StatusTombstone
-		}
-
-		// Fix: Any non-tombstone issue with deleted_at set is malformed
-		if issue.Status != types.StatusTombstone && issue.DeletedAt != nil {
-			issue.Status = types.StatusTombstone
-		}
-
 		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
 			now := time.Now()
 			issue.ClosedAt = &now
-		}
-
-		// Ensure tombstones have deleted_at set
-		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-			now := time.Now()
-			issue.DeletedAt = &now
 		}
 
 		issues = append(issues, &issue)

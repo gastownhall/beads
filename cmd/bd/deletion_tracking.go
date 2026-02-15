@@ -15,7 +15,7 @@ import (
 //
 // During 3-way merge, we try to delete issues that were removed remotely. However, the issue
 // may already be gone from the local database due to:
-//   - Already tombstoned by a previous sync/import
+//   - Already deleted by a previous sync/import
 //   - Never existed locally (multi-repo scenarios, partial clones)
 //   - Deleted by user between export and import phases
 //

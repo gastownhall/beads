@@ -767,18 +767,17 @@ func isNonFastForwardError(output string) bool {
 
 // contentMergeRecovery performs a content-level merge when push fails due to divergence.
 //
-// The problem with git rebase: it replays commits textually, which can resurrect
-// tombstones. For example, if remote has a tombstone and local has 'closed',
-// the rebase overwrites the tombstone with 'closed'.
+// The problem with git rebase: it replays commits textually, which can overwrite
+// remote changes. For example, if remote has updated content and local has stale data,
+// the rebase overwrites the remote update with the local version.
 //
-// This function uses the same content-level merge as PullFromSyncBranch:
+// This function uses a remote-wins strategy:
 // 1. Fetch remote
-// 2. Find merge base
-// 3. Extract JSONL from base, local, remote
-// 4. Run 3-way content merge (respects tombstones)
-// 5. Reset to remote, commit merged content
+// 2. Extract JSONL from remote
+// 3. Use remote content as the merged result (remote-wins)
+// 4. Reset to remote, commit merged content
 //
-// This fixes a sync race where rebase-based divergence recovery resurrects tombstones.
+// This fixes a sync race where rebase-based divergence recovery overwrites remote changes.
 func contentMergeRecovery(ctx context.Context, worktreePath, branch, remote string) error {
 	// The JSONL is always at .beads/issues.jsonl relative to worktree
 	jsonlRelPath := filepath.Join(".beads", "issues.jsonl")
@@ -889,7 +888,7 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 		// Check if this is a non-fast-forward error (concurrent push conflict)
 		if isNonFastForwardError(outputStr) {
 			// Use content-level merge instead of git rebase.
-			// Git rebase is text-level and can resurrect tombstones.
+			// Git rebase is text-level and can overwrite remote changes.
 			if mergeErr := contentMergeRecovery(ctx, worktreePath, branch, remote); mergeErr != nil {
 				// Content merge failed - provide clear recovery options
 				return fmt.Errorf(`sync branch diverged and automatic recovery failed

@@ -123,68 +123,6 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 	}
 }
 
-// CheckExpiredTombstones detects tombstones that have exceeded their TTL.
-func CheckExpiredTombstones(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Expired Tombstones",
-			Status:   StatusOK,
-			Message:  "N/A (no JSONL file)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Read JSONL and count expired tombstones
-	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Expired Tombstones",
-			Status:   StatusOK,
-			Message:  "N/A (unable to read JSONL)",
-			Category: CategoryMaintenance,
-		}
-	}
-	defer file.Close()
-
-	var expiredCount int
-	decoder := json.NewDecoder(file)
-	ttl := types.DefaultTombstoneTTL
-
-	for {
-		var issue types.Issue
-		if err := decoder.Decode(&issue); err != nil {
-			break
-		}
-		issue.SetDefaults()
-		if issue.IsExpired(ttl) {
-			expiredCount++
-		}
-	}
-
-	if expiredCount == 0 {
-		return DoctorCheck{
-			Name:     "Expired Tombstones",
-			Status:   StatusOK,
-			Message:  "No expired tombstones",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	ttlDays := int(ttl.Hours() / 24)
-	return DoctorCheck{
-		Name:     "Expired Tombstones",
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d tombstone(s) older than %d days", expiredCount, ttlDays),
-		Detail:   "Expired tombstones can be pruned to reduce JSONL file size",
-		Fix:      "Run 'bd doctor --fix' to prune, or 'bd admin cleanup --force' for more options",
-		Category: CategoryMaintenance,
-	}
-}
-
 // CheckStaleMolecules detects complete-but-unclosed molecules.
 // A molecule is stale if all children are closed but the root is still open.
 func CheckStaleMolecules(path string) DoctorCheck {
@@ -381,10 +319,6 @@ func CheckPersistentMolIssues(path string) DoctorCheck {
 		if err := decoder.Decode(&issue); err != nil {
 			break
 		}
-		// Skip deleted issues (tombstones)
-		if issue.DeletedAt != nil {
-			continue
-		}
 		// Look for mol- prefix that shouldn't be in JSONL
 		// (ephemeral issues have Ephemeral=true and don't get exported)
 		if strings.HasPrefix(issue.ID, "mol-") && !issue.Ephemeral {
@@ -508,10 +442,6 @@ func checkMisclassifiedWisps(path string) DoctorCheck {
 		var issue types.Issue
 		if err := decoder.Decode(&issue); err != nil {
 			break
-		}
-		// Skip deleted issues (tombstones)
-		if issue.DeletedAt != nil {
-			continue
 		}
 		// Look for wisp pattern without ephemeral flag
 		// These shouldn't be in JSONL at all (wisps are ephemeral)
@@ -646,11 +576,6 @@ func detectPatrolPollution(file *os.File) patrolPollutionResult {
 			break
 		}
 
-		// Skip tombstones
-		if issue.DeletedAt != nil {
-			continue
-		}
-
 		title := issue.Title
 
 		// Check for patrol digest pattern: "Digest: mol-*-patrol"
@@ -692,11 +617,6 @@ func getPatrolPollutionIDs(path string) ([]string, error) {
 		var issue types.Issue
 		if err := decoder.Decode(&issue); err != nil {
 			break
-		}
-
-		// Skip tombstones
-		if issue.DeletedAt != nil {
-			continue
 		}
 
 		title := issue.Title

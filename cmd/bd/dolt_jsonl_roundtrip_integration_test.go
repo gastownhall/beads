@@ -122,7 +122,7 @@ func findCommentTimestampByText(iss *types.Issue, text string) (time.Time, bool)
 	return time.Time{}, false
 }
 
-func TestDoltJSONLRoundTrip_DepsLabelsCommentsTombstones(t *testing.T) {
+func TestDoltJSONLRoundTrip_DepsLabelsCommentsDeletions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
 	}
@@ -216,21 +216,17 @@ func TestDoltJSONLRoundTrip_DepsLabelsCommentsTombstones(t *testing.T) {
 		t.Fatalf("expected comment on %s in export1", idA)
 	}
 
-	// Create a tombstone record in JSONL for issue B (Dolt backend may not support
-	// creating tombstones via `bd delete`, but it must round-trip tombstones via JSONL).
+	// Mark issue B as closed+deleted in JSONL (simulating a soft delete).
 	now := time.Now().UTC()
-	issues1[idB].Status = types.StatusTombstone
-	issues1[idB].DeletedAt = &now
-	issues1[idB].DeletedBy = "test"
-	issues1[idB].DeleteReason = "test tombstone"
-	issues1[idB].OriginalType = string(issues1[idB].IssueType)
+	issues1[idB].Status = types.StatusClosed
+	issues1[idB].ClosedAt = &now
 	issues1[idB].SetDefaults()
 
-	jsonl1Tomb := filepath.Join(ws1, ".beads", "issues.tomb.jsonl")
-	writeJSONLIssues(t, jsonl1Tomb, issues1)
-	issues1Tomb := readJSONLIssues(t, jsonl1Tomb)
-	if issues1Tomb[idB].Status != types.StatusTombstone {
-		t.Fatalf("expected %s to be tombstone in tombstone JSONL, got %q", idB, issues1Tomb[idB].Status)
+	jsonl1Deleted := filepath.Join(ws1, ".beads", "issues.deleted.jsonl")
+	writeJSONLIssues(t, jsonl1Deleted, issues1)
+	issues1Deleted := readJSONLIssues(t, jsonl1Deleted)
+	if issues1Deleted[idB].Status != types.StatusClosed {
+		t.Fatalf("expected %s to be closed in deleted JSONL, got %q", idB, issues1Deleted[idB].Status)
 	}
 
 	// Workspace 2: import JSONL into fresh Dolt DB and re-export.
@@ -252,7 +248,7 @@ func TestDoltJSONLRoundTrip_DepsLabelsCommentsTombstones(t *testing.T) {
 
 	// Copy JSONL into ws2 beads dir
 	jsonl2in := filepath.Join(ws2, ".beads", "issues.jsonl")
-	data, err := os.ReadFile(jsonl1Tomb)
+	data, err := os.ReadFile(jsonl1Deleted)
 	if err != nil {
 		t.Fatalf("read export1: %v", err)
 	}
@@ -271,10 +267,10 @@ func TestDoltJSONLRoundTrip_DepsLabelsCommentsTombstones(t *testing.T) {
 
 	issues2 := readJSONLIssues(t, jsonl2out)
 	if len(issues2) != 2 {
-		t.Fatalf("expected 2 issues in export2 (including tombstone), got %d", len(issues2))
+		t.Fatalf("expected 2 issues in export2 (including deleted), got %d", len(issues2))
 	}
-	if issues2[idB].Status != types.StatusTombstone {
-		t.Fatalf("expected %s to be tombstone in export2, got %q", idB, issues2[idB].Status)
+	if issues2[idB].Status != types.StatusClosed {
+		t.Fatalf("expected %s to be closed in export2, got %q", idB, issues2[idB].Status)
 	}
 	// Ensure comment timestamp preserved across import/export
 	ts2, ok := findCommentTimestampByText(issues2[idA], commentText)

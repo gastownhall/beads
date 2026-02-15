@@ -31,10 +31,6 @@ CREATE TABLE IF NOT EXISTS issues (
     compacted_at DATETIME,
     compacted_at_commit VARCHAR(64),
     original_size INT,
-    deleted_at DATETIME,
-    deleted_by VARCHAR(255) DEFAULT '',
-    delete_reason TEXT DEFAULT '',
-    original_type VARCHAR(32) DEFAULT '',
     -- Messaging fields
     sender VARCHAR(255) DEFAULT '',
     ephemeral TINYINT(1) DEFAULT 0,

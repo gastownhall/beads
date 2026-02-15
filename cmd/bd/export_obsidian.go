@@ -17,7 +17,6 @@ var obsidianCheckbox = map[types.Status]string{
 	types.StatusInProgress: "- [/]",
 	types.StatusBlocked:    "- [c]",
 	types.StatusClosed:     "- [x]",
-	types.StatusTombstone:  "- [-]",
 	types.StatusDeferred:   "- [-]",
 	types.StatusPinned:     "- [n]", // Review/attention
 	types.StatusHooked:     "- [/]", // Treat as in-progress

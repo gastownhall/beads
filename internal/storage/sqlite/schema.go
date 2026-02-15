@@ -59,11 +59,10 @@ CREATE TABLE IF NOT EXISTS issues (
     payload TEXT DEFAULT '',
     -- NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
     -- These relationships are now stored in the dependencies table
-    -- closed_at constraint: closed issues must have it, tombstones may retain it from before deletion
+    -- closed_at constraint: closed issues must have it, non-closed must not
     CHECK (
         (status = 'closed' AND closed_at IS NOT NULL) OR
-        (status = 'tombstone') OR
-        (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL)
+        (status != 'closed' AND closed_at IS NULL)
     )
 );
 

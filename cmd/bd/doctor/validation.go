@@ -211,13 +211,13 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 
 	// Count duplicate groups and total duplicates using SQL GROUP BY.
 	// This matches the original algorithm: group by title|description|design|acceptance_criteria|status,
-	// only for non-closed, non-tombstone issues.
+	// only for non-closed issues.
 	query := `
 		SELECT COUNT(*) as group_count, SUM(cnt - 1) as dup_count
 		FROM (
 			SELECT COUNT(*) as cnt
 			FROM issues
-			WHERE status NOT IN ('closed', 'tombstone')
+			WHERE status != 'closed'
 			GROUP BY title, description, design, acceptance_criteria, status
 			HAVING COUNT(*) > 1
 		) dups
@@ -289,8 +289,7 @@ func CheckTestPollution(path string) DoctorCheck {
 	// Look for common test patterns in titles
 	query := `
 		SELECT COUNT(*) FROM issues
-		WHERE status != 'tombstone'
-		AND (
+		WHERE (
 			title LIKE 'test-%' OR
 			title LIKE 'Test Issue%' OR
 			title LIKE '%test issue%' OR

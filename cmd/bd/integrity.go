@@ -308,7 +308,7 @@ func validatePostImport(before, after int, _ string) error {
 }
 
 // validatePostImportWithExpectedDeletions checks that import didn't cause data loss,
-// accounting for expected deletions (e.g., tombstones).
+// accounting for expected deletions.
 // Returns error if issue count decreased unexpectedly (data loss) or nil if OK.
 //
 // Parameters:
@@ -320,7 +320,7 @@ func validatePostImportWithExpectedDeletions(before, after, expectedDeletions in
 	if after < before {
 		decrease := before - after
 
-		// Account for expected deletions (tombstones converted to actual deletions)
+		// Account for expected deletions
 		if expectedDeletions > 0 && decrease <= expectedDeletions {
 			fmt.Fprintf(os.Stderr, "Import complete: %d → %d issues (-%d, expected deletions)\n",
 				before, after, decrease)
@@ -328,8 +328,7 @@ func validatePostImportWithExpectedDeletions(before, after, expectedDeletions in
 		}
 
 		// Unexpected decrease - warn but don't fail
-		// With tombstones as the deletion mechanism, decreases are unusual
-		// but can happen during cleanup or migration
+		// Decreases are unusual but can happen during cleanup or migration
 		fmt.Fprintf(os.Stderr, "Warning: import reduced issue count: %d → %d (-%d)\n",
 			before, after, decrease)
 		return nil
@@ -368,8 +367,7 @@ func countDBIssuesFast(ctx context.Context, store storage.Storage) (int, error) 
 	}
 
 	// Fallback: load all issues and count them (slow but always works)
-	// Include tombstones to match JSONL count which includes tombstones
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to count database issues: %w", err)
 	}

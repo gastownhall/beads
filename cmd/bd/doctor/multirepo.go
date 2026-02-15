@@ -237,7 +237,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	// Find issues with types not in knownTypes
 	rows, err := db.Query(`
 		SELECT DISTINCT issue_type FROM issues
-		WHERE status != 'tombstone' AND source_repo != '' AND source_repo != '.'
+		WHERE source_repo != '' AND source_repo != '.'
 	`)
 	if err != nil {
 		return nil

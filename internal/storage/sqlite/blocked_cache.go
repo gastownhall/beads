@@ -198,7 +198,7 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 		              json_extract(d.metadata, '$.spawner_id'),
 		              d.depends_on_id
 		            )
-		            AND child.status NOT IN ('closed', 'tombstone')
+		            AND child.status NOT IN ('closed')
 		        )
 		        OR
 		        -- Alternative gate: "any-children" - blocked until ANY child closes
@@ -211,7 +211,7 @@ func (s *SQLiteStorage) rebuildBlockedCache(ctx context.Context, exec execer) er
 		              json_extract(d.metadata, '$.spawner_id'),
 		              d.depends_on_id
 		            )
-		            AND child.status IN ('closed', 'tombstone')
+		            AND child.status IN ('closed')
 		        )
 		      )
 		  ),

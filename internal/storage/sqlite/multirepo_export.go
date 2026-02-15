@@ -26,8 +26,8 @@ func (s *SQLiteStorage) ExportToMultiRepo(ctx context.Context) (map[string]int, 
 		return nil, nil
 	}
 
-	// Get all issues including tombstones for sync propagation (bd-dve)
-	allIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	// Get all issues for sync propagation
+	allIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query issues: %w", err)
 	}

@@ -48,16 +48,6 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.ClosedAt = &closedAt
 	}
 
-	// Defensive fix for deleted_at invariant
-	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		deletedAt := maxTime.Add(time.Second)
-		issue.DeletedAt = &deletedAt
-	}
-
 	// Validate issue
 	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -172,16 +162,6 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 			closedAt := maxTime.Add(time.Second)
 			issue.ClosedAt = &closedAt
-		}
-
-		// Defensive fix for deleted_at invariant
-		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-			maxTime := issue.CreatedAt
-			if issue.UpdatedAt.After(maxTime) {
-				maxTime = issue.UpdatedAt
-			}
-			deletedAt := maxTime.Add(time.Second)
-			issue.DeletedAt = &deletedAt
 		}
 
 		// Validate issue
@@ -509,50 +489,6 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
-// CreateTombstone converts an issue to a tombstone record (soft delete)
-func (s *DoltStore) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
-	// Get the issue to preserve its original type
-	issue, err := s.GetIssue(ctx, id)
-	if err != nil {
-		return fmt.Errorf("failed to get issue: %w", err)
-	}
-	if issue == nil {
-		return fmt.Errorf("issue not found: %s", id)
-	}
-
-	now := time.Now().UTC()
-	originalType := string(issue.IssueType)
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
-
-	// Convert issue to tombstone
-	_, err = tx.ExecContext(ctx, `
-		UPDATE issues
-		SET status = ?,
-		    closed_at = NULL,
-		    deleted_at = ?,
-		    deleted_by = ?,
-		    delete_reason = ?,
-		    original_type = ?,
-		    updated_at = ?
-		WHERE id = ?
-	`, types.StatusTombstone, now, actor, reason, originalType, now, id)
-	if err != nil {
-		return fmt.Errorf("failed to create tombstone: %w", err)
-	}
-
-	// Record tombstone creation event
-	if err := recordEvent(ctx, tx, id, "deleted", actor, "", reason); err != nil {
-		return fmt.Errorf("failed to record tombstone event: %w", err)
-	}
-
-	return tx.Commit()
-}
-
 // DeleteIssues deletes multiple issues in a single transaction.
 // If cascade is true, recursively deletes dependents.
 // If cascade is false but force is true, deletes issues and orphans dependents.
@@ -695,57 +631,29 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		return nil, fmt.Errorf("failed to delete dependencies: %w", err)
 	}
 
-	// 2. Get issue types before converting to tombstones
-	issueTypes := make(map[string]string)
-	rows, err := tx.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, issue_type FROM issues WHERE id IN (%s)`, inClause),
+	// 2. Delete labels, comments, and events for the issues
+	for _, table := range []string{"labels", "comments", "events"} {
+		if err := validateTableName(table); err != nil {
+			return nil, fmt.Errorf("invalid table name %q: %w", table, err)
+		}
+		_, err = tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE issue_id IN (%s)`, table, inClause), //nolint:gosec // G201: table validated above, inClause contains only ? placeholders
+			args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to delete from %s: %w", table, err)
+		}
+	}
+
+	// 3. Delete the issues themselves
+	deleteResult, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM issues WHERE id IN (%s)`, inClause),
 		args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get issue types: %w", err)
-	}
-	for rows.Next() {
-		var id, issueType string
-		if err := rows.Scan(&id, &issueType); err != nil {
-			_ = rows.Close() // Best effort cleanup on error path
-			return nil, fmt.Errorf("failed to scan issue type: %w", err)
-		}
-		issueTypes[id] = issueType
-	}
-	_ = rows.Close() // Redundant close for safety (rows already iterated)
-
-	// 3. Convert issues to tombstones
-	now := time.Now().UTC()
-	deletedCount := 0
-	for id, originalType := range issueTypes {
-		execResult, err := tx.ExecContext(ctx, `
-			UPDATE issues
-			SET status = ?,
-			    closed_at = NULL,
-			    deleted_at = ?,
-			    deleted_by = ?,
-			    delete_reason = ?,
-			    original_type = ?,
-			    updated_at = ?
-			WHERE id = ?
-		`, types.StatusTombstone, now, "batch delete", "batch delete", originalType, now, id)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create tombstone for %s: %w", id, err)
-		}
-
-		rowsAffected, _ := execResult.RowsAffected()
-		if rowsAffected == 0 {
-			continue
-		}
-		deletedCount++
-
-		// Record tombstone creation event
-		if err := recordEvent(ctx, tx, id, "deleted", "batch delete", "", "batch delete"); err != nil {
-			return nil, fmt.Errorf("failed to record tombstone event for %s: %w", id, err)
-		}
-
+		return nil, fmt.Errorf("failed to delete issues: %w", err)
 	}
 
-	result.DeletedCount = deletedCount
+	rowsAffected, _ := deleteResult.RowsAffected()
+	result.DeletedCount = int(rowsAffected)
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
@@ -816,7 +724,6 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			mol_type, work_type, quality_score, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
@@ -827,7 +734,6 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
@@ -841,7 +747,6 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 		issue.Status, issue.Priority, issue.IssueType, nullString(issue.Assignee), nullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, nullStringPtr(issue.CompactedAtCommit), nullIntVal(issue.OriginalSize),
-		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 		issue.Sender, issue.Ephemeral, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 		issue.MolType, issue.WorkType, issue.QualityScore, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
@@ -855,10 +760,10 @@ func insertIssue(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error) {
 	var issue types.Issue
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
-	var closedAt, compactedAt, deletedAt, lastActivity, dueAt, deferUntil sql.NullTime
+	var closedAt, compactedAt, lastActivity, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason, deletedBy, deleteReason, originalType sql.NullString
+	var contentHash, sourceRepo, closeReason sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
@@ -872,7 +777,6 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
@@ -887,7 +791,6 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &ephemeral, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
@@ -948,18 +851,6 @@ func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error)
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
-	}
-	if deletedAt.Valid {
-		issue.DeletedAt = &deletedAt.Time
-	}
-	if deletedBy.Valid {
-		issue.DeletedBy = deletedBy.String
-	}
-	if deleteReason.Valid {
-		issue.DeleteReason = deleteReason.String
-	}
-	if originalType.Valid {
-		issue.OriginalType = originalType.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String

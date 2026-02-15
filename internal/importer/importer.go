@@ -272,7 +272,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 }
 
 // handlePrefixMismatch checks and handles prefix mismatches.
-// Returns a filtered issues slice with tombstoned issues having wrong prefixes removed.
+// Returns a filtered issues slice with mismatched-prefix issues reported.
 func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
 	configuredPrefix, err := store.GetConfig(ctx, "issue_prefix")
 	if err != nil {
@@ -303,13 +303,7 @@ func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*
 	}
 
 	// Analyze prefixes in imported issues
-	// Track tombstones separately - they don't count as "real" mismatches
-	tombstoneMismatchPrefixes := make(map[string]int)
-	nonTombstoneMismatchCount := 0
-
-	// Also track which tombstones have wrong prefixes for filtering
 	var filteredIssues []*types.Issue
-	var tombstonesToRemove []string
 
 	for _, issue := range issues {
 		// GH#422: Check if issue ID starts with configured prefix directly
@@ -326,40 +320,15 @@ func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*
 		if !prefixMatches {
 			// Extract prefix for error reporting (best effort)
 			prefix := utils.ExtractIssuePrefix(issue.ID)
-			if issue.IsTombstone() {
-				tombstoneMismatchPrefixes[prefix]++
-				tombstonesToRemove = append(tombstonesToRemove, issue.ID)
-				// Don't add to filtered list - we'll remove these
-			} else {
-				result.PrefixMismatch = true
-				result.MismatchPrefixes[prefix]++
-				nonTombstoneMismatchCount++
-				filteredIssues = append(filteredIssues, issue)
-			}
+			result.PrefixMismatch = true
+			result.MismatchPrefixes[prefix]++
+			filteredIssues = append(filteredIssues, issue)
 		} else {
 			// Correct prefix - keep the issue
 			filteredIssues = append(filteredIssues, issue)
 		}
 	}
 
-	// If ALL mismatched prefix issues are tombstones, they're just pollution
-	// from contributor PRs that used different test prefixes. These are safe to remove.
-	if nonTombstoneMismatchCount == 0 && len(tombstoneMismatchPrefixes) > 0 {
-		// Log that we're ignoring tombstoned mismatches
-		var tombstonePrefixList []string
-		for prefix, count := range tombstoneMismatchPrefixes {
-			tombstonePrefixList = append(tombstonePrefixList, fmt.Sprintf("%s- (%d tombstones)", prefix, count))
-		}
-		fmt.Fprintf(os.Stderr, "Ignoring prefix mismatches (all are tombstones): %v\n", tombstonePrefixList)
-		// Clear mismatch flags - no real issues to worry about
-		result.PrefixMismatch = false
-		result.MismatchPrefixes = make(map[string]int)
-		// Return filtered list without the tombstones
-		return filteredIssues, nil
-	}
-
-	// If there are non-tombstone mismatches, we need to include all issues (tombstones too)
-	// but still report the error for non-tombstones
 	if result.PrefixMismatch {
 		// If not handling the mismatch, return error
 		if !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
@@ -386,7 +355,7 @@ func handlePrefixMismatch(ctx context.Context, store storage.Storage, issues []*
 func detectUpdates(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
 	// Backend-agnostic collision detection:
 	// "collision" here means: same ID exists but content hash differs.
-	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("collision detection failed: %w", err)
 	}
@@ -601,9 +570,8 @@ func handleRenameTx(ctx context.Context, tx storage.Transaction, existing *types
 
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
-	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
-	// when trying to create issues that were previously deleted
-	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	// Get all DB issues once for matching
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
@@ -651,16 +619,6 @@ func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Is
 			continue
 		}
 		seenIDs[incoming.ID] = true
-
-		// CRITICAL: Check for tombstone FIRST, before any other matching
-		// This prevents ghost resurrection regardless of which phase would normally match.
-		// If this ID has a tombstone in the DB, skip importing it entirely.
-		if existingByID, found := dbByID[incoming.ID]; found {
-			if existingByID.Status == types.StatusTombstone {
-				result.Skipped++
-				continue
-			}
-		}
 
 		// Phase 0: Match by external_ref first (if present)
 		// This enables re-syncing from external systems (Jira, GitHub, Linear)
@@ -764,11 +722,6 @@ func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Is
 
 		// Phase 2: New content - check for ID collision
 		if existingWithID, found := dbByID[incoming.ID]; found {
-			// Skip tombstones - don't try to update or resurrect deleted issues
-			if existingWithID.Status == types.StatusTombstone {
-				result.Skipped++
-				continue
-			}
 			// ID exists but different content - this is a collision
 			// The update should have been detected earlier by detectUpdates
 			// If we reach here, it means collision wasn't resolved - treat as update
@@ -886,7 +839,7 @@ func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Is
 	}
 
 	// OrphanResurrect: if any hierarchical parents are missing, attempt to resurrect them
-	// from local JSONL history by creating tombstone parents (status=closed).
+	// from local JSONL history by creating placeholder parents (status=closed).
 	if opts.OrphanHandling == OrphanResurrect {
 		if err := addResurrectedParents(store, dbByID, issues, &newIssues); err != nil {
 			return err
@@ -935,7 +888,7 @@ func upsertIssues(ctx context.Context, store storage.Storage, issues []*types.Is
 // upsertIssuesTx performs upsert using a transaction for atomicity.
 func upsertIssuesTx(ctx context.Context, tx storage.Transaction, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
 	// Use transaction-scoped reads for consistency.
-	dbIssues, err := tx.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	dbIssues, err := tx.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
@@ -979,12 +932,6 @@ func upsertIssuesTx(ctx context.Context, tx storage.Transaction, store storage.S
 			continue
 		}
 		seenIDs[incoming.ID] = true
-
-		// Never resurrect over tombstones.
-		if existingByID, found := dbByID[incoming.ID]; found && existingByID != nil && existingByID.Status == types.StatusTombstone {
-			result.Skipped++
-			continue
-		}
 
 		// Phase 0: external_ref
 		if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
@@ -1065,10 +1012,6 @@ func upsertIssuesTx(ctx context.Context, tx storage.Transaction, store storage.S
 
 		// Phase 2: same ID exists -> update candidate
 		if existingWithID, found := dbByID[incoming.ID]; found && existingWithID != nil {
-			if existingWithID.Status == types.StatusTombstone {
-				result.Skipped++
-				continue
-			}
 			if !opts.SkipUpdate {
 				if shouldProtectFromUpdate(incoming.ID, incoming.UpdatedAt, opts.ProtectLocalExportIDs) {
 					debugLogProtection(incoming.ID, opts.ProtectLocalExportIDs[incoming.ID], incoming.UpdatedAt)
@@ -1298,7 +1241,7 @@ func importCommentsTx(ctx context.Context, tx storage.Transaction, issues []*typ
 	return nil
 }
 
-// addResurrectedParents ensures missing hierarchical parents exist by adding "tombstone parent"
+// addResurrectedParents ensures missing hierarchical parents exist by adding placeholder parent
 // issues to newIssues (if needed). Parents are sourced from the local JSONL file when possible.
 func addResurrectedParents(store storage.Storage, dbByID map[string]*types.Issue, allIncoming []*types.Issue, newIssues *[]*types.Issue) error {
 	// Track which IDs will exist after creation
@@ -1345,7 +1288,7 @@ func addResurrectedParents(store storage.Storage, dbByID map[string]*types.Issue
 
 		now := time.Now().UTC()
 		closedAt := now
-		tombstone := &types.Issue{
+		placeholder := &types.Issue{
 			ID:        found.ID,
 			Title:     found.Title,
 			IssueType: found.IssueType,
@@ -1358,9 +1301,9 @@ func addResurrectedParents(store storage.Storage, dbByID map[string]*types.Issue
 			Description: "[RESURRECTED] Recreated as closed to preserve hierarchical structure.",
 		}
 		// Compute hash (ImportIssues computed hashes for original slice only)
-		tombstone.ContentHash = tombstone.ComputeContentHash()
+		placeholder.ContentHash = placeholder.ComputeContentHash()
 
-		*newIssues = append(*newIssues, tombstone)
+		*newIssues = append(*newIssues, placeholder)
 		willExist[parentID] = true
 		return nil
 	}
@@ -1422,7 +1365,7 @@ func findIssueInLocalJSONL(jsonlPath, issueID string) (*types.Issue, error) {
 // importDependencies imports dependency relationships
 func importDependencies(ctx context.Context, store storage.Storage, issues []*types.Issue, opts Options, result *Result) error {
 	// Backend-agnostic existence check map to avoid relying on backend-specific FK errors.
-	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	dbIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to load issues for dependency validation: %w", err)
 	}
@@ -1452,7 +1395,7 @@ func importDependencies(ctx context.Context, store storage.Storage, issues []*ty
 		}
 
 		for _, dep := range issue.Dependencies {
-			// Validate referenced issues exist (after upsert). Tombstones count as existing.
+			// Validate referenced issues exist (after upsert).
 			if !exists[dep.IssueID] || !exists[dep.DependsOnID] {
 				depDesc := fmt.Sprintf("%s → %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
 				if opts.Strict {
@@ -1620,10 +1563,6 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool
 	seen := make(map[string][]string)
 
 	for _, issue := range issues {
-		// Skip tombstone records - their external_ref is no longer "claimed" (GH#55u)
-		if issue.Status == types.StatusTombstone {
-			continue
-		}
 		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
 			ref := *issue.ExternalRef
 			seen[ref] = append(seen[ref], issue.ID)

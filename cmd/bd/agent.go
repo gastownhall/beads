@@ -483,11 +483,6 @@ func runAgentBackfillLabels(cmd *cobra.Command, args []string) error {
 	skipped := 0
 
 	for _, agent := range agents {
-		// Skip tombstoned agents
-		if agent.Status == types.StatusTombstone {
-			continue
-		}
-
 		// Extract role_type and rig from description if not set in fields
 		roleType := agent.RoleType
 		rig := agent.Rig

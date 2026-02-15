@@ -643,7 +643,6 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
@@ -676,10 +675,10 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 func scanIssueRow(rows *sql.Rows) (*types.Issue, error) {
 	var issue types.Issue
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
-	var closedAt, compactedAt, deletedAt, lastActivity, dueAt, deferUntil sql.NullTime
+	var closedAt, compactedAt, lastActivity, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var assignee, externalRef, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason, deletedBy, deleteReason, originalType sql.NullString
+	var contentHash, sourceRepo, closeReason sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
@@ -693,7 +692,6 @@ func scanIssueRow(rows *sql.Rows) (*types.Issue, error) {
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &ephemeral, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
@@ -746,18 +744,6 @@ func scanIssueRow(rows *sql.Rows) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
-	}
-	if deletedAt.Valid {
-		issue.DeletedAt = &deletedAt.Time
-	}
-	if deletedBy.Valid {
-		issue.DeletedBy = deletedBy.String
-	}
-	if deleteReason.Valid {
-		issue.DeleteReason = deleteReason.String
-	}
-	if originalType.Valid {
-		issue.OriginalType = originalType.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String

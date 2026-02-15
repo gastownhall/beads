@@ -565,37 +565,6 @@ func TestDefensiveClosedAtFix(t *testing.T) {
 		}
 	})
 
-	t.Run("sets deleted_at for tombstones missing it", func(t *testing.T) {
-		now := time.Now()
-		pastTime := now.Add(-24 * time.Hour)
-
-		issues := []*types.Issue{
-			{
-				Title:     "Tombstone without deleted_at",
-				Priority:  1,
-				IssueType: "task",
-				Status:    "tombstone",
-				CreatedAt: pastTime,
-				UpdatedAt: pastTime.Add(time.Hour),
-				// DeletedAt intentionally NOT set
-			},
-		}
-
-		err := validateBatchIssues(issues)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// deleted_at should be set to max(created_at, updated_at) + 1 second
-		if issues[0].DeletedAt == nil {
-			t.Fatal("deleted_at should have been set")
-		}
-
-		expectedDeletedAt := pastTime.Add(time.Hour).Add(time.Second)
-		if !issues[0].DeletedAt.Equal(expectedDeletedAt) {
-			t.Errorf("deleted_at mismatch: want %v, got %v", expectedDeletedAt, *issues[0].DeletedAt)
-		}
-	})
 }
 
 // TestGH956_BatchCreateExistingID tests that batch creation properly rejects

@@ -176,9 +176,8 @@ func exportToJSONLDeferred(ctx context.Context, jsonlPath string) (*ExportResult
 		}
 	}()
 
-	// Get all issues including tombstones for sync propagation (bd-rp4o fix)
-	// Tombstones must be exported so they propagate to other clones and prevent resurrection
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	// Get all issues for sync propagation
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issues: %w", err)
 	}
@@ -469,21 +468,12 @@ func performIncrementalExport(ctx context.Context, jsonlPath string, dirtyIDs []
 		}
 	}
 
-	// Handle tombstones and deletions using cached results (no second GetIssue call)
+	// Handle deletions using cached results (no second GetIssue call)
 	for _, id := range dirtyIDs {
 		issue := issueByID[id] // Use cached result
 		if issue == nil {
-			// Issue was fully deleted (not even a tombstone)
+			// Issue was fully deleted
 			delete(issueMap, id)
-		} else if issue.Status == types.StatusTombstone {
-			// Issue is a tombstone - keep it in export for propagation
-			if !issue.Ephemeral {
-				data, err := json.Marshal(issue)
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal tombstone %s: %w", id, err)
-				}
-				issueMap[id] = data
-			}
 		}
 	}
 
@@ -615,16 +605,16 @@ func validateOpenIssuesForSync(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize store for validation: %w", err)
 	}
 
-	// Get all issues (excluding tombstones) and filter to open ones
+	// Get all issues and filter to open ones
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get issues for validation: %w", err)
 	}
 
-	// Filter to only open issues (not closed, not tombstones)
+	// Filter to only open issues (not closed)
 	var issues []*types.Issue
 	for _, issue := range allIssues {
-		if issue.Status != types.StatusClosed && issue.Status != types.StatusTombstone {
+		if issue.Status != types.StatusClosed {
 			issues = append(issues, issue)
 		}
 	}

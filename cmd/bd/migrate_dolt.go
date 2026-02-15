@@ -347,7 +347,7 @@ type storageReader interface {
 // extractFromStore extracts all data from a storage backend
 func extractFromStore(ctx context.Context, store storageReader) (*migrationData, error) {
 	// Get all issues
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch issues: %w", err)
 	}
@@ -455,7 +455,6 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 				status, priority, issue_type, assignee, estimated_minutes,
 				created_at, created_by, owner, updated_at, closed_at, external_ref,
 				compaction_level, compacted_at, compacted_at_commit, original_size,
-				deleted_at, deleted_by, delete_reason, original_type,
 				sender, ephemeral, pinned, is_template, crystallizes,
 				mol_type, work_type, quality_score, source_system, source_repo, close_reason,
 				event_kind, actor, target, payload,
@@ -466,7 +465,6 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?,
 				?, ?, ?, ?,
 				?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?, ?,
@@ -480,7 +478,6 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 			issue.Status, issue.Priority, issue.IssueType, nullableString(issue.Assignee), nullableIntPtr(issue.EstimatedMinutes),
 			issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullableStringPtr(issue.ExternalRef),
 			issue.CompactionLevel, issue.CompactedAt, nullableStringPtr(issue.CompactedAtCommit), nullableInt(issue.OriginalSize),
-			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, issue.Ephemeral, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 			issue.MolType, issue.WorkType, nullableFloat32Ptr(issue.QualityScore), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,

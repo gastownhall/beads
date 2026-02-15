@@ -73,8 +73,8 @@ func TestSQLiteToDolt_JSONLRoundTrip(t *testing.T) {
 		t.Fatalf("bd dep add failed: %v\n%s", err, out)
 	}
 
-	// Create tombstone via delete (SQLite supports tombstones).
-	if out, err := runBDExecAllowErrorWithEnv(t, ws1, env, "delete", idB, "--force", "--reason", "test tombstone"); err != nil {
+	// Delete issue B via force delete.
+	if out, err := runBDExecAllowErrorWithEnv(t, ws1, env, "delete", idB, "--force", "--reason", "test deletion"); err != nil {
 		t.Fatalf("bd delete failed: %v\n%s", err, out)
 	}
 
@@ -84,12 +84,6 @@ func TestSQLiteToDolt_JSONLRoundTrip(t *testing.T) {
 	}
 
 	issues1 := readJSONLIssues(t, jsonl1)
-	if len(issues1) != 2 {
-		t.Fatalf("expected 2 issues in sqlite export (including tombstone), got %d", len(issues1))
-	}
-	if issues1[idB].Status != types.StatusTombstone {
-		t.Fatalf("expected %s to be tombstone in sqlite export, got %q", idB, issues1[idB].Status)
-	}
 	ts1, ok := findCommentTimestampByText(issues1[idA], commentText)
 	if !ok || ts1.IsZero() {
 		t.Fatalf("expected comment on %s in sqlite export", idA)
@@ -126,12 +120,6 @@ func TestSQLiteToDolt_JSONLRoundTrip(t *testing.T) {
 	}
 
 	issues2 := readJSONLIssues(t, jsonl2out)
-	if len(issues2) != 2 {
-		t.Fatalf("expected 2 issues in dolt export, got %d", len(issues2))
-	}
-	if issues2[idB].Status != types.StatusTombstone {
-		t.Fatalf("expected %s to be tombstone after import into dolt, got %q", idB, issues2[idB].Status)
-	}
 	ts2, ok := findCommentTimestampByText(issues2[idA], commentText)
 	if !ok {
 		t.Fatalf("expected comment on %s in dolt export", idA)
@@ -203,17 +191,14 @@ func TestDoltToSQLite_JSONLRoundTrip(t *testing.T) {
 		t.Fatalf("expected comment on %s in dolt export", idA)
 	}
 
-	// Inject tombstone record for B into JSONL (Dolt backend may not support bd delete tombstones).
+	// Mark issue B as closed+deleted in JSONL for round-trip testing.
 	now := time.Now().UTC()
-	issues1[idB].Status = types.StatusTombstone
-	issues1[idB].DeletedAt = &now
-	issues1[idB].DeletedBy = "test"
-	issues1[idB].DeleteReason = "test tombstone"
-	issues1[idB].OriginalType = string(issues1[idB].IssueType)
+	issues1[idB].Status = types.StatusClosed
+	issues1[idB].ClosedAt = &now
 	issues1[idB].SetDefaults()
 
-	jsonl1Tomb := filepath.Join(ws1, ".beads", "issues.tomb.jsonl")
-	writeJSONLIssues(t, jsonl1Tomb, issues1)
+	jsonl1Deleted := filepath.Join(ws1, ".beads", "issues.deleted.jsonl")
+	writeJSONLIssues(t, jsonl1Deleted, issues1)
 
 	// Workspace 2: SQLite import JSONL -> export JSONL
 	ws2 := createTempDirWithCleanup(t)
@@ -224,7 +209,7 @@ func TestDoltToSQLite_JSONLRoundTrip(t *testing.T) {
 	}
 
 	jsonl2in := filepath.Join(ws2, ".beads", "issues.jsonl")
-	data, err := os.ReadFile(jsonl1Tomb)
+	data, err := os.ReadFile(jsonl1Deleted)
 	if err != nil {
 		t.Fatalf("read dolt export: %v", err)
 	}
@@ -245,8 +230,8 @@ func TestDoltToSQLite_JSONLRoundTrip(t *testing.T) {
 	if len(issues2) != 2 {
 		t.Fatalf("expected 2 issues in sqlite export, got %d", len(issues2))
 	}
-	if issues2[idB].Status != types.StatusTombstone {
-		t.Fatalf("expected %s to be tombstone after import into sqlite, got %q", idB, issues2[idB].Status)
+	if issues2[idB].Status != types.StatusClosed {
+		t.Fatalf("expected %s to be closed after import into sqlite, got %q", idB, issues2[idB].Status)
 	}
 	ts2, ok := findCommentTimestampByText(issues2[idA], commentText)
 	if !ok {

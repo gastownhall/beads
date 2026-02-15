@@ -142,11 +142,11 @@ func TestPrefixDetection_MultiplePrefixes(t *testing.T) {
 			},
 		},
 		{
-			name: "tombstones mixed with regular issues",
+			name: "closed issues mixed with regular issues",
 			content: `{"id":"bd-1","title":"Issue 1","status":"open"}
-{"id":"bd-2","title":"Issue 2","status":"tombstone"}
+{"id":"bd-2","title":"Issue 2","status":"closed"}
 {"id":"proj-3","title":"Issue 3","status":"closed"}
-{"id":"bd-4","title":"Issue 4","status":"tombstone"}
+{"id":"bd-4","title":"Issue 4","status":"closed"}
 `,
 			expectedCount: 4,
 			expectedPrefixes: map[string]int{

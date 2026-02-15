@@ -637,15 +637,10 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, syncBranchGitignoreCheck)
 	// Don't fail overall check for sync branch gitignore, just warn
 
-	// Check 18: Deletions manifest (legacy, now replaced by tombstones)
+	// Check 18: Deletions manifest (legacy)
 	deletionsCheck := convertWithCategory(doctor.CheckDeletionsManifest(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, deletionsCheck)
 	// Don't fail overall check for missing deletions manifest, just warn
-
-	// Check 19: Tombstones health
-	tombstonesCheck := convertWithCategory(doctor.CheckTombstones(path), doctor.CategoryMetadata)
-	result.Checks = append(result.Checks, tombstonesCheck)
-	// Don't fail overall check for tombstone issues, just warn
 
 	// Check 20: Untracked .beads/*.jsonl files
 	untrackedCheck := convertWithCategory(doctor.CheckUntrackedBeadsFiles(path), doctor.CategoryData)
@@ -708,11 +703,6 @@ func runDiagnostics(path string) doctorResult {
 	patrolPollutionCheck := convertDoctorCheck(doctor.CheckPatrolPollution(path))
 	result.Checks = append(result.Checks, patrolPollutionCheck)
 	// Don't fail overall check for patrol pollution, just warn
-
-	// Check 27: Expired tombstones (maintenance)
-	tombstonesExpiredCheck := convertDoctorCheck(doctor.CheckExpiredTombstones(path))
-	result.Checks = append(result.Checks, tombstonesExpiredCheck)
-	// Don't fail overall check for expired tombstones, just warn
 
 	// Check 28: Compaction candidates (maintenance)
 	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))

@@ -912,18 +912,17 @@ func TestStatistics_EpicsEligibleForClosure(t *testing.T) {
 	}
 }
 
-func TestStatistics_TombstonesExcludedFromTotal(t *testing.T) {
+func TestStatistics_DeletedExcludedFromTotal(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()
 
 	ctx := context.Background()
-	deletedAt := time.Now()
+	now := time.Now()
 
-	// Create 2 regular issues and 1 tombstone
+	// Create 2 regular issues
 	issues := []*types.Issue{
 		{Title: "Open Issue", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
-		{Title: "Closed Issue", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &deletedAt},
-		{Title: "Tombstone Issue", Status: types.StatusTombstone, Priority: 1, IssueType: types.TypeTask, DeletedAt: &deletedAt, DeletedBy: "test"},
+		{Title: "Closed Issue", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &now},
 	}
 
 	for _, issue := range issues {
@@ -942,12 +941,8 @@ func TestStatistics_TombstonesExcludedFromTotal(t *testing.T) {
 		t.Fatalf("GetStatistics failed: %v", err)
 	}
 
-	// Tombstone should be excluded from total but counted separately
 	if stats.TotalIssues != 2 {
-		t.Errorf("Expected 2 total issues (excluding tombstone), got %d", stats.TotalIssues)
-	}
-	if stats.TombstoneIssues != 1 {
-		t.Errorf("Expected 1 tombstone issue, got %d", stats.TombstoneIssues)
+		t.Errorf("Expected 2 total issues, got %d", stats.TotalIssues)
 	}
 	if stats.OpenIssues != 1 {
 		t.Errorf("Expected 1 open issue, got %d", stats.OpenIssues)
@@ -957,7 +952,7 @@ func TestStatistics_TombstonesExcludedFromTotal(t *testing.T) {
 	}
 }
 
-func TestCreateTombstone(t *testing.T) {
+func TestDeleteIssueMemory(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()
 
@@ -975,42 +970,29 @@ func TestCreateTombstone(t *testing.T) {
 	}
 	issueID := issue.ID
 
-	// Create tombstone
-	if err := store.CreateTombstone(ctx, issueID, "test-actor", "test deletion"); err != nil {
-		t.Fatalf("CreateTombstone failed: %v", err)
+	// Delete the issue
+	if err := store.DeleteIssue(ctx, issueID); err != nil {
+		t.Fatalf("DeleteIssue failed: %v", err)
 	}
 
-	// Verify the issue is now a tombstone
-	updated, err := store.GetIssue(ctx, issueID)
+	// Verify the issue is gone
+	deleted, err := store.GetIssue(ctx, issueID)
 	if err != nil {
 		t.Fatalf("GetIssue failed: %v", err)
 	}
-
-	if updated.Status != types.StatusTombstone {
-		t.Errorf("Expected status=%s, got %s", types.StatusTombstone, updated.Status)
-	}
-	if updated.DeletedAt == nil {
-		t.Error("Expected DeletedAt to be set")
-	}
-	if updated.DeletedBy != "test-actor" {
-		t.Errorf("Expected DeletedBy=test-actor, got %s", updated.DeletedBy)
-	}
-	if updated.DeleteReason != "test deletion" {
-		t.Errorf("Expected DeleteReason='test deletion', got %s", updated.DeleteReason)
-	}
-	if updated.OriginalType != string(types.TypeTask) {
-		t.Errorf("Expected OriginalType=%s, got %s", types.TypeTask, updated.OriginalType)
+	if deleted != nil {
+		t.Errorf("Expected issue to be deleted, but got %+v", deleted)
 	}
 }
 
-func TestCreateTombstone_NotFound(t *testing.T) {
+func TestDeleteIssueMemory_NotFound(t *testing.T) {
 	store := setupTestMemory(t)
 	defer store.Close()
 
 	ctx := context.Background()
 
-	// Try to create tombstone for non-existent issue
-	err := store.CreateTombstone(ctx, "nonexistent", "test", "reason")
+	// Try to delete a non-existent issue
+	err := store.DeleteIssue(ctx, "nonexistent")
 	if err == nil {
 		t.Fatal("Expected error for non-existent issue")
 	}

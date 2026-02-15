@@ -369,17 +369,8 @@ func parseJSONLWithErrors(jsonlPath string) ([]*types.Issue, []ParseError) {
 		}
 
 		// Fix non-closed issue with closed_at set (corruption recovery)
-		if issue.Status != types.StatusClosed && issue.Status != types.StatusTombstone && issue.ClosedAt != nil {
+		if issue.Status != types.StatusClosed && issue.ClosedAt != nil {
 			issue.ClosedAt = nil
-		}
-
-		// Fix tombstone invariants (corruption recovery)
-		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-			now := time.Now()
-			issue.DeletedAt = &now
-		}
-		if issue.Status != types.StatusTombstone && issue.DeletedAt != nil {
-			issue.DeletedAt = nil
 		}
 
 		issues = append(issues, &issue)
@@ -442,16 +433,6 @@ func importIssuesBootstrap(ctx context.Context, store *DoltStore, issues []*type
 	}
 	defer func() { _ = tx.Rollback() }() // No-op after successful commit
 
-	// Pre-scan: identify IDs with tombstone versions (resurrection protection).
-	// If a JSONL has both a live and tombstone version of the same ID,
-	// the tombstone wins to prevent resurrecting deleted issues.
-	tombstoneIDs := make(map[string]bool)
-	for _, issue := range issues {
-		if issue.Status == types.StatusTombstone {
-			tombstoneIDs[issue.ID] = true
-		}
-	}
-
 	imported := 0
 	skipped := 0
 	seenIDs := make(map[string]bool)
@@ -460,13 +441,6 @@ func importIssuesBootstrap(ctx context.Context, store *DoltStore, issues []*type
 	for _, issue := range issues {
 		// Skip duplicates within batch
 		if seenIDs[issue.ID] {
-			skipped++
-			continue
-		}
-
-		// Tombstone resurrection protection: if this ID has a tombstone
-		// version anywhere in the file, skip the live version
-		if tombstoneIDs[issue.ID] && issue.Status != types.StatusTombstone {
 			skipped++
 			continue
 		}

@@ -293,8 +293,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.LegacyJSONLConfig(path)
 		case "JSONL Integrity":
 			err = fix.JSONLIntegrity(path)
-		case "Deletions Manifest":
-			err = fix.MigrateTombstones(path)
 		case "Untracked Files":
 			err = fix.UntrackedJSONL(path)
 		case "Sync Branch Health":
@@ -331,9 +329,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Stale Closed Issues":
 			// consolidate cleanup into doctor --fix
 			err = fix.StaleClosedIssues(path)
-		case "Expired Tombstones":
-			// consolidate cleanup into doctor --fix
-			err = fix.ExpiredTombstones(path)
 		case "Compaction Candidates":
 			// No auto-fix: compaction requires agent review
 			fmt.Printf("  ⚠ Run 'bd compact --analyze' to review candidates\n")

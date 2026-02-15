@@ -6,31 +6,22 @@ import (
 	"strings"
 )
 
-// MigrateTombstoneClosedAt updates the closed_at constraint to allow tombstones
-// to retain their closed_at timestamp from before deletion.
-//
-// Previously: CHECK ((status = 'closed') = (closed_at IS NOT NULL))
-// - This required clearing closed_at when creating tombstones from closed issues
-//
-// Now: CHECK (closed + tombstone OR non-closed/tombstone with no closed_at)
-// - closed issues must have closed_at
-// - tombstones may have closed_at (from before deletion) or not
-// - other statuses must NOT have closed_at
-//
-// This allows importing tombstones that were closed before being deleted,
-// preserving the historical closed_at timestamp for audit purposes.
+// MigrateTombstoneClosedAt is a legacy migration that relaxes the closed_at constraint.
+// The soft-delete status is no longer used (Dolt handles delete propagation natively)
+// but this migration must remain for existing databases that already have it recorded.
+// It recreates the issues table with a relaxed CHECK constraint.
 func MigrateTombstoneClosedAt(db *sql.DB) error {
 	// SQLite doesn't support ALTER TABLE to modify CHECK constraints
 	// We must recreate the table with the new constraint
 
 	// Idempotency check: see if the new CHECK constraint already exists
-	// The new constraint contains "status = 'tombstone'" which the old one didn't
+	// The relaxed constraint contains a legacy status clause that the old one didn't
 	var tableSql string
 	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&tableSql)
 	if err != nil {
 		return fmt.Errorf("failed to get issues table schema: %w", err)
 	}
-	// If the schema already has the tombstone clause, migration is already applied
+	// If the schema already has the relaxed constraint clause, migration is already applied
 	if strings.Contains(tableSql, "status = 'tombstone'") || strings.Contains(tableSql, `status = "tombstone"`) {
 		return nil
 	}

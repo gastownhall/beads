@@ -30,22 +30,6 @@ func TestCheckPendingMigrations(t *testing.T) {
 			wantStatus:  StatusOK,
 			wantMessage: "None required",
 		},
-		{
-			name: "deletions.jsonl exists with entries",
-			setup: func(t *testing.T, dir string) {
-				beadsDir := filepath.Join(dir, ".beads")
-				if err := os.MkdirAll(beadsDir, 0755); err != nil {
-					t.Fatalf("failed to create .beads: %v", err)
-				}
-				// Create deletions.jsonl with an entry
-				content := `{"id":"bd-test","ts":"2024-01-01T00:00:00Z","by":"test"}`
-				if err := os.WriteFile(filepath.Join(beadsDir, "deletions.jsonl"), []byte(content), 0644); err != nil {
-					t.Fatalf("failed to create deletions.jsonl: %v", err)
-				}
-			},
-			wantStatus:     StatusWarning,
-			wantMigrations: 1,
-		},
 	}
 
 	for _, tt := range tests {
@@ -106,83 +90,4 @@ func TestDetectPendingMigrations(t *testing.T) {
 		}
 	})
 
-	t.Run("deletions.jsonl triggers tombstones migration", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "bd-doctor-migration-*")
-		if err != nil {
-			t.Fatalf("failed to create temp dir: %v", err)
-		}
-		defer os.RemoveAll(tmpDir)
-
-		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			t.Fatalf("failed to create .beads: %v", err)
-		}
-
-		// Create deletions.jsonl with an entry
-		content := `{"id":"bd-test","ts":"2024-01-01T00:00:00Z","by":"test"}`
-		if err := os.WriteFile(filepath.Join(beadsDir, "deletions.jsonl"), []byte(content), 0644); err != nil {
-			t.Fatalf("failed to create deletions.jsonl: %v", err)
-		}
-
-		migrations := DetectPendingMigrations(tmpDir)
-		if len(migrations) != 1 {
-			t.Errorf("expected 1 migration, got %d", len(migrations))
-			return
-		}
-
-		if migrations[0].Name != "tombstones" {
-			t.Errorf("migration name = %q, want %q", migrations[0].Name, "tombstones")
-		}
-
-		if migrations[0].Command != "bd migrate tombstones" {
-			t.Errorf("migration command = %q, want %q", migrations[0].Command, "bd migrate tombstones")
-		}
-	})
-}
-
-func TestNeedsTombstonesMigration(t *testing.T) {
-	t.Run("no deletions.jsonl returns false", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "bd-doctor-migration-*")
-		if err != nil {
-			t.Fatalf("failed to create temp dir: %v", err)
-		}
-		defer os.RemoveAll(tmpDir)
-
-		if needsTombstonesMigration(tmpDir) {
-			t.Error("expected false for non-existent deletions.jsonl")
-		}
-	})
-
-	t.Run("empty deletions.jsonl returns false", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "bd-doctor-migration-*")
-		if err != nil {
-			t.Fatalf("failed to create temp dir: %v", err)
-		}
-		defer os.RemoveAll(tmpDir)
-
-		if err := os.WriteFile(filepath.Join(tmpDir, "deletions.jsonl"), []byte(""), 0644); err != nil {
-			t.Fatalf("failed to create deletions.jsonl: %v", err)
-		}
-
-		if needsTombstonesMigration(tmpDir) {
-			t.Error("expected false for empty deletions.jsonl")
-		}
-	})
-
-	t.Run("deletions.jsonl with entries returns true", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "bd-doctor-migration-*")
-		if err != nil {
-			t.Fatalf("failed to create temp dir: %v", err)
-		}
-		defer os.RemoveAll(tmpDir)
-
-		content := `{"id":"bd-test","ts":"2024-01-01T00:00:00Z","by":"test"}`
-		if err := os.WriteFile(filepath.Join(tmpDir, "deletions.jsonl"), []byte(content), 0644); err != nil {
-			t.Fatalf("failed to create deletions.jsonl: %v", err)
-		}
-
-		if !needsTombstonesMigration(tmpDir) {
-			t.Error("expected true for deletions.jsonl with entries")
-		}
-	})
 }

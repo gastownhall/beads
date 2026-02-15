@@ -354,12 +354,12 @@ func TestCountJSONLIssues(t *testing.T) {
 			expectError:   false,
 		},
 		{
-			name: "counts all including tombstones",
+			name: "counts all including closed",
 			content: `{"id":"test-1","title":"Test 1","status":"open"}
-{"id":"test-2","title":"Test 2","status":"tombstone"}
+{"id":"test-2","title":"Test 2","status":"closed"}
 {"id":"test-3","title":"Test 3","status":"closed"}
 `,
-			expectedCount: 3, // CountJSONLIssues counts all records including tombstones
+			expectedCount: 3, // CountJSONLIssues counts all records including closed
 			expectError:   false,
 		},
 		{

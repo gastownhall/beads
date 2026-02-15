@@ -235,7 +235,6 @@ func validateRepos(ctx context.Context, s storage.Storage, from, to string, stri
 	fromIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
 		SourceRepo:        &from,
 		Limit:             1,
-		IncludeTombstones: true,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check source repository: %w", err)
@@ -255,7 +254,6 @@ func validateRepos(ctx context.Context, s storage.Storage, from, to string, stri
 	toIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
 		SourceRepo:        &to,
 		Limit:             1,
-		IncludeTombstones: true,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check destination repository: %w", err)
@@ -272,7 +270,6 @@ func findCandidateIssues(ctx context.Context, s storage.Storage, p migrateIssues
 	// Build filter from params
 	filter := types.IssueFilter{
 		SourceRepo:        &p.from,
-		IncludeTombstones: true,
 	}
 
 	// Filter by status
@@ -515,7 +512,6 @@ func checkOrphanedDependencies(ctx context.Context, s storage.Storage) ([]string
 
 	existingIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
 		IDs:               idList,
-		IncludeTombstones: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to check issue existence: %w", err)

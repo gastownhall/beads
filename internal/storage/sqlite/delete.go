@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -271,10 +270,7 @@ func (s *SQLiteStorage) populateDeleteStats(ctx context.Context, exec dbExecutor
 }
 
 func (s *SQLiteStorage) executeDelete(ctx context.Context, exec dbExecutor, inClause string, args []interface{}, result *types.DeleteIssuesResult) error {
-	// Note: This method now creates tombstones instead of hard-deleting
-	// Only dependencies are deleted - issues are converted to tombstones
-
-	// 1. Delete dependencies - tombstones don't block other issues
+	// 1. Delete dependencies
 	_, err := exec.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)`, inClause, inClause),
 		append(args, args...)...)
@@ -282,77 +278,51 @@ func (s *SQLiteStorage) executeDelete(ctx context.Context, exec dbExecutor, inCl
 		return fmt.Errorf("failed to delete dependencies: %w", err)
 	}
 
-	// 2. Get issue types before converting to tombstones (need for original_type)
-	issueTypes := make(map[string]string)
-	rows, err := exec.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, issue_type FROM issues WHERE id IN (%s)`, inClause),
+	// 2. Delete related data (events, labels, comments, dirty markers)
+	_, err = exec.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM events WHERE issue_id IN (%s)`, inClause),
 		args...)
 	if err != nil {
-		return fmt.Errorf("failed to get issue types: %w", err)
-	}
-	for rows.Next() {
-		var id, issueType string
-		if err := rows.Scan(&id, &issueType); err != nil {
-			_ = rows.Close() // #nosec G104 - error handling not critical in error path
-			return fmt.Errorf("failed to scan issue type: %w", err)
-		}
-		issueTypes[id] = issueType
-	}
-	_ = rows.Close()
-
-	// 3. Convert issues to tombstones (only for issues that exist)
-	// Note: closed_at must be set to NULL because of CHECK constraint:
-	// (status = 'closed') = (closed_at IS NOT NULL)
-	now := time.Now()
-	deletedCount := 0
-	for id, originalType := range issueTypes {
-		execResult, err := exec.ExecContext(ctx, `
-			UPDATE issues
-			SET status = ?,
-			    closed_at = NULL,
-			    deleted_at = ?,
-			    deleted_by = ?,
-			    delete_reason = ?,
-			    original_type = ?,
-			    updated_at = ?
-			WHERE id = ?
-		`, types.StatusTombstone, now, "batch delete", "batch delete", originalType, now, id)
-		if err != nil {
-			return fmt.Errorf("failed to create tombstone for %s: %w", id, err)
-		}
-
-		rowsAffected, _ := execResult.RowsAffected()
-		if rowsAffected == 0 {
-			continue // Issue doesn't exist, skip
-		}
-		deletedCount++
-
-		// Record tombstone creation event
-		_, err = exec.ExecContext(ctx, `
-			INSERT INTO events (issue_id, event_type, actor, comment)
-			VALUES (?, ?, ?, ?)
-		`, id, "deleted", "batch delete", "batch delete")
-		if err != nil {
-			return fmt.Errorf("failed to record tombstone event for %s: %w", id, err)
-		}
-
-		// Mark issue as dirty for incremental export
-		_, err = exec.ExecContext(ctx, `
-			INSERT INTO dirty_issues (issue_id, marked_at)
-			VALUES (?, ?)
-			ON CONFLICT (issue_id) DO UPDATE SET marked_at = excluded.marked_at
-		`, id, now)
-		if err != nil {
-			return fmt.Errorf("failed to mark issue dirty for %s: %w", id, err)
-		}
+		return fmt.Errorf("failed to delete events: %w", err)
 	}
 
-	// 4. Invalidate blocked issues cache since statuses changed
+	_, err = exec.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM labels WHERE issue_id IN (%s)`, inClause),
+		args...)
+	if err != nil {
+		return fmt.Errorf("failed to delete labels: %w", err)
+	}
+
+	_, err = exec.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM comments WHERE issue_id IN (%s)`, inClause),
+		args...)
+	if err != nil {
+		return fmt.Errorf("failed to delete comments: %w", err)
+	}
+
+	_, err = exec.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM dirty_issues WHERE issue_id IN (%s)`, inClause),
+		args...)
+	if err != nil {
+		return fmt.Errorf("failed to delete dirty markers: %w", err)
+	}
+
+	// 3. Hard delete the issues
+	deleteResult, err := exec.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM issues WHERE id IN (%s)`, inClause),
+		args...)
+	if err != nil {
+		return fmt.Errorf("failed to delete issues: %w", err)
+	}
+
+	deletedCount, _ := deleteResult.RowsAffected()
+
+	// 4. Invalidate blocked issues cache since issues were removed
 	if err := s.invalidateBlockedCache(ctx, exec); err != nil {
 		return fmt.Errorf("failed to invalidate blocked cache: %w", err)
 	}
 
-	result.DeletedCount = deletedCount
+	result.DeletedCount = int(deletedCount)
 	return nil
 }
 

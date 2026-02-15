@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestImportIssues_BackendAgnostic_DepsLabelsCommentsTombstone(t *testing.T) {
+func TestImportIssues_BackendAgnostic_DepsLabelsCommentsDeleted(t *testing.T) {
 	ctx := context.Background()
 	store := memory.New("")
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -40,13 +40,10 @@ func TestImportIssues_BackendAgnostic_DepsLabelsCommentsTombstone(t *testing.T) 
 		ID:           "test-2",
 		Title:        "Issue B",
 		IssueType:    types.TypeTask,
-		Status:       types.StatusTombstone,
+		Status:       types.StatusClosed,
 		Priority:     4,
-		DeletedAt:    &deletedTS,
-		DeletedBy:    "tester",
-		DeleteReason: "bye",
-		OriginalType: string(types.TypeTask),
-		Description:  "tombstone",
+		ClosedAt:     &deletedTS,
+		Description:  "deleted issue",
 		ContentHash:  "",
 		Dependencies: nil,
 		Labels:       nil,
@@ -56,7 +53,6 @@ func TestImportIssues_BackendAgnostic_DepsLabelsCommentsTombstone(t *testing.T) 
 		CreatedBy:    "",
 		SourceSystem: "",
 		ExternalRef:  nil,
-		ClosedAt:     nil,
 		CompactedAt:  nil,
 		DeferUntil:   nil,
 		LastActivity: nil,
@@ -105,10 +101,10 @@ func TestImportIssues_BackendAgnostic_DepsLabelsCommentsTombstone(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
-	if b.Status != types.StatusTombstone {
-		t.Fatalf("expected tombstone status, got %q", b.Status)
+	if b.Status != types.StatusClosed {
+		t.Fatalf("expected closed status, got %q", b.Status)
 	}
-	if b.DeletedAt == nil || !b.DeletedAt.Equal(deletedTS) {
-		t.Fatalf("expected DeletedAt preserved (%s), got %#v", deletedTS.Format(time.RFC3339Nano), b.DeletedAt)
+	if b.ClosedAt == nil || !b.ClosedAt.Equal(deletedTS) {
+		t.Fatalf("expected ClosedAt preserved (%s), got %#v", deletedTS.Format(time.RFC3339Nano), b.ClosedAt)
 	}
 }

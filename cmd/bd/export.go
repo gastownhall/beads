@@ -222,19 +222,10 @@ Examples:
 		labelsAny = utils.NormalizeLabels(labelsAny)
 
 		// Build filter
-		// Tombstone export logic:
-		// - No status filter → include tombstones for sync propagation
-		// - --status=tombstone → include only tombstones (filter handles this)
-		// - --status=<other> → exclude tombstones (user wants specific status)
 		filter := types.IssueFilter{}
 		if statusFilter != "" {
 			status := types.Status(statusFilter)
 			filter.Status = &status
-			// Only include tombstones if explicitly filtering for them
-			filter.IncludeTombstones = (status == types.StatusTombstone)
-		} else {
-			// No status filter: include tombstones for sync propagation
-			filter.IncludeTombstones = true
 		}
 		if assignee != "" {
 			filter.Assignee = &assignee

@@ -530,13 +530,6 @@ func issueEqual(a, b *beads.Issue) bool {
 		return false
 	}
 
-	// Tombstone fields
-	if !timePtrEqual(a.DeletedAt, b.DeletedAt) ||
-		a.DeletedBy != b.DeletedBy ||
-		a.DeleteReason != b.DeleteReason {
-		return false
-	}
-
 	// Labels (order-independent comparison)
 	if !stringSliceEqual(a.Labels, b.Labels) {
 		return false

@@ -211,7 +211,7 @@ func GetInvariantNames() []string {
 // This runs BEFORE migrations to prevent the chicken-and-egg problem where:
 // 1. bd doctor --fix tries to open the database
 // 2. Opening triggers migrations with invariant checks
-// 3. Invariant check fails due to orphaned refs from prior tombstone deletion
+// 3. Invariant check fails due to orphaned refs from prior issue deletion
 // 4. Fix never runs because database won't open
 //
 // Returns counts of cleaned items for logging.

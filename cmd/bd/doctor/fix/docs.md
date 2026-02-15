@@ -1,5 +1,9 @@
 # Noridoc: cmd/bd/doctor/fix
 
+**LEGACY**: The tombstone/soft-delete system described here was removed in Dolt-Native v2.
+Dolt handles delete propagation natively. References to `StatusTombstone`, `DeletedAt`,
+`DeletedBy`, `DeleteReason`, and `OriginalType` are historical.
+
 Path: @/cmd/bd/doctor/fix
 
 ### Overview

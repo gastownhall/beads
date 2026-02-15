@@ -51,19 +51,17 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
 		issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, issue.SpecID, sourceRepo, issue.CloseReason,
-		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 		issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
@@ -113,19 +111,17 @@ func insertIssueStrict(ctx context.Context, conn *sql.Conn, issue *types.Issue) 
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
 		issue.Priority, issue.IssueType, issue.Assignee,
 		issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, issue.SpecID, sourceRepo, issue.CloseReason,
-		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 		issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 		issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 		string(issue.MolType),
@@ -145,12 +141,11 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -186,7 +181,6 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.Priority, issue.IssueType, issue.Assignee,
 			issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, issue.SpecID, sourceRepo, issue.CloseReason,
-			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),
@@ -215,12 +209,11 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type,
 			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 			await_type, await_id, timeout_ns, waiters, mol_type,
 			event_kind, actor, target, payload,
 			due_at, defer_until, metadata
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -256,7 +249,6 @@ func insertIssuesStrict(ctx context.Context, conn *sql.Conn, issues []*types.Iss
 			issue.Priority, issue.IssueType, issue.Assignee,
 			issue.EstimatedMinutes, issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, issue.SpecID, sourceRepo, issue.CloseReason,
-			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
 			issue.Sender, wisp, string(issue.WispType), pinned, isTemplate, crystallizes,
 			issue.AwaitType, issue.AwaitID, int64(issue.Timeout), formatJSONStringArray(issue.Waiters),
 			string(issue.MolType),

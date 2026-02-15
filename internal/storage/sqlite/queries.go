@@ -68,16 +68,6 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		issue.ClosedAt = &closedAt
 	}
 
-	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
-	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		deletedAt := maxTime.Add(time.Second)
-		issue.DeletedAt = &deletedAt
-	}
-
 	// Validate issue before creating (with custom status and type support)
 	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -158,15 +148,13 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
 		// Use isHierarchicalID to correctly handle prefixes with dots (GH#508)
 		if isHierarchical, parentID := isHierarchicalID(issue.ID); isHierarchical {
-			// Try to resurrect entire parent chain if any parents are missing
-			// Use the conn-based version to participate in the same transaction
-			resurrected, err := s.tryResurrectParentChainWithConn(ctx, conn, issue.ID)
-			if err != nil {
-				return fmt.Errorf("failed to resurrect parent chain for %s: %w", issue.ID, err)
+			// Check that parent exists
+			var parentCount int
+			if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&parentCount); err != nil {
+				return wrapDBError("check parent existence", err)
 			}
-			if !resurrected {
-				// Parent(s) not found in JSONL history - cannot proceed
-				return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
+			if parentCount == 0 {
+				return fmt.Errorf("parent issue %s does not exist", parentID)
 			}
 
 			// Update child_counters to prevent future ID collisions (GH#728 fix)
@@ -176,40 +164,6 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 					return fmt.Errorf("failed to update child counter: %w", err)
 				}
 			}
-		}
-	}
-
-	// bd-0gm4r: Handle tombstone collision for explicit IDs
-	// If the user explicitly specifies an ID that matches an existing tombstone,
-	// delete the tombstone first so the new issue can be created.
-	// This enables re-creating issues after hard deletion (e.g., polecat respawn).
-	if issue.ID != "" {
-		var existingStatus string
-		err := conn.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&existingStatus)
-		if err == nil && existingStatus == string(types.StatusTombstone) {
-			// Delete the tombstone record to allow re-creation
-			// Also clean up related tables (events, labels, dependencies, comments, dirty_issues)
-			if _, err := conn.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone events: %w", err)
-			}
-			if _, err := conn.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone labels: %w", err)
-			}
-			if _, err := conn.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ? OR depends_on_id = ?`, issue.ID, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone dependencies: %w", err)
-			}
-			if _, err := conn.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone comments: %w", err)
-			}
-			if _, err := conn.ExecContext(ctx, `DELETE FROM dirty_issues WHERE issue_id = ?`, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone dirty marker: %w", err)
-			}
-			if _, err := conn.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, issue.ID); err != nil {
-				return fmt.Errorf("failed to delete tombstone: %w", err)
-			}
-			// Note: Tombstone is now gone, proceed with normal creation
-		} else if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("failed to check for existing tombstone: %w", err)
 		}
 	}
 
@@ -266,10 +220,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var originalSize sql.NullInt64
 	var sourceRepo sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
-	var deletedBy sql.NullString
-	var deleteReason sql.NullString
-	var originalType sql.NullString
 	// Messaging fields
 	var sender sql.NullString
 	var wisp sql.NullInt64
@@ -313,7 +263,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       spec_id, compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters,
 		       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
@@ -327,7 +276,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef,
 		&specID, &issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
@@ -386,16 +334,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
-	}
-	issue.DeletedAt = parseNullableTimeString(deletedAt)
-	if deletedBy.Valid {
-		issue.DeletedBy = deletedBy.String
-	}
-	if deleteReason.Valid {
-		issue.DeleteReason = deleteReason.String
-	}
-	if originalType.Valid {
-		issue.OriginalType = originalType.String
 	}
 	// Messaging fields
 	if sender.Valid {
@@ -581,10 +519,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var compactedAtCommit sql.NullString
 	var sourceRepo sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
-	var deletedBy sql.NullString
-	var deleteReason sql.NullString
-	var originalType sql.NullString
 	// Messaging fields
 	var sender sql.NullString
 	var wisp sql.NullInt64
@@ -607,7 +541,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, created_by, owner, updated_at, closed_at, external_ref,
 		       spec_id, compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type,
 		       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 		       await_type, await_id, timeout_ns, waiters
 		FROM issues
@@ -618,7 +551,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRefCol,
 		&specID, &issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&sender, &wisp, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
@@ -674,16 +606,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
-	}
-	issue.DeletedAt = parseNullableTimeString(deletedAt)
-	if deletedBy.Valid {
-		issue.DeletedBy = deletedBy.String
-	}
-	if deleteReason.Valid {
-		issue.DeleteReason = deleteReason.String
-	}
-	if originalType.Valid {
-		issue.OriginalType = originalType.String
 	}
 	// Messaging fields
 	if sender.Valid {
@@ -1381,8 +1303,7 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 				WHERE d.issue_id = ?
 				  AND d.type = ?
 				  AND i.status != ?
-				  AND i.status != ?
-			`, convoyID, types.DepTracks, types.StatusClosed, types.StatusTombstone).Scan(&openCount)
+			`, convoyID, types.DepTracks, types.StatusClosed).Scan(&openCount)
 			if err != nil {
 				return fmt.Errorf("failed to count open tracked issues for convoy %s: %w", convoyID, err)
 			}
@@ -1418,63 +1339,3 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	})
 }
 
-// CreateTombstone converts an existing issue to a tombstone record.
-// This is a soft-delete that preserves the issue in the database with status="tombstone".
-// The issue will still appear in exports but be excluded from normal queries.
-// Dependencies must be removed separately before calling this method.
-func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
-	// Get the issue to preserve its original type
-	issue, err := s.GetIssue(ctx, id)
-	if err != nil {
-		return fmt.Errorf("failed to get issue: %w", err)
-	}
-	if issue == nil {
-		return fmt.Errorf("issue not found: %s", id)
-	}
-
-	now := time.Now()
-	originalType := string(issue.IssueType)
-
-	// Execute in transaction using BEGIN IMMEDIATE (GH#1272 fix)
-	return s.withTx(ctx, func(conn *sql.Conn) error {
-		// Convert issue to tombstone
-		// Note: closed_at must be set to NULL because of CHECK constraint:
-		// (status = 'closed') = (closed_at IS NOT NULL)
-		_, err := conn.ExecContext(ctx, `
-			UPDATE issues
-			SET status = ?,
-			    closed_at = NULL,
-			    deleted_at = ?,
-			    deleted_by = ?,
-			    delete_reason = ?,
-			    original_type = ?,
-			    updated_at = ?
-			WHERE id = ?
-		`, types.StatusTombstone, now, actor, reason, originalType, now, id)
-		if err != nil {
-			return fmt.Errorf("failed to create tombstone: %w", err)
-		}
-
-		// Record tombstone creation event
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO events (issue_id, event_type, actor, comment)
-			VALUES (?, ?, ?, ?)
-		`, id, "deleted", actor, reason)
-		if err != nil {
-			return fmt.Errorf("failed to record tombstone event: %w", err)
-		}
-
-		// Mark issue as dirty for incremental export
-		if err := markDirty(ctx, conn, id); err != nil {
-			return fmt.Errorf("failed to mark issue dirty: %w", err)
-		}
-
-		// Invalidate blocked issues cache since status changed
-		// Tombstone issues don't block others, so this affects blocking calculations
-		if err := s.invalidateBlockedCache(ctx, conn); err != nil {
-			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
-		}
-
-		return nil
-	})
-}

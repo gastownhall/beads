@@ -102,7 +102,7 @@ func resolveSyncConflicts(ctx context.Context, jsonlPath string, strategy config
 		return fmt.Errorf("initializing store: %w", err)
 	}
 
-	localIssues, err := store.SearchIssues(ctx, "", beads.IssueFilter{IncludeTombstones: true})
+	localIssues, err := store.SearchIssues(ctx, "", beads.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("loading local issues: %w", err)
 	}

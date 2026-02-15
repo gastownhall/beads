@@ -79,15 +79,15 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected 3 deletions (cascade), got %d", result.DeletedCount)
 		}
 
-		// Verify all converted to tombstones (bd-3b4)
-		if issue, _ := store.GetIssue(ctx, "bd-1"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-1 should be tombstone")
+		// Verify all deleted (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-1"); issue != nil {
+			t.Error("bd-1 should be deleted")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-2 should be tombstone")
+		if issue, _ := store.GetIssue(ctx, "bd-2"); issue != nil {
+			t.Error("bd-2 should be deleted")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-3 should be tombstone")
+		if issue, _ := store.GetIssue(ctx, "bd-3"); issue != nil {
+			t.Error("bd-3 should be deleted")
 		}
 	})
 
@@ -129,14 +129,14 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected bd-2 to be orphaned, got %v", result.OrphanedIssues)
 		}
 
-		// Verify bd-1 is tombstone, bd-2 and bd-3 still active (bd-3b4)
-		if issue, _ := store.GetIssue(ctx, "bd-1"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-1 should be tombstone")
+		// Verify bd-1 is deleted, bd-2 and bd-3 still active (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-1"); issue != nil {
+			t.Error("bd-1 should be deleted")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil || issue.Status == types.StatusTombstone {
+		if issue, _ := store.GetIssue(ctx, "bd-2"); issue == nil {
 			t.Error("bd-2 should still be active")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil || issue.Status == types.StatusTombstone {
+		if issue, _ := store.GetIssue(ctx, "bd-3"); issue == nil {
 			t.Error("bd-3 should still be active")
 		}
 	})
@@ -194,12 +194,12 @@ func TestDeleteIssues(t *testing.T) {
 			t.Errorf("Expected 2 deletions, got %d", result.DeletedCount)
 		}
 
-		// Verify both converted to tombstones (bd-3b4)
-		if issue, _ := store.GetIssue(ctx, "bd-10"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-10 should be tombstone")
+		// Verify both deleted (bd-3b4)
+		if issue, _ := store.GetIssue(ctx, "bd-10"); issue != nil {
+			t.Error("bd-10 should be deleted")
 		}
-		if issue, _ := store.GetIssue(ctx, "bd-11"); issue == nil || issue.Status != types.StatusTombstone {
-			t.Error("bd-11 should be tombstone")
+		if issue, _ := store.GetIssue(ctx, "bd-11"); issue != nil {
+			t.Error("bd-11 should be deleted")
 		}
 	})
 }
