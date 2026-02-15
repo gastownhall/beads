@@ -3,12 +3,11 @@ package main
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/jira"
+	"github.com/steveyegge/beads/internal/tracker"
 )
 
 func TestJiraSyncStats(t *testing.T) {
-	// Test that stats struct initializes correctly (uses jira.SyncStats now)
-	stats := jira.SyncStats{}
+	stats := tracker.SyncStats{}
 
 	if stats.Pulled != 0 {
 		t.Errorf("expected Pulled to be 0, got %d", stats.Pulled)
@@ -34,10 +33,9 @@ func TestJiraSyncStats(t *testing.T) {
 }
 
 func TestJiraSyncResult(t *testing.T) {
-	// Test result struct initialization (uses jira.SyncResult now)
-	result := jira.SyncResult{
+	result := tracker.SyncResult{
 		Success: true,
-		Stats: jira.SyncStats{
+		Stats: tracker.SyncStats{
 			Created: 5,
 			Updated: 3,
 		},

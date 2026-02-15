@@ -1,16 +1,16 @@
 package jira
 
 import (
+	"strings"
+
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // jiraFieldMapper implements tracker.FieldMapper for Jira.
-// This is a minimal implementation since Jira sync currently uses the Python script.
 type jiraFieldMapper struct{}
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
-	// Jira priority names: Highest(1), High(2), Medium(3), Low(4), Lowest(5)
 	if name, ok := trackerPriority.(string); ok {
 		switch name {
 		case "Highest":
@@ -105,10 +105,101 @@ func (m *jiraFieldMapper) TypeToTracker(beadsType types.IssueType) interface{} {
 	}
 }
 
-func (m *jiraFieldMapper) IssueToBeads(_ *tracker.TrackerIssue) *tracker.IssueConversion {
-	return nil
+func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueConversion {
+	ji, ok := ti.Raw.(*Issue)
+	if !ok || ji == nil {
+		return nil
+	}
+
+	issue := &types.Issue{
+		Title:       ji.Fields.Summary,
+		Description: DescriptionToPlainText(ji.Fields.Description),
+		Priority:    m.PriorityToBeads(priorityName(ji)),
+		Status:      m.StatusToBeads(statusName(ji)),
+		IssueType:   m.TypeToBeads(typeName(ji)),
+	}
+
+	if ji.Fields.Assignee != nil {
+		issue.Owner = ji.Fields.Assignee.DisplayName
+	}
+
+	if ji.Fields.Labels != nil {
+		issue.Labels = ji.Fields.Labels
+	}
+
+	// Set external ref from issue URL
+	if ji.Self != "" {
+		ref := extractBrowseURL(ji)
+		issue.ExternalRef = &ref
+	}
+
+	return &tracker.IssueConversion{
+		Issue: issue,
+	}
 }
 
-func (m *jiraFieldMapper) IssueToTracker(_ *types.Issue) map[string]interface{} {
-	return nil
+func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
+	fields := map[string]interface{}{
+		"summary": issue.Title,
+	}
+
+	// Convert description to ADF
+	if issue.Description != "" {
+		fields["description"] = PlainTextToADF(issue.Description)
+	}
+
+	// Set issue type
+	typeName := m.TypeToTracker(issue.IssueType)
+	if name, ok := typeName.(string); ok {
+		fields["issuetype"] = map[string]string{"name": name}
+	}
+
+	// Set priority
+	priorityName := m.PriorityToTracker(issue.Priority)
+	if name, ok := priorityName.(string); ok {
+		fields["priority"] = map[string]string{"name": name}
+	}
+
+	// Set labels
+	if len(issue.Labels) > 0 {
+		fields["labels"] = issue.Labels
+	}
+
+	return fields
+}
+
+// Helper functions for safe field extraction from Jira issues.
+
+func priorityName(ji *Issue) string {
+	if ji.Fields.Priority != nil {
+		return ji.Fields.Priority.Name
+	}
+	return ""
+}
+
+func statusName(ji *Issue) string {
+	if ji.Fields.Status != nil {
+		return ji.Fields.Status.Name
+	}
+	return ""
+}
+
+func typeName(ji *Issue) string {
+	if ji.Fields.IssueType != nil {
+		return ji.Fields.IssueType.Name
+	}
+	return ""
+}
+
+// extractBrowseURL builds the human-readable browse URL from a Jira issue.
+// Self is "https://company.atlassian.net/rest/api/3/issue/10001";
+// we need "https://company.atlassian.net/browse/PROJ-123".
+func extractBrowseURL(ji *Issue) string {
+	if ji.Self == "" || ji.Key == "" {
+		return ""
+	}
+	if idx := strings.Index(ji.Self, "/rest/api/"); idx > 0 {
+		return ji.Self[:idx] + "/browse/" + ji.Key
+	}
+	return ""
 }

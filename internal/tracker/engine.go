@@ -280,13 +280,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		}
 
 		if existing != nil {
-			// Conflict-aware pull: when prefer-local, skip updating issues
-			// that were locally modified since last sync to preserve local changes.
-			if opts.ConflictResolution == ConflictLocal && lastSync != nil {
-				if existing.UpdatedAt.After(*lastSync) {
-					stats.Skipped++
-					continue
-				}
+			// Conflict-aware pull: skip updating issues that were locally
+			// modified since last sync. Conflict detection (Phase 2) will
+			// handle these per the configured resolution strategy.
+			// Without this guard, pull silently overwrites local changes
+			// before conflict detection can compare timestamps.
+			if lastSync != nil && existing.UpdatedAt.After(*lastSync) {
+				stats.Skipped++
+				continue
 			}
 
 			// Update existing issue
