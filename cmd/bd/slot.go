@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -99,47 +98,57 @@ func runSlotSet(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve agent ID
-	var agentID string
-	var err error
-	agentID, err = utils.ResolvePartialID(ctx, store, agentArg)
+	// Resolve agent ID with routing support (agent beads may live in a different database)
+	routedResult, err := resolveAndGetIssueWithRouting(ctx, store, agentArg)
 	if err != nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
 		return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
+	}
+	if routedResult == nil || routedResult.Issue == nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
+		return fmt.Errorf("agent bead not found: %s", agentArg)
+	}
+	defer routedResult.Close()
+
+	agentID := routedResult.ResolvedID
+	agent := routedResult.Issue
+
+	// Determine which store to use (routed or local)
+	activeStore := store
+	if routedResult.Routed {
+		activeStore = routedResult.Store
 	}
 
 	// Resolve bead ID - use routing for cross-beads references (e.g., hq-* from rig beads)
 	var beadID string
 	if needsRouting(beadArg) {
 		// Cross-beads reference - resolve via routing
-		result, err := resolveAndGetIssueWithRouting(ctx, store, beadArg)
+		result, routeErr := resolveAndGetIssueWithRouting(ctx, store, beadArg)
 		if result != nil {
 			defer result.Close()
 		}
-		if err != nil {
-			return fmt.Errorf("failed to resolve bead %s: %w", beadArg, err)
+		if routeErr != nil {
+			return fmt.Errorf("failed to resolve bead %s: %w", beadArg, routeErr)
 		}
 		if result == nil || result.Issue == nil {
 			return fmt.Errorf("failed to resolve bead %s: no issue found matching %q", beadArg, beadArg)
 		}
 		beadID = result.ResolvedID
 	} else {
-		var err error
 		beadID, err = utils.ResolvePartialID(ctx, store, beadArg)
 		if err != nil {
 			return fmt.Errorf("failed to resolve bead %s: %w", beadArg, err)
 		}
 	}
 
-	// Get current agent bead to check cardinality
-	var agent *types.Issue
-	agent, err = store.GetIssue(ctx, agentID)
-	if err != nil || agent == nil {
-		return fmt.Errorf("agent bead not found: %s", agentID)
-	}
-
-	// Verify agent bead is actually an agent
-	if agent.IssueType != "agent" {
-		return fmt.Errorf("%s is not an agent bead (type=%s)", agentID, agent.IssueType)
+	// Verify agent bead is actually an agent (check for gt:agent label)
+	labels, _ := activeStore.GetLabels(ctx, agentID)
+	if !isAgentBead(labels) {
+		return fmt.Errorf("%s is not an agent bead (missing gt:agent label)", agentID)
 	}
 
 	// Check cardinality - error if slot is already occupied (for hook)
@@ -155,7 +164,7 @@ func runSlotSet(cmd *cobra.Command, args []string) error {
 	case "role":
 		updates["role_bead"] = beadID
 	}
-	if err := store.UpdateIssue(ctx, agentID, updates, actor); err != nil {
+	if err := activeStore.UpdateIssue(ctx, agentID, updates, actor); err != nil {
 		return fmt.Errorf("failed to set slot: %w", err)
 	}
 
@@ -187,24 +196,34 @@ func runSlotClear(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve agent ID
-	var agentID string
-	var err error
-	agentID, err = utils.ResolvePartialID(ctx, store, agentArg)
+	// Resolve agent ID with routing support (agent beads may live in a different database)
+	routedResult, err := resolveAndGetIssueWithRouting(ctx, store, agentArg)
 	if err != nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
 		return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
 	}
+	if routedResult == nil || routedResult.Issue == nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
+		return fmt.Errorf("agent bead not found: %s", agentArg)
+	}
+	defer routedResult.Close()
 
-	// Get current agent bead to verify it's an agent
-	var agent *types.Issue
-	agent, err = store.GetIssue(ctx, agentID)
-	if err != nil || agent == nil {
-		return fmt.Errorf("agent bead not found: %s", agentID)
+	agentID := routedResult.ResolvedID
+
+	// Determine which store to use (routed or local)
+	activeStore := store
+	if routedResult.Routed {
+		activeStore = routedResult.Store
 	}
 
-	// Verify agent bead is actually an agent
-	if agent.IssueType != "agent" {
-		return fmt.Errorf("%s is not an agent bead (type=%s)", agentID, agent.IssueType)
+	// Verify agent bead is actually an agent (check for gt:agent label)
+	labels, _ := activeStore.GetLabels(ctx, agentID)
+	if !isAgentBead(labels) {
+		return fmt.Errorf("%s is not an agent bead (missing gt:agent label)", agentID)
 	}
 
 	// Clear the slot (set to empty string)
@@ -215,7 +234,7 @@ func runSlotClear(cmd *cobra.Command, args []string) error {
 	case "role":
 		updates["role_bead"] = ""
 	}
-	if err := store.UpdateIssue(ctx, agentID, updates, actor); err != nil {
+	if err := activeStore.UpdateIssue(ctx, agentID, updates, actor); err != nil {
 		return fmt.Errorf("failed to clear slot: %w", err)
 	}
 
@@ -239,24 +258,35 @@ func runSlotShow(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve agent ID
-	var agentID string
-	var err error
-	agentID, err = utils.ResolvePartialID(ctx, store, agentArg)
+	// Resolve agent ID with routing support (agent beads may live in a different database)
+	routedResult, err := resolveAndGetIssueWithRouting(ctx, store, agentArg)
 	if err != nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
 		return fmt.Errorf("failed to resolve agent %s: %w", agentArg, err)
 	}
+	if routedResult == nil || routedResult.Issue == nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
+		return fmt.Errorf("agent bead not found: %s", agentArg)
+	}
+	defer routedResult.Close()
 
-	// Get agent bead
-	var agent *types.Issue
-	agent, err = store.GetIssue(ctx, agentID)
-	if err != nil || agent == nil {
-		return fmt.Errorf("agent bead not found: %s", agentID)
+	agentID := routedResult.ResolvedID
+	agent := routedResult.Issue
+
+	// Determine which store to use (routed or local)
+	activeStore := store
+	if routedResult.Routed {
+		activeStore = routedResult.Store
 	}
 
-	// Verify agent bead is actually an agent
-	if agent.IssueType != "agent" {
-		return fmt.Errorf("%s is not an agent bead (type=%s)", agentID, agent.IssueType)
+	// Verify agent bead is actually an agent (check for gt:agent label)
+	labels, _ := activeStore.GetLabels(ctx, agentID)
+	if !isAgentBead(labels) {
+		return fmt.Errorf("%s is not an agent bead (missing gt:agent label)", agentID)
 	}
 
 	if jsonOutput {
