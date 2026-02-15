@@ -36,7 +36,7 @@ dolt version
 bd init --backend=dolt
 
 # Or convert existing SQLite database
-bd migrate --to=dolt
+bd migrate --to-dolt
 ```
 
 ### 3. Configure Sync Mode
