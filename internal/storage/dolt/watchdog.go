@@ -13,18 +13,18 @@ import (
 
 // Watchdog constants
 const (
-	watchdogCheckInterval    = 10 * time.Second
-	watchdogQueryTimeout     = 2 * time.Second
-	watchdogMaxRestarts      = 3
-	watchdogBackoffInterval  = 60 * time.Second
+	watchdogCheckInterval   = 10 * time.Second
+	watchdogQueryTimeout    = 2 * time.Second
+	watchdogMaxRestarts     = 3
+	watchdogBackoffInterval = 60 * time.Second
 )
 
 // watchdogState tracks health transitions for logging
 type watchdogState struct {
-	healthy        bool
-	restartCount   int
-	lastFailure    time.Time
-	backingOff     bool
+	healthy      bool
+	restartCount int
+	lastFailure  time.Time
+	backingOff   bool
 }
 
 // startWatchdog begins background health monitoring for server mode.
@@ -237,4 +237,3 @@ func (s *DoltStore) stopWatchdog() {
 		}
 	}
 }
-

@@ -34,7 +34,6 @@ Example:
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := rootCtx
 
-
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {

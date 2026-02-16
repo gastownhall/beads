@@ -15,9 +15,9 @@ import (
 // e2eDoctorResult mirrors the JSON output struct from cmd/bd/doctor.go.
 // Kept minimal — only the fields we assert on.
 type e2eDoctorResult struct {
-	Path      string             `json:"path"`
-	Checks    []e2eDoctorCheck   `json:"checks"`
-	OverallOK bool               `json:"overall_ok"`
+	Path      string           `json:"path"`
+	Checks    []e2eDoctorCheck `json:"checks"`
+	OverallOK bool             `json:"overall_ok"`
 }
 
 type e2eDoctorCheck struct {

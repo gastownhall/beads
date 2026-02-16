@@ -70,7 +70,6 @@ By default, shows only open gates. Use --all to include closed gates.`,
 
 		ctx := rootCtx
 
-
 		// Direct mode
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {

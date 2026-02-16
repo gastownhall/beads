@@ -745,4 +745,3 @@ func formatJSONArray(arr []string) string {
 func listMigrations() []string {
 	return dolt.ListMigrations()
 }
-

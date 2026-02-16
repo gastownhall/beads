@@ -125,7 +125,6 @@ Examples:
 
 		ctx := rootCtx
 
-
 		// Direct mode
 		if store == nil {
 			fmt.Fprintf(os.Stderr, "Error: no storage available\n")

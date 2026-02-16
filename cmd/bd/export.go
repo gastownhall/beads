@@ -188,7 +188,6 @@ Examples:
 			defer func() { _ = store.Close() }()
 		}
 
-
 		// Handle --events and --events-reset flags
 		if eventsFlag || eventsReset {
 			eventsPath := filepath.Join(filepath.Dir(dbPath), "events.jsonl")

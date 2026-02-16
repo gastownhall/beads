@@ -391,8 +391,8 @@ const (
 	StatusBlocked    Status = "blocked"
 	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
 	StatusClosed     Status = "closed"
-	StatusPinned     Status = "pinned"    // Persistent bead that stays open indefinitely
-	StatusHooked     Status = "hooked"    // Work attached to an agent's hook (GUPP)
+	StatusPinned     Status = "pinned" // Persistent bead that stays open indefinitely
+	StatusHooked     Status = "hooked" // Work attached to an agent's hook (GUPP)
 )
 
 // IsValid checks if the status value is valid (built-in statuses only)
@@ -879,7 +879,7 @@ type Statistics struct {
 	BlockedIssues           int     `json:"blocked_issues"`
 	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
 	ReadyIssues             int     `json:"ready_issues"`
-	PinnedIssues            int     `json:"pinned_issues"`    // Persistent issues
+	PinnedIssues            int     `json:"pinned_issues"` // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }

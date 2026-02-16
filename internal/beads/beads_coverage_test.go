@@ -82,8 +82,6 @@ func TestFindDatabaseInBeadsDir_DoltBackend(t *testing.T) {
 	}
 }
 
-
-
 // TestFindAllDatabases_Unit tests FindAllDatabases without the integration tag
 func TestFindAllDatabases_Unit(t *testing.T) {
 	// Save original env
@@ -537,4 +535,3 @@ func TestFindBeadsDir_BEADS_DIR_WithProjectFiles(t *testing.T) {
 		t.Errorf("FindBeadsDir() = %q, want %q", result, tmpDir)
 	}
 }
-

@@ -54,9 +54,9 @@ var (
 )
 var (
 	sandboxMode     bool
-	allowStale      bool          // Use --allow-stale: skip staleness check (emergency escape hatch)
-	readonlyMode    bool          // Read-only mode: block write operations (for worker sandboxes)
-	storeIsReadOnly bool          // Track if store was opened read-only (for staleness checks)
+	allowStale      bool               // Use --allow-stale: skip staleness check (emergency escape hatch)
+	readonlyMode    bool               // Read-only mode: block write operations (for worker sandboxes)
+	storeIsReadOnly bool               // Track if store was opened read-only (for staleness checks)
 	lockTimeout     = 30 * time.Second // Dolt open timeout (fixed default)
 	profileEnabled  bool
 	profileFile     *os.File

@@ -83,4 +83,3 @@ func TestCommitExists(t *testing.T) {
 		}
 	})
 }
-

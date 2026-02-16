@@ -210,4 +210,3 @@ func (c *Compactor) CompactTier1Batch(ctx context.Context, issueIDs []string) ([
 	wg.Wait()
 	return results, nil
 }
-

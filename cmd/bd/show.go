@@ -64,7 +64,6 @@ var showCmd = &cobra.Command{
 			return
 		}
 
-
 		// Note: Direct mode uses resolveAndGetIssueWithRouting for prefix-based routing
 
 		// Handle --thread flag: show full conversation thread

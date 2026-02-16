@@ -505,7 +505,6 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	}
 }
 
-
 // Fix functions
 
 // FixDatabaseConfig auto-detects and fixes metadata.json database/JSONL config mismatches
@@ -785,4 +784,3 @@ func CheckDatabaseSize(path string) DoctorCheck {
 		Message: fmt.Sprintf("%d closed issues (threshold: %d)", closedCount, threshold),
 	}
 }
-

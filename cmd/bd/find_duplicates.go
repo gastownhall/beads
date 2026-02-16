@@ -95,7 +95,6 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 		}
 	}
 
-
 	// Fetch issues
 	filter := types.IssueFilter{}
 	if status != "" && status != "all" {

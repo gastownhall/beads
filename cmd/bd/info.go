@@ -61,7 +61,6 @@ Examples:
 		if store != nil {
 			ctx := rootCtx
 
-
 			filter := types.IssueFilter{}
 			issues, err := store.SearchIssues(ctx, "", filter)
 			if err == nil {

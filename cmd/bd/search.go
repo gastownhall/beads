@@ -201,7 +201,6 @@ Examples:
 
 		ctx := rootCtx
 
-
 		// Direct mode - search using store
 		// The query parameter in SearchIssues already searches across title, description, and id
 		issues, err := store.SearchIssues(ctx, query, filter)

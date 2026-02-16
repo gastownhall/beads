@@ -26,7 +26,6 @@ const CanonicalDatabaseName = "beads.db"
 // RedirectFileName is the name of the file that redirects to another .beads directory
 const RedirectFileName = "redirect"
 
-
 // FollowRedirect checks if a .beads directory contains a redirect file and follows it.
 // If a redirect file exists, it returns the target .beads directory path.
 // If no redirect exists or there's an error, it returns the original path unchanged.
