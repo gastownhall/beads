@@ -50,6 +50,11 @@ func TestMain(m *testing.M) {
 	// This ensures backward compatibility with tests that manipulate globals directly.
 	enableTestModeGlobals()
 
+	// Set BEADS_TEST_MODE once for the entire test run (bd-cqjoi).
+	// Previously each test set/unset this env var via ensureTestMode(),
+	// which raced under t.Parallel().
+	_ = os.Setenv("BEADS_TEST_MODE", "1")
+
 	// Prevent daemon auto-start and ensure tests don't interact with any running daemon.
 	// This prevents false positives in the test guard when a background daemon touches
 	// .beads files (like issues.jsonl via auto-sync) during test execution.

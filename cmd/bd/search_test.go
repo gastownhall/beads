@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -129,6 +128,7 @@ func TestSearchCommand_MissingQueryShowsHelp(t *testing.T) {
 	// 3. Exit with code 1
 
 	// We can't test os.Exit() directly, but we can verify the logic up to that point
+	var errBuf bytes.Buffer
 	cmd := &cobra.Command{
 		Use:   "search [query]",
 		Short: "Test",
@@ -139,20 +139,10 @@ func TestSearchCommand_MissingQueryShowsHelp(t *testing.T) {
 			}
 
 			if query == "" {
-				// Capture stderr
-				oldStderr := os.Stderr
-				r, w, _ := os.Pipe()
-				os.Stderr = w
-
+				// Use cobra's SetErr to capture stderr without redirecting os.Stderr (bd-cqjoi)
 				cmd.PrintErrf("Error: search query is required\n")
 
-				w.Close()
-				os.Stderr = oldStderr
-
-				var buf bytes.Buffer
-				io.Copy(&buf, r)
-
-				if buf.String() == "" {
+				if errBuf.String() == "" {
 					t.Error("Expected error message to stderr")
 				}
 
@@ -164,6 +154,7 @@ func TestSearchCommand_MissingQueryShowsHelp(t *testing.T) {
 		},
 	}
 
+	cmd.SetErr(&errBuf)
 	cmd.SetArgs([]string{}) // No query
 	_ = cmd.Execute()
 }

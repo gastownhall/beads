@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -21,6 +22,18 @@ import (
 
 // testIDCounter ensures unique IDs across all test runs
 var testIDCounter atomic.Uint64
+
+// doltNewMutex serializes dolt.New() calls in tests. The Dolt embedded engine's
+// InitStatusVariables() has an internal race condition when called concurrently
+// from multiple goroutines (writes to a shared global map without synchronization).
+// Serializing store creation prevents this race while allowing tests to run their
+// assertions in parallel after the store is created.
+var doltNewMutex sync.Mutex
+
+// stdioMutex serializes tests that redirect os.Stdout or os.Stderr.
+// These process-global file descriptors cannot be safely redirected from
+// concurrent goroutines.
+var stdioMutex sync.Mutex
 
 // generateUniqueTestID creates a globally unique test ID using prefix, test name, and atomic counter.
 // This prevents ID collisions when multiple tests manipulate global state.
@@ -49,13 +62,11 @@ func initConfigForTest(t *testing.T) {
 	t.Cleanup(config.ResetForTesting)
 }
 
-// ensureTestMode sets BEADS_TEST_MODE environment variable to prevent production pollution
+// ensureTestMode is a no-op; BEADS_TEST_MODE is set once in TestMain.
+// Previously each test set/unset the env var, which raced under t.Parallel().
 func ensureTestMode(t *testing.T) {
 	t.Helper()
-	os.Setenv("BEADS_TEST_MODE", "1")
-	t.Cleanup(func() {
-		os.Unsetenv("BEADS_TEST_MODE")
-	})
+	// BEADS_TEST_MODE is set in TestMain and stays set for the entire test run.
 }
 
 // ensureCleanGlobalState resets global state that may have been modified by other tests.
@@ -113,8 +124,11 @@ func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 
 	ensureTestMode(t)
 
+	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
+	doltNewMutex.Lock()
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	doltNewMutex.Unlock()
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
@@ -141,8 +155,11 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 
 	ensureTestMode(t)
 
+	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
+	doltNewMutex.Lock()
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	doltNewMutex.Unlock()
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
@@ -168,6 +185,9 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 // then falls back to direct open for BEADS_DB or other non-standard paths.
 func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 	t.Helper()
+	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
+	doltNewMutex.Lock()
+	defer doltNewMutex.Unlock()
 	ctx := context.Background()
 	// Try NewFromConfig which reads metadata.json for correct database name
 	beadsDir := filepath.Dir(dbPath)
@@ -197,8 +217,12 @@ func runCommandInDirWithOutput(dir string, name string, args ...string) (string,
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
+// Uses stdioMutex to prevent races with concurrent os.Stderr redirection.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
 
 	old := os.Stderr
 	r, w, err := os.Pipe()

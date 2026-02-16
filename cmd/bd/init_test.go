@@ -1046,8 +1046,14 @@ func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
 	})
 }
 
+// captureStdout captures stdout output from fn and returns it as a string.
+// Uses stdioMutex to prevent races with concurrent os.Stdout redirection (bd-cqjoi).
 func captureStdout(t *testing.T, fn func() error) string {
 	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
