@@ -4,19 +4,19 @@ This document describes the performance benchmarks available in the beads projec
 
 ## Running Benchmarks
 
-### All SQLite Benchmarks
+### All Dolt Benchmarks
 ```bash
-go test -tags=bench -bench=. -benchmem ./internal/storage/sqlite/...
+go test -tags=bench -bench=. -benchmem ./internal/storage/dolt/...
 ```
 
 ### Specific Benchmark
 ```bash
-go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/sqlite/...
+go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/dolt/...
 ```
 
 ### With CPU Profiling
 ```bash
-go test -tags=bench -bench=BenchmarkGetReadyWork_Large -cpuprofile=cpu.prof ./internal/storage/sqlite/...
+go test -tags=bench -bench=BenchmarkGetReadyWork_Large -cpuprofile=cpu.prof ./internal/storage/dolt/...
 go tool pprof -http=:8080 cpu.prof
 ```
 
@@ -131,10 +131,10 @@ This generates a flamegraph showing where time is spent across all benchmarks.
 Example:
 ```bash
 # Baseline
-go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/sqlite/...
+go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/dolt/...
 
 # Make changes...
 
 # Measure improvement
-go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/sqlite/...
+go test -tags=bench -bench=BenchmarkGetReadyWork_Large -benchmem ./internal/storage/dolt/...
 ```

@@ -13,10 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Three-Layer Design
 
 1. **Storage Layer** (`internal/storage/`)
-   - Interface-based design in `storage.go`
-   - **Dolt** (primary) in `storage/dolt/` — version-controlled SQL with cell-level merge
-   - SQLite (legacy) in `storage/sqlite/` — still supported for simple setups
-   - Memory backend in `storage/memory/` for testing
+   - **Dolt** in `storage/dolt/` — version-controlled SQL database with cell-level merge
+   - Common types and interfaces in `storage.go`
 
 2. **RPC Layer** (`internal/rpc/`)
    - Client/server architecture using Unix domain sockets (Windows named pipes)

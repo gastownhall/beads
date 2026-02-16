@@ -329,7 +329,7 @@ Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. 
 |------|-------|
 | CLI entry | `cmd/bd/main.go` |
 | Storage interface | `internal/storage/storage.go` |
-| SQLite implementation | `internal/storage/sqlite/` |
+| Dolt implementation | `internal/storage/dolt/` |
 | RPC protocol | `internal/rpc/protocol.go`, `server_*.go` |
 | Export logic | `cmd/bd/export.go`, `autoflush.go` |
 | Import logic | `cmd/bd/import.go`, `internal/importer/` |
