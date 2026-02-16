@@ -181,13 +181,15 @@ func getMoleculeProgress(ctx context.Context, s *dolt.DoltStore, moleculeID stri
 		Total:         len(subgraph.Issues) - 1, // Exclude root
 	}
 
-	// Get ready issues for this molecule
-	// IncludeMolSteps: true because we specifically need to see molecule steps here
+	// Compute step readiness from within-molecule dependencies.
+	// Uses analyzeMoleculeParallel instead of GetReadyWork because GetReadyWork
+	// excludes ephemeral issues (wisp steps are ephemeral by definition).
+	// See: https://github.com/steveyegge/gastown/issues/1276
+	analysis := analyzeMoleculeParallel(subgraph)
 	readyIDs := make(map[string]bool)
-	readyIssues, err := s.GetReadyWork(ctx, types.WorkFilter{IncludeMolSteps: true})
-	if err == nil {
-		for _, issue := range readyIssues {
-			readyIDs[issue.ID] = true
+	for id, info := range analysis.Steps {
+		if info.IsReady {
+			readyIDs[id] = true
 		}
 	}
 
