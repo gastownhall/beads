@@ -80,3 +80,34 @@ func TestAcquireAccessLock_BoundedRetriesUnderContention(t *testing.T) {
 		}
 	}
 }
+
+func TestAcquireAccessLock_BoundedTimeoutAcrossReadAndWriteModes(t *testing.T) {
+	t.Parallel()
+
+	doltDir := filepath.Join(t.TempDir(), ".beads", "dolt")
+	holder, err := AcquireAccessLock(doltDir, true, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("failed to acquire holder lock: %v", err)
+	}
+	defer holder.Release()
+
+	assertBusyWithinBound := func(name string, write bool) {
+		t.Helper()
+		start := time.Now()
+		_, lockErr := AcquireAccessLock(doltDir, write, 140*time.Millisecond)
+		elapsed := time.Since(start)
+
+		if lockErr == nil {
+			t.Fatalf("%s: expected lock busy error, got nil", name)
+		}
+		if !errors.Is(lockErr, lockfile.ErrLockBusy) {
+			t.Fatalf("%s: expected lock busy error, got: %v", name, lockErr)
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("%s: lock wait exceeded deterministic bound: %v", name, elapsed)
+		}
+	}
+
+	assertBusyWithinBound("write-mode", true)
+	assertBusyWithinBound("read-mode", false)
+}
