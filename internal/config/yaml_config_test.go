@@ -14,10 +14,7 @@ func TestIsYamlOnlyKey(t *testing.T) {
 	}{
 		// Exact matches
 		{"no-db", true},
-		{"no-daemon", true},
-		{"no-auto-flush", true},
 		{"json", true},
-		{"auto-start-daemon", true},
 		{"flush-debounce", true},
 		{"git.author", true},
 		{"git.no-gpg-sign", true},
@@ -31,17 +28,11 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"repos.primary", true},
 		{"external_projects.beads", true},
 
-		// Daemon settings (GH#871)
-		{"daemon.auto_commit", true},
-		{"daemon.auto_push", true},
-		{"daemon.auto_pull", true},
-		{"daemon.custom_setting", true}, // prefix match
-
 		// Hierarchy settings (GH#995)
 		{"hierarchy.max-depth", true},
 		{"hierarchy.custom_setting", true}, // prefix match
 
-		// SQLite keys (should return false)
+		// Non-yaml keys (should return false)
 		{"jira.url", false},
 		{"jira.project", false},
 		{"linear.api_key", false},

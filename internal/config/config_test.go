@@ -65,13 +65,9 @@ func TestDefaults(t *testing.T) {
 		getter   func(string) interface{}
 	}{
 		{"json", false, func(k string) interface{} { return GetBool(k) }},
-		{"no-daemon", false, func(k string) interface{} { return GetBool(k) }},
-		{"no-auto-flush", false, func(k string) interface{} { return GetBool(k) }},
-		{"no-auto-import", false, func(k string) interface{} { return GetBool(k) }},
 		{"db", "", func(k string) interface{} { return GetString(k) }},
 		{"actor", "", func(k string) interface{} { return GetString(k) }},
 		{"flush-debounce", 30 * time.Second, func(k string) interface{} { return GetDuration(k) }},
-		{"auto-start-daemon", true, func(k string) interface{} { return GetBool(k) }},
 	}
 
 	for _, tt := range tests {
@@ -94,11 +90,9 @@ func TestEnvironmentBinding(t *testing.T) {
 		getter   func(string) interface{}
 	}{
 		{"BD_JSON", "json", "true", true, func(k string) interface{} { return GetBool(k) }},
-		{"BD_NO_DAEMON", "no-daemon", "true", true, func(k string) interface{} { return GetBool(k) }},
 		{"BD_ACTOR", "actor", "testuser", "testuser", func(k string) interface{} { return GetString(k) }},
 		{"BD_DB", "db", "/tmp/test.db", "/tmp/test.db", func(k string) interface{} { return GetString(k) }},
 		{"BEADS_FLUSH_DEBOUNCE", "flush-debounce", "10s", 10 * time.Second, func(k string) interface{} { return GetDuration(k) }},
-		{"BEADS_AUTO_START_DAEMON", "auto-start-daemon", "false", false, func(k string) interface{} { return GetBool(k) }},
 	}
 
 	for _, tt := range tests {

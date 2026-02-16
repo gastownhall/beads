@@ -9,22 +9,22 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 )
 
-// TestFindDatabaseInBeadsDir_CanonicalDB tests finding the canonical beads.db file
-func TestFindDatabaseInBeadsDir_CanonicalDB(t *testing.T) {
+// TestFindDatabaseInBeadsDir_DoltDir tests finding the dolt database directory
+func TestFindDatabaseInBeadsDir_DoltDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create canonical beads.db
-	dbPath := filepath.Join(tmpDir, CanonicalDatabaseName)
-	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
+	// Create dolt directory (the canonical database location)
+	doltDir := filepath.Join(tmpDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	result := findDatabaseInBeadsDir(tmpDir, false)
 
 	resultResolved, _ := filepath.EvalSymlinks(result)
-	expectedResolved, _ := filepath.EvalSymlinks(dbPath)
+	expectedResolved, _ := filepath.EvalSymlinks(doltDir)
 	if resultResolved != expectedResolved {
-		t.Errorf("findDatabaseInBeadsDir() = %q, want %q", result, dbPath)
+		t.Errorf("findDatabaseInBeadsDir() = %q, want %q", result, doltDir)
 	}
 }
 
@@ -106,8 +106,13 @@ func TestFindAllDatabases_Unit(t *testing.T) {
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		dbPath := filepath.Join(beadsDir, "beads.db")
-		if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
+		// Create metadata.json so hasBeadsProjectFiles returns true
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// Create dolt directory (canonical database location)
+		doltDir := filepath.Join(beadsDir, "dolt")
+		if err := os.MkdirAll(doltDir, 0755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -213,7 +218,12 @@ func TestRepoContext_GitCmdCWD(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+	// Create metadata.json so hasBeadsProjectFiles returns true
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Create dolt directory for database detection
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -470,13 +480,13 @@ func TestFindDatabaseInTree_WithBEADS_DIR(t *testing.T) {
 		t.Skipf("git not available: %v", err)
 	}
 
-	// Create .beads with db
+	// Create .beads with dolt directory
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -494,9 +504,9 @@ func TestFindDatabaseInTree_WithBEADS_DIR(t *testing.T) {
 	}
 
 	resultResolved, _ := filepath.EvalSymlinks(result)
-	expectedResolved, _ := filepath.EvalSymlinks(dbPath)
+	expectedResolved, _ := filepath.EvalSymlinks(doltDir)
 	if resultResolved != expectedResolved {
-		t.Errorf("findDatabaseInTree() = %q, want %q", result, dbPath)
+		t.Errorf("findDatabaseInTree() = %q, want %q", result, doltDir)
 	}
 }
 
@@ -513,8 +523,8 @@ func TestFindBeadsDir_BEADS_DIR_WithProjectFiles(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	// Create project files in the directory
-	if err := os.WriteFile(filepath.Join(tmpDir, "beads.db"), []byte{}, 0644); err != nil {
+	// Create metadata.json (project file that indicates a beads directory)
+	if err := os.WriteFile(filepath.Join(tmpDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -528,13 +538,17 @@ func TestFindBeadsDir_BEADS_DIR_WithProjectFiles(t *testing.T) {
 	}
 }
 
-// TestNewStorage_Unit tests that deprecated NewStorage creates a dolt store
+// TestNewStorage_Unit tests that NewStorage wraps dolt.New successfully
 func TestNewStorage_Unit(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
+	doltPath := filepath.Join(tmpDir, "dolt")
 
-	_, err := NewStorage(t.Context(), dbPath)
-	if err == nil {
-		t.Fatal("NewStorage() should return an error (deprecated)")
+	store, err := NewStorage(t.Context(), doltPath)
+	if err != nil {
+		t.Fatalf("NewStorage() returned error: %v", err)
 	}
+	if store == nil {
+		t.Fatal("NewStorage() returned nil store")
+	}
+	_ = store.Close()
 }

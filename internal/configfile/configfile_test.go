@@ -65,10 +65,11 @@ func TestLoadNonexistent(t *testing.T) {
 
 func TestDatabasePath(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
+	// DatabasePath always returns dolt path regardless of Database field
 	cfg := &Config{Database: "beads.db"}
 
 	got := cfg.DatabasePath(beadsDir)
-	want := filepath.Join(beadsDir, "beads.db")
+	want := filepath.Join(beadsDir, "dolt")
 
 	if got != want {
 		t.Errorf("DatabasePath() = %q, want %q", got, want)

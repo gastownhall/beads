@@ -620,11 +620,20 @@ func FindAllDatabases() []DatabaseInfo {
 			// Follow redirect if present
 			beadsDir = FollowRedirect(beadsDir)
 
-			// Found .beads/ directory, look for *.db files
-			matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
-			if err == nil && len(matches) > 0 {
-				dbPath := matches[0]
+			// Look for database: dolt directory first, then legacy *.db files
+			dbPath := ""
+			doltDir := filepath.Join(beadsDir, "dolt")
+			if dInfo, dErr := os.Stat(doltDir); dErr == nil && dInfo.IsDir() {
+				dbPath = doltDir
+			} else {
+				// Legacy: check for *.db files (pre-migration)
+				matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+				if err == nil && len(matches) > 0 {
+					dbPath = matches[0]
+				}
+			}
 
+			if dbPath != "" {
 				// Resolve symlinks to get canonical path for deduplication
 				canonicalPath := dbPath
 				if resolved, err := filepath.EvalSymlinks(dbPath); err == nil {
@@ -643,22 +652,13 @@ func FindAllDatabases() []DatabaseInfo {
 				}
 				seen[canonicalPath] = true
 
-				// Count issues if we can open the database (best-effort)
-				issueCount := -1
-				// Don't fail if we can't open/query the database - it might be locked
-				// or corrupted, but we still want to detect and warn about it
-				//
-				// Note: Issue counting requires opening a dolt store which is already
-				// imported here. Callers needing issue counts can use dolt.New() directly.
-
 				databases = append(databases, DatabaseInfo{
 					Path:       dbPath,
 					BeadsDir:   beadsDir,
-					IssueCount: issueCount,
+					IssueCount: -1,
 				})
 
 				// Stop searching upward - the closest .beads is the one to use
-				// Parent directories are out of scope in multi-workspace setups
 				break
 			}
 		}

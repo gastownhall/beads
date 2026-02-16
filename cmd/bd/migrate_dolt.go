@@ -3,8 +3,743 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
+
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
+
+// migrationData holds all data extracted from the source database
+type migrationData struct {
+	issues     []*types.Issue
+	labelsMap  map[string][]string
+	depsMap    map[string][]*types.Dependency
+	eventsMap  map[string][]*types.Event
+	config     map[string]string
+	prefix     string
+	issueCount int
+}
+
+// handleToDoltMigration migrates from SQLite to Dolt backend.
+// 1. Finds SQLite .db files in .beads/
+// 2. Creates Dolt database in `.beads/dolt/`
+// 3. Imports all issues, labels, dependencies, events
+// 4. Copies all config values
+// 5. Updates `metadata.json` to use Dolt
+func handleToDoltMigration(dryRun bool, autoYes bool) {
+	ctx := context.Background()
+
+	// Find .beads directory
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		exitWithError("no_beads_directory", "No .beads directory found. Run 'bd init' first.",
+			"run 'bd init' to initialize bd")
+	}
+
+	// Find SQLite database by scanning for .db files
+	sqlitePath := findSQLiteDB(beadsDir)
+	if sqlitePath == "" {
+		exitWithError("no_sqlite_database", "No SQLite database found to migrate",
+			"no .db files found in "+beadsDir)
+	}
+
+	// Dolt path
+	doltPath := filepath.Join(beadsDir, "dolt")
+
+	// Check if Dolt directory already exists
+	if _, err := os.Stat(doltPath); err == nil {
+		exitWithError("dolt_exists", fmt.Sprintf("Dolt directory already exists at %s", doltPath),
+			"remove it first if you want to re-migrate")
+	}
+
+	// Extract all data from SQLite
+	data, err := extractFromSQLite(ctx, sqlitePath)
+	if err != nil {
+		exitWithError("extraction_failed", err.Error(), "")
+	}
+
+	// Show migration plan
+	printMigrationPlan("SQLite to Dolt", sqlitePath, doltPath, data)
+
+	// Dry run mode
+	if dryRun {
+		printDryRun(sqlitePath, doltPath, data, true)
+		return
+	}
+
+	// Prompt for confirmation
+	if !autoYes && !jsonOutput {
+		if !confirmBackendMigration("SQLite", "Dolt", true) {
+			fmt.Println("Migration canceled")
+			return
+		}
+	}
+
+	// Create backup
+	backupPath := strings.TrimSuffix(sqlitePath, ".db") + ".backup-pre-dolt-" + time.Now().Format("20060102-150405") + ".db"
+	if err := copyFile(sqlitePath, backupPath); err != nil {
+		exitWithError("backup_failed", err.Error(), "")
+	}
+	printSuccess(fmt.Sprintf("Created backup: %s", filepath.Base(backupPath)))
+
+	// Create Dolt database
+	printProgress("Creating Dolt database...")
+
+	// Use prefix-based database name to avoid cross-rig contamination.
+	dbName := "beads"
+	if data.prefix != "" {
+		dbName = "beads_" + data.prefix
+	}
+	doltStore, err := dolt.New(ctx, &dolt.Config{Path: doltPath, Database: dbName})
+	if err != nil {
+		exitWithError("dolt_create_failed", err.Error(), "")
+	}
+
+	// Import data with cleanup on failure
+	imported, skipped, importErr := importToDolt(ctx, doltStore, data)
+	if importErr != nil {
+		_ = doltStore.Close()
+		_ = os.RemoveAll(doltPath)
+		exitWithError("import_failed", importErr.Error(), "partial Dolt directory has been cleaned up")
+	}
+
+	// Set sync.mode to dolt-native in the DB.
+	if err := doltStore.SetConfig(ctx, "sync.mode", "dolt-native"); err != nil {
+		printWarning(fmt.Sprintf("failed to set sync.mode in DB: %v", err))
+	} else {
+		printSuccess("Set sync.mode = dolt-native in database")
+	}
+
+	// Commit the migration
+	commitMsg := fmt.Sprintf("Migrate from SQLite: %d issues imported", imported)
+	if err := doltStore.Commit(ctx, commitMsg); err != nil {
+		printWarning(fmt.Sprintf("failed to create Dolt commit: %v", err))
+	}
+
+	_ = doltStore.Close()
+
+	printSuccess(fmt.Sprintf("Imported %d issues (%d skipped)", imported, skipped))
+
+	// Load and update metadata.json
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		cfg = configfile.DefaultConfig()
+	}
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+	cfg.Backend = configfile.BackendDolt
+	cfg.Database = "dolt"
+	cfg.DoltDatabase = dbName
+	cfg.DoltServerPort = configfile.DefaultDoltServerPort
+	if err := cfg.Save(beadsDir); err != nil {
+		exitWithError("config_save_failed", err.Error(),
+			"data was imported but metadata.json was not updated - manually set backend to 'dolt'")
+	}
+
+	printSuccess("Updated metadata.json to use Dolt backend")
+
+	// Check if git hooks need updating for Dolt compatibility
+	if hooksNeedDoltUpdate(beadsDir) {
+		printWarning("Git hooks need updating for Dolt backend")
+		if !jsonOutput {
+			fmt.Println("  The pre-commit and post-merge hooks use JSONL sync which doesn't apply to Dolt.")
+			fmt.Println("  Run 'bd hooks install --force' to update them.")
+		}
+	}
+
+	// Final status
+	printFinalStatus("dolt", imported, skipped, backupPath, doltPath, sqlitePath, true)
+}
+
+// findSQLiteDB looks for a SQLite .db file in the beads directory.
+// Returns the path to the first .db file found, or empty string if none.
+func findSQLiteDB(beadsDir string) string {
+	// Check common names first
+	for _, name := range []string{"beads.db", "issues.db"} {
+		p := filepath.Join(beadsDir, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	// Scan for any .db file
+	entries, err := os.ReadDir(beadsDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") &&
+			!strings.Contains(entry.Name(), "backup") {
+			return filepath.Join(beadsDir, entry.Name())
+		}
+	}
+	return ""
+}
+
+// hooksNeedDoltUpdate checks if installed git hooks lack the Dolt backend skip logic.
+func hooksNeedDoltUpdate(beadsDir string) bool {
+	repoRoot := filepath.Dir(beadsDir)
+	hooksDir := filepath.Join(repoRoot, ".git", "hooks")
+
+	postMergePath := filepath.Join(hooksDir, "post-merge")
+	// #nosec G304 -- postMergePath is derived from the local repo's .git/hooks directory.
+	content, err := os.ReadFile(postMergePath)
+	if err != nil {
+		return false
+	}
+
+	contentStr := string(content)
+
+	if strings.Contains(contentStr, "bd-shim") {
+		return false
+	}
+	if !strings.Contains(contentStr, "bd") {
+		return false
+	}
+	if strings.Contains(contentStr, `"backend"`) && strings.Contains(contentStr, `"dolt"`) {
+		return false
+	}
+	return true
+}
+
+// handleToSQLiteMigration is no longer supported — SQLite backend was removed.
+func handleToSQLiteMigration(_ bool, _ bool) {
+	exitWithError("sqlite_removed",
+		"SQLite backend has been removed; migration to SQLite is no longer supported",
+		"Dolt is now the only storage backend")
+}
+
+// extractFromSQLite extracts all data from a SQLite database using raw SQL.
+func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, error) {
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+	}
+	defer db.Close()
+
+	// Get prefix from config table
+	prefix := ""
+	_ = db.QueryRowContext(ctx, "SELECT value FROM config WHERE key = 'issue_prefix'").Scan(&prefix)
+
+	// Get all config
+	config := make(map[string]string)
+	configRows, err := db.QueryContext(ctx, "SELECT key, value FROM config")
+	if err == nil {
+		defer configRows.Close()
+		for configRows.Next() {
+			var k, v string
+			if err := configRows.Scan(&k, &v); err == nil {
+				config[k] = v
+			}
+		}
+	}
+
+	// Get all issues
+	issueRows, err := db.QueryContext(ctx, `
+		SELECT id, COALESCE(content_hash,''), COALESCE(title,''), COALESCE(description,''),
+			COALESCE(design,''), COALESCE(acceptance_criteria,''), COALESCE(notes,''),
+			COALESCE(status,''), COALESCE(priority,0), COALESCE(issue_type,''),
+			COALESCE(assignee,''), estimated_minutes,
+			COALESCE(created_at,''), COALESCE(created_by,''), COALESCE(owner,''),
+			COALESCE(updated_at,''), COALESCE(closed_at,''), external_ref,
+			COALESCE(compaction_level,0), COALESCE(compacted_at,''), compacted_at_commit,
+			COALESCE(original_size,0),
+			COALESCE(sender,''), COALESCE(ephemeral,0), COALESCE(pinned,0),
+			COALESCE(is_template,0), COALESCE(crystallizes,''),
+			COALESCE(mol_type,''), COALESCE(work_type,''), quality_score,
+			COALESCE(source_system,''), COALESCE(source_repo,''), COALESCE(close_reason,''),
+			COALESCE(event_kind,''), COALESCE(actor,''), COALESCE(target,''), COALESCE(payload,''),
+			COALESCE(await_type,''), COALESCE(await_id,''), COALESCE(timeout_ns,0), COALESCE(waiters,''),
+			COALESCE(hook_bead,''), COALESCE(role_bead,''), COALESCE(agent_state,''),
+			COALESCE(last_activity,''), COALESCE(role_type,''), COALESCE(rig,''),
+			COALESCE(due_at,''), COALESCE(defer_until,'')
+		FROM issues`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query issues: %w", err)
+	}
+	defer issueRows.Close()
+
+	var issues []*types.Issue
+	for issueRows.Next() {
+		var issue types.Issue
+		var estMin sql.NullInt64
+		var extRef, compactCommit sql.NullString
+		var qualScore sql.NullFloat64
+		var timeoutNs int64
+		var waitersJSON string
+		if err := issueRows.Scan(
+			&issue.ID, &issue.ContentHash, &issue.Title, &issue.Description,
+			&issue.Design, &issue.AcceptanceCriteria, &issue.Notes,
+			&issue.Status, &issue.Priority, &issue.IssueType,
+			&issue.Assignee, &estMin,
+			&issue.CreatedAt, &issue.CreatedBy, &issue.Owner,
+			&issue.UpdatedAt, &issue.ClosedAt, &extRef,
+			&issue.CompactionLevel, &issue.CompactedAt, &compactCommit,
+			&issue.OriginalSize,
+			&issue.Sender, &issue.Ephemeral, &issue.Pinned,
+			&issue.IsTemplate, &issue.Crystallizes,
+			&issue.MolType, &issue.WorkType, &qualScore,
+			&issue.SourceSystem, &issue.SourceRepo, &issue.CloseReason,
+			&issue.EventKind, &issue.Actor, &issue.Target, &issue.Payload,
+			&issue.AwaitType, &issue.AwaitID, &timeoutNs, &waitersJSON,
+			&issue.HookBead, &issue.RoleBead, &issue.AgentState,
+			&issue.LastActivity, &issue.RoleType, &issue.Rig,
+			&issue.DueAt, &issue.DeferUntil,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan issue: %w", err)
+		}
+		if estMin.Valid {
+			v := int(estMin.Int64)
+			issue.EstimatedMinutes = &v
+		}
+		if extRef.Valid {
+			issue.ExternalRef = &extRef.String
+		}
+		if compactCommit.Valid {
+			issue.CompactedAtCommit = &compactCommit.String
+		}
+		if qualScore.Valid {
+			v := float32(qualScore.Float64)
+			issue.QualityScore = &v
+		}
+		issue.Timeout = time.Duration(timeoutNs)
+		if waitersJSON != "" {
+			_ = json.Unmarshal([]byte(waitersJSON), &issue.Waiters)
+		}
+		issues = append(issues, &issue)
+	}
+
+	// Get labels
+	labelsMap := make(map[string][]string)
+	labelRows, err := db.QueryContext(ctx, "SELECT issue_id, label FROM labels")
+	if err == nil {
+		defer labelRows.Close()
+		for labelRows.Next() {
+			var issueID, label string
+			if err := labelRows.Scan(&issueID, &label); err == nil {
+				labelsMap[issueID] = append(labelsMap[issueID], label)
+			}
+		}
+	}
+
+	// Get dependencies
+	depsMap := make(map[string][]*types.Dependency)
+	depRows, err := db.QueryContext(ctx, "SELECT issue_id, depends_on_id, COALESCE(type,''), COALESCE(created_by,''), COALESCE(created_at,'') FROM dependencies")
+	if err == nil {
+		defer depRows.Close()
+		for depRows.Next() {
+			var dep types.Dependency
+			if err := depRows.Scan(&dep.IssueID, &dep.DependsOnID, &dep.Type, &dep.CreatedBy, &dep.CreatedAt); err == nil {
+				depsMap[dep.IssueID] = append(depsMap[dep.IssueID], &dep)
+			}
+		}
+	}
+
+	// Get events
+	eventsMap := make(map[string][]*types.Event)
+	eventRows, err := db.QueryContext(ctx, "SELECT issue_id, COALESCE(event_type,''), COALESCE(actor,''), old_value, new_value, comment, COALESCE(created_at,'') FROM events")
+	if err == nil {
+		defer eventRows.Close()
+		for eventRows.Next() {
+			var issueID string
+			var event types.Event
+			var oldVal, newVal, comment sql.NullString
+			if err := eventRows.Scan(&issueID, &event.EventType, &event.Actor, &oldVal, &newVal, &comment, &event.CreatedAt); err == nil {
+				if oldVal.Valid {
+					event.OldValue = &oldVal.String
+				}
+				if newVal.Valid {
+					event.NewValue = &newVal.String
+				}
+				if comment.Valid {
+					event.Comment = &comment.String
+				}
+				eventsMap[issueID] = append(eventsMap[issueID], &event)
+			}
+		}
+	}
+
+	// Assign labels and dependencies to issues
+	for _, issue := range issues {
+		if labels, ok := labelsMap[issue.ID]; ok {
+			issue.Labels = labels
+		}
+		if deps, ok := depsMap[issue.ID]; ok {
+			issue.Dependencies = deps
+		}
+	}
+
+	return &migrationData{
+		issues:     issues,
+		labelsMap:  labelsMap,
+		depsMap:    depsMap,
+		eventsMap:  eventsMap,
+		config:     config,
+		prefix:     prefix,
+		issueCount: len(issues),
+	}, nil
+}
+
+// importToDolt imports all data to Dolt, returning (imported, skipped, error)
+func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationData) (int, int, error) {
+	// Set all config values first
+	for key, value := range data.config {
+		if err := store.SetConfig(ctx, key, value); err != nil {
+			return 0, 0, fmt.Errorf("failed to set config %s: %w", key, err)
+		}
+	}
+
+	tx, err := store.UnderlyingDB().BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	imported := 0
+	skipped := 0
+	seenIDs := make(map[string]bool)
+	total := len(data.issues)
+
+	for i, issue := range data.issues {
+		if !jsonOutput && total > 100 && (i+1)%100 == 0 {
+			fmt.Printf("  Importing issues: %d/%d\r", i+1, total)
+		}
+
+		if seenIDs[issue.ID] {
+			skipped++
+			continue
+		}
+		seenIDs[issue.ID] = true
+
+		if issue.ContentHash == "" {
+			issue.ContentHash = issue.ComputeContentHash()
+		}
+
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO issues (
+				id, content_hash, title, description, design, acceptance_criteria, notes,
+				status, priority, issue_type, assignee, estimated_minutes,
+				created_at, created_by, owner, updated_at, closed_at, external_ref,
+				compaction_level, compacted_at, compacted_at_commit, original_size,
+				sender, ephemeral, pinned, is_template, crystallizes,
+				mol_type, work_type, quality_score, source_system, source_repo, close_reason,
+				event_kind, actor, target, payload,
+				await_type, await_id, timeout_ns, waiters,
+				hook_bead, role_bead, agent_state, last_activity, role_type, rig,
+				due_at, defer_until
+			) VALUES (
+				?, ?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?,
+				?, ?
+			)
+		`,
+			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
+			issue.Status, issue.Priority, issue.IssueType, nullableString(issue.Assignee), nullableIntPtr(issue.EstimatedMinutes),
+			issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullableStringPtr(issue.ExternalRef),
+			issue.CompactionLevel, issue.CompactedAt, nullableStringPtr(issue.CompactedAtCommit), nullableInt(issue.OriginalSize),
+			issue.Sender, issue.Ephemeral, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
+			issue.MolType, issue.WorkType, nullableFloat32Ptr(issue.QualityScore), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
+			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
+			issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONArray(issue.Waiters),
+			issue.HookBead, issue.RoleBead, issue.AgentState, issue.LastActivity, issue.RoleType, issue.Rig,
+			issue.DueAt, issue.DeferUntil,
+		)
+		if err != nil {
+			if strings.Contains(err.Error(), "Duplicate entry") ||
+				strings.Contains(err.Error(), "UNIQUE constraint") {
+				skipped++
+				continue
+			}
+			return imported, skipped, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+		}
+
+		// Insert labels
+		for _, label := range issue.Labels {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO labels (issue_id, label) VALUES (?, ?)`, issue.ID, label); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to insert label %q for issue %s: %v\n", label, issue.ID, err)
+			}
+		}
+
+		imported++
+	}
+
+	if !jsonOutput && total > 100 {
+		fmt.Printf("  Importing issues: %d/%d\n", total, total)
+	}
+
+	// Import dependencies
+	printProgress("Importing dependencies...")
+	for _, issue := range data.issues {
+		for _, dep := range issue.Dependencies {
+			var exists int
+			if err := tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", dep.DependsOnID).Scan(&exists); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: skipping dependency %s -> %s: target issue not found\n", dep.IssueID, dep.DependsOnID)
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO dependencies (issue_id, depends_on_id, type, created_by, created_at)
+				VALUES (?, ?, ?, ?, ?)
+				ON DUPLICATE KEY UPDATE type = type
+			`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedBy, dep.CreatedAt); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to insert dependency %s -> %s: %v\n", dep.IssueID, dep.DependsOnID, err)
+			}
+		}
+	}
+
+	// Import events (includes comments)
+	printProgress("Importing events...")
+	eventCount := 0
+	for issueID, events := range data.eventsMap {
+		for _, event := range events {
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+			`, issueID, event.EventType, event.Actor,
+				nullableStringPtr(event.OldValue), nullableStringPtr(event.NewValue),
+				nullableStringPtr(event.Comment), event.CreatedAt)
+			if err == nil {
+				eventCount++
+			}
+		}
+	}
+	if !jsonOutput {
+		fmt.Printf("  Imported %d events\n", eventCount)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return imported, skipped, fmt.Errorf("failed to commit: %w", err)
+	}
+
+	return imported, skipped, nil
+}
+
+// Helper functions for output
+
+func exitWithError(code, message, hint string) {
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"error":   code,
+			"message": message,
+		})
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		if hint != "" {
+			fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+		}
+	}
+	os.Exit(1)
+}
+
+func printNoop(message string) {
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":  "noop",
+			"message": message,
+		})
+	} else {
+		fmt.Printf("%s\n", ui.RenderPass("✓ "+message))
+		fmt.Println("No migration needed")
+	}
+}
+
+func printSuccess(message string) {
+	if !jsonOutput {
+		fmt.Printf("%s\n", ui.RenderPass("✓ "+message))
+	}
+}
+
+func printWarning(message string) {
+	if !jsonOutput {
+		fmt.Printf("%s\n", ui.RenderWarn("Warning: "+message))
+	}
+}
+
+func printProgress(message string) {
+	if !jsonOutput {
+		fmt.Printf("%s\n", message)
+	}
+}
+
+func printMigrationPlan(title, source, target string, data *migrationData) {
+	if jsonOutput {
+		return
+	}
+	fmt.Printf("%s Migration\n", title)
+	fmt.Printf("%s\n\n", strings.Repeat("=", len(title)+10))
+	fmt.Printf("Source: %s\n", source)
+	fmt.Printf("Target: %s\n", target)
+	fmt.Printf("Issues to migrate: %d\n", data.issueCount)
+
+	eventCount := 0
+	for _, events := range data.eventsMap {
+		eventCount += len(events)
+	}
+	fmt.Printf("Events to migrate: %d\n", eventCount)
+	fmt.Printf("Config keys: %d\n", len(data.config))
+
+	if data.prefix != "" {
+		fmt.Printf("Issue prefix: %s\n", data.prefix)
+	}
+	fmt.Println()
+}
+
+func printDryRun(source, target string, data *migrationData, withBackup bool) {
+	eventCount := 0
+	for _, events := range data.eventsMap {
+		eventCount += len(events)
+	}
+
+	if jsonOutput {
+		result := map[string]interface{}{
+			"dry_run":      true,
+			"source":       source,
+			"target":       target,
+			"issue_count":  data.issueCount,
+			"event_count":  eventCount,
+			"config_keys":  len(data.config),
+			"prefix":       data.prefix,
+			"would_backup": withBackup,
+		}
+		outputJSON(result)
+	} else {
+		fmt.Println("Dry run mode - no changes will be made")
+		fmt.Println("Would perform:")
+		step := 1
+		if withBackup {
+			fmt.Printf("  %d. Create backup of source database\n", step)
+			step++
+		}
+		fmt.Printf("  %d. Create target database at %s\n", step, target)
+		step++
+		fmt.Printf("  %d. Import %d issues with labels and dependencies\n", step, data.issueCount)
+		step++
+		fmt.Printf("  %d. Import %d events (history/comments)\n", step, eventCount)
+		step++
+		fmt.Printf("  %d. Copy %d config values\n", step, len(data.config))
+		step++
+		fmt.Printf("  %d. Update metadata.json\n", step)
+	}
+}
+
+func confirmBackendMigration(from, to string, withBackup bool) bool {
+	fmt.Printf("This will:\n")
+	step := 1
+	if withBackup {
+		fmt.Printf("  %d. Create a backup of your %s database\n", step, from)
+		step++
+	}
+	fmt.Printf("  %d. Create a %s database and import all data\n", step, to)
+	step++
+	fmt.Printf("  %d. Update metadata.json to use %s backend\n", step, to)
+	step++
+	fmt.Printf("  %d. Keep your %s database (can be deleted after verification)\n\n", step, from)
+	fmt.Printf("Continue? [y/N] ")
+	var response string
+	_, _ = fmt.Scanln(&response)
+	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
+}
+
+func printFinalStatus(backend string, imported, skipped int, backupPath, newPath, oldPath string, toDolt bool) {
+	if jsonOutput {
+		result := map[string]interface{}{
+			"status":          "success",
+			"backend":         backend,
+			"issues_imported": imported,
+			"issues_skipped":  skipped,
+		}
+		if backupPath != "" {
+			result["backup_path"] = backupPath
+		}
+		if toDolt {
+			result["dolt_path"] = newPath
+		} else {
+			result["sqlite_path"] = newPath
+		}
+		outputJSON(result)
+	} else {
+		fmt.Println()
+		fmt.Printf("%s\n", ui.RenderPass("✓ Migration complete!"))
+		fmt.Println()
+		fmt.Printf("Your beads now use %s storage.\n", strings.ToUpper(backend))
+		if backupPath != "" {
+			fmt.Printf("Backup: %s\n", backupPath)
+		}
+		fmt.Println()
+		fmt.Println("Next steps:")
+		fmt.Println("  - Verify data: bd list")
+		fmt.Println("  - After verification, you can delete the old database:")
+		fmt.Printf("    rm %s\n", oldPath)
+	}
+}
+
+// Helper functions for nullable values
+
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullableStringPtr(s *string) interface{} {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
+func nullableIntPtr(i *int) interface{} {
+	if i == nil {
+		return nil
+	}
+	return *i
+}
+
+func nullableInt(i int) interface{} {
+	if i == 0 {
+		return nil
+	}
+	return i
+}
+
+func nullableFloat32Ptr(f *float32) interface{} {
+	if f == nil {
+		return nil
+	}
+	return *f
+}
+
+// formatJSONArray formats a string slice as JSON (matches Dolt schema expectation)
+func formatJSONArray(arr []string) string {
+	if len(arr) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(arr)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
 
 // listMigrations returns registered Dolt migrations (CGO build).
 func listMigrations() []string {
