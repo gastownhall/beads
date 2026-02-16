@@ -14,7 +14,6 @@ INSTALL_DIR := $(HOME)/.local/bin
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
 #     and gms_pure_go tag tells go-mysql-server to use pure-Go regex too.
-#   - CGO_ENABLED=0 is fine if you only need SQLite backend (no embedded Dolt).
 #   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
 export CGO_ENABLED := 1
 
@@ -68,23 +67,20 @@ test-full-cgo:
 	@echo "Running full CGO-enabled tests..."
 	@./scripts/test-cgo.sh ./...
 
-# Run performance benchmarks (10K and 20K issue databases with automatic CPU profiling)
-# Generates CPU profile: internal/storage/sqlite/bench-cpu-<timestamp>.prof
+# Run performance benchmarks against Dolt storage backend
+# Requires CGO and Dolt; generates CPU profile files
 # View flamegraph: go tool pprof -http=:8080 <profile-file>
 bench:
-	@echo "Running performance benchmarks..."
-	@echo "This will generate 10K and 20K issue databases and profile all operations."
-	@echo "CPU profiles will be saved to internal/storage/sqlite/"
+	@echo "Running performance benchmarks (Dolt backend)..."
 	@echo ""
-	go test -bench=. -benchtime=1s -tags=bench -run=^$$ ./internal/storage/sqlite/ -timeout=30m
+	go test -bench=. -benchtime=1s -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=30m
 	@echo ""
-	@echo "Benchmark complete. Profile files saved in internal/storage/sqlite/"
-	@echo "View flamegraph: cd internal/storage/sqlite && go tool pprof -http=:8080 bench-cpu-*.prof"
+	@echo "Benchmark complete."
 
 # Run quick benchmarks (shorter benchtime for faster feedback)
 bench-quick:
 	@echo "Running quick performance benchmarks..."
-	go test -bench=. -benchtime=100ms -tags=bench -run=^$$ ./internal/storage/sqlite/ -timeout=15m
+	go test -bench=. -benchtime=100ms -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=15m
 
 # Check that local branch is up to date with origin/main
 check-up-to-date:
@@ -142,7 +138,7 @@ clean:
 	@echo "Cleaning..."
 	rm -f bd
 	rm -f bd.exe
-	rm -f internal/storage/sqlite/bench-cpu-*.prof
+	rm -f internal/storage/dolt/bench-cpu-*.prof
 	rm -f beads-perf-*.prof
 
 # Show help

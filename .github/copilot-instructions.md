@@ -14,7 +14,7 @@
 ## Tech Stack
 
 - **Language**: Go 1.21+
-- **Storage**: SQLite (internal/storage/sqlite/)
+- **Storage**: Dolt (internal/storage/dolt/)
 - **CLI Framework**: Cobra
 - **Testing**: Go standard testing + table-driven tests
 - **CI/CD**: GitHub Actions
@@ -24,7 +24,7 @@
 
 ### Testing
 - Always write tests for new features
-- Use `BEADS_DB=/tmp/test.db` to avoid polluting production database
+- Use `t.TempDir() in Go tests` to avoid polluting production database
 - Run `go test -short ./...` before committing
 - Never create test issues in production DB (use temporary DB)
 
@@ -90,13 +90,13 @@ beads/
 ├── internal/
 │   ├── types/           # Core data types
 │   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
+│       └── dolt/        # Dolt implementation
 ├── integrations/
 │   └── beads-mcp/       # MCP server (Python)
 ├── examples/            # Integration examples
 ├── docs/                # Documentation
 └── .beads/
-    ├── beads.db         # SQLite database (DO NOT COMMIT)
+    ├── dolt/            # Dolt database (DO NOT COMMIT)
     └── issues.jsonl     # Git-synced issue storage
 ```
 
@@ -124,10 +124,10 @@ Use the beads MCP server for native function calls instead of shell commands:
 - ✅ Use bd for ALL task tracking
 - ✅ Always use `--json` flag for programmatic use
 - ✅ Run `bd sync` at end of sessions
-- ✅ Test with `BEADS_DB=/tmp/test.db`
+- ✅ Test with `t.TempDir() in Go tests`
 - ❌ Do NOT create markdown TODO lists
 - ❌ Do NOT create test issues in production DB
-- ❌ Do NOT commit `.beads/beads.db` (JSONL only)
+- ❌ Do NOT commit `.beads/dolt/` (JSONL only)
 
 ---
 

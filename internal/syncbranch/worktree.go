@@ -368,10 +368,7 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 			fmt.Sprintf("⚠️  Warning: Could not extract local content for safety check: %v", extractErr))
 	}
 
-	mergedContent, err := performContentMerge(ctx, worktreePath, syncBranch, remote, jsonlRelPath)
-	if err != nil {
-		return nil, fmt.Errorf("content merge failed: %w", err)
-	}
+	mergedContent := performContentMerge(ctx, worktreePath, syncBranch, remote, jsonlRelPath)
 
 	// Reset worktree to remote's history (adopt their commit graph)
 	resetCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard",
@@ -618,13 +615,13 @@ func resetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) 
 // The 3-way merge engine has been removed (Dolt handles sync natively).
 // When sync branches diverge, we take remote content since the caller
 // resets to remote's commit graph anyway.
-func performContentMerge(ctx context.Context, worktreePath, branch, remote, jsonlRelPath string) ([]byte, error) {
+func performContentMerge(ctx context.Context, worktreePath, branch, remote, jsonlRelPath string) []byte {
 	remoteRef := fmt.Sprintf("%s/%s", remote, branch)
 	remoteContent, err := extractJSONLFromCommit(ctx, worktreePath, remoteRef, jsonlRelPath)
 	if err != nil {
 		remoteContent = []byte{}
 	}
-	return remoteContent, nil
+	return remoteContent
 }
 
 // extractJSONLFromCommit extracts a file's content from a specific git commit.
@@ -789,10 +786,7 @@ func contentMergeRecovery(ctx context.Context, worktreePath, branch, remote stri
 	}
 
 	// Step 2: Perform content-level merge (same algorithm as PullFromSyncBranch)
-	mergedContent, err := performContentMerge(ctx, worktreePath, branch, remote, jsonlRelPath)
-	if err != nil {
-		return fmt.Errorf("content merge failed: %w", err)
-	}
+	mergedContent := performContentMerge(ctx, worktreePath, branch, remote, jsonlRelPath)
 
 	// Step 3: Reset worktree to remote's history (adopt their commit graph)
 	resetCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard",

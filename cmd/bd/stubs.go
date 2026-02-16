@@ -28,8 +28,10 @@ func findJSONLPath() string {
 // readFromGitRef reads a file from a specific git ref (e.g., HEAD, branch name).
 // Returns the raw file contents from git.
 func readFromGitRef(filePath, gitRef string) ([]byte, error) {
-	// Use git show to read the file at the given ref
-	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", gitRef, filePath))
+	// Use git show to read the file at the given ref.
+	// The ref:path argument is a single token for git-show, not a shell command.
+	arg := gitRef + ":" + filePath
+	cmd := exec.Command("git", "show", arg) // #nosec G204 -- args are not shell-interpreted
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s from git ref %s: %w", filePath, gitRef, err)

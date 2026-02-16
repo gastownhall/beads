@@ -21,8 +21,7 @@ beads/
 ├── internal/
 │   ├── types/           # Core data types
 │   └── storage/         # Storage layer
-│       ├── dolt/        # Dolt implementation (primary)
-│       └── sqlite/      # SQLite implementation (legacy)
+│       └── dolt/        # Dolt implementation
 ├── examples/            # Integration examples
 └── *.md                 # Documentation
 ```
@@ -267,10 +266,10 @@ This installs:
 
 ### Adding Storage Features
 
-1. Update schema in `internal/storage/sqlite/schema.go`
+1. Add Dolt SQL schema changes in `internal/storage/dolt/`
 2. Add migration if needed
 3. Update `internal/types/types.go` if new types
-4. Implement in `internal/storage/sqlite/sqlite.go`
+4. Implement in `internal/storage/dolt/` (queries, issues, etc.)
 5. Add tests
 6. Update export/import in `cmd/bd/export.go` and `cmd/bd/import.go`
 

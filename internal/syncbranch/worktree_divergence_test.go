@@ -250,10 +250,7 @@ func TestPerformContentMerge(t *testing.T) {
 		runGit(t, repoDir, "checkout", "-B", "test-branch", localHead)
 
 		// Perform merge
-		merged, err := performContentMerge(ctx, repoDir, "test-branch", "origin", ".beads/issues.jsonl")
-		if err != nil {
-			t.Fatalf("performContentMerge() error = %v", err)
-		}
+		merged := performContentMerge(ctx, repoDir, "test-branch", "origin", ".beads/issues.jsonl")
 
 		// 3-way merge removed: performContentMerge now returns remote content (remote wins)
 		mergedStr := string(merged)
@@ -295,10 +292,7 @@ func TestPerformContentMerge(t *testing.T) {
 		runGit(t, repoDir, "checkout", "-B", "test-branch", localHead)
 
 		// Perform merge
-		merged, err := performContentMerge(ctx, repoDir, "test-branch", "origin", ".beads/issues.jsonl")
-		if err != nil {
-			t.Fatalf("performContentMerge() error = %v", err)
-		}
+		merged := performContentMerge(ctx, repoDir, "test-branch", "origin", ".beads/issues.jsonl")
 
 		// Deletion should win - test-2 should be gone
 		mergedStr := string(merged)
