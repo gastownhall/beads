@@ -145,8 +145,7 @@ func showDoltConfig(testConnection bool) {
 	}
 
 	if backend != configfile.BackendDolt {
-		fmt.Printf("Backend: %s (not using Dolt)\n", backend)
-		fmt.Println("\nTo migrate to Dolt: bd migrate --to-dolt")
+		fmt.Printf("Backend: %s\n", backend)
 		return
 	}
 
@@ -195,7 +194,6 @@ func setDoltConfig(key, value string, updateConfig bool) {
 
 	if cfg.GetBackend() != configfile.BackendDolt {
 		fmt.Fprintf(os.Stderr, "Error: not using Dolt backend\n")
-		fmt.Fprintf(os.Stderr, "To migrate to Dolt: bd migrate --to-dolt\n")
 		os.Exit(1)
 	}
 

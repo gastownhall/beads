@@ -9,14 +9,14 @@ import (
 	"github.com/steveyegge/beads"
 )
 
-func TestNewSQLiteStorage(t *testing.T) {
+func TestNewStorage(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
+	dbPath := filepath.Join(tmpDir, "test-dolt")
 
 	ctx := context.Background()
-	store, err := beads.NewSQLiteStorage(ctx, dbPath)
+	store, err := beads.NewStorage(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("NewSQLiteStorage failed: %v", err)
+		t.Fatalf("NewStorage failed: %v", err)
 	}
 	defer store.Close()
 

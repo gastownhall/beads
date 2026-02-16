@@ -22,21 +22,9 @@ type Storage = beads.Storage
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
 
-// NewSQLiteStorage is deprecated. Use NewStorage instead.
-// Retained for backward compatibility during the SQLite-to-Dolt transition.
-func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
-	return NewStorage(ctx, dbPath)
-}
-
 // NewStorage creates a new storage instance at the given path using the Dolt backend.
 func NewStorage(ctx context.Context, dbPath string) (Storage, error) {
 	return dolt.New(ctx, &dolt.Config{Path: dbPath})
-}
-
-// GetConfiguredBackend returns the backend type from the beads directory config.
-// Returns "dolt" if no config exists or backend is not specified.
-func GetConfiguredBackend(beadsDir string) string {
-	return beads.GetConfiguredBackend(beadsDir)
 }
 
 // FindDatabasePath finds the beads database in the current directory tree

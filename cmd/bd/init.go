@@ -149,13 +149,6 @@ be set via BEADS_DOLT_PASSWORD environment variable.`,
 			initDBPath = filepath.Join(beadsDirForInit, "dolt")
 		}
 
-		// Detect old SQLite database files and warn users.
-		// SQLite backend has been removed; point users to bd migrate-dolt.
-		if oldDBPath := filepath.Join(beadsDirForInit, beads.CanonicalDatabaseName); fileExists(oldDBPath) {
-			fmt.Fprintf(os.Stderr, "Warning: found legacy SQLite database at %s\n", oldDBPath)
-			fmt.Fprintf(os.Stderr, "SQLite backend has been removed. Run 'bd migrate-dolt' to convert.\n\n")
-		}
-
 		// Determine if we should create .beads/ directory in CWD or main repo root
 		// For worktrees, .beads should always be in the main repository root
 		cwd, err := os.Getwd()

@@ -39,66 +39,6 @@ func TestDoltShowConfigNotInRepo(t *testing.T) {
 	}
 }
 
-func TestDoltShowConfigSQLiteBackend(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads dir: %v", err)
-	}
-
-	// Create metadata.json with SQLite backend
-	cfg := configfile.DefaultConfig()
-	cfg.Backend = configfile.BackendSQLite
-	if err := cfg.Save(beadsDir); err != nil {
-		t.Fatalf("failed to save config: %v", err)
-	}
-
-	oldCwd, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldCwd) }()
-
-	t.Run("text output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = false
-
-		output := captureDoltShowOutput(t)
-
-		if output == "" {
-			t.Skip("output capture failed, os.Exit called")
-		}
-
-		// Should mention not using Dolt
-		if !containsAny(output, "not using Dolt", "sqlite") {
-			t.Errorf("output should indicate not using Dolt: %s", output)
-		}
-	})
-
-	t.Run("json output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = true
-
-		output := captureDoltShowOutput(t)
-
-		if output == "" {
-			t.Skip("output capture failed")
-		}
-
-		var result map[string]any
-		if err := json.Unmarshal([]byte(output), &result); err != nil {
-			// May have extra output, just verify it's valid JSON-ish
-			t.Skipf("output not pure JSON: %s", output)
-		}
-
-		if result["backend"] != "sqlite" {
-			t.Errorf("expected backend 'sqlite', got %v", result["backend"])
-		}
-	})
-}
-
 func TestDoltShowConfigEmbeddedMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

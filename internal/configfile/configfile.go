@@ -14,7 +14,7 @@ const ConfigFileName = "metadata.json"
 type Config struct {
 	Database    string `json:"database"`
 	JSONLExport string `json:"jsonl_export,omitempty"`
-	Backend     string `json:"backend,omitempty"` // "sqlite" (default) or "dolt"
+	Backend     string `json:"backend,omitempty"` // always "dolt"
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -110,27 +110,13 @@ func (c *Config) Save(beadsDir string) error {
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
-	backend := c.GetBackend()
-
-	if backend == BackendDolt {
-		// For dolt backend, always use "dolt" as the directory name.
-		// The Database field is irrelevant for dolt — data always lives at .beads/dolt/.
-		// Stale values like "town", "wyvern", "beads_rig" caused split-brain (see DOLT-HEALTH-P0.md).
-		if filepath.IsAbs(c.Database) {
-			return c.Database
-		}
-		return filepath.Join(beadsDir, "dolt")
+	// Always use "dolt" as the directory name.
+	// The Database field is irrelevant — data always lives at .beads/dolt/.
+	// Stale values like "town", "wyvern", "beads_rig" caused split-brain (see DOLT-HEALTH-P0.md).
+	if filepath.IsAbs(c.Database) {
+		return c.Database
 	}
-
-	// SQLite (default)
-	db := strings.TrimSpace(c.Database)
-	if db == "" {
-		db = "beads.db"
-	}
-	if filepath.IsAbs(db) {
-		return db
-	}
-	return filepath.Join(beadsDir, db)
+	return filepath.Join(beadsDir, "dolt")
 }
 
 func (c *Config) JSONLPath(beadsDir string) string {
@@ -162,8 +148,7 @@ func (c *Config) GetStaleClosedIssuesDays() int {
 
 // Backend constants
 const (
-	BackendSQLite = "sqlite" // Legacy: kept for migration detection only
-	BackendDolt   = "dolt"
+	BackendDolt = "dolt"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
@@ -211,12 +196,9 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the configured backend type, defaulting to Dolt.
+// GetBackend returns the configured backend type (always Dolt).
 func (c *Config) GetBackend() string {
-	if c.Backend == "" {
-		return BackendDolt
-	}
-	return c.Backend
+	return BackendDolt
 }
 
 // Dolt mode constants

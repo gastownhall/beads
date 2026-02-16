@@ -28,8 +28,6 @@ const CanonicalDatabaseName = "beads.db"
 // RedirectFileName is the name of the file that redirects to another .beads directory
 const RedirectFileName = "redirect"
 
-// LegacyDatabaseNames are old names that should be migrated
-var LegacyDatabaseNames = []string{"bd.db", "issues.db", "bugs.db"}
 
 // FollowRedirect checks if a .beads directory contains a redirect file and follows it.
 // If a redirect file exists, it returns the target .beads directory path.
@@ -217,93 +215,31 @@ func findLocalBeadsDir() string {
 	return ""
 }
 
-// findDatabaseInBeadsDir searches for a database file within a .beads directory.
-// It implements the standard search order:
-// 1. Check metadata.json first (single source of truth)
-//   - For SQLite backend: returns path to .db file
-//   - For Dolt backend: returns path to dolt/ directory
-//
-// 2. Fall back to canonical beads.db
-// 3. Search for *.db files, filtering out backups and vc.db
-//
-// If warnOnIssues is true, warnings are printed to stderr for:
-// - Multiple databases found (ambiguous state)
-// - Legacy database names that should be migrated
-//
+// findDatabaseInBeadsDir searches for a database within a .beads directory.
+// Checks metadata.json for the Dolt database path. For server mode, no local
+// directory is required. For embedded mode, the dolt/ directory must exist.
 // Returns empty string if no database is found.
-func findDatabaseInBeadsDir(beadsDir string, warnOnIssues bool) string {
+func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	// Check for metadata.json first (single source of truth)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		backend := cfg.GetBackend()
-		if backend == configfile.BackendDolt {
-			// For Dolt server mode, database is on the server - no local directory required
-			if cfg.IsDoltServerMode() {
-				return cfg.DatabasePath(beadsDir)
-			}
-			// For embedded Dolt, check if the configured database directory exists
-			doltPath := cfg.DatabasePath(beadsDir)
-			if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
-				return doltPath
-			}
-		} else {
-			// For SQLite, check if the .db file exists
-			dbPath := cfg.DatabasePath(beadsDir)
-			if _, err := os.Stat(dbPath); err == nil {
-				return dbPath
-			}
+		// For Dolt server mode, database is on the server - no local directory required
+		if cfg.IsDoltServerMode() {
+			return cfg.DatabasePath(beadsDir)
+		}
+		// For embedded Dolt, check if the configured database directory exists
+		doltPath := cfg.DatabasePath(beadsDir)
+		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+			return doltPath
 		}
 	}
 
-	// Fall back to canonical beads.db for backward compatibility
-	canonicalDB := filepath.Join(beadsDir, CanonicalDatabaseName)
-	if _, err := os.Stat(canonicalDB); err == nil {
-		return canonicalDB
+	// Fall back: check if dolt directory exists without metadata.json
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+		return doltPath
 	}
 
-	// Look for any .db file in the beads directory
-	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
-	if err != nil || len(matches) == 0 {
-		return ""
-	}
-
-	// Filter out backup files and vc.db
-	var validDBs []string
-	for _, match := range matches {
-		baseName := filepath.Base(match)
-		// Skip backup files (contains ".backup" in name) and vc.db
-		if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
-			validDBs = append(validDBs, match)
-		}
-	}
-
-	if len(validDBs) == 0 {
-		return ""
-	}
-
-	if warnOnIssues {
-		// Warn about multiple databases found
-		if len(validDBs) > 1 {
-			fmt.Fprintf(os.Stderr, "Warning: Multiple database files found in %s:\n", beadsDir)
-			for _, db := range validDBs {
-				fmt.Fprintf(os.Stderr, "  - %s\n", filepath.Base(db))
-			}
-			fmt.Fprintf(os.Stderr, "Run 'bd init' to migrate to %s or manually remove old databases.\n\n", CanonicalDatabaseName)
-		}
-
-		// Warn about legacy database names
-		dbName := filepath.Base(validDBs[0])
-		if dbName != CanonicalDatabaseName {
-			for _, legacy := range LegacyDatabaseNames {
-				if dbName == legacy {
-					fmt.Fprintf(os.Stderr, "WARNING: Using legacy database name: %s\n", dbName)
-					fmt.Fprintf(os.Stderr, "Run 'bd migrate' to upgrade to canonical name: %s\n\n", CanonicalDatabaseName)
-					break
-				}
-			}
-		}
-	}
-
-	return validDBs[0]
+	return ""
 }
 
 // Issue represents a tracked work item with metadata, dependencies, and status.
@@ -378,20 +314,6 @@ func NewStorage(ctx context.Context, dbPath string) (Storage, error) {
 	return dolt.New(ctx, &dolt.Config{Path: dbPath})
 }
 
-// GetConfiguredBackend returns the backend type from the beads directory config.
-// Returns "dolt" if no config exists or backend is not specified.
-// If backend is explicitly "sqlite", returns "sqlite" so migration tooling can detect it.
-func GetConfiguredBackend(beadsDir string) string {
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
-		return configfile.BackendDolt
-	}
-	backend := cfg.GetBackend()
-	if backend == "" {
-		return configfile.BackendDolt
-	}
-	return backend
-}
 
 // FindDatabasePath discovers the bd database path using bd's standard search order:
 //  1. $BEADS_DIR environment variable (points to .beads directory)

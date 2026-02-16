@@ -28,47 +28,6 @@ func TestFindDatabaseInBeadsDir_CanonicalDB(t *testing.T) {
 	}
 }
 
-// TestFindDatabaseInBeadsDir_LegacyDB tests finding legacy database names with warnings
-func TestFindDatabaseInBeadsDir_LegacyDB(t *testing.T) {
-	for _, legacyName := range LegacyDatabaseNames {
-		t.Run(legacyName, func(t *testing.T) {
-			tmpDir := t.TempDir()
-
-			dbPath := filepath.Join(tmpDir, legacyName)
-			if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			// With warnOnIssues=true should still find the db
-			result := findDatabaseInBeadsDir(tmpDir, true)
-
-			resultResolved, _ := filepath.EvalSymlinks(result)
-			expectedResolved, _ := filepath.EvalSymlinks(dbPath)
-			if resultResolved != expectedResolved {
-				t.Errorf("findDatabaseInBeadsDir() = %q, want %q", result, dbPath)
-			}
-		})
-	}
-}
-
-// TestFindDatabaseInBeadsDir_MultipleDatabases tests the warning path for multiple DBs
-func TestFindDatabaseInBeadsDir_MultipleDatabases(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create multiple .db files (not canonical name)
-	for _, name := range []string{"one.db", "two.db"} {
-		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte{}, 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Should find one of them (with warnings to stderr)
-	result := findDatabaseInBeadsDir(tmpDir, true)
-	if result == "" {
-		t.Error("findDatabaseInBeadsDir() returned empty string, expected a db path")
-	}
-}
-
 // TestFindDatabaseInBeadsDir_NoDatabase tests empty directory
 func TestFindDatabaseInBeadsDir_NoDatabase(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -79,45 +38,22 @@ func TestFindDatabaseInBeadsDir_NoDatabase(t *testing.T) {
 	}
 }
 
-// TestFindDatabaseInBeadsDir_SkipsBackupAndVC tests that backup and vc.db files are skipped
-func TestFindDatabaseInBeadsDir_SkipsBackupAndVC(t *testing.T) {
+// TestFindDatabaseInBeadsDir_DoltFallback tests fallback to dolt dir without metadata.json
+func TestFindDatabaseInBeadsDir_DoltFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create only backup and vc.db files (should be ignored)
-	for _, name := range []string{"beads.backup.db", "vc.db"} {
-		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte{}, 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	result := findDatabaseInBeadsDir(tmpDir, false)
-	if result != "" {
-		t.Errorf("findDatabaseInBeadsDir() should skip backup/vc files, got %q", result)
-	}
-}
-
-// TestFindDatabaseInBeadsDir_WithMetadataJSON tests the metadata.json config path
-func TestFindDatabaseInBeadsDir_WithMetadataJSON(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create metadata.json with sqlite backend
-	metadataContent := `{"backend": "sqlite", "database": "beads.db"}`
-	if err := os.WriteFile(filepath.Join(tmpDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create the db file that metadata.json references
-	dbPath := filepath.Join(tmpDir, "beads.db")
-	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
+	// Create dolt directory without metadata.json
+	doltDir := filepath.Join(tmpDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	result := findDatabaseInBeadsDir(tmpDir, false)
 
 	resultResolved, _ := filepath.EvalSymlinks(result)
-	expectedResolved, _ := filepath.EvalSymlinks(dbPath)
+	expectedResolved, _ := filepath.EvalSymlinks(doltDir)
 	if resultResolved != expectedResolved {
-		t.Errorf("findDatabaseInBeadsDir() = %q, want %q", result, dbPath)
+		t.Errorf("findDatabaseInBeadsDir() = %q, want %q", result, doltDir)
 	}
 }
 
@@ -146,40 +82,7 @@ func TestFindDatabaseInBeadsDir_DoltBackend(t *testing.T) {
 	}
 }
 
-// TestGetConfiguredBackend tests the GetConfiguredBackend function
-func TestGetConfiguredBackend(t *testing.T) {
-	t.Run("no config returns dolt", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		result := GetConfiguredBackend(tmpDir)
-		if result != "dolt" {
-			t.Errorf("GetConfiguredBackend() = %q, want %q", result, "dolt")
-		}
-	})
 
-	t.Run("sqlite config returns sqlite for migration detection", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		metadataContent := `{"backend": "sqlite"}`
-		if err := os.WriteFile(filepath.Join(tmpDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
-			t.Fatal(err)
-		}
-		result := GetConfiguredBackend(tmpDir)
-		if result != "sqlite" {
-			t.Errorf("GetConfiguredBackend() = %q, want %q", result, "sqlite")
-		}
-	})
-
-	t.Run("dolt config", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		metadataContent := `{"backend": "dolt"}`
-		if err := os.WriteFile(filepath.Join(tmpDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
-			t.Fatal(err)
-		}
-		result := GetConfiguredBackend(tmpDir)
-		if result != "dolt" {
-			t.Errorf("GetConfiguredBackend() = %q, want %q", result, "dolt")
-		}
-	})
-}
 
 // TestFindAllDatabases_Unit tests FindAllDatabases without the integration tag
 func TestFindAllDatabases_Unit(t *testing.T) {

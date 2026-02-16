@@ -369,11 +369,6 @@ var rootCmd = &cobra.Command{
 		// Protect forks from accidentally committing upstream issue database
 		ensureForkProtection()
 
-		// Show migration hint for SQLite users (rate-limited to once per 24h, non-blocking)
-		if hintDir := beads.FindBeadsDir(); hintDir != "" {
-			maybeShowMigrationHint(hintDir)
-		}
-
 		// Performance profiling setup
 		if profileEnabled {
 			timestamp := time.Now().Format("20060102-150405")

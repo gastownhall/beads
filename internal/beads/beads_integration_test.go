@@ -169,7 +169,7 @@ func TestLibraryIntegration(t *testing.T) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Dir(dbPath)})
 	if err != nil {
-		t.Fatalf("NewSQLiteStorage failed: %v", err)
+		t.Fatalf("NewStorage failed: %v", err)
 	}
 	defer store.Close()
 
@@ -332,7 +332,7 @@ func TestBatchCreateIssues(t *testing.T) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Dir(dbPath)})
 	if err != nil {
-		t.Fatalf("NewSQLiteStorage failed: %v", err)
+		t.Fatalf("NewStorage failed: %v", err)
 	}
 	defer store.Close()
 
@@ -407,7 +407,7 @@ func TestRoundTripIssue(t *testing.T) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Dir(dbPath)})
 	if err != nil {
-		t.Fatalf("NewSQLiteStorage failed: %v", err)
+		t.Fatalf("NewStorage failed: %v", err)
 	}
 	defer store.Close()
 
@@ -494,7 +494,7 @@ func TestImportWithDeletedParent(t *testing.T) {
 	// (simulating scenario where parent was deleted)
 	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Dir(dbPath)})
 	if err != nil {
-		t.Fatalf("NewSQLiteStorage failed: %v", err)
+		t.Fatalf("NewStorage failed: %v", err)
 	}
 	defer store.Close()
 
