@@ -1600,12 +1600,14 @@ func TestInitBEADS_DIR(t *testing.T) {
 			t.Fatalf("Init with BEADS_DIR failed: %v", err)
 		}
 
-		expectedDBPath := filepath.Join(beadsDirPath, beads.CanonicalDatabaseName)
-		if _, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
-			t.Errorf("Database was not created at BEADS_DIR path: %s", expectedDBPath)
+		expectedDBPath := filepath.Join(beadsDirPath, "dolt")
+		if info, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
+			t.Errorf("Dolt database was not created at BEADS_DIR path: %s", expectedDBPath)
+		} else if !info.IsDir() {
+			t.Errorf("Expected %s to be a directory", expectedDBPath)
 		}
 
-		cwdDBPath := filepath.Join(cwdPath, ".beads", beads.CanonicalDatabaseName)
+		cwdDBPath := filepath.Join(cwdPath, ".beads", "dolt")
 		if _, err := os.Stat(cwdDBPath); err == nil {
 			t.Errorf("Database should NOT have been created at CWD: %s", cwdDBPath)
 		}
@@ -1642,9 +1644,11 @@ func TestInitBEADS_DIR(t *testing.T) {
 			t.Fatalf("Init without BEADS_DIR failed: %v", err)
 		}
 
-		expectedDBPath := filepath.Join(tmpDir, ".beads", beads.CanonicalDatabaseName)
-		if _, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
-			t.Errorf("Database was not created at default CWD/.beads path: %s", expectedDBPath)
+		expectedDBPath := filepath.Join(tmpDir, ".beads", "dolt")
+		if info, err := os.Stat(expectedDBPath); os.IsNotExist(err) {
+			t.Errorf("Dolt database was not created at default CWD/.beads path: %s", expectedDBPath)
+		} else if !info.IsDir() {
+			t.Errorf("Expected %s to be a directory", expectedDBPath)
 		}
 
 		store, err := openExistingTestDB(t, expectedDBPath)
@@ -1665,6 +1669,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 
 	// Precedence: BEADS_DB > BEADS_DIR
 	t.Run("BEADS_DB_OverridesBeadsDir", func(t *testing.T) {
+		t.Skip("BEADS_DB env var does not control Dolt store location; Dolt always uses .beads/dolt/")
 		resetBeadsDirState(t)
 
 		beadsDirTarget := t.TempDir()
