@@ -290,8 +290,10 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	}
 	whereClauses := []string{
 		statusClause,
-		"(ephemeral = 0 OR ephemeral IS NULL)", // Exclude wisps by ephemeral flag
-		"(pinned = 0 OR pinned IS NULL)",       // Exclude pinned issues (context markers, not work)
+		"(pinned = 0 OR pinned IS NULL)", // Exclude pinned issues (context markers, not work)
+	}
+	if !filter.IncludeEphemeral {
+		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 	}
 	args := []interface{}{}
 	if filter.Status != "" {

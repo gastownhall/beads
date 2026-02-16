@@ -1417,6 +1417,45 @@ func TestDoltStoreGetReadyWork(t *testing.T) {
 	if !foundReady {
 		t.Error("expected ready issue to be in ready work")
 	}
+
+	// Test ephemeral filtering: create an ephemeral issue
+	ephemeral := &types.Issue{
+		ID:        "test-ephemeral",
+		Title:     "Ephemeral Task",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, ephemeral, "tester"); err != nil {
+		t.Fatalf("failed to create ephemeral issue: %v", err)
+	}
+
+	// Default filter should exclude ephemeral
+	readyDefault, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("failed to get ready work (default): %v", err)
+	}
+	for _, issue := range readyDefault {
+		if issue.ID == ephemeral.ID {
+			t.Error("expected ephemeral issue to be excluded by default")
+		}
+	}
+
+	// IncludeEphemeral should include it
+	readyWithEph, err := store.GetReadyWork(ctx, types.WorkFilter{IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("failed to get ready work (include-ephemeral): %v", err)
+	}
+	foundEphemeral := false
+	for _, issue := range readyWithEph {
+		if issue.ID == ephemeral.ID {
+			foundEphemeral = true
+		}
+	}
+	if !foundEphemeral {
+		t.Error("expected ephemeral issue to be included when IncludeEphemeral=true")
+	}
 }
 
 // TestCloseWithTimeout tests the close timeout helper function

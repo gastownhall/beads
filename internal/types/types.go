@@ -1012,6 +1012,11 @@ type WorkFilter struct {
 	// Time-based deferral filtering (GH#820)
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps
 
+	// Ephemeral issue filtering
+	// By default, GetReadyWork excludes ephemeral issues (wisps).
+	// Set to true to include them (e.g., for merge-request processing).
+	IncludeEphemeral bool
+
 	// Molecule step filtering
 	// By default, GetReadyWork excludes mol/wisp steps (IDs containing -mol- or -wisp-)
 	// Set to true for internal callers that need to see mol steps (e.g., findGateReadyMolecules)

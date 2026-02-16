@@ -55,6 +55,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		prettyFormat, _ := cmd.Flags().GetBool("pretty")
 		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
+		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 		rigOverride, _ := cmd.Flags().GetString("rig")
 		var molType *types.MolType
 		if molTypeStr != "" {
@@ -86,7 +87,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			SortPolicy:      types.SortPolicy(sortPolicy),
 			Labels:          labels,
 			LabelsAny:       labelsAny,
-			IncludeDeferred: includeDeferred, // GH#820: respect --include-deferred flag
+			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
+			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -378,6 +380,7 @@ func init() {
 	readyCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
 	readyCmd.Flags().Bool("pretty", false, "Display issues in a tree format with status/priority symbols")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
+	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig gastown, --rig gt-, --rig gt)")
 	rootCmd.AddCommand(readyCmd)
