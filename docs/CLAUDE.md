@@ -49,8 +49,8 @@ Remote (shared across machines)
 Core implementation:
 - Dolt storage: `internal/storage/dolt/`
 - Export: `cmd/bd/export.go`
-- Import: `internal/importer/importer.go`
-- Sync: `cmd/bd/sync_helpers.go`, `cmd/bd/sync_conflict.go`
+- Import: `cmd/bd/import.go`
+- Sync: `cmd/bd/sync_helpers.go`, `cmd/bd/sync_git.go`
 
 ### Key Data Types
 
@@ -84,7 +84,7 @@ golangci-lint run ./...
 ## Testing Philosophy
 
 - Unit tests live next to implementation (`*_test.go`)
-- Integration tests use real databases (Dolt or SQLite temp files)
+- Integration tests use real Dolt databases (via embedded server in temp dirs)
 - Script-based tests in `cmd/bd/testdata/*.txt` (see `scripttest_test.go`)
 - RPC layer has extensive isolation and edge case coverage
 
