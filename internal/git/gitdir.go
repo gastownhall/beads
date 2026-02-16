@@ -135,6 +135,19 @@ func GetGitHooksDir() (string, error) {
 	if out, err := cmd.Output(); err == nil {
 		hooksPath := strings.TrimSpace(string(out))
 		if hooksPath != "" {
+			// Expand tilde — git config may return ~/... which Go doesn't expand.
+			// Without this, Windows treats "~/.githooks" as a relative path and
+			// joins it to the repo root, creating a literal "~" directory. (GH#1796)
+			if strings.HasPrefix(hooksPath, "~/") || strings.HasPrefix(hooksPath, "~\\") {
+				if home, err := os.UserHomeDir(); err == nil {
+					hooksPath = filepath.Join(home, hooksPath[2:])
+				}
+			} else if hooksPath == "~" {
+				if home, err := os.UserHomeDir(); err == nil {
+					hooksPath = home
+				}
+			}
+
 			if filepath.IsAbs(hooksPath) {
 				return hooksPath, nil
 			}
@@ -144,6 +157,7 @@ func GetGitHooksDir() (string, error) {
 			if abs, err := filepath.Abs(p); err == nil {
 				return abs, nil
 			}
+
 			return p, nil
 		}
 	}
