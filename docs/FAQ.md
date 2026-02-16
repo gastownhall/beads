@@ -398,7 +398,7 @@ That's it! No PostgreSQL, no Redis, no Docker, no node_modules.
 
 ### Can I extend bd's database?
 
-See [EXTENDING.md](EXTENDING.md) for the legacy SQLite extension approach (deprecated). With the Dolt backend, use `bd query` for direct SQL access or build integrations using `bd --json` CLI output.
+With the Dolt backend, use `bd query` for direct SQL access or build integrations using `bd --json` CLI output.
 
 ### Does bd support Windows?
 

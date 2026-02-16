@@ -379,7 +379,7 @@ The `bd mol squash` command uses hard delete intentionally - tombstones would be
 - [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
 - [INTERNALS.md](INTERNALS.md) - FlushManager, Blocked Cache implementation details
 - [DAEMON.md](DAEMON.md) - Daemon management and configuration
-- [EXTENDING.md](EXTENDING.md) - Extending bd (deprecated, SQLite-era)
+- [ADVANCED.md](ADVANCED.md) - Advanced features and configuration
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Recovery procedures and common issues
 - [FAQ.md](FAQ.md) - Common questions about the architecture
 - [COLLISION_MATH.md](COLLISION_MATH.md) - Hash collision probability analysis
