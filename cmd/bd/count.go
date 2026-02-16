@@ -103,7 +103,6 @@ Examples:
 		labelsAny = utils.NormalizeLabels(labelsAny)
 
 		ctx := rootCtx
-		requireFreshDB(ctx)
 
 		// Direct mode
 		filter := types.IssueFilter{}

@@ -168,7 +168,6 @@ func displayShowIssue(ctx context.Context, issueID string) {
 // watchIssue watches for changes to an issue and auto-refreshes the display (GH#654)
 func watchIssue(ctx context.Context, issueID string) {
 	// Ensure we have a fresh database for watching (matches non-watch path)
-	requireFreshDB(ctx)
 
 	// Find .beads directory
 	beadsDir := ".beads"

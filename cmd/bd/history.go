@@ -29,7 +29,6 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
-		requireFreshDB(ctx)
 
 		// Get issue history
 		history, err := store.History(ctx, issueID)

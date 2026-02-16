@@ -67,18 +67,7 @@ func getDebounceDuration() time.Duration {
 // If multi-repo mode is configured, routes issues to their respective JSONL files.
 // Otherwise, exports to a single JSONL file.
 func exportToJSONLWithStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
-	// Try multi-repo export first
-	results, err := store.ExportToMultiRepo(ctx)
-	if err != nil {
-		return fmt.Errorf("multi-repo export failed: %w", err)
-	}
-	if results != nil {
-		// Multi-repo mode active - export succeeded
-		return nil
-	}
-
-	// Single-repo mode - use existing logic
-	// Get all issues for sync propagation
+	// Get all issues for export
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return fmt.Errorf("failed to get issues: %w", err)
@@ -180,17 +169,6 @@ func exportToJSONLWithStore(ctx context.Context, store *dolt.DoltStore, jsonlPat
 
 // importToJSONLWithStore imports issues from JSONL using the provided store.
 func importToJSONLWithStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
-	// Try multi-repo import first
-	results, err := store.HydrateFromMultiRepo(ctx)
-	if err != nil {
-		return fmt.Errorf("multi-repo import failed: %w", err)
-	}
-	if results != nil {
-		// Multi-repo mode active - import succeeded
-		return nil
-	}
-
-	// Single-repo mode - use existing logic
 	file, err := os.Open(jsonlPath) // #nosec G304 - controlled path from config
 	if err != nil {
 		return fmt.Errorf("failed to open JSONL: %w", err)

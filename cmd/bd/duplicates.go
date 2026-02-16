@@ -34,7 +34,6 @@ Example:
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := rootCtx
 
-		requireFreshDB(ctx)
 
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})

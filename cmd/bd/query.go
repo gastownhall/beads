@@ -125,7 +125,6 @@ Examples:
 
 		ctx := rootCtx
 
-		requireFreshDB(ctx)
 
 		// Direct mode
 		if store == nil {
@@ -148,17 +147,6 @@ Examples:
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
-		}
-
-		// If no issues found, check if git has issues and auto-import
-		if len(issues) == 0 {
-			if checkAndAutoImport(ctx, store) {
-				issues, err = store.SearchIssues(ctx, "", searchFilter)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			}
 		}
 
 		// Apply predicate filter if needed (for OR queries)

@@ -2,8 +2,6 @@ package main
 
 import (
 	"cmp"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -190,7 +188,6 @@ Examples:
 			defer func() { _ = store.Close() }()
 		}
 
-		requireFreshDB(rootCtx)
 
 		// Handle --events and --events-reset flags
 		if eventsFlag || eventsReset {
@@ -537,30 +534,8 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Skipped %d issue(s) with timestamp-only changes\n", skippedCount)
 		}
 
-		// Only clear dirty issues and auto-flush state if exporting to the default JSONL path
-		// This prevents clearing dirty flags when exporting to stdout or custom paths (e.g., bd export -o backup.jsonl)
-		if output == findJSONLPath() {
-			// Clear only the issues that were actually exported (fixes bd-52 race condition)
-			if err := store.ClearDirtyIssuesByID(ctx, exportedIDs); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clear dirty issues: %v\n", err)
-			}
-
-			// Clear auto-flush state since we just manually exported
-			// This cancels any pending auto-flush timer and marks DB as clean
-			clearAutoFlushState()
-
-			// Store JSONL file hash for integrity validation
-			// nolint:gosec // G304: finalPath is validated JSONL export path
-			jsonlData, err := os.ReadFile(finalPath)
-			if err == nil {
-				hasher := sha256.New()
-				hasher.Write(jsonlData)
-				fileHash := hex.EncodeToString(hasher.Sum(nil))
-				if err := store.SetJSONLFileHash(ctx, fileHash); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to update jsonl_file_hash: %v\n", err)
-				}
-			}
-		}
+		// Suppress "unused" for exportedIDs (used in JSON stats below)
+		_ = exportedIDs
 
 		// If writing to file, atomically replace the target file
 		if tempFile != nil {

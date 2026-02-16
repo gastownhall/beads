@@ -620,8 +620,6 @@ var listCmd = &cobra.Command{
 			}
 			defer func() { _ = rigStore.Close() }() // Best effort cleanup
 			activeStore = rigStore
-		} else {
-			requireFreshDB(ctx)
 		}
 
 		// Direct mode
@@ -629,18 +627,6 @@ var listCmd = &cobra.Command{
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
-		}
-
-		// If no issues found, check if git has issues and auto-import (only for local store)
-		if len(issues) == 0 && rigOverride == "" {
-			if checkAndAutoImport(ctx, activeStore) {
-				// Re-run the query after import
-				issues, err = activeStore.SearchIssues(ctx, "", filter)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			}
 		}
 
 		// Apply sorting

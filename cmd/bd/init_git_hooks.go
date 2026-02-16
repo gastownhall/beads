@@ -371,12 +371,6 @@ exit 0
 `
 }
 
-// mergeDriverInstalled always returns true now that the 3-way merge engine
-// has been removed (Dolt handles sync natively). No new merge driver installations.
-func mergeDriverInstalled() bool {
-	return true
-}
-
 // installJJHooks installs simplified git hooks for colocated jujutsu+git repos.
 // jj's model is simpler: the working copy IS always a commit, so no staging needed.
 // Changes flow into the current change automatically.
@@ -550,8 +544,3 @@ func printJJAliasInstructions() {
 	fmt.Printf("For more details, see: https://github.com/steveyegge/beads/blob/main/docs/JUJUTSU.md\n\n")
 }
 
-// installMergeDriver is a no-op now that the 3-way merge engine has been removed.
-// Dolt handles sync natively without a git merge driver.
-func installMergeDriver() error {
-	return nil
-}

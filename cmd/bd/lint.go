@@ -50,7 +50,6 @@ Examples:
 		var issues []*types.Issue
 
 		// Direct mode
-		requireFreshDB(ctx)
 
 		if store == nil {
 			FatalErrorWithHint("database not initialized",

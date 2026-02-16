@@ -121,24 +121,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			defer func() { _ = rigStore.Close() }()
 			activeStore = rigStore
 		} else {
-			requireFreshDB(ctx)
 		}
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
-		}
-		// If no ready work found, check if git has issues and auto-import (only for local store)
-		if len(issues) == 0 && rigOverride == "" {
-			if checkAndAutoImport(ctx, activeStore) {
-				// Re-run the query after import
-				issues, err = activeStore.GetReadyWork(ctx, filter)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			}
 		}
 		if jsonOutput {
 			// Always output array, even if empty

@@ -111,17 +111,6 @@ be set via BEADS_DOLT_PASSWORD environment variable.`,
 			prefix = config.GetString("issue-prefix")
 		}
 
-		// auto-detect prefix from first issue in JSONL file
-		if prefix == "" {
-			issueCount, jsonlPath, gitRef := checkGitForIssues()
-			if issueCount > 0 {
-				firstIssue, err := readFirstIssueFromGit(jsonlPath, gitRef)
-				if firstIssue != nil && err == nil {
-					prefix = utils.ExtractIssuePrefix(firstIssue.ID)
-				}
-			}
-		}
-
 		// auto-detect prefix from directory name
 		if prefix == "" {
 			// Auto-detect from directory name

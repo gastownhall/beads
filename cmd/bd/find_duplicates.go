@@ -95,7 +95,6 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 		}
 	}
 
-	requireFreshDB(ctx)
 
 	// Fetch issues
 	filter := types.IssueFilter{}

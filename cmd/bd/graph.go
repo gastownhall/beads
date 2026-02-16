@@ -89,7 +89,6 @@ Examples:
 			os.Exit(1)
 		}
 
-		requireFreshDB(ctx)
 
 		// Handle --all flag: show graph for all open issues
 		if graphAll {

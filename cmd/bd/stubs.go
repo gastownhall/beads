@@ -25,10 +25,6 @@ func findJSONLPath() string {
 	return ""
 }
 
-// clearAutoFlushState is a no-op stub. Auto-flush was part of the old daemon/JSONL
-// sync system which has been removed. Dolt handles persistence natively.
-func clearAutoFlushState() {}
-
 // readFromGitRef reads a file from a specific git ref (e.g., HEAD, branch name).
 // Returns the raw file contents from git.
 func readFromGitRef(filePath, gitRef string) ([]byte, error) {

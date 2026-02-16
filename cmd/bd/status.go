@@ -74,7 +74,6 @@ Examples:
 		var err error
 
 		ctx := rootCtx
-		requireFreshDB(ctx)
 
 		// Direct mode
 		stats, err = store.GetStatistics(ctx)
