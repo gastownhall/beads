@@ -1349,6 +1349,51 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 }
 
+func TestCheckRedirectTargetValid_AbsolutePath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	targetRoot := filepath.Join(tmpDir, "target")
+	targetBeads := filepath.Join(targetRoot, ".beads")
+	if err := os.MkdirAll(targetBeads, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetBeads, "metadata.json"), []byte(`{"backend":"dolt"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	workRoot := filepath.Join(tmpDir, "work")
+	workBeads := filepath.Join(workRoot, ".beads")
+	if err := os.MkdirAll(workBeads, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	redirectPath := filepath.Join(workBeads, "redirect")
+	if err := os.WriteFile(redirectPath, []byte(targetBeads+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workRoot); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	check := CheckRedirectTargetValid()
+	if check.Status != StatusOK {
+		t.Fatalf("expected status %s, got %s (detail: %s)", StatusOK, check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Message, targetBeads) {
+		t.Errorf("expected message to include target path, got: %s", check.Message)
+	}
+}
+
 func TestGitignoreTemplate_ContainsRedirect(t *testing.T) {
 	// Verify the template contains the redirect pattern
 	if !strings.Contains(GitignoreTemplate, "redirect") {
