@@ -715,7 +715,7 @@ func setupTwoTowns(t *testing.T, ctx context.Context) (*TownSetup, *TownSetup) {
 }
 
 // TestSyncWithCredentials tests federation sync with SQL user authentication.
-// Note: PushWithCredentials may hang if Dolt's CALL DOLT_PUSH doesn't respect
+// Note: PushTo may hang if Dolt's CALL DOLT_PUSH doesn't respect
 // context cancellation. We enforce a 30s Go-level timeout around the push.
 func TestSyncWithCredentials(t *testing.T) {
 	skipIfNoDolt(t)
@@ -775,7 +775,9 @@ func TestSyncWithCredentials(t *testing.T) {
 	// respect context cancellation for network operations.
 	pushDone := make(chan error, 1)
 	go func() {
-		pushDone <- alpha.store.PushWithCredentials(ctx, "beta-town")
+		pushDone <- alpha.store.withPeerCredentials(ctx, "beta-town", func() error {
+			return alpha.store.PushTo(ctx, "beta-town")
+		})
 	}()
 	select {
 	case err := <-pushDone:

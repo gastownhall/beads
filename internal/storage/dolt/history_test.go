@@ -9,10 +9,10 @@ import (
 )
 
 // =============================================================================
-// GetIssueHistory Tests
+// getIssueHistory Tests
 // =============================================================================
 
-func TestGetIssueHistory(t *testing.T) {
+func TestgetIssueHistory(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -51,9 +51,9 @@ func TestGetIssueHistory(t *testing.T) {
 	}
 
 	// Get history
-	history, err := store.GetIssueHistory(ctx, issue.ID)
+	history, err := store.getIssueHistory(ctx, issue.ID)
 	if err != nil {
-		t.Fatalf("GetIssueHistory failed: %v", err)
+		t.Fatalf("getIssueHistory failed: %v", err)
 	}
 
 	// Should have at least 2 history entries (initial + update)
@@ -67,7 +67,7 @@ func TestGetIssueHistory(t *testing.T) {
 	}
 }
 
-func TestGetIssueHistory_NonExistent(t *testing.T) {
+func TestgetIssueHistory_NonExistent(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -75,9 +75,9 @@ func TestGetIssueHistory_NonExistent(t *testing.T) {
 	defer cancel()
 
 	// Get history for non-existent issue
-	history, err := store.GetIssueHistory(ctx, "nonexistent-id")
+	history, err := store.getIssueHistory(ctx, "nonexistent-id")
 	if err != nil {
-		t.Fatalf("GetIssueHistory failed: %v", err)
+		t.Fatalf("getIssueHistory failed: %v", err)
 	}
 
 	if len(history) != 0 {
@@ -86,10 +86,10 @@ func TestGetIssueHistory_NonExistent(t *testing.T) {
 }
 
 // =============================================================================
-// GetIssueAsOf Tests
+// getIssueAsOf Tests
 // =============================================================================
 
-func TestGetIssueAsOf(t *testing.T) {
+func TestgetIssueAsOf(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -133,9 +133,9 @@ func TestGetIssueAsOf(t *testing.T) {
 	}
 
 	// Query the issue as of the initial commit
-	oldIssue, err := store.GetIssueAsOf(ctx, issue.ID, initialHash)
+	oldIssue, err := store.getIssueAsOf(ctx, issue.ID, initialHash)
 	if err != nil {
-		t.Fatalf("GetIssueAsOf failed: %v", err)
+		t.Fatalf("getIssueAsOf failed: %v", err)
 	}
 
 	if oldIssue == nil {
@@ -157,7 +157,7 @@ func TestGetIssueAsOf(t *testing.T) {
 	}
 }
 
-func TestGetIssueAsOf_InvalidRef(t *testing.T) {
+func TestgetIssueAsOf_InvalidRef(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -165,13 +165,13 @@ func TestGetIssueAsOf_InvalidRef(t *testing.T) {
 	defer cancel()
 
 	// Try with SQL injection attempt
-	_, err := store.GetIssueAsOf(ctx, "test-id", "'; DROP TABLE issues; --")
+	_, err := store.getIssueAsOf(ctx, "test-id", "'; DROP TABLE issues; --")
 	if err == nil {
 		t.Error("expected error for invalid ref, got nil")
 	}
 }
 
-func TestGetIssueAsOf_NonExistentIssue(t *testing.T) {
+func TestgetIssueAsOf_NonExistentIssue(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -200,9 +200,9 @@ func TestGetIssueAsOf_NonExistentIssue(t *testing.T) {
 	}
 
 	// Query non-existent issue at valid commit
-	result, err := store.GetIssueAsOf(ctx, "nonexistent", hash)
+	result, err := store.getIssueAsOf(ctx, "nonexistent", hash)
 	if err != nil {
-		t.Fatalf("GetIssueAsOf failed: %v", err)
+		t.Fatalf("getIssueAsOf failed: %v", err)
 	}
 
 	if result != nil {
@@ -211,162 +211,7 @@ func TestGetIssueAsOf_NonExistentIssue(t *testing.T) {
 }
 
 // =============================================================================
-// GetDiff Tests
-// =============================================================================
-
-func TestGetDiff(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	// Create initial state
-	issue := &types.Issue{
-		ID:        "diff-test",
-		Title:     "Initial",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeTask,
-	}
-	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
-		t.Fatalf("failed to create issue: %v", err)
-	}
-
-	if err := store.Commit(ctx, "Initial"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	fromHash, err := store.GetCurrentCommit(ctx)
-	if err != nil {
-		t.Fatalf("failed to get commit hash: %v", err)
-	}
-
-	// Make a change
-	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
-		"title": "Modified",
-	}, "tester"); err != nil {
-		t.Fatalf("failed to update: %v", err)
-	}
-
-	if err := store.Commit(ctx, "Modified"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	toHash, err := store.GetCurrentCommit(ctx)
-	if err != nil {
-		t.Fatalf("failed to get commit hash: %v", err)
-	}
-
-	// Get diff between commits
-	diff, err := store.GetDiff(ctx, fromHash, toHash)
-	if err != nil {
-		// Some Dolt versions may not support dolt_diff function the same way
-		t.Skipf("GetDiff not supported or failed: %v", err)
-	}
-
-	// Should find changes in the issues table
-	foundIssues := false
-	for _, entry := range diff {
-		if entry.TableName == "issues" {
-			foundIssues = true
-			break
-		}
-	}
-
-	if !foundIssues && len(diff) > 0 {
-		t.Log("diff entries found but not for issues table")
-	}
-}
-
-// =============================================================================
-// GetIssueDiff Tests
-// =============================================================================
-
-func TestGetIssueDiff(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	// Create initial state
-	issue := &types.Issue{
-		ID:          "issuediff-test",
-		Title:       "Original Title",
-		Description: "Original Desc",
-		Status:      types.StatusOpen,
-		Priority:    1,
-		IssueType:   types.TypeTask,
-	}
-	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
-		t.Fatalf("failed to create issue: %v", err)
-	}
-
-	if err := store.Commit(ctx, "Initial"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	fromHash, err := store.GetCurrentCommit(ctx)
-	if err != nil {
-		t.Fatalf("failed to get commit hash: %v", err)
-	}
-
-	// Modify the issue
-	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
-		"title":  "New Title",
-		"status": types.StatusInProgress,
-	}, "tester"); err != nil {
-		t.Fatalf("failed to update: %v", err)
-	}
-
-	if err := store.Commit(ctx, "Updated"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	toHash, err := store.GetCurrentCommit(ctx)
-	if err != nil {
-		t.Fatalf("failed to get commit hash: %v", err)
-	}
-
-	// Get issue-specific diff
-	diff, err := store.GetIssueDiff(ctx, issue.ID, fromHash, toHash)
-	if err != nil {
-		// dolt_diff_issues function may not exist in all versions
-		t.Skipf("GetIssueDiff not supported: %v", err)
-	}
-
-	if diff == nil {
-		t.Skip("no diff returned - may be version dependent")
-	}
-
-	if diff.DiffType != "modified" {
-		t.Logf("diff type: %s", diff.DiffType)
-	}
-}
-
-func TestGetIssueDiff_InvalidRefs(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	// Test with invalid fromRef
-	_, err := store.GetIssueDiff(ctx, "test", "invalid;ref", "main")
-	if err == nil {
-		t.Error("expected error for invalid fromRef")
-	}
-
-	// Test with invalid toRef
-	_, err = store.GetIssueDiff(ctx, "test", "main", "invalid;ref")
-	if err == nil {
-		t.Error("expected error for invalid toRef")
-	}
-}
-
-// =============================================================================
-// GetInternalConflicts Tests
+// getInternalConflicts Tests
 // =============================================================================
 
 func TestGetInternalConflicts_NoConflicts(t *testing.T) {

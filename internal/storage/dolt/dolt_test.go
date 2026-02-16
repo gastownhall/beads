@@ -130,7 +130,7 @@ func TestNewDoltStore(t *testing.T) {
 	}
 
 	// Verify not closed
-	if store.IsClosed() {
+	if store.closed.Load() {
 		t.Error("store should not be closed")
 	}
 }

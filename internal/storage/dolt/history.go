@@ -64,16 +64,16 @@ func validateTableName(table string) error {
 	return nil
 }
 
-// IssueHistory represents an issue at a specific point in history
-type IssueHistory struct {
+// issueHistory represents an issue at a specific point in history
+type issueHistory struct {
 	Issue      *types.Issue
 	CommitHash string
 	Committer  string
 	CommitDate time.Time
 }
 
-// GetIssueHistory returns the complete history of an issue
-func (s *DoltStore) GetIssueHistory(ctx context.Context, issueID string) ([]*IssueHistory, error) {
+// getIssueHistory returns the complete history of an issue
+func (s *DoltStore) getIssueHistory(ctx context.Context, issueID string) ([]*issueHistory, error) {
 	rows, err := s.queryContext(ctx, `
 		SELECT
 			id, title, description, design, acceptance_criteria, notes,
@@ -90,9 +90,9 @@ func (s *DoltStore) GetIssueHistory(ctx context.Context, issueID string) ([]*Iss
 	}
 	defer rows.Close()
 
-	var history []*IssueHistory
+	var history []*issueHistory
 	for rows.Next() {
-		var h IssueHistory
+		var h issueHistory
 		var issue types.Issue
 		var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 		var closedAt sql.NullTime
@@ -151,8 +151,8 @@ func (s *DoltStore) GetIssueHistory(ctx context.Context, issueID string) ([]*Iss
 	return history, rows.Err()
 }
 
-// GetIssueAsOf returns an issue as it existed at a specific commit or time
-func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
+// getIssueAsOf returns an issue as it existed at a specific commit or time
+func (s *DoltStore) getIssueAsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	// Validate ref to prevent SQL injection
 	if err := validateRef(ref); err != nil {
 		return nil, fmt.Errorf("invalid ref: %w", err)
@@ -212,124 +212,9 @@ func (s *DoltStore) GetIssueAsOf(ctx context.Context, issueID string, ref string
 	return &issue, nil
 }
 
-// DiffEntry represents a change between two commits
-type DiffEntry struct {
-	TableName  string
-	DiffType   string // "added", "modified", "removed"
-	FromCommit string
-	ToCommit   string
-	RowID      string
-}
-
-// GetDiff returns changes between two commits
-func (s *DoltStore) GetDiff(ctx context.Context, fromRef, toRef string) ([]*DiffEntry, error) {
-	rows, err := s.queryContext(ctx, `
-		SELECT table_name, diff_type, from_commit, to_commit
-		FROM dolt_diff(?, ?)
-	`, fromRef, toRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get diff: %w", err)
-	}
-	defer rows.Close()
-
-	var entries []*DiffEntry
-	for rows.Next() {
-		var e DiffEntry
-		if err := rows.Scan(&e.TableName, &e.DiffType, &e.FromCommit, &e.ToCommit); err != nil {
-			return nil, fmt.Errorf("failed to scan diff entry: %w", err)
-		}
-		entries = append(entries, &e)
-	}
-
-	return entries, rows.Err()
-}
-
-// GetIssueDiff returns detailed changes to a specific issue between commits
-func (s *DoltStore) GetIssueDiff(ctx context.Context, issueID, fromRef, toRef string) (*IssueDiff, error) {
-	// Validate refs to prevent SQL injection
-	if err := validateRef(fromRef); err != nil {
-		return nil, fmt.Errorf("invalid fromRef: %w", err)
-	}
-	if err := validateRef(toRef); err != nil {
-		return nil, fmt.Errorf("invalid toRef: %w", err)
-	}
-
-	// nolint:gosec // G201: refs are validated by validateRef() above
-	// Syntax: dolt_diff(from_ref, to_ref, 'table_name')
-	query := fmt.Sprintf(`
-		SELECT
-			from_id, to_id,
-			from_title, to_title,
-			from_status, to_status,
-			from_description, to_description,
-			diff_type
-		FROM dolt_diff('%s', '%s', 'issues')
-		WHERE from_id = ? OR to_id = ?
-	`, fromRef, toRef)
-
-	var diff IssueDiff
-	var fromID, toID, fromTitle, toTitle, fromStatus, toStatus sql.NullString
-	var fromDesc, toDesc sql.NullString
-
-	err := s.db.QueryRowContext(ctx, query, issueID, issueID).Scan(
-		&fromID, &toID,
-		&fromTitle, &toTitle,
-		&fromStatus, &toStatus,
-		&fromDesc, &toDesc,
-		&diff.DiffType,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get issue diff: %w", err)
-	}
-
-	if fromID.Valid {
-		diff.FromID = fromID.String
-	}
-	if toID.Valid {
-		diff.ToID = toID.String
-	}
-	if fromTitle.Valid {
-		diff.FromTitle = fromTitle.String
-	}
-	if toTitle.Valid {
-		diff.ToTitle = toTitle.String
-	}
-	if fromStatus.Valid {
-		diff.FromStatus = fromStatus.String
-	}
-	if toStatus.Valid {
-		diff.ToStatus = toStatus.String
-	}
-	if fromDesc.Valid {
-		diff.FromDescription = fromDesc.String
-	}
-	if toDesc.Valid {
-		diff.ToDescription = toDesc.String
-	}
-
-	return &diff, nil
-}
-
-// IssueDiff represents changes to an issue between two commits
-type IssueDiff struct {
-	DiffType        string // "added", "modified", "removed"
-	FromID          string
-	ToID            string
-	FromTitle       string
-	ToTitle         string
-	FromStatus      string
-	ToStatus        string
-	FromDescription string
-	ToDescription   string
-}
-
-// GetInternalConflicts returns any merge conflicts in the current state (internal format).
+// getInternalConflicts returns any merge conflicts in the current state (internal format).
 // For the public interface, use GetConflicts which returns storage.Conflict.
-func (s *DoltStore) GetInternalConflicts(ctx context.Context) ([]*TableConflict, error) {
+func (s *DoltStore) getInternalConflicts(ctx context.Context) ([]*tableConflict, error) {
 	rows, err := s.queryContext(ctx,
 		"SELECT `table`, num_conflicts FROM dolt_conflicts")
 	if err != nil {
@@ -337,9 +222,9 @@ func (s *DoltStore) GetInternalConflicts(ctx context.Context) ([]*TableConflict,
 	}
 	defer rows.Close()
 
-	var conflicts []*TableConflict
+	var conflicts []*tableConflict
 	for rows.Next() {
-		var c TableConflict
+		var c tableConflict
 		if err := rows.Scan(&c.TableName, &c.NumConflicts); err != nil {
 			return nil, fmt.Errorf("failed to scan conflict: %w", err)
 		}
@@ -349,8 +234,8 @@ func (s *DoltStore) GetInternalConflicts(ctx context.Context) ([]*TableConflict,
 	return conflicts, rows.Err()
 }
 
-// TableConflict represents a Dolt table-level merge conflict (internal representation).
-type TableConflict struct {
+// tableConflict represents a Dolt table-level merge conflict (internal representation).
+type tableConflict struct {
 	TableName    string
 	NumConflicts int
 }

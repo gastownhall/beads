@@ -703,19 +703,9 @@ func (s *DoltStore) Path() string {
 	return s.dbPath
 }
 
-// IsClosed returns true if Close() has been called
-func (s *DoltStore) IsClosed() bool {
-	return s.closed.Load()
-}
-
 // UnderlyingDB returns the underlying *sql.DB connection
 func (s *DoltStore) UnderlyingDB() *sql.DB {
 	return s.db
-}
-
-// UnderlyingConn returns a connection from the pool
-func (s *DoltStore) UnderlyingConn(ctx context.Context) (*sql.Conn, error) {
-	return s.db.Conn(ctx)
 }
 
 // =============================================================================
@@ -779,23 +769,6 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) error {
 func (s *DoltStore) Merge(ctx context.Context, branch string) ([]storage.Conflict, error) {
 	// DOLT_MERGE may create a merge commit; pass explicit author for determinism.
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", s.commitAuthorString(), branch)
-	if err != nil {
-		// Check if the error is due to conflicts
-		conflicts, conflictErr := s.GetConflicts(ctx)
-		if conflictErr == nil && len(conflicts) > 0 {
-			return conflicts, nil
-		}
-		return nil, fmt.Errorf("failed to merge branch %s: %w", branch, err)
-	}
-	return nil, nil
-}
-
-// MergeAllowUnrelated merges the specified branch allowing unrelated histories.
-// This is needed for initial federation sync between independently initialized towns.
-// Returns any merge conflicts if present.
-func (s *DoltStore) MergeAllowUnrelated(ctx context.Context, branch string) ([]storage.Conflict, error) {
-	// DOLT_MERGE may create a merge commit; pass explicit author for determinism.
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_MERGE('--allow-unrelated-histories', '--author', ?, ?)", s.commitAuthorString(), branch)
 	if err != nil {
 		// Check if the error is due to conflicts
 		conflicts, conflictErr := s.GetConflicts(ctx)

@@ -12,7 +12,7 @@ import (
 
 // History returns the complete version history for an issue.
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
-	internal, err := s.GetIssueHistory(ctx, issueID)
+	internal, err := s.getIssueHistory(ctx, issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.His
 // AsOf returns the state of an issue at a specific commit hash or branch ref.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
-	return s.GetIssueAsOf(ctx, issueID, ref)
+	return s.getIssueAsOf(ctx, issueID, ref)
 }
 
 // Diff returns changes between two commits/branches.
@@ -172,7 +172,7 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 // GetConflicts returns any merge conflicts in the current state.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
-	internal, err := s.GetInternalConflicts(ctx)
+	internal, err := s.getInternalConflicts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -184,57 +184,6 @@ func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error
 		})
 	}
 	return conflicts, nil
-}
-
-// ExportChanges represents the result of GetChangesSinceExport.
-type ExportChanges struct {
-	Entries         []*storage.DiffEntry // Changes since the export commit
-	NeedsFullExport bool                 // True if fromCommit is invalid/GC'd
-}
-
-// GetChangesSinceExport returns changes since a specific commit hash.
-// If the commit hash is invalid or has been garbage collected, it returns
-// NeedsFullExport=true to indicate a full export is required.
-func (s *DoltStore) GetChangesSinceExport(ctx context.Context, fromCommit string) (*ExportChanges, error) {
-	// Empty commit means this is the first export
-	if fromCommit == "" {
-		return &ExportChanges{NeedsFullExport: true}, nil
-	}
-
-	// Validate the ref format
-	if err := validateRef(fromCommit); err != nil {
-		return &ExportChanges{NeedsFullExport: true}, nil
-	}
-
-	// Check if the commit exists
-	exists, err := s.CommitExists(ctx, fromCommit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check commit existence: %w", err)
-	}
-	if !exists {
-		return &ExportChanges{NeedsFullExport: true}, nil
-	}
-
-	// Get current HEAD commit to check if we're already at fromCommit
-	currentCommit, err := s.GetCurrentCommit(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current commit: %w", err)
-	}
-
-	// If fromCommit equals HEAD, there are no changes.
-	// Note: This also avoids a nil pointer panic in the embedded Dolt driver
-	// when querying dolt_diff with identical from/to refs.
-	if fromCommit == currentCommit {
-		return &ExportChanges{Entries: nil}, nil
-	}
-
-	// Get the diff from that commit to HEAD
-	entries, err := s.Diff(ctx, fromCommit, "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get diff: %w", err)
-	}
-
-	return &ExportChanges{Entries: entries}, nil
 }
 
 // CommitExists checks whether a commit hash exists in the repository.
