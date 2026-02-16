@@ -250,38 +250,46 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(cfg.Path, 0o750); err != nil {
-		return nil, fmt.Errorf("failed to create database directory: %w", err)
-	}
-
-	// IMPORTANT: Use an absolute path for embedded DSNs.
-	//
-	// The embedded driver sets its internal filesystem working directory to Config.Directory
-	// and also passes the directory path through to lower layers. If we pass a relative path,
-	// the working-directory stacking can effectively double it (e.g. ".beads/dolt/.beads/dolt").
-	absPath, err := filepath.Abs(cfg.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	// Acquire advisory flock before opening dolt (embedded mode only).
-	// This prevents multiple bd processes from competing for dolt's internal LOCK file.
-	// Set BD_SKIP_ACCESS_LOCK=1 to bypass flock for testing whether Dolt's internal
-	// locking is sufficient. See bd-39gso for testing plan.
+	// Embedded-only: create local directory and acquire access lock.
+	// In server mode, the database lives on the remote dolt sql-server;
+	// creating a local dolt/ directory would shadow the server connection
+	// with an empty embedded db (see bd-vyr).
+	var absPath string
 	var accessLock *AccessLock
-	if !cfg.ServerMode && cfg.OpenTimeout > 0 && os.Getenv("BD_SKIP_ACCESS_LOCK") == "" {
-		exclusive := !cfg.ReadOnly
-		var lockErr error
-		accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
-		if lockErr != nil {
-			return nil, fmt.Errorf("failed to acquire dolt access lock: %w", lockErr)
+	if !cfg.ServerMode {
+		if err := os.MkdirAll(cfg.Path, 0o750); err != nil {
+			return nil, fmt.Errorf("failed to create database directory: %w", err)
+		}
+
+		// IMPORTANT: Use an absolute path for embedded DSNs.
+		//
+		// The embedded driver sets its internal filesystem working directory to Config.Directory
+		// and also passes the directory path through to lower layers. If we pass a relative path,
+		// the working-directory stacking can effectively double it (e.g. ".beads/dolt/.beads/dolt").
+		var err error
+		absPath, err = filepath.Abs(cfg.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get absolute path: %w", err)
+		}
+
+		// Acquire advisory flock before opening dolt (embedded mode only).
+		// This prevents multiple bd processes from competing for dolt's internal LOCK file.
+		// Set BD_SKIP_ACCESS_LOCK=1 to bypass flock for testing whether Dolt's internal
+		// locking is sufficient. See bd-39gso for testing plan.
+		if cfg.OpenTimeout > 0 && os.Getenv("BD_SKIP_ACCESS_LOCK") == "" {
+			exclusive := !cfg.ReadOnly
+			var lockErr error
+			accessLock, lockErr = AcquireAccessLock(absPath, exclusive, cfg.OpenTimeout)
+			if lockErr != nil {
+				return nil, fmt.Errorf("failed to acquire dolt access lock: %w", lockErr)
+			}
 		}
 	}
 
 	var db *sql.DB
 	var connStr string
 	var embeddedConnector *embedded.Connector
+	var err error
 
 	if cfg.ServerMode {
 		// Fail-fast TCP check before MySQL protocol initialization.
