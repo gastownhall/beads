@@ -1,6 +1,6 @@
 [project]
 name = "beads-mcp"
-version = "0.50.3"
+version = "0.51.0"
 description = "MCP server for beads issue tracker."
 readme = "README.md"
 requires-python = ">=3.10"

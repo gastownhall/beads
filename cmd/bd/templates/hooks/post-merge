@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # bd-shim v1
-# bd-hooks-version: 0.50.3
+# bd-hooks-version: 0.51.0
 #
 # bd (beads) post-merge hook - thin shim
 #
