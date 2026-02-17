@@ -70,6 +70,15 @@ func formatPrettyIssue(issue *types.Issue) string {
 	return fmt.Sprintf("%s %s %s %s%s", statusIcon, issue.ID, priorityTag, typeBadge, issue.Title)
 }
 
+// formatPrettyIssueWithContext formats an issue with optional parent epic annotation
+func formatPrettyIssueWithContext(issue *types.Issue, parentEpic string) string {
+	base := formatPrettyIssue(issue)
+	if parentEpic == "" {
+		return base
+	}
+	return base + " " + ui.RenderMuted("← "+parentEpic)
+}
+
 // formatIssueLong formats a single issue in long format to a buffer
 func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) {
 	status := string(issue.Status)

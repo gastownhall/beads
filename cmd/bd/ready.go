@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -54,6 +57,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		parentID, _ := cmd.Flags().GetString("parent")
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		prettyFormat, _ := cmd.Flags().GetBool("pretty")
+		plainFormat, _ := cmd.Flags().GetBool("plain")
 		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
 		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 		rigOverride, _ := cmd.Flags().GetString("rig")
@@ -169,9 +173,26 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			maybeShowTip(store)
 			return
 		}
-		if prettyFormat {
-			displayPrettyList(issues, false)
-		} else {
+		// Check if results were truncated by the limit
+		totalReady := len(issues)
+		truncated := false
+		if filter.Limit > 0 && len(issues) == filter.Limit {
+			// Re-query without limit to get total count
+			countFilter := filter
+			countFilter.Limit = 0
+			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
+			if countErr == nil && len(allIssues) > len(issues) {
+				totalReady = len(allIssues)
+				truncated = true
+			}
+		}
+
+		// Build parent epic map for pretty display
+		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
+
+		// Determine display mode: --plain or --pretty=false triggers plain format
+		usePlain := plainFormat || !prettyFormat
+		if usePlain {
 			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
 				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
@@ -186,6 +207,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 			}
 			fmt.Println()
+		} else {
+			displayReadyList(issues, parentEpicMap)
+		}
+
+		// Show truncation footer if results were limited
+		if truncated {
+			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
 		}
 
 		// Show tip after successful ready (direct mode only)
@@ -236,6 +264,77 @@ var blockedCmd = &cobra.Command{
 			fmt.Println()
 		}
 	},
+}
+
+// buildParentEpicMap builds a map from child issue ID to parent epic title.
+// Only includes parents that are epics.
+func buildParentEpicMap(ctx context.Context, s *dolt.DoltStore, issues []*types.Issue) map[string]string {
+	if len(issues) == 0 {
+		return nil
+	}
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	allDeps, err := s.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil
+	}
+
+	// Find parent-child deps where the issue is the child
+	parentIDs := make(map[string]bool)
+	childToParent := make(map[string]string) // childID -> parentID
+	for issueID, deps := range allDeps {
+		for _, dep := range deps {
+			if dep.Type == types.DepParentChild {
+				parentIDs[dep.DependsOnID] = true
+				childToParent[issueID] = dep.DependsOnID
+			}
+		}
+	}
+
+	if len(parentIDs) == 0 {
+		return nil
+	}
+
+	// Fetch parent issues and filter to epics
+	epicTitles := make(map[string]string) // parentID -> title
+	for parentID := range parentIDs {
+		parent, err := s.GetIssue(ctx, parentID)
+		if err != nil || parent == nil {
+			continue
+		}
+		if parent.IssueType == "epic" {
+			epicTitles[parentID] = parent.Title
+		}
+	}
+
+	// Build final map: childID -> epic title
+	result := make(map[string]string)
+	for childID, parentID := range childToParent {
+		if title, ok := epicTitles[parentID]; ok {
+			result[childID] = title
+		}
+	}
+	return result
+}
+
+// displayReadyList displays ready issues in pretty format with optional parent epic context
+func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
+	for _, issue := range issues {
+		epicTitle := ""
+		if parentEpicMap != nil {
+			epicTitle = parentEpicMap[issue.ID]
+		}
+		fmt.Println(formatPrettyIssueWithContext(issue, epicTitle))
+	}
+
+	// Summary footer
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("Ready: %d issues with no blockers\n", len(issues))
+	fmt.Println()
+	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 }
 
 // runMoleculeReady shows ready steps within a specific molecule
@@ -371,14 +470,15 @@ func init() {
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	readyCmd.Flags().BoolP("unassigned", "u", false, "Show only unassigned issues")
-	readyCmd.Flags().StringP("sort", "s", "hybrid", "Sort policy: hybrid (default), priority, oldest")
+	readyCmd.Flags().StringP("sort", "s", "priority", "Sort policy: priority (default), hybrid, oldest")
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
 	readyCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	readyCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
-	readyCmd.Flags().Bool("pretty", false, "Display issues in a tree format with status/priority symbols")
+	readyCmd.Flags().Bool("pretty", true, "Display issues in a tree format with status/priority symbols")
+	readyCmd.Flags().Bool("plain", false, "Display issues as a plain numbered list")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")

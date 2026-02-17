@@ -282,6 +282,135 @@ func TestReadyCommandInit(t *testing.T) {
 	if len(readyCmd.Short) == 0 {
 		t.Error("readyCmd should have Short description")
 	}
+
+	// Verify --pretty defaults to true
+	prettyFlag := readyCmd.Flags().Lookup("pretty")
+	if prettyFlag == nil {
+		t.Fatal("--pretty flag should exist")
+	}
+	if prettyFlag.DefValue != "true" {
+		t.Errorf("--pretty default should be 'true', got %q", prettyFlag.DefValue)
+	}
+
+	// Verify --plain flag exists and defaults to false
+	plainFlag := readyCmd.Flags().Lookup("plain")
+	if plainFlag == nil {
+		t.Fatal("--plain flag should exist")
+	}
+	if plainFlag.DefValue != "false" {
+		t.Errorf("--plain default should be 'false', got %q", plainFlag.DefValue)
+	}
+
+	// Verify --sort defaults to "priority"
+	sortFlag := readyCmd.Flags().Lookup("sort")
+	if sortFlag == nil {
+		t.Fatal("--sort flag should exist")
+	}
+	if sortFlag.DefValue != "priority" {
+		t.Errorf("--sort default should be 'priority', got %q", sortFlag.DefValue)
+	}
+}
+
+func TestBuildParentEpicMap(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create an epic, a non-epic parent, and child tasks
+	epic := &types.Issue{
+		ID:        "test-epic",
+		Title:     "Auth Overhaul",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}
+	nonEpicParent := &types.Issue{
+		ID:        "test-parent-task",
+		Title:     "Parent Task",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	childOfEpic := &types.Issue{
+		ID:        "test-child-1",
+		Title:     "Implement login",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	childOfTask := &types.Issue{
+		ID:        "test-child-2",
+		Title:     "Subtask of non-epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	orphan := &types.Issue{
+		ID:        "test-orphan",
+		Title:     "Standalone task",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+
+	for _, issue := range []*types.Issue{epic, nonEpicParent, childOfEpic, childOfTask, orphan} {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Add parent-child dependencies
+	deps := []*types.Dependency{
+		{IssueID: "test-child-1", DependsOnID: "test-epic", Type: types.DepParentChild, CreatedAt: time.Now()},
+		{IssueID: "test-child-2", DependsOnID: "test-parent-task", Type: types.DepParentChild, CreatedAt: time.Now()},
+	}
+	for _, dep := range deps {
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("MapsChildToEpicParentOnly", func(t *testing.T) {
+		issues := []*types.Issue{childOfEpic, childOfTask, orphan}
+		result := buildParentEpicMap(ctx, s, issues)
+
+		// child-1 should map to the epic
+		if result["test-child-1"] != "Auth Overhaul" {
+			t.Errorf("Expected test-child-1 to map to 'Auth Overhaul', got %q", result["test-child-1"])
+		}
+
+		// child-2 should NOT be in the map (parent is not an epic)
+		if _, ok := result["test-child-2"]; ok {
+			t.Errorf("test-child-2 should not be in map (parent is not an epic), got %q", result["test-child-2"])
+		}
+
+		// orphan should NOT be in the map
+		if _, ok := result["test-orphan"]; ok {
+			t.Errorf("test-orphan should not be in map (no parent)")
+		}
+	})
+
+	t.Run("EmptyIssuesReturnsNil", func(t *testing.T) {
+		result := buildParentEpicMap(ctx, s, nil)
+		if result != nil {
+			t.Errorf("Expected nil for empty issues, got %v", result)
+		}
+	})
+
+	t.Run("NoParentDepsReturnsNil", func(t *testing.T) {
+		// orphan has no parent-child deps
+		result := buildParentEpicMap(ctx, s, []*types.Issue{orphan})
+		if result != nil {
+			t.Errorf("Expected nil when no parent deps exist, got %v", result)
+		}
+	})
 }
 
 // GH#820: Tests for defer_until filtering in ready work

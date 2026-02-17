@@ -105,6 +105,78 @@ func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
 	}
 }
 
+func TestFormatPrettyIssueWithContext(t *testing.T) {
+	t.Parallel()
+
+	issue := &types.Issue{
+		ID:        "bd-42",
+		Title:     "Implement feature",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+
+	t.Run("WithoutParentEpic", func(t *testing.T) {
+		out := formatPrettyIssueWithContext(issue, "")
+		base := formatPrettyIssue(issue)
+		if out != base {
+			t.Errorf("Without parent epic, output should match formatPrettyIssue.\nGot:  %q\nWant: %q", out, base)
+		}
+	})
+
+	t.Run("WithParentEpic", func(t *testing.T) {
+		out := formatPrettyIssueWithContext(issue, "Auth Overhaul")
+		if !strings.Contains(out, "bd-42") {
+			t.Errorf("Expected issue ID in output: %q", out)
+		}
+		if !strings.Contains(out, "Implement feature") {
+			t.Errorf("Expected title in output: %q", out)
+		}
+		if !strings.Contains(out, "Auth Overhaul") {
+			t.Errorf("Expected parent epic title in output: %q", out)
+		}
+	})
+}
+
+func TestDisplayReadyList(t *testing.T) {
+	t.Parallel()
+
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "Task A", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "Task B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeBug},
+	}
+
+	t.Run("WithParentEpics", func(t *testing.T) {
+		epicMap := map[string]string{"bd-1": "My Epic"}
+		out := captureStdout(t, func() error {
+			displayReadyList(issues, epicMap)
+			return nil
+		})
+		if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-2") {
+			t.Errorf("Expected both issue IDs in output: %q", out)
+		}
+		if !strings.Contains(out, "My Epic") {
+			t.Errorf("Expected parent epic annotation in output: %q", out)
+		}
+		if !strings.Contains(out, "Ready: 2 issues") {
+			t.Errorf("Expected summary footer in output: %q", out)
+		}
+	})
+
+	t.Run("WithNilEpicMap", func(t *testing.T) {
+		out := captureStdout(t, func() error {
+			displayReadyList(issues, nil)
+			return nil
+		})
+		if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-2") {
+			t.Errorf("Expected both issue IDs in output: %q", out)
+		}
+		if !strings.Contains(out, "Ready: 2 issues") {
+			t.Errorf("Expected summary footer in output: %q", out)
+		}
+	})
+}
+
 func TestListSortIssues_ClosedNilLast(t *testing.T) {
 	t1 := time.Now().Add(-2 * time.Hour)
 	t2 := time.Now().Add(-1 * time.Hour)
