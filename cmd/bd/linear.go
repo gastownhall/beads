@@ -515,8 +515,7 @@ func maskAPIKey(key string) string {
 	return key[:4] + "..." + key[len(key)-4:]
 }
 
-// getLinearConfig reads a Linear configuration value, handling both daemon mode
-// (where store is nil) and direct mode. Returns the value and its source.
+// getLinearConfig reads a Linear configuration value. Returns the value and its source.
 // Priority: project config > environment variable.
 func getLinearConfig(ctx context.Context, key string) (value string, source string) {
 	// Try to read from store (works in direct mode)

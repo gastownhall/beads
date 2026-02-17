@@ -75,7 +75,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  fmt.Sprintf("Server not running (%d peers configured)", len(remotes)),
 			Detail:   "Federation requires dolt sql-server for peer sync",
-			Fix:      "Run 'bd daemon start --federation' to enable peer-to-peer sync",
+			Fix:      "Start dolt sql-server in server mode to enable peer-to-peer sync",
 			Category: CategoryFederation,
 		}
 	}
@@ -448,7 +448,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 				Status:   StatusWarning,
 				Message:  "Embedded mode with lock file",
 				Detail:   "Another process may be using the database in embedded mode",
-				Fix:      "Close other bd processes or start daemon with --federation",
+				Fix:      "Close other bd processes or switch to server mode",
 				Category: CategoryFederation,
 			}
 		}
@@ -489,7 +489,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  fmt.Sprintf("Embedded mode with %d peers configured", peerCount),
 			Detail:   "Federation with peers requires server mode for multi-writer support",
-			Fix:      "Run 'bd daemon start --federation' to enable server mode",
+			Fix:      "Switch to server mode: gt dolt start && bd config set dolt.mode server",
 			Category: CategoryFederation,
 		}
 	}

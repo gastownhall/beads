@@ -154,7 +154,7 @@ const (
 // BackendCapabilities describes behavioral constraints for a storage backend.
 //
 // This is intentionally small and stable: callers should use these flags to decide
-// whether to enable features like daemon/RPC/autostart and process spawning.
+// whether to enable features like RPC and process spawning.
 //
 // NOTE: The embedded Dolt driver is effectively single-writer at the OS-process level.
 // Even if multiple goroutines are safe within one process, multiple processes opening
@@ -162,8 +162,7 @@ const (
 // "read-only" failures. Therefore, Dolt is treated as single-process-only.
 type BackendCapabilities struct {
 	// SingleProcessOnly indicates the backend must not be accessed from multiple
-	// Beads OS processes concurrently (no daemon mode, no RPC client/server split,
-	// no helper-process spawning).
+	// Beads OS processes concurrently (embedded mode is single-writer).
 	SingleProcessOnly bool
 }
 

@@ -44,7 +44,7 @@ func isChildOf(childID, parentID string) bool {
 // warnIfCyclesExist checks for dependency cycles and prints a warning if found.
 func warnIfCyclesExist(s *dolt.DoltStore) {
 	if s == nil {
-		return // Skip cycle check in daemon mode (daemon handles it)
+		return // Skip cycle check if store is not available
 	}
 	cycles, err := s.DetectCycles(rootCtx)
 	if err != nil {

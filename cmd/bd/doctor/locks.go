@@ -15,11 +15,11 @@ import (
 var staleLockThresholds = map[string]time.Duration{
 	"bootstrap.lock": 5 * time.Minute, // Bootstrap should complete quickly
 	".sync.lock":     1 * time.Hour,   // Sync can be slow for large repos
-	"daemon.lock":    0,               // Handled separately via flock check
+	"daemon.lock":    0,               // Legacy: handled separately via flock check
 }
 
 // CheckStaleLockFiles detects leftover lock files from crashed processes.
-// Stale lock files can block bootstrap, sync, and daemon operations.
+// Stale lock files can block bootstrap and sync operations.
 func CheckStaleLockFiles(path string) DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
@@ -57,14 +57,14 @@ func CheckStaleLockFiles(path string) DoctorCheck {
 		}
 	}
 
-	// Check daemon lock - use flock probe instead of age
+	// Check legacy daemon lock - use flock probe instead of age
 	daemonLockPath := filepath.Join(beadsDir, "daemon.lock")
 	if _, err := os.Stat(daemonLockPath); err == nil {
-		// Check if daemon is actually running via flock
+		// Check if any process holds the lock via flock
 		running, _ := lockfile.TryDaemonLock(beadsDir)
 		if !running {
 			staleFiles = append(staleFiles, "daemon.lock")
-			details = append(details, "daemon.lock: file exists but no daemon process holds the lock")
+			details = append(details, "daemon.lock: legacy file exists but no process holds the lock")
 		}
 	}
 

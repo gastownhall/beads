@@ -203,7 +203,7 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 func applyFixList(path string, fixes []doctorCheck) {
 	// Apply fixes in a dependency-aware order.
 	// Rough dependency chain:
-	// permissions/daemon cleanup → config sanity → DB integrity/migrations → DB↔JSONL sync.
+	// permissions/lock cleanup → config sanity → DB integrity/migrations → DB↔JSONL sync.
 	order := []string{
 		"Lock Files",
 		"Permissions",

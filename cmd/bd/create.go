@@ -380,7 +380,7 @@ var createCmd = &cobra.Command{
 		}
 
 		// Switch to target repo for multi-repo support (bd-6x6g)
-		// When routing to a different repo, we bypass daemon mode and use direct storage
+		// When routing to a different repo, we use direct storage access
 		var targetStore *dolt.DoltStore
 		if repoPath != "." {
 			targetBeadsDir := routing.ExpandPath(repoPath)
@@ -828,7 +828,7 @@ func init() {
 }
 
 // createInRig creates an issue in a different rig using --rig flag or auto-routing.
-// This bypasses the normal daemon/direct flow and directly creates in the target rig.
+// This directly creates in the target rig's database.
 func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef, specID string, wisp bool) {
 	ctx := rootCtx
 
@@ -998,8 +998,8 @@ func findTownBeadsDir() (string, error) {
 	return "", fmt.Errorf("no routes.jsonl found in any parent .beads directory")
 }
 
-// formatTimeForRPC converts a *time.Time to RFC3339 string for daemon RPC calls.
-// Returns empty string if t is nil, allowing the daemon to distinguish "not set" from "set to zero".
+// formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.
+// Returns empty string if t is nil, to distinguish "not set" from "set to zero".
 func formatTimeForRPC(t *time.Time) string {
 	if t == nil {
 		return ""

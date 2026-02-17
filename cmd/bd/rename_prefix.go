@@ -77,7 +77,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			os.Exit(1)
 		}
 
-		// rename-prefix requires direct mode (not supported by daemon)
+		// rename-prefix requires direct database access
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -93,8 +93,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		// Get JSONL path for sync operations
 		jsonlPath := findJSONLPath()
 
-		// Sync-branch pull was previously handled by the daemon.
-		// With daemon removed, sync-branch operations are handled by bd sync.
+		// Sync-branch operations are handled by bd sync.
 
 		// Force import from JSONL to ensure DB has all issues before rename
 		// This prevents data loss if JSONL has issues from other workspaces

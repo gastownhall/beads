@@ -96,7 +96,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 				Status:  StatusWarning,
 				Message: fmt.Sprintf("version %s (CLI: %s)", dbVersion, cliVersion),
 				Detail:  "Storage: Dolt",
-				Fix:     "Update bd CLI and re-run (dolt metadata will be updated automatically by the daemon)",
+				Fix:     "Update bd CLI and re-run (dolt metadata will be updated automatically)",
 			}
 		}
 
@@ -332,7 +332,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Database schema is incomplete or incompatible",
 			Detail:  fmt.Sprintf("Missing: %s", strings.Join(missingElements, ", ")),
-			Fix:     "Run 'bd migrate' to upgrade schema, or if daemon is running an old version, run 'bd daemons killall' to restart",
+			Fix:     "Run 'bd migrate' to upgrade schema",
 		}
 	}
 
@@ -522,8 +522,8 @@ func classifyDatabaseError(errMsg string, jsonlCount int, jsonlAvailable bool) (
 		errorType = "Database is locked"
 		recoverySteps = "1. Check for running bd processes: ps aux | grep bd\n" +
 			"2. Kill any stale processes\n" +
-			"3. Remove stale locks: rm .beads/beads.db-shm .beads/beads.db-wal .beads/daemon.lock\n" +
-			"4. Retry: bd doctor --fix"
+			"3. Remove stale locks: bd doctor --fix\n" +
+			"4. Retry: bd doctor"
 
 	case strings.Contains(errMsg, "not a database") || strings.Contains(errMsg, "file is not a database"):
 		errorType = "File is not a valid SQLite database"

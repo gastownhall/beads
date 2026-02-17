@@ -209,7 +209,7 @@ fi
 #
 # This hook ensures that any pending bd issue changes are flushed to
 # .beads/issues.jsonl before the commit is created, preventing the
-# race condition where daemon auto-flush fires after the commit.
+# stale JSONL from being committed.
 
 ` + preCommitHookBody()
 }

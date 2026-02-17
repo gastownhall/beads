@@ -529,7 +529,7 @@ NOTE: Import requires direct database access.`,
 // The function sets DB mtime to max(JSONL mtime, now) + 1ns to handle clock skew.
 // If jsonlPath is empty or can't be read, falls back to time.Now().
 //
-// Fixes issues #278, #301, #321: daemon export leaving JSONL newer than DB.
+// Fixes issues #278, #301, #321: export leaving JSONL newer than DB.
 func TouchDatabaseFile(dbPath, jsonlPath string) error {
 	targetTime := time.Now()
 

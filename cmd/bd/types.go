@@ -36,8 +36,7 @@ Examples:
   bd types --json       # Output as JSON
 `,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Ensure direct mode for database access (types command needs to read config).
-		// In daemon mode, store is nil so custom types would never be fetched.
+		// Ensure database access is active (types command needs to read config).
 		if err := ensureDirectMode("types command requires direct database access"); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			return

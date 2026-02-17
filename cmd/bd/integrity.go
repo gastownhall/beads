@@ -19,10 +19,9 @@ import (
 
 // isJSONLNewer checks if JSONL file is newer than database file.
 // Returns true if JSONL is newer AND has different content, false otherwise.
-// This prevents false positives from daemon auto-export timestamp skew.
 //
 // NOTE: This uses computeDBHash which is more expensive than hasJSONLChanged.
-// For daemon auto-import, prefer hasJSONLChanged() which uses metadata-based
+// For auto-import, prefer hasJSONLChanged() which uses metadata-based
 // content tracking and is safe against git operations.
 func isJSONLNewer(jsonlPath string) bool {
 	return isJSONLNewerWithStore(jsonlPath, nil)

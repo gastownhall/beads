@@ -50,7 +50,7 @@ func StaleLockFiles(path string) error {
 		}
 	}
 
-	// Remove stale daemon lock (only if no process holds the flock)
+	// Remove stale legacy daemon lock (only if no process holds the flock)
 	daemonLockPath := filepath.Join(beadsDir, "daemon.lock")
 	if _, err := os.Stat(daemonLockPath); err == nil {
 		running, _ := lockfile.TryDaemonLock(beadsDir)

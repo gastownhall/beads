@@ -12,18 +12,11 @@ import (
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
-const GitignoreTemplate = `# SQLite databases
-*.db
-*.db?*
-*.db-journal
-*.db-wal
-*.db-shm
+const GitignoreTemplate = `# Dolt database (managed by Dolt, not git)
+dolt/
+dolt-access.lock
 
-# Daemon runtime files
-daemon.lock
-daemon.log
-daemon-*.log.gz
-daemon.pid
+# Runtime files
 bd.sock
 sync-state.json
 last-touched
@@ -31,21 +24,9 @@ last-touched
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
-# Legacy database files
-db.sqlite
-bd.db
-
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
 redirect
-
-# Merge artifacts (temporary files from 3-way merge)
-beads.base.jsonl
-beads.base.meta.json
-beads.left.jsonl
-beads.left.meta.json
-beads.right.jsonl
-beads.right.meta.json
 
 # Sync state (local-only, per-machine)
 # These files are machine-specific and should not be shared across clones
@@ -54,9 +35,24 @@ beads.right.meta.json
 sync_base.jsonl
 export-state/
 
-# Dolt database (managed by Dolt remotes, not git)
-dolt/
-dolt-access.lock
+# Legacy files (from pre-Dolt versions)
+*.db
+*.db?*
+*.db-journal
+*.db-wal
+*.db-shm
+db.sqlite
+bd.db
+daemon.lock
+daemon.log
+daemon-*.log.gz
+daemon.pid
+beads.base.jsonl
+beads.base.meta.json
+beads.left.jsonl
+beads.left.meta.json
+beads.right.jsonl
+beads.right.meta.json
 
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
