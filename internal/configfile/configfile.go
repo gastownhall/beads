@@ -27,6 +27,7 @@ type Config struct {
 	DoltServerPort int    `json:"dolt_server_port,omitempty"` // Server port (default: 3307)
 	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
 	DoltDatabase   string `json:"dolt_database,omitempty"`    // SQL database name (default: beads)
+	DoltServerTLS  bool   `json:"dolt_server_tls,omitempty"`  // Enable TLS for server connections (required for Hosted Dolt)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Stale closed issues check configuration
@@ -281,4 +282,20 @@ func (c *Config) GetDoltDatabase() string {
 		return c.DoltDatabase
 	}
 	return DefaultDoltDatabase
+}
+
+// GetDoltServerPassword returns the Dolt server password.
+// Checks BEADS_DOLT_PASSWORD env var (password should never be stored in config files).
+func (c *Config) GetDoltServerPassword() string {
+	return os.Getenv("BEADS_DOLT_PASSWORD")
+}
+
+// GetDoltServerTLS returns whether TLS is enabled for server connections.
+// Required for Hosted Dolt instances.
+// Checks BEADS_DOLT_SERVER_TLS env var first ("1" or "true"), then config.
+func (c *Config) GetDoltServerTLS() bool {
+	if t := os.Getenv("BEADS_DOLT_SERVER_TLS"); t != "" {
+		return t == "1" || strings.ToLower(t) == "true"
+	}
+	return c.DoltServerTLS
 }
