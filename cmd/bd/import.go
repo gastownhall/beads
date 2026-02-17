@@ -149,52 +149,11 @@ NOTE: Import requires direct database access.`,
 			if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
 				bytes.Equal(trimmed, []byte("=======")) ||
 				bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
-				fmt.Fprintf(os.Stderr, "Git conflict markers detected in JSONL file (line %d)\n", lineNum)
-				fmt.Fprintf(os.Stderr, "→ Attempting automatic 3-way merge...\n\n")
-
-				// Attempt automatic merge using bd merge command
-				if err := attemptAutoMerge(input); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: Automatic merge failed: %v\n\n", err)
-					fmt.Fprintf(os.Stderr, "To resolve manually:\n")
-					fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
-					fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n\n")
-					fmt.Fprintf(os.Stderr, "For advanced field-level merging, see: https://github.com/neongreen/mono/tree/main/beads-merge\n")
-					os.Exit(1)
-				}
-
-				fmt.Fprintf(os.Stderr, "✓ Automatic merge successful\n")
-				fmt.Fprintf(os.Stderr, "→ Restarting import with merged JSONL...\n\n")
-
-				// Re-open the input file to read the merged content
-				if input != "" {
-					// Close current file handle
-					if in != os.Stdin {
-						_ = in.Close()
-					}
-
-					// Re-open the merged file
-					// #nosec G304 - user-provided file path is intentional
-					f, err := os.Open(input)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error reopening merged file: %v\n", err)
-						os.Exit(1)
-					}
-					defer func() {
-						if err := f.Close(); err != nil {
-							fmt.Fprintf(os.Stderr, "Warning: failed to close input file: %v\n", err)
-						}
-					}()
-					in = f
-					scanner = bufio.NewScanner(in)
-					allIssues = nil       // Reset issues list
-					deletionMarkers = nil // Reset deletion markers list
-					lineNum = 0           // Reset line counter
-					continue              // Restart parsing from beginning
-				} else {
-					// Can't retry stdin - should not happen since git conflicts only in files
-					fmt.Fprintf(os.Stderr, "Error: Cannot retry merge from stdin\n")
-					os.Exit(1)
-				}
+				fmt.Fprintf(os.Stderr, "Error: Git conflict markers detected in JSONL file (line %d)\n\n", lineNum)
+				fmt.Fprintf(os.Stderr, "To resolve:\n")
+				fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
+				fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
+				os.Exit(1)
 			}
 
 			// Check for deletion markers first
@@ -635,13 +594,6 @@ func countLinesInGitHEAD(filePath string, workDir string) int {
 		lines++
 	}
 	return lines
-}
-
-// attemptAutoMerge previously resolved git conflicts using the 3-way merge engine.
-// The merge engine has been removed (Dolt handles sync natively).
-// Returns an error directing users to manual resolution.
-func attemptAutoMerge(_ string) error {
-	return fmt.Errorf("3-way JSONL merge engine removed (Dolt handles sync natively); resolve conflicts manually")
 }
 
 // detectPrefixFromIssues extracts the common prefix from issue IDs

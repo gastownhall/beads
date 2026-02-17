@@ -245,11 +245,9 @@ func preemptiveFetchAndFastForward(ctx context.Context, worktreePath, branch, re
 // a content-based merge instead of relying on git's commit-level merge. When local and remote
 // sync branches have diverged:
 //  1. Fetch remote changes (don't pull)
-//  2. Find the merge base
-//  3. Extract JSONL from base, local, and remote
-//  4. Perform 3-way content merge using bd's merge algorithm
-//  5. Reset to remote's history (adopt remote commit graph)
-//  6. Commit merged content on top
+//  2. Extract JSONL from remote
+//  3. Reset to remote's history (adopt remote commit graph)
+//  4. Commit merged content on top
 //
 // IMPORTANT: After successful content merge, auto-pushes to remote by default.
 // Includes safety check: warns (but doesn't block) if >50% issues vanished AND >5 existed.
@@ -327,7 +325,7 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		// GH#1173: Do NOT copy uncommitted worktree changes to main repo.
 		// The worktree may have uncommitted changes from previous exports that
 		// haven't been committed yet. Copying those to main would make local
-		// data appear as "remote" data, corrupting the 3-way merge.
+		// data appear as "remote" data, corrupting the content merge.
 		// Instead, copy only the COMMITTED state from the worktree.
 		if err := copyCommittedJSONLToMainRepo(ctx, worktreePath, jsonlRelPath, jsonlPath); err != nil {
 			return nil, err
@@ -353,12 +351,11 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		return result, nil
 	}
 
-	// Case 3: DIVERGED - perform content-based merge
-	// This is the key fix: instead of git merge (which can fail), we:
-	// 1. Extract JSONL content from base, local, and remote
-	// 2. Merge at content level using our 3-way merge algorithm
-	// 3. Reset to remote's commit history
-	// 4. Commit merged content on top
+	// Case 3: DIVERGED - take remote content (remote-wins strategy)
+	// Instead of git merge (which can fail), we:
+	// 1. Extract JSONL content from remote
+	// 2. Reset to remote's commit history
+	// 3. Commit merged content on top
 
 	// Extract local content before merge for safety check
 	localContent, extractErr := extractJSONLFromCommit(ctx, worktreePath, "HEAD", jsonlRelPath)
@@ -612,7 +609,6 @@ func resetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) 
 }
 
 // performContentMerge extracts JSONL from remote and returns it.
-// The 3-way merge engine has been removed (Dolt handles sync natively).
 // When sync branches diverge, we take remote content since the caller
 // resets to remote's commit graph anyway.
 func performContentMerge(ctx context.Context, worktreePath, branch, remote, jsonlRelPath string) []byte {
@@ -637,7 +633,7 @@ func extractJSONLFromCommit(ctx context.Context, worktreePath, commit, filePath 
 
 // copyCommittedJSONLToMainRepo copies the COMMITTED JSONL from worktree to main repo.
 // GH#1173: This extracts the file from HEAD rather than the working directory,
-// ensuring uncommitted local changes don't corrupt the 3-way merge.
+// ensuring uncommitted local changes don't corrupt the content merge.
 func copyCommittedJSONLToMainRepo(ctx context.Context, worktreePath, jsonlRelPath, jsonlPath string) error {
 	// GH#785: Handle bare repo worktrees
 	normalizedRelPath := normalizeBeadsRelPath(jsonlRelPath)
