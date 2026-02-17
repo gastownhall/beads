@@ -936,6 +936,7 @@ type IssueFilter struct {
 
 	// Parent filtering: filter children by parent issue ID
 	ParentID *string // Filter by parent issue (via parent-child dependency)
+	NoParent bool    // Exclude issues that are children of another issue
 
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)

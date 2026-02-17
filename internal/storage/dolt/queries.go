@@ -204,6 +204,11 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		args = append(args, parentID, parentID)
 	}
 
+	// No-parent filtering: exclude issues that are children of another issue
+	if filter.NoParent {
+		whereClauses = append(whereClauses, "id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')")
+	}
+
 	// Molecule type filtering
 	if filter.MolType != nil {
 		whereClauses = append(whereClauses, "mol_type = ?")

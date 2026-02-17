@@ -301,6 +301,7 @@ var listCmd = &cobra.Command{
 			// Flag registered; GetString only errors if flag doesn't exist
 			parentID, _ = cmd.Flags().GetString("filter-parent")
 		}
+		noParent, _ := cmd.Flags().GetBool("no-parent")
 
 		// Molecule type filtering
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
@@ -553,8 +554,15 @@ var listCmd = &cobra.Command{
 		}
 
 		// Parent filtering: filter children by parent issue
+		if parentID != "" && noParent {
+			fmt.Fprintf(os.Stderr, "Error: --parent and --no-parent are mutually exclusive\n")
+			os.Exit(1)
+		}
 		if parentID != "" {
 			filter.ParentID = &parentID
+		}
+		if noParent {
+			filter.NoParent = true
 		}
 
 		// Molecule type filtering
@@ -829,6 +837,8 @@ func init() {
 	// Parent filtering: filter children by parent issue
 	listCmd.Flags().String("parent", "", "Filter by parent issue ID (shows children of specified issue)")
 	listCmd.Flags().String("filter-parent", "", "Alias for --parent")
+	_ = listCmd.Flags().MarkHidden("filter-parent") // Only fails if flag missing (caught in tests)
+	listCmd.Flags().Bool("no-parent", false, "Exclude child issues (show only top-level issues)")
 
 	// Molecule type filtering
 	listCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
