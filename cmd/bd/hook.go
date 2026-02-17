@@ -537,7 +537,6 @@ func updateExportStateCommit(beadsDir, worktreeRoot, doltCommit string) {
 	_ = saveExportState(beadsDir, worktreeRoot, prevState) // Best effort: export state is advisory
 }
 
-
 // stageJSONLFiles stages JSONL files for git commit (unless BEADS_NO_AUTO_STAGE is set).
 func stageJSONLFiles(ctx context.Context) {
 	if os.Getenv("BEADS_NO_AUTO_STAGE") != "" {
