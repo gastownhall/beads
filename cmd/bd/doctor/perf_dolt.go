@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/dolthub/driver"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // DoltPerfMetrics holds performance metrics for Dolt operations
@@ -66,6 +67,12 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		metrics.ServerStatus = "not running"
 	}
 
+	// Determine the database name from configuration
+	dbName := configfile.DefaultDoltDatabase
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbName = cfg.GetDoltDatabase()
+	}
+
 	// Start profiling if requested
 	if enableProfiling {
 		profilePath := fmt.Sprintf("beads-dolt-perf-%s.prof", time.Now().Format("2006-01-02-150405"))
@@ -79,14 +86,14 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Connect and run diagnostics - try server mode first if available
 	if serverRunning {
-		if err := runDoltServerDiagnostics(metrics, "127.0.0.1", 3307); err != nil {
+		if err := runDoltServerDiagnostics(metrics, "127.0.0.1", 3307, dbName); err != nil {
 			fmt.Fprintf(os.Stderr, "Server mode diagnostics failed, falling back to embedded: %v\n", err)
-			if err := runDoltEmbeddedDiagnostics(metrics, doltDir); err != nil {
+			if err := runDoltEmbeddedDiagnostics(metrics, doltDir, dbName); err != nil {
 				return metrics, fmt.Errorf("embedded mode diagnostics failed: %w", err)
 			}
 		}
 	} else {
-		if err := runDoltEmbeddedDiagnostics(metrics, doltDir); err != nil {
+		if err := runDoltEmbeddedDiagnostics(metrics, doltDir, dbName); err != nil {
 			return metrics, fmt.Errorf("embedded mode diagnostics failed: %w", err)
 		}
 	}
@@ -98,11 +105,11 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 }
 
 // runDoltServerDiagnostics runs diagnostics via dolt sql-server
-func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int) error {
+func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, dbName string) error {
 	metrics.Backend = "dolt-server"
 	metrics.ServerMode = true
 
-	dsn := fmt.Sprintf("root:@tcp(%s:%d)/beads?parseTime=true", host, port)
+	dsn := fmt.Sprintf("root:@tcp(%s:%d)/%s?parseTime=true", host, port, dbName)
 
 	// Measure connection time
 	start := time.Now()
@@ -127,7 +134,7 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int) e
 }
 
 // runDoltEmbeddedDiagnostics runs diagnostics via embedded Dolt
-func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string) error {
+func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string, dbName string) error {
 	metrics.Backend = "dolt-embedded"
 	metrics.ServerMode = false
 
@@ -147,9 +154,9 @@ func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string) error 
 
 	ctx := context.Background()
 
-	// Switch to beads database
-	if _, err := db.ExecContext(ctx, "USE beads"); err != nil {
-		return fmt.Errorf("failed to switch to beads database: %w", err)
+	// Switch to the configured database
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName)); err != nil {
+		return fmt.Errorf("failed to switch to %s database: %w", dbName, err)
 	}
 
 	if err := db.PingContext(ctx); err != nil {
@@ -470,13 +477,19 @@ func CompareDoltModes(path string) error {
 	doltDir := filepath.Join(beadsDir, "dolt")
 	serverRunning := isDoltServerRunning("127.0.0.1", 3307)
 
+	// Determine the database name from configuration
+	dbName := configfile.DefaultDoltDatabase
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbName = cfg.GetDoltDatabase()
+	}
+
 	fmt.Println("\nDolt Mode Comparison")
 	fmt.Println(strings.Repeat("=", 50))
 
 	// Run embedded mode diagnostics
 	fmt.Println("\n[Embedded Mode]")
 	embeddedMetrics := &DoltPerfMetrics{}
-	if err := runDoltEmbeddedDiagnostics(embeddedMetrics, doltDir); err != nil {
+	if err := runDoltEmbeddedDiagnostics(embeddedMetrics, doltDir, dbName); err != nil {
 		fmt.Printf("  Error: %v\n", err)
 	} else {
 		fmt.Printf("  Connection time: %dms\n", embeddedMetrics.ConnectionTime)
@@ -489,7 +502,7 @@ func CompareDoltModes(path string) error {
 	if serverRunning {
 		fmt.Println("\n[Server Mode]")
 		serverMetrics := &DoltPerfMetrics{}
-		if err := runDoltServerDiagnostics(serverMetrics, "127.0.0.1", 3307); err != nil {
+		if err := runDoltServerDiagnostics(serverMetrics, "127.0.0.1", 3307, dbName); err != nil {
 			fmt.Printf("  Error: %v\n", err)
 		} else {
 			fmt.Printf("  Connection time: %dms\n", serverMetrics.ConnectionTime)
