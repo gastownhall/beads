@@ -8,7 +8,7 @@ license = {text = "MIT"}
 dependencies = [
     "fastmcp==2.14.5",
     "pydantic==2.12.5",
-    "pydantic-settings==2.12.0",
+    "pydantic-settings==2.13.0",
 ]
 authors = [
     {name = "Beads Contributors"}
