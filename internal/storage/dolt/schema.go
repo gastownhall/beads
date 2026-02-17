@@ -1,5 +1,3 @@
-//go:build cgo
-
 package dolt
 
 // currentSchemaVersion is bumped whenever the schema or migrations change.
