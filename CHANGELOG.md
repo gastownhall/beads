@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-02-16
+
+### Added
+
+- **`bd ready --include-ephemeral`** — new flag to include ephemeral issues in ready work results
+
+### Fixed
+
+- **Doctor redirect target resolution** — fix path resolution for redirect targets (#1803)
+- **Dolt directory creation guard** — skip dolt directory creation when not in server mode (#1800)
+- **Tilde expansion in core.hooksPath on Windows** — properly expand `~` in git hook paths (#1798)
+- **Worktree redirect path resolution** — resolve redirect paths from worktree root, not `.beads/` dir (#1791)
+- **Block rename-prefix in worktrees** — prevent rename-prefix from running in git worktrees to avoid JSONL staleness (#1792)
+- **CI lint warnings** — resolve gosec G204 and unparam lint warnings (#1790)
+
+### Removed
+
+- **Dead git-portable sync functions** — remove unused `gitCommitBeadsDir` and `gitPush` (#1793)
+
 ## [0.51.0] - 2026-02-16
 
 ### Changed
