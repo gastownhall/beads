@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/debug"
+	"gopkg.in/yaml.v3"
 )
 
 // Sync trigger constants define when sync operations occur.
@@ -375,6 +376,7 @@ func LogOverride(override ConfigOverride) {
 
 // SaveConfigValue sets a key-value pair and writes it to the config file.
 // If no config file is currently loaded, it creates config.yaml in the given beadsDir.
+// Only the specified key is modified; other file contents are preserved.
 func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 	if v == nil {
 		return fmt.Errorf("config not initialized")
@@ -387,7 +389,36 @@ func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 		v.SetConfigFile(configPath)
 	}
 
-	return v.WriteConfigAs(configPath)
+	// Read existing file contents to avoid dumping all merged viper state
+	// (defaults, env vars, overrides) into the config file.
+	existing := make(map[string]interface{})
+	if data, err := os.ReadFile(configPath); err == nil {
+		_ = yaml.Unmarshal(data, &existing)
+	}
+
+	// Set the single key using dot-path splitting for nested keys (e.g. "sync.mode").
+	setNestedKey(existing, key, value)
+
+	out, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	return os.WriteFile(configPath, out, 0o644)
+}
+
+// setNestedKey sets a value in a nested map using a dot-separated key path.
+func setNestedKey(m map[string]interface{}, key string, value interface{}) {
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) == 1 {
+		m[key] = value
+		return
+	}
+	sub, ok := m[parts[0]].(map[string]interface{})
+	if !ok {
+		sub = make(map[string]interface{})
+		m[parts[0]] = sub
+	}
+	setNestedKey(sub, parts[1], value)
 }
 
 // GetString retrieves a string configuration value
