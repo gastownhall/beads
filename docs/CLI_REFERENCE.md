@@ -495,6 +495,11 @@ bd mol wisp list --all --json    # Include closed
 bd mol wisp gc --json
 bd mol wisp gc --age 24h --json  # Custom age threshold
 bd mol wisp gc --dry-run         # Preview what would be cleaned
+
+# Purge all closed wisps (bulk cleanup)
+bd mol wisp gc --closed              # Preview closed wisp deletion
+bd mol wisp gc --closed --force      # Delete all closed wisps
+bd mol wisp gc --closed --dry-run    # Detailed dry-run preview
 ```
 
 ### Bonding (Combining Work)

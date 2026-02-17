@@ -231,6 +231,7 @@ bd mol wisp list        # Check for orphans
 bd mol squash <id>      # Create digest
 bd mol burn <id>        # Or discard
 bd mol wisp gc          # Garbage collect old wisps
+bd mol wisp gc --closed --force  # Purge all closed wisps
 ```
 
 ## Layer Cake Architecture

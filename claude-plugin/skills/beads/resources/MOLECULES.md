@@ -199,6 +199,8 @@ Use burn for routine work with no archival value.
 
 ```bash
 bd mol wisp gc                       # Clean up orphaned wisps
+bd mol wisp gc --closed              # Preview closed wisp deletion
+bd mol wisp gc --closed --force      # Purge all closed wisps
 ```
 
 ---
@@ -331,6 +333,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 | `bd mol wisp <proto>` | Create ephemeral wisp |
 | `bd mol wisp list` | List all wisps |
 | `bd mol wisp gc` | Garbage collect orphaned wisps |
+| `bd mol wisp gc --closed` | Purge all closed wisps (preview; use --force to delete) |
 | `bd ship <capability>` | Publish capability for cross-project deps |
 
 ---

@@ -507,14 +507,21 @@ A wisp is considered abandoned if:
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
+Use --closed to purge ALL closed wisps (regardless of age). This is the
+fastest way to reclaim space from accumulated wisp bloat. Safe by default:
+requires --force to actually delete.
+
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
 
 Examples:
-  bd mol wisp gc                # Clean abandoned wisps (default: 1h threshold)
-  bd mol wisp gc --dry-run      # Preview what would be cleaned
-  bd mol wisp gc --age 24h      # Custom age threshold
-  bd mol wisp gc --all          # Also clean closed wisps older than threshold`,
+  bd mol wisp gc                       # Clean abandoned wisps (default: 1h threshold)
+  bd mol wisp gc --dry-run             # Preview what would be cleaned
+  bd mol wisp gc --age 24h             # Custom age threshold
+  bd mol wisp gc --all                 # Also clean closed wisps older than threshold
+  bd mol wisp gc --closed              # Preview closed wisp deletion
+  bd mol wisp gc --closed --force      # Delete all closed wisps
+  bd mol wisp gc --closed --dry-run    # Explicit dry-run (same as no --force)`,
 	Run: runWispGC,
 }
 
@@ -534,6 +541,8 @@ func runWispGC(cmd *cobra.Command, args []string) {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	ageStr, _ := cmd.Flags().GetString("age")
 	cleanAll, _ := cmd.Flags().GetBool("all")
+	closedMode, _ := cmd.Flags().GetBool("closed")
+	force, _ := cmd.Flags().GetBool("force")
 
 	// Parse age threshold
 	ageThreshold := time.Hour // Default 1 hour
@@ -551,6 +560,12 @@ func runWispGC(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: no database connection\n")
 		fmt.Fprintf(os.Stderr, "Hint: run 'bd init' or 'bd import' to initialize the database\n")
 		os.Exit(1)
+	}
+
+	// --closed mode: purge all closed wisps (batch deletion)
+	if closedMode {
+		runWispPurgeClosed(ctx, dryRun, force)
+		return
 	}
 
 	// Query wisps from main database using Ephemeral filter
@@ -615,29 +630,92 @@ func runWispGC(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// Delete abandoned wisps
-	var cleanedIDs []string
-	for _, issue := range abandoned {
-		if err := store.DeleteIssue(ctx, issue.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to delete %s: %v\n", issue.ID, err)
+	// Use batch deletion for efficiency (cascade=true, wisps reference each other)
+	ids := make([]string, len(abandoned))
+	for i, issue := range abandoned {
+		ids[i] = issue.ID
+	}
+	deleteBatch(nil, ids, true, false, true, jsonOutput, false, "wisp gc")
+}
+
+// runWispPurgeClosed deletes all closed wisps using batch deletion.
+// Safe by default: preview-only without --force.
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool) {
+	// Query closed ephemeral issues
+	statusClosed := types.StatusClosed
+	ephemeralTrue := true
+	filter := types.IssueFilter{
+		Status:    &statusClosed,
+		Ephemeral: &ephemeralTrue,
+	}
+
+	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing closed wisps: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Filter out pinned issues (protected from cleanup)
+	pinnedCount := 0
+	filtered := make([]*types.Issue, 0, len(closedIssues))
+	for _, issue := range closedIssues {
+		if issue.Pinned {
+			pinnedCount++
 			continue
 		}
-		cleanedIDs = append(cleanedIDs, issue.ID)
+		filtered = append(filtered, issue)
+	}
+	closedIssues = filtered
+
+	if pinnedCount > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
 	}
 
-	result := WispGCResult{
-		CleanedIDs:   cleanedIDs,
-		CleanedCount: len(cleanedIDs),
-	}
-
-	if jsonOutput {
-		outputJSON(result)
+	if len(closedIssues) == 0 {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"deleted_count": 0,
+				"message":       "No closed wisps to delete",
+			})
+		} else {
+			fmt.Println("No closed wisps to delete")
+		}
 		return
 	}
 
-	fmt.Printf("%s Cleaned %d abandoned wisp(s)\n", ui.RenderPass("✓"), result.CleanedCount)
-	for _, id := range cleanedIDs {
-		fmt.Printf("  - %s\n", id)
+	// Extract IDs
+	ids := make([]string, len(closedIssues))
+	for i, issue := range closedIssues {
+		ids[i] = issue.ID
+	}
+
+	// Preview mode (no --force and no --dry-run)
+	if !force && !dryRun {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"candidates": len(ids),
+				"dry_run":    true,
+			})
+		} else {
+			fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
+			fmt.Printf("\nUse --force to proceed, or --dry-run for detailed preview.\n")
+		}
+		return
+	}
+
+	if !jsonOutput {
+		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
+		if dryRun {
+			fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
+		}
+		fmt.Println()
+	}
+
+	// Use batch deletion with cascade (wisps mostly reference other wisps)
+	deleteBatch(nil, ids, force, dryRun, true, jsonOutput, false, "wisp gc --closed")
+
+	if !dryRun && force && !jsonOutput {
+		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	}
 }
 
@@ -655,6 +733,8 @@ func init() {
 	wispGCCmd.Flags().Bool("dry-run", false, "Preview what would be cleaned")
 	wispGCCmd.Flags().String("age", "1h", "Age threshold for abandoned wisp detection")
 	wispGCCmd.Flags().Bool("all", false, "Also clean closed wisps older than threshold")
+	wispGCCmd.Flags().Bool("closed", false, "Delete all closed wisps (ignores --age threshold)")
+	wispGCCmd.Flags().BoolP("force", "f", false, "Actually delete (default: preview only)")
 
 	wispCmd.AddCommand(wispCreateCmd)
 	wispCmd.AddCommand(wispListCmd)

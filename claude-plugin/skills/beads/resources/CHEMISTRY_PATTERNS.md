@@ -165,6 +165,7 @@ bd wisp list
 
 # Garbage collect orphaned wisps
 bd wisp gc
+bd wisp gc --closed --force          # Purge all closed wisps
 
 # View proto/mol structure
 bd mol show <id>
