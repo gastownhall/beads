@@ -9,6 +9,7 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 		{Name: "Dolt Schema", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryCore},
 		{Name: "Dolt-JSONL Sync", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryData},
 		{Name: "Dolt Status", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryData},
+		{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (requires CGO for Dolt)", Category: CategoryRuntime},
 	}
 }
 
@@ -49,5 +50,15 @@ func CheckDoltStatus(path string) DoctorCheck {
 		Status:   StatusOK,
 		Message:  "N/A (requires CGO for Dolt)",
 		Category: CategoryData,
+	}
+}
+
+// CheckLockHealth returns N/A when CGO is not available.
+func CheckLockHealth(path string) DoctorCheck {
+	return DoctorCheck{
+		Name:     "Dolt Lock Health",
+		Status:   StatusOK,
+		Message:  "N/A (requires CGO for Dolt)",
+		Category: CategoryRuntime,
 	}
 }

@@ -100,11 +100,11 @@ func TestRunDoltHealthChecks_DoltBackendNoDatabase(t *testing.T) {
 	}
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) != 1 {
-		t.Fatalf("expected 1 check, got %d", len(checks))
+	if len(checks) < 1 {
+		t.Fatalf("expected at least 1 check, got %d", len(checks))
 	}
 
-	// With dolt backend but no actual database, expect an error
+	// With dolt backend but no actual database, expect an error on first check
 	if checks[0].Status != StatusError {
 		t.Errorf("expected StatusError for dolt backend without DB, got %s", checks[0].Status)
 	}
@@ -172,8 +172,8 @@ func TestLockContention(t *testing.T) {
 	defer exLock.Release()
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) != 1 {
-		t.Fatalf("expected 1 check on lock contention, got %d", len(checks))
+	if len(checks) < 1 {
+		t.Fatalf("expected at least 1 check on lock contention, got %d", len(checks))
 	}
 
 	check := checks[0]
@@ -220,8 +220,8 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) != 1 {
-		t.Fatalf("expected 1 check (connection error), got %d", len(checks))
+	if len(checks) < 1 {
+		t.Fatalf("expected at least 1 check (connection error + lock health), got %d", len(checks))
 	}
 
 	check := checks[0]
@@ -241,5 +241,99 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 	lockPath := filepath.Join(beadsDir, "dolt-access.lock")
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Errorf("lock file should not exist in server mode, but found at %s", lockPath)
+	}
+}
+
+func TestCheckLockHealth_NoIssues(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckLockHealth(tmpDir)
+	if check.Status != StatusOK {
+		t.Errorf("expected OK status, got %s: %s", check.Status, check.Message)
+	}
+}
+
+func TestCheckLockHealth_DetectsNomsLOCK(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	nomsDir := filepath.Join(beadsDir, "dolt", "beads", ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	if err := os.WriteFile(lockPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckLockHealth(tmpDir)
+	if check.Status != StatusWarning {
+		t.Errorf("expected Warning status with noms LOCK present, got %s", check.Status)
+	}
+	if !strings.Contains(check.Detail, "noms LOCK") {
+		t.Errorf("expected detail to mention noms LOCK, got: %s", check.Detail)
+	}
+}
+
+func TestCheckLockHealth_DetectsHeldAdvisoryLock(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the advisory lock
+	lock, err := dolt.AcquireAccessLock(doltDir, true, 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to acquire advisory lock: %v", err)
+	}
+	defer lock.Release()
+
+	check := CheckLockHealth(tmpDir)
+	if check.Status != StatusWarning {
+		t.Errorf("expected Warning status with advisory lock held, got %s", check.Status)
+	}
+	if !strings.Contains(check.Detail, "advisory lock") {
+		t.Errorf("expected detail to mention advisory lock, got: %s", check.Detail)
+	}
+}
+
+func TestCheckLockHealth_NonDoltBackend(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write SQLite backend config
+	configContent := []byte(`{"backend":"sqlite"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckLockHealth(tmpDir)
+	if check.Status != StatusOK {
+		t.Errorf("expected OK for non-Dolt backend, got %s", check.Status)
 	}
 }

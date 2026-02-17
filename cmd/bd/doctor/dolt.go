@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	// Import Dolt driver for direct connection
 	_ "github.com/dolthub/driver"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -215,8 +217,12 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 			{Name: "Dolt Schema", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryCore},
 			{Name: "Dolt-JSONL Sync", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
 			{Name: "Dolt Status", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
+			{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryRuntime},
 		}
 	}
+
+	// Run lock health check before opening database (it doesn't need a connection)
+	lockCheck := CheckLockHealth(path)
 
 	conn, err := openDoltDBWithLock(beadsDir)
 	if err != nil {
@@ -225,10 +231,10 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 			Status:   StatusError,
 			Message:  "Failed to open Dolt database",
 			Detail:   err.Error(),
-			Fix:      "Run 'bd daemon killall' or check for stale LOCK files in .beads/dolt/",
+			Fix:      "Run 'bd doctor --fix' to clean stale lock files, or check .beads/dolt/",
 			Category: CategoryCore,
 		}
-		return []DoctorCheck{errCheck}
+		return []DoctorCheck{errCheck, lockCheck}
 	}
 	defer conn.Close()
 
@@ -237,6 +243,7 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 		checkSchemaWithDB(conn),
 		checkIssueCountWithDB(conn, beadsDir),
 		checkStatusWithDB(conn),
+		lockCheck,
 	}
 }
 
@@ -558,4 +565,72 @@ func CheckDoltStatus(path string) DoctorCheck {
 	defer conn.Close()
 
 	return checkStatusWithDB(conn)
+}
+
+// CheckLockHealth checks the health of Dolt lock files.
+// It probes for stale noms LOCK files and checks whether the advisory lock
+// is currently held, providing actionable guidance when issues are found.
+func CheckLockHealth(path string) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	if !IsDoltBackend(beadsDir) {
+		return DoctorCheck{
+			Name:     "Dolt Lock Health",
+			Status:   StatusOK,
+			Message:  "N/A (not using Dolt backend)",
+			Category: CategoryRuntime,
+		}
+	}
+
+	var warnings []string
+
+	// Check for stale noms LOCK files
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if dbEntries, err := os.ReadDir(doltDir); err == nil {
+		for _, dbEntry := range dbEntries {
+			if !dbEntry.IsDir() {
+				continue
+			}
+			nomsLock := filepath.Join(doltDir, dbEntry.Name(), ".dolt", "noms", "LOCK")
+			if _, err := os.Stat(nomsLock); err == nil {
+				warnings = append(warnings,
+					fmt.Sprintf("noms LOCK file exists at dolt/%s/.dolt/noms/LOCK — may block database access", dbEntry.Name()))
+			}
+		}
+	}
+
+	// Probe advisory lock to check if it's currently held
+	accessLockPath := filepath.Join(beadsDir, "dolt-access.lock")
+	if _, err := os.Stat(accessLockPath); err == nil {
+		f, err := os.OpenFile(accessLockPath, os.O_RDWR, 0) //nolint:gosec // controlled path
+		if err == nil {
+			if lockErr := lockfile.FlockExclusiveNonBlocking(f); lockErr != nil {
+				// Lock is held by another process
+				warnings = append(warnings,
+					"advisory lock is currently held by another bd process")
+			} else {
+				// We acquired it, meaning no one holds it — release immediately
+				_ = lockfile.FlockUnlock(f)
+			}
+			_ = f.Close()
+		}
+	}
+
+	if len(warnings) == 0 {
+		return DoctorCheck{
+			Name:     "Dolt Lock Health",
+			Status:   StatusOK,
+			Message:  "No lock contention detected",
+			Category: CategoryRuntime,
+		}
+	}
+
+	return DoctorCheck{
+		Name:     "Dolt Lock Health",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("%d lock issue(s) detected", len(warnings)),
+		Detail:   strings.Join(warnings, "; "),
+		Fix:      "Run 'bd doctor --fix' to clean stale lock files, or wait for the other process to finish",
+		Category: CategoryRuntime,
+	}
 }
