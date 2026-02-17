@@ -334,7 +334,5 @@ federation:
 
 ## See Also
 
-- [Sync Modes](CONFIG.md#sync-mode-configuration) - Detailed sync configuration
-- [Daemon](DAEMON.md) - Background sync daemon
 - [Troubleshooting](TROUBLESHOOTING.md) - General troubleshooting
 - [Dolt Documentation](https://docs.dolthub.com/) - Official Dolt docs

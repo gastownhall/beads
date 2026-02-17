@@ -245,28 +245,6 @@ bd admin cleanup --force
 
 **Note:** Compaction is permanent graceful decay. Original content is discarded but viewable via `bd restore <id>` from git history.
 
-## Background Daemon
-
-bd runs a background daemon for auto-sync and performance. You rarely need to manage it directly:
-
-```bash
-# Check daemon status
-bd info | grep daemon
-
-# List all running daemons
-bd daemons list
-
-# Force direct mode (skip daemon)
-bd --no-daemon ready
-```
-
-**When to disable daemon:**
-- Git worktrees (required: `bd --no-daemon`)
-- CI/CD pipelines
-- Resource-constrained environments
-
-See [DAEMON.md](DAEMON.md) for complete daemon management guide.
-
 ## Next Steps
 
 - Add labels: `./bd create "Task" -l "backend,urgent"`

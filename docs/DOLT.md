@@ -1,41 +1,30 @@
 # Dolt Backend for Beads
 
-Beads supports Dolt as an alternative storage backend to SQLite. Dolt provides version-controlled SQL database capabilities, enabling powerful workflows for multi-agent environments and team collaboration.
+Beads uses Dolt as its storage backend. Dolt provides a version-controlled SQL database with cell-level merge, native branching, and multi-writer support via server mode.
 
-## Why Use Dolt?
+## Why Dolt?
 
-| Feature | SQLite | Dolt |
-|---------|--------|------|
-| Version control | Via JSONL export | Native (cell-level) |
-| Multi-writer | Single process | Server mode supported |
-| Merge conflicts | Line-based JSONL | Cell-level 3-way merge |
-| History | Git commits | Dolt commits + Git |
-| Branching | Via Git branches | Native Dolt branches |
-
-**Recommended for:**
-- Multi-agent environments (Gas Town)
-- Teams wanting database-level version control
-- Projects needing cell-level conflict resolution
-
-**Stick with SQLite for:**
-- Simple single-user setups
-- Maximum compatibility
-- Minimal dependencies
+- **Native version control** — cell-level diffs and merges, not line-based
+- **Multi-writer support** — server mode enables concurrent agents
+- **Built-in history** — every write creates a Dolt commit
+- **Native branching** — Dolt branches independent of git branches
 
 ## Getting Started
 
-### New Project with Dolt
+### New Project
 
 ```bash
 # Embedded mode (single writer)
-bd init --backend dolt
+bd init
 
 # Server mode (multi-writer)
-gt dolt start                    # Start the Dolt server
-bd init --backend dolt --server  # Initialize with server mode
+gt dolt start           # Start the Dolt server
+bd init --server        # Initialize with server mode
 ```
 
-### Migrate Existing Project to Dolt
+### Migrate from SQLite (Legacy)
+
+If upgrading from an older version that used SQLite:
 
 ```bash
 # Preview the migration
@@ -50,14 +39,6 @@ bd migrate --to-dolt --cleanup
 
 Migration creates backups automatically. Your original SQLite database is preserved as `beads.backup-pre-dolt-*.db`.
 
-### Migrate Back to SQLite (Escape Hatch)
-
-If you need to revert:
-
-```bash
-bd migrate --to-sqlite
-```
-
 ## Modes of Operation
 
 ### Embedded Mode (Default)
@@ -66,13 +47,14 @@ Single-process access to the Dolt database. Good for development and single-agen
 
 ```yaml
 # .beads/config.yaml (or auto-detected)
-database: dolt
+dolt:
+  mode: embedded
 ```
 
 Characteristics:
 - No server process needed
 - Single writer at a time
-- Daemon mode disabled (direct access only)
+- Direct database access
 
 ### Server Mode (Multi-Writer)
 
@@ -88,7 +70,6 @@ cd ~/.dolt-data/beads && dolt sql-server --port 3307
 
 ```yaml
 # .beads/config.yaml
-database: dolt
 dolt:
   mode: server
   host: 127.0.0.1
@@ -116,16 +97,13 @@ Federation enables direct sync between Dolt installations without a central hub.
 └─────────────────┘         └─────────────────┘
 ```
 
-The daemon in federation mode exposes two ports:
+In federation mode, the server exposes two ports:
 - **MySQL (3306)**: Multi-writer SQL access
 - **remotesapi (8080)**: Peer-to-peer push/pull
 
 ### Quick Start
 
 ```bash
-# Start daemon in federation mode
-bd daemon start --federation
-
 # Add a peer
 bd federation add-peer town-beta 192.168.1.100:8080/beads
 
@@ -169,9 +147,6 @@ bd doctor --deep
 
 # Verify peer connectivity
 bd federation status
-
-# View daemon federation logs
-bd daemon logs | grep -i federation
 ```
 
 ## Contributor Onboarding (Clone Bootstrap)
@@ -194,48 +169,6 @@ When someone clones a repository that uses Dolt backend:
 ```bash
 bd list              # Should show issues
 bd vc log            # Should show "Bootstrap from JSONL" commit
-```
-
-## Git Hooks Integration
-
-Dolt uses specialized hooks for JSONL synchronization:
-
-| Hook | Purpose |
-|------|---------|
-| pre-commit | Export Dolt changes to JSONL, stage for commit |
-| post-merge | Import pulled JSONL changes into Dolt |
-
-### Installing Hooks
-
-```bash
-# Recommended for Dolt projects
-bd hooks install --beads
-
-# Or shared across team
-bd hooks install --shared
-```
-
-### How Hooks Work
-
-**Pre-commit (export):**
-1. Checks if Dolt has changes since last export
-2. Exports database to `issues.jsonl`
-3. Stages JSONL file for git commit
-4. Tracks export state per-worktree
-
-**Post-merge (import):**
-1. Creates temporary Dolt branch
-2. Imports JSONL to that branch
-3. Merges using Dolt's cell-level 3-way merge
-4. Deletes temporary branch
-
-The branch-then-merge pattern provides better conflict resolution than line-based JSONL merging.
-
-### Verifying Hooks
-
-```bash
-bd hooks list        # Shows installed hooks
-bd doctor            # Checks hook health
 ```
 
 ## Troubleshooting
@@ -290,51 +223,11 @@ bd doctor --server         # Server mode checks (if applicable)
    bd doctor --fix
    ```
 
-2. **Nuclear option (rebuild from JSONL):**
+2. **Rebuild from JSONL:**
    ```bash
    rm -rf .beads/dolt
-   bd sync                  # Rebuilds from JSONL
+   bd list                  # Re-triggers bootstrap from JSONL
    ```
-
-3. **Restore from backup:**
-   ```bash
-   # If you have a pre-migration backup
-   ls .beads/*.backup-*.db
-   ```
-
-### Hooks Not Firing
-
-**Symptom:** JSONL not updating on commit, or Dolt not updating on pull.
-
-**Check:**
-```bash
-bd hooks list              # See what's installed
-git config core.hooksPath  # May override .git/hooks
-bd doctor                  # Checks hook health
-```
-
-**Reinstall:**
-```bash
-bd hooks install --beads --force
-```
-
-### Migration Failed Halfway
-
-**Symptom:** Both SQLite and Dolt exist, unclear state.
-
-**Recovery:**
-```bash
-# Check what exists
-ls .beads/*.db .beads/dolt/
-
-# If Dolt looks incomplete, restart migration
-rm -rf .beads/dolt
-bd migrate --to-dolt
-
-# If you want to abandon migration
-rm -rf .beads/dolt
-# SQLite remains as primary
-```
 
 ### Lock Contention (Embedded Mode)
 
@@ -353,10 +246,7 @@ bd config set dolt.mode server
 ```yaml
 # .beads/config.yaml
 
-# Database backend
-database: dolt           # sqlite | dolt
-
-# Dolt-specific settings
+# Dolt settings
 dolt:
   # Auto-commit Dolt history after writes (default: on for embedded, off for server)
   auto-commit: on        # on | off
@@ -367,10 +257,6 @@ dolt:
   port: 3307
   user: root
   # Password via BEADS_DOLT_PASSWORD env var
-
-# Sync mode (how JSONL and database stay in sync)
-sync:
-  mode: git-portable     # git-portable | dolt-native | belt-and-suspenders
 ```
 
 ### Environment Variables
@@ -381,10 +267,11 @@ sync:
 | `BEADS_DOLT_SERVER_MODE` | Enable server mode (set to "1") |
 | `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
 | `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307) |
+| `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
+| `BEADS_DOLT_SERVER_USER` | MySQL connection user |
+| `DOLT_REMOTE_USER` | Push/pull auth user |
+| `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
-
-**Note**: Backend selection (`sqlite` vs `dolt`) is controlled by `metadata.json`,
-not environment variables. This prevents accidental data fragmentation across backends.
 
 ## Dolt Version Control
 
@@ -446,7 +333,7 @@ Server runs on port 3307 (avoids MySQL conflict on 3306).
 
 ## Migration Cleanup
 
-After successful migration, you may have backup files:
+After successful migration from SQLite, you may have backup files:
 
 ```
 .beads/beads.backup-pre-dolt-20260122-213600.db
@@ -469,6 +356,5 @@ rm .beads/*.backup-*.db
 ## See Also
 
 - [CONFIG.md](CONFIG.md) - Full configuration reference
-- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git hooks and sync workflows
+- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git worktrees and protected branches
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - General troubleshooting
-- [SYNC.md](SYNC.md) - Sync modes and strategies

@@ -343,7 +343,6 @@ bd --actor alice <command>
 
 **See also:**
 - [TROUBLESHOOTING.md - Sandboxed environments](TROUBLESHOOTING.md#sandboxed-environments-codex-claude-code-etc) for detailed sandbox troubleshooting
-- [DAEMON.md](DAEMON.md) for daemon mode details
 
 ## Advanced Operations
 
@@ -661,30 +660,6 @@ bd migrate sync beads-sync --orphan                    # Delete and recreate as 
 - **Existing worktree**: If a worktree exists for the branch, it's automatically removed before migration.
 - **Non-destructive to remote**: The remote branch is not modified; use `git push --force` to update it after migration.
 
-### Daemon Management
-
-See [docs/DAEMON.md](DAEMON.md) for complete daemon management reference.
-
-```bash
-# List all running daemons
-bd daemons list --json
-
-# Check health (version mismatches, stale sockets)
-bd daemons health --json
-
-# Stop/restart specific daemon
-bd daemons stop /path/to/workspace --json
-bd daemons restart 12345 --json  # By PID
-
-# View daemon logs
-bd daemons logs /path/to/workspace -n 100
-bd daemons logs 12345 -f  # Follow mode
-
-# Stop all daemons
-bd daemons killall --json
-bd daemons killall --force --json  # Force kill if graceful fails
-```
-
 ### Sync Operations
 
 ```bash
@@ -931,7 +906,6 @@ See also:
 
 - [AGENTS.md](../AGENTS.md) - Main agent workflow guide
 - [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
-- [DAEMON.md](DAEMON.md) - Daemon management and event-driven mode
-- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git workflows and merge strategies
+- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git worktrees and protected branches
 - [LABELS.md](../LABELS.md) - Label system guide
 - [README.md](../README.md) - User documentation

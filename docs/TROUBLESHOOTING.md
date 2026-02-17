@@ -122,8 +122,6 @@ bd daemon start --foreground
 
 ### Related Documentation
 
-- [DAEMON.md](DAEMON.md) - Daemon management and troubleshooting
-- [SYNC.md](SYNC.md) - Git sync behavior and conflict resolution
 - [ROUTING.md](ROUTING.md) - Multi-repo routing configuration
 
 ## Installation Issues
@@ -855,7 +853,6 @@ bd sync
 | `--allow-stale` | Skip staleness validation | Emergency access to database | **High** - may show stale data |
 
 **Related:**
-- See [DAEMON.md](DAEMON.md) for daemon troubleshooting
 - See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions
 - GitHub issue [#353](https://github.com/steveyegge/beads/issues/353) for background
 

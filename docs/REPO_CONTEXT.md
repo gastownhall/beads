@@ -246,7 +246,6 @@ func TestSomething(t *testing.T) {
 - [WORKTREES.md](WORKTREES.md) - Git worktree integration
 - [ROUTING.md](ROUTING.md) - Multi-repository routing
 - [CONFIG.md](CONFIG.md) - BEADS_DIR and environment variables
-- [DAEMON.md](DAEMON.md) - Daemon architecture and workspace handling
 
 ## Implementation Notes
 

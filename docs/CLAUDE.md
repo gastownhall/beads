@@ -30,7 +30,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Storage Architecture
 
-Beads uses **Dolt** as its primary storage backend — a version-controlled SQL database:
+Beads uses **Dolt** as its storage backend — a version-controlled SQL database:
 
 ```
 Dolt DB (.beads/dolt/)
