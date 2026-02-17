@@ -516,7 +516,7 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  fmt.Sprintf("%d uncommitted change(s)", len(changes)),
 			Detail:   fmt.Sprintf("Changes: %v", changes),
-			Fix:      "Dolt changes are auto-committed by bd commands",
+			Fix:      "Run 'bd vc commit -m \"commit changes\"' to commit, or changes will auto-commit on next bd command",
 			Category: CategoryData,
 		}
 	}

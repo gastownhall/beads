@@ -238,8 +238,12 @@ Examples:
 			previewFixes(result)
 		} else if doctorFix {
 			applyFixes(result)
-			// Re-run diagnostics to show results
-			result = runDiagnostics(absPath)
+			// Note: we intentionally do NOT re-run diagnostics here.
+			// The embedded Dolt driver is a process-level singleton; if any
+			// Close() timed out during the first diagnostic pass, the leaked
+			// goroutine holds internal noms locks and a second open will
+			// deadlock. Users should run 'bd doctor' again to verify fixes.
+			fmt.Println("\nRun 'bd doctor' again to verify fixes.")
 		}
 
 		// Add timestamp and platform info for export

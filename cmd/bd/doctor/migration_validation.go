@@ -367,7 +367,7 @@ func CheckDoltLocks(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  "Uncommitted changes detected",
 			Detail:   detail,
-			Fix:      "Changes will be auto-committed on next bd command",
+			Fix:      "Run 'bd vc commit -m \"commit changes\"' to commit, or changes will auto-commit on next bd command",
 			Category: CategoryMaintenance,
 		}
 	}

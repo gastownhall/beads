@@ -238,7 +238,8 @@ func scanJSONLArtifacts(beadsDir string, report *ArtifactReport) {
 		name string
 		desc string
 	}{
-		{"issues.jsonl", "JSONL export in dolt-native directory"},
+		// Note: issues.jsonl is NOT an artifact — the pre-commit hook exports
+		// Dolt → JSONL on every git commit so the file is tracked in git.
 		{"issues.jsonl.new", "JSONL export artifact"},
 		{"beads.left.jsonl", "merge leftover"},
 		{"interactions.jsonl", "interactions log (usually empty)"},

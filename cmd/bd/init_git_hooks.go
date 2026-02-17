@@ -246,18 +246,25 @@ if [ -z "$BEADS_DIR" ]; then
     exit 0
 fi
 
-# Skip for Dolt backend (uses its own sync mechanism, not JSONL)
+# Export database to JSONL.
+# For Dolt backend: bd export writes Dolt → JSONL.
+# For other backends: bd sync --flush-only flushes pending writes to JSONL.
 if [ -f "$BEADS_DIR/metadata.json" ]; then
     if grep -q '"backend"[[:space:]]*:[[:space:]]*"dolt"' "$BEADS_DIR/metadata.json" 2>/dev/null; then
-        exit 0
+        bd export -o "$BEADS_DIR/issues.jsonl" >/dev/null 2>&1 || true
+    else
+        if ! bd sync --flush-only >/dev/null 2>&1; then
+            echo "Error: Failed to flush bd changes to storage" >&2
+            echo "Run 'bd sync --flush-only' manually to diagnose" >&2
+            exit 1
+        fi
     fi
-fi
-
-# Flush pending changes to JSONL
-if ! bd sync --flush-only >/dev/null 2>&1; then
-    echo "Error: Failed to flush bd changes to storage" >&2
-    echo "Run 'bd sync --flush-only' manually to diagnose" >&2
-    exit 1
+else
+    if ! bd sync --flush-only >/dev/null 2>&1; then
+        echo "Error: Failed to flush bd changes to storage" >&2
+        echo "Run 'bd sync --flush-only' manually to diagnose" >&2
+        exit 1
+    fi
 fi
 
 # If the JSONL file was modified, stage it
@@ -268,9 +275,6 @@ if [ -f "$BEADS_DIR/issues.jsonl" ]; then
         # Regular repo: file is in the working tree, safe to add
         git add "$BEADS_DIR/issues.jsonl" 2>/dev/null || true
     fi
-    # For worktrees: .beads is in the main repo's working tree, not this worktree
-    # Git rejects adding files outside the worktree, so we skip it.
-    # The main repo will see the changes on the next pull/sync.
 fi
 
 exit 0

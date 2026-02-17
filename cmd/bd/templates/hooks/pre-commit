@@ -1,17 +1,12 @@
 #!/usr/bin/env sh
-# bd-shim v1
+# bd-shim v2
 # bd-hooks-version: 0.52.0
 #
-# bd (beads) pre-commit hook - thin shim
+# bd (beads) pre-commit hook
 #
-# This shim delegates to 'bd hook pre-commit' which contains
-# the actual hook logic. This pattern ensures hook behavior is always
-# in sync with the installed bd version - no manual updates needed.
-#
-# The 'bd hook' command (singular) supports:
-# - Per-worktree export state tracking
-# - Dolt branch-then-merge pattern for cell-level conflict resolution
-# - Hook chaining configuration
+# Exports database to JSONL and stages it before every git commit.
+# For Dolt backend: runs bd export to write Dolt → JSONL.
+# For other backends: delegates to bd hook pre-commit.
 
 # Check if bd is available
 if ! command -v bd >/dev/null 2>&1; then
@@ -21,4 +16,29 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
+# Find .beads directory
+BEADS_DIR=""
+if [ -d .beads ]; then
+    BEADS_DIR=".beads"
+elif git rev-parse --git-common-dir >/dev/null 2>&1; then
+    MAIN_ROOT="$(dirname "$(git rev-parse --git-common-dir)")"
+    if [ -d "$MAIN_ROOT/.beads" ]; then
+        BEADS_DIR="$MAIN_ROOT/.beads"
+    fi
+fi
+
+if [ -z "$BEADS_DIR" ]; then
+    exit 0
+fi
+
+# For Dolt backend: export database to JSONL and stage it
+if [ -f "$BEADS_DIR/metadata.json" ]; then
+    if grep -q '"backend"[[:space:]]*:[[:space:]]*"dolt"' "$BEADS_DIR/metadata.json" 2>/dev/null; then
+        bd export -o "$BEADS_DIR/issues.jsonl" >/dev/null 2>&1 || true
+        git add "$BEADS_DIR/issues.jsonl" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
+# Non-Dolt: delegate to bd hook pre-commit
 exec bd hook pre-commit "$@"

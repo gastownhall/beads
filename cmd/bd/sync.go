@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -29,15 +28,18 @@ For data interchange:
   bd export        Export database to JSONL
   bd import        Import JSONL into database`,
 	Run: func(_ *cobra.Command, _ []string) {
+		// The global store is already opened by PersistentPreRun with the
+		// access lock held. Use it directly instead of spawning a subprocess
+		// (which would deadlock on the same lock).
+		if store == nil {
+			return // No database open, nothing to export
+		}
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			return // Not a beads workspace, silent no-op
+			return
 		}
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		cmd := exec.Command("bd", "export", "-o", jsonlPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		if err := exportToJSONLWithStore(rootCtx, store, jsonlPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: export failed: %v\n", err)
 		}
 	},
