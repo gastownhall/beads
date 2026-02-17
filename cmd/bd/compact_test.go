@@ -13,7 +13,7 @@ import (
 )
 
 func TestCompactSuite(t *testing.T) {
-	t.Skip("Compaction not yet implemented for Dolt backend")
+	// Compaction is now implemented for Dolt backend
 	tmpDir := t.TempDir()
 	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
 	s := newTestStore(t, testDB)
