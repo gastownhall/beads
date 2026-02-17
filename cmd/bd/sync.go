@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // syncCmd exports Dolt database to JSONL for backward compatibility.
@@ -41,6 +42,24 @@ For data interchange:
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 		if err := exportToJSONLWithStore(rootCtx, store, jsonlPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: export failed: %v\n", err)
+		}
+
+		// Commit to sync branch if configured
+		syncBranch := syncbranch.GetFromYAML()
+		if syncBranch != "" {
+			repoRoot, err := syncbranch.GetRepoRoot(rootCtx)
+			if err == nil {
+				push := syncbranch.HasGitRemote(rootCtx)
+				result, err := syncbranch.CommitToSyncBranch(rootCtx, repoRoot, syncBranch, jsonlPath, push)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to commit to sync branch: %v\n", err)
+				} else if result != nil && result.Committed {
+					fmt.Fprintf(os.Stderr, "Committed to sync branch: %s\n", syncBranch)
+					if result.Pushed {
+						fmt.Fprintf(os.Stderr, "Pushed to remote\n")
+					}
+				}
+			}
 		}
 	},
 }

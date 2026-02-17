@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -488,8 +489,18 @@ func doExportAndSaveState(ctx context.Context, s *dolt.DoltStore, beadsDir, work
 		return
 	}
 
-	// Stage JSONL files for git commit
-	stageJSONLFiles(ctx)
+	// Commit to sync branch if configured, otherwise stage for main
+	if sb := hookGetSyncBranch(); sb != "" {
+		repoRoot, err := syncbranch.GetRepoRoot(ctx)
+		if err == nil {
+			// Don't push during pre-commit hook — too slow
+			if _, err := syncbranch.CommitToSyncBranch(ctx, repoRoot, sb, jsonlPath, false); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit to sync branch: %v\n", err)
+			}
+		}
+	} else {
+		stageJSONLFiles(ctx)
+	}
 
 	// Save export state
 	jsonlHash, _ := computeJSONLHashForHook(jsonlPath)

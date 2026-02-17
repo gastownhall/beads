@@ -735,6 +735,13 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		os.Exit(1)
 	}
 
+	// Create worktree for the sync branch (non-fatal)
+	if _, err := syncbranch.EnsureWorktree(ctx); err != nil {
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: could not create sync branch worktree: %v\n", err)
+		}
+	}
+
 	// Success output
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
