@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 func TestStaleLockFiles(t *testing.T) {
@@ -192,6 +194,26 @@ func TestProbeStale(t *testing.T) {
 		}
 		if !probeStale(lockPath) {
 			t.Error("unheld lock file should be stale")
+		}
+	})
+
+	t.Run("held lock is not stale", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		lockPath := filepath.Join(tmpDir, "test.lock")
+
+		// Create and hold an exclusive flock
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := lockfile.FlockExclusiveNonBlock(f); err != nil {
+			t.Fatalf("failed to acquire test lock: %v", err)
+		}
+		defer func() { _ = lockfile.FlockUnlock(f) }()
+
+		if probeStale(lockPath) {
+			t.Error("held lock should NOT be treated as stale")
 		}
 	})
 }
