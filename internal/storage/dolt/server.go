@@ -34,13 +34,14 @@ const (
 
 // ServerConfig holds configuration for the dolt sql-server
 type ServerConfig struct {
-	DataDir        string // Path to Dolt database directory
-	SQLPort        int    // MySQL protocol port (default: 3307)
-	RemotesAPIPort int    // remotesapi port for peer sync (default: 8080)
-	Host           string // Host to bind to (default: 127.0.0.1)
-	LogFile        string // Log file for server output (optional)
-	User           string // MySQL user (default: root)
-	ReadOnly       bool   // Start in read-only mode
+	DataDir           string // Path to Dolt database directory
+	SQLPort           int    // MySQL protocol port (default: 3307)
+	RemotesAPIPort    int    // remotesapi port for peer sync (default: 8080)
+	Host              string // Host to bind to (default: 127.0.0.1)
+	LogFile           string // Log file for server output (optional)
+	User              string // MySQL user (default: root)
+	ReadOnly          bool   // Start in read-only mode
+	DisableRemotesAPI bool   // Skip --remotesapi-port flag entirely (not needed outside federation)
 }
 
 // Server manages a dolt sql-server process
@@ -86,8 +87,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.checkPortAvailable(s.cfg.SQLPort); err != nil {
 		return fmt.Errorf("SQL port %d not available: %w", s.cfg.SQLPort, err)
 	}
-	if err := s.checkPortAvailable(s.cfg.RemotesAPIPort); err != nil {
-		return fmt.Errorf("remotesapi port %d not available: %w", s.cfg.RemotesAPIPort, err)
+	if !s.cfg.DisableRemotesAPI {
+		if err := s.checkPortAvailable(s.cfg.RemotesAPIPort); err != nil {
+			return fmt.Errorf("remotesapi port %d not available: %w", s.cfg.RemotesAPIPort, err)
+		}
 	}
 
 	// Build command args
@@ -96,8 +99,13 @@ func (s *Server) Start(ctx context.Context) error {
 		"sql-server",
 		"--host", s.cfg.Host,
 		"--port", strconv.Itoa(s.cfg.SQLPort),
-		"--remotesapi-port", strconv.Itoa(s.cfg.RemotesAPIPort),
 		"--no-auto-commit", // Let the application manage commits
+	}
+
+	// Only add remotesapi port when needed (federation). Dolt binds remotesapi
+	// on all interfaces (:port), so port 8080 conflicts are common.
+	if !s.cfg.DisableRemotesAPI {
+		args = append(args, "--remotesapi-port", strconv.Itoa(s.cfg.RemotesAPIPort))
 	}
 
 	if s.cfg.ReadOnly {

@@ -50,10 +50,24 @@ var doltTestCmdNoCGO = &cobra.Command{
 	Run:   noCGODoltError,
 }
 
+var doltStartCmdNoCGO = &cobra.Command{
+	Use:   "start",
+	Short: "Start a Dolt SQL server using configured settings",
+	Run:   noCGODoltError,
+}
+
+var doltStopCmdNoCGO = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the running Dolt SQL server",
+	Run:   noCGODoltError,
+}
+
 func init() {
 	doltSetCmdNoCGO.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltCmd.AddCommand(doltShowCmdNoCGO)
 	doltCmd.AddCommand(doltSetCmdNoCGO)
 	doltCmd.AddCommand(doltTestCmdNoCGO)
+	doltCmd.AddCommand(doltStartCmdNoCGO)
+	doltCmd.AddCommand(doltStopCmdNoCGO)
 	rootCmd.AddCommand(doltCmd)
 }

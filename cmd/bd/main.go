@@ -322,6 +322,7 @@ var rootCmd = &cobra.Command{
 			"bash",
 			"completion",
 			"doctor",
+			"dolt",
 			"fish",
 			"help",
 			"hook", // manages its own store lifecycle; double-open deadlocks embedded Dolt (#1719)

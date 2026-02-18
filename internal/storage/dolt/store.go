@@ -33,6 +33,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	embedded "github.com/dolthub/driver"
+
 	// Import MySQL driver for server mode connections
 	_ "github.com/go-sql-driver/mysql"
 
@@ -354,7 +355,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			if accessLock != nil {
 				accessLock.Release()
 			}
-			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  dolt sql-server  # Manual start in database directory",
+			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  bd dolt start  # If using Beads directly",
 				addr, err)
 		}
 		_ = conn.Close()
@@ -578,7 +579,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			_ = db.Close()
 			// Check for connection refused - server likely not running
 			if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  dolt sql-server  # Manual start in database directory",
+				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  bd dolt start # If using Beads directly",
 					cfg.ServerHost, cfg.ServerPort, err)
 			}
 			return nil, "", fmt.Errorf("failed to create database: %w", err)

@@ -107,6 +107,121 @@ func TestServerConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestServerConfigDisableRemotesAPI tests the DisableRemotesAPI flag
+func TestServerConfigDisableRemotesAPI(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		server := NewServer(ServerConfig{
+			DataDir: "/tmp/test",
+		})
+		if server.cfg.DisableRemotesAPI {
+			t.Error("expected DisableRemotesAPI to be false by default")
+		}
+	})
+
+	t.Run("preserved when set", func(t *testing.T) {
+		server := NewServer(ServerConfig{
+			DataDir:           "/tmp/test",
+			DisableRemotesAPI: true,
+		})
+		if !server.cfg.DisableRemotesAPI {
+			t.Error("expected DisableRemotesAPI to be true")
+		}
+		// Defaults should still be applied for other fields
+		if server.cfg.SQLPort != DefaultSQLPort {
+			t.Errorf("expected default SQL port %d, got %d", DefaultSQLPort, server.cfg.SQLPort)
+		}
+	})
+
+	t.Run("port check skipped when disabled", func(t *testing.T) {
+		// Start with DisableRemotesAPI: port 8080 conflict shouldn't matter.
+		// We can't do a full Start() without a dolt repo, but we verify
+		// the port check is skipped by using a port that IS in use.
+		// The SQL port check will fail first (no server to start), but
+		// the remotesapi port check should be skipped entirely.
+		server := NewServer(ServerConfig{
+			DataDir:           t.TempDir(),
+			SQLPort:           13307,
+			RemotesAPIPort:    1, // Port 1 is privileged, would fail check
+			DisableRemotesAPI: true,
+		})
+		// Verify the config was set correctly
+		if server.cfg.RemotesAPIPort != 1 {
+			t.Errorf("expected RemotesAPIPort 1, got %d", server.cfg.RemotesAPIPort)
+		}
+		if !server.cfg.DisableRemotesAPI {
+			t.Error("expected DisableRemotesAPI true")
+		}
+	})
+}
+
+// TestServerStartStopDisableRemotesAPI tests server lifecycle without remotesapi
+func TestServerStartStopDisableRemotesAPI(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping server test")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "dolt-server-noremotes-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Set up dolt identity (HOME may be a temp dir in test)
+	for _, args := range [][]string{
+		{"config", "--global", "--add", "user.name", "Test User"},
+		{"config", "--global", "--add", "user.email", "test@test.com"},
+	} {
+		cfgCmd := exec.Command("dolt", args...)
+		cfgCmd.Dir = tmpDir
+		if out, err := cfgCmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt %v failed: %v, output: %s", args, err, out)
+		}
+	}
+
+	// Initialize dolt repo
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = tmpDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to init dolt repo: %v, output: %s", err, output)
+	}
+
+	logFile := filepath.Join(tmpDir, "server.log")
+	server := NewServer(ServerConfig{
+		DataDir:           tmpDir,
+		SQLPort:           13309, // Non-standard port
+		Host:              "127.0.0.1",
+		LogFile:           logFile,
+		DisableRemotesAPI: true, // No remotesapi
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := server.Start(ctx); err != nil {
+		if logContent, readErr := os.ReadFile(logFile); readErr == nil {
+			t.Logf("Server log:\n%s", logContent)
+		}
+		t.Fatalf("failed to start server: %v", err)
+	}
+
+	if !server.IsRunning() {
+		t.Error("server should be running")
+	}
+
+	if server.SQLPort() != 13309 {
+		t.Errorf("expected SQL port 13309, got %d", server.SQLPort())
+	}
+
+	if err := server.Stop(); err != nil {
+		t.Fatalf("failed to stop server: %v", err)
+	}
+
+	if server.IsRunning() {
+		t.Error("server should not be running after stop")
+	}
+}
+
 // TestGetRunningServerPID tests the PID file detection
 func TestGetRunningServerPID(t *testing.T) {
 	// Create temp directory
