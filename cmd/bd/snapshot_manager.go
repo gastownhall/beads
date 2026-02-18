@@ -38,6 +38,11 @@ type SnapshotStats struct {
 	LeftExists     bool // Whether left snapshot exists
 }
 
+// getVersion returns the current bd version.
+func getVersion() string {
+	return Version
+}
+
 // SnapshotManager handles snapshot file operations and validation
 type SnapshotManager struct {
 	jsonlPath string
