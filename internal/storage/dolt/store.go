@@ -171,6 +171,30 @@ func isRetryableError(err error) bool {
 	return false
 }
 
+// isLockError returns true if the error indicates a Dolt lock contention problem.
+// These errors occur when the embedded Dolt engine cannot access its noms storage
+// layer, typically because a stale LOCK file was left behind by a crashed process.
+func isLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "database is locked") ||
+		strings.Contains(errStr, "lock file") ||
+		strings.Contains(errStr, "noms lock") ||
+		strings.Contains(errStr, "locked by another dolt process")
+}
+
+// wrapLockError wraps lock-related errors with actionable guidance.
+// Non-lock errors and nil are returned unchanged.
+func wrapLockError(err error) error {
+	if !isLockError(err) {
+		return err
+	}
+	return fmt.Errorf("%w\n\nThe Dolt database is locked. This usually means a previous bd process "+
+		"crashed without releasing its lock.\nRun 'bd doctor --fix' to clean stale lock files.", err)
+}
+
 // withRetry executes an operation with retry for transient errors.
 // Only active in server mode; embedded mode has driver-level retry.
 func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
@@ -199,7 +223,7 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 		result, execErr = s.db.ExecContext(ctx, query, args...)
 		return execErr
 	})
-	return result, err
+	return result, wrapLockError(err)
 }
 
 // queryContext wraps s.db.QueryContext with server-mode retry for transient errors.
@@ -210,16 +234,16 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 		rows, queryErr = s.db.QueryContext(ctx, query, args...)
 		return queryErr
 	})
-	return rows, err
+	return rows, wrapLockError(err)
 }
 
 // queryRowContext wraps s.db.QueryRowContext with server-mode retry for transient errors.
 // The scan function receives the *sql.Row and should call .Scan() on it.
 func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) error, query string, args ...any) error {
-	return s.withRetry(ctx, func() error {
+	return wrapLockError(s.withRetry(ctx, func() error {
 		row := s.db.QueryRowContext(ctx, query, args...)
 		return scan(row)
-	})
+	}))
 }
 
 // New creates a new Dolt storage backend
@@ -407,7 +431,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		if accessLock != nil {
 			accessLock.Release()
 		}
-		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
+		return nil, wrapLockError(fmt.Errorf("failed to ping Dolt database: %w", err))
 	}
 
 	store := &DoltStore{
