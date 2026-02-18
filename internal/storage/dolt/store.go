@@ -161,6 +161,13 @@ func isRetryableError(err error) bool {
 	if strings.Contains(errStr, "i/o timeout") {
 		return true
 	}
+	// Dolt server catalog race: after CREATE DATABASE, the server's in-memory
+	// catalog may not have registered the new database yet. The immediately
+	// following USE (implicit via DSN) fails with "Unknown database". This is
+	// transient and resolves once the catalog refreshes. (GH-1851)
+	if strings.Contains(errStr, "unknown database") {
+		return true
+	}
 	return false
 }
 
@@ -553,6 +560,28 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			return nil, "", fmt.Errorf("failed to create database: %w", err)
 		}
 		// Database already exists - that's fine, continue
+	}
+
+	// Wait for the Dolt server's in-memory catalog to register the new database.
+	// After CREATE DATABASE, there is a race where the server has created the
+	// database on disk but hasn't updated its catalog yet. Pinging db (which
+	// has the database in the DSN) will fail with "Unknown database" until the
+	// catalog catches up. We retry with exponential backoff. (GH-1851)
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 100 * time.Millisecond
+	bo.MaxElapsedTime = 10 * time.Second
+	if err := backoff.Retry(func() error {
+		pingErr := db.PingContext(ctx)
+		if pingErr != nil && isRetryableError(pingErr) {
+			return pingErr // retryable — backoff will retry
+		}
+		if pingErr != nil {
+			return backoff.Permanent(pingErr)
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx)); err != nil {
+		_ = db.Close()
+		return nil, "", fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
 	return db, connStr, nil

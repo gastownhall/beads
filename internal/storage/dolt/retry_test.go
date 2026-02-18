@@ -75,6 +75,16 @@ func TestIsRetryableError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "unknown database - retryable (catalog race GH-1851)",
+			err:      errors.New("Error 1049 (42000): Unknown database 'beads_test'"),
+			expected: true,
+		},
+		{
+			name:     "Unknown Database (case insensitive)",
+			err:      errors.New("Unknown Database 'beads_test'"),
+			expected: true,
+		},
+		{
 			name:     "syntax error - not retryable",
 			err:      errors.New("Error 1064: You have an error in your SQL syntax"),
 			expected: false,
@@ -141,6 +151,27 @@ func TestWithRetry_ServerMode_RetryOnBadConnection(t *testing.T) {
 			return errors.New("driver: bad connection")
 		}
 		return nil // Success on 3rd attempt
+	})
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 retries + success), got %d", callCount)
+	}
+}
+
+func TestWithRetry_ServerMode_RetryOnUnknownDatabase(t *testing.T) {
+	// Simulates the GH-1851 race: "Unknown database" is transient after CREATE DATABASE
+	store := &DoltStore{serverMode: true}
+
+	callCount := 0
+	err := store.withRetry(context.Background(), func() error {
+		callCount++
+		if callCount < 3 {
+			return errors.New("Error 1049 (42000): Unknown database 'beads_test'")
+		}
+		return nil // Catalog caught up on 3rd attempt
 	})
 
 	if err != nil {
