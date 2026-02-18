@@ -217,9 +217,10 @@ func TestParseIssueType(t *testing.T) {
 		{"task type", "task", types.TypeTask, false, ""},
 		{"epic type", "epic", types.TypeEpic, false, ""},
 		{"chore type", "chore", types.TypeChore, false, ""},
+		// Molecule is now a core type (used by swarm create)
+		{"molecule type", "molecule", types.TypeMolecule, false, ""},
 		// Gas Town types require types.custom configuration (invalid without config)
 		{"merge-request type", "merge-request", types.TypeTask, true, "invalid issue type"},
-		{"molecule type", "molecule", types.TypeTask, true, "invalid issue type"},
 		{"gate type", "gate", types.TypeTask, true, "invalid issue type"},
 		{"event type", "event", types.TypeTask, true, "invalid issue type"},
 		{"message type", "message", types.TypeMessage, false, ""},

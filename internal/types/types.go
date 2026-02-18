@@ -433,6 +433,7 @@ const (
 	TypeChore    IssueType = "chore"
 	TypeDecision IssueType = "decision"
 	TypeMessage  IssueType = "message"
+	TypeMolecule IssueType = "molecule" // Molecule type for swarm coordination (internal use)
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
@@ -448,11 +449,11 @@ const TypeEvent IssueType = "event"
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
-// Only core work types (bug, feature, task, epic, chore, decision) are built-in.
-// Other types (molecule, gate, convoy, etc.) require types.custom configuration.
+// Core work types (bug, feature, task, epic, chore, decision, message) and molecule type are built-in.
+// Other types (gate, convoy, etc.) require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule:
 		return true
 	}
 	return false
