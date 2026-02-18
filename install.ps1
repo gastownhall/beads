@@ -176,7 +176,7 @@ function Install-FromRelease {
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
 
         Write-Info "Extracting archive..."
-        Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
+        Microsoft.PowerShell.Archive\Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
 
         $bdPath = Join-Path $tempRoot "bd.exe"
         if (-not (Test-Path $bdPath)) {
