@@ -32,7 +32,27 @@ jobs:
       - name: Install cross-compilation toolchains and signing tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode libicu-dev
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Create zig cross-compilation wrappers
+        run: |
+          mkdir -p /tmp/zigcc
+          for pair in \
+            "cc-x86_64-macos:x86_64-macos" \
+            "cc-aarch64-macos:aarch64-macos" \
+            "cc-aarch64-windows-gnu:aarch64-windows-gnu" \
+            "cc-aarch64-linux-android:aarch64-linux-android" \
+            "cc-x86_64-freebsd:x86_64-freebsd"; do
+            name="${pair%%:*}"
+            target="${pair##*:}"
+            printf '#!/bin/sh\nexec zig cc -target %s "$@"\n' "$target" > "/tmp/zigcc/$name"
+            chmod +x "/tmp/zigcc/$name"
+          done
 
       - name: Install go-winres for Windows PE resource embedding
         run: go install github.com/tc-hib/go-winres@latest

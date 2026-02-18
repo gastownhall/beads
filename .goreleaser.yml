@@ -16,7 +16,9 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=gcc
+      - CXX=g++
     goos:
       - linux
     goarch:
@@ -32,7 +34,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+    tags:
+      - gms_pure_go
     goos:
       - linux
     goarch:
@@ -48,7 +53,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-aarch64-linux-android
+    tags:
+      - gms_pure_go
     goos:
       - android
     goarch:
@@ -64,7 +72,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-x86_64-macos
+    tags:
+      - gms_pure_go
     goos:
       - darwin
     goarch:
@@ -80,7 +91,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-aarch64-macos
+    tags:
+      - gms_pure_go
     goos:
       - darwin
     goarch:
@@ -96,7 +110,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+    tags:
+      - gms_pure_go
     goos:
       - windows
     goarch:
@@ -118,7 +135,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-aarch64-windows-gnu
+    tags:
+      - gms_pure_go
     goos:
       - windows
     goarch:
@@ -140,7 +160,10 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-x86_64-freebsd
+    tags:
+      - gms_pure_go
     goos:
       - freebsd
     goarch:
