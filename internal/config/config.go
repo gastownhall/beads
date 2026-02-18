@@ -36,8 +36,18 @@ func Initialize() error {
 	v.SetConfigType("yaml")
 
 	// Explicitly locate config.yaml and use SetConfigFile to avoid picking up config.json
-	// Precedence: project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
+	// Precedence: BEADS_DIR > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
 	configFileSet := false
+
+	// 0. Check BEADS_DIR first (highest priority)
+	// This ensures bd commands with BEADS_DIR set find the correct config
+	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" && !configFileSet {
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		if _, err := os.Stat(configPath); err == nil {
+			v.SetConfigFile(configPath)
+			configFileSet = true
+		}
+	}
 
 	// 1. Walk up from CWD to find project .beads/config.yaml
 	//    This allows commands to work from subdirectories
