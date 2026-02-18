@@ -432,9 +432,8 @@ func hookPreCommitDolt(beadsDir, worktreeRoot string) int {
 	// Load previous export state for this worktree
 	prevState, _ := loadExportState(beadsDir, worktreeRoot)
 
-	// Create storage
-	doltPath := filepath.Join(beadsDir, "dolt")
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath})
+	// Open storage using config to get the correct database name (e.g. "beads_bd")
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not open database: %v\n", err)
 		return 0
@@ -446,7 +445,7 @@ func hookPreCommitDolt(beadsDir, worktreeRoot string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not get Dolt commit: %v\n", err)
 		// Fall back to full export without commit tracking
-		doExportAndSaveState(ctx, beadsDir, worktreeRoot, "")
+		doExportAndSaveState(ctx, store, beadsDir, worktreeRoot, "")
 		return 0
 	}
 
@@ -469,16 +468,24 @@ func hookPreCommitDolt(beadsDir, worktreeRoot string) int {
 		}
 	}
 
-	doExportAndSaveState(ctx, beadsDir, worktreeRoot, currentDoltCommit)
+	doExportAndSaveState(ctx, store, beadsDir, worktreeRoot, currentDoltCommit)
 	return 0
 }
 
 // doExportAndSaveState performs the export and saves state. Shared by main path and fallback.
-func doExportAndSaveState(ctx context.Context, beadsDir, worktreeRoot, doltCommit string) {
+// When store is non-nil, exports in-process to avoid spawning a child `bd sync`
+// that would deadlock on the embedded Dolt lock (see issue #1841).
+// When store is nil, falls back to spawning `bd sync --flush-only`.
+func doExportAndSaveState(ctx context.Context, store *dolt.DoltStore, beadsDir, worktreeRoot, doltCommit string) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
-	// Export to JSONL
-	if err := runJSONLExport(); err != nil {
+	// Export to JSONL — in-process when we already hold the Dolt lock
+	if store != nil {
+		if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not export to JSONL: %v\n", err)
+			return
+		}
+	} else if err := runJSONLExport(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not export to JSONL: %v\n", err)
 		return
 	}
@@ -618,9 +625,8 @@ func hookPostMerge(args []string) int {
 func hookPostMergeDolt(beadsDir string) int {
 	ctx := context.Background()
 
-	// Create storage
-	doltPath := filepath.Join(beadsDir, "dolt")
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath})
+	// Open storage using config to get the correct database name (e.g. "beads_bd")
+	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not open database: %v\n", err)
 		return 0
