@@ -529,7 +529,6 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	}
 
 	// Remove FK constraint on depends_on_id to allow external references.
-	// See SQLite migration 025_remove_depends_on_fk.go for design context.
 	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
 	_, err = db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
 	if err == nil {

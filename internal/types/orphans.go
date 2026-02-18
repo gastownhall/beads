@@ -4,7 +4,7 @@ package types
 import "context"
 
 // IssueProvider abstracts issue storage for orphan detection.
-// Implementations may be backed by SQLite, RPC, JSONL, or mocks.
+// Implementations may be backed by Dolt or mocks.
 type IssueProvider interface {
 	// GetOpenIssues returns issues that are open or in_progress.
 	// Should return empty slice (not error) if no issues exist.

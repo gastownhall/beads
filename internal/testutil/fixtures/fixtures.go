@@ -134,14 +134,14 @@ func DefaultXLargeConfig() DataConfig {
 	}
 }
 
-// LargeSQLite creates a 10K issue database with realistic patterns
-func LargeSQLite(ctx context.Context, store *dolt.DoltStore) error {
+// LargeDolt creates a 10K issue database with realistic patterns
+func LargeDolt(ctx context.Context, store *dolt.DoltStore) error {
 	cfg := DefaultLargeConfig()
 	return generateIssuesWithConfig(ctx, store, cfg)
 }
 
-// XLargeSQLite creates a 20K issue database with realistic patterns
-func XLargeSQLite(ctx context.Context, store *dolt.DoltStore) error {
+// XLargeDolt creates a 20K issue database with realistic patterns
+func XLargeDolt(ctx context.Context, store *dolt.DoltStore) error {
 	cfg := DefaultXLargeConfig()
 	return generateIssuesWithConfig(ctx, store, cfg)
 }

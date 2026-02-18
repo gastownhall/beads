@@ -156,7 +156,7 @@ func IsConfiguredWithDB(dbPath string) bool {
 		}
 	}
 
-	// Derive beadsDir from dbPath (parent directory in both SQLite and Dolt cases)
+	// Derive beadsDir from dbPath (parent directory)
 	beadsDir := filepath.Dir(dbPath)
 
 	// Read sync.branch from database config table
@@ -165,7 +165,7 @@ func IsConfiguredWithDB(dbPath string) bool {
 }
 
 // getConfigFromDB reads a config value from the database.
-// This is backend-aware and works with both SQLite and Dolt databases.
+// Returns empty string if the database doesn't exist or the key is not found.
 // Returns empty string if the database doesn't exist or the key is not found.
 func getConfigFromDB(beadsDir string, key string) string {
 	// Check if beads directory exists

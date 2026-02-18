@@ -30,7 +30,7 @@ type Compactor struct {
 }
 
 // compactableStore defines the storage interface required for compaction.
-// This interface can be implemented by any storage backend (SQLite, Dolt, etc.)
+// This interface can be implemented by any storage backend
 // that wants to support the compaction feature.
 type compactableStore interface {
 	CheckEligibility(ctx context.Context, issueID string, tier int) (bool, string, error)

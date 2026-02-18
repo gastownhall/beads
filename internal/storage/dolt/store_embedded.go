@@ -166,7 +166,7 @@ func openEmbeddedConnection(dsn string) (*sql.DB, string, *embedded.Connector, e
 	db := sql.OpenDB(connector)
 
 	// Configure connection pool
-	// Dolt embedded mode is single-writer like SQLite
+	// Dolt embedded mode is single-writer
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)

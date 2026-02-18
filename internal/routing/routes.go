@@ -386,7 +386,7 @@ func (rs *RoutedStorage) Close() error {
 type StorageOpener func(ctx context.Context, beadsDir string) (*dolt.DoltStore, error)
 
 // GetRoutedStorageForID returns a storage connection for the given issue ID.
-// If the ID matches a route, it opens a connection to the routed database using SQLite.
+// If the ID matches a route, it opens a connection to the routed database.
 // Otherwise, it returns nil (caller should use their existing storage).
 //
 // DEPRECATED: Use GetRoutedStorageWithOpener for proper backend support.

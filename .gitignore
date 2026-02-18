@@ -31,7 +31,7 @@ pkg/
 .DS_Store
 Thumbs.db
 
-# SQLite databases (now using JSONL as source of truth)
+# Legacy SQLite database files
 *.db
 *.db-journal
 *.db-wal

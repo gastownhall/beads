@@ -61,7 +61,7 @@ var YamlOnlyKeys = map[string]bool{
 }
 
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
-// rather than the SQLite database.
+// rather than the Dolt database.
 func IsYamlOnlyKey(key string) bool {
 	// Check exact match
 	if YamlOnlyKeys[key] {

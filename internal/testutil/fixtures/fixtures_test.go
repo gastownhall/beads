@@ -11,7 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestLargeSQLite(t *testing.T) {
+func TestLargeDolt(t *testing.T) {
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -25,8 +25,8 @@ func TestLargeSQLite(t *testing.T) {
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
-	if err := LargeSQLite(ctx, store); err != nil {
-		t.Fatalf("LargeSQLite failed: %v", err)
+	if err := LargeDolt(ctx, store); err != nil {
+		t.Fatalf("LargeDolt failed: %v", err)
 	}
 
 	// Verify issue count
@@ -59,7 +59,7 @@ func TestLargeSQLite(t *testing.T) {
 	t.Logf("Created %d epics, %d features, %d tasks", epics, features, tasks)
 }
 
-func TestXLargeSQLite(t *testing.T) {
+func TestXLargeDolt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping XLarge test in short mode")
 	}
@@ -77,8 +77,8 @@ func TestXLargeSQLite(t *testing.T) {
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
-	if err := XLargeSQLite(ctx, store); err != nil {
-		t.Fatalf("XLargeSQLite failed: %v", err)
+	if err := XLargeDolt(ctx, store); err != nil {
+		t.Fatalf("XLargeDolt failed: %v", err)
 	}
 
 	// Verify issue count

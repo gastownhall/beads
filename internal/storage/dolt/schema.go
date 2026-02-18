@@ -6,7 +6,6 @@ package dolt
 const currentSchemaVersion = 3
 
 // schema defines the MySQL-compatible database schema for Dolt.
-// This mirrors the SQLite schema but uses MySQL syntax.
 const schema = `
 -- Issues table
 CREATE TABLE IF NOT EXISTS issues (
@@ -90,7 +89,6 @@ CREATE TABLE IF NOT EXISTS issues (
 
 -- Dependencies table (edge schema)
 -- Note: No FK on depends_on_id to allow external references (external:<rig>:<id>).
--- See SQLite migration 025_remove_depends_on_fk.go for design context.
 CREATE TABLE IF NOT EXISTS dependencies (
     issue_id VARCHAR(255) NOT NULL,
     depends_on_id VARCHAR(255) NOT NULL,
@@ -259,7 +257,7 @@ INSERT IGNORE INTO config (` + "`key`" + `, value) VALUES
 `
 
 // readyIssuesView is a MySQL-compatible view for ready work
-// Note: Dolt supports recursive CTEs like SQLite.
+// Note: Dolt supports recursive CTEs.
 // Uses LEFT JOIN instead of NOT EXISTS to avoid Dolt mergeJoinIter panic.
 // See: https://github.com/dolthub/go-mysql-server/issues/3413
 const readyIssuesView = `
