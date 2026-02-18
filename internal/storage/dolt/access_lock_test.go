@@ -253,4 +253,3 @@ func TestAcquireAccessLock_ReleaseUnblocksWaiter(t *testing.T) {
 		t.Fatal("waiter did not acquire lock after holder released")
 	}
 }
-
