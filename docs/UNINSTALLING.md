@@ -7,8 +7,8 @@ This guide explains how to completely remove Beads from a repository.
 Run these commands from your repository root:
 
 ```bash
-# 1. Stop any running daemon
-bd daemons killall
+# 1. Stop any running bd process (optional)
+pkill -f "bd.*daemon" 2>/dev/null || true
 
 # 2. Remove git hooks installed by Beads
 rm -f .git/hooks/pre-commit .git/hooks/post-merge .git/hooks/pre-push .git/hooks/post-checkout
@@ -30,13 +30,14 @@ rm -rf .git/beads-worktrees
 
 ## Detailed Steps
 
-### 1. Stop the Daemon
+### 1. Stop Legacy Daemon Processes (Optional)
 
-If a Beads daemon is running for this repository, stop it first:
+Newer versions no longer expose daemon management commands, but you may have
+an old daemon process from a previous release. Stop it before cleanup:
 
 ```bash
-bd daemons list     # Check if daemon is running
-bd daemons killall  # Stop all daemons
+pgrep -lf "bd.*daemon"                    # Check for legacy daemon processes
+pkill -f "bd.*daemon" 2>/dev/null || true # Stop them if present
 ```
 
 ### 2. Remove Git Hooks

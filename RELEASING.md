@@ -586,10 +586,10 @@ After a successful release:
    ./scripts/bump-version.sh 0.24.3 --commit --install --upgrade-mcp
    ```
 
-2. **Restart local daemons** to pick up the new version:
+2. **Verify the upgraded CLI**:
    ```bash
-   bd daemons killall --json
-   # Daemons will auto-restart with new version on next bd command
+   bd version
+   bd doctor quick
    ```
 
 3. **Announce** on relevant channels (Twitter, blog, etc.)

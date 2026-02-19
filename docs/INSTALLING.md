@@ -518,7 +518,6 @@ sudo mv bd /usr/local/bin/
 ```bash
 bd info --whats-new
 bd hooks install
-bd daemons killall
 bd version
 ```
 

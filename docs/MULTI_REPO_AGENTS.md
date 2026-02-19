@@ -285,13 +285,12 @@ The single MCP server automatically routes based on workspace directory.
 
 ### Version mismatch after upgrade
 
-**Symptom:** Daemon operations fail after `bd` upgrade
+**Symptom:** Commands fail right after a `bd` upgrade
 
 **Fix:**
 ```bash
-bd daemons health --json  # Check for mismatches
-bd daemons killall        # Restart all daemons
-# Daemons auto-start with new version on next command
+bd version      # Confirm active CLI version
+bd doctor quick # Validate local installation health
 ```
 
 ## Best Practices for Agents

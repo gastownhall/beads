@@ -123,25 +123,6 @@ create_beads_alias() {
     log_success "Created 'beads' alias -> bd"
 }
 
-# Stop existing daemons before upgrade (safe for fresh installs)
-stop_existing_daemons() {
-    # Skip if bd isn't installed (fresh install)
-    if ! command -v bd &> /dev/null; then
-        return 0
-    fi
-
-    log_info "Stopping existing bd daemons before upgrade..."
-
-    # Try graceful shutdown via bd daemons killall
-    if bd daemons killall 2>/dev/null; then
-        log_success "Stopped existing daemons"
-    else
-        log_warning "No daemons running or failed to stop (continuing anyway)"
-    fi
-
-    return 0
-}
-
 # Download and install from GitHub releases
 install_from_release() {
     log_info "Installing bd from GitHub releases..."
@@ -494,9 +475,6 @@ main() {
     local platform
     platform=$(detect_platform)
     log_info "Platform: $platform"
-
-    # Stop any running daemons before replacing binary
-    stop_existing_daemons
 
     # Try downloading from GitHub releases first
     if install_from_release "$platform"; then
