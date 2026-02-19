@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 // staleLockThresholds defines the age thresholds for each lock type.
@@ -15,7 +14,6 @@ import (
 var staleLockThresholds = map[string]time.Duration{
 	"bootstrap.lock":   5 * time.Minute, // Bootstrap should complete quickly
 	".sync.lock":       1 * time.Hour,   // Sync can be slow for large repos
-	"daemon.lock":      0,               // Legacy: handled separately via flock check
 	"dolt-access.lock": 5 * time.Minute, // Embedded dolt advisory lock
 }
 
@@ -55,17 +53,6 @@ func CheckStaleLockFiles(path string) DoctorCheck {
 			staleFiles = append(staleFiles, ".sync.lock")
 			details = append(details, fmt.Sprintf(".sync.lock: age %s (threshold: %s)",
 				age.Round(time.Second), staleLockThresholds[".sync.lock"]))
-		}
-	}
-
-	// Check legacy daemon lock - use flock probe instead of age
-	daemonLockPath := filepath.Join(beadsDir, "daemon.lock")
-	if _, err := os.Stat(daemonLockPath); err == nil {
-		// Check if any process holds the lock via flock
-		running, _ := lockfile.TryDaemonLock(beadsDir)
-		if !running {
-			staleFiles = append(staleFiles, "daemon.lock")
-			details = append(details, "daemon.lock: legacy file exists but no process holds the lock")
 		}
 	}
 

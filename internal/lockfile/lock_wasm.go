@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-var errDaemonLocked = errors.New("daemon lock already held by another process")
+var errProcessLocked = errors.New("lock already held by another process")
 
 func flockExclusive(f *os.File) error {
 	// WASM doesn't support file locking

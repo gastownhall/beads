@@ -14,7 +14,6 @@ import (
 // This is safe because:
 // - Bootstrap/sync/startup locks use flock, which is released on process exit
 // - If the flock is released but the file remains, the file is just clutter
-// - Daemon lock staleness is verified via flock probe (not just file age)
 func StaleLockFiles(path string) error {
 	beadsDir := filepath.Join(path, ".beads")
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -46,19 +45,6 @@ func StaleLockFiles(path string) error {
 				errors = append(errors, fmt.Sprintf(".sync.lock: %v", err))
 			} else {
 				removed = append(removed, ".sync.lock")
-			}
-		}
-	}
-
-	// Remove stale legacy daemon lock (only if no process holds the flock)
-	daemonLockPath := filepath.Join(beadsDir, "daemon.lock")
-	if _, err := os.Stat(daemonLockPath); err == nil {
-		running, _ := lockfile.TryDaemonLock(beadsDir)
-		if !running {
-			if err := os.Remove(daemonLockPath); err != nil {
-				errors = append(errors, fmt.Sprintf("daemon.lock: %v", err))
-			} else {
-				removed = append(removed, "daemon.lock")
 			}
 		}
 	}

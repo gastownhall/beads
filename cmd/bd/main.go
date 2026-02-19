@@ -27,6 +27,12 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// Command group IDs for help organization
+const (
+	GroupMaintenance  = "maintenance"
+	GroupIntegrations = "integrations"
+)
+
 var (
 	dbPath     string
 	actor      string
@@ -313,8 +319,8 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// GH#1093: Check noDbCommands BEFORE expensive operations (ensureForkProtection,
-		// signalOrchestratorActivity) to avoid spawning git subprocesses for simple commands
+		// GH#1093: Check noDbCommands BEFORE expensive operations (ensureForkProtection)
+		// to avoid spawning git subprocesses for simple commands
 		// like "bd version" that don't need database access.
 		noDbCommands := []string{
 			"__complete",       // Cobra's internal completion command (shell completions work without db)
@@ -361,10 +367,6 @@ var rootCmd = &cobra.Command{
 		if v, _ := cmd.Flags().GetBool("version"); v {
 			return
 		}
-
-		// Signal orchestrator daemon about bd activity (best-effort, for exponential backoff)
-		// GH#1093: Moved after noDbCommands check to avoid git subprocesses for simple commands
-		defer signalOrchestratorActivity()
 
 		// Protect forks from accidentally committing upstream issue database
 		ensureForkProtection()

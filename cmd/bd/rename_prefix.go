@@ -93,8 +93,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		// Get JSONL path for sync operations
 		jsonlPath := findJSONLPath()
 
-		// Sync-branch operations are handled by bd sync.
-
 		// Force import from JSONL to ensure DB has all issues before rename
 		// This prevents data loss if JSONL has issues from other workspaces
 		if !dryRun && jsonlPath != "" {
