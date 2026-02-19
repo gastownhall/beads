@@ -210,6 +210,26 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.53.0",
+		Date:    "2026-02-18",
+		Changes: []string{
+			"NEW: Dolt-in-Git sync — native Dolt push/pull via git remotes replaces JSONL pipeline",
+			"NEW: bd dolt start/stop — explicit Dolt server management (#1813)",
+			"NEW: bd dolt commit — desire-path ergonomics for Dolt data",
+			"NEW: Server mode without CGO — OpenFromConfig exported (#1805)",
+			"NEW: Hosted Dolt support — TLS, auth, explicit branch config",
+			"NEW: bd mol wisp gc --closed for bulk purge of closed wisps",
+			"NEW: Storage interface decouples from concrete DoltStore",
+			"NEW: Lock health diagnostics in bd doctor",
+			"FIX: Pre-commit deadlock on embedded Dolt (#1841)",
+			"FIX: bd doctor --fix hang — run fixes in-process (#1850)",
+			"FIX: Dolt lock errors surfaced with guidance (#1816)",
+			"FIX: BEADS_DIR config loading (#1854)",
+			"REMOVED: JSONL sync-branch pipeline (~11,000 lines deleted)",
+			"REMOVED: Daemon infrastructure, 3-way merge remnants, dead stubs",
+		},
+	},
+	{
 		Version: "0.52.0",
 		Date:    "2026-02-16",
 		Changes: []string{

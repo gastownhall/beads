@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-02-18
+
+### Added
+
+- **Dolt-in-Git sync** — native Dolt push/pull via git remotes replaces the entire JSONL sync pipeline; `BootstrapFromGitRemote()`, `HasRemote()`, `sync.git-remote` config key
+- **`bd dolt start` / `bd dolt stop`** — explicit Dolt server management commands (#1813)
+- **`bd dolt commit`** — desire-path ergonomics for committing Dolt data (#1812)
+- **Server mode without CGO** — `OpenFromConfig()` exported for server-mode aware store opening (#1805)
+- **Hosted Dolt support** — TLS, authentication, and explicit branch configuration
+- **`bd mol wisp gc --closed`** — bulk purge of closed wisps
+- **`--no-parent` flag for `bd list`** — filter out child issues
+- **`bd ready` pretty format** — improved default output with priority sort, truncation footer, and parent epic context
+- **Dolt compaction methods** — `bd compact` support for Dolt databases
+- **Storage interface** — `Storage` interface decouples from concrete `DoltStore` (bd-l3o)
+- **Lock health diagnostics** — `bd doctor` detects and reports dolt-access.lock and noms LOCK issues
+- **Codecov integration** — component-based coverage tracking in CI
+
+### Fixed
+
+- **Pre-commit deadlock on embedded Dolt** — resolve hook deadlock (#1841, #1843)
+- **`bd doctor --fix` hang** — run fixes in-process instead of spawning subprocess (#1850)
+- **Dolt lock errors** — surface lock errors with actionable guidance instead of silent empty results (#1816)
+- **`BEADS_DIR` config loading** — respect `BEADS_DIR` when loading config.yaml (#1854)
+- **Dolt `Unknown database` retry** — retry on `Unknown database` after `CREATE DATABASE` (#1851, #1852)
+- **Windows `Expand-Archive`** — qualify to avoid Pscx module conflict (#1826)
+- **`bd init` git repo check** — ensures git repo exists and runs clean diagnostics
+- **`SaveConfigValue`** — preserves existing file contents (#1816)
+- **`molecule` core type** — treat molecule as core issue type (#1866)
+- **Formula `VarDef`** — distinguish "no default" from `default=""` (#1837)
+- **Worktree test isolation** — harden metadata.json isolation (bd-la2cl)
+- **Goroutine leak** — replace `time.Sleep` with `waitFor` in tests (#1822)
+
+### Removed
+
+- **JSONL sync-branch pipeline** — deleted `internal/syncbranch/` (5,720 lines), `snapshot_manager`, `deletion_tracking`, doctor sync-branch checks/fixes, and all associated tests (~11,000 lines total)
+- **Daemon infrastructure** — removed lockfile activity signal and orchestrator (bd-9u8zd)
+- **3-way merge engine remnants** — removed remaining merge code (bd-aswyy)
+- **Dead stubs** — `CheckBackendMigration`, `NeedsJSONL`, and other no-ops (bd-23nlq)
+- **Dead SQLite-only `bd repair` command**
+
+### Documentation
+
+- **BeadHub** — added to COMMUNITY_TOOLS.md
+- **beads-compound plugin** — added to Claude Code Orchestration section (#1814)
+- **Stale reference cleanup** — removed daemon/SQLite/JSONL/tombstone references from docs and comments
+
 ## [0.52.0] - 2026-02-16
 
 ### Added
