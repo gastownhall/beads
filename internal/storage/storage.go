@@ -26,6 +26,7 @@ type Storage interface {
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error)
+	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error
@@ -36,6 +37,8 @@ type Storage interface {
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error
 	GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
+	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error)
 
 	// Labels
@@ -53,6 +56,7 @@ type Storage interface {
 	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
+	GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error)
 
 	// Statistics
 	GetStatistics(ctx context.Context) (*types.Statistics, error)

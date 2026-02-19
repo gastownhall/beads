@@ -87,9 +87,10 @@ type (
 	WorkFilter       = types.WorkFilter
 	StaleFilter      = types.StaleFilter
 	DependencyCounts = types.DependencyCounts
-	IssueWithCounts  = types.IssueWithCounts
-	SortPolicy       = types.SortPolicy
-	EpicStatus       = types.EpicStatus
+	IssueWithCounts              = types.IssueWithCounts
+	IssueWithDependencyMetadata  = types.IssueWithDependencyMetadata
+	SortPolicy                   = types.SortPolicy
+	EpicStatus                   = types.EpicStatus
 )
 
 // Status constants
