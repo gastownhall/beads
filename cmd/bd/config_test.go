@@ -183,7 +183,7 @@ func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
 	}
 
 	// Test that IsYamlOnlyKey correctly identifies yaml-only keys
-	yamlOnlyKeys := []string{"no-db", "json", "sync.branch", "routing.mode"}
+	yamlOnlyKeys := []string{"no-db", "json", "routing.mode"}
 	for _, key := range yamlOnlyKeys {
 		if !config.IsYamlOnlyKey(key) {
 			t.Errorf("Expected %q to be a yaml-only key", key)

@@ -1091,19 +1091,26 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 			t.Fatalf("failed to create %s: %v", id, err)
 		}
 	}
-	// B depends on A, C depends on B, A depends on C (circular)
-	deps := []struct{ from, to string }{
+	// B depends on A, C depends on B (these two are acyclic, use normal API)
+	for _, d := range []struct{ from, to string }{
 		{"circ-b", "circ-a"},
 		{"circ-c", "circ-b"},
-		{"circ-a", "circ-c"},
-	}
-	for _, d := range deps {
+	} {
 		dep := &types.Dependency{
 			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep %s->%s: %v", d.from, d.to, err)
 		}
+	}
+	// A depends on C completes the cycle. Insert directly via SQL to bypass
+	// the cycle detection in AddDependency -- this test exercises DeleteIssues'
+	// ability to handle cycles that may exist in the database, not AddDependency.
+	if _, err := store.execContext(ctx, `
+		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata)
+		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+	`, "circ-a", "circ-c"); err != nil {
+		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
 
 	// Cascade delete from A should find B and C via the cycle

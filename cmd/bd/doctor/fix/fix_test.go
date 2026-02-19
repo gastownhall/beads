@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -93,45 +92,6 @@ func TestDBJSONLSync_Validation(t *testing.T) {
 		err := DBJSONLSync(dir)
 		if err != nil {
 			t.Errorf("expected no error when no JSONL exists, got: %v", err)
-		}
-	})
-}
-
-// TestSyncBranchConfig_Validation tests syncBranchConfig validation
-func TestSyncBranchConfig_Validation(t *testing.T) {
-	t.Run("not a git repository", func(t *testing.T) {
-		dir := setupTestWorkspace(t)
-		err := syncBranchConfig(dir)
-		if err == nil {
-			t.Error("expected error for non-git repository")
-		}
-	})
-}
-
-// TestSyncBranchHealth_Validation tests SyncBranchHealth validation
-func TestSyncBranchHealth_Validation(t *testing.T) {
-	t.Run("no main or master branch", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-		// Create a commit on a different branch
-		cmd := exec.Command("git", "checkout", "-b", "other")
-		cmd.Dir = dir
-		_ = cmd.Run()
-
-		// Create a file and commit
-		testFile := filepath.Join(dir, "test.txt")
-		if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		cmd = exec.Command("git", "add", "test.txt")
-		cmd.Dir = dir
-		_ = cmd.Run()
-		cmd = exec.Command("git", "commit", "-m", "initial")
-		cmd.Dir = dir
-		_ = cmd.Run()
-
-		err := SyncBranchHealth(dir, "beads-sync")
-		if err == nil {
-			t.Error("expected error when neither main nor master exists")
 		}
 	})
 }
@@ -277,59 +237,6 @@ func TestDBJSONLSync_MissingDatabase(t *testing.T) {
 	err := DBJSONLSync(dir)
 	if err != nil {
 		t.Errorf("expected no error when database doesn't exist, got: %v", err)
-	}
-}
-
-// TestSyncBranchConfig_BranchDoesNotExist tests fixing config when branch doesn't exist
-func TestSyncBranchConfig_BranchDoesNotExist(t *testing.T) {
-	// Skip if running as test binary (can't execute bd subcommands)
-	skipIfTestBinary(t)
-
-	dir := setupTestGitRepo(t)
-
-	// Try to run fix without any commits (no branch exists yet)
-	err := syncBranchConfig(dir)
-	if err == nil {
-		t.Error("expected error when no branch exists")
-	}
-	if err != nil && !strings.Contains(err.Error(), "failed to get current branch") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// TestSyncBranchConfig_InvalidRemoteURL tests fix behavior with invalid remote
-func TestSyncBranchConfig_InvalidRemoteURL(t *testing.T) {
-	// Skip if running as test binary (can't execute bd subcommands)
-	skipIfTestBinary(t)
-
-	dir := setupTestGitRepo(t)
-
-	// Create initial commit
-	testFile := filepath.Join(dir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
-		t.Fatalf("failed to create test file: %v", err)
-	}
-	runGit(t, dir, "add", "test.txt")
-	runGit(t, dir, "commit", "-m", "initial commit")
-
-	// Add invalid remote
-	runGit(t, dir, "remote", "add", "origin", "invalid://bad-url")
-
-	// Fix should still succeed - it only sets config, doesn't interact with remote
-	err := syncBranchConfig(dir)
-	if err != nil {
-		t.Fatalf("unexpected error with invalid remote: %v", err)
-	}
-
-	// Verify config was set
-	cmd := exec.Command("git", "config", "sync.branch")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("failed to get sync.branch config: %v", err)
-	}
-	if strings.TrimSpace(string(output)) == "" {
-		t.Error("sync.branch config was not set")
 	}
 }
 

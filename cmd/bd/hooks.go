@@ -556,11 +556,6 @@ func runPreCommitHook() int {
 		return 0 // Not a bd workspace, nothing to do
 	}
 
-	// Check if sync-branch is configured (changes go to separate branch)
-	if hookGetSyncBranch() != "" {
-		return 0 // Skip - changes synced to separate branch
-	}
-
 	// Flush pending changes to JSONL
 	// Use --flush-only to skip git operations (we're already in a git hook)
 	cmd := exec.Command("bd", "sync", "--flush-only")
@@ -675,11 +670,6 @@ func runPrePushHook(args []string) int {
 	// Skip if bd sync is already in progress (prevents circular error)
 	if os.Getenv("BD_SYNC_IN_PROGRESS") != "" {
 		return 0
-	}
-
-	// Check if sync-branch is configured
-	if hookGetSyncBranch() != "" {
-		return 0 // Skip - changes synced to separate branch
 	}
 
 	// Get RepoContext for git operations (needed for flush and staging)
@@ -995,35 +985,6 @@ func getPinnedMolecule() string {
 // =============================================================================
 // Hook Helper Functions
 // =============================================================================
-
-// hookGetSyncBranch returns the configured sync branch for hook context.
-// This is a simplified version that doesn't require context.
-func hookGetSyncBranch() string {
-	// Check environment variable first
-	if branch := os.Getenv("BEADS_SYNC_BRANCH"); branch != "" {
-		return branch
-	}
-
-	// Check config.yaml
-	configPath := ".beads/config.yaml"
-	data, err := os.ReadFile(configPath) // #nosec G304 -- config path is hardcoded
-	if err != nil {
-		return ""
-	}
-
-	// Simple YAML parsing for sync-branch
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "sync-branch:") {
-			value := strings.TrimPrefix(line, "sync-branch:")
-			value = strings.TrimSpace(value)
-			value = strings.Trim(value, `"'`)
-			return value
-		}
-	}
-
-	return ""
-}
 
 // isRebaseInProgress checks if a rebase is in progress.
 func isRebaseInProgress() bool {

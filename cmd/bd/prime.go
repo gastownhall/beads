@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads"
 	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 var (
@@ -160,7 +159,16 @@ var isEphemeralBranch = func() bool {
 
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)
 var primeHasGitRemote = func() bool {
-	return syncbranch.HasGitRemote(context.Background())
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		return false
+	}
+	cmd := rc.GitCmdCWD(context.Background(), "remote")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
 }
 
 // getRedirectNotice returns a notice string if beads is redirected

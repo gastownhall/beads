@@ -10,8 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // PendingMigration represents a single pending migration
@@ -101,21 +99,9 @@ func CheckPendingMigrations(path string) DoctorCheck {
 	}
 }
 
-// needsSyncMigration checks if sync-branch should be configured
+// needsSyncMigration always returns false now that sync-branch is removed.
 func needsSyncMigration(repoPath string) bool {
-	// Check if already configured
-	if syncbranch.GetFromYAML() != "" {
-		return false
-	}
-
-	// Check if we're in a git repository
-	_, err := git.GetGitDir()
-	if err != nil {
-		return false
-	}
-
-	// Check if has remote (multi-clone indicator)
-	return hasGitRemote(repoPath)
+	return false
 }
 
 // hasGitRemote checks if the repository has a git remote

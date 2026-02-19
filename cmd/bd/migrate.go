@@ -9,7 +9,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -723,7 +722,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	}
 
 	// Update sync.branch config
-	if err := syncbranch.Set(ctx, store, b); err != nil {
+	if err := store.SetConfig(ctx, "sync.branch", b); err != nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "config_update_failed",
@@ -733,13 +732,6 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 			fmt.Fprintf(os.Stderr, "Error: failed to set sync.branch: %v\n", err)
 		}
 		os.Exit(1)
-	}
-
-	// Create worktree for the sync branch (non-fatal)
-	if _, err := syncbranch.EnsureWorktree(ctx); err != nil {
-		if !jsonOutput {
-			fmt.Fprintf(os.Stderr, "Warning: could not create sync branch worktree: %v\n", err)
-		}
 	}
 
 	// Success output

@@ -865,6 +865,18 @@ type HistoryEntry struct {
 	IssueData map[string]interface{}
 }
 
+// HasRemote checks if a Dolt remote with the given name exists.
+func (s *DoltStore) HasRemote(ctx context.Context, name string) (bool, error) {
+	var count int
+	err := s.queryRowContext(ctx, func(row *sql.Row) error {
+		return row.Scan(&count)
+	}, "SELECT COUNT(*) FROM dolt_remotes WHERE name = ?", name)
+	if err != nil {
+		return false, fmt.Errorf("failed to check remote %s: %w", name, err)
+	}
+	return count > 0, nil
+}
+
 // AddRemote adds a Dolt remote
 func (s *DoltStore) AddRemote(ctx context.Context, name, url string) error {
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)

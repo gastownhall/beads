@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -291,13 +290,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Untracked Files":
 			err = fix.UntrackedJSONL(path)
 		case "Sync Branch Health":
-			// Get sync branch from config
-			syncBranch := syncbranch.GetFromYAML()
-			if syncBranch == "" {
-				fmt.Printf("  ⚠ No sync branch configured in config.yaml\n")
-				continue
-			}
-			err = fix.SyncBranchHealth(path, syncBranch)
+			// No-op: sync-branch removed (Dolt-in-Git replaces JSONL pipeline)
 		case "Merge Artifacts":
 			err = fix.MergeArtifacts(path)
 		case "Orphaned Dependencies":

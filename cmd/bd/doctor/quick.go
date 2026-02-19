@@ -3,21 +3,15 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
-// CheckSyncBranchQuick does a fast check for sync-branch configuration.
-// Returns empty string if OK, otherwise returns issue description.
+// CheckSyncBranchQuick is a no-op now that sync-branch is removed.
 func CheckSyncBranchQuick() string {
-	if syncbranch.IsConfigured() {
-		return ""
-	}
-	return "sync-branch not configured in config.yaml"
+	return ""
 }
 
 // CheckHooksQuick does a fast check for outdated git hooks.
@@ -84,72 +78,7 @@ func CheckHooksQuick(cliVersion string) string {
 	return fmt.Sprintf("Git hooks outdated: %s (%s → %s)", strings.Join(outdatedHooks, ", "), oldestVersion, cliVersion)
 }
 
-// CheckSyncBranchHookQuick does a fast check for sync-branch hook compatibility.
-// Returns empty string if OK, otherwise returns issue description.
+// CheckSyncBranchHookQuick is a no-op now that sync-branch is removed.
 func CheckSyncBranchHookQuick(path string) string {
-	// Check if sync-branch is configured
-	syncBranch := syncbranch.GetFromYAML()
-	if syncBranch == "" {
-		return "" // sync-branch not configured, nothing to check
-	}
-
-	// Get common git directory for hooks (shared across worktrees)
-	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	cmd.Dir = path
-	output, err := cmd.Output()
-	if err != nil {
-		return "" // Not a git repo, skip
-	}
-	gitCommonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(path, gitCommonDir)
-	}
-
-	// Find pre-push hook (check shared hooks first via core.hooksPath)
-	var hookPath string
-	hooksPathCmd := exec.Command("git", "config", "--get", "core.hooksPath")
-	hooksPathCmd.Dir = path
-	if hooksPathOutput, err := hooksPathCmd.Output(); err == nil {
-		sharedHooksDir := strings.TrimSpace(string(hooksPathOutput))
-		if !filepath.IsAbs(sharedHooksDir) {
-			sharedHooksDir = filepath.Join(path, sharedHooksDir)
-		}
-		hookPath = filepath.Join(sharedHooksDir, "pre-push")
-	} else {
-		// Hooks are in the common git directory, not the worktree-specific one
-		hookPath = filepath.Join(gitCommonDir, "hooks", "pre-push")
-	}
-
-	content, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
-	if err != nil {
-		return "" // No pre-push hook, covered by other checks
-	}
-
-	// Check if bd hook and extract version
-	hookStr := string(content)
-	if !strings.Contains(hookStr, "bd-hooks-version:") {
-		return "" // Not a bd hook, can't check
-	}
-
-	var hookVersion string
-	for _, line := range strings.Split(hookStr, "\n") {
-		if strings.Contains(line, "bd-hooks-version:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				hookVersion = strings.TrimSpace(parts[1])
-			}
-			break
-		}
-	}
-
-	if hookVersion == "" {
-		return "" // Can't determine version
-	}
-
-	// Check if version < MinSyncBranchHookVersion (when sync-branch bypass was added)
-	if CompareVersions(hookVersion, MinSyncBranchHookVersion) < 0 {
-		return fmt.Sprintf("Pre-push hook (%s) incompatible with sync-branch mode (requires %s+)", hookVersion, MinSyncBranchHookVersion)
-	}
-
 	return ""
 }

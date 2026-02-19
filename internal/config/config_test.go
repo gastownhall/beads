@@ -1134,9 +1134,6 @@ func TestSyncModeConstants(t *testing.T) {
 	if SyncModeGitPortable != "git-portable" {
 		t.Errorf("SyncModeGitPortable = %q, want \"git-portable\"", SyncModeGitPortable)
 	}
-	if SyncModeRealtime != "realtime" {
-		t.Errorf("SyncModeRealtime = %q, want \"realtime\"", SyncModeRealtime)
-	}
 	if SyncModeDoltNative != "dolt-native" {
 		t.Errorf("SyncModeDoltNative = %q, want \"dolt-native\"", SyncModeDoltNative)
 	}
@@ -1264,7 +1261,6 @@ func TestIsSyncModeValid(t *testing.T) {
 		valid bool
 	}{
 		{string(SyncModeGitPortable), true},
-		{string(SyncModeRealtime), true},
 		{string(SyncModeDoltNative), true},
 		{string(SyncModeBeltAndSuspenders), true},
 		{"invalid-mode", false},
@@ -1332,7 +1328,7 @@ func TestSyncConfigFromFile(t *testing.T) {
 	// Create a config file with sync settings
 	configContent := `
 sync:
-  mode: realtime
+  mode: git-portable
   export_on: change
   import_on: change
 
@@ -1363,8 +1359,8 @@ federation:
 
 	// Test sync config
 	syncCfg := GetSyncConfig()
-	if syncCfg.Mode != SyncModeRealtime {
-		t.Errorf("GetSyncConfig().Mode = %q, want %q", syncCfg.Mode, SyncModeRealtime)
+	if syncCfg.Mode != SyncModeGitPortable {
+		t.Errorf("GetSyncConfig().Mode = %q, want %q", syncCfg.Mode, SyncModeGitPortable)
 	}
 	if syncCfg.ExportOn != SyncTriggerChange {
 		t.Errorf("GetSyncConfig().ExportOn = %q, want %q", syncCfg.ExportOn, SyncTriggerChange)
@@ -1443,7 +1439,6 @@ func TestNeedsDoltRemote(t *testing.T) {
 		needsRemote bool
 	}{
 		{SyncModeGitPortable, false},
-		{SyncModeRealtime, false},
 		{SyncModeDoltNative, true},
 		{SyncModeBeltAndSuspenders, true},
 	}

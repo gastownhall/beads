@@ -26,12 +26,6 @@ func TestGetSyncMode(t *testing.T) {
 			expectsWarning: false,
 		},
 		{
-			name:           "realtime is valid",
-			configValue:    "realtime",
-			expectedMode:   SyncModeRealtime,
-			expectsWarning: false,
-		},
-		{
 			name:           "dolt-native is valid",
 			configValue:    "dolt-native",
 			expectedMode:   SyncModeDoltNative,
@@ -47,12 +41,6 @@ func TestGetSyncMode(t *testing.T) {
 			name:           "mixed case is normalized",
 			configValue:    "Git-Portable",
 			expectedMode:   SyncModeGitPortable,
-			expectsWarning: false,
-		},
-		{
-			name:           "whitespace is trimmed",
-			configValue:    "  realtime  ",
-			expectedMode:   SyncModeRealtime,
 			expectsWarning: false,
 		},
 		{
@@ -356,11 +344,10 @@ func TestIsValidSyncMode(t *testing.T) {
 		valid bool
 	}{
 		{"git-portable", true},
-		{"realtime", true},
 		{"dolt-native", true},
 		{"belt-and-suspenders", true},
 		{"Git-Portable", true}, // case insensitive
-		{"  realtime  ", true}, // whitespace trimmed
+		{"realtime", false},    // removed: no longer a valid mode
 		{"invalid", false},
 		{"", false},
 	}
@@ -421,10 +408,10 @@ func TestIsValidSovereignty(t *testing.T) {
 
 func TestValidSyncModes(t *testing.T) {
 	modes := ValidSyncModes()
-	if len(modes) != 4 {
-		t.Errorf("ValidSyncModes() returned %d modes, want 4", len(modes))
+	if len(modes) != 3 {
+		t.Errorf("ValidSyncModes() returned %d modes, want 3", len(modes))
 	}
-	expected := []string{"git-portable", "realtime", "dolt-native", "belt-and-suspenders"}
+	expected := []string{"git-portable", "dolt-native", "belt-and-suspenders"}
 	for i, m := range modes {
 		if m != expected[i] {
 			t.Errorf("ValidSyncModes()[%d] = %q, want %q", i, m, expected[i])

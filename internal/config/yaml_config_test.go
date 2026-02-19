@@ -22,7 +22,6 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		// Prefix matches
 		{"routing.mode", true},
 		{"routing.custom-key", true},
-		{"sync.branch", true},
 		{"sync.require_confirmation_on_mass_delete", true},
 		{"directory.labels", true},
 		{"repos.primary", true},
@@ -159,8 +158,6 @@ func TestNormalizeYamlKey(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"sync.branch", "sync-branch"},   // alias should be normalized
-		{"sync-branch", "sync-branch"},   // already canonical
 		{"no-db", "no-db"},               // no alias, unchanged
 		{"json", "json"},                 // no alias, unchanged
 		{"routing.mode", "routing.mode"}, // no alias for this one
@@ -173,102 +170,6 @@ func TestNormalizeYamlKey(t *testing.T) {
 				t.Errorf("normalizeYamlKey(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
-	}
-}
-
-func TestSetYamlConfig_KeyNormalization(t *testing.T) {
-	// Create a temp directory with .beads/config.yaml
-	tmpDir, err := os.MkdirTemp("", "beads-yaml-key-norm-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	initialConfig := `# Beads Config
-sync-branch: old-value
-`
-	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
-		t.Fatalf("Failed to write config.yaml: %v", err)
-	}
-
-	// Change to temp directory for the test
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	// Test SetYamlConfig with aliased key (sync.branch should write as sync-branch)
-	if err := SetYamlConfig("sync.branch", "new-value"); err != nil {
-		t.Fatalf("SetYamlConfig() error = %v", err)
-	}
-
-	// Read back and verify
-	content, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("Failed to read config.yaml: %v", err)
-	}
-
-	contentStr := string(content)
-	// Should update the existing sync-branch line, not add sync.branch
-	if !strings.Contains(contentStr, "sync-branch: \"new-value\"") {
-		t.Errorf("config.yaml should contain 'sync-branch: \"new-value\"', got:\n%s", contentStr)
-	}
-	if strings.Contains(contentStr, "sync.branch") {
-		t.Errorf("config.yaml should NOT contain 'sync.branch' (should be normalized to sync-branch), got:\n%s", contentStr)
-	}
-}
-
-func TestGetYamlConfig_KeyNormalization(t *testing.T) {
-	// Create a temp directory with .beads/config.yaml
-	tmpDir, err := os.MkdirTemp("", "beads-yaml-get-key-norm-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-
-	// Write config with canonical key name (sync-branch, not sync.branch)
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	initialConfig := `# Beads Config
-sync-branch: test-value
-`
-	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
-		t.Fatalf("Failed to write config.yaml: %v", err)
-	}
-
-	// Change to temp directory for the test
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-	defer os.Chdir(oldWd)
-
-	// Initialize viper to read the config
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() error = %v", err)
-	}
-
-	// Test GetYamlConfig with aliased key (sync.branch should find sync-branch value)
-	got := GetYamlConfig("sync.branch")
-	if got != "test-value" {
-		t.Errorf("GetYamlConfig(\"sync.branch\") = %q, want %q", got, "test-value")
-	}
-
-	// Also verify canonical key works
-	got = GetYamlConfig("sync-branch")
-	if got != "test-value" {
-		t.Errorf("GetYamlConfig(\"sync-branch\") = %q, want %q", got, "test-value")
 	}
 }
 
@@ -374,52 +275,3 @@ func TestValidateYamlConfigValue_OtherKeys(t *testing.T) {
 	}
 }
 
-// TestValidateYamlConfigValue_SyncBranch_RejectsMain tests that main/master are rejected as sync branch (GH#1166)
-func TestValidateYamlConfigValue_SyncBranch_RejectsMain(t *testing.T) {
-	tests := []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{"sync-branch main", "sync-branch", "main"},
-		{"sync-branch master", "sync-branch", "master"},
-		{"sync.branch main", "sync.branch", "main"},
-		{"sync.branch master", "sync.branch", "master"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateYamlConfigValue(tt.key, tt.value)
-			if err == nil {
-				t.Errorf("expected error for %s=%s, got nil", tt.key, tt.value)
-			}
-			if err != nil && !strings.Contains(err.Error(), "cannot use") {
-				t.Errorf("expected 'cannot use' error, got: %v", err)
-			}
-		})
-	}
-}
-
-// TestValidateYamlConfigValue_SyncBranch_AcceptsValid tests that valid branch names are accepted (GH#1166)
-func TestValidateYamlConfigValue_SyncBranch_AcceptsValid(t *testing.T) {
-	tests := []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{"sync-branch beads-sync", "sync-branch", "beads-sync"},
-		{"sync-branch feature/test", "sync-branch", "feature/test"},
-		{"sync.branch beads-sync", "sync.branch", "beads-sync"},
-		{"sync.branch develop", "sync.branch", "develop"},
-		{"sync-branch empty", "sync-branch", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateYamlConfigValue(tt.key, tt.value)
-			if err != nil {
-				t.Errorf("unexpected error for %s=%s: %v", tt.key, tt.value, err)
-			}
-		})
-	}
-}

@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // CheckInstallation verifies that .beads directory exists
@@ -106,17 +105,6 @@ func CheckUntrackedBeadsFiles(path string) DoctorCheck {
 			Name:    "Untracked Files",
 			Status:  StatusOK,
 			Message: "N/A (no .beads directory)",
-		}
-	}
-
-	// In sync-branch mode, JSONL files are intentionally untracked in working branches.
-	// They are committed only to the dedicated sync branch via bd sync.
-	if branch := syncbranch.GetFromYAML(); branch != "" {
-		return DoctorCheck{
-			Name:    "Untracked Files",
-			Status:  StatusOK,
-			Message: "N/A (sync-branch mode)",
-			Detail:  fmt.Sprintf("JSONL files tracked in '%s' branch only", branch),
 		}
 	}
 

@@ -18,6 +18,17 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, cfg *dolt.Config) e
 	// Path is the dolt subdirectory, parent is .beads directory
 	beadsDir := filepath.Dir(path)
 
+	// Dolt-in-Git bootstrap: if sync.git-remote is configured and no local
+	// dolt dir exists, clone from the git remote (refs/dolt/data).
+	if gitRemoteURL := config.GetYamlConfig("sync.git-remote"); gitRemoteURL != "" {
+		if bootstrapped, err := dolt.BootstrapFromGitRemote(ctx, path, gitRemoteURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: git remote bootstrap failed: %v\n", err)
+			// Fall through to JSONL bootstrap
+		} else if bootstrapped {
+			return nil // Successfully cloned from git remote
+		}
+	}
+
 	// In dolt-native mode, JSONL is export-only backup — never auto-import.
 	// If the dolt DB doesn't exist in this mode, that's an error, not a bootstrap opportunity.
 	// This prevents split-brain: without this guard, a wrong path (from B1) would silently
