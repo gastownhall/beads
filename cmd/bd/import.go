@@ -92,7 +92,6 @@ NOTE: Import requires direct database access.`,
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 		force, _ := cmd.Flags().GetBool("force")
-		protectLeftSnapshot, _ := cmd.Flags().GetBool("protect-left-snapshot")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
 		_ = noGitHistory // Accepted for compatibility with bd sync subprocess calls
 
@@ -237,23 +236,6 @@ NOTE: Import requires direct database access.`,
 			ClearDuplicateExternalRefs: clearDuplicateExternalRefs,
 			OrphanHandling:             orphanHandling,
 			DeletionIDs:                deletionIDs,
-		}
-
-		// If --protect-left-snapshot is set, read the left snapshot and build timestamp map
-		// GH#865: Use timestamp-aware protection - only protect if local is newer than incoming
-		if protectLeftSnapshot && input != "" {
-			beadsDir := filepath.Dir(input)
-			leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
-			if _, err := os.Stat(leftSnapshotPath); err == nil {
-				sm := NewSnapshotManager(input)
-				leftTimestamps, err := sm.BuildIDToTimestampMap(leftSnapshotPath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to read left snapshot: %v\n", err)
-				} else if len(leftTimestamps) > 0 {
-					opts.ProtectLocalExportIDs = leftTimestamps
-					fmt.Fprintf(os.Stderr, "Protecting %d issue(s) from left snapshot (timestamp-aware)\n", len(leftTimestamps))
-				}
-			}
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -635,7 +617,6 @@ func init() {
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
-	importCmd.Flags().Bool("protect-left-snapshot", false, "Protect issues in left snapshot from git-history-backfill")
 	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (passed by bd sync)")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)

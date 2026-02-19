@@ -31,8 +31,6 @@ type SyncMode string
 const (
 	// SyncModeGitPortable exports JSONL on push, imports on pull (default)
 	SyncModeGitPortable SyncMode = "git-portable"
-	// SyncModeRealtime exports JSONL on every change (legacy behavior)
-	SyncModeRealtime SyncMode = "realtime"
 	// SyncModeDoltNative uses Dolt remote directly (dolthub://, gs://, s3://)
 	SyncModeDoltNative SyncMode = "dolt-native"
 	// SyncModeBeltAndSuspenders uses Dolt remote + JSONL backup
@@ -42,7 +40,6 @@ const (
 // validSyncModes is the set of allowed sync mode values
 var validSyncModes = map[SyncMode]bool{
 	SyncModeGitPortable:       true,
-	SyncModeRealtime:          true,
 	SyncModeDoltNative:        true,
 	SyncModeBeltAndSuspenders: true,
 }
@@ -51,7 +48,6 @@ var validSyncModes = map[SyncMode]bool{
 func ValidSyncModes() []string {
 	return []string{
 		string(SyncModeGitPortable),
-		string(SyncModeRealtime),
 		string(SyncModeDoltNative),
 		string(SyncModeBeltAndSuspenders),
 	}

@@ -17,17 +17,6 @@ func TestStatusConstants(t *testing.T) {
 	}
 }
 
-func TestMinSyncBranchHookVersion(t *testing.T) {
-	// Verify the minimum version is set
-	if MinSyncBranchHookVersion == "" {
-		t.Error("MinSyncBranchHookVersion should not be empty")
-	}
-	// Should be a valid semver
-	if !IsValidSemver(MinSyncBranchHookVersion) {
-		t.Errorf("MinSyncBranchHookVersion %q is not valid semver", MinSyncBranchHookVersion)
-	}
-}
-
 func TestDoctorCheckStruct(t *testing.T) {
 	check := DoctorCheck{
 		Name:    "Test",

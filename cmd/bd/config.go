@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // gitSSHRemotePattern matches standard git SSH remote URLs (user@host:path)
@@ -115,17 +114,9 @@ var configSetCmd = &cobra.Command{
 
 		ctx := rootCtx
 
-		// Special handling for sync.branch to apply validation
-		if strings.TrimSpace(key) == syncbranch.ConfigKey {
-			if err := syncbranch.Set(ctx, store, value); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			if err := store.SetConfig(ctx, key, value); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
-				os.Exit(1)
-			}
+		if err := store.SetConfig(ctx, key, value); err != nil {
+			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
+			os.Exit(1)
 		}
 
 		if jsonOutput {
@@ -201,12 +192,7 @@ var configGetCmd = &cobra.Command{
 		var value string
 		var err error
 
-		// Special handling for sync.branch to support env var override
-		if strings.TrimSpace(key) == syncbranch.ConfigKey {
-			value, err = syncbranch.Get(ctx, store)
-		} else {
-			value, err = store.GetConfig(ctx, key)
-		}
+		value, err = store.GetConfig(ctx, key)
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting config: %v\n", err)
@@ -278,14 +264,6 @@ var configListCmd = &cobra.Command{
 // value used by commands is different due to higher-priority config sources.
 func showConfigYAMLOverrides(dbConfig map[string]string) {
 	var overrides []string
-
-	// Check sync.branch - can be overridden by BEADS_SYNC_BRANCH env var or config.yaml sync-branch
-	if dbSyncBranch, ok := dbConfig[syncbranch.ConfigKey]; ok && dbSyncBranch != "" {
-		effectiveBranch := syncbranch.GetFromYAML()
-		if effectiveBranch != "" && effectiveBranch != dbSyncBranch {
-			overrides = append(overrides, fmt.Sprintf("  sync.branch: database has '%s' but effective value is '%s' (from config.yaml or env)", dbSyncBranch, effectiveBranch))
-		}
-	}
 
 	if len(overrides) > 0 {
 		fmt.Println("\n⚠️  Config overrides (higher priority sources):")

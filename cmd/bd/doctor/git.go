@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,12 +9,9 @@ import (
 	"regexp"
 	"strings"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -430,353 +426,89 @@ func gitRevListCount(path string, rangeExpr string) (int, error) {
 	return n, nil
 }
 
-// CheckSyncBranchHookCompatibility checks if pre-push hook is compatible with sync-branch mode.
-// When sync-branch is configured, the pre-push hook must have the sync-branch bypass logic
-// (added in version 0.29.0). Without it, users experience circular "bd sync" failures (issue #532).
+// CheckSyncBranchHookCompatibility is a no-op now that sync-branch is removed.
 func CheckSyncBranchHookCompatibility(path string) DoctorCheck {
-	// Check if sync-branch is configured
-	syncBranch := syncbranch.GetFromYAML()
-	if syncBranch == "" {
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusOK,
-			Message: "N/A (sync-branch not configured)",
-		}
-	}
-
-	// sync-branch is configured - check pre-push hook version
-	// Get common git directory for hooks (shared across worktrees)
-	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	cmd.Dir = path
-	output, err := cmd.Output()
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusOK,
-			Message: "N/A (not a git repository)",
-		}
-	}
-	gitCommonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(path, gitCommonDir)
-	}
-
-	// Hooks are shared across worktrees and live in the common git directory
-	hookPath := filepath.Join(gitCommonDir, "hooks", "pre-push")
-
-	hookContent, err := os.ReadFile(hookPath) // #nosec G304 - path is controlled
-	if err != nil {
-		// No pre-push hook installed - different issue, covered by checkGitHooks
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusOK,
-			Message: "N/A (no pre-push hook installed)",
-		}
-	}
-
-	// Check if this is a bd hook and extract version
-	hookStr := string(hookContent)
-	if !strings.Contains(hookStr, "bd-hooks-version:") {
-		// Not a bd hook - check if it's an external hook manager
-		externalManagers := fix.DetectExternalHookManagers(path)
-		if len(externalManagers) > 0 {
-			names := fix.ManagerNames(externalManagers)
-
-			// Check if external manager has bd integration
-			integration := fix.CheckExternalHookManagerIntegration(path)
-			if integration != nil {
-				// Detection-only managers - we can't verify their config
-				if integration.DetectionOnly {
-					return DoctorCheck{
-						Name:    "Sync Branch Hook Compatibility",
-						Status:  StatusOK,
-						Message: fmt.Sprintf("Managed by %s (cannot verify bd integration)", names),
-						Detail:  "Ensure pre-push hook calls 'bd hooks run pre-push' for sync-branch",
-					}
-				}
-
-				if integration.Configured {
-					// Has bd integration - check if pre-push is covered
-					hasPrepush := false
-					for _, h := range integration.HooksWithBd {
-						if h == "pre-push" {
-							hasPrepush = true
-							break
-						}
-					}
-
-					if hasPrepush {
-						var detail string
-						// Only report hooks that ARE in config but lack bd integration
-						if len(integration.HooksWithoutBd) > 0 {
-							detail = fmt.Sprintf("Hooks without bd: %s", strings.Join(integration.HooksWithoutBd, ", "))
-						}
-						return DoctorCheck{
-							Name:    "Sync Branch Hook Compatibility",
-							Status:  StatusOK,
-							Message: fmt.Sprintf("Managed by %s with bd integration", integration.Manager),
-							Detail:  detail,
-						}
-					}
-
-					// Has bd integration but missing pre-push
-					return DoctorCheck{
-						Name:    "Sync Branch Hook Compatibility",
-						Status:  StatusWarning,
-						Message: fmt.Sprintf("Managed by %s (missing pre-push bd integration)", integration.Manager),
-						Detail:  "pre-push hook needs 'bd hooks run pre-push' for sync-branch",
-						Fix:     fmt.Sprintf("Add or upgrade to 'bd hooks run pre-push' in %s. See %s", integration.Manager, hooksExamplesURL),
-					}
-				}
-			}
-
-			// External manager detected but no bd integration found
-			return DoctorCheck{
-				Name:    "Sync Branch Hook Compatibility",
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("Managed by %s (no bd integration detected)", names),
-				Detail:  fmt.Sprintf("Pre-push hook managed by %s but no 'bd hooks run' found", names),
-				Fix:     fmt.Sprintf("Add or upgrade to 'bd hooks run <hook>' in %s. See %s", names, hooksExamplesURL),
-			}
-		}
-
-		// No external manager - truly custom hook
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusWarning,
-			Message: "Pre-push hook is not a bd hook",
-			Detail:  "Cannot verify sync-branch compatibility with custom hooks",
-			Fix: "Either run 'bd hooks install --force' to use bd hooks,\n" +
-				"  or ensure your custom hook skips validation when pushing to sync-branch",
-		}
-	}
-
-	// Extract version from hook
-	var hookVersion string
-	for _, line := range strings.Split(hookStr, "\n") {
-		if strings.Contains(line, "bd-hooks-version:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				hookVersion = strings.TrimSpace(parts[1])
-			}
-			break
-		}
-	}
-
-	if hookVersion == "" {
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusWarning,
-			Message: "Could not determine pre-push hook version",
-			Detail:  "Cannot verify sync-branch compatibility",
-			Fix:     "Run 'bd hooks install --force' to update hooks",
-		}
-	}
-
-	// MinSyncBranchHookVersion added sync-branch bypass logic
-	// If hook version < MinSyncBranchHookVersion, it will cause circular "bd sync" failures
-	if CompareVersions(hookVersion, MinSyncBranchHookVersion) < 0 {
-		return DoctorCheck{
-			Name:    "Sync Branch Hook Compatibility",
-			Status:  StatusError,
-			Message: fmt.Sprintf("Pre-push hook incompatible with sync-branch mode (version %s)", hookVersion),
-			Detail:  fmt.Sprintf("Hook version %s lacks sync-branch bypass (requires %s+). This causes circular 'bd sync' failures during push.", hookVersion, MinSyncBranchHookVersion),
-			Fix:     "Run 'bd hooks install --force' to update hooks",
-		}
-	}
-
 	return DoctorCheck{
 		Name:    "Sync Branch Hook Compatibility",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Pre-push hook compatible with sync-branch (version %s)", hookVersion),
+		Message: "N/A (sync-branch removed)",
 	}
 }
 
-// CheckSyncBranchConfig checks if sync-branch is properly configured.
-func CheckSyncBranchConfig(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Skip if .beads doesn't exist
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  StatusOK,
-			Message: "N/A (no .beads directory)",
-		}
-	}
-
+// CheckMergeDriver verifies that the git merge driver is correctly configured.
+func CheckMergeDriver(path string) DoctorCheck {
 	// Check if we're in a git repository using worktree-aware detection
 	_, err := git.GetGitDir()
 	if err != nil {
 		return DoctorCheck{
-			Name:    "Sync Branch Config",
+			Name:    "Git Merge Driver",
 			Status:  StatusOK,
 			Message: "N/A (not a git repository)",
 		}
 	}
 
-	// Check sync-branch from config.yaml or environment variable
-	// This is the source of truth for multi-clone setups
-	syncBranch := syncbranch.GetFromYAML()
-
-	// Get current branch
-	currentBranch := ""
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	// Get current merge driver configuration
+	cmd := exec.Command("git", "config", "merge.beads.driver")
 	cmd.Dir = path
-	if output, err := cmd.Output(); err == nil {
-		currentBranch = strings.TrimSpace(string(output))
-	}
-
-	// CRITICAL: Check if we're on the sync branch - this is a misconfiguration
-	// that will cause bd sync to fail trying to create a worktree for a branch
-	// that's already checked out
-	if syncBranch != "" && currentBranch == syncBranch {
+	output, err := cmd.Output()
+	if err != nil {
+		// Merge driver not configured
 		return DoctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  StatusError,
-			Message: fmt.Sprintf("On sync branch '%s'", syncBranch),
-			Detail:  fmt.Sprintf("Currently on branch '%s' which is configured as the sync branch. bd sync cannot create a worktree for a branch that's already checked out.", syncBranch),
-			Fix:     "Switch to your main working branch: git checkout main",
-		}
-	}
-
-	if syncBranch != "" {
-		return DoctorCheck{
-			Name:    "Sync Branch Config",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Configured (%s)", syncBranch),
-			Detail:  fmt.Sprintf("Current branch: %s, sync branch: %s", currentBranch, syncBranch),
-		}
-	}
-
-	// Not configured - this is optional but recommended for multi-clone setups
-	// Check if this looks like a multi-clone setup (has remote)
-	hasRemote := false
-	cmd = exec.Command("git", "remote")
-	cmd.Dir = path
-	if output, err := cmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
-		hasRemote = true
-	}
-
-	if hasRemote {
-		return DoctorCheck{
-			Name:    "Sync Branch Config",
+			Name:    "Git Merge Driver",
 			Status:  StatusWarning,
-			Message: "sync-branch not configured",
-			Detail:  "Multi-clone setups should configure sync-branch for safe data synchronization",
-			Fix:     "Run 'bd migrate sync beads-sync' to set up sync branch workflow",
+			Message: "Git merge driver not configured",
+			Fix:     "Run 'bd init' to configure the merge driver, or manually: git config merge.beads.driver \"bd merge %A %O %A %B\"",
 		}
 	}
 
-	// No remote - probably a local-only repo, sync-branch not needed
+	currentConfig := strings.TrimSpace(string(output))
+	correctConfig := "bd merge %A %O %A %B"
+
+	// Check if using old incorrect placeholders
+	if strings.Contains(currentConfig, "%L") || strings.Contains(currentConfig, "%R") {
+		return DoctorCheck{
+			Name:    "Git Merge Driver",
+			Status:  StatusError,
+			Message: fmt.Sprintf("Incorrect merge driver config: %q (uses invalid %%L/%%R placeholders)", currentConfig),
+			Detail:  "Git only supports %O (base), %A (current), %B (other). Using %L/%R causes merge failures.",
+			Fix:     "Run 'bd doctor --fix' to update to correct config, or manually: git config merge.beads.driver \"bd merge %A %O %A %B\"",
+		}
+	}
+
+	// Check if config is correct
+	if currentConfig != correctConfig {
+		return DoctorCheck{
+			Name:    "Git Merge Driver",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("Non-standard merge driver config: %q", currentConfig),
+			Detail:  fmt.Sprintf("Expected: %q", correctConfig),
+			Fix:     fmt.Sprintf("Run 'bd doctor --fix' to update config, or manually: git config merge.beads.driver \"%s\"", correctConfig),
+		}
+	}
+
 	return DoctorCheck{
-		Name:    "Sync Branch Config",
+		Name:    "Git Merge Driver",
 		Status:  StatusOK,
-		Message: "N/A (no remote configured)",
+		Message: "Correctly configured",
+		Detail:  currentConfig,
 	}
 }
 
-// CheckSyncBranchHealth detects when the sync branch has diverged from main
-// or from the remote sync branch (after a force-push reset).
+// CheckSyncBranchConfig is a no-op now that sync-branch is removed.
+func CheckSyncBranchConfig(path string) DoctorCheck {
+	return DoctorCheck{
+		Name:    "Sync Branch Config",
+		Status:  StatusOK,
+		Message: "N/A (sync-branch removed)",
+	}
+}
+
+// CheckSyncBranchHealth is a no-op now that sync-branch is removed.
 func CheckSyncBranchHealth(path string) DoctorCheck {
-	// Skip if not in a git repo using worktree-aware detection
-	_, err := git.GetGitDir()
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: "N/A (not a git repository)",
-		}
-	}
-
-	// Get configured sync branch
-	syncBranch := syncbranch.GetFromYAML()
-	if syncBranch == "" {
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: "N/A (no sync branch configured)",
-		}
-	}
-
-	// Check if local sync branch exists
-	cmd := exec.Command("git", "rev-parse", "--verify", syncBranch) // #nosec G204 - syncBranch from config file
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		// Local branch doesn't exist - that's fine, bd sync will create it
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("N/A (local %s branch not created yet)", syncBranch),
-		}
-	}
-
-	// Check if remote sync branch exists
-	remote := "origin"
-	remoteBranch := fmt.Sprintf("%s/%s", remote, syncBranch)
-	cmd = exec.Command("git", "rev-parse", "--verify", remoteBranch) // #nosec G204 - remoteBranch from config
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		// Remote branch doesn't exist - that's fine
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("N/A (remote %s not found)", remoteBranch),
-		}
-	}
-
-	// Check 1: Is local sync branch diverged from remote? (after force-push)
-	// If they have no common ancestor in recent history, the remote was likely force-pushed
-	cmd = exec.Command("git", "merge-base", syncBranch, remoteBranch) // #nosec G204 - branches from config
-	cmd.Dir = path
-	mergeBaseOutput, err := cmd.Output()
-	if err != nil {
-		// No common ancestor - branches have completely diverged
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusWarning,
-			Message: fmt.Sprintf("Local %s diverged from remote", syncBranch),
-			Detail:  "The remote sync branch was likely reset/force-pushed. Your local branch has orphaned history.",
-			Fix:     "Run 'bd doctor --fix' to reset sync branch",
-		}
-	}
-
-	// Check if local is behind remote (needs to fast-forward)
-	mergeBase := strings.TrimSpace(string(mergeBaseOutput))
-	cmd = exec.Command("git", "rev-parse", syncBranch) // #nosec G204 - syncBranch from config
-	cmd.Dir = path
-	localHead, _ := cmd.Output() // Best effort: empty output means git check skipped
-	localHeadStr := strings.TrimSpace(string(localHead))
-
-	cmd = exec.Command("git", "rev-parse", remoteBranch) // #nosec G204 - remoteBranch from config
-	cmd.Dir = path
-	remoteHead, _ := cmd.Output() // Best effort: empty output means git check skipped
-	remoteHeadStr := strings.TrimSpace(string(remoteHead))
-
-	// If merge base equals local but not remote, local is behind
-	if mergeBase == localHeadStr && mergeBase != remoteHeadStr {
-		// Count how far behind
-		cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", syncBranch, remoteBranch)) // #nosec G204 - branches from config
-		cmd.Dir = path
-		countOutput, _ := cmd.Output() // Best effort: empty output means git check skipped
-		behindCount := strings.TrimSpace(string(countOutput))
-
-		return DoctorCheck{
-			Name:    "Sync Branch Health",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Local %s is %s commits behind remote (will sync)", syncBranch, behindCount),
-		}
-	}
-
-	// Note: We intentionally do NOT check if sync branch differs from main on source files.
-	// The sync branch only tracks .beads/ data - source file differences are expected behavior.
-	// See GH#1062 for why the previous check was removed (it caused destructive --fix behavior).
-
 	return DoctorCheck{
 		Name:    "Sync Branch Health",
 		Status:  StatusOK,
-		Message: "OK",
+		Message: "N/A (sync-branch removed)",
 	}
 }
 
@@ -983,105 +715,5 @@ func CheckOrphanedIssues(path string) DoctorCheck {
 		Message:  "N/A (not yet implemented for Dolt backend)",
 		Category: CategoryGit,
 	}
-
-	// Unreachable: legacy SQLite-based implementation below preserved for reference
-	// during Dolt reimplementation.
-
-	// Skip if not in a git repo (check from path directory)
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = path
-	if err := cmd.Run(); err != nil {
-		return DoctorCheck{
-			Name:     "Orphaned Issues",
-			Status:   StatusOK,
-			Message:  "N/A (not a git repository)",
-			Category: CategoryGit,
-		}
-	}
-
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Skip if no .beads directory
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Orphaned Issues",
-			Status:   StatusOK,
-			Message:  "N/A (no .beads directory)",
-			Category: CategoryGit,
-		}
-	}
-
-	// Get database path from config or use canonical name
-	dbPath := filepath.Join(beadsDir, "beads.db")
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Orphaned Issues",
-			Status:   StatusOK,
-			Message:  "N/A (no database)",
-			Category: CategoryGit,
-		}
-	}
-
-	// Use the shared findOrphanedIssuesFromPath function (creates its own provider)
-	orphans, err := findOrphanedIssuesFromPath(path)
-	if err != nil {
-		return DoctorCheck{
-			Name:     "Orphaned Issues",
-			Status:   StatusOK,
-			Message:  "N/A (unable to check orphaned issues)",
-			Category: CategoryGit,
-		}
-	}
-
-	// Check for "no open issues" case - this requires checking the database
-	// since FindOrphanedIssues silently returns empty slice
-	db, err := openDBReadOnly(dbPath)
-	if err == nil {
-		defer db.Close()
-		rows, err := db.Query("SELECT COUNT(*) FROM issues WHERE status IN ('open', 'in_progress')")
-		if err == nil {
-			defer rows.Close()
-			if rows.Next() {
-				var count int
-				if err := rows.Scan(&count); err == nil && count == 0 {
-					return DoctorCheck{
-						Name:     "Orphaned Issues",
-						Status:   StatusOK,
-						Message:  "No open issues to check",
-						Category: CategoryGit,
-					}
-				}
-			}
-		}
-	}
-
-	if len(orphans) == 0 {
-		return DoctorCheck{
-			Name:     "Orphaned Issues",
-			Status:   StatusOK,
-			Message:  "No issues referenced in commits but still open",
-			Category: CategoryGit,
-		}
-	}
-
-	// Build detail message
-	var details []string
-	for _, orphan := range orphans {
-		details = append(details, fmt.Sprintf("%s (commit %s)", orphan.IssueID, orphan.LatestCommit))
-	}
-
-	return DoctorCheck{
-		Name:     "Orphaned Issues",
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d issue(s) referenced in commits but still open", len(orphans)),
-		Detail:   strings.Join(details, ", "),
-		Fix:      "Run 'bd show <id>' to check if implemented, then 'bd close <id>' if done",
-		Category: CategoryGit,
-	}
 }
 
-// openDBReadOnly opens a SQLite database in read-only mode
-func openDBReadOnly(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite3", sqliteConnString(dbPath, true))
-}

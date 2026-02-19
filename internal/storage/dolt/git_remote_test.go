@@ -3,6 +3,7 @@
 package dolt
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"os"
@@ -11,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // Git Remote Integration Tests
@@ -600,4 +604,333 @@ func TestGitRemoteSpecialCharacters(t *testing.T) {
 			t.Errorf("clone: %s desc mismatch:\n  got:  %q\n  want: %q", s.id, rows[0]["description"], s.desc)
 		}
 	}
+}
+
+// --- Embedded driver git remote tests ---
+//
+// These tests verify that Dolt's git remote support works through the
+// embedded SQL driver (dolthub/driver), not just the CLI. This is the
+// critical question for the Dolt-in-Git spike: can we use store.Push()
+// and store.Pull() with a bare git repo as the remote?
+
+// setupEmbeddedGitRemote creates a bare git repo and returns a DoltStore
+// connected via the embedded driver with the bare repo configured as "origin".
+func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) {
+	t.Helper()
+	skipIfNoDolt(t)
+	skipIfNoGit(t)
+
+	baseDir, err := os.MkdirTemp("", "embedded-git-remote-test-*")
+	if err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+
+	// Create bare git repo with initial commit (same as setupGitRemote)
+	remoteDir := filepath.Join(baseDir, "remote.git")
+	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
+
+	seedDir := filepath.Join(baseDir, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to create seed dir: %v", err)
+	}
+	runCmd(t, seedDir, "git", "init", "-b", "main")
+	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "remote", "add", "origin", remoteDir)
+	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
+
+	remoteURL := "file://" + remoteDir
+
+	// Create embedded DoltStore
+	doltDir := filepath.Join(baseDir, "embedded-dolt")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:           doltDir,
+		CommitterName:  "test",
+		CommitterEmail: "test@example.com",
+		Database:       dbName,
+	})
+	if err != nil {
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to create embedded DoltStore: %v", err)
+	}
+
+	// Set issue prefix (required for CreateIssue)
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		store.Close()
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to set prefix: %v", err)
+	}
+
+	// Add git remote via embedded SQL
+	if err := store.AddRemote(ctx, "origin", remoteURL); err != nil {
+		store.Close()
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to add remote: %v", err)
+	}
+
+	setup := &gitRemoteSetup{
+		baseDir:   baseDir,
+		remoteDir: remoteDir,
+		remoteURL: remoteURL,
+		sourceDir: doltDir,
+	}
+
+	cleanup := func() {
+		store.Close()
+		os.RemoveAll(baseDir)
+	}
+
+	return store, setup, cleanup
+}
+
+func TestGitRemoteEmbeddedPushPull(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create test data via embedded store
+	issue := &types.Issue{
+		ID:        "emb-git-001",
+		Title:     "Embedded git remote test",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Commit
+	if err := store.Commit(ctx, "Add emb-git-001"); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+
+	// Push via embedded driver — this is the key verification
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+
+	// Verify: clone via CLI and check data arrived
+	cloneDir := filepath.Join(setup.baseDir, "clone-verify")
+	doltClone(t, setup.remoteURL, cloneDir)
+
+	rows := queryCSV(t, cloneDir, "SELECT id, title FROM issues WHERE id = 'emb-git-001'")
+	if len(rows) == 0 {
+		t.Fatal("clone: expected emb-git-001 to exist after embedded push")
+	}
+	if rows[0]["title"] != "Embedded git remote test" {
+		t.Errorf("clone: title = %q, want %q", rows[0]["title"], "Embedded git remote test")
+	}
+
+	// Now test Pull: add data in the clone, push via CLI, pull into embedded store
+	sourceInsertIssue(t, cloneDir, "emb-git-002", "Added in clone")
+	sourceCommitAndPush(t, cloneDir, "Add emb-git-002 from clone")
+
+	// Pull via embedded driver
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+
+	// Verify pulled data
+	var title string
+	err := store.db.QueryRowContext(ctx, "SELECT title FROM issues WHERE id = 'emb-git-002'").Scan(&title)
+	if err != nil {
+		t.Fatalf("query after pull failed: %v", err)
+	}
+	if title != "Added in clone" {
+		t.Errorf("pull: title = %q, want %q", title, "Added in clone")
+	}
+
+	t.Log("Embedded driver git remote push/pull verified successfully")
+}
+
+func TestGitRemoteEmbeddedHasRemote(t *testing.T) {
+	store, _, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// HasRemote should find "origin"
+	has, err := store.HasRemote(ctx, "origin")
+	if err != nil {
+		t.Fatalf("HasRemote failed: %v", err)
+	}
+	if !has {
+		t.Error("HasRemote('origin') = false, want true")
+	}
+
+	// HasRemote should not find nonexistent remote
+	has, err = store.HasRemote(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("HasRemote failed: %v", err)
+	}
+	if has {
+		t.Error("HasRemote('nonexistent') = true, want false")
+	}
+}
+
+func TestGitRemoteSyncRoundTrip(t *testing.T) {
+	// Full bidirectional sync test:
+	// 1. Source creates issues, commits, pushes to git remote
+	// 2. Clone bootstraps from git remote (BootstrapFromGitRemote path)
+	// 3. Clone adds issues, commits, pushes
+	// 4. Source pulls — verifies bidirectional sync
+	// All via embedded DoltStore methods.
+
+	sourceStore, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Step 1: Source creates data and pushes
+	for i := 1; i <= 3; i++ {
+		issue := &types.Issue{
+			ID:        fmt.Sprintf("rt-src-%03d", i),
+			Title:     fmt.Sprintf("Source issue %d", i),
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+			Priority:  2,
+		}
+		if err := sourceStore.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("source CreateIssue %d failed: %v", i, err)
+		}
+	}
+
+	if err := sourceStore.Commit(ctx, "Add source issues"); err != nil {
+		t.Fatalf("source Commit failed: %v", err)
+	}
+	if err := sourceStore.Push(ctx); err != nil {
+		t.Fatalf("source Push failed: %v", err)
+	}
+
+	// Step 2: Bootstrap clone from git remote
+	// Close source store first to avoid embedded driver conflicts,
+	// then use BootstrapFromGitRemoteWithDB + open a new embedded store.
+	sourceStore.Close()
+
+	cloneDoltDir := filepath.Join(setup.baseDir, "clone-dolt")
+	cloneDBName := "clonedb"
+	bootstrapped, err := BootstrapFromGitRemoteWithDB(ctx, cloneDoltDir, setup.remoteURL, cloneDBName)
+	if err != nil {
+		t.Fatalf("BootstrapFromGitRemoteWithDB failed: %v", err)
+	}
+	if !bootstrapped {
+		t.Fatal("expected bootstrap to occur (no existing dolt dir)")
+	}
+
+	cloneStore, err := New(ctx, &Config{
+		Path:           cloneDoltDir,
+		CommitterName:  "clone-user",
+		CommitterEmail: "clone@example.com",
+		Database:       cloneDBName,
+	})
+	if err != nil {
+		t.Fatalf("failed to open cloned store: %v", err)
+	}
+
+	// Verify source data arrived in clone
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("rt-src-%03d", i)
+		issue, getErr := cloneStore.GetIssue(ctx, id)
+		if getErr != nil {
+			t.Fatalf("clone GetIssue(%s) failed: %v", id, getErr)
+		}
+		if issue == nil {
+			t.Fatalf("clone: expected %s to exist", id)
+		}
+		expected := fmt.Sprintf("Source issue %d", i)
+		if issue.Title != expected {
+			t.Errorf("clone: %s title = %q, want %q", id, issue.Title, expected)
+		}
+	}
+
+	// Step 3: Clone adds data and pushes back
+	cloneIssue := &types.Issue{
+		ID:        "rt-clone-001",
+		Title:     "Clone-originated issue",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := cloneStore.CreateIssue(ctx, cloneIssue, "clone-user"); err != nil {
+		t.Fatalf("clone CreateIssue failed: %v", err)
+	}
+
+	if err := cloneStore.Commit(ctx, "Add clone issue"); err != nil {
+		t.Fatalf("clone Commit failed: %v", err)
+	}
+	if err := cloneStore.Push(ctx); err != nil {
+		t.Fatalf("clone Push failed: %v", err)
+	}
+
+	// Close clone store before re-opening source
+	cloneStore.Close()
+
+	// Step 4: Re-open source and pull — verify bidirectional sync
+	sourceStore2, err := New(ctx, &Config{
+		Path:           filepath.Join(setup.baseDir, "embedded-dolt"),
+		CommitterName:  "test",
+		CommitterEmail: "test@example.com",
+		Database:       findClonedDBName(t, filepath.Join(setup.baseDir, "embedded-dolt")),
+	})
+	if err != nil {
+		t.Fatalf("failed to re-open source store: %v", err)
+	}
+	defer sourceStore2.Close()
+
+	if err := sourceStore2.Pull(ctx); err != nil {
+		t.Fatalf("source Pull failed: %v", err)
+	}
+
+	// Verify clone's issue arrived in source
+	issue, err := sourceStore2.GetIssue(ctx, "rt-clone-001")
+	if err != nil {
+		t.Fatalf("source GetIssue(rt-clone-001) failed: %v", err)
+	}
+	if issue == nil {
+		t.Fatal("source: expected rt-clone-001 to exist after pull")
+	}
+	if issue.Title != "Clone-originated issue" {
+		t.Errorf("source: rt-clone-001 title = %q, want %q", issue.Title, "Clone-originated issue")
+	}
+
+	// Verify original source data still intact
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("rt-src-%03d", i)
+		srcIssue, getErr := sourceStore2.GetIssue(ctx, id)
+		if getErr != nil || srcIssue == nil {
+			t.Errorf("source: expected %s to still exist after pull", id)
+		}
+	}
+
+	t.Log("Full round-trip sync verified: source -> git remote -> clone -> git remote -> source")
+}
+
+// findClonedDBName discovers the database name inside a dolt directory
+// by looking for subdirectories containing .dolt.
+func findClonedDBName(t *testing.T, doltDir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(doltDir)
+	if err != nil {
+		t.Fatalf("failed to read dolt dir %s: %v", doltDir, err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		doltSubDir := filepath.Join(doltDir, entry.Name(), ".dolt")
+		if info, statErr := os.Stat(doltSubDir); statErr == nil && info.IsDir() {
+			return entry.Name()
+		}
+	}
+	t.Fatalf("no dolt database found in %s", doltDir)
+	return ""
 }

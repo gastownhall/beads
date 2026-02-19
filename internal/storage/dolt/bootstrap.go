@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -115,6 +116,56 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) (bool, *BootstrapResult
 	}
 
 	return true, result, nil
+}
+
+// BootstrapFromGitRemote clones a Dolt database from a git remote URL.
+// This is used when no local .beads/dolt/ exists but config.yaml has
+// sync.git-remote configured, enabling cold-start from a git remote
+// that already contains Dolt data on refs/dolt/data.
+//
+// dolt clone creates <target>/.dolt/ directly (no database subdirectory),
+// but the embedded driver expects <doltDir>/<database>/.dolt/. To reconcile,
+// we clone into <doltDir>/<database>/ so the embedded driver finds it.
+// If database is empty, "beads" is used.
+//
+// Returns true if the clone was performed, false if skipped (dolt dir already exists).
+func BootstrapFromGitRemote(ctx context.Context, doltDir, gitRemoteURL string) (bool, error) {
+	return BootstrapFromGitRemoteWithDB(ctx, doltDir, gitRemoteURL, "")
+}
+
+// BootstrapFromGitRemoteWithDB is like BootstrapFromGitRemote but allows
+// specifying the database name (used by the embedded driver for the
+// subdirectory structure).
+func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, database string) (bool, error) {
+	// Skip if Dolt database already exists
+	if doltExists(doltDir) {
+		return false, nil
+	}
+
+	if database == "" {
+		database = "beads"
+	}
+
+	// Verify dolt CLI is available
+	if _, err := exec.LookPath("dolt"); err != nil {
+		return false, fmt.Errorf("dolt CLI not found (required for git remote bootstrap): %w", err)
+	}
+
+	// Create the parent dolt directory
+	if err := os.MkdirAll(doltDir, 0o750); err != nil {
+		return false, fmt.Errorf("failed to create dolt directory: %w", err)
+	}
+
+	// Clone into <doltDir>/<database>/ so the embedded driver can find it.
+	// `dolt clone <url> <target>` creates <target>/.dolt/ directly.
+	cloneTarget := filepath.Join(doltDir, database)
+	cmd := exec.CommandContext(ctx, "dolt", "clone", gitRemoteURL, cloneTarget)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s", err, output)
+	}
+
+	fmt.Fprintf(os.Stderr, "Bootstrapped from git remote: %s\n", gitRemoteURL)
+	return true, nil
 }
 
 // doltExists checks if a Dolt database directory exists

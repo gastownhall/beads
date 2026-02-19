@@ -38,8 +38,7 @@ var YamlOnlyKeys = map[string]bool{
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
 
 	// Sync settings
-	"sync-branch": true,
-	"sync.branch": true,
+	"sync.git-remote":  true,
 	"sync.require_confirmation_on_mass_delete": true,
 
 	// Routing settings
@@ -81,9 +80,7 @@ func IsYamlOnlyKey(key string) bool {
 
 // keyAliases maps alternative key names to their canonical yaml form.
 // This ensures consistency when users use different formats (dot vs hyphen).
-var keyAliases = map[string]string{
-	"sync.branch": "sync-branch",
-}
+var keyAliases = map[string]string{}
 
 // normalizeYamlKey converts a key to its canonical yaml format.
 // Some keys have aliases (e.g., sync.branch -> sync-branch) to handle
@@ -286,13 +283,6 @@ func validateYamlConfigValue(key, value string) error {
 		}
 		if depth < 1 {
 			return fmt.Errorf("hierarchy.max-depth must be at least 1, got %d", depth)
-		}
-	case "sync-branch", "sync.branch":
-		// GH#1166: Validate sync branch name at config time
-		// Note: Cannot import syncbranch due to import cycle, so inline the validation.
-		// This mirrors syncbranch.ValidateSyncBranchName() logic.
-		if value == "main" || value == "master" {
-			return fmt.Errorf("cannot use '%s' as sync branch: git worktrees prevent checking out the same branch in multiple locations. Use a dedicated branch like 'beads-sync' instead", value)
 		}
 	}
 	return nil

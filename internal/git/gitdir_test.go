@@ -11,20 +11,6 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 	// Use an explicit temporary HOME so tilde expansion is deterministic
 	// regardless of the environment (CI, containers, overridden HOME, etc.).
 	fakeHome := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", fakeHome)
-	t.Cleanup(func() {
-		if origHome != "" {
-			os.Setenv("HOME", origHome)
-		} else {
-			os.Unsetenv("HOME")
-		}
-	})
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("skipping: cannot determine home directory: %v", err)
-	}
 
 	tests := []struct {
 		name      string
@@ -36,17 +22,17 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 		{
 			name:      "tilde with forward slash",
 			hooksPath: "~/.githooks",
-			wantDir:   filepath.Join(homeDir, ".githooks"),
+			wantDir:   filepath.Join(fakeHome, ".githooks"),
 		},
 		{
 			name:      "tilde with backslash",
 			hooksPath: `~\.githooks`,
-			wantDir:   filepath.Join(homeDir, ".githooks"),
+			wantDir:   filepath.Join(fakeHome, ".githooks"),
 		},
 		{
 			name:      "bare tilde",
 			hooksPath: "~",
-			wantDir:   homeDir,
+			wantDir:   fakeHome,
 		},
 		{
 			name:      "relative path without tilde",
@@ -61,14 +47,32 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 			// Setting core.hooksPath to a backslash-tilde path (e.g. ~\.githooks)
 			// causes all subsequent git commands to fail with "failed to expand
 			// user dir", and even `git config --unset` cannot recover.
+			//
+			// IMPORTANT: setupTestRepo must run BEFORE overriding HOME, because
+			// git init/commit need the real HOME for global config access
+			// (e.g. safe.directory on CI). Overriding HOME too early causes
+			// git config to fail with exit status 128 on some environments.
 			subRepoPath, subCleanup := setupTestRepo(t)
 			defer subCleanup()
+
+			// Override HOME after repo setup so tilde expansion resolves
+			// to fakeHome deterministically for the code under test.
+			origHome := os.Getenv("HOME")
+			os.Setenv("HOME", fakeHome)
+			t.Cleanup(func() {
+				if origHome != "" {
+					os.Setenv("HOME", origHome)
+				} else {
+					os.Unsetenv("HOME")
+				}
+			})
+
 			ResetCaches()
 
 			cmd := exec.Command("git", "config", "core.hooksPath", tt.hooksPath)
 			cmd.Dir = subRepoPath
-			if err := cmd.Run(); err != nil {
-				t.Skipf("git config rejected core.hooksPath %q: %v", tt.hooksPath, err)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("Failed to set core.hooksPath to %q: %v\n%s", tt.hooksPath, err, out)
 			}
 
 			originalDir, err := os.Getwd()

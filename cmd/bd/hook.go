@@ -18,7 +18,6 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -365,58 +364,7 @@ func hookPreCommit() int {
 		return exitCode
 	}
 
-	// Non-Dolt backend: skip export when sync-branch is configured
-	// (changes go to separate branch, nothing to export here)
-	if hookGetSyncBranch() != "" {
-		if cfg.ChainStrategy == ChainAfter {
-			return runChainedHookWithConfig("pre-commit", nil, cfg)
-		}
-		return 0
-	}
-
-	// SQLite backend: Use existing sync --flush-only
-	cmd := exec.Command("bd", "sync", "--flush-only")
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "Warning: Failed to flush bd changes to JSONL")
-		fmt.Fprintln(os.Stderr, "Run 'bd sync --flush-only' manually to diagnose")
-	}
-
-	// Stage JSONL files
-	if os.Getenv("BEADS_NO_AUTO_STAGE") == "" {
-		rc, rcErr := beads.GetRepoContext()
-		ctx := context.Background()
-		for _, f := range jsonlFilePaths {
-			if _, err := os.Stat(f); err == nil {
-				var gitAdd *exec.Cmd
-				if rcErr == nil {
-					gitAdd = rc.GitCmdCWD(ctx, "add", f)
-				} else {
-					// #nosec G204 -- f comes from jsonlFilePaths (controlled, hardcoded paths)
-					gitAdd = exec.Command("git", "add", f)
-				}
-				_ = gitAdd.Run() // Best effort: file may not be tracked in git
-			}
-		}
-	}
-
-	// Update export state
-	currentCommit, _ := getCurrentGitCommit()
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	jsonlHash, _ := computeJSONLHashForHook(jsonlPath)
-
-	state := &ExportState{
-		WorktreeRoot:     worktreeRoot,
-		LastExportCommit: currentCommit,
-		LastExportTime:   time.Now(),
-		JSONLHash:        jsonlHash,
-	}
-	if err := saveExportState(beadsDir, worktreeRoot, state); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not save export state: %v\n", err)
-	}
-
-	if cfg.ChainStrategy == ChainAfter {
-		return runChainedHookWithConfig("pre-commit", nil, cfg)
-	}
+	// Backend is always Dolt; non-Dolt paths removed.
 	return 0
 }
 
@@ -488,18 +436,7 @@ func doExportAndSaveState(ctx context.Context, s *dolt.DoltStore, beadsDir, work
 		return
 	}
 
-	// Commit to sync branch if configured, otherwise stage for main
-	if sb := hookGetSyncBranch(); sb != "" {
-		repoRoot, err := syncbranch.GetRepoRoot(ctx)
-		if err == nil {
-			// Don't push during pre-commit hook — too slow
-			if _, err := syncbranch.CommitToSyncBranch(ctx, repoRoot, sb, jsonlPath, false); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to commit to sync branch: %v\n", err)
-			}
-		}
-	} else {
-		stageJSONLFiles(ctx)
-	}
+	stageJSONLFiles(ctx)
 
 	// Save export state
 	jsonlHash, _ := computeJSONLHashForHook(jsonlPath)
@@ -599,22 +536,7 @@ func hookPostMerge(args []string) int {
 		return exitCode
 	}
 
-	// SQLite backend: Use existing sync --import-only
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after merge")
-		fmt.Fprintln(os.Stderr, string(output))
-		fmt.Fprintln(os.Stderr, "Run 'bd doctor --fix' to diagnose and repair")
-	}
-
-	// Run quick health check
-	healthCmd := exec.Command("bd", "doctor", "--check-health")
-	_ = healthCmd.Run()
-
-	if cfg.ChainStrategy == ChainAfter {
-		return runChainedHookWithConfig("post-merge", args, cfg)
-	}
+	// Backend is always Dolt; non-Dolt paths removed.
 	return 0
 }
 
@@ -798,33 +720,7 @@ func hookPostCheckout(args []string) int {
 		return exitCode
 	}
 
-	// SQLite backend: Use existing sync --import-only
-	cmd := exec.Command("bd", "sync", "--import-only", "--no-git-history")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Warning: Failed to sync bd changes after checkout")
-		fmt.Fprintln(os.Stderr, string(output))
-		fmt.Fprintln(os.Stderr, "Run 'bd doctor --fix' to diagnose and repair")
-	}
-
-	// Update state after import
-	newHash, _ := computeJSONLHashForHook(jsonlPath)
-	currentCommit, _ := getCurrentGitCommit()
-	state := &ExportState{
-		WorktreeRoot:     worktreeRoot,
-		LastExportCommit: currentCommit,
-		LastExportTime:   time.Now(),
-		JSONLHash:        newHash,
-	}
-	_ = saveExportState(beadsDir, worktreeRoot, state) // Best effort: export state is advisory
-
-	// Run quick health check
-	healthCmd := exec.Command("bd", "doctor", "--check-health")
-	_ = healthCmd.Run()
-
-	if cfg.ChainStrategy == ChainAfter {
-		return runChainedHookWithConfig("post-checkout", args, cfg)
-	}
+	// Backend is always Dolt; non-Dolt paths removed.
 	return 0
 }
 

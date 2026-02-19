@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/syncbranch"
 )
 
 // ensureDirectMode makes sure the CLI is operating in direct-storage mode.
@@ -33,15 +30,6 @@ func ensureStoreActive() error {
 		return fmt.Errorf("no beads database found.\n" +
 			"Hint: run 'bd init' to create a database in the current directory,\n" +
 			"      or use 'bd --no-db' for JSONL-only mode")
-	}
-
-	// GH#1349: Ensure sync branch worktree exists if configured.
-	// This must happen before any JSONL operations to fix fresh clone scenario
-	// where findJSONLPath would otherwise fall back to main's stale JSONL.
-	if _, err := syncbranch.EnsureWorktree(context.Background()); err != nil {
-		// Log warning but don't fail - operations can still work with main's JSONL
-		// This allows graceful degradation if worktree creation fails
-		debug.Logf("Warning: could not ensure sync worktree: %v", err)
 	}
 
 	// Check if this is a JSONL-only project
