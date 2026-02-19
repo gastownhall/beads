@@ -73,6 +73,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=/tmp/zigcc/cc-x86_64-macos
+      - GOMAXPROCS=1
     tags:
       - gms_pure_go
     goos:
@@ -92,6 +93,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=/tmp/zigcc/cc-aarch64-macos
+      - GOMAXPROCS=1
     tags:
       - gms_pure_go
     goos:
@@ -136,6 +138,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=/tmp/zigcc/cc-aarch64-windows-gnu
+      - GOMAXPROCS=1
     tags:
       - gms_pure_go
     goos:
@@ -161,6 +164,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=/tmp/zigcc/cc-x86_64-freebsd
+      - GOMAXPROCS=1
     tags:
       - gms_pure_go
     goos:
