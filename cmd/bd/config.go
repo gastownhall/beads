@@ -255,23 +255,15 @@ var configListCmd = &cobra.Command{
 
 		// Check for config.yaml overrides that take precedence (bd-20j)
 		// This helps diagnose when effective config differs from database config
-		showConfigYAMLOverrides(config)
+		showConfigYAMLOverrides()
 	},
 }
 
 // showConfigYAMLOverrides warns when config.yaml or env vars override database settings.
 // This addresses the confusion when `bd config list` shows one value but the effective
 // value used by commands is different due to higher-priority config sources.
-func showConfigYAMLOverrides(dbConfig map[string]string) {
-	var overrides []string
-
-	if len(overrides) > 0 {
-		fmt.Println("\n⚠️  Config overrides (higher priority sources):")
-		for _, o := range overrides {
-			fmt.Println(o)
-		}
-		fmt.Println("\nNote: config.yaml and environment variables take precedence over database config.")
-	}
+// TODO(bd-20j): implement override detection logic
+func showConfigYAMLOverrides() {
 }
 
 var configUnsetCmd = &cobra.Command{

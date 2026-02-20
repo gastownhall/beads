@@ -273,4 +273,3 @@ func TestValidateYamlConfigValue_OtherKeys(t *testing.T) {
 		t.Errorf("unexpected error for routing.mode: %v", err)
 	}
 }
-

@@ -1,7 +1,7 @@
 {
   "name": "beads",
   "description": "AI-supervised issue tracker for coding workflows. Manage tasks, discover work, and maintain context with simple CLI commands.",
-  "version": "0.55.0",
+  "version": "0.55.1",
   "author": {
     "name": "Steve Yegge",
     "url": "https://github.com/steveyegge"

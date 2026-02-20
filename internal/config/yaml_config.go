@@ -34,7 +34,7 @@ var YamlOnlyKeys = map[string]bool{
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
 
 	// Sync settings
-	"sync.git-remote":  true,
+	"sync.git-remote":                          true,
 	"sync.require_confirmation_on_mass_delete": true,
 
 	// Routing settings

@@ -485,7 +485,6 @@ func CheckMergeDriver(path string) DoctorCheck {
 	}
 }
 
-
 // CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.
 // Hooks installed before Dolt support was added don't have the backend check and will
 // fail with confusing errors on git pull/commit.
@@ -685,4 +684,3 @@ func CheckOrphanedIssues(path string) DoctorCheck {
 		Category: CategoryGit,
 	}
 }
-

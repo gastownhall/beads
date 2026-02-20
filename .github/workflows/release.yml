@@ -50,18 +50,18 @@ jobs:
             "cc-x86_64-freebsd:x86_64-freebsd"; do
             name="${pair%%:*}"
             target="${pair##*:}"
-            # Use bash for array handling; replace -lresolv with -lresolv.9
-            # to work around zig filtering macOS libc names (ziglang/zig#16674).
+            # Build wrapper: replace -lresolv with -lresolv.9 to work around
+            # zig filtering macOS libc names (ziglang/zig#16674).
             # Serialize zig calls per target with flock to prevent races.
-            cat > "/tmp/zigcc/$name" <<'WRAPPER'
-#!/bin/bash
-args=()
-for arg in "$@"; do
-  [[ "$arg" == "-lresolv" ]] && args+=("-lresolv.9") || args+=("$arg")
-done
-WRAPPER
-            printf 'exec flock /tmp/zigcc/lock-%s zig cc -target %s "${args[@]}"\n' \
-              "$target" "$target" >> "/tmp/zigcc/$name"
+            {
+              echo '#!/bin/bash'
+              echo 'args=()'
+              echo 'for arg in "$@"; do'
+              echo '  [[ "$arg" == "-lresolv" ]] && args+=("-lresolv.9") || args+=("$arg")'
+              echo 'done'
+              printf 'exec flock /tmp/zigcc/lock-%s zig cc -target %s "${args[@]}"\n' \
+                "$target" "$target"
+            } > "/tmp/zigcc/$name"
             chmod +x "/tmp/zigcc/$name"
           done
 

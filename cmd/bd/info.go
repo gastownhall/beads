@@ -210,6 +210,15 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.55.1",
+		Date:    "2026-02-20",
+		Changes: []string{
+			"FIX: Release workflow YAML broken by heredoc in zig wrapper step",
+			"FIX: Version consistency (marketplace.json missed in v0.55.0 bump)",
+			"FIX: Go formatting and lint issues in 9 files",
+		},
+	},
+	{
 		Version: "0.55.0",
 		Date:    "2026-02-20",
 		Changes: []string{

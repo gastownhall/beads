@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
 )
 
 // staleLockThresholds defines the age thresholds for each lock type.

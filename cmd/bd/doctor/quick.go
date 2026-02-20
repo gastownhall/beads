@@ -72,4 +72,3 @@ func CheckHooksQuick(cliVersion string) string {
 	}
 	return fmt.Sprintf("Git hooks outdated: %s (%s → %s)", strings.Join(outdatedHooks, ", "), oldestVersion, cliVersion)
 }
-
