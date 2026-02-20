@@ -267,6 +267,99 @@ func TestReadySuite(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("ReadyWorkIncludesIssuesWhoseBlockersAreClosed", func(t *testing.T) {
+		issues := []*types.Issue{
+			{
+				ID:        "test-closed-blocker-1",
+				Title:     "Closed blocker 1",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			},
+			{
+				ID:        "test-closed-blocker-2",
+				Title:     "Closed blocker 2",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			},
+			{
+				ID:        "test-open-blocker",
+				Title:     "Open blocker",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			},
+			{
+				ID:        "test-ready-via-closed-blockers",
+				Title:     "Ready when all blockers are closed",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			},
+			{
+				ID:        "test-still-blocked",
+				Title:     "Still blocked by open blocker",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			},
+		}
+
+		for _, issue := range issues {
+			if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		deps := []*types.Dependency{
+			{IssueID: "test-ready-via-closed-blockers", DependsOnID: "test-closed-blocker-1", Type: types.DepBlocks, CreatedAt: time.Now()},
+			{IssueID: "test-ready-via-closed-blockers", DependsOnID: "test-closed-blocker-2", Type: types.DepBlocks, CreatedAt: time.Now()},
+			{IssueID: "test-still-blocked", DependsOnID: "test-closed-blocker-1", Type: types.DepBlocks, CreatedAt: time.Now()},
+			{IssueID: "test-still-blocked", DependsOnID: "test-open-blocker", Type: types.DepBlocks, CreatedAt: time.Now()},
+		}
+		for _, dep := range deps {
+			if err := s.AddDependency(ctx, dep, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := s.CloseIssue(ctx, "test-closed-blocker-1", "completed", "test", "session-ready-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CloseIssue(ctx, "test-closed-blocker-2", "completed", "test", "session-ready-2"); err != nil {
+			t.Fatal(err)
+		}
+
+		ready, err := s.GetReadyWork(ctx, types.WorkFilter{Status: "open"})
+		if err != nil {
+			t.Fatalf("GetReadyWork with Status=open failed: %v", err)
+		}
+
+		foundReadyViaClosed := false
+		foundStillBlocked := false
+		for _, issue := range ready {
+			if issue.ID == "test-ready-via-closed-blockers" {
+				foundReadyViaClosed = true
+			}
+			if issue.ID == "test-still-blocked" {
+				foundStillBlocked = true
+			}
+		}
+
+		if !foundReadyViaClosed {
+			t.Error("Issue with only closed blockers should be in ready work")
+		}
+		if foundStillBlocked {
+			t.Error("Issue with any open blocker should not be in ready work")
+		}
+	})
 }
 
 func TestReadyCommandInit(t *testing.T) {

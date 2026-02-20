@@ -16,8 +16,8 @@ import (
 
 var readyCmd = &cobra.Command{
 	Use:   "ready",
-	Short: "Show ready work (open, no blockers)",
-	Long: `Show ready work (open issues with no blockers).
+	Short: "Show ready work (open, no active blockers)",
+	Long: `Show ready work (open issues with no active blockers).
 
 Excludes in_progress, blocked, deferred, and hooked issues. This uses the
 GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
@@ -193,7 +193,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		// Determine display mode: --plain or --pretty=false triggers plain format
 		usePlain := plainFormat || !prettyFormat
 		if usePlain {
-			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
+			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
 				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
 					ui.RenderPriority(issue.Priority),
@@ -332,7 +332,7 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	// Summary footer
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 80))
-	fmt.Printf("Ready: %d issues with no blockers\n", len(issues))
+	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 }
