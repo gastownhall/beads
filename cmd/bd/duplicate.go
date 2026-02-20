@@ -86,14 +86,23 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("canonical issue not found: %s", canonicalID)
 	}
 
-	// Update the duplicate issue with duplicate_of and close it
+	// Add a "duplicates" dependency edge (duplicate → canonical)
+	dep := &types.Dependency{
+		IssueID:     duplicateID,
+		DependsOnID: canonicalID,
+		Type:        types.DepDuplicates,
+	}
+	if err := store.AddDependency(ctx, dep, actor); err != nil {
+		return fmt.Errorf("failed to add duplicate link: %w", err)
+	}
+
+	// Close the duplicate issue
 	closedStatus := string(types.StatusClosed)
 	updates := map[string]interface{}{
-		"duplicate_of": canonicalID,
-		"status":       closedStatus,
+		"status": closedStatus,
 	}
 	if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
-		return fmt.Errorf("failed to mark as duplicate: %w", err)
+		return fmt.Errorf("failed to close duplicate: %w", err)
 	}
 
 	if jsonOutput {
@@ -139,14 +148,23 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("replacement issue not found: %s", newID)
 	}
 
-	// Update the old issue with superseded_by and close it
+	// Add a "supersedes" dependency edge (old → new)
+	dep := &types.Dependency{
+		IssueID:     oldID,
+		DependsOnID: newID,
+		Type:        types.DepSupersedes,
+	}
+	if err := store.AddDependency(ctx, dep, actor); err != nil {
+		return fmt.Errorf("failed to add supersede link: %w", err)
+	}
+
+	// Close the superseded issue
 	closedStatus := string(types.StatusClosed)
 	updates := map[string]interface{}{
-		"superseded_by": newID,
-		"status":        closedStatus,
+		"status": closedStatus,
 	}
 	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
-		return fmt.Errorf("failed to mark as superseded: %w", err)
+		return fmt.Errorf("failed to close superseded issue: %w", err)
 	}
 
 	if jsonOutput {
