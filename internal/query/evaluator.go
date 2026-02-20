@@ -194,6 +194,8 @@ func (e *Evaluator) applyComparison(comp *ComparisonNode, filter *types.IssueFil
 		return e.applyBoolFilter(comp, filter, "template")
 	case "mol_type":
 		return e.applyMolTypeFilter(comp, filter)
+	case "has_metadata_key":
+		return e.applyHasMetadataKeyFilter(comp, filter)
 	default:
 		if strings.HasPrefix(comp.Field, "metadata.") {
 			return e.applyMetadataFilter(comp, filter)
@@ -487,6 +489,18 @@ func (e *Evaluator) applyMetadataFilter(comp *ComparisonNode, filter *types.Issu
 	return nil
 }
 
+// applyHasMetadataKeyFilter handles has_metadata_key=<keyname> queries (GH#1406).
+func (e *Evaluator) applyHasMetadataKeyFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op != OpEquals {
+		return fmt.Errorf("has_metadata_key only supports = operator")
+	}
+	if err := storage.ValidateMetadataKey(comp.Value); err != nil {
+		return err
+	}
+	filter.HasMetadataKey = comp.Value
+	return nil
+}
+
 // buildMetadataPredicate builds a predicate for metadata.<key>=<value> in OR queries.
 // Parses the issue's JSON metadata and compares the top-level scalar at the given key.
 func (e *Evaluator) buildMetadataPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
@@ -517,6 +531,28 @@ func (e *Evaluator) buildMetadataPredicate(comp *ComparisonNode) (func(*types.Is
 		}
 		// Fall back to comparing the raw JSON representation (numbers, bools)
 		return strings.Trim(string(raw), "\"") == value
+	}, nil
+}
+
+// buildHasMetadataKeyPredicate builds a predicate for has_metadata_key=<keyname> in OR queries.
+func (e *Evaluator) buildHasMetadataKeyPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	if comp.Op != OpEquals {
+		return nil, fmt.Errorf("has_metadata_key only supports = operator")
+	}
+	key := comp.Value
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return nil, err
+	}
+	return func(i *types.Issue) bool {
+		if len(i.Metadata) == 0 {
+			return false
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(i.Metadata, &data); err != nil {
+			return false
+		}
+		_, ok := data[key]
+		return ok
 	}, nil
 }
 
@@ -664,6 +700,8 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.Ephemeral })
 	case "template":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.IsTemplate })
+	case "has_metadata_key":
+		return e.buildHasMetadataKeyPredicate(comp)
 	default:
 		if strings.HasPrefix(comp.Field, "metadata.") {
 			return e.buildMetadataPredicate(comp)

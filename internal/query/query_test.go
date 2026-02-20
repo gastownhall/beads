@@ -684,6 +684,103 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 	}
 }
 
+func TestEvaluatorHasMetadataKeyQueries(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name              string
+		query             string
+		expectFilter      func(*types.IssueFilter) bool
+		requiresPredicate bool
+		expectError       bool
+	}{
+		{
+			name:  "has_metadata_key=team",
+			query: "has_metadata_key=team",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.HasMetadataKey == "team"
+			},
+		},
+		{
+			name:  "has_metadata_key combined with status",
+			query: "has_metadata_key=sprint AND status=open",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.HasMetadataKey == "sprint" &&
+					f.Status != nil && *f.Status == types.StatusOpen
+			},
+		},
+		{
+			name:              "has_metadata_key in OR triggers predicate",
+			query:             "has_metadata_key=team OR status=open",
+			requiresPredicate: true,
+		},
+		{
+			name:        "has_metadata_key with invalid key",
+			query:       `has_metadata_key="bad key"`,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tt.query)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EvaluateAt(%q) error = %v", tt.query, err)
+			}
+			if tt.expectFilter != nil && !tt.expectFilter(&result.Filter) {
+				t.Errorf("filter check failed for %q, filter=%+v", tt.query, result.Filter)
+			}
+			if result.RequiresPredicate != tt.requiresPredicate {
+				t.Errorf("RequiresPredicate = %v, want %v for %q", result.RequiresPredicate, tt.requiresPredicate, tt.query)
+			}
+		})
+	}
+}
+
+func TestHasMetadataKeyPredicateEvaluation(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	result, err := EvaluateAt("has_metadata_key=team OR status=closed", now)
+	if err != nil {
+		t.Fatalf("EvaluateAt error: %v", err)
+	}
+	if result.Predicate == nil {
+		t.Fatal("expected predicate for OR query")
+	}
+
+	// Issue with the key present
+	issueMatch := &types.Issue{
+		Status:   types.StatusOpen,
+		Metadata: []byte(`{"team":"platform"}`),
+	}
+	if !result.Predicate(issueMatch) {
+		t.Error("predicate should match issue with team key present")
+	}
+
+	// Issue without the key
+	issueNoKey := &types.Issue{
+		Status:   types.StatusOpen,
+		Metadata: []byte(`{"sprint":"Q1"}`),
+	}
+	if result.Predicate(issueNoKey) {
+		t.Error("predicate should not match issue without team key")
+	}
+
+	// Issue with no metadata but closed status (matches second branch)
+	issueClosed := &types.Issue{
+		Status: types.StatusClosed,
+	}
+	if !result.Predicate(issueClosed) {
+		t.Error("predicate should match closed issue via OR")
+	}
+}
+
 func TestMetadataPredicateEvaluation(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 

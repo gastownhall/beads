@@ -332,9 +332,10 @@ var KnownFields = map[string]bool{
 	"template":  true,
 
 	// Other
-	"spec":     true,
-	"spec_id":  true, // alias
-	"parent":   true,
-	"mol_type": true,
-	"notes":    true,
+	"spec":             true,
+	"spec_id":          true, // alias
+	"parent":           true,
+	"mol_type":         true,
+	"notes":            true,
+	"has_metadata_key": true, // GH#1406
 }
