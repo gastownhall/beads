@@ -58,7 +58,7 @@ Examples:
 		// Direct storage access
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
-				"run 'bd init' to create a database, or use 'bd --no-db' for JSONL-only mode")
+				"run 'bd init' to create a database")
 		}
 
 		for _, id := range args {

@@ -34,7 +34,7 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 		csvOutput, _ := cmd.Flags().GetBool("csv")
 
 		if store == nil {
-			FatalErrorRespectJSON("no database connection available (try without --no-db)")
+			FatalErrorRespectJSON("no database connection available (run 'bd init' first)")
 		}
 
 		db := store.UnderlyingDB()

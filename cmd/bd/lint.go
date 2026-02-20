@@ -53,7 +53,7 @@ Examples:
 
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
-				"run 'bd init' to create a database, or use 'bd --no-db' for JSONL-only mode")
+				"run 'bd init' to create a database")
 		}
 
 		if len(args) > 0 {
