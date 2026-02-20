@@ -444,13 +444,12 @@ func (s *Store) SearchIssues(ctx context.Context, query string, filter types.Iss
 		whereStr = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
+	limitSQL := ""
+	if filter.Limit > 0 {
+		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
-	sqlQuery := "SELECT " + issueSelectColumns + " FROM issues" + whereStr + " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
+	sqlQuery := "SELECT " + issueSelectColumns + " FROM issues" + whereStr + " ORDER BY created_at DESC" + limitSQL
 
 	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {

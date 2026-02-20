@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/ephemeral"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -23,8 +24,18 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 	return t.CreateIssue(ctx, issue, actor)
 }
 
-// RunInTransaction executes a function within a database transaction
+// RunInTransaction executes a function within a database transaction.
+// When an ephemeral store is attached, uses a routing transaction that
+// lazily determines the target store (Dolt or SQLite) based on whether
+// the first CreateIssue call has Ephemeral=true.
 func (s *DoltStore) RunInTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
+	if s.ephemeralStore != nil {
+		return s.runRoutingTransaction(ctx, fn)
+	}
+	return s.runDoltTransaction(ctx, fn)
+}
+
+func (s *DoltStore) runDoltTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
 	sqlTx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -45,6 +56,278 @@ func (s *DoltStore) RunInTransaction(ctx context.Context, fn func(tx storage.Tra
 	}
 
 	return sqlTx.Commit()
+}
+
+func (s *DoltStore) runRoutingTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
+	rt := &routingTransaction{store: s, ctx: ctx}
+
+	defer func() {
+		if r := recover(); r != nil {
+			rt.rollback()
+			panic(r)
+		}
+	}()
+
+	if err := fn(rt); err != nil {
+		rt.rollback()
+		return err
+	}
+
+	return rt.commit()
+}
+
+// routingTransaction implements storage.Transaction by lazily routing to either
+// the Dolt or ephemeral store based on the first CreateIssue call.
+// Since cloneSubgraph always sets the same Ephemeral flag for all issues in a
+// subgraph, all operations within one transaction go to the same store.
+type routingTransaction struct {
+	store    *DoltStore
+	ctx      context.Context
+	doltTx   *doltTransaction           // non-nil when routing to Dolt
+	ephTx    *ephemeral.Tx              // non-nil when routing to ephemeral
+	sqlTx    *sql.Tx                    // underlying Dolt tx (if started)
+	resolved bool                       // true once the target store is determined
+}
+
+// ensureDolt lazily starts a Dolt transaction.
+func (rt *routingTransaction) ensureDolt() error {
+	if rt.doltTx != nil {
+		return nil
+	}
+	sqlTx, err := rt.store.db.BeginTx(rt.ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin dolt transaction: %w", err)
+	}
+	rt.sqlTx = sqlTx
+	rt.doltTx = &doltTransaction{tx: sqlTx, store: rt.store}
+	rt.resolved = true
+	return nil
+}
+
+// ensureEphemeral lazily starts an ephemeral transaction.
+func (rt *routingTransaction) ensureEphemeral() error {
+	if rt.ephTx != nil {
+		return nil
+	}
+	tx, err := rt.store.ephemeralStore.BeginTx(rt.ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin ephemeral transaction: %w", err)
+	}
+	rt.ephTx = tx
+	rt.resolved = true
+	return nil
+}
+
+func (rt *routingTransaction) commit() error {
+	if rt.doltTx != nil {
+		return rt.sqlTx.Commit()
+	}
+	if rt.ephTx != nil {
+		return rt.ephTx.Commit()
+	}
+	return nil // no ops happened
+}
+
+func (rt *routingTransaction) rollback() {
+	if rt.sqlTx != nil {
+		_ = rt.sqlTx.Rollback()
+	}
+	if rt.ephTx != nil {
+		_ = rt.ephTx.Rollback()
+	}
+}
+
+func (rt *routingTransaction) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
+	if issue.Ephemeral {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
+		return rt.ephTx.Transaction().CreateIssue(ctx, issue, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.CreateIssue(ctx, issue, actor)
+}
+
+func (rt *routingTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
+	for _, issue := range issues {
+		if err := rt.CreateIssue(ctx, issue, actor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rt *routingTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	if IsEphemeralID(id) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().UpdateIssue(ctx, id, updates, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.UpdateIssue(ctx, id, updates, actor)
+}
+
+func (rt *routingTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
+	if IsEphemeralID(id) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().CloseIssue(ctx, id, reason, actor, session)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (rt *routingTransaction) DeleteIssue(ctx context.Context, id string) error {
+	if IsEphemeralID(id) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().DeleteIssue(ctx, id)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.DeleteIssue(ctx, id)
+}
+
+func (rt *routingTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	if IsEphemeralID(id) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().GetIssue(ctx, id)
+	}
+	if rt.doltTx != nil {
+		return rt.doltTx.GetIssue(ctx, id)
+	}
+	// Fall back to non-transactional read
+	return rt.store.GetIssue(ctx, id)
+}
+
+func (rt *routingTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	if filter.Ephemeral != nil && *filter.Ephemeral && rt.ephTx != nil {
+		return rt.ephTx.Transaction().SearchIssues(ctx, query, filter)
+	}
+	if rt.doltTx != nil {
+		return rt.doltTx.SearchIssues(ctx, query, filter)
+	}
+	return rt.store.SearchIssues(ctx, query, filter)
+}
+
+func (rt *routingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	if IsEphemeralID(dep.IssueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().AddDependency(ctx, dep, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.AddDependency(ctx, dep, actor)
+}
+
+func (rt *routingTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().RemoveDependency(ctx, issueID, dependsOnID, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.RemoveDependency(ctx, issueID, dependsOnID, actor)
+}
+
+func (rt *routingTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().GetDependencyRecords(ctx, issueID)
+	}
+	if rt.doltTx != nil {
+		return rt.doltTx.GetDependencyRecords(ctx, issueID)
+	}
+	return rt.store.GetDependencyRecords(ctx, issueID)
+}
+
+func (rt *routingTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().AddLabel(ctx, issueID, label, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.AddLabel(ctx, issueID, label, actor)
+}
+
+func (rt *routingTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().RemoveLabel(ctx, issueID, label, actor)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.RemoveLabel(ctx, issueID, label, actor)
+}
+
+func (rt *routingTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().GetLabels(ctx, issueID)
+	}
+	if rt.doltTx != nil {
+		return rt.doltTx.GetLabels(ctx, issueID)
+	}
+	return rt.store.GetLabels(ctx, issueID)
+}
+
+func (rt *routingTransaction) SetConfig(ctx context.Context, key, value string) error {
+	// Config always goes to Dolt (the persistent store)
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.SetConfig(ctx, key, value)
+}
+
+func (rt *routingTransaction) GetConfig(ctx context.Context, key string) (string, error) {
+	if rt.doltTx != nil {
+		return rt.doltTx.GetConfig(ctx, key)
+	}
+	return rt.store.GetConfig(ctx, key)
+}
+
+func (rt *routingTransaction) SetMetadata(ctx context.Context, key, value string) error {
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.SetMetadata(ctx, key, value)
+}
+
+func (rt *routingTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
+	if rt.doltTx != nil {
+		return rt.doltTx.GetMetadata(ctx, key)
+	}
+	// Fall back to non-tx read
+	return "", nil
+}
+
+func (rt *routingTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().AddComment(ctx, issueID, actor, comment)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return err
+	}
+	return rt.doltTx.AddComment(ctx, issueID, actor, comment)
+}
+
+func (rt *routingTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().ImportIssueComment(ctx, issueID, author, text, createdAt)
+	}
+	if err := rt.ensureDolt(); err != nil {
+		return nil, err
+	}
+	return rt.doltTx.ImportIssueComment(ctx, issueID, author, text, createdAt)
+}
+
+func (rt *routingTransaction) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
+	if IsEphemeralID(issueID) && rt.ephTx != nil {
+		return rt.ephTx.Transaction().GetIssueComments(ctx, issueID)
+	}
+	if rt.doltTx != nil {
+		return rt.doltTx.GetIssueComments(ctx, issueID)
+	}
+	return rt.store.GetIssueComments(ctx, issueID)
 }
 
 // CreateIssue creates an issue within the transaction

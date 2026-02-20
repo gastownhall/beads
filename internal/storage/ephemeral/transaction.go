@@ -40,6 +40,33 @@ func (s *Store) RunInTransaction(ctx context.Context, fn func(tx storage.Transac
 	return sqlTx.Commit()
 }
 
+// BeginTx starts a transaction and returns it for external management.
+// The caller is responsible for calling Commit() or Rollback() on the returned Tx.
+// Used by the DoltStore routing transaction to manage ephemeral transactions externally.
+func (s *Store) BeginTx(ctx context.Context) (*Tx, error) {
+	sqlTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin ephemeral tx: %w", err)
+	}
+	return &Tx{inner: &ephemeralTransaction{tx: sqlTx, store: s}, sqlTx: sqlTx}, nil
+}
+
+// Tx is an exported transaction handle for the ephemeral store.
+// It wraps ephemeralTransaction and exposes Commit/Rollback for external lifecycle management.
+type Tx struct {
+	inner *ephemeralTransaction
+	sqlTx *sql.Tx
+}
+
+// Transaction returns the storage.Transaction interface for use in routing transactions.
+func (t *Tx) Transaction() storage.Transaction { return t.inner }
+
+// Commit commits the transaction.
+func (t *Tx) Commit() error { return t.sqlTx.Commit() }
+
+// Rollback rolls back the transaction.
+func (t *Tx) Rollback() error { return t.sqlTx.Rollback() }
+
 func (t *ephemeralTransaction) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	now := time.Now().UTC()
 	if issue.CreatedAt.IsZero() {
