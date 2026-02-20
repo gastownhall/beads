@@ -232,9 +232,22 @@ func handleToSQLiteMigration(_ bool, _ bool) {
 		"Dolt is now the only storage backend")
 }
 
+// parseNullTime parses a time string into *time.Time. Returns nil for empty strings.
+func parseNullTime(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z07:00", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
+}
+
 // extractFromSQLite extracts all data from a SQLite database using raw SQL.
 func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
@@ -290,14 +303,15 @@ func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, erro
 		var qualScore sql.NullFloat64
 		var timeoutNs int64
 		var waitersJSON string
+		var closedAt, compactedAt, lastActivity, dueAt, deferUntil sql.NullString
 		if err := issueRows.Scan(
 			&issue.ID, &issue.ContentHash, &issue.Title, &issue.Description,
 			&issue.Design, &issue.AcceptanceCriteria, &issue.Notes,
 			&issue.Status, &issue.Priority, &issue.IssueType,
 			&issue.Assignee, &estMin,
 			&issue.CreatedAt, &issue.CreatedBy, &issue.Owner,
-			&issue.UpdatedAt, &issue.ClosedAt, &extRef,
-			&issue.CompactionLevel, &issue.CompactedAt, &compactCommit,
+			&issue.UpdatedAt, &closedAt, &extRef,
+			&issue.CompactionLevel, &compactedAt, &compactCommit,
 			&issue.OriginalSize,
 			&issue.Sender, &issue.Ephemeral, &issue.Pinned,
 			&issue.IsTemplate, &issue.Crystallizes,
@@ -306,8 +320,8 @@ func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, erro
 			&issue.EventKind, &issue.Actor, &issue.Target, &issue.Payload,
 			&issue.AwaitType, &issue.AwaitID, &timeoutNs, &waitersJSON,
 			&issue.HookBead, &issue.RoleBead, &issue.AgentState,
-			&issue.LastActivity, &issue.RoleType, &issue.Rig,
-			&issue.DueAt, &issue.DeferUntil,
+			&lastActivity, &issue.RoleType, &issue.Rig,
+			&dueAt, &deferUntil,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
 		}
@@ -325,6 +339,11 @@ func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, erro
 			v := float32(qualScore.Float64)
 			issue.QualityScore = &v
 		}
+		issue.ClosedAt = parseNullTime(closedAt.String)
+		issue.CompactedAt = parseNullTime(compactedAt.String)
+		issue.LastActivity = parseNullTime(lastActivity.String)
+		issue.DueAt = parseNullTime(dueAt.String)
+		issue.DeferUntil = parseNullTime(deferUntil.String)
 		issue.Timeout = time.Duration(timeoutNs)
 		if waitersJSON != "" {
 			_ = json.Unmarshal([]byte(waitersJSON), &issue.Waiters)
