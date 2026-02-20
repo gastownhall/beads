@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -237,6 +239,14 @@ func TestCompleteCommandWorksWithoutDatabase(t *testing.T) {
 	// Reset state to simulate no database
 	store = nil
 	dbPath = ""
+
+	// Reset caches so FindDatabasePath won't use stale git worktree info
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
 
 	// Change to temp directory (no database present)
 	originalWd, err := os.Getwd()

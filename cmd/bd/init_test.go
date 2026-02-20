@@ -1687,11 +1687,12 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	initCmd.Flags().Set("quiet", "false")
 	initCmd.Flags().Set("backend", "")
 
-	// Create temp dir WITHOUT git init — ComputeRepoID will fail
+	// Create temp dir WITHOUT git init — bd init will create one,
+	// but there will be no remote configured so upstream warning is expected.
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Capture stderr to check for repo_id warning
+	// Capture stderr to check for upstream warning
 	stderr := captureStderr(t, func() {
 		rootCmd.SetArgs([]string{"init", "--prefix", "nogit"})
 		if err := rootCmd.Execute(); err != nil {
@@ -1699,9 +1700,9 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 		}
 	})
 
-	// Should warn about repository ID (not in a git repo)
-	if !strings.Contains(stderr, "repository ID") {
-		t.Errorf("expected warning about repository ID in non-git dir, stderr: %s", stderr)
+	// Should warn about missing upstream (bd init creates git repo, but no remote)
+	if !strings.Contains(stderr, "upstream") && !strings.Contains(stderr, "repository ID") {
+		t.Errorf("expected warning about upstream or repository ID in non-git dir, stderr: %s", stderr)
 	}
 
 	// Verify .beads/dolt directory was created (init succeeded)

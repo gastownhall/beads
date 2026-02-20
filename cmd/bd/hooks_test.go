@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -197,6 +198,17 @@ func TestHooksCheckGitHooks(t *testing.T) {
 			t.Fatalf("installHooks() failed: %v", err)
 		}
 
+		// Build expected shim versions from embedded hook templates
+		expectedVersions := make(map[string]string)
+		for name, content := range hooks {
+			for _, line := range strings.Split(content, "\n") {
+				if strings.HasPrefix(line, shimVersionPrefix) {
+					expectedVersions[name] = strings.TrimSpace(strings.TrimPrefix(line, shimVersionPrefix))
+					break
+				}
+			}
+		}
+
 		statuses = CheckGitHooks()
 		for _, status := range statuses {
 			if !status.Installed {
@@ -205,8 +217,9 @@ func TestHooksCheckGitHooks(t *testing.T) {
 			if !status.IsShim {
 				t.Errorf("Hook %s should be a thin shim", status.Name)
 			}
-			if status.Version != "v1" {
-				t.Errorf("Hook %s shim version mismatch: got %s, want v1", status.Name, status.Version)
+			expectedVer := expectedVersions[status.Name]
+			if status.Version != expectedVer {
+				t.Errorf("Hook %s shim version mismatch: got %s, want %s", status.Name, status.Version, expectedVer)
 			}
 			if status.Outdated {
 				t.Errorf("Hook %s should not be outdated", status.Name)
