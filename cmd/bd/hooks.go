@@ -29,7 +29,10 @@ func getEmbeddedHooks() (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read embedded hook %s: %w", name, err)
 		}
-		hooks[name] = string(content)
+		// Normalize line endings to LF — embedded templates may contain CRLF
+		// when built on Windows or from an NTFS-mounted filesystem (e.g. WSL).
+		// Git hooks with CRLF fail: /usr/bin/env: 'sh\r': No such file or directory
+		hooks[name] = strings.ReplaceAll(string(content), "\r\n", "\n")
 	}
 
 	return hooks, nil

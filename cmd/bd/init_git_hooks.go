@@ -154,6 +154,12 @@ func installGitHooks() error {
 	postMergePath := filepath.Join(hooksDir, "post-merge")
 	postMergeContent := buildPostMergeHook(chainHooks, existingHooks)
 
+	// Normalize line endings to LF — on Windows/NTFS, Go string literals
+	// are fine but concatenated content from other sources may have CRLF.
+	// Git hooks with CRLF fail: /usr/bin/env: 'sh\r': No such file or directory
+	preCommitContent = strings.ReplaceAll(preCommitContent, "\r\n", "\n")
+	postMergeContent = strings.ReplaceAll(postMergeContent, "\r\n", "\n")
+
 	// Write pre-commit hook (executable scripts need 0700)
 	// #nosec G306 - git hooks must be executable
 	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0700); err != nil {
