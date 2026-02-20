@@ -138,7 +138,7 @@ func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string, dbName
 	metrics.Backend = "dolt-embedded"
 	metrics.ServerMode = false
 
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
+	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local&database=%s", doltDir, dbName)
 
 	// Measure connection time (includes bootstrap overhead)
 	start := time.Now()
@@ -153,11 +153,6 @@ func runDoltEmbeddedDiagnostics(metrics *DoltPerfMetrics, doltDir string, dbName
 	db.SetMaxIdleConns(1)
 
 	ctx := context.Background()
-
-	// Switch to the configured database
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName)); err != nil {
-		return fmt.Errorf("failed to switch to %s database: %w", dbName, err)
-	}
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
