@@ -73,6 +73,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Claude Code Orchestration
 
+- **[Foolery](https://github.com/acartine/foolery)** - Local web UI that sits on top of Beads, giving you a visual control surface for organizing, orchestrating, and reviewing AI agent work. Features dependency-aware wave planning, a built-in terminal for live agent monitoring, a verification queue for reviewing completed beats, and keyboard-first navigation. Install with `curl -fsSL https://raw.githubusercontent.com/acartine/foolery/main/scripts/install.sh | bash`. Built by [@acartine](https://github.com/acartine). (Next.js/TypeScript)
+
 - **[beads-compound](https://github.com/roberto-mello/beads-compound-plugin)** - Claude Code plugin marketplace with persistent memory and compound-engineering workflows. Hooks auto-capture knowledge from `bd comments add` at session end and inject relevant entries at session start based on open beads. Includes 28 specialized agents, 26 commands, and 15 skills for planning, review, research, and parallel work. Also supports OpenCode and Gemini CLI. Built by [@roberto-mello](https://github.com/roberto-mello). (Bash/TypeScript)
 
 - **[beads-orchestration](https://github.com/AvivK5498/Claude-Code-Beads-Orchestration)** - Multi-agent orchestration skill for Claude Code. Orchestrator investigates issues, manages beads tasks automatically, and delegates to tech-specific supervisors on isolated branches. Includes hooks for workflow enforcement, epic/subtask support, and optional external provider delegation (Codex/Gemini). Install via npm: `npm install -g @avivkaplan/beads-orchestration`. Built by [@AvivK5498](https://github.com/AvivK5498). (Node.js/Python)
