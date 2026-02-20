@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -556,6 +557,11 @@ func runPreCommitHook() int {
 		return 0 // Not a bd workspace, nothing to do
 	}
 
+	// In dolt-native mode, Dolt is the source of truth — skip JSONL export
+	if config.GetSyncMode() == config.SyncModeDoltNative {
+		return 0
+	}
+
 	// Flush pending changes to JSONL
 	// Use --flush-only to skip git operations (we're already in a git hook)
 	cmd := exec.Command("bd", "sync", "--flush-only")
@@ -631,6 +637,11 @@ func runPostMergeHook() int {
 		return 0
 	}
 
+	// In dolt-native mode, Dolt is the source of truth — skip JSONL import
+	if config.GetSyncMode() == config.SyncModeDoltNative {
+		return 0
+	}
+
 	// Check if any JSONL file exists
 	if !hasBeadsJSONL() {
 		return 0
@@ -664,6 +675,11 @@ func runPrePushHook(args []string) int {
 
 	// Check if we're in a bd workspace
 	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0
+	}
+
+	// In dolt-native mode, Dolt is the source of truth — skip JSONL checks
+	if config.GetSyncMode() == config.SyncModeDoltNative {
 		return 0
 	}
 
@@ -771,6 +787,11 @@ func runPostCheckoutHook(args []string) int {
 
 	// Check if we're in a bd workspace
 	if _, err := os.Stat(".beads"); os.IsNotExist(err) {
+		return 0
+	}
+
+	// In dolt-native mode, Dolt is the source of truth — skip JSONL import
+	if config.GetSyncMode() == config.SyncModeDoltNative {
 		return 0
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // syncCmd exports Dolt database to JSONL for backward compatibility.
@@ -38,6 +39,20 @@ For data interchange:
 		if beadsDir == "" {
 			return
 		}
+
+		// In dolt-native mode, skip JSONL export — Dolt is the source of truth.
+		// Only push to Dolt remote if configured.
+		if config.GetSyncMode() == config.SyncModeDoltNative {
+			if hasRemote, err := store.HasRemote(rootCtx, "origin"); err == nil && hasRemote {
+				if err := store.Push(rootCtx); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: Dolt push failed: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Pushed to Dolt git remote\n")
+				}
+			}
+			return
+		}
+
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 		if err := exportToJSONLWithStore(rootCtx, store, jsonlPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: export failed: %v\n", err)
