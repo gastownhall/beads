@@ -37,6 +37,24 @@ set -euo pipefail
 #   bd formula show beads-release
 #
 # =============================================================================
+#
+# ⚠️  CRITICAL: GITHUB API RATE LIMIT WARNING ⚠️
+#
+# The GitHub API allows 5000 requests/hour. Multiple past releases have burned
+# through the ENTIRE rate limit by polling CI status in loops, blocking ALL
+# crew members for up to an hour.
+#
+# DO NOT:
+#   - Use `gh run watch` (polls every 3s = 1200 req/hr per invocation)
+#   - Run background monitors that poll CI status
+#   - Loop on `gh run view` or `gh run list`
+#
+# INSTEAD:
+#   - Let the molecule gate system handle CI waiting
+#   - If checking manually: sleep 10-15min, then check ONCE
+#   - Budget: 3-5 total API calls for CI monitoring
+#
+# =============================================================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

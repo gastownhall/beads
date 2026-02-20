@@ -210,6 +210,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.55.2",
+		Date:    "2026-02-20",
+		Changes: []string{
+			"FIX: Release CI libresolv — strip -lresolv from zig wrappers (macOS uses netgo)",
+		},
+	},
+	{
 		Version: "0.55.1",
 		Date:    "2026-02-20",
 		Changes: []string{

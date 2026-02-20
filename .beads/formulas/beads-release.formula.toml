@@ -14,6 +14,20 @@ formula = "beads-release"
 description = """
 Beads release workflow v2 - gate-aware async release.
 
+⚠️  CRITICAL: DO NOT POLL GITHUB CI STATUS IN A LOOP ⚠️
+The GitHub API rate limit is 5000 requests/hour. Previous releases have burned
+through the entire rate limit by polling CI status every 30 seconds using
+`gh run watch`, background monitors, or loop-based status checks. This blocks
+ALL crew members from using the GitHub API for up to an hour.
+
+INSTEAD:
+- Use the gate system (await-ci step) which handles this correctly
+- If checking manually, use ONE `gh run view <id>` call, then WAIT
+- NEVER use `gh run watch` — it polls every 3 seconds (1200 req/hr per invocation)
+- NEVER run multiple background monitors polling CI
+- If you need to wait, use `sleep` for 5-10 minutes, then check ONCE
+- Budget: ~3-5 API calls total for CI monitoring, not hundreds
+
 This formula orchestrates a complete release cycle with async gates:
 
 Phase 1 (Polecat Work):
@@ -602,6 +616,10 @@ git push origin v{{version}}
 
 This triggers GitHub Actions to build artifacts and publish.
 
+⚠️  AFTER PUSHING: Do NOT poll CI status. Do NOT use `gh run watch`.
+The gate system handles CI monitoring. If working manually, push the tag,
+then sleep 10-15 minutes and check ONCE with `gh run view`.
+
 **Phase 1 Complete**: After this step, signal phase-complete:
 ```bash
 gt done --phase-complete
@@ -625,7 +643,7 @@ This gate blocks until the release.yml workflow run succeeds.
 The Refinery auto-discovers the workflow run triggered by v{{version}}
 and closes this gate when it completes.
 
-Expected time: 5-10 minutes
+Expected time: 10-20 minutes (GoReleaser builds ~15 targets with --parallelism 1)
 
 The gate monitors:
 - Build artifacts (all platforms)
@@ -634,6 +652,21 @@ The gate monitors:
 - PyPI publish
 
 If the workflow fails, this gate remains open and requires manual intervention.
+
+⚠️  RATE LIMIT WARNING — READ THIS ⚠️
+DO NOT poll GitHub API to check CI status. The rate limit is 5000/hour and
+`gh run watch` burns through it in minutes (polls every 3 seconds = 1200 req/hr).
+Multiple past releases have been blocked for an hour because of this.
+
+FORBIDDEN:
+- `gh run watch` (polls every 3s, burns 1200 req/hr)
+- Any loop or background process that calls `gh run view` repeatedly
+- Multiple concurrent API monitors
+
+ALLOWED:
+- Let the gate system handle it (preferred)
+- Sleep 10-15 minutes, then ONE `gh run view <id>` call
+- Check `gh api rate_limit` before making API calls if unsure
 """
 
 [steps.gate]

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.2] - 2026-02-20
+
+### Fixed
+
+- **Release CI: libresolv** — strip `-lresolv` entirely from zig wrappers instead of replacing with `-lresolv.9` (zig sysroot has neither); macOS builds use `netgo` tag so libresolv is not needed
+- **Release formula** — added rate limit warnings to prevent burning GitHub API quota during CI wait
+
 ## [0.55.1] - 2026-02-20
 
 ### Fixed
