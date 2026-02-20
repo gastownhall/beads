@@ -219,7 +219,7 @@ func findJSONLPath(beadsDir string) string {
 	}
 
 	for _, path := range candidates {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Size() > 0 {
 			return path
 		}
 	}
@@ -315,7 +315,7 @@ func performBootstrap(ctx context.Context, cfg BootstrapConfig, jsonlPath string
 	}
 
 	if len(issues) == 0 {
-		return nil, fmt.Errorf("no valid issues found in JSONL file %s", jsonlPath)
+		return &BootstrapResult{}, nil
 	}
 
 	// Detect prefix from issues

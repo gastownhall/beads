@@ -667,3 +667,76 @@ func TestBootstrapWithoutOptionalFiles(t *testing.T) {
 		t.Errorf("expected 0 interactions imported, got %d", result.InteractionsImported)
 	}
 }
+
+func TestBootstrapEmptyJSONL(t *testing.T) {
+	// An empty issues.jsonl (0 bytes) is the expected state for a
+	// freshly-initialized database. Bootstrap should treat it as
+	// "nothing to import" rather than a fatal error.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+
+	// Create empty issues.jsonl (0 bytes)
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create empty JSONL: %v", err)
+	}
+
+	ctx := context.Background()
+	bootstrapped, result, err := Bootstrap(ctx, BootstrapConfig{
+		BeadsDir:    beadsDir,
+		DoltPath:    doltDir,
+		LockTimeout: 10 * time.Second,
+	})
+
+	if err != nil {
+		t.Fatalf("bootstrap should not error on empty JSONL, got: %v", err)
+	}
+	if bootstrapped {
+		t.Error("expected no bootstrap when JSONL is empty")
+	}
+	if result != nil {
+		t.Error("expected nil result when JSONL is empty")
+	}
+}
+
+func TestBootstrapJSONLWithOnlyInvalidLines(t *testing.T) {
+	// A JSONL file containing only blank lines or invalid JSON should
+	// result in a graceful bootstrap with 0 issues, not a fatal error.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+
+	// Create JSONL with only whitespace and invalid lines (no valid issues)
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	content := "\n  \n\n"
+	if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to create JSONL: %v", err)
+	}
+
+	ctx := context.Background()
+	bootstrapped, result, err := Bootstrap(ctx, BootstrapConfig{
+		BeadsDir:    beadsDir,
+		DoltPath:    doltDir,
+		LockTimeout: 10 * time.Second,
+	})
+
+	if err != nil {
+		t.Fatalf("bootstrap should not error on JSONL with only blank lines, got: %v", err)
+	}
+	if !bootstrapped {
+		t.Error("expected bootstrap to be attempted")
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.IssuesImported != 0 {
+		t.Errorf("expected 0 issues imported, got %d", result.IssuesImported)
+	}
+}
