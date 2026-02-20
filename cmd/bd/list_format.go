@@ -173,8 +173,8 @@ func buildBlockingMaps(allDeps map[string][]*types.Dependency, closedIDs map[str
 }
 
 // getClosedBlockerIDs collects all unique blocker IDs from dependency records
-// and returns the subset that are closed. This is used to filter stale "blocked by"
-// annotations in bd list output.
+// and returns the subset that are closed or unreachable. This is used to filter
+// stale "blocked by" annotations in bd list output.
 func getClosedBlockerIDs(ctx context.Context, s *dolt.DoltStore, allDeps map[string][]*types.Dependency) map[string]bool {
 	// Collect unique blocker IDs
 	blockerIDs := make(map[string]bool)
@@ -190,6 +190,10 @@ func getClosedBlockerIDs(ctx context.Context, s *dolt.DoltStore, allDeps map[str
 	for id := range blockerIDs {
 		issue, err := s.GetIssue(ctx, id)
 		if err != nil || issue == nil {
+			// Treat missing or unreachable blockers as resolved — a blocker
+			// that cannot be fetched cannot block work, matching the behavior
+			// of computeBlockedIDs which only considers active issues.
+			closedIDs[id] = true
 			continue
 		}
 		if issue.Status == types.StatusClosed {
