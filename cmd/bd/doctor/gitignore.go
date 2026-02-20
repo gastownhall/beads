@@ -15,6 +15,7 @@ dolt-access.lock
 
 # Runtime files
 bd.sock
+bd.sock.startlock
 sync-state.json
 last-touched
 
@@ -69,6 +70,7 @@ var requiredPatterns = []string{
 	"*.db?*",
 	"redirect",
 	"last-touched",
+	"bd.sock.startlock",
 	".sync.lock",
 	".jsonl.lock",
 	"sync_base.jsonl",
