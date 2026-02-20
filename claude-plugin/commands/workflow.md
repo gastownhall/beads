@@ -12,8 +12,8 @@ Beads is an issue tracker designed for AI-supervised coding workflows. Here's ho
 Use `/beads:ready` or the `ready` MCP tool to see tasks with no blockers.
 
 ## 2. Claim Your Task
-Update the issue status to `in_progress`:
-- Via command: `/beads:update <id> in_progress`
+Claim the issue atomically (assignee + `in_progress` in one step):
+- Via command: `/beads:update <id> --claim`
 - Via MCP tool: `update` with `status: "in_progress"`
 
 ## 3. Work on It

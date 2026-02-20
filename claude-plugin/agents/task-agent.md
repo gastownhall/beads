@@ -39,7 +39,7 @@ You are a task-completion agent for beads. Your goal is to find ready work and c
 
 # Important Guidelines
 
-- Always update issue status (`in_progress` when starting, close when done)
+- Always claim before working (MCP: set status to `in_progress`; CLI: `--claim` for atomic assignee + status) and close when done
 - Link discovered work with `discovered-from` dependencies
 - Don't close issues unless work is actually complete
 - If blocked, use `update` to set status to `blocked` and explain why

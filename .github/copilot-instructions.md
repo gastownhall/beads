@@ -52,7 +52,7 @@ bd stale --days 30 --json          # Forgotten issues
 
 # Create and manage (ALWAYS include --description)
 bd create "Title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
-bd update <id> --status in_progress --json
+bd update <id> --claim --json
 bd close <id> --reason "Done" --json
 
 # Search
@@ -66,7 +66,7 @@ bd sync  # Force immediate export/commit/push
 ### Workflow
 
 1. **Check ready work**: `bd ready --json`
-2. **Claim task**: `bd update <id> --status in_progress`
+2. **Claim task**: `bd update <id> --claim`
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** `bd create "Found bug" --description="What was found and why" -p 1 --deps discovered-from:<parent-id> --json`
 5. **Complete**: `bd close <id> --reason "Done" --json`
