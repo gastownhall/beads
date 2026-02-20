@@ -210,6 +210,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.55.3",
+		Date:    "2026-02-20",
+		Changes: []string{
+			"FIX: Release CI macOS — CGO_ENABLED=0 for darwin (zig sysroot lacks frameworks)",
+		},
+	},
+	{
 		Version: "0.55.2",
 		Date:    "2026-02-20",
 		Changes: []string{

@@ -71,8 +71,7 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=1
-      - CC=/tmp/zigcc/cc-x86_64-macos
+      - CGO_ENABLED=0
     tags:
       - gms_pure_go
       - netgo
@@ -91,8 +90,7 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=1
-      - CC=/tmp/zigcc/cc-aarch64-macos
+      - CGO_ENABLED=0
     tags:
       - gms_pure_go
       - netgo

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.3] - 2026-02-20
+
+### Fixed
+
+- **Release CI: macOS builds** — disable CGO for darwin targets; zig sysroot lacks macOS frameworks (CoreFoundation, Security) and libresolv; pure-Go build via `gms_pure_go` + `netgo` tags
+
 ## [0.55.2] - 2026-02-20
 
 ### Fixed
