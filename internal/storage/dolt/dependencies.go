@@ -9,18 +9,24 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddDependency adds a dependency between two issues
+// AddDependency adds a dependency between two issues.
+// Uses an explicit transaction so writes persist when @@autocommit is OFF
+// (e.g. Dolt server started with --no-auto-commit).
 func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	metadata := dep.Metadata
 	if metadata == "" {
 		metadata = "{}"
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Validate that the source issue exists
 	var issueExists int
-	if err := s.queryRowContext(ctx, func(row *sql.Row) error {
-		return row.Scan(&issueExists)
-	}, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.IssueID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.IssueID).Scan(&issueExists); err != nil {
 		return fmt.Errorf("failed to check issue existence: %w", err)
 	}
 	if issueExists == 0 {
@@ -30,9 +36,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 	// Validate that the target issue exists (skip for external cross-rig references)
 	if !strings.HasPrefix(dep.DependsOnID, "external:") {
 		var targetExists int
-		if err := s.queryRowContext(ctx, func(row *sql.Row) error {
-			return row.Scan(&targetExists)
-		}, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.DependsOnID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.DependsOnID).Scan(&targetExists); err != nil {
 			return fmt.Errorf("failed to check target issue existence: %w", err)
 		}
 		if targetExists == 0 {
@@ -44,9 +48,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 	// would create a cycle by seeing if depends_on_id can already reach issue_id.
 	if dep.Type == types.DepBlocks {
 		var reachable int
-		err := s.queryRowContext(ctx, func(row *sql.Row) error {
-			return row.Scan(&reachable)
-		}, `
+		if err := tx.QueryRowContext(ctx, `
 			WITH RECURSIVE reachable AS (
 				SELECT ? AS node, 0 AS depth
 				UNION ALL
@@ -57,8 +59,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 				  AND r.depth < 100
 			)
 			SELECT COUNT(*) FROM reachable WHERE node = ?
-		`, dep.DependsOnID, dep.IssueID)
-		if err != nil {
+		`, dep.DependsOnID, dep.IssueID).Scan(&reachable); err != nil {
 			return fmt.Errorf("failed to check for dependency cycle: %w", err)
 		}
 		if reachable > 0 {
@@ -66,26 +67,33 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}
 	}
 
-	_, err := s.execContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?, ?)
 		ON DUPLICATE KEY UPDATE type = VALUES(type), metadata = VALUES(metadata)
-	`, dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID)
-	if err != nil {
+	`, dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
-// RemoveDependency removes a dependency between two issues
+// RemoveDependency removes a dependency between two issues.
+// Uses an explicit transaction so writes persist when @@autocommit is OFF.
 func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	_, err := s.execContext(ctx, `
-		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
-	`, issueID, dependsOnID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
+	`, issueID, dependsOnID); err != nil {
 		return fmt.Errorf("failed to remove dependency: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // GetDependencies retrieves issues that this issue depends on
