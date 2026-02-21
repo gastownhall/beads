@@ -236,6 +236,7 @@ NOTE: Import requires direct database access.`,
 			ClearDuplicateExternalRefs: clearDuplicateExternalRefs,
 			OrphanHandling:             orphanHandling,
 			DeletionIDs:                deletionIDs,
+			SkipPrefixValidation:       cmd.Flags().Changed("skip-prefix-validation") || cmd.Flags().Changed("rename-on-import"),
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -614,6 +615,7 @@ func init() {
 	importCmd.Flags().Bool("dedupe-after", false, "Detect and report content duplicates after import")
 	importCmd.Flags().Bool("dry-run", false, "Preview collision detection without making changes")
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
+	importCmd.Flags().Bool("skip-prefix-validation", false, "Skip issue ID prefix validation (implied by --rename-on-import)")
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
