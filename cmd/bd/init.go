@@ -323,11 +323,15 @@ be set via BEADS_DOLT_PASSWORD environment variable.`,
 		// These settings define fundamental behavior (issue IDs, sync workflow).
 		// Failure here indicates a serious problem that prevents normal operation.
 
-		// Set the issue prefix in config
-		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
-			_ = store.Close()
-			os.Exit(1)
+		// Set the issue prefix in config (only if not already configured —
+		// avoid clobbering when multiple rigs share the same Dolt database)
+		existing, _ := store.GetConfig(ctx, "issue_prefix")
+		if existing == "" {
+			if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
+				_ = store.Close()
+				os.Exit(1)
+			}
 		}
 
 		// === TRACKING METADATA (Pattern B: Warn and Continue) ===

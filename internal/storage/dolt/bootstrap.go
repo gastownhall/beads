@@ -328,10 +328,14 @@ func performBootstrap(ctx context.Context, cfg BootstrapConfig, jsonlPath string
 	}
 	defer func() { _ = store.Close() }() // Best effort cleanup
 
-	// Set issue prefix
+	// Set issue prefix (only if not already configured — avoid clobbering
+	// when multiple rigs share the same Dolt database)
 	if result.PrefixDetected != "" {
-		if err := store.SetConfig(ctx, "issue_prefix", result.PrefixDetected); err != nil {
-			return nil, fmt.Errorf("failed to set issue_prefix: %w", err)
+		existing, _ := store.GetConfig(ctx, "issue_prefix")
+		if existing == "" {
+			if err := store.SetConfig(ctx, "issue_prefix", result.PrefixDetected); err != nil {
+				return nil, fmt.Errorf("failed to set issue_prefix: %w", err)
+			}
 		}
 	}
 
