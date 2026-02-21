@@ -271,24 +271,30 @@ func (s *DoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, erro
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	issue, err := scanIssue(ctx, s.db, id)
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
-	if issue == nil {
-		return nil, nil
+	if issue != nil {
+		// Fetch labels
+		labels, err := s.GetLabels(ctx, issue.ID)
+		s.mu.RUnlock()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get labels: %w", err)
+		}
+		issue.Labels = labels
+		return issue, nil
+	}
+	s.mu.RUnlock()
+
+	// Fallback: check ephemeral store for issues created with --ephemeral flag
+	// whose IDs don't match the wisp pattern (e.g., mail messages)
+	if s.ephemeralStore != nil {
+		return s.ephemeralStore.GetIssue(ctx, id)
 	}
 
-	// Fetch labels
-	labels, err := s.GetLabels(ctx, issue.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get labels: %w", err)
-	}
-	issue.Labels = labels
-
-	return issue, nil
+	return nil, nil
 }
 
 // GetIssueByExternalRef retrieves an issue by external reference

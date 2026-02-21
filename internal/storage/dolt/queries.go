@@ -286,7 +286,31 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	}
 	defer rows.Close()
 
-	return s.scanIssueIDs(ctx, rows)
+	doltResults, err := s.scanIssueIDs(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// When filter.Ephemeral is nil (search everything) and ephemeral store exists,
+	// also search the ephemeral store and merge results. This ensures ephemeral
+	// beads (like mail messages created with --ephemeral) appear in queries.
+	if filter.Ephemeral == nil && s.ephemeralStore != nil {
+		ephResults, ephErr := s.ephemeralStore.SearchIssues(ctx, query, filter)
+		if ephErr == nil && len(ephResults) > 0 {
+			// Deduplicate by ID (prefer Dolt version if exists in both)
+			seen := make(map[string]bool, len(doltResults))
+			for _, issue := range doltResults {
+				seen[issue.ID] = true
+			}
+			for _, issue := range ephResults {
+				if !seen[issue.ID] {
+					doltResults = append(doltResults, issue)
+				}
+			}
+		}
+	}
+
+	return doltResults, nil
 }
 
 // GetReadyWork returns issues that are ready to work on (not blocked)

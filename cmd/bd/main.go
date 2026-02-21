@@ -574,7 +574,8 @@ var rootCmd = &cobra.Command{
 
 		// Initialize ephemeral store (SQLite) for wisp/molecule storage
 		ephPath := filepath.Join(beadsDir, "ephemeral.sqlite3")
-		if es, esErr := ephemeral.New(ephPath, ""); esErr != nil {
+		ephPrefix, _ := store.GetConfig(rootCtx, "issue_prefix")
+		if es, esErr := ephemeral.New(ephPath, ephPrefix); esErr != nil {
 			debug.Logf("warning: failed to open ephemeral store: %v", esErr)
 		} else {
 			store.SetEphemeralStore(es)

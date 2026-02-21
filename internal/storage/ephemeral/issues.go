@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -29,7 +30,45 @@ func (s *Store) CreateIssue(ctx context.Context, issue *types.Issue, actor strin
 	// Ensure ephemeral flag is set
 	issue.Ephemeral = true
 
+	// Generate ID if not provided
+	if issue.ID == "" {
+		prefix := s.prefix
+		if issue.PrefixOverride != "" {
+			prefix = issue.PrefixOverride
+		} else if issue.IDPrefix != "" {
+			prefix = prefix + "-" + issue.IDPrefix
+		}
+		id, err := s.generateID(ctx, prefix, issue, actor)
+		if err != nil {
+			return fmt.Errorf("failed to generate ephemeral issue ID: %w", err)
+		}
+		issue.ID = id
+	}
+
 	return s.insertIssue(ctx, s.db, issue, actor)
+}
+
+// generateID generates a unique hash-based ID for an ephemeral issue (non-transaction path).
+func (s *Store) generateID(ctx context.Context, prefix string, issue *types.Issue, actor string) (string, error) {
+	baseLength := 4
+	maxLength := 8
+
+	for length := baseLength; length <= maxLength; length++ {
+		for nonce := 0; nonce < 10; nonce++ {
+			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
+
+			var count int
+			err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, candidate).Scan(&count)
+			if err != nil {
+				return "", fmt.Errorf("failed to check for ID collision: %w", err)
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("failed to generate unique ephemeral ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
 }
 
 // CreateIssues inserts multiple issues into the ephemeral store.
@@ -49,6 +88,21 @@ func (s *Store) CreateIssues(ctx context.Context, issues []*types.Issue, actor s
 			issue.UpdatedAt = now
 		}
 		issue.Ephemeral = true
+
+		// Generate ID if not provided
+		if issue.ID == "" {
+			prefix := s.prefix
+			if issue.PrefixOverride != "" {
+				prefix = issue.PrefixOverride
+			} else if issue.IDPrefix != "" {
+				prefix = prefix + "-" + issue.IDPrefix
+			}
+			id, err := generateEphemeralID(ctx, tx, prefix, issue, actor)
+			if err != nil {
+				return fmt.Errorf("failed to generate ephemeral issue ID: %w", err)
+			}
+			issue.ID = id
+		}
 
 		if err := s.insertIssue(ctx, tx, issue, actor); err != nil {
 			return err

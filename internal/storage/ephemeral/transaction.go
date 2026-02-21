@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -76,7 +77,47 @@ func (t *ephemeralTransaction) CreateIssue(ctx context.Context, issue *types.Iss
 		issue.UpdatedAt = now
 	}
 	issue.Ephemeral = true
+
+	// Generate ID if not provided (mirrors doltTransaction.CreateIssue behavior)
+	if issue.ID == "" {
+		prefix := t.store.prefix
+		if issue.PrefixOverride != "" {
+			prefix = issue.PrefixOverride
+		} else if issue.IDPrefix != "" {
+			prefix = prefix + "-" + issue.IDPrefix
+		}
+		id, err := generateEphemeralID(ctx, t.tx, prefix, issue, actor)
+		if err != nil {
+			return fmt.Errorf("failed to generate ephemeral issue ID: %w", err)
+		}
+		issue.ID = id
+	}
+
 	return t.store.insertIssue(ctx, t.tx, issue, actor)
+}
+
+// generateEphemeralID generates a unique hash-based ID for an ephemeral issue.
+// Mirrors the logic in dolt.generateIssueID but queries the ephemeral sqlite store.
+func generateEphemeralID(ctx context.Context, tx *sql.Tx, prefix string, issue *types.Issue, actor string) (string, error) {
+	baseLength := 4
+	maxLength := 8
+
+	for length := baseLength; length <= maxLength; length++ {
+		for nonce := 0; nonce < 10; nonce++ {
+			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
+
+			var count int
+			err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, candidate).Scan(&count)
+			if err != nil {
+				return "", fmt.Errorf("failed to check for ID collision: %w", err)
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("failed to generate unique ephemeral ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
 }
 
 func (t *ephemeralTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
