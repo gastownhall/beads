@@ -15,7 +15,9 @@ import (
 // exists. GetBackend() always returns "dolt" after the dolt-native cleanup.
 // (bd-yqpwy)
 
-func TestRunDoltHealthChecks_DoltBackendNoDatabase(t *testing.T) {
+func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
+	// Server-only mode: without a running dolt sql-server, the connection
+	// check should return StatusError.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -28,20 +30,19 @@ func TestRunDoltHealthChecks_DoltBackendNoDatabase(t *testing.T) {
 		t.Fatalf("failed to write config: %v", err)
 	}
 
-	// Create the dolt directory
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		t.Fatalf("failed to create dolt dir: %v", err)
-	}
+	// Point at a port nothing listens on to ensure connection fails
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "59998")
 
 	checks := RunDoltHealthChecks(tmpDir)
 	if len(checks) < 1 {
 		t.Fatalf("expected at least 1 check, got %d", len(checks))
 	}
 
-	// Verify the first check is the connection check.
 	if checks[0].Name != "Dolt Connection" {
 		t.Errorf("expected first check to be 'Dolt Connection', got %q", checks[0].Name)
+	}
+	if checks[0].Status != StatusError {
+		t.Errorf("expected StatusError (no server running), got %s: %s", checks[0].Status, checks[0].Message)
 	}
 }
 
@@ -63,11 +64,13 @@ func TestRunDoltHealthChecks_CheckNameAndCategory(t *testing.T) {
 	}
 }
 
+// TestLockContention was removed: server-only mode does not acquire advisory
+// locks — the server handles its own locking. Lock contention is no longer
+// a doctor concern for connection establishment.
+
 func TestServerMode_NoLockAcquired(t *testing.T) {
-	// Verifies that server mode connection errors are reported correctly.
-	// BEADS_DOLT_SERVER_MODE=1 triggers server mode, which attempts MySQL
-	// connection instead of embedded Dolt. We force a non-listening port
-	// so the connection always fails.
+	// Server-only mode never acquires advisory locks.
+	// We force a non-listening port so the connection always fails.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
@@ -80,8 +83,6 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 		t.Fatalf("failed to write config: %v", err)
 	}
 
-	// Enable server mode via env var, pointing at a port nothing listens on
-	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
 
 	checks := RunDoltHealthChecks(tmpDir)
@@ -91,15 +92,21 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 
 	check := checks[0]
 
-	// Server mode should fail with a connection error
+	// Should fail with a connection error, NOT a lock error
 	if check.Status != StatusError {
 		t.Errorf("expected StatusError (server unreachable), got %s", check.Status)
 	}
 
 	// The error should NOT be about lock acquisition
 	if strings.Contains(check.Detail, "access lock") {
-		t.Errorf("server mode should not attempt lock acquisition, but Detail contains %q: %s",
+		t.Errorf("should not attempt lock acquisition, but Detail contains %q: %s",
 			"access lock", check.Detail)
+	}
+
+	// Verify no lock file was created
+	lockPath := filepath.Join(beadsDir, "dolt-access.lock")
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("lock file should not exist, but found at %s", lockPath)
 	}
 }
 

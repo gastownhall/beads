@@ -1,5 +1,3 @@
-//go:build cgo
-
 package doctor
 
 import (
@@ -11,49 +9,40 @@ import (
 	"strings"
 	"time"
 
-	// Import Dolt driver for direct connection
-	_ "github.com/dolthub/driver"
+	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
-// closeDoltDBWithTimeout closes a sql.DB with a timeout to prevent indefinite hangs.
-// This is needed because embedded Dolt can hang on close.
-func closeDoltDBWithTimeout(db *sql.DB) {
-	// Use the shared helper; ignore errors since we're just cleaning up
-	_ = doltutil.CloseWithTimeout("db", db.Close)
-}
-
-// openDoltDB opens a connection to the Dolt database, respecting the configured mode.
-// In server mode, connects via MySQL driver to the Dolt SQL server.
-// In embedded mode, uses the in-process Dolt driver.
-// Returns the db, whether server mode was used, and any error.
-// The caller should use closeDoltDB to properly close the connection.
-func openDoltDB(beadsDir string) (*sql.DB, bool, error) {
+// openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.
+// All Dolt operations require a running dolt sql-server.
+func openDoltDB(beadsDir string) (*sql.DB, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to load config: %w", err)
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if cfg != nil && cfg.IsDoltServerMode() {
-		db, err := openDoltDBViaServer(cfg)
-		return db, true, err
-	}
-
-	db, err := openDoltDBEmbedded(beadsDir)
-	return db, false, err
+	return openDoltDBViaServer(cfg)
 }
 
 // openDoltDBViaServer connects to the Dolt SQL server using the MySQL protocol.
 // The database is selected in the DSN, so no USE statement is needed.
+// If cfg is nil, default connection parameters are used.
 func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
-	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
+	host := configfile.DefaultDoltServerHost
+	port := configfile.DefaultDoltServerPort
+	user := configfile.DefaultDoltServerUser
+	database := configfile.DefaultDoltDatabase
+
+	if cfg != nil {
+		host = cfg.GetDoltServerHost()
+		port = cfg.GetDoltServerPort()
+		user = cfg.GetDoltServerUser()
+		database = cfg.GetDoltDatabase()
+	}
+
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	var connStr string
@@ -86,65 +75,33 @@ func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
 	return db, nil
 }
 
-// openDoltDBEmbedded opens a Dolt database using the in-process embedded driver.
-// Reads the configured database name from metadata.json (dolt_database field)
-// and includes it in the connection string so the driver opens directly to
-// the correct database (avoids phantom changes from the default database).
-func openDoltDBEmbedded(beadsDir string) (*sql.DB, error) {
-	doltDir := filepath.Join(beadsDir, "dolt")
-
-	// Determine the database name from configuration
-	dbName := configfile.DefaultDoltDatabase
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		dbName = cfg.GetDoltDatabase()
-	}
-
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local&database=%s", doltDir, dbName)
-
-	db, err := sql.Open("dolt", connStr)
-	if err != nil {
-		return nil, err
-	}
-
-	return db, nil
-}
-
-// closeDoltDB closes a database connection, using a timeout for embedded mode
-// (which can hang on close) and a regular close for server mode.
-func closeDoltDB(db *sql.DB, serverMode bool) {
-	if serverMode {
-		_ = db.Close() // Best effort cleanup
-	} else {
-		closeDoltDBWithTimeout(db)
-	}
-}
-
-// doltConn holds an open Dolt connection.
+// doltConn holds an open Dolt server connection.
 // Used by doctor checks to coordinate database access.
 type doltConn struct {
-	db         *sql.DB
-	serverMode bool
-	cfg        *configfile.Config // config for server mode detail (host:port)
+	db  *sql.DB
+	cfg *configfile.Config // config for server detail (host:port)
 }
 
 // Close releases the database connection.
 func (c *doltConn) Close() {
-	closeDoltDB(c.db, c.serverMode)
+	_ = c.db.Close()
 }
 
-// openDoltDBWithLock opens a Dolt connection for doctor checks.
+// openDoltDBWithLock opens a Dolt connection via the SQL server.
+// The "WithLock" name is retained for API compatibility; server mode
+// relies on the server's own locking and does not acquire advisory locks.
 func openDoltDBWithLock(beadsDir string) (*doltConn, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	db, serverMode, err := openDoltDB(beadsDir)
+	db, err := openDoltDBViaServer(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return &doltConn{db: db, serverMode: serverMode, cfg: cfg}, nil
+	return &doltConn{db: db, cfg: cfg}, nil
 }
 
 // GetBackend returns the configured backend type from configuration.
@@ -161,8 +118,8 @@ func IsDoltBackend(beadsDir string) bool {
 }
 
 // RunDoltHealthChecks runs all Dolt-specific health checks using a single
-// shared connection. Returns one check per health dimension. Non-Dolt
-// backends get N/A results for all dimensions.
+// shared server connection. Returns one check per health dimension.
+// Non-Dolt backends get N/A results for all dimensions.
 func RunDoltHealthChecks(path string) []DoctorCheck {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
@@ -184,9 +141,9 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 		errCheck := DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusError,
-			Message:  "Failed to open Dolt database",
+			Message:  "Failed to connect to Dolt server",
 			Detail:   err.Error(),
-			Fix:      "Run 'bd doctor --fix' to clean stale lock files, or check .beads/dolt/",
+			Fix:      "Ensure dolt sql-server is running, or check server host/port configuration",
 			Category: CategoryCore,
 		}
 		return []DoctorCheck{errCheck, lockCheck}
@@ -210,18 +167,16 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusError,
-			Message:  "Failed to ping Dolt database",
+			Message:  "Failed to ping Dolt server",
 			Detail:   err.Error(),
 			Category: CategoryCore,
 		}
 	}
 
-	storageDetail := "Storage: Dolt"
-	if conn.serverMode && conn.cfg != nil {
+	storageDetail := "Storage: Dolt (server mode)"
+	if conn.cfg != nil {
 		storageDetail = fmt.Sprintf("Storage: Dolt (server %s:%d)",
 			conn.cfg.GetDoltServerHost(), conn.cfg.GetDoltServerPort())
-	} else if conn.serverMode {
-		storageDetail = "Storage: Dolt (server mode)"
 	}
 
 	return DoctorCheck{
@@ -233,7 +188,7 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 	}
 }
 
-// CheckDoltConnection verifies connectivity to the Dolt database.
+// CheckDoltConnection verifies connectivity to the Dolt SQL server.
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltConnection(path string) DoctorCheck {
@@ -249,37 +204,14 @@ func CheckDoltConnection(path string) DoctorCheck {
 		}
 	}
 
-	// Load config to check mode
-	cfg, _ := configfile.Load(beadsDir) // Best effort: nil config uses default Dolt settings
-	isServerMode := cfg != nil && cfg.IsDoltServerMode()
-
-	// In embedded mode, check if Dolt database directory exists on disk
-	if !isServerMode {
-		dbName := configfile.DefaultDoltDatabase
-		if cfg != nil {
-			dbName = cfg.GetDoltDatabase()
-		}
-		doltPath := filepath.Join(beadsDir, "dolt", dbName, ".dolt")
-		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-			return DoctorCheck{
-				Name:     "Dolt Connection",
-				Status:   StatusError,
-				Message:  "Dolt database not found",
-				Detail:   fmt.Sprintf("Expected: %s", doltPath),
-				Fix:      "Run 'bd init' to create Dolt database",
-				Category: CategoryCore,
-			}
-		}
-	}
-
-	// Open with lock coordination
 	conn, err := openDoltDBWithLock(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusError,
-			Message:  "Failed to open Dolt database",
+			Message:  "Failed to connect to Dolt server",
 			Detail:   err.Error(),
+			Fix:      "Ensure dolt sql-server is running",
 			Category: CategoryCore,
 		}
 	}
