@@ -13,14 +13,14 @@ import (
 
 // SearchIssues finds issues matching query and filters
 func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	// Route ephemeral-only queries to SQLite store
-	if filter.Ephemeral != nil && *filter.Ephemeral && s.ephemeralStore != nil {
-		return s.ephemeralStore.SearchIssues(ctx, query, filter)
+	// Route ephemeral-only queries to wisps table
+	if filter.Ephemeral != nil && *filter.Ephemeral {
+		return s.searchWisps(ctx, query, filter)
 	}
 
-	// If searching by IDs that are all ephemeral, route to ephemeral
-	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) && s.ephemeralStore != nil {
-		return s.ephemeralStore.SearchIssues(ctx, query, filter)
+	// If searching by IDs that are all ephemeral, route to wisps table
+	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
+		return s.searchWisps(ctx, query, filter)
 	}
 
 	s.mu.RLock()
@@ -291,18 +291,17 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		return nil, err
 	}
 
-	// When filter.Ephemeral is nil (search everything) and ephemeral store exists,
-	// also search the ephemeral store and merge results. This ensures ephemeral
-	// beads (like mail messages created with --ephemeral) appear in queries.
-	if filter.Ephemeral == nil && s.ephemeralStore != nil {
-		ephResults, ephErr := s.ephemeralStore.SearchIssues(ctx, query, filter)
-		if ephErr == nil && len(ephResults) > 0 {
+	// When filter.Ephemeral is nil (search everything), also search the wisps
+	// table and merge results. This ensures ephemeral beads appear in queries.
+	if filter.Ephemeral == nil {
+		wispResults, wispErr := s.searchWisps(ctx, query, filter)
+		if wispErr == nil && len(wispResults) > 0 {
 			// Deduplicate by ID (prefer Dolt version if exists in both)
 			seen := make(map[string]bool, len(doltResults))
 			for _, issue := range doltResults {
 				seen[issue.ID] = true
 			}
-			for _, issue := range ephResults {
+			for _, issue := range wispResults {
 				if !seen[issue.ID] {
 					doltResults = append(doltResults, issue)
 				}
@@ -428,7 +427,25 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	}
 	defer rows.Close()
 
-	return s.scanIssueIDs(ctx, rows)
+	issues, err := s.scanIssueIDs(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// When IncludeEphemeral is set, also query the wisps table for ready work.
+	if filter.IncludeEphemeral {
+		wispFilter := types.IssueFilter{Limit: filter.Limit}
+		if filter.Status != "" {
+			s := types.Status(filter.Status)
+			wispFilter.Status = &s
+		}
+		wisps, wErr := s.searchWisps(ctx, "", wispFilter)
+		if wErr == nil {
+			issues = append(issues, wisps...)
+		}
+	}
+
+	return issues, nil
 }
 
 // GetBlockedIssues returns issues that are blocked by other issues.

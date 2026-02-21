@@ -23,6 +23,7 @@ var migrationsList = []Migration{
 	{"spec_id_column", migrations.MigrateSpecIDColumn},
 	{"orphan_detection", migrations.DetectOrphanedChildren},
 	{"wisps_table", migrations.MigrateWispsTable},
+	{"wisp_auxiliary_tables", migrations.MigrateWispAuxiliaryTables},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.

@@ -17,9 +17,9 @@ import (
 
 // CreateIssue creates a new issue
 func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
-	// Route ephemeral issues to SQLite store
-	if issue.Ephemeral && s.ephemeralStore != nil {
-		return s.ephemeralStore.CreateIssue(ctx, issue, actor)
+	// Route ephemeral issues to wisps table
+	if issue.Ephemeral {
+		return s.createWisp(ctx, issue, actor)
 	}
 
 	// Fetch custom statuses and types for validation
@@ -127,18 +127,21 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	// Route all-ephemeral batches to SQLite store
-	if s.ephemeralStore != nil {
-		allEph := true
+	// Route all-ephemeral batches to wisps table
+	allEph := true
+	for _, issue := range issues {
+		if !issue.Ephemeral {
+			allEph = false
+			break
+		}
+	}
+	if allEph {
 		for _, issue := range issues {
-			if !issue.Ephemeral {
-				allEph = false
-				break
+			if err := s.createWisp(ctx, issue, actor); err != nil {
+				return err
 			}
 		}
-		if allEph {
-			return s.ephemeralStore.CreateIssues(ctx, issues, actor)
-		}
+		return nil
 	}
 
 	// Fetch custom statuses and types for validation
@@ -265,9 +268,9 @@ func parseHierarchicalID(id string) (parentID string, childNum int, ok bool) {
 
 // GetIssue retrieves an issue by ID
 func (s *DoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetIssue(ctx, id)
+	// Route ephemeral IDs to wisps table
+	if IsEphemeralID(id) {
+		return s.getWisp(ctx, id)
 	}
 
 	s.mu.RLock()
@@ -287,12 +290,6 @@ func (s *DoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, erro
 		return issue, nil
 	}
 	s.mu.RUnlock()
-
-	// Fallback: check ephemeral store for issues created with --ephemeral flag
-	// whose IDs don't match the wisp pattern (e.g., mail messages)
-	if s.ephemeralStore != nil {
-		return s.ephemeralStore.GetIssue(ctx, id)
-	}
 
 	return nil, nil
 }
@@ -316,9 +313,9 @@ func (s *DoltStore) GetIssueByExternalRef(ctx context.Context, externalRef strin
 
 // UpdateIssue updates fields on an issue
 func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.UpdateIssue(ctx, id, updates, actor)
+	// Route ephemeral IDs to wisps table
+	if IsEphemeralID(id) {
+		return s.updateWisp(ctx, id, updates, actor)
 	}
 
 	oldIssue, err := s.GetIssue(ctx, id)
@@ -393,9 +390,9 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 // It sets the assignee to actor and status to "in_progress" only if the issue
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
-	// Route ephemeral IDs to SQLite store with atomic claim semantics
-	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.ClaimIssue(ctx, id, actor)
+	// Route ephemeral IDs to wisps table
+	if IsEphemeralID(id) {
+		return s.claimWisp(ctx, id, actor)
 	}
 
 	oldIssue, err := s.GetIssue(ctx, id)
@@ -458,9 +455,9 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 
 // CloseIssue closes an issue with a reason
 func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.CloseIssue(ctx, id, reason, actor, session)
+	// Route ephemeral IDs to wisps table
+	if IsEphemeralID(id) {
+		return s.closeWisp(ctx, id, reason, actor, session)
 	}
 
 	now := time.Now().UTC()
@@ -496,9 +493,9 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 
 // DeleteIssue permanently removes an issue
 func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.DeleteIssue(ctx, id)
+	// Route ephemeral IDs to wisps table
+	if IsEphemeralID(id) {
+		return s.deleteWisp(ctx, id)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
