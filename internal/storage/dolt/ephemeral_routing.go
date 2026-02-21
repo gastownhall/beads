@@ -2,36 +2,37 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/ephemeral"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// SetEphemeralStore attaches an ephemeral store for transparent routing.
-// When set, operations on ephemeral IDs (containing "-wisp-") or issues
-// with Ephemeral=true are routed to the SQLite store instead of Dolt.
+// SetEphemeralStore is a no-op retained for backward compatibility.
+// Wisp routing now uses the Dolt wisps table instead of a separate SQLite store.
+// Callers that still call SetEphemeralStore will not break, but the store is ignored.
 func (s *DoltStore) SetEphemeralStore(es *ephemeral.Store) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ephemeralStore = es
+	// No-op: wisps are now stored in the Dolt wisps table.
+	// If the caller passed a non-nil store, close it to release resources.
+	if es != nil {
+		_ = es.Close()
+	}
 }
 
-// EphemeralStore returns the attached ephemeral store, or nil.
+// EphemeralStore returns nil. Retained for backward compatibility.
 func (s *DoltStore) EphemeralStore() *ephemeral.Store {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ephemeralStore
+	return nil
 }
 
-// HasEphemeralStore returns true if an ephemeral store is attached.
+// HasEphemeralStore returns false. Wisps are now in the Dolt wisps table.
 func (s *DoltStore) HasEphemeralStore() bool {
-	return s.EphemeralStore() != nil
+	return false
 }
 
 // IsEphemeralID returns true if the ID belongs to an ephemeral issue.
 func IsEphemeralID(id string) bool {
-	return ephemeral.IsEphemeralID(id)
+	return strings.Contains(id, "-wisp-")
 }
 
 // allEphemeral returns true if all IDs in the slice are ephemeral.
@@ -61,8 +62,6 @@ func partitionIDs(ids []string) (ephIDs, doltIDs []string) {
 func (s *DoltStore) SearchIssuesDoltOnly(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	// Clear Ephemeral filter to prevent routing, since we want Dolt results
 	filter.Ephemeral = nil
-	// Remove the ephemeral filter and query Dolt for all matching issues,
-	// then filter client-side
 	results, err := s.SearchIssues(ctx, query, filter)
 	if err != nil {
 		return nil, err
@@ -77,32 +76,27 @@ func (s *DoltStore) SearchIssuesDoltOnly(ctx context.Context, query string, filt
 	return ephIssues, nil
 }
 
-// PromoteFromEphemeral copies an issue from ephemeral to Dolt storage,
+// PromoteFromEphemeral copies an issue from the wisps table to the issues table,
 // clearing the Ephemeral flag. Used by mol squash to crystallize wisps.
 func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor string) error {
-	es := s.EphemeralStore()
-	if es == nil {
-		return nil // No ephemeral store, nothing to promote
-	}
-
-	issue, err := es.GetIssue(ctx, id)
+	issue, err := s.getWisp(ctx, id)
 	if err != nil {
 		return err
 	}
 	if issue == nil {
-		return nil // Not found in ephemeral, nothing to promote
+		return nil // Not found in wisps, nothing to promote
 	}
 
 	// Clear ephemeral flag for persistent storage
 	issue.Ephemeral = false
 
-	// Create in Dolt
+	// Create in issues table (bypasses ephemeral routing since Ephemeral=false)
 	if err := s.CreateIssue(ctx, issue, actor); err != nil {
-		return err
+		return fmt.Errorf("failed to promote wisp to issues: %w", err)
 	}
 
-	// Copy labels
-	labels, err := es.GetLabels(ctx, id)
+	// Copy labels from wisp_labels to labels
+	labels, err := s.getWispLabels(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -112,8 +106,8 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 		}
 	}
 
-	// Copy dependencies
-	deps, err := es.GetDependencyRecords(ctx, id)
+	// Copy dependencies from wisp_dependencies to dependencies
+	deps, err := s.getWispDependencyRecords(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -127,6 +121,21 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 		}
 	}
 
-	// Delete from ephemeral
-	return es.DeleteIssue(ctx, id)
+	// Delete from wisps table
+	return s.deleteWisp(ctx, id)
+}
+
+// getWispDependencyRecords returns raw dependency records for a wisp from wisp_dependencies.
+func (s *DoltStore) getWispDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
+	rows, err := s.queryContext(ctx, `
+		SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM wisp_dependencies
+		WHERE issue_id = ?
+	`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wisp dependency records: %w", err)
+	}
+	defer rows.Close()
+
+	return scanDependencyRows(rows)
 }

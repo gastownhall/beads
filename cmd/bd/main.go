@@ -24,7 +24,6 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/ephemeral"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -591,14 +590,8 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Initialize ephemeral store (SQLite) for wisp/molecule storage
-		ephPath := filepath.Join(beadsDir, "ephemeral.sqlite3")
-		ephPrefix, _ := store.GetConfig(rootCtx, "issue_prefix")
-		if es, esErr := ephemeral.New(ephPath, ephPrefix); esErr != nil {
-			debug.Logf("warning: failed to open ephemeral store: %v", esErr)
-		} else {
-			store.SetEphemeralStore(es)
-		}
+		// Wisps are now stored in the Dolt wisps table (dolt_ignored).
+		// No separate ephemeral store needed.
 
 		// Mark store as active for flush goroutine safety
 		storeMutex.Lock()

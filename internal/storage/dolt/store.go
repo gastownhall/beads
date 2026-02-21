@@ -35,7 +35,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/ephemeral"
 )
 
 // DoltStore implements the Storage interface using Dolt
@@ -57,9 +56,6 @@ type DoltStore struct {
 	// Watchdog for server mode auto-recovery
 	watchdogCancel context.CancelFunc
 	watchdogDone   chan struct{}
-
-	// Ephemeral store for wisps/molecules (SQLite-backed, avoids Dolt history bloat)
-	ephemeralStore *ephemeral.Store
 
 	// Version control config
 	committerName  string
@@ -665,13 +661,6 @@ func (s *DoltStore) Close() error {
 		s.embeddedConnector = nil
 	}
 	s.db = nil
-	// Close ephemeral store if attached
-	if s.ephemeralStore != nil {
-		if cerr := s.ephemeralStore.Close(); cerr != nil {
-			err = errors.Join(err, cerr)
-		}
-		s.ephemeralStore = nil
-	}
 	// Release advisory lock after db and connector are closed
 	if s.accessLock != nil {
 		s.accessLock.Release()

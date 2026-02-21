@@ -13,9 +13,9 @@ import (
 // Uses an explicit transaction so writes persist when @@autocommit is OFF
 // (e.g. Dolt server started with --no-auto-commit).
 func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	// Route to ephemeral if the issue is ephemeral
-	if IsEphemeralID(dep.IssueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.AddDependency(ctx, dep, actor)
+	// Route to wisp_dependencies if the issue is ephemeral
+	if IsEphemeralID(dep.IssueID) {
+		return s.addWispDependency(ctx, dep, actor)
 	}
 
 	metadata := dep.Metadata
@@ -86,9 +86,9 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 // RemoveDependency removes a dependency between two issues.
 // Uses an explicit transaction so writes persist when @@autocommit is OFF.
 func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	// Route to ephemeral if the issue is ephemeral
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.RemoveDependency(ctx, issueID, dependsOnID, actor)
+	// Route to wisp_dependencies if the issue is ephemeral
+	if IsEphemeralID(issueID) {
+		return s.removeWispDependency(ctx, issueID, dependsOnID)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -108,9 +108,9 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 
 // GetDependencies retrieves issues that this issue depends on
 func (s *DoltStore) GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
-	// Route to ephemeral if the issue is ephemeral
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependencies(ctx, issueID)
+	// Route to wisp_dependencies if the issue is ephemeral
+	if IsEphemeralID(issueID) {
+		return s.getWispDependencies(ctx, issueID)
 	}
 
 	rows, err := s.queryContext(ctx, `
@@ -129,9 +129,9 @@ func (s *DoltStore) GetDependencies(ctx context.Context, issueID string) ([]*typ
 
 // GetDependents retrieves issues that depend on this issue
 func (s *DoltStore) GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error) {
-	// Route to ephemeral if the issue is ephemeral
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependents(ctx, issueID)
+	// Route to wisp_dependencies if the issue is ephemeral
+	if IsEphemeralID(issueID) {
+		return s.getWispDependents(ctx, issueID)
 	}
 
 	rows, err := s.queryContext(ctx, `
@@ -150,9 +150,9 @@ func (s *DoltStore) GetDependents(ctx context.Context, issueID string) ([]*types
 
 // GetDependenciesWithMetadata returns dependencies with metadata
 func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependenciesWithMetadata(ctx, issueID)
+	// Route ephemeral IDs to wisp_dependencies
+	if IsEphemeralID(issueID) {
+		return s.getWispDependenciesWithMetadata(ctx, issueID)
 	}
 
 	rows, err := s.queryContext(ctx, `
@@ -221,9 +221,9 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 
 // GetDependentsWithMetadata returns dependents with metadata
 func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependentsWithMetadata(ctx, issueID)
+	// Route ephemeral IDs to wisp_dependencies
+	if IsEphemeralID(issueID) {
+		return s.getWispDependentsWithMetadata(ctx, issueID)
 	}
 
 	rows, err := s.queryContext(ctx, `
@@ -292,9 +292,9 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 
 // GetDependencyRecords returns raw dependency records for an issue
 func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
-	// Route to ephemeral if the issue is ephemeral
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependencyRecords(ctx, issueID)
+	// Route to wisp_dependencies if the issue is ephemeral
+	if IsEphemeralID(issueID) {
+		return s.getWispDependencyRecords(ctx, issueID)
 	}
 
 	rows, err := s.queryContext(ctx, `
@@ -339,29 +339,29 @@ func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs 
 		return make(map[string][]*types.Dependency), nil
 	}
 
-	// Partition and merge from both stores
-	if s.ephemeralStore != nil {
-		ephIDs, doltIDs := partitionIDs(issueIDs)
-		if len(ephIDs) > 0 {
-			result := make(map[string][]*types.Dependency)
-			ephResult, err := s.ephemeralStore.GetDependencyRecordsForIssues(ctx, ephIDs)
+	// Partition and merge from wisps and issues tables
+	ephIDs, doltIDs := partitionIDs(issueIDs)
+	if len(ephIDs) > 0 {
+		result := make(map[string][]*types.Dependency)
+		for _, id := range ephIDs {
+			deps, err := s.getWispDependencyRecords(ctx, id)
 			if err != nil {
 				return nil, err
 			}
-			for k, v := range ephResult {
+			if len(deps) > 0 {
+				result[id] = deps
+			}
+		}
+		if len(doltIDs) > 0 {
+			doltResult, err := s.getDependencyRecordsForIssuesDolt(ctx, doltIDs)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range doltResult {
 				result[k] = v
 			}
-			if len(doltIDs) > 0 {
-				doltResult, err := s.getDependencyRecordsForIssuesDolt(ctx, doltIDs)
-				if err != nil {
-					return nil, err
-				}
-				for k, v := range doltResult {
-					result[k] = v
-				}
-			}
-			return result, nil
 		}
+		return result, nil
 	}
 
 	return s.getDependencyRecordsForIssuesDolt(ctx, issueIDs)
@@ -421,25 +421,25 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 		return blockedByMap, blocksMap, nil
 	}
 
-	// Partition and merge from both stores
-	if s.ephemeralStore != nil {
-		ephIDs, doltIDs := partitionIDs(issueIDs)
-		if len(ephIDs) > 0 {
-			ephBlocked, ephBlocks, err := s.ephemeralStore.GetBlockingInfoForIssues(ctx, ephIDs)
-			if err != nil {
-				return nil, nil, err
+	// Partition and merge wisp and dolt IDs
+	ephIDs, doltIDs := partitionIDs(issueIDs)
+	if len(ephIDs) > 0 {
+		// For wisp IDs, query wisp_dependencies with a LEFT JOIN to wisps
+		for _, ephID := range ephIDs {
+			deps, depErr := s.getWispDependencyRecords(ctx, ephID)
+			if depErr != nil {
+				return nil, nil, depErr
 			}
-			for k, v := range ephBlocked {
-				blockedByMap[k] = v
+			for _, dep := range deps {
+				if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+					blockedByMap[ephID] = append(blockedByMap[ephID], dep.DependsOnID)
+				}
 			}
-			for k, v := range ephBlocks {
-				blocksMap[k] = v
-			}
-			if len(doltIDs) == 0 {
-				return blockedByMap, blocksMap, nil
-			}
-			issueIDs = doltIDs
 		}
+		if len(doltIDs) == 0 {
+			return blockedByMap, blocksMap, nil
+		}
+		issueIDs = doltIDs
 	}
 
 	placeholders := make([]string, len(issueIDs))
@@ -596,10 +596,6 @@ func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) 
 
 // GetDependencyTree returns a dependency tree for visualization
 func (s *DoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
-	// Route ephemeral IDs to SQLite store
-	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
-		return s.ephemeralStore.GetDependencyTree(ctx, issueID, maxDepth, showAllPaths, reverse)
-	}
 
 	// Simple implementation - can be optimized with CTE
 	visited := make(map[string]bool)
@@ -822,25 +818,23 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 		return nil, nil
 	}
 
-	// Partition IDs between ephemeral and Dolt stores
-	if s.ephemeralStore != nil {
-		ephIDs, doltIDs := partitionIDs(ids)
-		if len(ephIDs) > 0 {
-			var allIssues []*types.Issue
-			ephIssues, err := s.ephemeralStore.GetIssuesByIDs(ctx, ephIDs)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get ephemeral issues: %w", err)
-			}
-			allIssues = append(allIssues, ephIssues...)
-			if len(doltIDs) > 0 {
-				doltIssues, err := s.getIssuesByIDsDolt(ctx, doltIDs)
-				if err != nil {
-					return nil, err
-				}
-				allIssues = append(allIssues, doltIssues...)
-			}
-			return allIssues, nil
+	// Partition IDs between wisps and issues tables
+	ephIDs, doltIDs := partitionIDs(ids)
+	if len(ephIDs) > 0 {
+		var allIssues []*types.Issue
+		wispIssues, err := s.getWispsByIDs(ctx, ephIDs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get wisp issues: %w", err)
 		}
+		allIssues = append(allIssues, wispIssues...)
+		if len(doltIDs) > 0 {
+			doltIssues, err := s.getIssuesByIDsDolt(ctx, doltIDs)
+			if err != nil {
+				return nil, err
+			}
+			allIssues = append(allIssues, doltIssues...)
+		}
+		return allIssues, nil
 	}
 
 	return s.getIssuesByIDsDolt(ctx, ids)
