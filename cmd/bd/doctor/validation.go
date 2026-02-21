@@ -141,12 +141,16 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Query for orphaned dependencies
+	// Query for orphaned dependencies.
+	// Exclude external: refs — these are synthetic cross-rig tracking deps
+	// injected by the JSONL exporter and intentionally reference issues not
+	// present in the local database (#1593).
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
 		FROM dependencies d
 		LEFT JOIN issues i ON d.depends_on_id = i.id
 		WHERE i.id IS NULL
+		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
 	if err != nil {

@@ -116,12 +116,13 @@ func OrphanedDependencies(path string, verbose bool) error {
 	}
 	defer db.Close()
 
-	// Find orphaned dependencies
+	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
 	query := `
 		SELECT d.issue_id, d.depends_on_id
 		FROM dependencies d
 		LEFT JOIN issues i ON d.depends_on_id = i.id
 		WHERE i.id IS NULL
+		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
 	if err != nil {
