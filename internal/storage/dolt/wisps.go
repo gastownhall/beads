@@ -687,8 +687,49 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 		}
 		issues = append(issues, issue)
 	}
+	if err := queryRows.Err(); err != nil {
+		return nil, err
+	}
 
-	return issues, queryRows.Err()
+	// Hydrate labels for each wisp (batch query)
+	if len(issues) > 0 {
+		labelPlaceholders := make([]string, len(issues))
+		labelArgs := make([]interface{}, len(issues))
+		issueMap := make(map[string]*types.Issue, len(issues))
+		for i, issue := range issues {
+			labelPlaceholders[i] = "?"
+			labelArgs[i] = issue.ID
+			issueMap[issue.ID] = issue
+		}
+
+		//nolint:gosec // G201: placeholders contains only ? markers
+		labelSQL := fmt.Sprintf(`
+			SELECT issue_id, label FROM wisp_labels
+			WHERE issue_id IN (%s)
+			ORDER BY issue_id, label
+		`, strings.Join(labelPlaceholders, ","))
+
+		labelRows, err := s.queryContext(ctx, labelSQL, labelArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get wisp labels: %w", err)
+		}
+		defer labelRows.Close()
+
+		for labelRows.Next() {
+			var issueID, label string
+			if err := labelRows.Scan(&issueID, &label); err != nil {
+				return nil, err
+			}
+			if issue, ok := issueMap[issueID]; ok {
+				issue.Labels = append(issue.Labels, label)
+			}
+		}
+		if err := labelRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return issues, nil
 }
 
 // addWispDependency adds a dependency to the wisp_dependencies table.
