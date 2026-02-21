@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -297,6 +298,39 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, updates map[string]i
 	}
 
 	return nil
+}
+
+// ClaimIssue atomically claims an issue using check-and-set semantics.
+// Returns storage.ErrAlreadyClaimed if the issue already has an assignee.
+func (s *Store) ClaimIssue(ctx context.Context, id string, actor string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin claim tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentAssignee sql.NullString
+	err = tx.QueryRowContext(ctx, "SELECT assignee FROM issues WHERE id = ?", id).Scan(&currentAssignee)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("issue %s not found", id)
+	}
+	if err != nil {
+		return fmt.Errorf("check assignee: %w", err)
+	}
+
+	if currentAssignee.Valid && currentAssignee.String != "" {
+		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, currentAssignee.String)
+	}
+
+	now := formatTime(time.Now().UTC())
+	_, err = tx.ExecContext(ctx,
+		`UPDATE issues SET assignee = ?, status = 'in_progress', updated_at = ? WHERE id = ?`,
+		actor, now, id)
+	if err != nil {
+		return fmt.Errorf("claim ephemeral issue: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // CloseIssue marks an issue as closed.

@@ -160,7 +160,10 @@ func (rt *routingTransaction) CreateIssues(ctx context.Context, issues []*types.
 }
 
 func (rt *routingTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	if IsEphemeralID(id) && rt.ephTx != nil {
+	if IsEphemeralID(id) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().UpdateIssue(ctx, id, updates, actor)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -170,7 +173,10 @@ func (rt *routingTransaction) UpdateIssue(ctx context.Context, id string, update
 }
 
 func (rt *routingTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	if IsEphemeralID(id) && rt.ephTx != nil {
+	if IsEphemeralID(id) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().CloseIssue(ctx, id, reason, actor, session)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -180,7 +186,10 @@ func (rt *routingTransaction) CloseIssue(ctx context.Context, id string, reason 
 }
 
 func (rt *routingTransaction) DeleteIssue(ctx context.Context, id string) error {
-	if IsEphemeralID(id) && rt.ephTx != nil {
+	if IsEphemeralID(id) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().DeleteIssue(ctx, id)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -211,7 +220,10 @@ func (rt *routingTransaction) SearchIssues(ctx context.Context, query string, fi
 }
 
 func (rt *routingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	if IsEphemeralID(dep.IssueID) && rt.ephTx != nil {
+	if IsEphemeralID(dep.IssueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().AddDependency(ctx, dep, actor)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -221,7 +233,10 @@ func (rt *routingTransaction) AddDependency(ctx context.Context, dep *types.Depe
 }
 
 func (rt *routingTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	if IsEphemeralID(issueID) && rt.ephTx != nil {
+	if IsEphemeralID(issueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().RemoveDependency(ctx, issueID, dependsOnID, actor)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -241,7 +256,10 @@ func (rt *routingTransaction) GetDependencyRecords(ctx context.Context, issueID 
 }
 
 func (rt *routingTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	if IsEphemeralID(issueID) && rt.ephTx != nil {
+	if IsEphemeralID(issueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().AddLabel(ctx, issueID, label, actor)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -251,7 +269,10 @@ func (rt *routingTransaction) AddLabel(ctx context.Context, issueID, label, acto
 }
 
 func (rt *routingTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	if IsEphemeralID(issueID) && rt.ephTx != nil {
+	if IsEphemeralID(issueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().RemoveLabel(ctx, issueID, label, actor)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -301,7 +322,10 @@ func (rt *routingTransaction) GetMetadata(ctx context.Context, key string) (stri
 }
 
 func (rt *routingTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	if IsEphemeralID(issueID) && rt.ephTx != nil {
+	if IsEphemeralID(issueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return err
+		}
 		return rt.ephTx.Transaction().AddComment(ctx, issueID, actor, comment)
 	}
 	if err := rt.ensureDolt(); err != nil {
@@ -311,7 +335,10 @@ func (rt *routingTransaction) AddComment(ctx context.Context, issueID, actor, co
 }
 
 func (rt *routingTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	if IsEphemeralID(issueID) && rt.ephTx != nil {
+	if IsEphemeralID(issueID) {
+		if err := rt.ensureEphemeral(); err != nil {
+			return nil, err
+		}
 		return rt.ephTx.Transaction().ImportIssueComment(ctx, issueID, author, text, createdAt)
 	}
 	if err := rt.ensureDolt(); err != nil {

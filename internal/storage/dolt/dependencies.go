@@ -150,6 +150,11 @@ func (s *DoltStore) GetDependents(ctx context.Context, issueID string) ([]*types
 
 // GetDependenciesWithMetadata returns dependencies with metadata
 func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	// Route ephemeral IDs to SQLite store
+	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
+		return s.ephemeralStore.GetDependenciesWithMetadata(ctx, issueID)
+	}
+
 	rows, err := s.queryContext(ctx, `
 		SELECT d.depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id
 		FROM dependencies d
@@ -216,6 +221,11 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 
 // GetDependentsWithMetadata returns dependents with metadata
 func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	// Route ephemeral IDs to SQLite store
+	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
+		return s.ephemeralStore.GetDependentsWithMetadata(ctx, issueID)
+	}
+
 	rows, err := s.queryContext(ctx, `
 		SELECT d.issue_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id
 		FROM dependencies d
@@ -586,6 +596,11 @@ func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) 
 
 // GetDependencyTree returns a dependency tree for visualization
 func (s *DoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
+	// Route ephemeral IDs to SQLite store
+	if IsEphemeralID(issueID) && s.ephemeralStore != nil {
+		return s.ephemeralStore.GetDependencyTree(ctx, issueID, maxDepth, showAllPaths, reverse)
+	}
+
 	// Simple implementation - can be optimized with CTE
 	visited := make(map[string]bool)
 	return s.buildDependencyTree(ctx, issueID, 0, maxDepth, reverse, visited)

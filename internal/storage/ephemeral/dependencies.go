@@ -182,6 +182,169 @@ func (s *Store) GetBlockingInfoForIssues(ctx context.Context, issueIDs []string)
 	return blockedByMap, blocksMap, rows2.Err()
 }
 
+// GetDependenciesWithMetadata returns dependencies with their dep type.
+func (s *Store) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT d.depends_on_id, d.type FROM dependencies d WHERE d.issue_id = ?`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("get ephemeral deps with metadata: %w", err)
+	}
+	defer rows.Close()
+
+	type depMeta struct{ depID, depType string }
+	var deps []depMeta
+	for rows.Next() {
+		var dm depMeta
+		if err := rows.Scan(&dm.depID, &dm.depType); err != nil {
+			return nil, err
+		}
+		deps = append(deps, dm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.depID
+	}
+	issues, err := s.GetIssuesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, d := range deps {
+		issue, ok := issueMap[d.depID]
+		if !ok {
+			continue
+		}
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: types.DependencyType(d.depType),
+		})
+	}
+	return results, nil
+}
+
+// GetDependentsWithMetadata returns dependents with their dep type.
+func (s *Store) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT d.issue_id, d.type FROM dependencies d WHERE d.depends_on_id = ?`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("get ephemeral dependents with metadata: %w", err)
+	}
+	defer rows.Close()
+
+	type depMeta struct{ depID, depType string }
+	var deps []depMeta
+	for rows.Next() {
+		var dm depMeta
+		if err := rows.Scan(&dm.depID, &dm.depType); err != nil {
+			return nil, err
+		}
+		deps = append(deps, dm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.depID
+	}
+	issues, err := s.GetIssuesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, d := range deps {
+		issue, ok := issueMap[d.depID]
+		if !ok {
+			continue
+		}
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: types.DependencyType(d.depType),
+		})
+	}
+	return results, nil
+}
+
+// GetDependencyTree returns a dependency tree for visualization.
+func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
+	visited := make(map[string]bool)
+	return s.buildDependencyTree(ctx, issueID, 0, maxDepth, reverse, visited)
+}
+
+func (s *Store) buildDependencyTree(ctx context.Context, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool) ([]*types.TreeNode, error) {
+	if depth >= maxDepth || visited[issueID] {
+		return nil, nil
+	}
+	visited[issueID] = true
+
+	issue, err := s.GetIssue(ctx, issueID)
+	if err != nil || issue == nil {
+		return nil, err
+	}
+
+	var query string
+	if reverse {
+		query = "SELECT issue_id FROM dependencies WHERE depends_on_id = ?"
+	} else {
+		query = "SELECT depends_on_id FROM dependencies WHERE issue_id = ?"
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var childIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		childIDs = append(childIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	node := &types.TreeNode{
+		Issue: *issue,
+		Depth: depth,
+	}
+
+	nodes := []*types.TreeNode{node}
+	for _, childID := range childIDs {
+		children, err := s.buildDependencyTree(ctx, childID, depth+1, maxDepth, reverse, visited)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, children...)
+	}
+
+	return nodes, nil
+}
+
 // scanIssues scans multiple issues from rows.
 func scanIssues(rows *sql.Rows) ([]*types.Issue, error) {
 	var issues []*types.Issue

@@ -127,6 +127,20 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
+	// Route all-ephemeral batches to SQLite store
+	if s.ephemeralStore != nil {
+		allEph := true
+		for _, issue := range issues {
+			if !issue.Ephemeral {
+				allEph = false
+				break
+			}
+		}
+		if allEph {
+			return s.ephemeralStore.CreateIssues(ctx, issues, actor)
+		}
+	}
+
 	// Fetch custom statuses and types for validation
 	customStatuses, err := s.GetCustomStatuses(ctx)
 	if err != nil {
@@ -373,12 +387,9 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 // It sets the assignee to actor and status to "in_progress" only if the issue
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
-	// Route ephemeral IDs to SQLite store (claim = update assignee)
+	// Route ephemeral IDs to SQLite store with atomic claim semantics
 	if IsEphemeralID(id) && s.ephemeralStore != nil {
-		return s.ephemeralStore.UpdateIssue(ctx, id, map[string]interface{}{
-			"assignee": actor,
-			"status":   "in_progress",
-		}, actor)
+		return s.ephemeralStore.ClaimIssue(ctx, id, actor)
 	}
 
 	oldIssue, err := s.GetIssue(ctx, id)
