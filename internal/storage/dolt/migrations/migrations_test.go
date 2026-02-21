@@ -201,3 +201,77 @@ func TestDetectOrphanedChildren(t *testing.T) {
 		t.Fatalf("orphan detection should be idempotent: %v", err)
 	}
 }
+
+func TestMigrateWispsTable(t *testing.T) {
+	db := openTestDolt(t)
+
+	// Verify wisps table doesn't exist yet
+	exists, err := tableExists(db, "wisps")
+	if err != nil {
+		t.Fatalf("failed to check table: %v", err)
+	}
+	if exists {
+		t.Fatal("wisps table should not exist yet")
+	}
+
+	// Run migration
+	if err := MigrateWispsTable(db); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	// Verify wisps table now exists
+	exists, err = tableExists(db, "wisps")
+	if err != nil {
+		t.Fatalf("failed to check table after migration: %v", err)
+	}
+	if !exists {
+		t.Fatal("wisps table should exist after migration")
+	}
+
+	// Verify dolt_ignore has the patterns
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM dolt_ignore WHERE pattern IN ('wisps', 'wisp_%')").Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query dolt_ignore: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 dolt_ignore patterns, got %d", count)
+	}
+
+	// Verify dolt_add('-A') does NOT stage the wisps table (dolt_ignore effect)
+	_, err = db.Exec("CALL DOLT_ADD('-A')")
+	if err != nil {
+		t.Fatalf("dolt_add failed: %v", err)
+	}
+
+	// After dolt_add('-A'), wisps should remain unstaged due to dolt_ignore.
+	// Note: Dolt still shows ignored tables in dolt_status as "new table"
+	// with staged=false (similar to gitignored files), but they will never
+	// be committed because dolt_add skips them.
+	var staged bool
+	err = db.QueryRow("SELECT staged FROM dolt_status WHERE table_name = 'wisps'").Scan(&staged)
+	if err == nil && staged {
+		t.Fatal("wisps table should NOT be staged after dolt_add('-A') (dolt_ignore should prevent staging)")
+	}
+
+	// Run migration again (idempotent)
+	if err := MigrateWispsTable(db); err != nil {
+		t.Fatalf("re-running migration should be idempotent: %v", err)
+	}
+
+	// Verify we can INSERT and query from wisps table
+	_, err = db.Exec(`INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes)
+		VALUES ('wisp-test1', 'Test Wisp', 'desc', '', '', '')`)
+	if err != nil {
+		t.Fatalf("failed to insert into wisps: %v", err)
+	}
+
+	var title string
+	err = db.QueryRow("SELECT title FROM wisps WHERE id = 'wisp-test1'").Scan(&title)
+	if err != nil {
+		t.Fatalf("failed to query wisps: %v", err)
+	}
+	if title != "Test Wisp" {
+		t.Fatalf("expected title 'Test Wisp', got %q", title)
+	}
+}
