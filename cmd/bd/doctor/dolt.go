@@ -88,10 +88,10 @@ func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
 
 // openDoltDBEmbedded opens a Dolt database using the in-process embedded driver.
 // Reads the configured database name from metadata.json (dolt_database field)
-// and switches to it after opening.
+// and includes it in the connection string so the driver opens directly to
+// the correct database (avoids phantom changes from the default database).
 func openDoltDBEmbedded(beadsDir string) (*sql.DB, error) {
 	doltDir := filepath.Join(beadsDir, "dolt")
-	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local", doltDir)
 
 	// Determine the database name from configuration
 	dbName := configfile.DefaultDoltDatabase
@@ -99,15 +99,11 @@ func openDoltDBEmbedded(beadsDir string) (*sql.DB, error) {
 		dbName = cfg.GetDoltDatabase()
 	}
 
+	connStr := fmt.Sprintf("file://%s?commitname=beads&commitemail=beads@local&database=%s", doltDir, dbName)
+
 	db, err := sql.Open("dolt", connStr)
 	if err != nil {
 		return nil, err
-	}
-
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName)); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to switch to %s database: %w", dbName, err)
 	}
 
 	return db, nil

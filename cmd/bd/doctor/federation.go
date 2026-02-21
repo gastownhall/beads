@@ -15,6 +15,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
+// doltDatabaseName returns the configured Dolt database name for the given beads directory.
+// Falls back to the default ("beads") if config cannot be read.
+func doltDatabaseName(beadsDir string) string {
+	dbName := configfile.DefaultDoltDatabase
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbName = cfg.GetDoltDatabase()
+	}
+	return dbName
+}
+
 // CheckFederationRemotesAPI checks if the remotesapi port is accessible for federation.
 // This is the port used for peer-to-peer sync operations.
 func CheckFederationRemotesAPI(path string) DoctorCheck {
@@ -48,7 +58,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	if serverPID == 0 {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
+		store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -133,7 +143,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
@@ -250,7 +260,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
@@ -343,7 +353,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Federation Conflicts",
@@ -438,7 +448,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 
 	// Open storage to check for remotes
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true})
+	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 	if err != nil {
 		// If we can't open the store, check if there's a lock file indicating embedded mode
 		lockFile := filepath.Join(doltPath, ".dolt", "lock")
