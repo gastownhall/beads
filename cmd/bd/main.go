@@ -193,7 +193,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables auto-sync")
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
-	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on). Default: on for embedded, off for server mode. Override via config key dolt.auto-commit")
+	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on|batch). Default: batch for embedded, off for server mode. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
@@ -539,13 +539,15 @@ var rootCmd = &cobra.Command{
 		// config explicitly set it. Server mode defaults to OFF because the
 		// server handles commits via its own transaction lifecycle; firing
 		// DOLT_COMMIT after every write under concurrent load causes
-		// 'database is read only' errors. Embedded mode defaults to ON so
-		// each write is durably committed.
+		// 'database is read only' errors. Embedded mode defaults to BATCH
+		// so that multiple operations accumulate in the working set and are
+		// committed together at logical boundaries (bd sync, bd dolt commit),
+		// reducing commit bloat from per-command commits.
 		if strings.TrimSpace(doltAutoCommit) == "" {
 			if doltCfg.ServerMode {
 				doltAutoCommit = string(doltAutoCommitOff)
 			} else {
-				doltAutoCommit = string(doltAutoCommitOn)
+				doltAutoCommit = string(doltAutoCommitBatch)
 			}
 		}
 

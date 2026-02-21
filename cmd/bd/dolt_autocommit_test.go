@@ -38,3 +38,43 @@ func TestIsDoltNothingToCommit(t *testing.T) {
 		t.Fatal("unexpected classification")
 	}
 }
+
+func TestGetDoltAutoCommitMode_Batch(t *testing.T) {
+	old := doltAutoCommit
+	defer func() { doltAutoCommit = old }()
+
+	doltAutoCommit = "batch"
+	mode, err := getDoltAutoCommitMode()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != doltAutoCommitBatch {
+		t.Fatalf("expected batch, got %q", mode)
+	}
+
+	// Also verify the other modes still work
+	doltAutoCommit = "on"
+	mode, err = getDoltAutoCommitMode()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != doltAutoCommitOn {
+		t.Fatalf("expected on, got %q", mode)
+	}
+
+	doltAutoCommit = "off"
+	mode, err = getDoltAutoCommitMode()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != doltAutoCommitOff {
+		t.Fatalf("expected off, got %q", mode)
+	}
+
+	// Invalid mode
+	doltAutoCommit = "invalid"
+	_, err = getDoltAutoCommitMode()
+	if err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+}

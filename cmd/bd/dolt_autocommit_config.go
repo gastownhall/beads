@@ -8,8 +8,9 @@ import (
 type doltAutoCommitMode string
 
 const (
-	doltAutoCommitOff doltAutoCommitMode = "off"
-	doltAutoCommitOn  doltAutoCommitMode = "on"
+	doltAutoCommitOff   doltAutoCommitMode = "off"
+	doltAutoCommitOn    doltAutoCommitMode = "on"
+	doltAutoCommitBatch doltAutoCommitMode = "batch"
 )
 
 func getDoltAutoCommitMode() (doltAutoCommitMode, error) {
@@ -24,7 +25,9 @@ func getDoltAutoCommitMode() (doltAutoCommitMode, error) {
 		return doltAutoCommitOff, nil
 	case doltAutoCommitOn:
 		return doltAutoCommitOn, nil
+	case doltAutoCommitBatch:
+		return doltAutoCommitBatch, nil
 	default:
-		return "", fmt.Errorf("invalid --dolt-auto-commit=%q (valid: off, on)", doltAutoCommit)
+		return "", fmt.Errorf("invalid --dolt-auto-commit=%q (valid: off, on, batch)", doltAutoCommit)
 	}
 }

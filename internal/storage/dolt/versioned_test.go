@@ -3,7 +3,10 @@
 package dolt
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestCommitExists tests the CommitExists method.
@@ -80,6 +83,95 @@ func TestCommitExists(t *testing.T) {
 			if exists {
 				t.Errorf("expected malformed input %q to return false", tc)
 			}
+		}
+	})
+}
+
+// TestCommitPending tests the batch commit mechanism.
+func TestCommitPending(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Initial commit so the store has a clean HEAD
+	if err := store.Commit(ctx, "initial state"); err != nil {
+		t.Fatalf("initial commit failed: %v", err)
+	}
+
+	t.Run("returns false when nothing to commit", func(t *testing.T) {
+		committed, err := store.CommitPending(ctx, "test-actor")
+		if err != nil {
+			t.Fatalf("CommitPending failed: %v", err)
+		}
+		if committed {
+			t.Error("expected false when no changes pending")
+		}
+	})
+
+	t.Run("commits accumulated changes with summary", func(t *testing.T) {
+		headBefore, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatalf("failed to get HEAD: %v", err)
+		}
+
+		// Create an issue (DML without Dolt commit)
+		issue := &types.Issue{
+			Title:     "Batch test issue",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Now commit pending changes
+		committed, err := store.CommitPending(ctx, "test-actor")
+		if err != nil {
+			t.Fatalf("CommitPending failed: %v", err)
+		}
+		if !committed {
+			t.Error("expected true when changes were pending")
+		}
+
+		headAfter, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatalf("failed to get HEAD after commit: %v", err)
+		}
+		if headAfter == headBefore {
+			t.Error("expected HEAD to advance after CommitPending")
+		}
+	})
+
+	t.Run("generates descriptive message", func(t *testing.T) {
+		// Create another issue to have pending changes
+		issue := &types.Issue{
+			Title:     "Message test issue",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue failed: %v", err)
+		}
+
+		// Build the message (without committing)
+		msg := store.buildBatchCommitMessage(ctx, "test-actor")
+		if !strings.Contains(msg, "batch commit") {
+			t.Errorf("expected 'batch commit' in message, got: %q", msg)
+		}
+		if !strings.Contains(msg, "test-actor") {
+			t.Errorf("expected actor in message, got: %q", msg)
+		}
+		if !strings.Contains(msg, "created") {
+			t.Errorf("expected 'created' in message for new issues, got: %q", msg)
+		}
+
+		// Clean up — commit to clear working set
+		if err := store.Commit(ctx, "cleanup"); err != nil {
+			t.Fatalf("cleanup commit failed: %v", err)
 		}
 	})
 }

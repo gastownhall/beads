@@ -709,6 +709,80 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 	return nil
 }
 
+// CommitPending creates a single Dolt commit for all uncommitted changes in the working set.
+// Returns (true, nil) if changes were committed, (false, nil) if there was nothing to commit,
+// or (false, err) on failure. The commit message summarizes the accumulated changes by
+// querying dolt_diff to count issue-level operations.
+//
+// This is the primary commit mechanism for batch mode, where multiple bd commands
+// accumulate changes in the working set before committing at a logical boundary.
+func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
+	// Check if there are any uncommitted changes
+	status, err := s.Status(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check status: %w", err)
+	}
+	if len(status.Staged) == 0 && len(status.Unstaged) == 0 {
+		return false, nil // Nothing to commit
+	}
+
+	msg := s.buildBatchCommitMessage(ctx, actor)
+	if err := s.Commit(ctx, msg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// buildBatchCommitMessage generates a descriptive commit message summarizing
+// what changed since the last commit by querying dolt_diff against HEAD.
+func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) string {
+	if actor == "" {
+		actor = s.committerName
+	}
+
+	// Count issue-level changes by diff type
+	var added, modified, removed int
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT diff_type, COUNT(*) as cnt
+		FROM dolt_diff('HEAD', 'WORKING', 'issues')
+		GROUP BY diff_type
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var diffType string
+			var count int
+			if scanErr := rows.Scan(&diffType, &count); scanErr == nil {
+				switch diffType {
+				case "added":
+					added = count
+				case "modified":
+					modified = count
+				case "removed":
+					removed = count
+				}
+			}
+		}
+	}
+
+	// Build descriptive message
+	var parts []string
+	if added > 0 {
+		parts = append(parts, fmt.Sprintf("%d created", added))
+	}
+	if modified > 0 {
+		parts = append(parts, fmt.Sprintf("%d updated", modified))
+	}
+	if removed > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", removed))
+	}
+
+	if len(parts) == 0 {
+		return fmt.Sprintf("bd: batch commit by %s", actor)
+	}
+	return fmt.Sprintf("bd: batch commit by %s — %s", actor, strings.Join(parts, ", "))
+}
+
 // Push pushes commits to the remote.
 // When remote credentials are configured (for Hosted Dolt), sets DOLT_REMOTE_PASSWORD
 // env var and passes --user flag to authenticate.

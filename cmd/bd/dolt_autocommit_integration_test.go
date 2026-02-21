@@ -122,8 +122,8 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 
 	before := doltHeadCommit(t, tmpDir, env)
 
-	// A write command should create a new Dolt commit (auto-commit default is on in embedded mode).
-	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "create", "Auto-commit test", "--json")
+	// Explicitly enable auto-commit=on (default is now "batch" in embedded mode).
+	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "on", "create", "Auto-commit test", "--json")
 	if err != nil {
 		t.Fatalf("bd create failed: %v\n%s", err, out)
 	}
@@ -148,13 +148,73 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	}
 
 	// A read-only command should not create another commit.
-	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "list")
+	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "on", "list")
 	if err != nil {
 		t.Fatalf("bd list failed: %v\n%s", err, out)
 	}
 	afterList := doltHeadCommit(t, tmpDir, env)
 	if afterList != after {
 		t.Fatalf("expected Dolt HEAD unchanged after read command; before=%s after=%s", after, afterList)
+	}
+}
+
+func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("dolt integration test not supported on windows")
+	}
+
+	tmpDir := createTempDirWithCleanup(t)
+	setupGitRepoForIntegration(t, tmpDir)
+
+	env := []string{
+		"BEADS_TEST_MODE=1",
+		"BEADS_NO_DAEMON=1",
+	}
+
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	if initErr != nil {
+		if isDoltBackendUnavailable(initOut) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	before := doltHeadCommit(t, tmpDir, env)
+
+	// In batch mode (default for embedded), writes should NOT advance HEAD.
+	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "create", "Batch test 1", "--json")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\n%s", err, out)
+	}
+
+	afterCreate := doltHeadCommit(t, tmpDir, env)
+	if afterCreate != before {
+		t.Fatalf("expected Dolt HEAD unchanged in batch mode; before=%s after=%s", before, afterCreate)
+	}
+
+	// Create another issue — still deferred.
+	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "create", "Batch test 2", "--json")
+	if err != nil {
+		t.Fatalf("bd create (2) failed: %v\n%s", err, out)
+	}
+
+	afterCreate2 := doltHeadCommit(t, tmpDir, env)
+	if afterCreate2 != before {
+		t.Fatalf("expected Dolt HEAD still unchanged; before=%s after=%s", before, afterCreate2)
+	}
+
+	// An explicit "bd dolt commit" should commit all accumulated changes.
+	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "dolt", "commit")
+	if err != nil {
+		t.Fatalf("bd dolt commit failed: %v\n%s", err, out)
+	}
+
+	afterCommit := doltHeadCommit(t, tmpDir, env)
+	if afterCommit == before {
+		t.Fatalf("expected Dolt HEAD to advance after explicit commit; before=%s after=%s", before, afterCommit)
 	}
 }
 

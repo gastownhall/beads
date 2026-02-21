@@ -40,6 +40,18 @@ For data interchange:
 			return
 		}
 
+		// Batch commit: if auto-commit mode is "batch", commit all pending
+		// changes as a single logical Dolt commit before sync operations.
+		// This is the primary commit boundary for batch mode.
+		if mode, err := getDoltAutoCommitMode(); err == nil && mode == doltAutoCommitBatch {
+			if _, commitErr := store.CommitPending(rootCtx, getActor()); commitErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: batch commit failed: %v\n", commitErr)
+			}
+		}
+
+		// Mark as explicit commit so PersistentPostRun doesn't double-commit
+		commandDidExplicitDoltCommit = true
+
 		// In dolt-native mode, skip JSONL export — Dolt is the source of truth.
 		// Only push to Dolt remote if configured.
 		if config.GetSyncMode() == config.SyncModeDoltNative {
