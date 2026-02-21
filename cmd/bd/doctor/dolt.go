@@ -580,7 +580,11 @@ func CheckLockHealth(path string) DoctorCheck {
 
 	var warnings []string
 
-	// Check for stale noms LOCK files
+	// Check for noms LOCK files that are actively held by another process.
+	// Dolt's noms chunk store creates a LOCK file on open and releases the
+	// flock on close, but never deletes the file. We probe the flock to
+	// distinguish an actively held lock (real contention) from a stale
+	// file left by a previous process (harmless).
 	doltDir := filepath.Join(beadsDir, "dolt")
 	if dbEntries, err := os.ReadDir(doltDir); err == nil {
 		for _, dbEntry := range dbEntries {
@@ -588,9 +592,16 @@ func CheckLockHealth(path string) DoctorCheck {
 				continue
 			}
 			nomsLock := filepath.Join(doltDir, dbEntry.Name(), ".dolt", "noms", "LOCK")
-			if _, err := os.Stat(nomsLock); err == nil {
-				warnings = append(warnings,
-					fmt.Sprintf("noms LOCK file exists at dolt/%s/.dolt/noms/LOCK — may block database access", dbEntry.Name()))
+			if f, err := os.OpenFile(nomsLock, os.O_RDWR, 0); err == nil { //nolint:gosec // controlled path
+				if lockErr := lockfile.FlockExclusiveNonBlocking(f); lockErr != nil {
+					// Lock is actively held by another process
+					warnings = append(warnings,
+						fmt.Sprintf("noms LOCK at dolt/%s/.dolt/noms/LOCK is held by another process — may block database access", dbEntry.Name()))
+				} else {
+					// File exists but lock is not held — stale file, not a problem
+					_ = lockfile.FlockUnlock(f)
+				}
+				_ = f.Close()
 			}
 		}
 	}

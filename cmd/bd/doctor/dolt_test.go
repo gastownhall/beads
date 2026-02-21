@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -264,7 +265,10 @@ func TestCheckLockHealth_NoIssues(t *testing.T) {
 	}
 }
 
-func TestCheckLockHealth_DetectsNomsLOCK(t *testing.T) {
+func TestCheckLockHealth_UnlockedNomsLOCK(t *testing.T) {
+	// A noms LOCK file that is NOT flock'd should not produce a warning.
+	// This is the common case: a previous bd process created the file,
+	// released the flock on close, but the file persists on disk.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	nomsDir := filepath.Join(beadsDir, "dolt", "beads", ".dolt", "noms")
@@ -283,8 +287,45 @@ func TestCheckLockHealth_DetectsNomsLOCK(t *testing.T) {
 	}
 
 	check := CheckLockHealth(tmpDir)
+	if check.Status != StatusOK {
+		t.Errorf("expected OK status with unlocked noms LOCK file, got %s (detail: %s)", check.Status, check.Detail)
+	}
+}
+
+func TestCheckLockHealth_HeldNomsLOCK(t *testing.T) {
+	// A noms LOCK file that IS flock'd should produce a warning —
+	// another process is actively using the database.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	nomsDir := filepath.Join(beadsDir, "dolt", "beads", ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	if err := os.WriteFile(lockPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold an exclusive flock on the LOCK file to simulate an active dolt process
+	f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
+		t.Fatalf("failed to acquire flock: %v", err)
+	}
+	defer func() { _ = lockfile.FlockUnlock(f) }()
+
+	check := CheckLockHealth(tmpDir)
 	if check.Status != StatusWarning {
-		t.Errorf("expected Warning status with noms LOCK present, got %s", check.Status)
+		t.Errorf("expected Warning status with held noms LOCK, got %s", check.Status)
 	}
 	if !strings.Contains(check.Detail, "noms LOCK") {
 		t.Errorf("expected detail to mention noms LOCK, got: %s", check.Detail)
