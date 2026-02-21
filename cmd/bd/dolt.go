@@ -203,9 +203,12 @@ var doltCommitCmd = &cobra.Command{
 	Short: "Create a Dolt commit from pending changes",
 	Long: `Create a Dolt commit from any uncommitted changes in the working set.
 
-This is useful before push operations that require a clean working set.
-Normally, auto-commit handles this after each bd write command, but manual
-commit may be needed if auto-commit was off or changes were made externally.
+This is the primary commit point for batch mode. When auto-commit is set to
+"batch", changes accumulate in the working set across multiple bd commands and
+are committed together here with a descriptive summary message.
+
+Also useful before push operations that require a clean working set, or when
+auto-commit was off or changes were made externally.
 
 For more options (--stdin, custom messages), see: bd vc commit`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -217,17 +220,29 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
-			msg = "bd: manual commit (dolt commit)"
-		}
-		if err := st.Commit(ctx, msg); err != nil {
-			errLower := strings.ToLower(err.Error())
-			if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
+			// No explicit message — use CommitPending which generates a
+			// descriptive summary of accumulated changes.
+			committed, err := st.CommitPending(ctx, getActor())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if !committed {
 				fmt.Println("Nothing to commit.")
 				return
 			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		} else {
+			if err := st.Commit(ctx, msg); err != nil {
+				errLower := strings.ToLower(err.Error())
+				if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
+					fmt.Println("Nothing to commit.")
+					return
+				}
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
+		commandDidExplicitDoltCommit = true
 		fmt.Println("Committed.")
 	},
 }
