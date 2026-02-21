@@ -367,6 +367,7 @@ func runWispList(cmd *cobra.Command, args []string) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral: &ephemeralFlag,
+		Limit:     5000,
 	}
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
@@ -572,6 +573,7 @@ func runWispGC(cmd *cobra.Command, args []string) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral: &ephemeralFlag,
+		Limit:     5000,
 	}
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
@@ -647,6 +649,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool) {
 	filter := types.IssueFilter{
 		Status:    &statusClosed,
 		Ephemeral: &ephemeralTrue,
+		Limit:     5000,
 	}
 
 	closedIssues, err := store.SearchIssues(ctx, "", filter)
