@@ -455,6 +455,14 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Dolt health checks (connection, schema, sync, status via AccessLock)
+	// Run BEFORE federation checks: federation opens Dolt connections that may
+	// leave noms LOCK files on disk. CheckLockHealth (inside RunDoltHealthChecks)
+	// must run first to avoid false positives from doctor's own connections (#1925).
+	for _, dc := range doctor.RunDoltHealthChecks(path) {
+		result.Checks = append(result.Checks, convertDoctorCheck(dc))
+	}
+
 	// Federation health checks (bd-wkumz.6)
 	// Check 8d: Federation remotesapi port accessibility
 	remotesAPICheck := convertWithCategory(doctor.CheckFederationRemotesAPI(path), doctor.CategoryFederation)
@@ -691,11 +699,6 @@ func runDiagnostics(path string) doctorResult {
 	kvSyncCheck := convertDoctorCheck(doctor.CheckKVSyncStatus(path))
 	result.Checks = append(result.Checks, kvSyncCheck)
 	// Don't fail overall check for KV sync warning, just inform
-
-	// Dolt health checks (connection, schema, sync, status via AccessLock)
-	for _, dc := range doctor.RunDoltHealthChecks(path) {
-		result.Checks = append(result.Checks, convertDoctorCheck(dc))
-	}
 
 	// Check 32: Dolt locks (uncommitted changes)
 	doltLocksCheck := convertDoctorCheck(doctor.CheckDoltLocks(path))
