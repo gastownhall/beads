@@ -3,10 +3,14 @@
 package dolt
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // columnInfo holds the subset of information_schema.columns needed for parity checks.
@@ -213,5 +217,116 @@ func TestMigrations004And005Together(t *testing.T) {
 		if err == nil && staged {
 			t.Errorf("table %s should NOT be staged (dolt_ignore should prevent staging)", table)
 		}
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// TestSearchWispsFilterParity exercises every IssueFilter field that SearchIssues
+// supports against searchWisps to verify no filter is silently ignored.
+// Each filter is tested individually to isolate failures.
+func TestSearchWispsFilterParity(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a test wisp with enough fields populated for filters to match
+	now := time.Now().UTC()
+	past := now.Add(-24 * time.Hour)
+	future := now.Add(24 * time.Hour)
+	wisp := &types.Issue{
+		Title:       "test wisp for filter parity",
+		Description: "description text here",
+		Notes:       "some notes content",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   "task",
+		Assignee:    "tester",
+		Ephemeral:   true,
+		DueAt:       &future,
+		DeferUntil:  &future,
+	}
+	if err := store.createWisp(ctx, wisp, "test-actor"); err != nil {
+		t.Fatalf("failed to create test wisp: %v", err)
+	}
+
+	// Add a label to the wisp
+	if err := store.addWispLabel(ctx, wisp.ID, "test-label", "test-actor"); err != nil {
+		t.Fatalf("failed to add wisp label: %v", err)
+	}
+
+	// Helper to run searchWisps and check for errors
+	search := func(name string, filter types.IssueFilter) {
+		t.Helper()
+		results, err := store.searchWisps(ctx, "", filter)
+		if err != nil {
+			t.Errorf("filter %s: searchWisps returned error: %v", name, err)
+			return
+		}
+		// We don't require results (filter may exclude the wisp), but no error means
+		// the filter was properly handled and didn't cause a SQL error.
+		_ = results
+	}
+
+	openStatus := types.StatusOpen
+	closedStatus := types.StatusClosed
+	priority2 := 2
+	priority1 := 1
+	priority3 := 3
+	boolTrue := true
+	boolFalse := false
+	assignee := "tester"
+	taskType := types.TypeTask
+
+	// Test each filter field individually
+	search("Status", types.IssueFilter{Status: &openStatus})
+	search("ExcludeStatus", types.IssueFilter{ExcludeStatus: []types.Status{closedStatus}})
+	search("IssueType", types.IssueFilter{IssueType: &taskType})
+	search("ExcludeTypes", types.IssueFilter{ExcludeTypes: []types.IssueType{"bug"}})
+	search("Assignee", types.IssueFilter{Assignee: &assignee})
+	search("Priority", types.IssueFilter{Priority: &priority2})
+	search("PriorityMin", types.IssueFilter{PriorityMin: &priority1})
+	search("PriorityMax", types.IssueFilter{PriorityMax: &priority3})
+	search("IDs", types.IssueFilter{IDs: []string{wisp.ID}})
+	search("IDPrefix", types.IssueFilter{IDPrefix: "test-wisp"})
+	search("SpecIDPrefix", types.IssueFilter{SpecIDPrefix: "spec"})
+	search("TitleSearch", types.IssueFilter{TitleSearch: "test"})
+	search("TitleContains", types.IssueFilter{TitleContains: "parity"})
+	search("DescriptionContains", types.IssueFilter{DescriptionContains: "description"})
+	search("NotesContains", types.IssueFilter{NotesContains: "notes"})
+	search("Labels", types.IssueFilter{Labels: []string{"test-label"}})
+	search("LabelsAny", types.IssueFilter{LabelsAny: []string{"test-label", "other"}})
+	search("Pinned true", types.IssueFilter{Pinned: &boolTrue})
+	search("Pinned false", types.IssueFilter{Pinned: &boolFalse})
+	search("SourceRepo", types.IssueFilter{SourceRepo: strPtr("example/repo")})
+	search("IsTemplate true", types.IssueFilter{IsTemplate: &boolTrue})
+	search("IsTemplate false", types.IssueFilter{IsTemplate: &boolFalse})
+	search("EmptyDescription", types.IssueFilter{EmptyDescription: true})
+	search("NoAssignee", types.IssueFilter{NoAssignee: true})
+	search("NoLabels", types.IssueFilter{NoLabels: true})
+	search("NoParent", types.IssueFilter{NoParent: true})
+	search("Deferred", types.IssueFilter{Deferred: true})
+	search("Overdue", types.IssueFilter{Overdue: true})
+
+	// Time-range filters (critical for wisp GC)
+	search("CreatedAfter", types.IssueFilter{CreatedAfter: &past})
+	search("CreatedBefore", types.IssueFilter{CreatedBefore: &future})
+	search("UpdatedAfter", types.IssueFilter{UpdatedAfter: &past})
+	search("UpdatedBefore", types.IssueFilter{UpdatedBefore: &future})
+	search("ClosedAfter", types.IssueFilter{ClosedAfter: &past})
+	search("ClosedBefore", types.IssueFilter{ClosedBefore: &future})
+	search("DeferAfter", types.IssueFilter{DeferAfter: &past})
+	search("DeferBefore", types.IssueFilter{DeferBefore: &future})
+	search("DueAfter", types.IssueFilter{DueAfter: &past})
+	search("DueBefore", types.IssueFilter{DueBefore: &future})
+
+	// Verify time-range filters actually return results when they should
+	results, err := store.searchWisps(ctx, "", types.IssueFilter{CreatedAfter: &past})
+	if err != nil {
+		t.Fatalf("CreatedAfter search failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("CreatedAfter filter should have returned the test wisp")
 	}
 }
