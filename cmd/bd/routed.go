@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -67,14 +69,16 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltSto
 		// Step 2: Resolve and get from routed store
 		result, err := resolveAndGetFromStore(ctx, routedStorage.Storage, id, true)
 		if err != nil {
+			if !errors.Is(err, storage.ErrNotFound) {
+				_ = routedStorage.Close()
+				return nil, err
+			}
+			// Not found in routed store — fall through to local store
 			_ = routedStorage.Close()
-			return nil, err
-		}
-		if result != nil {
+		} else {
 			result.closeFn = func() { _ = routedStorage.Close() }
 			return result, nil
 		}
-		_ = routedStorage.Close()
 	}
 
 	// Step 3: Fall back to local store
@@ -93,9 +97,6 @@ func resolveAndGetFromStore(ctx context.Context, s *dolt.DoltStore, id string, r
 	issue, err := s.GetIssue(ctx, resolvedID)
 	if err != nil {
 		return nil, err
-	}
-	if issue == nil {
-		return nil, nil
 	}
 
 	return &RoutedResult{

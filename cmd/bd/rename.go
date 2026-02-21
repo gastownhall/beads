@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -58,19 +60,19 @@ func runRename(cmd *cobra.Command, args []string) error {
 	// Check if old issue exists
 	oldIssue, err := store.GetIssue(ctx, oldID)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("issue %s not found", oldID)
+		}
 		return fmt.Errorf("failed to get issue %s: %w", oldID, err)
-	}
-	if oldIssue == nil {
-		return fmt.Errorf("issue %s not found", oldID)
 	}
 
 	// Check if new ID already exists
-	existing, err := store.GetIssue(ctx, newID)
-	if err != nil {
-		return fmt.Errorf("failed to check for existing issue: %w", err)
-	}
-	if existing != nil {
+	_, err = store.GetIssue(ctx, newID)
+	if err == nil {
 		return fmt.Errorf("issue %s already exists", newID)
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("failed to check for existing issue: %w", err)
 	}
 
 	// Update the issue ID

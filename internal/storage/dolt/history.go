@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -176,7 +177,7 @@ func (s *DoltStore) getIssueAsOf(ctx context.Context, issueID string, ref string
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, fmt.Errorf("%w: issue %s as of %s", storage.ErrNotFound, issueID, ref)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue as of %s: %w", ref, err)

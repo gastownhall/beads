@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -42,11 +44,11 @@ This is read-only and does not modify the database or git state.`,
 		// Get the issue
 		issue, err := store.GetIssue(ctx, issueID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: issue '%s' not found: %v\n", issueID, err)
-			os.Exit(1)
-		}
-		if issue == nil {
-			fmt.Fprintf(os.Stderr, "Error: issue '%s' not found\n", issueID)
+			if errors.Is(err, storage.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "Error: issue '%s' not found\n", issueID)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: issue '%s' not found: %v\n", issueID, err)
+			}
 			os.Exit(1)
 		}
 

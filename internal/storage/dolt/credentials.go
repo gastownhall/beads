@@ -153,7 +153,7 @@ func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.Federat
 }
 
 // GetFederationPeer retrieves a federation peer by name.
-// Returns nil if peer doesn't exist.
+// Returns storage.ErrNotFound (wrapped) if the peer does not exist.
 func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
 	var peer storage.FederationPeer
 	var encryptedPwd []byte
@@ -166,7 +166,7 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 	`, name).Scan(&peer.Name, &peer.RemoteURL, &username, &encryptedPwd, &peer.Sovereignty, &lastSync, &peer.CreatedAt, &peer.UpdatedAt)
 
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, fmt.Errorf("%w: federation peer %s", storage.ErrNotFound, name)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get federation peer: %w", err)

@@ -17,6 +17,16 @@ import (
 // claimed by another user. The error message contains the current assignee.
 var ErrAlreadyClaimed = errors.New("issue already claimed")
 
+// ErrNotFound is returned when a requested entity does not exist in the database.
+var ErrNotFound = errors.New("not found")
+
+// ErrNotInitialized is returned when the database has not been initialized
+// (e.g., issue_prefix config is missing).
+var ErrNotInitialized = errors.New("database not initialized")
+
+// ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
+var ErrPrefixMismatch = errors.New("prefix mismatch")
+
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
 // alternative implementations (mocks, proxies, etc.) can be substituted.

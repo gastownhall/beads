@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -93,11 +95,11 @@ Force: Delete and orphan dependents
 		// Get the issue to be deleted
 		issue, err := store.GetIssue(ctx, issueID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if issue == nil {
-			fmt.Fprintf(os.Stderr, "Error: issue %s not found\n", issueID)
+			if errors.Is(err, storage.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "Error: issue %s not found\n", issueID)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			os.Exit(1)
 		}
 		// Find all connected issues (dependencies in both directions)
@@ -332,11 +334,12 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	for _, id := range issueIDs {
 		issue, err := store.GetIssue(ctx, id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting issue %s: %v\n", id, err)
-			os.Exit(1)
-		}
-		if issue == nil {
-			notFound = append(notFound, id)
+			if errors.Is(err, storage.ErrNotFound) {
+				notFound = append(notFound, id)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error getting issue %s: %v\n", id, err)
+				os.Exit(1)
+			}
 		} else {
 			issues[id] = issue
 		}
@@ -450,11 +453,12 @@ func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade boo
 	for _, id := range issueIDs {
 		issue, err := store.GetIssue(ctx, id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting issue %s: %v\n", id, err)
-			os.Exit(1)
-		}
-		if issue == nil {
-			notFound = append(notFound, id)
+			if errors.Is(err, storage.ErrNotFound) {
+				notFound = append(notFound, id)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error getting issue %s: %v\n", id, err)
+				os.Exit(1)
+			}
 		} else {
 			issues[id] = issue
 		}

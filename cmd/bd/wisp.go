@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -208,14 +210,13 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		}
 
 		// Load the proto
-		// Note: GetIssue returns (nil, nil) for not-found, so check both
 		protoIssue, err := store.GetIssue(ctx, protoID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
-			os.Exit(1)
-		}
-		if protoIssue == nil {
-			fmt.Fprintf(os.Stderr, "Error: proto not found: %s\n", protoID)
+			if errors.Is(err, storage.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "Error: proto not found: %s\n", protoID)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error loading proto %s: %v\n", protoID, err)
+			}
 			os.Exit(1)
 		}
 		if !isProtoIssue(protoIssue) {
@@ -299,8 +300,7 @@ func isProtoIssue(issue *types.Issue) bool {
 // resolvePartialIDDirect resolves a partial ID directly from store
 func resolvePartialIDDirect(ctx context.Context, partial string) (string, error) {
 	// Try direct lookup first
-	// Note: GetIssue returns (nil, nil) for not-found, so check both
-	if issue, err := store.GetIssue(ctx, partial); err == nil && issue != nil {
+	if issue, err := store.GetIssue(ctx, partial); err == nil {
 		return issue.ID, nil
 	}
 	// Search by prefix

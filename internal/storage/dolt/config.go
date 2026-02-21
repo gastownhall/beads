@@ -18,6 +18,19 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set config %s: %w", key, err)
 	}
+
+	// Invalidate caches for keys that affect cached data
+	s.cacheMu.Lock()
+	switch key {
+	case "status.custom":
+		s.customStatusCached = false
+		s.customStatusCache = nil
+	case "types.custom":
+		s.customTypeCached = false
+		s.customTypeCache = nil
+	}
+	s.cacheMu.Unlock()
+
 	return nil
 }
 
@@ -96,7 +109,17 @@ func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error)
 // GetCustomStatuses returns custom status values from config.
 // If the database doesn't have custom statuses configured, falls back to config.yaml.
 // Returns an empty slice if no custom statuses are configured.
+// Results are cached per DoltStore lifetime and invalidated when SetConfig
+// updates the "status.custom" key.
 func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
+	s.cacheMu.Lock()
+	if s.customStatusCached {
+		result := s.customStatusCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
 	value, err := s.GetConfig(ctx, "status.custom")
 	if err != nil {
 		// On database error, try fallback to config.yaml
@@ -105,16 +128,20 @@ func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
 		}
 		return nil, err
 	}
+
+	var result []string
 	if value != "" {
-		return parseCommaSeparatedList(value), nil
+		result = parseCommaSeparatedList(value)
+	} else if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+		result = yamlStatuses
 	}
 
-	// Fallback to config.yaml when database doesn't have status.custom set.
-	if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-		return yamlStatuses, nil
-	}
+	s.cacheMu.Lock()
+	s.customStatusCache = result
+	s.customStatusCached = true
+	s.cacheMu.Unlock()
 
-	return nil, nil
+	return result, nil
 }
 
 // GetCustomTypes returns custom issue type values from config.
@@ -122,7 +149,17 @@ func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
 // This fallback is essential during operations when the database connection is
 // temporarily unavailable or when types.custom hasn't been configured yet.
 // Returns an empty slice if no custom types are configured.
+// Results are cached per DoltStore lifetime and invalidated when SetConfig
+// updates the "types.custom" key.
 func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
+	s.cacheMu.Lock()
+	if s.customTypeCached {
+		result := s.customTypeCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
 	value, err := s.GetConfig(ctx, "types.custom")
 	if err != nil {
 		// On database error, try fallback to config.yaml
@@ -131,18 +168,20 @@ func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 		}
 		return nil, err
 	}
+
+	var result []string
 	if value != "" {
-		return parseCommaSeparatedList(value), nil
+		result = parseCommaSeparatedList(value)
+	} else if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
+		result = yamlTypes
 	}
 
-	// Fallback to config.yaml when database doesn't have types.custom set.
-	// This allows operations to work with custom types defined in config.yaml
-	// before they're persisted to the database.
-	if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
-		return yamlTypes, nil
-	}
+	s.cacheMu.Lock()
+	s.customTypeCache = result
+	s.customTypeCached = true
+	s.cacheMu.Unlock()
 
-	return nil, nil
+	return result, nil
 }
 
 // parseCommaSeparatedList splits a comma-separated string into a slice of trimmed entries.

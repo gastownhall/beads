@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
@@ -420,12 +422,12 @@ var createCmd = &cobra.Command{
 		if parentID != "" {
 			ctx := rootCtx
 			// Validate parent exists before generating child ID
-			parentIssue, err := store.GetIssue(ctx, parentID)
+			_, err := store.GetIssue(ctx, parentID)
 			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					FatalError("parent issue %s not found", parentID)
+				}
 				FatalError("failed to check parent issue: %v", err)
-			}
-			if parentIssue == nil {
-				FatalError("parent issue %s not found", parentID)
 			}
 			childID, err := store.GetNextChildID(ctx, parentID)
 			if err != nil {

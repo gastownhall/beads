@@ -506,11 +506,24 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		return nil, err
 	}
 
-	// Step 4: Hydrate blocked issues and build results
+	// Step 4: Batch-fetch all blocked issues and build results
+	blockedIDs := make([]string, 0, len(blockerMap))
+	for id := range blockerMap {
+		blockedIDs = append(blockedIDs, id)
+	}
+	issues, err := s.GetIssuesByIDs(ctx, blockedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-fetch blocked issues: %w", err)
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, issue := range issues {
+		issueMap[issue.ID] = issue
+	}
+
 	var results []*types.BlockedIssue
 	for id, blockerIDs := range blockerMap {
-		issue, err := s.GetIssue(ctx, id)
-		if err != nil || issue == nil {
+		issue, ok := issueMap[id]
+		if !ok || issue == nil {
 			continue
 		}
 
@@ -587,7 +600,53 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 
-	// Step 3: For each epic with children, check child statuses
+	// Step 3: Batch-fetch statuses for all child issues across all epics
+	allChildIDs := make([]string, 0)
+	for _, children := range epicChildMap {
+		allChildIDs = append(allChildIDs, children...)
+	}
+	childStatusMap := make(map[string]string)
+	if len(allChildIDs) > 0 {
+		placeholders := make([]string, len(allChildIDs))
+		args := make([]interface{}, len(allChildIDs))
+		for i, id := range allChildIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
+		statusQuery := fmt.Sprintf("SELECT id, status FROM issues WHERE id IN (%s)", strings.Join(placeholders, ","))
+		statusRows, err := s.queryContext(ctx, statusQuery, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
+		}
+		for statusRows.Next() {
+			var id, status string
+			if err := statusRows.Scan(&id, &status); err != nil {
+				_ = statusRows.Close()
+				return nil, err
+			}
+			childStatusMap[id] = status
+		}
+		_ = statusRows.Close()
+	}
+
+	// Step 4: Batch-fetch all epic issues
+	epicsWithChildren := make([]string, 0)
+	for _, epicID := range epicIDs {
+		if len(epicChildMap[epicID]) > 0 {
+			epicsWithChildren = append(epicsWithChildren, epicID)
+		}
+	}
+	epicIssues, err := s.GetIssuesByIDs(ctx, epicsWithChildren)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-fetch epic issues: %w", err)
+	}
+	epicIssueMap := make(map[string]*types.Issue, len(epicIssues))
+	for _, issue := range epicIssues {
+		epicIssueMap[issue.ID] = issue
+	}
+
+	// Step 5: Build results from cached data
 	var results []*types.EpicStatus
 	for _, epicID := range epicIDs {
 		children := epicChildMap[epicID]
@@ -595,19 +654,17 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 			continue
 		}
 
+		issue, ok := epicIssueMap[epicID]
+		if !ok || issue == nil {
+			continue
+		}
+
 		totalChildren := len(children)
 		closedChildren := 0
 		for _, childID := range children {
-			var status string
-			err := s.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", childID).Scan(&status)
-			if err == nil && types.Status(status) == types.StatusClosed {
+			if status, ok := childStatusMap[childID]; ok && types.Status(status) == types.StatusClosed {
 				closedChildren++
 			}
-		}
-
-		issue, err := s.GetIssue(ctx, epicID)
-		if err != nil || issue == nil {
-			continue
 		}
 
 		results = append(results, &types.EpicStatus{
@@ -683,47 +740,12 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
 
-	// Blocked count: use separate single-table queries with Go-level filtering
-	// to avoid Dolt's joinIter panic (slice bounds out of range at join_iters.go:192).
-	// Even IN (SELECT ...) subqueries across tables can trigger this panic because
-	// Dolt's optimizer converts them to join plans internally.
-	// Same fix pattern as GetBlockedIssues (57e25f69).
+	// Blocked count: reuse computeBlockedIDs which caches the result across
+	// GetReadyWork and GetStatistics calls within the same CLI invocation.
 	var blockedCount int
-
-	// Step 1: Get all active issue IDs (single-table scan)
-	activeIDs := make(map[string]bool)
-	activeRows, err := s.queryContext(ctx, `
-		SELECT id FROM issues
-		WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-	`)
+	blockedIDs, err := s.computeBlockedIDs(ctx)
 	if err == nil {
-		for activeRows.Next() {
-			var id string
-			if err := activeRows.Scan(&id); err == nil {
-				activeIDs[id] = true
-			}
-		}
-		_ = activeRows.Close() // Redundant close for safety (rows already iterated)
-
-		// Step 2: Get all blocking dependencies (single-table scan)
-		depRows, err := s.queryContext(ctx, `
-			SELECT issue_id, depends_on_id FROM dependencies
-			WHERE type = 'blocks'
-		`)
-		if err == nil {
-			blockedSet := make(map[string]bool)
-			for depRows.Next() {
-				var issueID, blockerID string
-				if err := depRows.Scan(&issueID, &blockerID); err == nil {
-					// Step 3: Filter in Go — both sides must be active
-					if activeIDs[issueID] && activeIDs[blockerID] {
-						blockedSet[issueID] = true
-					}
-				}
-			}
-			_ = depRows.Close() // Redundant close for safety (rows already iterated)
-			blockedCount = len(blockedSet)
-		}
+		blockedCount = len(blockedIDs)
 	}
 	stats.BlockedIssues = blockedCount
 
@@ -741,8 +763,18 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 // computeBlockedIDs returns the set of issue IDs that are blocked by active issues.
 // Uses separate single-table queries with Go-level filtering to avoid Dolt's
 // joinIter panic (slice bounds out of range at join_iters.go:192).
+// Results are cached per DoltStore lifetime and invalidated when dependencies
+// change (AddDependency, RemoveDependency).
 // Caller must hold s.mu (at least RLock).
 func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
+	s.cacheMu.Lock()
+	if s.blockedIDsCached {
+		result := s.blockedIDsCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
 	// Step 1: Get all active issue IDs (single-table scan)
 	activeIDs := make(map[string]bool)
 	activeRows, err := s.queryContext(ctx, `
@@ -795,7 +827,24 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 	for id := range blockedSet {
 		result = append(result, id)
 	}
+
+	s.cacheMu.Lock()
+	s.blockedIDsCache = result
+	s.blockedIDsCacheMap = blockedSet
+	s.blockedIDsCached = true
+	s.cacheMu.Unlock()
+
 	return result, nil
+}
+
+// invalidateBlockedIDsCache clears the blocked IDs cache so the next call
+// to computeBlockedIDs will recompute from the database.
+func (s *DoltStore) invalidateBlockedIDsCache() {
+	s.cacheMu.Lock()
+	s.blockedIDsCached = false
+	s.blockedIDsCache = nil
+	s.blockedIDsCacheMap = nil
+	s.cacheMu.Unlock()
 }
 
 // GetMoleculeProgress returns progress stats for a molecule
@@ -833,22 +882,48 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 
-	// Step 2: Get status for each child (single-table lookups)
-	for _, childID := range childIDs {
-		var status string
-		var createdAt sql.NullString
-		err := s.db.QueryRowContext(ctx, "SELECT status, created_at FROM issues WHERE id = ?", childID).Scan(&status, &createdAt)
-		if err != nil {
-			continue
+	// Step 2: Batch-fetch status for all children (single batched query)
+	if len(childIDs) > 0 {
+		placeholders := make([]string, len(childIDs))
+		args := make([]interface{}, len(childIDs))
+		for i, id := range childIDs {
+			placeholders[i] = "?"
+			args[i] = id
 		}
-		stats.Total++
-		switch types.Status(status) {
-		case types.StatusClosed:
-			stats.Completed++
-		case types.StatusInProgress:
-			stats.InProgress++
-			if stats.CurrentStepID == "" {
-				stats.CurrentStepID = childID
+		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
+		query := fmt.Sprintf("SELECT id, status FROM issues WHERE id IN (%s)", strings.Join(placeholders, ","))
+		statusRows, err := s.queryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
+		}
+		type childInfo struct {
+			status string
+		}
+		childMap := make(map[string]childInfo)
+		for statusRows.Next() {
+			var id, status string
+			if err := statusRows.Scan(&id, &status); err != nil {
+				_ = statusRows.Close()
+				return nil, err
+			}
+			childMap[id] = childInfo{status: status}
+		}
+		_ = statusRows.Close()
+
+		for _, childID := range childIDs {
+			info, ok := childMap[childID]
+			if !ok {
+				continue
+			}
+			stats.Total++
+			switch types.Status(info.status) {
+			case types.StatusClosed:
+				stats.Completed++
+			case types.StatusInProgress:
+				stats.InProgress++
+				if stats.CurrentStepID == "" {
+					stats.CurrentStepID = childID
+				}
 			}
 		}
 	}

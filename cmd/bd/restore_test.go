@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -164,8 +166,8 @@ func TestRestoreWithInvalidIssueID(t *testing.T) {
 	ctx := context.Background()
 	issue, err := testStore.GetIssue(ctx, "nonexistent-issue-12345")
 
-	if err != nil {
-		t.Fatalf("GetIssue returned unexpected error: %v", err)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetIssue expected ErrNotFound, got: %v", err)
 	}
 	if issue != nil {
 		t.Fatalf("GetIssue returned issue for non-existent ID: %v", issue)

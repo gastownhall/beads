@@ -80,6 +80,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}
 
+	s.invalidateBlockedIDsCache()
 	return tx.Commit()
 }
 
@@ -103,6 +104,7 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		return fmt.Errorf("failed to remove dependency: %w", err)
 	}
 
+	s.invalidateBlockedIDsCache()
 	return tx.Commit()
 }
 

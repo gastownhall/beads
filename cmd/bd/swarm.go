@@ -3,12 +3,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -627,10 +629,10 @@ Examples:
 		// Get the issue
 		issue, err := store.GetIssue(ctx, issueID)
 		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				FatalErrorRespectJSON("issue '%s' not found", issueID)
+			}
 			FatalErrorRespectJSON("failed to get issue: %v", err)
-		}
-		if issue == nil {
-			FatalErrorRespectJSON("issue '%s' not found", issueID)
 		}
 
 		var epic *types.Issue
@@ -912,10 +914,10 @@ Examples:
 		// Get the issue
 		issue, err := store.GetIssue(ctx, inputID)
 		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				FatalErrorRespectJSON("issue '%s' not found", inputID)
+			}
 			FatalErrorRespectJSON("failed to get issue: %v", err)
-		}
-		if issue == nil {
-			FatalErrorRespectJSON("issue '%s' not found", inputID)
 		}
 
 		var epicID string

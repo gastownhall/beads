@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -52,10 +54,10 @@ Examples:
 		// Verify the issue is actually a wisp
 		issue, err := store.GetIssue(ctx, fullID)
 		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				FatalErrorRespectJSON("issue %s not found", fullID)
+			}
 			FatalErrorRespectJSON("getting issue %s: %v", fullID, err)
-		}
-		if issue == nil {
-			FatalErrorRespectJSON("issue %s not found", fullID)
 		}
 		if !issue.Ephemeral {
 			FatalErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
