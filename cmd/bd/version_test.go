@@ -61,7 +61,7 @@ func TestVersionCommand(t *testing.T) {
 		output := buf.String()
 
 		// Parse JSON output
-		var result map[string]string
+		var result map[string]interface{}
 		if err := json.Unmarshal([]byte(output), &result); err != nil {
 			t.Fatalf("Failed to parse JSON output: %v", err)
 		}
@@ -72,6 +72,12 @@ func TestVersionCommand(t *testing.T) {
 		}
 		if result["build"] == "" {
 			t.Error("Expected build field to be non-empty")
+		}
+		// Verify cgo field is present and true (test file has //go:build cgo)
+		if cgo, ok := result["cgo"]; !ok {
+			t.Error("Expected cgo field to be present")
+		} else if cgo != true {
+			t.Errorf("Expected cgo=true in CGO build, got %v", cgo)
 		}
 	})
 
@@ -186,7 +192,7 @@ func TestVersionOutputWithCommitAndBranch(t *testing.T) {
 		buf.ReadFrom(r)
 		output := buf.String()
 
-		var result map[string]string
+		var result map[string]interface{}
 		if err := json.Unmarshal([]byte(output), &result); err != nil {
 			t.Fatalf("Failed to parse JSON output: %v", err)
 		}

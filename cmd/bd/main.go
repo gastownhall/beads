@@ -369,6 +369,23 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
+		// Early CGO check: non-CGO binaries cannot use the embedded Dolt backend,
+		// which is the only local storage option since v0.51.0. Detect this before
+		// any database operation to provide a clear, actionable error instead of
+		// confusing "no beads database found" messages. Server mode (pure Go MySQL
+		// driver) is allowed through. (GH#1856)
+		if !cgoAvailable() {
+			fmt.Fprintf(os.Stderr, "Error: this bd binary was built without CGO support\n\n")
+			fmt.Fprintf(os.Stderr, "Since bd v0.51.0, the embedded Dolt database backend requires CGO.\n")
+			fmt.Fprintf(os.Stderr, "This binary cannot create or open local databases.\n\n")
+			fmt.Fprintf(os.Stderr, "Solutions:\n")
+			fmt.Fprintf(os.Stderr, "  • Install via Homebrew:  brew install beads\n")
+			fmt.Fprintf(os.Stderr, "  • Download from releases: https://github.com/steveyegge/beads/releases\n")
+			fmt.Fprintf(os.Stderr, "  • Build from source:      CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest\n\n")
+			fmt.Fprintf(os.Stderr, "For more info: https://github.com/steveyegge/beads/issues/1856\n")
+			os.Exit(1)
+		}
+
 		// Protect forks from accidentally committing upstream issue database
 		ensureForkProtection()
 
