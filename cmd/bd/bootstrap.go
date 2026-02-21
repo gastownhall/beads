@@ -7,70 +7,26 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// bootstrapEmbeddedDolt checks if a JSONL-to-Dolt bootstrap is needed and runs it if so.
+// bootstrapEmbeddedDolt checks if a Dolt clone from git remote is needed and runs it if so.
 func bootstrapEmbeddedDolt(ctx context.Context, path string, cfg *dolt.Config) error {
-	// Path is the dolt subdirectory, parent is .beads directory
-	beadsDir := filepath.Dir(path)
-
 	// Dolt-in-Git bootstrap: if sync.git-remote is configured and no local
 	// dolt dir exists, clone from the git remote (refs/dolt/data).
 	if gitRemoteURL := config.GetYamlConfig("sync.git-remote"); gitRemoteURL != "" {
 		if bootstrapped, err := dolt.BootstrapFromGitRemote(ctx, path, gitRemoteURL); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: git remote bootstrap failed: %v\n", err)
-			// Fall through to JSONL bootstrap
+			return fmt.Errorf("git remote bootstrap failed: %v", err)
 		} else if bootstrapped {
 			return nil // Successfully cloned from git remote
 		}
 	}
 
-	// In dolt-native mode, JSONL is export-only backup — never auto-import.
-	// If the dolt DB doesn't exist in this mode, that's an error, not a bootstrap opportunity.
-	// This prevents split-brain: without this guard, a wrong path (from B1) would silently
-	// create a new DB from stale JSONL, diverging from the real dolt-native data.
-	if config.GetSyncMode() == config.SyncModeDoltNative {
-		if !hasDoltSubdir(path) {
-			return fmt.Errorf("dolt database not found at %s (JSONL auto-import is disabled in dolt-native sync mode; run 'bd init --backend=dolt' to create a new database)", path)
-		}
-		return nil // Dolt exists, no bootstrap needed
+	// If the dolt DB doesn't exist, that's an error — no JSONL fallback.
+	if !hasDoltSubdir(path) {
+		return fmt.Errorf("dolt database not found at %s (run 'bd init --backend=dolt' to create, or configure sync.git-remote for clone)", path)
 	}
 
-	// Load routes from routes.jsonl for bootstrap import.
-	// Routes are passed to Bootstrap to avoid import cycles (routing → dolt → routing).
-	var bootstrapRoutes []dolt.BootstrapRoute
-	if routes, err := routing.LoadRoutes(beadsDir); err == nil {
-		for _, r := range routes {
-			bootstrapRoutes = append(bootstrapRoutes, dolt.BootstrapRoute{
-				Prefix: r.Prefix,
-				Path:   r.Path,
-			})
-		}
-	}
-
-	bootstrapped, result, err := dolt.Bootstrap(ctx, dolt.BootstrapConfig{
-		BeadsDir:    beadsDir,
-		DoltPath:    path,
-		Database:    cfg.Database,
-		Routes:      bootstrapRoutes,
-	})
-	if err != nil {
-		return fmt.Errorf("bootstrap failed: %w", err)
-	}
-
-	if bootstrapped && result != nil {
-		fmt.Fprintf(os.Stderr, "Bootstrapping Dolt from JSONL...\n")
-		if len(result.ParseErrors) > 0 {
-			fmt.Fprintf(os.Stderr, "  Skipped %d malformed lines (see above for details)\n", len(result.ParseErrors))
-		}
-		fmt.Fprintf(os.Stderr, "  Imported %d issues", result.IssuesImported)
-		if result.IssuesSkipped > 0 {
-			fmt.Fprintf(os.Stderr, ", skipped %d duplicates", result.IssuesSkipped)
-		}
-		fmt.Fprintf(os.Stderr, "\n  Dolt database ready\n")
-	}
 	return nil
 }
 
