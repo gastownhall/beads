@@ -60,8 +60,8 @@ func RunDeepValidation(path string) DeepValidationResult {
 		return result
 	}
 
-	// Open database
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	// Open database (backend-aware)
+	db, closeFn, err := openDeepValidationDB(beadsDir, dbPath)
 	if err != nil {
 		check := DoctorCheck{
 			Name:     "Deep Validation",
@@ -74,7 +74,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 		result.OverallOK = false
 		return result
 	}
-	defer db.Close()
+	defer closeFn()
 
 	// Get counts for progress reporting
 	_ = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&result.TotalIssues)             // Best effort: zero counts are safe defaults for diagnostic display
