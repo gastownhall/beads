@@ -728,6 +728,12 @@ func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, erro
 
 	msg := s.buildBatchCommitMessage(ctx, actor)
 	if err := s.Commit(ctx, msg); err != nil {
+		// Dolt may report "nothing to commit" even when Status() showed changes
+		// (e.g., system tables or schema-only diffs). Treat as no-op.
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
