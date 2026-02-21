@@ -214,19 +214,7 @@ var versionChanges = []VersionChange{
 		Date:    "2026-02-20",
 		Changes: []string{
 			"FIX: Release CI FreeBSD — CGO_ENABLED=0 (zig sysroot lacks stdlib.h)",
-		},
-	},
-	{
-		Version: "0.55.3",
-		Date:    "2026-02-20",
-		Changes: []string{
 			"FIX: Release CI macOS — CGO_ENABLED=0 for darwin (zig sysroot lacks frameworks)",
-		},
-	},
-	{
-		Version: "0.55.2",
-		Date:    "2026-02-20",
-		Changes: []string{
 			"FIX: Release CI libresolv — strip -lresolv from zig wrappers (macOS uses netgo)",
 		},
 	},
