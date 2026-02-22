@@ -4,15 +4,9 @@
 #
 # bd (beads) pre-commit hook — thin shim
 #
-# Delegates to 'bd hook pre-commit' which contains the actual hook logic.
-# This pattern ensures hook behavior is always in sync with the installed
-# bd version — no manual updates needed.
-#
-# The 'bd hook' command supports:
-# - Per-worktree export state tracking
-# - Dolt in-process export (no lock deadlocks)
-# - Sync-branch routing
-# - Hook chaining configuration
+# Delegates to 'bd hooks run pre-commit' which contains the actual hook
+# logic. This pattern ensures hook behavior is always in sync with the
+# installed bd version — no manual updates needed.
 
 # Check if bd is available
 if ! command -v bd >/dev/null 2>&1; then
@@ -22,4 +16,4 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
-exec bd hook pre-commit "$@"
+exec bd hooks run pre-commit "$@"
