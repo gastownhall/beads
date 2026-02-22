@@ -7,7 +7,7 @@ import (
 
 func openDeepValidationDB(beadsDir string, sqliteDBPath string) (*sql.DB, func(), error) {
 	if info, err := os.Stat(sqliteDBPath); err == nil && info.IsDir() {
-		conn, err := openDoltDBWithLock(beadsDir)
+		conn, err := openDoltConn(beadsDir)
 		if err != nil {
 			return nil, func() {}, err
 		}

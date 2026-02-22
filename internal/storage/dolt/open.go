@@ -31,16 +31,12 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	cfg.Path = fileCfg.DatabasePath(beadsDir)
 
 	// Always apply database name from metadata.json (prefix-based naming, bd-u8rda).
-	// This must happen for both embedded and server modes; previously it was
-	// gated on IsDoltServerMode(), causing embedded-mode opens to fall back
-	// to the default "beads" database and miss the prefix-specific one.
 	if cfg.Database == "" {
 		cfg.Database = fileCfg.GetDoltDatabase()
 	}
 
-	// Merge Dolt server mode config (config provides defaults, caller can override)
+	// Merge server connection config (config provides defaults, caller can override)
 	if fileCfg.IsDoltServerMode() {
-		cfg.ServerMode = true
 		if cfg.ServerHost == "" {
 			cfg.ServerHost = fileCfg.GetDoltServerHost()
 		}

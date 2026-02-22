@@ -178,9 +178,7 @@ Examples:
 				os.Exit(1)
 			}
 			beadsDir := filepath.Dir(dbPath)
-			store, err = dolt.NewFromConfigWithOptions(rootCtx, beadsDir, &dolt.Config{
-				OpenTimeout: lockTimeout,
-			})
+			store, err = dolt.NewFromConfigWithOptions(rootCtx, beadsDir, &dolt.Config{})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)

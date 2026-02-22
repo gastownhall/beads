@@ -26,12 +26,12 @@ import (
 type storageExecutor func(store *dolt.DoltStore) error
 
 // withStorage executes an operation with either the direct store or a read-only store in daemon mode
-func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, fn storageExecutor) error {
+func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, fn storageExecutor) error {
 	if store != nil {
 		return fn(store)
 	} else if dbPath != "" {
 		// Daemon mode: open read-only connection
-		roStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, ReadOnly: true, OpenTimeout: lockTimeout})
+		roStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, ReadOnly: true})
 		if err != nil {
 			return err
 		}
@@ -42,10 +42,10 @@ func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, lock
 }
 
 // getHierarchicalChildren handles the --tree --parent combination logic
-func getHierarchicalChildren(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, parentID string) ([]*types.Issue, error) {
+func getHierarchicalChildren(ctx context.Context, store *dolt.DoltStore, dbPath string, parentID string) ([]*types.Issue, error) {
 	// First verify that the parent issue exists
 	var parentIssue *types.Issue
-	err := withStorage(ctx, store, dbPath, lockTimeout, func(s *dolt.DoltStore) error {
+	err := withStorage(ctx, store, dbPath, func(s *dolt.DoltStore) error {
 		var err error
 		parentIssue, err = s.GetIssue(ctx, parentID)
 		return err
@@ -65,7 +65,7 @@ func getHierarchicalChildren(ctx context.Context, store *dolt.DoltStore, dbPath 
 	allDescendants[parentID] = parentIssue
 
 	// Recursively find all descendants
-	err = findAllDescendants(ctx, store, dbPath, lockTimeout, parentID, allDescendants, 0, 10) // max depth 10
+	err = findAllDescendants(ctx, store, dbPath, parentID, allDescendants, 0, 10) // max depth 10
 	if err != nil {
 		return nil, fmt.Errorf("error finding descendants: %v", err)
 	}
@@ -80,14 +80,14 @@ func getHierarchicalChildren(ctx context.Context, store *dolt.DoltStore, dbPath 
 }
 
 // findAllDescendants recursively finds all descendants using parent filtering
-func findAllDescendants(ctx context.Context, store *dolt.DoltStore, dbPath string, lockTimeout time.Duration, parentID string, result map[string]*types.Issue, currentDepth, maxDepth int) error {
+func findAllDescendants(ctx context.Context, store *dolt.DoltStore, dbPath string, parentID string, result map[string]*types.Issue, currentDepth, maxDepth int) error {
 	if currentDepth >= maxDepth {
 		return nil // Prevent infinite recursion
 	}
 
 	// Get direct children using the same filter logic as regular --parent
 	var children []*types.Issue
-	err := withStorage(ctx, store, dbPath, lockTimeout, func(s *dolt.DoltStore) error {
+	err := withStorage(ctx, store, dbPath, func(s *dolt.DoltStore) error {
 		filter := types.IssueFilter{
 			ParentID: &parentID,
 		}
@@ -104,7 +104,7 @@ func findAllDescendants(ctx context.Context, store *dolt.DoltStore, dbPath strin
 		if _, exists := result[child.ID]; !exists {
 			result[child.ID] = child
 			// Recursively find this child's descendants
-			err = findAllDescendants(ctx, store, dbPath, lockTimeout, child.ID, result, currentDepth+1, maxDepth)
+			err = findAllDescendants(ctx, store, dbPath, child.ID, result, currentDepth+1, maxDepth)
 			if err != nil {
 				return err
 			}
@@ -640,7 +640,7 @@ var listCmd = &cobra.Command{
 		if prettyFormat {
 			// Special handling for --tree --parent combination (hierarchical descendants)
 			if parentID != "" {
-				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", 0, parentID)
+				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", parentID)
 				if err != nil {
 					FatalError("%v", err)
 				}

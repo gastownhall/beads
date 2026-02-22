@@ -196,7 +196,7 @@ func getGitLabConfigValue(ctx context.Context, key string) string {
 			return value
 		}
 	} else if dbPath != "" {
-		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, OpenTimeout: 5 * time.Second})
+		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
 			value, _ := tempStore.GetConfig(ctx, key)

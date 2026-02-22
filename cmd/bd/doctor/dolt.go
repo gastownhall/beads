@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	// MySQL driver for connecting to dolt sql-server
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -16,14 +17,18 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// openDoltDBViaServer connects to the Dolt SQL server using the MySQL protocol.
-// The database is selected in the DSN, so no USE statement is needed.
-// If cfg is nil, default connection parameters are used.
-func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
+// openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.
+func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
 	host := configfile.DefaultDoltServerHost
 	port := configfile.DefaultDoltServerPort
 	user := configfile.DefaultDoltServerUser
 	database := configfile.DefaultDoltDatabase
+	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	if cfg != nil {
 		host = cfg.GetDoltServerHost()
@@ -31,8 +36,6 @@ func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
 		user = cfg.GetDoltServerUser()
 		database = cfg.GetDoltDatabase()
 	}
-
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	var connStr string
 	if password != "" {
@@ -45,7 +48,7 @@ func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open server connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to open server connection: %w", err)
 	}
 
 	db.SetMaxOpenConns(2)
@@ -58,13 +61,13 @@ func openDoltDBViaServer(cfg *configfile.Config) (*sql.DB, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, fmt.Errorf("server not reachable: %w", err)
+		return nil, nil, fmt.Errorf("server not reachable: %w", err)
 	}
 
-	return db, nil
+	return db, cfg, nil
 }
 
-// doltConn holds an open Dolt server connection.
+// doltConn holds an open Dolt connection.
 // Used by doctor checks to coordinate database access.
 type doltConn struct {
 	db  *sql.DB
@@ -76,16 +79,9 @@ func (c *doltConn) Close() {
 	_ = c.db.Close()
 }
 
-// openDoltDBWithLock opens a Dolt connection via the SQL server.
-// The "WithLock" name is retained for API compatibility; server mode
-// relies on the server's own locking and does not acquire advisory locks.
-func openDoltDBWithLock(beadsDir string) (*doltConn, error) {
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
-	}
-
-	db, err := openDoltDBViaServer(cfg)
+// openDoltConn opens a Dolt connection for doctor checks.
+func openDoltConn(beadsDir string) (*doltConn, error) {
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +121,7 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 	// Run lock health check before opening database (it doesn't need a connection)
 	lockCheck := CheckLockHealth(path)
 
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		errCheck := DoctorCheck{
 			Name:     "Dolt Connection",
@@ -193,7 +189,7 @@ func CheckDoltConnection(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
@@ -260,7 +256,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
@@ -345,7 +341,7 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt-JSONL Sync",
@@ -428,7 +424,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",
