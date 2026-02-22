@@ -152,6 +152,9 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 	} else if result.KeptChildren {
 		fmt.Printf("  Children preserved (--keep-children)\n")
 	}
+	if result.WispSquash {
+		fmt.Printf("  Root auto-closed: %s\n", result.MoleculeID)
+	}
 }
 
 // generateDigest creates a summary from the molecule execution
@@ -279,6 +282,15 @@ func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, c
 			fmt.Fprintf(os.Stderr, "Warning: failed to delete some children: %v\n", err)
 		}
 		result.DeletedCount = deleted
+	}
+
+	// Auto-close the root if it's a wisp — squash completes the molecule lifecycle
+	if root.Ephemeral {
+		reason := fmt.Sprintf("Squashed: %d steps → digest %s", len(children), result.DigestID)
+		if err := s.CloseIssue(ctx, root.ID, reason, actorName, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to auto-close wisp root %s: %v\n", root.ID, err)
+		}
+		result.WispSquash = true
 	}
 
 	return result, nil

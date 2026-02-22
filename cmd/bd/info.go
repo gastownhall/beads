@@ -241,6 +241,7 @@ var versionChanges = []VersionChange{
 		Version: "0.54.0",
 		Date:    "2026-02-18",
 		Changes: []string{
+			"FIX: mol squash auto-closes wisp root to prevent Dolt lock errors",
 			"FIX: Release CI zig cross-compilation cache race (--parallelism 1)",
 			"FIX: Android ARM64 build uses CGO_ENABLED=0 (server mode only)",
 			"FIX: macOS cross-builds use netgo tag with zig 0.14.0",
