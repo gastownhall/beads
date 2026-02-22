@@ -11,9 +11,10 @@ Run these commands from your repository root:
 pkill -f "bd.*daemon" 2>/dev/null || true
 
 # 2. Remove git hooks installed by Beads
-rm -f .git/hooks/pre-commit .git/hooks/post-merge .git/hooks/pre-push .git/hooks/post-checkout
+rm -f .git/hooks/pre-commit .git/hooks/prepare-commit-msg .git/hooks/post-merge .git/hooks/pre-push .git/hooks/post-checkout
 
-# 3. Remove merge driver config
+# 3. Remove git config entries
+git config --unset beads.role
 git config --unset merge.beads.driver
 git config --unset merge.beads.name
 
@@ -47,6 +48,7 @@ Beads installs these hooks in `.git/hooks/`:
 | Hook | Purpose |
 |------|---------|
 | `pre-commit` | Syncs JSONL before commits |
+| `prepare-commit-msg` | Adds beads metadata to commit messages |
 | `post-merge` | Imports changes after merges |
 | `pre-push` | Syncs before pushing |
 | `post-checkout` | Imports after branch switches |
@@ -55,6 +57,7 @@ To remove them:
 
 ```bash
 rm -f .git/hooks/pre-commit
+rm -f .git/hooks/prepare-commit-msg
 rm -f .git/hooks/post-merge
 rm -f .git/hooks/pre-push
 rm -f .git/hooks/post-checkout
@@ -70,11 +73,12 @@ Restore any backups if needed:
 mv .git/hooks/pre-commit.backup .git/hooks/pre-commit
 ```
 
-### 3. Remove Merge Driver Configuration
+### 3. Remove Git Config Entries
 
-Beads configures a custom merge driver in your git config:
+Beads adds these entries to your git config:
 
 ```bash
+git config --unset beads.role
 git config --unset merge.beads.driver
 git config --unset merge.beads.name
 ```
