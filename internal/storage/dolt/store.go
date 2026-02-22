@@ -195,13 +195,25 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 	}, backoff.WithContext(bo, ctx))
 }
 
-// execContext wraps s.db.ExecContext with retry for transient errors.
+// execContext wraps a write statement in an explicit BEGIN/COMMIT to ensure
+// durability when the Dolt server runs with autocommit disabled (the default
+// when started with --no-auto-commit). Without this, writes remain in an
+// uncommitted implicit transaction that Dolt rolls back on connection close,
+// causing silent data loss for callers that do not use db.BeginTx themselves.
 func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var result sql.Result
 	err := s.withRetry(ctx, func() error {
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
 		var execErr error
-		result, execErr = s.db.ExecContext(ctx, query, args...)
-		return execErr
+		result, execErr = tx.ExecContext(ctx, query, args...)
+		if execErr != nil {
+			_ = tx.Rollback()
+			return execErr
+		}
+		return tx.Commit()
 	})
 	return result, wrapLockError(err)
 }

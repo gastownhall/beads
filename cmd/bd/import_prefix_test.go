@@ -23,7 +23,7 @@ func TestCLI_Import_PrefixValidation_E2E(t *testing.T) {
 		bdName = "bd.exe"
 	}
 	bdBinary := filepath.Join(tmpDir, bdName)
-	
+
 	buildCmd := exec.Command("go", "build", "-o", bdBinary, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build bd: %v\nOutput: %s", err, out)
@@ -34,7 +34,7 @@ func TestCLI_Import_PrefixValidation_E2E(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0755); err != nil {
 		t.Fatalf("Failed to create proj dir: %v", err)
 	}
-	
+
 	runCmd := func(args ...string) (string, error) {
 		cmd := exec.Command(bdBinary, args...)
 		cmd.Dir = projDir

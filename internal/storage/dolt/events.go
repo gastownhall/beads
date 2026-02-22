@@ -93,9 +93,12 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 		commentTable = "comments"
 	}
 
+	// Verify issue exists — use queryRowContext for server-mode retry.
 	var exists bool
 	//nolint:gosec // G201: table is hardcoded
-	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID).Scan(&exists); err != nil {
+	if err := s.queryRowContext(ctx, func(row *sql.Row) error {
+		return row.Scan(&exists)
+	}, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID); err != nil {
 		return nil, fmt.Errorf("failed to check issue existence: %w", err)
 	}
 	if !exists {

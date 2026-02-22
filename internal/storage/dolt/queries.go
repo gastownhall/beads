@@ -436,7 +436,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	if filter.IncludeEphemeral {
 		wispFilter := types.IssueFilter{Limit: filter.Limit}
 		if filter.Status != "" {
-			s := types.Status(filter.Status)
+			s := filter.Status
 			wispFilter.Status = &s
 		}
 		wisps, wErr := s.searchWisps(ctx, "", wispFilter)

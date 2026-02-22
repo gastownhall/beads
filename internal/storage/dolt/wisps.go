@@ -137,11 +137,9 @@ func recordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, 
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func generateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix string, issue *types.Issue, actor string) (string, error) {
-	baseLength, err := getAdaptiveIDLengthFromTable(ctx, tx, table, prefix)
-	if err != nil {
-		baseLength = 6
-	}
+	baseLength := getAdaptiveIDLengthFromTable(ctx, tx, table, prefix)
 
+	var err error
 	maxLength := 8
 	if baseLength > maxLength {
 		baseLength = maxLength
@@ -169,22 +167,21 @@ func generateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix strin
 // getAdaptiveIDLengthFromTable returns the adaptive ID length based on table size.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func getAdaptiveIDLengthFromTable(ctx context.Context, tx *sql.Tx, table, prefix string) (int, error) {
+func getAdaptiveIDLengthFromTable(ctx context.Context, tx *sql.Tx, table, prefix string) int {
 	var count int
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id LIKE ?`, table), prefix+"%").Scan(&count)
-	if err != nil {
-		return 4, nil // Default for wisps (small tables)
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id LIKE ?`, table), prefix+"%").Scan(&count); err != nil {
+		return 4 // Default for wisps (small tables)
 	}
 
 	switch {
 	case count < 100:
-		return 4, nil
+		return 4
 	case count < 1000:
-		return 5, nil
+		return 5
 	case count < 10000:
-		return 6, nil
+		return 6
 	default:
-		return 7, nil
+		return 7
 	}
 }
 
@@ -331,7 +328,7 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 }
 
 // updateWisp updates fields on a wisp in the wisps table.
-func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, _ string) error {
 	setClauses := []string{"updated_at = ?"}
 	args := []interface{}{time.Now().UTC()}
 
@@ -1043,7 +1040,7 @@ func (s *DoltStore) getWispDependentsWithMetadata(ctx context.Context, issueID s
 }
 
 // addWispLabel adds a label to a wisp in the wisp_labels table.
-func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, actor string) error {
+func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, _ string) error {
 	_, err := s.execContext(ctx, `
 		INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES (?, ?)
 	`, issueID, label)
