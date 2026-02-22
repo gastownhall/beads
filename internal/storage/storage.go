@@ -77,7 +77,7 @@ type Storage interface {
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 
 	// Transactions
-	RunInTransaction(ctx context.Context, fn func(tx Transaction) error) error
+	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
 	// Lifecycle
 	Close() error
@@ -99,7 +99,7 @@ type Storage interface {
 //
 // # Example Usage
 //
-//	err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+//	err := store.RunInTransaction(ctx, "bd: create parent and child", func(tx storage.Transaction) error {
 //	    // Create parent issue
 //	    if err := tx.CreateIssue(ctx, parentIssue, actor); err != nil {
 //	        return err // Triggers rollback

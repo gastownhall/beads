@@ -850,7 +850,7 @@ func cookFormula(ctx context.Context, s *dolt.DoltStore, f *formula.Formula, pro
 	issuesCreated := true
 
 	// Add labels and dependencies in a transaction
-	err := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
+	err := s.RunInTransaction(ctx, fmt.Sprintf("bd: cook formula %s", protoID), func(tx storage.Transaction) error {
 		// Add labels
 		for _, l := range labels {
 			if err := tx.AddLabel(ctx, l.issueID, l.label, actor); err != nil {
@@ -871,7 +871,7 @@ func cookFormula(ctx context.Context, s *dolt.DoltStore, f *formula.Formula, pro
 	if err != nil {
 		// Clean up: delete the issues we created since labels/deps failed
 		if issuesCreated {
-			cleanupErr := s.RunInTransaction(ctx, func(tx storage.Transaction) error {
+			cleanupErr := s.RunInTransaction(ctx, "bd: cook cleanup failed formula", func(tx storage.Transaction) error {
 				for i := len(issues) - 1; i >= 0; i-- {
 					_ = tx.DeleteIssue(ctx, issues[i].ID) // Best effort cleanup
 				}
@@ -968,7 +968,7 @@ func deleteProtoSubgraph(ctx context.Context, s *dolt.DoltStore, protoID string)
 	}
 
 	// Delete in reverse order (children first)
-	return s.RunInTransaction(ctx, func(tx storage.Transaction) error {
+	return s.RunInTransaction(ctx, fmt.Sprintf("bd: delete proto subgraph %s", protoID), func(tx storage.Transaction) error {
 		for i := len(subgraph.Issues) - 1; i >= 0; i-- {
 			issue := subgraph.Issues[i]
 			if err := tx.DeleteIssue(ctx, issue.ID); err != nil {

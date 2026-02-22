@@ -25,12 +25,14 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 }
 
 // RunInTransaction executes a function within a database transaction.
+// The commitMsg is used for the DOLT_COMMIT that occurs inside the transaction,
+// making the write atomically visible in Dolt's version history.
 // Wisp routing is handled within individual transaction methods based on ID/Ephemeral flag.
-func (s *DoltStore) RunInTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
-	return s.runDoltTransaction(ctx, fn)
+func (s *DoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	return s.runDoltTransaction(ctx, commitMsg, fn)
 }
 
-func (s *DoltStore) runDoltTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
+func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	sqlTx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -50,7 +52,28 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, fn func(tx storage.T
 		return err
 	}
 
+	// DOLT_COMMIT inside the SQL transaction — atomic with the writes
+	if commitMsg != "" {
+		_, err := sqlTx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString())
+		if err != nil && !isDoltNothingToCommit(err) {
+			_ = sqlTx.Rollback()
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+	}
+
 	return sqlTx.Commit()
+}
+
+// isDoltNothingToCommit returns true if the error indicates there were no
+// staged changes for Dolt to commit — a benign condition.
+func isDoltNothingToCommit(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "nothing to commit") ||
+		(strings.Contains(s, "no changes") && strings.Contains(s, "commit"))
 }
 
 // CreateIssue creates an issue within the transaction.

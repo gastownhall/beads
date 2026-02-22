@@ -327,7 +327,7 @@ func TestLongTransactionBlocking(t *testing.T) {
 		defer wg.Done()
 		defer close(longTxDone)
 
-		err := store.RunInTransaction(ctx, func(tx storage.Transaction) error {
+		err := store.RunInTransaction(ctx, "test: long transaction update", func(tx storage.Transaction) error {
 			// Signal that long tx has started
 			close(longTxStarted)
 
@@ -358,7 +358,7 @@ func TestLongTransactionBlocking(t *testing.T) {
 			shortCtx, shortCancel := context.WithTimeout(ctx, 5*time.Second)
 			defer shortCancel()
 
-			err := store.RunInTransaction(shortCtx, func(tx storage.Transaction) error {
+			err := store.RunInTransaction(shortCtx, fmt.Sprintf("test: short transaction %d", n), func(tx storage.Transaction) error {
 				return tx.UpdateIssue(shortCtx, issue.ID, map[string]interface{}{
 					"notes": fmt.Sprintf("Short tx %d", n),
 				}, fmt.Sprintf("short-tx-%d", n))
