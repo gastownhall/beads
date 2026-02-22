@@ -254,7 +254,7 @@ func applyConfigDefaults(cfg *Config) {
 			// Each test creates a unique temp directory, so hashing the path
 			// gives each test its own database on the shared test server.
 			h := fnv.New64a()
-			h.Write([]byte(cfg.Path))
+			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
 			cfg.Database = "beads"
