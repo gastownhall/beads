@@ -959,6 +959,10 @@ type IssueFilter struct {
 	DueAfter    *time.Time // Filter issues with due_at > this time
 	DueBefore   *time.Time // Filter issues with due_at < this time
 	Overdue     bool       // Filter issues where due_at < now AND status != closed
+
+	// Metadata field filtering (GH#1406)
+	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
+	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
 }
 
 // SortPolicy determines how ready work is ordered

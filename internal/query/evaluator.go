@@ -1,11 +1,13 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -193,6 +195,9 @@ func (e *Evaluator) applyComparison(comp *ComparisonNode, filter *types.IssueFil
 	case "mol_type":
 		return e.applyMolTypeFilter(comp, filter)
 	default:
+		if strings.HasPrefix(comp.Field, "metadata.") {
+			return e.applyMetadataFilter(comp, filter)
+		}
 		return fmt.Errorf("unknown field: %s", comp.Field)
 	}
 }
@@ -466,6 +471,55 @@ func (e *Evaluator) applyMolTypeFilter(comp *ComparisonNode, filter *types.Issue
 	return nil
 }
 
+// applyMetadataFilter handles metadata.<key>=<value> queries (GH#1406).
+func (e *Evaluator) applyMetadataFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	if comp.Op != OpEquals {
+		return fmt.Errorf("metadata fields only support = operator")
+	}
+	key := strings.TrimPrefix(comp.Field, "metadata.")
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return err
+	}
+	if filter.MetadataFields == nil {
+		filter.MetadataFields = make(map[string]string)
+	}
+	filter.MetadataFields[key] = comp.Value
+	return nil
+}
+
+// buildMetadataPredicate builds a predicate for metadata.<key>=<value> in OR queries.
+// Parses the issue's JSON metadata and compares the top-level scalar at the given key.
+func (e *Evaluator) buildMetadataPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	if comp.Op != OpEquals {
+		return nil, fmt.Errorf("metadata fields only support = operator")
+	}
+	key := strings.TrimPrefix(comp.Field, "metadata.")
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return nil, err
+	}
+	value := comp.Value
+	return func(i *types.Issue) bool {
+		if len(i.Metadata) == 0 {
+			return false
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(i.Metadata, &data); err != nil {
+			return false
+		}
+		raw, ok := data[key]
+		if !ok {
+			return false
+		}
+		// Try to unmarshal as a string first (most common case)
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s == value
+		}
+		// Fall back to comparing the raw JSON representation (numbers, bools)
+		return strings.Trim(string(raw), "\"") == value
+	}, nil
+}
+
 // applyNot applies a NOT expression to the filter.
 func (e *Evaluator) applyNot(not *NotNode, filter *types.IssueFilter) error {
 	comp, ok := not.Operand.(*ComparisonNode)
@@ -611,6 +665,9 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 	case "template":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.IsTemplate })
 	default:
+		if strings.HasPrefix(comp.Field, "metadata.") {
+			return e.buildMetadataPredicate(comp)
+		}
 		return nil, fmt.Errorf("unknown field: %s", comp.Field)
 	}
 }

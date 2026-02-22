@@ -15,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -607,6 +608,29 @@ var listCmd = &cobra.Command{
 			filter.Overdue = true
 		}
 
+		// Metadata filters (GH#1406)
+		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
+		if len(metadataFieldFlags) > 0 {
+			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
+			for _, mf := range metadataFieldFlags {
+				k, v, ok := strings.Cut(mf, "=")
+				if !ok || k == "" {
+					FatalErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
+				}
+				if err := storage.ValidateMetadataKey(k); err != nil {
+					FatalErrorRespectJSON("invalid --metadata-field key: %v", err)
+				}
+				filter.MetadataFields[k] = v
+			}
+		}
+		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
+		if hasMetadataKey != "" {
+			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
+				FatalErrorRespectJSON("invalid --has-metadata-key: %v", err)
+			}
+			filter.HasMetadataKey = hasMetadataKey
+		}
+
 		ctx := rootCtx
 
 		// Handle --rig flag: query a different rig's database
@@ -855,6 +879,10 @@ func init() {
 	listCmd.Flags().Bool("pretty", false, "Display issues in a tree format with status/priority symbols")
 	listCmd.Flags().Bool("tree", false, "Alias for --pretty: hierarchical tree format")
 	listCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-update display (implies --pretty)")
+
+	// Metadata filtering (GH#1406)
+	listCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
+	listCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 
 	// Pager control (bd-jdz3)
 	listCmd.Flags().Bool("no-pager", false, "Disable pager output")

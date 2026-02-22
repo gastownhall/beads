@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
@@ -190,6 +191,32 @@ Examples:
 			filter.PriorityMax = &priorityMax
 		}
 
+		// Metadata filters (GH#1406)
+		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
+		if len(metadataFieldFlags) > 0 {
+			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
+			for _, mf := range metadataFieldFlags {
+				k, v, ok := strings.Cut(mf, "=")
+				if !ok || k == "" {
+					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field: expected key=value, got %q\n", mf)
+					os.Exit(1)
+				}
+				if err := storage.ValidateMetadataKey(k); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field key: %v\n", err)
+					os.Exit(1)
+				}
+				filter.MetadataFields[k] = v
+			}
+		}
+		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
+		if hasMetadataKey != "" {
+			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --has-metadata-key: %v\n", err)
+				os.Exit(1)
+			}
+			filter.HasMetadataKey = hasMetadataKey
+		}
+
 		ctx := rootCtx
 
 		// Direct mode - search using store
@@ -333,6 +360,10 @@ func init() {
 	searchCmd.Flags().Bool("empty-description", false, "Filter issues with empty or missing description")
 	searchCmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
 	searchCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
+
+	// Metadata filtering (GH#1406)
+	searchCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
+	searchCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 
 	rootCmd.AddCommand(searchCmd)
 }

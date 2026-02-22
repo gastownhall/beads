@@ -617,3 +617,107 @@ func TestDurationParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestEvaluatorMetadataQueries(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name              string
+		query             string
+		expectFilter      func(*types.IssueFilter) bool
+		requiresPredicate bool
+		expectError       bool
+	}{
+		{
+			name:  "metadata.team=platform",
+			query: "metadata.team=platform",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["team"] == "platform"
+			},
+		},
+		{
+			name:  "metadata.jira.sprint=Q1",
+			query: "metadata.jira.sprint=Q1",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["jira.sprint"] == "Q1"
+			},
+		},
+		{
+			name:  "metadata combined with status",
+			query: "status=open AND metadata.team=platform",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.Status != nil && *f.Status == types.StatusOpen &&
+					f.MetadataFields != nil && f.MetadataFields["team"] == "platform"
+			},
+		},
+		{
+			name:              "metadata in OR triggers predicate",
+			query:             "metadata.team=platform OR status=open",
+			requiresPredicate: true,
+		},
+		{
+			name:        "metadata with unsupported operator",
+			query:       "metadata.team>platform",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tt.query)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EvaluateAt(%q) error = %v", tt.query, err)
+			}
+			if tt.expectFilter != nil && !tt.expectFilter(&result.Filter) {
+				t.Errorf("filter check failed for %q, filter=%+v", tt.query, result.Filter)
+			}
+			if result.RequiresPredicate != tt.requiresPredicate {
+				t.Errorf("RequiresPredicate = %v, want %v for %q", result.RequiresPredicate, tt.requiresPredicate, tt.query)
+			}
+		})
+	}
+}
+
+func TestMetadataPredicateEvaluation(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	result, err := EvaluateAt("metadata.team=platform OR status=closed", now)
+	if err != nil {
+		t.Fatalf("EvaluateAt error: %v", err)
+	}
+	if result.Predicate == nil {
+		t.Fatal("expected predicate for OR query")
+	}
+
+	// Issue with matching metadata
+	issueMatch := &types.Issue{
+		Status:   types.StatusOpen,
+		Metadata: []byte(`{"team":"platform"}`),
+	}
+	if !result.Predicate(issueMatch) {
+		t.Error("predicate should match issue with team=platform")
+	}
+
+	// Issue with non-matching metadata
+	issueNoMatch := &types.Issue{
+		Status:   types.StatusOpen,
+		Metadata: []byte(`{"team":"frontend"}`),
+	}
+	if result.Predicate(issueNoMatch) {
+		t.Error("predicate should not match issue with team=frontend")
+	}
+
+	// Issue with no metadata but closed status (matches second branch)
+	issueClosed := &types.Issue{
+		Status: types.StatusClosed,
+	}
+	if !result.Predicate(issueClosed) {
+		t.Error("predicate should match closed issue via OR")
+	}
+}

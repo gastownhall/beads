@@ -4,6 +4,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 // NormalizeMetadataValue converts metadata values to a validated JSON string.
@@ -31,4 +32,18 @@ func NormalizeMetadataValue(value interface{}) (string, error) {
 	}
 
 	return jsonStr, nil
+}
+
+// validMetadataKeyRe validates metadata key names for use in JSON path expressions.
+// Allows alphanumeric, underscore, and dot (for nested paths like "jira.sprint").
+var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+
+// ValidateMetadataKey checks that a metadata key is safe for use in JSON path
+// expressions. Keys must start with a letter or underscore and contain only
+// alphanumeric characters, underscores, and dots.
+func ValidateMetadataKey(key string) error {
+	if !validMetadataKeyRe.MatchString(key) {
+		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_.]*", key)
+	}
+	return nil
 }

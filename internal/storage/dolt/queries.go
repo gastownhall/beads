@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -260,6 +261,32 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	if filter.DueBefore != nil {
 		whereClauses = append(whereClauses, "due_at < ?")
 		args = append(args, filter.DueBefore.Format(time.RFC3339))
+	}
+
+	// Metadata existence check (GH#1406)
+	if filter.HasMetadataKey != "" {
+		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
+			return nil, err
+		}
+		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
+		args = append(args, "$."+filter.HasMetadataKey)
+	}
+
+	// Metadata field equality filters (GH#1406)
+	// Sort keys for deterministic query generation (important for testing)
+	if len(filter.MetadataFields) > 0 {
+		metaKeys := make([]string, 0, len(filter.MetadataFields))
+		for k := range filter.MetadataFields {
+			metaKeys = append(metaKeys, k)
+		}
+		sort.Strings(metaKeys)
+		for _, k := range metaKeys {
+			if err := storage.ValidateMetadataKey(k); err != nil {
+				return nil, err
+			}
+			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
+			args = append(args, "$."+k, filter.MetadataFields[k])
+		}
 	}
 
 	whereSQL := ""
