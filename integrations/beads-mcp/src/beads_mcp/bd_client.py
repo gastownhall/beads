@@ -26,6 +26,27 @@ from .models import (
 )
 
 
+def _sanitize_issue_deps(issue: dict) -> dict:
+    """Strip raw dependency records that don't match the LinkedIssue schema.
+
+    bd list/ready/blocked --json returns raw dep records (issue_id, depends_on_id,
+    type, created_at) but the Pydantic Issue model expects enriched LinkedIssue
+    objects (id, title, status, etc.). Replace raw records with empty lists and
+    preserve counts so validation succeeds.
+    """
+    for field, count_field in [
+        ("dependencies", "dependency_count"),
+        ("dependents", "dependent_count"),
+    ]:
+        raw = issue.get(field)
+        if isinstance(raw, list) and raw:
+            # Check if these are raw dep records (have depends_on_id) vs enriched
+            if isinstance(raw[0], dict) and "depends_on_id" in raw[0]:
+                issue[count_field] = len(raw)
+                issue[field] = []
+    return issue
+
+
 class BdError(Exception):
     """Base exception for bd CLI errors."""
 
@@ -403,7 +424,7 @@ class BdCliClient(BdClientBase):
         if not isinstance(data, list):
             return []
 
-        return [Issue.model_validate(issue) for issue in data]
+        return [Issue.model_validate(_sanitize_issue_deps(issue)) for issue in data]
 
     async def list_issues(self, params: ListIssuesParams | None = None) -> list[Issue]:
         """List issues with optional filters.
@@ -442,7 +463,7 @@ class BdCliClient(BdClientBase):
         if not isinstance(data, list):
             return []
 
-        return [Issue.model_validate(issue) for issue in data]
+        return [Issue.model_validate(_sanitize_issue_deps(issue)) for issue in data]
 
     async def show(self, params: ShowIssueParams) -> Issue:
         """Show issue details.
@@ -685,7 +706,7 @@ class BdCliClient(BdClientBase):
         if not isinstance(data, list):
             return []
 
-        return [BlockedIssue.model_validate(issue) for issue in data]
+        return [BlockedIssue.model_validate(_sanitize_issue_deps(issue)) for issue in data]
 
     async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis.
