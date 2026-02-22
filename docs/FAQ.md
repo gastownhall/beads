@@ -391,7 +391,7 @@ This makes bd ideal for:
 bd is a single static binary with no runtime dependencies:
 
 - **Language**: Go 1.24+
-- **Database**: Dolt (embedded or server mode)
+- **Database**: Dolt (server mode)
 - **Optional**: Git (for JSONL sync across machines)
 
 That's it! No PostgreSQL, no Redis, no Docker, no node_modules.
@@ -466,7 +466,7 @@ The hash/fingerprint/collision architecture prevents:
 
 Database corruption can occur from:
 - **Disk/hardware failures**: Power loss, disk errors, filesystem corruption
-- **Concurrent writes**: Multiple processes writing to the embedded database simultaneously
+- **Concurrent writes**: Multiple processes writing to the database simultaneously
 
 **Solution**: Reimport from JSONL (which survives in git history):
 ```bash

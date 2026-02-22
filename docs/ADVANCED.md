@@ -359,7 +359,7 @@ Understanding the role of each component:
 ### RPC Layer (Dolt Server Mode)
 - **Multi-writer access** — Connects to a running `dolt sql-server` for concurrent clients
 - **Used in multi-agent setups** — Gas Town and similar environments where multiple agents write simultaneously
-- **Not needed for single-user** — Dolt embedded mode works directly without a server
+- **Not needed for single-user** — a single Dolt server handles all local operations
 
 ### MCP Server (Optional)
 - **Protocol adapter** — Translates MCP calls to direct CLI invocations

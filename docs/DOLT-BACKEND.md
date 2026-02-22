@@ -51,7 +51,7 @@ sync:
 
 ## Server Mode (Recommended)
 
-Server mode provides 5-10x faster operations by running a persistent `dolt sql-server` that handles connections. This eliminates the 500-1000ms bootstrap overhead of embedded mode.
+Server mode provides fast operations by running a persistent `dolt sql-server` that handles connections.
 
 ### Server Mode is Enabled by Default
 
@@ -311,7 +311,7 @@ dolt:
   server_user: "root"
   server_pass: ""
 
-  # Embedded mode settings (when server_mode: false)
+  # Lock settings
   lock_retries: 30
   lock_retry_delay: "100ms"
   idle_timeout: "30s"

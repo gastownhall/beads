@@ -24,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 3. **CLI Layer** (`cmd/bd/`)
    - Cobra-based commands (one file per command: `create.go`, `list.go`, etc.)
-   - Direct database access (Dolt embedded or server mode)
+   - Direct database access (Dolt server mode)
    - All commands support `--json` for programmatic use
    - Main entry point in `main.go`
 
@@ -84,7 +84,7 @@ golangci-lint run ./...
 ## Testing Philosophy
 
 - Unit tests live next to implementation (`*_test.go`)
-- Integration tests use real Dolt databases (via embedded server in temp dirs)
+- Integration tests use real Dolt databases (via server in temp dirs)
 - Script-based tests in `cmd/bd/testdata/*.txt` (see `scripttest_test.go`)
 - RPC layer has extensive isolation and edge case coverage
 

@@ -275,7 +275,7 @@ verify_binary_has_cgo() {
 
     if strings "$binary_path" | awk '/^build[[:space:]]+CGO_ENABLED=0$/ { found=1 } END { exit(found?0:1) }'; then
         log_error "Binary produced by ${install_method} was built without CGO support"
-        log_warning "Dolt embedded mode requires CGO. Install ICU headers and retry."
+        log_warning "CGO is required for some features. Install ICU headers and retry."
         return 1
     fi
 

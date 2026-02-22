@@ -221,7 +221,7 @@ fi
 }
 
 // preCommitHookBody returns the common pre-commit hook logic.
-// Delegates to 'bd hook pre-commit' which handles all backends (Dolt in-process
+// Delegates to 'bd hook pre-commit' which handles all backends (Dolt
 // export, sync-branch routing, JSONL staging) without lock deadlocks.
 func preCommitHookBody() string {
 	return `# Check if bd is available

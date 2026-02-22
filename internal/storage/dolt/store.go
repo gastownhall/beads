@@ -93,8 +93,7 @@ type Config struct {
 }
 
 // Server mode retry configuration.
-// Server mode uses go-sql-driver/mysql which doesn't have built-in retry like the
-// embedded driver. We add retry for transient connection errors (stale pool connections,
+// We retry transient connection errors (stale pool connections,
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
 
@@ -160,7 +159,7 @@ func isRetryableError(err error) bool {
 }
 
 // isLockError returns true if the error indicates a Dolt lock contention problem.
-// These errors occur when the embedded Dolt engine cannot access its noms storage
+// These errors occur when the Dolt engine cannot access its noms storage
 // layer, typically because a stale LOCK file was left behind by a crashed process.
 func isLockError(err error) bool {
 	if err == nil {

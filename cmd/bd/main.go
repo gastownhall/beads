@@ -512,7 +512,7 @@ var rootCmd = &cobra.Command{
 			// prefix-based databases like "beads_hq"; see #1669)
 			doltCfg.Database = cfg.GetDoltDatabase()
 
-			// Always server mode — embedded Dolt removed per Tim Sehn directive
+			// Always server mode
 			doltCfg.ServerMode = true
 			doltCfg.ServerHost = cfg.GetDoltServerHost()
 			doltCfg.ServerPort = cfg.GetDoltServerPort()
