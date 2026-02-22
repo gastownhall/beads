@@ -695,18 +695,27 @@ var listCmd = &cobra.Command{
 				issue.Dependencies = allDeps[issue.ID]
 			}
 
-			// Build response with counts
+			// Build response with counts + computed parent (bd-ym8c)
 			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
 			for i, issue := range issues {
 				counts := depCounts[issue.ID]
 				if counts == nil {
 					counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
 				}
+				// Compute parent from dependency records
+				var parent *string
+				for _, dep := range allDeps[issue.ID] {
+					if dep.Type == types.DepParentChild {
+						parent = &dep.DependsOnID
+						break
+					}
+				}
 				issuesWithCounts[i] = &types.IssueWithCounts{
 					Issue:           issue,
 					DependencyCount: counts.DependencyCount,
 					DependentCount:  counts.DependentCount,
 					CommentCount:    commentCounts[issue.ID],
+					Parent:          parent,
 				}
 			}
 			outputJSON(issuesWithCounts)
@@ -728,14 +737,14 @@ var listCmd = &cobra.Command{
 		// Previously loaded ALL dependency records which was O(total_issues) and took 2-4s.
 		// Now scoped to only the displayed issues, making it O(displayed_issues).
 		// Best effort: display gracefully degrades with empty data
-		blockedByMap, blocksMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
+		blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
 
 		// Build output in buffer for pager support (bd-jdz3)
 		var buf strings.Builder
 		if ui.IsAgentMode() {
 			// Agent mode: ultra-compact, no colors, no pager
 			for _, issue := range issues {
-				formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID])
+				formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
 			}
 			fmt.Print(buf.String())
 			return
@@ -750,7 +759,7 @@ var listCmd = &cobra.Command{
 			// Compact format: one line per issue
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]
-				formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID])
+				formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
 			}
 		}
 

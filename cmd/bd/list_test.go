@@ -768,7 +768,7 @@ func TestFormatIssueCompact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueCompact(&buf, tt.issue, tt.labels, nil, nil)
+			formatIssueCompact(&buf, tt.issue, tt.labels, nil, nil, "")
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueCompact() = %q, want to contain %q", result, tt.want)
@@ -962,7 +962,7 @@ func TestFormatIssueCompactWithDependencies(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueCompact(&buf, tt.issue, nil, tt.blockedBy, tt.blocks)
+			formatIssueCompact(&buf, tt.issue, nil, tt.blockedBy, tt.blocks, "")
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueCompact() = %q, want to contain %q", result, tt.want)
@@ -1269,4 +1269,248 @@ func TestHierarchicalChildren(t *testing.T) {
 			t.Error("Expected 'not found' error for nonexistent parent")
 		}
 	})
+}
+
+// TestFormatDependencyInfoWithParent tests that parent-child deps render as "parent: X" (bd-hcxu)
+func TestFormatDependencyInfoWithParent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		blockedBy []string
+		blocks    []string
+		parent    string
+		want      string
+	}{
+		{
+			name:   "parent only",
+			parent: "epic-1",
+			want:   "(parent: epic-1)",
+		},
+		{
+			name:      "parent and blocked by",
+			parent:    "epic-1",
+			blockedBy: []string{"blocker-1"},
+			want:      "(parent: epic-1, blocked by: blocker-1)",
+		},
+		{
+			name:   "parent and blocks",
+			parent: "epic-1",
+			blocks: []string{"child-1"},
+			want:   "(parent: epic-1, blocks: child-1)",
+		},
+		{
+			name:      "parent, blocked by, and blocks",
+			parent:    "epic-1",
+			blockedBy: []string{"blocker-1"},
+			blocks:    []string{"child-1"},
+			want:      "(parent: epic-1, blocked by: blocker-1, blocks: child-1)",
+		},
+		{
+			name: "no parent, no deps",
+			want: "",
+		},
+		{
+			name:      "blocked by only (no parent)",
+			blockedBy: []string{"blocker-1"},
+			want:      "(blocked by: blocker-1)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatDependencyInfo(tt.blockedBy, tt.blocks, tt.parent)
+			if result != tt.want {
+				t.Errorf("formatDependencyInfo() = %q, want %q", result, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatIssueCompactWithParent tests compact format renders parent correctly (bd-hcxu)
+func TestFormatIssueCompactWithParent(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{
+		ID:        "test-child",
+		Title:     "Child Task",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+
+	t.Run("shows parent annotation", func(t *testing.T) {
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent")
+		result := buf.String()
+		if !strings.Contains(result, "(parent: test-parent)") {
+			t.Errorf("Expected '(parent: test-parent)' in output, got %q", result)
+		}
+	})
+
+	t.Run("does not show blocked by for parent", func(t *testing.T) {
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent")
+		result := buf.String()
+		if strings.Contains(result, "blocked by") {
+			t.Errorf("Should not contain 'blocked by' for parent-child dep, got %q", result)
+		}
+	})
+
+	t.Run("shows parent and blocked by together", func(t *testing.T) {
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "test-parent")
+		result := buf.String()
+		if !strings.Contains(result, "(parent: test-parent, blocked by: blocker-1)") {
+			t.Errorf("Expected '(parent: test-parent, blocked by: blocker-1)' in output, got %q", result)
+		}
+	})
+}
+
+// TestGetBlockingInfoForIssues_ParentChildSeparation tests that parent-child deps go to parentMap (bd-hcxu)
+func TestGetBlockingInfoForIssues_ParentChildSeparation(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create parent and child
+	parent := &types.Issue{
+		Title:     "Parent Epic",
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+	}
+	child := &types.Issue{
+		Title:     "Child Task",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+	blocker := &types.Issue{
+		Title:     "Blocker Task",
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+
+	for _, issue := range []*types.Issue{parent, child, blocker} {
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+
+	// Add parent-child dep
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild,
+	}, "test-user"); err != nil {
+		t.Fatalf("Failed to add parent-child dep: %v", err)
+	}
+
+	// Add blocking dep
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: child.ID, DependsOnID: blocker.ID, Type: types.DepBlocks,
+	}, "test-user"); err != nil {
+		t.Fatalf("Failed to add blocking dep: %v", err)
+	}
+
+	blockedByMap, blocksMap, parentMap, err := store.GetBlockingInfoForIssues(ctx, []string{child.ID, parent.ID, blocker.ID})
+	if err != nil {
+		t.Fatalf("GetBlockingInfoForIssues failed: %v", err)
+	}
+
+	// Child should have parent in parentMap, not in blockedByMap
+	if parentMap[child.ID] != parent.ID {
+		t.Errorf("parentMap[%s] = %q, want %q", child.ID, parentMap[child.ID], parent.ID)
+	}
+
+	// Child should have blocker in blockedByMap
+	if len(blockedByMap[child.ID]) != 1 || blockedByMap[child.ID][0] != blocker.ID {
+		t.Errorf("blockedByMap[%s] = %v, want [%s]", child.ID, blockedByMap[child.ID], blocker.ID)
+	}
+
+	// Parent should NOT appear in blockedByMap for child
+	for _, id := range blockedByMap[child.ID] {
+		if id == parent.ID {
+			t.Errorf("parent %s should NOT be in blockedByMap for child %s", parent.ID, child.ID)
+		}
+	}
+
+	// Blocker should show in blocksMap
+	if len(blocksMap[blocker.ID]) != 1 || blocksMap[blocker.ID][0] != child.ID {
+		t.Errorf("blocksMap[%s] = %v, want [%s]", blocker.ID, blocksMap[blocker.ID], child.ID)
+	}
+}
+
+// TestListJSON_ParentField tests that bd list --json includes computed parent field (bd-ym8c)
+func TestListJSON_ParentField(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	parent := &types.Issue{
+		Title:     "Parent Epic",
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+	}
+	child := &types.Issue{
+		Title:     "Child Task",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+	standalone := &types.Issue{
+		Title:     "Standalone Task",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+
+	for _, issue := range []*types.Issue{parent, child, standalone} {
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue: %v", err)
+		}
+	}
+
+	// Add parent-child dep
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild,
+	}, "test-user"); err != nil {
+		t.Fatalf("Failed to add parent-child dep: %v", err)
+	}
+
+	// Simulate what list.go JSON path does: fetch deps and compute parent
+	issueIDs := []string{parent.ID, child.ID, standalone.ID}
+	allDeps, err := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		t.Fatalf("GetDependencyRecordsForIssues failed: %v", err)
+	}
+
+	// Build IssueWithCounts with parent computation
+	for _, issue := range []*types.Issue{parent, child, standalone} {
+		var computedParent *string
+		for _, dep := range allDeps[issue.ID] {
+			if dep.Type == types.DepParentChild {
+				computedParent = &dep.DependsOnID
+				break
+			}
+		}
+
+		iwc := &types.IssueWithCounts{
+			Issue:  issue,
+			Parent: computedParent,
+		}
+
+		if issue.ID == child.ID {
+			if iwc.Parent == nil || *iwc.Parent != parent.ID {
+				t.Errorf("Child %s should have parent %s, got %v", child.ID, parent.ID, iwc.Parent)
+			}
+		} else {
+			if iwc.Parent != nil {
+				t.Errorf("Issue %s should have nil parent, got %q", issue.ID, *iwc.Parent)
+			}
+		}
+	}
 }

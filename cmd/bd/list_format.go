@@ -107,9 +107,9 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) 
 }
 
 // formatAgentIssue formats a single issue in ultra-compact agent mode format
-// Output: "ID: Title" with optional dependency info "(blocked by: X, blocks: Y)"
-func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, blocks []string) {
-	depInfo := formatDependencyInfo(blockedBy, blocks)
+// Output: "ID: Title" with optional dependency info "(parent: X, blocked by: Y, blocks: Z)"
+func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, blocks []string, parent string) {
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
 	if depInfo != "" {
 		buf.WriteString(fmt.Sprintf("%s: %s %s\n", issue.ID, issue.Title, depInfo))
 	} else {
@@ -117,14 +117,18 @@ func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, block
 	}
 }
 
-// formatDependencyInfo formats blocking dependency info for list output
-// Returns "(blocked by: X, Y, blocks: Z)" or "" if no blocking dependencies
-func formatDependencyInfo(blockedBy, blocks []string) string {
-	if len(blockedBy) == 0 && len(blocks) == 0 {
+// formatDependencyInfo formats dependency info for list output.
+// Parent-child deps are shown as "parent: X" (structural), separate from "blocked by" (blocking). (bd-hcxu)
+// Returns "(parent: X, blocked by: Y, blocks: Z)" or "" if no dependencies.
+func formatDependencyInfo(blockedBy, blocks []string, parent string) string {
+	if len(blockedBy) == 0 && len(blocks) == 0 && parent == "" {
 		return ""
 	}
 
 	var parts []string
+	if parent != "" {
+		parts = append(parts, fmt.Sprintf("parent: %s", parent))
+	}
 	if len(blockedBy) > 0 {
 		parts = append(parts, fmt.Sprintf("blocked by: %s", strings.Join(blockedBy, ", ")))
 	}
@@ -205,8 +209,8 @@ func getClosedBlockerIDs(ctx context.Context, s *dolt.DoltStore, allDeps map[str
 
 // formatIssueCompact formats a single issue in compact format to a buffer
 // Uses status icons for better scanability - consistent with bd graph
-// Format: [icon] [pin] ID [Priority] [Type] @assignee [labels] - Title (blocked by: X, blocks: Y)
-func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []string, blockedBy, blocks []string) {
+// Format: [icon] [pin] ID [Priority] [Type] @assignee [labels] - Title (parent: X, blocked by: Y, blocks: Z)
+func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []string, blockedBy, blocks []string, parent string) {
 	labelsStr := ""
 	if len(labels) > 0 {
 		labelsStr = fmt.Sprintf(" %v", labels)
@@ -217,7 +221,7 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 	}
 
 	// Format dependency info
-	depInfo := formatDependencyInfo(blockedBy, blocks)
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
 	if depInfo != "" {
 		depInfo = " " + depInfo
 	}

@@ -403,38 +403,44 @@ func (s *DoltStore) getDependencyRecordsForIssuesDolt(ctx context.Context, issue
 //   - Dependencies where issue_id is in the set ("this issue is blocked by X")
 //   - Dependencies where depends_on_id is in the set ("this issue blocks Y")
 //
-// It also returns a set of closed blocker IDs for filtering stale blocked-by annotations.
+// Parent-child dependencies are separated into parentMap (childID -> parentID) so callers
+// can display them distinctly from blocking deps. (bd-hcxu)
+//
 // This replaces the expensive pattern of GetAllDependencyRecords + getClosedBlockerIDs
 // which loaded the entire dependency table and did N+1 issue lookups. (bd-7di)
 func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []string) (
 	blockedByMap map[string][]string, // issueID -> list of IDs blocking it
 	blocksMap map[string][]string, // issueID -> list of IDs it blocks
+	parentMap map[string]string, // childID -> parentID (parent-child deps)
 	err error,
 ) {
 	blockedByMap = make(map[string][]string)
 	blocksMap = make(map[string][]string)
+	parentMap = make(map[string]string)
 
 	if len(issueIDs) == 0 {
-		return blockedByMap, blocksMap, nil
+		return blockedByMap, blocksMap, parentMap, nil
 	}
 
 	// Partition and merge wisp and dolt IDs
 	ephIDs, doltIDs := partitionIDs(issueIDs)
 	if len(ephIDs) > 0 {
-		// For wisp IDs, query wisp_dependencies with a LEFT JOIN to wisps
+		// For wisp IDs, query wisp_dependencies
 		for _, ephID := range ephIDs {
 			deps, depErr := s.getWispDependencyRecords(ctx, ephID)
 			if depErr != nil {
-				return nil, nil, depErr
+				return nil, nil, nil, depErr
 			}
 			for _, dep := range deps {
-				if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+				if dep.Type == types.DepParentChild {
+					parentMap[ephID] = dep.DependsOnID
+				} else if dep.Type == types.DepBlocks {
 					blockedByMap[ephID] = append(blockedByMap[ephID], dep.DependsOnID)
 				}
 			}
 		}
 		if len(doltIDs) == 0 {
-			return blockedByMap, blocksMap, nil
+			return blockedByMap, blocksMap, parentMap, nil
 		}
 		issueIDs = doltIDs
 	}
@@ -459,24 +465,29 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 
 	rows, qErr := s.queryContext(ctx, blockedByQuery, args...)
 	if qErr != nil {
-		return nil, nil, fmt.Errorf("failed to get blocked-by info: %w", qErr)
+		return nil, nil, nil, fmt.Errorf("failed to get blocked-by info: %w", qErr)
 	}
 	for rows.Next() {
 		var issueID, blockerID, depType, blockerStatus string
 		if scanErr := rows.Scan(&issueID, &blockerID, &depType, &blockerStatus); scanErr != nil {
 			_ = rows.Close()
-			return nil, nil, scanErr
+			return nil, nil, nil, scanErr
 		}
 		// Skip closed blockers — the dependency record is preserved, but a
 		// closed blocker no longer blocks work.
 		if types.Status(blockerStatus) == types.StatusClosed {
 			continue
 		}
-		blockedByMap[issueID] = append(blockedByMap[issueID], blockerID)
+		// Separate parent-child from blocking deps (bd-hcxu)
+		if depType == "parent-child" {
+			parentMap[issueID] = blockerID
+		} else {
+			blockedByMap[issueID] = append(blockedByMap[issueID], blockerID)
+		}
 	}
 	_ = rows.Close()
 	if rowErr := rows.Err(); rowErr != nil {
-		return nil, nil, rowErr
+		return nil, nil, nil, rowErr
 	}
 
 	// Query 2: Get "blocks" relationships — deps where depends_on_id is in our set
@@ -491,13 +502,13 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 
 	rows2, qErr2 := s.queryContext(ctx, blocksQuery, args...)
 	if qErr2 != nil {
-		return nil, nil, fmt.Errorf("failed to get blocks info: %w", qErr2)
+		return nil, nil, nil, fmt.Errorf("failed to get blocks info: %w", qErr2)
 	}
 	for rows2.Next() {
 		var blockerID, blockedID, depType, blockerStatus string
 		if scanErr := rows2.Scan(&blockerID, &blockedID, &depType, &blockerStatus); scanErr != nil {
 			_ = rows2.Close()
-			return nil, nil, scanErr
+			return nil, nil, nil, scanErr
 		}
 		// Skip if the blocker (our displayed issue) is closed
 		if types.Status(blockerStatus) == types.StatusClosed {
@@ -511,10 +522,10 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 	}
 	_ = rows2.Close()
 	if rowErr2 := rows2.Err(); rowErr2 != nil {
-		return nil, nil, rowErr2
+		return nil, nil, nil, rowErr2
 	}
 
-	return blockedByMap, blocksMap, nil
+	return blockedByMap, blocksMap, parentMap, nil
 }
 
 // GetDependencyCounts returns dependency counts for multiple issues

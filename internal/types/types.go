@@ -653,9 +653,10 @@ type IssueWithDependencyMetadata struct {
 // IssueWithCounts extends Issue with dependency relationship counts
 type IssueWithCounts struct {
 	*Issue
-	DependencyCount int `json:"dependency_count"`
-	DependentCount  int `json:"dependent_count"`
-	CommentCount    int `json:"comment_count"`
+	DependencyCount int     `json:"dependency_count"`
+	DependentCount  int     `json:"dependent_count"`
+	CommentCount    int     `json:"comment_count"`
+	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
 }
 
 // IssueDetails extends Issue with labels, dependencies, dependents, and comments.
