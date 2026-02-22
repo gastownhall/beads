@@ -909,6 +909,122 @@ func TestFindBeadsDir_Worktree(t *testing.T) {
 	}
 }
 
+// TestFindBeadsDir_WorktreeRedirectOverride tests that when a worktree has its
+// own .beads/redirect, it takes priority over the main repo's .beads directory.
+// This enables per-worktree topic selection via timvisher_EXP_bd_topics set.
+func TestFindBeadsDir_WorktreeRedirectOverride(t *testing.T) {
+	// Save original state
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+
+	// Create temporary directory for our test
+	tmpDir, err := os.MkdirTemp("", "beads-worktree-redirect-override-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Initialize main git repository with .beads containing project files
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+
+	cmd = exec.Command("git", "config", "user.email", "test@example.com")
+	cmd.Dir = mainRepoDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "config", "user.name", "Test User")
+	cmd.Dir = mainRepoDir
+	_ = cmd.Run()
+
+	// Create .beads in main repo with project files (would normally win)
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create initial commit
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "add", "-A")
+	cmd.Dir = mainRepoDir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd.Dir = mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	// Create an external topic .beads directory (the redirect target)
+	topicBeadsDir := filepath.Join(tmpDir, "topics", "my-topic", ".beads")
+	if err := os.MkdirAll(topicBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(topicBeadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"beads_my_topic"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a worktree
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	cmd = exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	cmd.Dir = mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git worktree add failed: %v", err)
+	}
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", worktreeDir)
+		cmd.Dir = mainRepoDir
+		_ = cmd.Run()
+	}()
+
+	// Create .beads/redirect in the worktree pointing to the external topic
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve symlinks for the redirect target (macOS /private/var)
+	topicBeadsDirResolved, _ := filepath.EvalSymlinks(topicBeadsDir)
+	if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "redirect"), []byte(topicBeadsDirResolved+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change to worktree
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+
+	// FindBeadsDir should follow the worktree redirect, NOT use main repo's .beads
+	result := FindBeadsDir()
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	mainBeadsDirResolved, _ := filepath.EvalSymlinks(mainBeadsDir)
+
+	if resultResolved == mainBeadsDirResolved {
+		t.Errorf("FindBeadsDir() = main repo .beads %q, want topic .beads %q (worktree redirect should override)", result, topicBeadsDirResolved)
+	}
+
+	if resultResolved != topicBeadsDirResolved {
+		t.Errorf("FindBeadsDir() = %q, want topic .beads %q (via worktree redirect)", result, topicBeadsDirResolved)
+	}
+}
+
 // TestFindBeadsDir_SiblingWorktree tests that FindBeadsDir does not escape past
 // the worktree boundary when the worktree is a sibling of the main repo (not a
 // child). This is the regression test for GH#1653.

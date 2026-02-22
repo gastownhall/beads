@@ -175,6 +175,18 @@ func findLocalBeadsDir() string {
 		return utils.CanonicalizePath(beadsDir)
 	}
 
+	// For worktrees, check worktree-local redirect first (per-worktree override)
+	if git.IsWorktree() {
+		worktreeRoot := git.GetRepoRoot()
+		if worktreeRoot != "" {
+			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
+			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
+			if _, err := os.Stat(redirectFile); err == nil {
+				return worktreeBeadsDir
+			}
+		}
+	}
+
 	// Check for worktree - use main repo's .beads
 	// Note: GetMainRepoRoot() is safe to call outside a git repo - it returns an error
 	mainRepoRoot, err := git.GetMainRepoRoot()
@@ -326,7 +338,8 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // Validates that the directory contains actual project files.
 // Redirect files are supported: if a .beads/redirect file exists, its contents
 // are used as the actual .beads directory path.
-// For worktrees, prioritizes the main repository's .beads directory.
+// For worktrees, prioritizes the main repository's .beads directory unless the
+// worktree has its own .beads/redirect (explicit per-worktree override).
 // This is useful for commands that need to detect beads projects without requiring a database.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
@@ -344,9 +357,29 @@ func FindBeadsDir() string {
 		}
 	}
 
-	// 2. For worktrees, check main repository root first
+	// 2. For worktrees, check worktree-local redirect first, then main repo
 	var mainRepoRoot string
 	if git.IsWorktree() {
+		// 2a. Per-worktree redirect override: if the worktree root has a
+		// .beads/redirect, follow it. This allows each worktree to
+		// independently point to a different beads directory (e.g., topics).
+		worktreeRoot := findGitRoot()
+		if worktreeRoot != "" {
+			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
+			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
+			if _, err := os.Stat(redirectFile); err == nil {
+				target := FollowRedirect(worktreeBeadsDir)
+				if target != worktreeBeadsDir {
+					if info, err := os.Stat(target); err == nil && info.IsDir() {
+						if hasBeadsProjectFiles(target) {
+							return target
+						}
+					}
+				}
+			}
+		}
+
+		// 2b. Fall back to main repository's .beads
 		var err error
 		mainRepoRoot, err = git.GetMainRepoRoot()
 		if err == nil && mainRepoRoot != "" {
@@ -452,7 +485,23 @@ func findDatabaseInTree() string {
 	// Check if we're in a git worktree
 	var mainRepoRoot string
 	if git.IsWorktree() {
-		// For worktrees, search main repository root first
+		// Per-worktree redirect override: if the worktree root has a
+		// .beads/redirect, follow it before checking the main repo.
+		worktreeRoot := findGitRoot()
+		if worktreeRoot != "" {
+			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
+			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
+			if _, err := os.Stat(redirectFile); err == nil {
+				target := FollowRedirect(worktreeBeadsDir)
+				if target != worktreeBeadsDir {
+					if dbPath := findDatabaseInBeadsDir(target, true); dbPath != "" {
+						return dbPath
+					}
+				}
+			}
+		}
+
+		// Fall back: search main repository root
 		var err error
 		mainRepoRoot, err = git.GetMainRepoRoot()
 		if err == nil && mainRepoRoot != "" {
