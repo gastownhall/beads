@@ -751,6 +751,25 @@ const (
 	WaitsForAnyChildren = "any-children" // Proceed when first child completes (future)
 )
 
+// ParseWaitsForGateMetadata extracts the waits-for gate type from dependency metadata.
+// Note: spawner identity comes from dependencies.depends_on_id in storage/query paths;
+// metadata.spawner_id is parsed for compatibility/future explicit targeting.
+// Returns WaitsForAllChildren on empty/invalid metadata for backward compatibility.
+func ParseWaitsForGateMetadata(metadata string) string {
+	if strings.TrimSpace(metadata) == "" {
+		return WaitsForAllChildren
+	}
+
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+		return WaitsForAllChildren
+	}
+	if meta.Gate == WaitsForAnyChildren {
+		return WaitsForAnyChildren
+	}
+	return WaitsForAllChildren
+}
+
 // AttestsMeta holds metadata for attests dependencies (skill attestations).
 // Stored as JSON in the Dependency.Metadata field.
 // Enables: Entity X attests that Entity Y has skill Z at level N.

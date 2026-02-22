@@ -756,6 +756,49 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 	}
 }
 
+func TestParseWaitsForGateMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		want     string
+	}{
+		{
+			name:     "empty defaults to all-children",
+			metadata: "",
+			want:     WaitsForAllChildren,
+		},
+		{
+			name:     "invalid json defaults to all-children",
+			metadata: "{bad",
+			want:     WaitsForAllChildren,
+		},
+		{
+			name:     "all-children metadata",
+			metadata: `{"gate":"all-children"}`,
+			want:     WaitsForAllChildren,
+		},
+		{
+			name:     "any-children metadata",
+			metadata: `{"gate":"any-children"}`,
+			want:     WaitsForAnyChildren,
+		},
+		{
+			name:     "unknown gate defaults to all-children",
+			metadata: `{"gate":"something-else"}`,
+			want:     WaitsForAllChildren,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseWaitsForGateMetadata(tt.metadata)
+			if got != tt.want {
+				t.Fatalf("ParseWaitsForGateMetadata(%q) = %q, want %q", tt.metadata, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsFailureClose(t *testing.T) {
 	tests := []struct {
 		name        string

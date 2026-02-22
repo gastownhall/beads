@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1447,6 +1448,115 @@ func TestDoltStoreGetReadyWork(t *testing.T) {
 	if !foundEphemeral {
 		t.Error("expected ephemeral issue to be included when IncludeEphemeral=true")
 	}
+}
+
+func TestDoltStoreGetReadyWorkWaitsForChildrenOfSpawner(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow Dolt integration test in short mode")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	implement := &types.Issue{
+		ID:        "test-implement",
+		Title:     "Implement",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	review := &types.Issue{
+		ID:        "test-review",
+		Title:     "Review",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	otherSpawner := &types.Issue{
+		ID:        "test-other-spawner",
+		Title:     "Other spawner",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	implChild := &types.Issue{
+		ID:        "test-implement.1",
+		Title:     "Implement child",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	otherChild := &types.Issue{
+		ID:        "test-other-spawner.1",
+		Title:     "Unrelated child",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, issue := range []*types.Issue{implement, review, otherSpawner, implChild, otherChild} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	for _, dep := range []*types.Dependency{
+		{IssueID: implChild.ID, DependsOnID: implement.ID, Type: types.DepParentChild},
+		{IssueID: otherChild.ID, DependsOnID: otherSpawner.ID, Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("failed to add parent-child dependency %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	metaJSON, err := json.Marshal(types.WaitsForMeta{Gate: types.WaitsForAllChildren})
+	if err != nil {
+		t.Fatalf("failed to marshal waits-for metadata: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     review.ID,
+		DependsOnID: implement.ID,
+		Type:        types.DepWaitsFor,
+		Metadata:    string(metaJSON),
+	}, "tester"); err != nil {
+		t.Fatalf("failed to add waits-for dependency: %v", err)
+	}
+
+	hasReadyID := func(issues []*types.Issue, id string) bool {
+		for _, issue := range issues {
+			if issue.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("blocked-before-child-close", func(t *testing.T) {
+		readyBefore, err := store.GetReadyWork(ctx, types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("failed to get ready work (before close): %v", err)
+		}
+		if hasReadyID(readyBefore, review.ID) {
+			t.Fatalf("expected %s to be blocked by open child of %s", review.ID, implement.ID)
+		}
+	})
+
+	t.Run("ready-after-child-close", func(t *testing.T) {
+		if err := store.CloseIssue(ctx, implChild.ID, "done", "tester", "session-test"); err != nil {
+			t.Fatalf("failed to close child issue: %v", err)
+		}
+
+		readyAfter, err := store.GetReadyWork(ctx, types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("failed to get ready work (after close): %v", err)
+		}
+		if !hasReadyID(readyAfter, review.ID) {
+			t.Fatalf("expected %s to become ready after children of %s close", review.ID, implement.ID)
+		}
+	})
 }
 
 // TestCloseWithTimeout tests the close timeout helper function
