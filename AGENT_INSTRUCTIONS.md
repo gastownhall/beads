@@ -116,9 +116,6 @@ This ensures JSONL is exported on commit and imported after pull/merge.
    #   - bd import -i .beads/issues.jsonl (re-import)
    #   - Or manual merge, then import
 
-   # Sync the database (exports to JSONL, commits)
-   bd sync
-
    # MANDATORY: Push everything to remote
    # DO NOT STOP BEFORE THIS COMMAND COMPLETES
    git push
@@ -165,7 +162,6 @@ git pull --rebase
 #   - git checkout --theirs .beads/issues.jsonl (accept remote)
 #   - bd import -i .beads/issues.jsonl (re-import)
 #   - Or manual merge, then import
-bd sync        # Export/import/commit
 git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
 git status     # MUST verify "up to date with origin/main"
 
@@ -202,34 +198,19 @@ bd update <id> --notes "additional notes"
 bd update <id> --acceptance "acceptance criteria"
 ```
 
-**IMPORTANT for AI agents:** When you finish making issue changes, always run:
-
-```bash
-bd sync
-```
-
-This immediately syncs the database with git — exporting JSONL, committing, pulling remote changes, and pushing.
-
 **Example agent session:**
 
 ```bash
-# Make changes (each write auto-commits to Dolt history)
+# Make changes (each write auto-commits to Dolt)
 bd create "Fix bug" -p 1
 bd create "Add tests" -p 1
 bd update bd-42 --status in_progress
 bd close bd-40 --reason "Completed"
 
-# Sync at end of session
-bd sync
+# Push Dolt data to remote if configured
+bd dolt push
 
-# Now safe to end session - everything is committed and pushed
-```
-
-**RECOMMENDED: Install git hooks for automatic JSONL sync:**
-
-```bash
-# One-time setup - run this in each beads workspace
-bd hooks install
+# Now safe to end session
 ```
 
 This installs:

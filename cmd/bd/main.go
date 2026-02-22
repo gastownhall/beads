@@ -343,6 +343,7 @@ var rootCmd = &cobra.Command{
 			"quickstart",
 			"resolve-conflicts",
 			"setup",
+			"sync", // deprecated no-op, prints message only
 			"version",
 			"zsh",
 		}

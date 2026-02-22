@@ -479,15 +479,7 @@ if [ -z "$BEADS_DIR" ]; then
     exit 0
 fi
 
-# Flush pending changes to JSONL
-# In jujutsu, changes automatically become part of the working copy commit
-if ! bd sync --flush-only >/dev/null 2>&1; then
-    echo "Error: Failed to flush bd changes to storage" >&2
-    echo "Run 'bd sync --flush-only' manually to diagnose" >&2
-    exit 1
-fi
-
-# No git add needed - jujutsu automatically includes working copy changes
+# Dolt handles persistence directly — no flush needed.
 exit 0
 `
 }

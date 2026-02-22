@@ -53,7 +53,7 @@ bd --version  # Requires v0.47.0+
 **Run `bd prime`** for AI-optimized workflow context (auto-loaded by hooks).
 **Run `bd <command> --help`** for specific command usage.
 
-Essential commands: `bd ready`, `bd create`, `bd show`, `bd update`, `bd close`, `bd sync`
+Essential commands: `bd ready`, `bd create`, `bd show`, `bd update`, `bd close`, `bd dolt push`
 
 ## Session Protocol
 
@@ -62,7 +62,7 @@ Essential commands: `bd ready`, `bd create`, `bd show`, `bd update`, `bd close`,
 3. `bd update <id> --claim` — Claim and start work atomically
 4. Add notes as you work (critical for compaction survival)
 5. `bd close <id> --reason "..."` — Complete task
-6. `bd sync` — Persist to git (always run at session end)
+6. `bd dolt push` — Push to Dolt remote (if configured)
 
 ## Advanced Features
 

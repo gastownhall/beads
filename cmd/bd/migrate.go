@@ -724,10 +724,9 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		fmt.Printf("Set sync.branch to '%s'\n\n", b)
 		fmt.Println("Next steps:")
 		fmt.Println("  1. No restart required. sync.branch is active immediately.")
-		fmt.Printf("     bd sync\n\n")
+		fmt.Printf("     bd dolt push\n\n")
 		fmt.Println("  2. Your existing data is preserved - no changes to git history")
-		fmt.Println("  3. Future issue updates will be committed to the separate branch")
-		fmt.Println("\nSee docs/PROTECTED_BRANCHES.md for complete workflow guide")
+		fmt.Println("  3. Future issue updates are stored in Dolt directly")
 	}
 }
 

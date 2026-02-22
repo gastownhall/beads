@@ -91,8 +91,8 @@ golangci-lint run ./...
 ## Important Notes
 
 - **Always read AGENTS.md first** - it has the complete workflow
-- Install git hooks for JSONL sync: `bd hooks install`
-- Run `bd sync` at end of agent sessions to sync with remote
+- Install git hooks: `bd hooks install`
+- Use `bd dolt push` / `bd dolt pull` for remote sync
 - Check for duplicates proactively: `bd duplicates --auto-merge`
 - Use `--json` flags for all programmatic use
 
