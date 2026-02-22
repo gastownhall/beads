@@ -413,13 +413,31 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
+	// Build ORDER BY clause based on SortPolicy
+	var orderBySQL string
+	switch filter.SortPolicy {
+	case types.SortPolicyOldest:
+		orderBySQL = "ORDER BY created_at ASC"
+	case types.SortPolicyPriority:
+		orderBySQL = "ORDER BY priority ASC, created_at DESC"
+	case types.SortPolicyHybrid, "": // hybrid is the default
+		// Recent issues (created within 48 hours) are sorted by priority;
+		// older issues are sorted by age (oldest first) to prevent starvation.
+		orderBySQL = `ORDER BY
+			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN 0 ELSE 1 END ASC,
+			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN priority ELSE 999 END ASC,
+			created_at ASC`
+	default:
+		orderBySQL = "ORDER BY priority ASC, created_at DESC"
+	}
+
 	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		%s
-		ORDER BY priority ASC, created_at DESC
 		%s
-	`, whereSQL, limitSQL)
+		%s
+	`, whereSQL, orderBySQL, limitSQL)
 
 	rows, err := s.queryContext(ctx, query, args...)
 	if err != nil {

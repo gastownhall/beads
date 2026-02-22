@@ -1498,3 +1498,125 @@ func TestCloseWithTimeout(t *testing.T) {
 		_ = originalTimeout // silence unused warning
 	})
 }
+
+// TestGetReadyWorkSortPolicy verifies that GetReadyWork respects the SortPolicy
+// field and that result ordering is preserved through the scanIssueIDs pipeline.
+func TestGetReadyWorkSortPolicy(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	now := time.Now().UTC()
+
+	// Create issues with distinct priorities and creation times.
+	// "old-p3" is 3 days old (outside the 48h hybrid window).
+	// "recent-p2" and "recent-p1" are recent (within 48h).
+	issues := []*types.Issue{
+		{
+			ID:        "test-old-p3",
+			Title:     "Old P3",
+			Status:    types.StatusOpen,
+			Priority:  3,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-72 * time.Hour), // 3 days ago
+		},
+		{
+			ID:        "test-recent-p2",
+			Title:     "Recent P2",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-1 * time.Hour), // 1 hour ago
+		},
+		{
+			ID:        "test-recent-p1",
+			Title:     "Recent P1",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-30 * time.Minute), // 30 min ago
+		},
+	}
+
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	t.Run("SortPolicyPriority", func(t *testing.T) {
+		result, err := store.GetReadyWork(ctx, types.WorkFilter{
+			SortPolicy: types.SortPolicyPriority,
+		})
+		if err != nil {
+			t.Fatalf("GetReadyWork failed: %v", err)
+		}
+
+		ids := issueIDs(result)
+		// Priority order: P1 < P2 < P3
+		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+	})
+
+	t.Run("SortPolicyOldest", func(t *testing.T) {
+		result, err := store.GetReadyWork(ctx, types.WorkFilter{
+			SortPolicy: types.SortPolicyOldest,
+		})
+		if err != nil {
+			t.Fatalf("GetReadyWork failed: %v", err)
+		}
+
+		ids := issueIDs(result)
+		// Oldest first: old-p3, recent-p2, recent-p1
+		assertOrder(t, ids, "test-old-p3", "test-recent-p2", "test-recent-p1")
+	})
+
+	t.Run("SortPolicyHybrid", func(t *testing.T) {
+		result, err := store.GetReadyWork(ctx, types.WorkFilter{
+			SortPolicy: types.SortPolicyHybrid,
+		})
+		if err != nil {
+			t.Fatalf("GetReadyWork failed: %v", err)
+		}
+
+		ids := issueIDs(result)
+		// Hybrid: recent bucket (P1 before P2) first, then old bucket
+		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+	})
+
+	t.Run("DefaultSortIsHybrid", func(t *testing.T) {
+		result, err := store.GetReadyWork(ctx, types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork failed: %v", err)
+		}
+
+		ids := issueIDs(result)
+		// Default (empty string) behaves like hybrid
+		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+	})
+}
+
+// issueIDs extracts IDs from a slice of issues.
+func issueIDs(issues []*types.Issue) []string {
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	return ids
+}
+
+// assertOrder verifies that the expected IDs appear in order within ids.
+// Other IDs may be interspersed (e.g., from other tests).
+func assertOrder(t *testing.T, ids []string, expected ...string) {
+	t.Helper()
+	pos := 0
+	for _, id := range ids {
+		if pos < len(expected) && id == expected[pos] {
+			pos++
+		}
+	}
+	if pos != len(expected) {
+		t.Errorf("expected order %v but got %v (matched %d of %d)", expected, ids, pos, len(expected))
+	}
+}
