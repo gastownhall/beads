@@ -258,11 +258,10 @@ environment variable.`,
 		if prefix != "" {
 			dbName = "beads_" + prefix
 		}
-		// Build server-mode config. Beads always uses dolt sql-server (no embedded mode).
+		// Build config. Beads always uses dolt sql-server.
 		doltCfg := &dolt.Config{
-			Path:       storagePath,
-			Database:   dbName,
-			ServerMode: true,
+			Path:     storagePath,
+			Database: dbName,
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
@@ -371,7 +370,7 @@ environment variable.`,
 					cfg.DoltDatabase = "beads_" + prefix
 				}
 
-				// Always server mode (embedded Dolt removed per Tim Sehn directive)
+				// Always server mode
 				cfg.DoltMode = configfile.DoltModeServer
 				if serverHost != "" {
 					cfg.DoltServerHost = serverHost

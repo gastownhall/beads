@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/debug"
@@ -518,7 +517,7 @@ func getLinearConfig(ctx context.Context, key string) (value string, source stri
 			return value, "project config (bd config)"
 		}
 	} else if dbPath != "" {
-		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, OpenTimeout: 5 * time.Second})
+		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
 			value, _ = tempStore.GetConfig(ctx, key) // Best effort: empty value is valid fallback

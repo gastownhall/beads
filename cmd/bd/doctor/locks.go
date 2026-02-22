@@ -13,7 +13,7 @@ import (
 var staleLockThresholds = map[string]time.Duration{
 	"bootstrap.lock":   5 * time.Minute, // Bootstrap should complete quickly
 	".sync.lock":       1 * time.Hour,   // Sync can be slow for large repos
-	"dolt-access.lock": 5 * time.Minute, // Embedded dolt advisory lock
+	"dolt-access.lock": 5 * time.Minute, // Dolt advisory lock
 }
 
 // CheckStaleLockFiles detects leftover lock files from crashed processes.

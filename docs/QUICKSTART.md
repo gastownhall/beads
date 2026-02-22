@@ -42,8 +42,8 @@ The wizard will:
 Notes:
 - SQLite backend stores data in `.beads/beads.db`.
 - Dolt backend stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
-- Dolt backend runs **single-process-only**; daemon mode is disabled.
-- Dolt backend **auto-commits** after each successful write command in embedded mode (`dolt.auto-commit: on`). In server mode, auto-commit defaults to OFF. Override with `bd --dolt-auto-commit off|on ...` or config.
+- Dolt backend uses a `dolt sql-server` for database operations.
+- Dolt backend auto-commit defaults to OFF. Override with `bd --dolt-auto-commit off|on ...` or config.
 
 ### Role Configuration
 

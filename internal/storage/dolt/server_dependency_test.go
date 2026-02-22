@@ -57,7 +57,6 @@ func TestServerMode_AddDependencyPersistsAcrossConnections(t *testing.T) {
 	storeCfg := &Config{
 		Path:       tmpDir,
 		Database:   "beads",
-		ServerMode: true,
 		ServerHost: "127.0.0.1",
 		ServerPort: 13311,
 	}
@@ -166,7 +165,6 @@ func TestServerMode_RemoveDependencyPersistsAcrossConnections(t *testing.T) {
 	storeCfg := &Config{
 		Path:       tmpDir,
 		Database:   "beads",
-		ServerMode: true,
 		ServerHost: "127.0.0.1",
 		ServerPort: 13312,
 	}

@@ -53,7 +53,6 @@ func bootstrapEmbeddedDolt(ctx context.Context, path string, cfg *dolt.Config) e
 	bootstrapped, result, err := dolt.Bootstrap(ctx, dolt.BootstrapConfig{
 		BeadsDir:    beadsDir,
 		DoltPath:    path,
-		LockTimeout: cfg.OpenTimeout,
 		Database:    cfg.Database,
 		Routes:      bootstrapRoutes,
 	})

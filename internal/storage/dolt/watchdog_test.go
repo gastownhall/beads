@@ -12,7 +12,6 @@ func TestWatchdog_DisableWatchdog(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{
 		Path:            tmpDir,
-		ServerMode:      true,
 		DisableWatchdog: true,
 	}
 
@@ -33,7 +32,6 @@ func TestWatchdog_CleansUpOnClose(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{
 		Path:       tmpDir,
-		ServerMode: true,
 	}
 
 	store := &DoltStore{}
@@ -63,7 +61,6 @@ func TestWatchdog_CleansUpOnClose(t *testing.T) {
 func TestWatchdog_BacksOffAfterRepeatedFailures(t *testing.T) {
 	cfg := &Config{
 		Path:       t.TempDir(),
-		ServerMode: true,
 		ServerHost: "127.0.0.1",
 		ServerPort: 39999, // Port nothing is listening on
 	}

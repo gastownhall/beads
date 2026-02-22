@@ -8,7 +8,7 @@
 //   - Native version control (commit, push, pull, branch, merge)
 //   - Time-travel queries via AS OF and dolt_history_* tables
 //   - Cell-level merge for conflict resolution
-//   - Server mode for multi-writer scenarios (federation, pure Go)
+//   - Multi-writer via dolt sql-server (federation, pure Go)
 //
 // All operations require a running dolt sql-server. Connect via MySQL protocol (pure Go).
 package dolt
@@ -73,10 +73,8 @@ type Config struct {
 	Remote         string        // Default remote name (e.g., "origin")
 	Database       string        // Database name within Dolt (default: "beads")
 	ReadOnly       bool          // Open in read-only mode (skip schema init)
-	OpenTimeout    time.Duration // Advisory lock timeout (0 = no advisory lock)
 
-	// Server mode options (federation)
-	ServerMode     bool   // Connect to dolt sql-server instead of embedded
+	// Server connection options
 	ServerHost     string // Server host (default: 127.0.0.1)
 	ServerPort     int    // Server port (default: 3307)
 	ServerUser     string // MySQL user (default: root)
@@ -92,9 +90,7 @@ type Config struct {
 	DisableWatchdog bool // Disable server health monitoring (default: enabled in server mode)
 }
 
-// Server mode retry configuration.
-// Server mode uses go-sql-driver/mysql which doesn't have built-in retry like the
-// embedded driver. We add retry for transient connection errors (stale pool connections,
+// Retry configuration for transient connection errors (stale pool connections,
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
 
@@ -160,8 +156,8 @@ func isRetryableError(err error) bool {
 }
 
 // isLockError returns true if the error indicates a Dolt lock contention problem.
-// These errors occur when the embedded Dolt engine cannot access its noms storage
-// layer, typically because a stale LOCK file was left behind by a crashed process.
+// These can occur when the Dolt server's storage layer is locked by another
+// process or a stale LOCK file was left behind by a crashed server.
 func isLockError(err error) bool {
 	if err == nil {
 		return false
@@ -179,8 +175,9 @@ func wrapLockError(err error) error {
 	if !isLockError(err) {
 		return err
 	}
-	return fmt.Errorf("%w\n\nThe Dolt database is locked. This usually means a previous bd process "+
-		"crashed without releasing its lock.\nRun 'bd doctor --fix' to clean stale lock files.", err)
+	return fmt.Errorf("%w\n\nThe Dolt database is locked. This usually means the Dolt server's "+
+		"storage is held by another process or a stale lock file exists.\n"+
+		"Try restarting the Dolt server, or run 'bd doctor --fix' to clean stale lock files.", err)
 }
 
 // withRetry executes an operation with retry for transient errors.
@@ -221,7 +218,7 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 	return result, wrapLockError(err)
 }
 
-// queryContext wraps s.db.QueryContext with server-mode retry for transient errors.
+// queryContext wraps s.db.QueryContext with retry for transient errors.
 func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	var rows *sql.Rows
 	err := s.withRetry(ctx, func() error {
@@ -232,7 +229,7 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 	return rows, wrapLockError(err)
 }
 
-// queryRowContext wraps s.db.QueryRowContext with server-mode retry for transient errors.
+// queryRowContext wraps s.db.QueryRowContext with retry for transient errors.
 // The scan function receives the *sql.Row and should call .Scan() on it.
 func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) error, query string, args ...any) error {
 	return wrapLockError(s.withRetry(ctx, func() error {

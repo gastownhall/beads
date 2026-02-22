@@ -239,7 +239,7 @@ Another bd process is accessing the database. Solutions:
 ps aux | grep bd
 kill <pid>
 
-# For embedded mode: remove the lock file
+# Remove a stale lock file
 rm .beads/dolt/.dolt/lock
 
 # For server mode: restart the Dolt server

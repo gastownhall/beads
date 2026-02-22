@@ -237,10 +237,9 @@ Examples:
 			releaseDiagnosticLocks(absPath)
 			applyFixes(result)
 			// Note: we intentionally do NOT re-run diagnostics here.
-			// The embedded Dolt driver is a process-level singleton; if any
-			// Close() timed out during the first diagnostic pass, the leaked
-			// goroutine holds internal noms locks and a second open will
-			// deadlock. Users should run 'bd doctor' again to verify fixes.
+			// If any Close() timed out during the first diagnostic pass,
+			// leaked goroutines may hold internal noms locks and a second
+			// open could deadlock. Users should run 'bd doctor' again to verify fixes.
 			fmt.Println("\nRun 'bd doctor' again to verify fixes.")
 		}
 
@@ -289,10 +288,8 @@ func init() {
 }
 
 // releaseDiagnosticLocks removes stale noms LOCK files that the diagnostics
-// phase may have left behind. The embedded Dolt driver's CloseWithTimeout can
-// leave goroutines (and their LOCK files) behind when it times out.
-// Only runs for embedded Dolt mode; skips server mode where locks belong to
-// the Dolt SQL server process.
+// phase may have left behind. CloseWithTimeout can leave goroutines (and
+// their LOCK files) behind when it times out.
 func releaseDiagnosticLocks(path string) {
 	beadsDir := filepath.Join(path, ".beads")
 	beadsDir = beads.FollowRedirect(beadsDir)
@@ -302,8 +299,8 @@ func releaseDiagnosticLocks(path string) {
 		return // Can't determine config, skip cleanup
 	}
 
-	// Only clean up in embedded Dolt mode.
-	if cfg.GetBackend() != configfile.BackendDolt || cfg.IsDoltServerMode() {
+	// Only clean up for Dolt backend.
+	if cfg.GetBackend() != configfile.BackendDolt {
 		return
 	}
 
@@ -480,7 +477,7 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false // Unresolved conflicts are a real problem
 	}
 
-	// Check 8h: Dolt init vs embedded mode mismatch
+	// Check 8h: Dolt server mode configuration check
 	doltModeCheck := convertWithCategory(doctor.CheckDoltServerModeMismatch(path), doctor.CategoryFederation)
 	result.Checks = append(result.Checks, doltModeCheck)
 

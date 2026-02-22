@@ -519,11 +519,8 @@ func compareDoltWithJSONL(ctx context.Context, store *dolt.DoltStore, jsonlIDs m
 }
 
 // checkDoltLocks checks for uncommitted changes in Dolt.
-// Respects dolt_mode configuration: uses MySQL driver for server mode,
-// embedded driver for embedded mode.
-// Uses openDoltDBWithLock for AccessLock coordination.
 func checkDoltLocks(beadsDir string) (bool, string) {
-	conn, err := openDoltDBWithLock(beadsDir)
+	conn, err := openDoltConn(beadsDir)
 	if err != nil {
 		return false, ""
 	}

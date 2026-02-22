@@ -13,7 +13,7 @@ bd's core design enables a distributed, git-backed issue tracker that feels like
 │  bd create, list, update, close, ready, show, dep, sync, ...    │
 │  - Cobra commands in cmd/bd/                                     │
 │  - All commands support --json for programmatic use              │
-│  - Direct DB access (embedded or server mode)                    │
+│  - Direct DB access (server mode via dolt sql-server)            │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
                                v
@@ -22,7 +22,7 @@ bd's core design enables a distributed, git-backed issue tracker that feels like
 │                      (.beads/dolt/)                               │
 │                                                                  │
 │  - Version-controlled SQL database with cell-level merge         │
-│  - Two modes: embedded (single-process) or server (multi-writer) │
+│  - Server mode via dolt sql-server (multi-writer capable)        │
 │  - Fast queries, indexes, foreign keys                           │
 │  - Issues, dependencies, labels, comments, events                │
 │  - Automatic Dolt commits on every write                         │
@@ -188,14 +188,13 @@ Each workspace runs its own background daemon for auto-sync:
 
      CLI commands ───RPC───▶ Server ───SQL───▶ Database
                               or
-     CLI commands ───SQL───▶ Database (embedded mode)
+     CLI commands ───SQL───▶ Database (via dolt sql-server)
 ```
 
-**Two modes:**
-- **Embedded:** In-process Dolt database (single-process, no server needed)
-- **Server:** Connect to external `dolt sql-server` (multi-writer, high-concurrency)
+**Server mode:**
+- Connects to `dolt sql-server` (multi-writer, high-concurrency)
 
-**Communication (server mode):**
+**Communication:**
 - Unix domain socket at `.beads/bd.sock` (Windows: named pipes)
 - Protocol defined in `internal/rpc/protocol.go`
 - Used by Dolt server mode for multi-writer access

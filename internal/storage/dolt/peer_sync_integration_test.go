@@ -598,7 +598,6 @@ func setupTwoTowns(t *testing.T, ctx context.Context) (*TownSetup, *TownSetup) {
 	alphaStore, err := New(ctx, &Config{
 		Path:           alphaDir,
 		Database:       "beads",
-		ServerMode:     true,
 		ServerHost:     "127.0.0.1",
 		ServerPort:     13307,
 		CommitterName:  "alpha-town",
@@ -661,7 +660,6 @@ func setupTwoTowns(t *testing.T, ctx context.Context) (*TownSetup, *TownSetup) {
 	betaStore, err := New(ctx, &Config{
 		Path:           betaDir,
 		Database:       "beads",
-		ServerMode:     true,
 		ServerHost:     "127.0.0.1",
 		ServerPort:     13308,
 		CommitterName:  "beta-town",

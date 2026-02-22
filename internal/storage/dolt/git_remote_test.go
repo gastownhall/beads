@@ -609,12 +609,12 @@ func TestGitRemoteSpecialCharacters(t *testing.T) {
 // --- Embedded driver git remote tests ---
 //
 // These tests verify that Dolt's git remote support works through the
-// embedded SQL driver (dolthub/driver), not just the CLI. This is the
-// critical question for the Dolt-in-Git spike: can we use store.Push()
-// and store.Pull() with a bare git repo as the remote?
+// SQL driver, not just the CLI. This is the critical question for the
+// Dolt-in-Git spike: can we use store.Push() and store.Pull() with a
+// bare git repo as the remote?
 
 // setupEmbeddedGitRemote creates a bare git repo and returns a DoltStore
-// connected via the embedded driver with the bare repo configured as "origin".
+// connected with the bare repo configured as "origin".
 func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
