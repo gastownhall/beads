@@ -30,6 +30,11 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	// Import MySQL driver for server mode connections
 	_ "github.com/go-sql-driver/mysql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -56,6 +61,10 @@ type DoltStore struct {
 	blockedIDsCacheMap map[string]bool
 	blockedIDsCached   bool // true once blockedIDsCache has been populated
 	cacheMu            sync.Mutex
+
+	// OTel span attribute cache (avoids per-call allocation)
+	spanAttrsOnce  sync.Once
+	spanAttrsCache []attribute.KeyValue
 
 	// Version control config
 	committerName  string
@@ -190,8 +199,10 @@ func wrapLockError(err error) error {
 
 // withRetry executes an operation with retry for transient errors.
 func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
+	attempts := 0
 	bo := newServerRetryBackoff()
-	return backoff.Retry(func() error {
+	err := backoff.Retry(func() error {
+		attempts++
 		err := op()
 		if err != nil && isRetryableError(err) {
 			return err // Retryable - backoff will retry
@@ -201,6 +212,65 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
+	if attempts > 1 {
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
+	}
+	return err
+}
+
+// doltTracer is the OTel tracer for SQL-level spans.
+// It uses the global provider, which is a no-op until telemetry.Init() is called.
+var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
+
+// doltMetrics holds OTel metric instruments for the dolt storage backend.
+// Instruments are registered against the global delegating provider at init time,
+// so they automatically forward to the real provider once telemetry.Init() runs.
+var doltMetrics struct {
+	retryCount  metric.Int64Counter
+	lockWaitMs  metric.Float64Histogram
+}
+
+func init() {
+	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
+	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
+		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
+		metric.WithUnit("{retry}"),
+	)
+	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
+		metric.WithDescription("Time spent waiting to acquire the dolt access lock"),
+		metric.WithUnit("ms"),
+	)
+}
+
+// doltSpanAttrs returns the fixed attributes shared by all SQL spans.
+// Cached to avoid allocating on every call (hot path when telemetry is disabled
+// still flows through no-op tracers).
+func (s *DoltStore) doltSpanAttrs() []attribute.KeyValue {
+	s.spanAttrsOnce.Do(func() {
+		s.spanAttrsCache = []attribute.KeyValue{
+			attribute.String("db.system", "dolt"),
+			attribute.Bool("db.readonly", s.readOnly),
+			attribute.Bool("db.server_mode", true), // always server mode after embedded removal
+		}
+	})
+	return s.spanAttrsCache
+}
+
+// spanSQL truncates a SQL string to keep spans readable.
+func spanSQL(q string) string {
+	if len(q) > 300 {
+		return q[:300] + "…"
+	}
+	return q
+}
+
+// endSpan records an error (if any) and ends the span.
+func endSpan(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 }
 
 // execContext wraps a write statement in an explicit BEGIN/COMMIT to ensure
@@ -209,6 +279,13 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 // uncommitted implicit transaction that Dolt rolls back on connection close,
 // causing silent data loss for callers that do not use db.BeginTx themselves.
 func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.exec",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("db.operation", "exec"),
+			attribute.String("db.statement", spanSQL(query)),
+		)...),
+	)
 	var result sql.Result
 	err := s.withRetry(ctx, func() error {
 		tx, txErr := s.db.BeginTx(ctx, nil)
@@ -223,27 +300,47 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 		}
 		return tx.Commit()
 	})
-	return result, wrapLockError(err)
+	finalErr := wrapLockError(err)
+	endSpan(span, finalErr)
+	return result, finalErr
 }
 
 // queryContext wraps s.db.QueryContext with retry for transient errors.
 func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.query",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("db.operation", "query"),
+			attribute.String("db.statement", spanSQL(query)),
+		)...),
+	)
 	var rows *sql.Rows
 	err := s.withRetry(ctx, func() error {
 		var queryErr error
 		rows, queryErr = s.db.QueryContext(ctx, query, args...)
 		return queryErr
 	})
-	return rows, wrapLockError(err)
+	finalErr := wrapLockError(err)
+	endSpan(span, finalErr)
+	return rows, finalErr
 }
 
 // queryRowContext wraps s.db.QueryRowContext with retry for transient errors.
 // The scan function receives the *sql.Row and should call .Scan() on it.
 func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) error, query string, args ...any) error {
-	return wrapLockError(s.withRetry(ctx, func() error {
+	ctx, span := doltTracer.Start(ctx, "dolt.query_row",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("db.operation", "query_row"),
+			attribute.String("db.statement", spanSQL(query)),
+		)...),
+	)
+	finalErr := wrapLockError(s.withRetry(ctx, func() error {
 		row := s.db.QueryRowContext(ctx, query, args...)
 		return scan(row)
 	}))
+	endSpan(span, finalErr)
+	return finalErr
 }
 
 // applyConfigDefaults fills in default values for unset Config fields.
@@ -711,11 +808,15 @@ func (s *DoltStore) commitAuthorString() string {
 }
 
 // Commit creates a Dolt commit with the given message
-func (s *DoltStore) Commit(ctx context.Context, message string) error {
+func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.commit",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(s.doltSpanAttrs()...),
+	)
+	defer func() { endSpan(span, retErr) }()
 	// NOTE: In SQL procedure mode, Dolt defaults author to the authenticated SQL user
 	// (e.g. root@localhost). Always pass an explicit author for deterministic history.
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString())
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 	return nil
@@ -835,7 +936,15 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 // Push pushes commits to the remote.
 // When remote credentials are configured (for Hosted Dolt), sets DOLT_REMOTE_PASSWORD
 // env var and passes --user flag to authenticate.
-func (s *DoltStore) Push(ctx context.Context) error {
+func (s *DoltStore) Push(ctx context.Context) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.push",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.remote", s.remote),
+			attribute.String("dolt.branch", s.branch),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
 	if s.remoteUser != "" {
 		federationEnvMutex.Lock()
 		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
@@ -858,7 +967,15 @@ func (s *DoltStore) Push(ctx context.Context) error {
 
 // ForcePush force-pushes commits to the remote, overwriting remote changes.
 // Use when the remote has uncommitted changes in its working set.
-func (s *DoltStore) ForcePush(ctx context.Context) error {
+func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.force_push",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.remote", s.remote),
+			attribute.String("dolt.branch", s.branch),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
 	if s.remoteUser != "" {
 		federationEnvMutex.Lock()
 		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
@@ -883,7 +1000,15 @@ func (s *DoltStore) ForcePush(ctx context.Context) error {
 // Passes branch explicitly to avoid "did not specify a branch" errors.
 // When remote credentials are configured (for Hosted Dolt), sets DOLT_REMOTE_PASSWORD
 // env var and passes --user flag to authenticate.
-func (s *DoltStore) Pull(ctx context.Context) error {
+func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.pull",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.remote", s.remote),
+			attribute.String("dolt.branch", s.branch),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
 	if s.remoteUser != "" {
 		federationEnvMutex.Lock()
 		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
@@ -905,18 +1030,30 @@ func (s *DoltStore) Pull(ctx context.Context) error {
 }
 
 // Branch creates a new branch
-func (s *DoltStore) Branch(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_BRANCH(?)", name)
-	if err != nil {
+func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.branch",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.branch", name),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
+	if _, err := s.db.ExecContext(ctx, "CALL DOLT_BRANCH(?)", name); err != nil {
 		return fmt.Errorf("failed to create branch %s: %w", name, err)
 	}
 	return nil
 }
 
 // Checkout switches to the specified branch
-func (s *DoltStore) Checkout(ctx context.Context, branch string) error {
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch)
-	if err != nil {
+func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.checkout",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.branch", branch),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
+	if _, err := s.db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
 		return fmt.Errorf("failed to checkout branch %s: %w", branch, err)
 	}
 	s.branch = branch
@@ -925,16 +1062,26 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) error {
 
 // Merge merges the specified branch into the current branch.
 // Returns any merge conflicts if present. Implements storage.VersionedStorage.
-func (s *DoltStore) Merge(ctx context.Context, branch string) ([]storage.Conflict, error) {
+func (s *DoltStore) Merge(ctx context.Context, branch string) (conflicts []storage.Conflict, retErr error) {
+	ctx, span := doltTracer.Start(ctx, "dolt.merge",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(s.doltSpanAttrs(),
+			attribute.String("dolt.merge_branch", branch),
+		)...),
+	)
+	defer func() { endSpan(span, retErr) }()
+
 	// DOLT_MERGE may create a merge commit; pass explicit author for determinism.
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", s.commitAuthorString(), branch)
 	if err != nil {
 		// Check if the error is due to conflicts
-		conflicts, conflictErr := s.GetConflicts(ctx)
-		if conflictErr == nil && len(conflicts) > 0 {
-			return conflicts, nil
+		mergeConflicts, conflictErr := s.GetConflicts(ctx)
+		if conflictErr == nil && len(mergeConflicts) > 0 {
+			span.SetAttributes(attribute.Int("dolt.conflicts", len(mergeConflicts)))
+			return mergeConflicts, nil
 		}
-		return nil, fmt.Errorf("failed to merge branch %s: %w", branch, err)
+		retErr = fmt.Errorf("failed to merge branch %s: %w", branch, err)
+		return nil, retErr
 	}
 	return nil, nil
 }

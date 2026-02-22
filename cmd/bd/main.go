@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	oteltrace "go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/attribute"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -24,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -91,6 +94,10 @@ var (
 	// commandTipIDsShown tracks which tip IDs were shown in this command (deduped).
 	// This is used for tip-commit message formatting.
 	commandTipIDsShown map[string]struct{}
+
+	// commandSpan is the root OTel span for the current command execution.
+	// All storage and AI spans are nested as children of this span.
+	commandSpan oteltrace.Span
 )
 
 // readOnlyCommands lists commands that only read from the database.
@@ -244,6 +251,22 @@ var rootCmd = &cobra.Command{
 		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
 		// pending batch commits before canceling the context.
 		rootCtx, rootCancel = setupGracefulShutdown()
+
+		// Initialize OTel (no-op unless BD_OTEL_METRICS_URL or BD_OTEL_STDOUT=true).
+		// Must run before any DB access so SQL spans nest under command spans.
+		if err := telemetry.Init(rootCtx, "bd", Version); err != nil {
+			debug.Logf("warning: telemetry init failed: %v", err)
+		}
+
+		// Start root span for this command. rootCtx now carries the span, so
+		// all downstream DB and AI calls become child spans automatically.
+		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
+			oteltrace.WithAttributes(
+				attribute.String("bd.command", cmd.Name()),
+				attribute.String("bd.version", Version),
+				attribute.String("bd.args", strings.Join(os.Args[1:], " ")),
+			),
+		)
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
@@ -482,6 +505,10 @@ var rootCmd = &cobra.Command{
 
 		// Set actor for audit trail
 		actor = getActorWithGit()
+		// Attach actor to the command span now that we have it.
+		if commandSpan != nil {
+			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
+		}
 
 		// Track bd version changes
 		// Best-effort tracking - failures are silent
@@ -626,6 +653,15 @@ var rootCmd = &cobra.Command{
 		if store != nil {
 			_ = store.Close() // Best effort cleanup
 		}
+
+		// End the command span and flush OTel data before process exit.
+		if commandSpan != nil {
+			commandSpan.End()
+			commandSpan = nil
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		telemetry.Shutdown(shutdownCtx)
+		shutdownCancel()
 
 		if profileFile != nil {
 			pprof.StopCPUProfile()
