@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -102,6 +103,13 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) 
 	}
 	if len(labels) > 0 {
 		buf.WriteString(fmt.Sprintf("  Labels: %v\n", labels))
+	}
+	if hasCustomMetadata(issue) {
+		if n := countMetadataKeys(issue); n > 0 {
+			buf.WriteString(fmt.Sprintf("  Metadata: %d keys\n", n))
+		} else {
+			buf.WriteString("  Metadata: set\n")
+		}
 	}
 	buf.WriteString("\n")
 }
@@ -246,4 +254,22 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 			ui.RenderType(string(issue.IssueType)),
 			assigneeStr, labelsStr, issue.Title, depInfo))
 	}
+}
+
+// hasCustomMetadata returns true if the issue has non-empty custom metadata.
+func hasCustomMetadata(issue *types.Issue) bool {
+	if len(issue.Metadata) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(issue.Metadata))
+	return trimmed != "{}" && trimmed != "null"
+}
+
+// countMetadataKeys returns the number of top-level keys in the issue's metadata JSON.
+func countMetadataKeys(issue *types.Issue) int {
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(issue.Metadata, &data); err != nil {
+		return 0
+	}
+	return len(data)
 }

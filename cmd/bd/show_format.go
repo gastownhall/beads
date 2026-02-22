@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -189,4 +191,69 @@ func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
 	priorityTag := ui.RenderPriority(dep.Priority)
 
 	return fmt.Sprintf("  %s %s %s: %s %s", prefix, statusIcon, idStr, dep.Title, priorityTag)
+}
+
+// formatIssueCustomMetadata renders the issue's custom JSON metadata field
+// for bd show output. Returns empty string if no metadata is set.
+// Top-level keys are displayed sorted alphabetically, one per line.
+// Scalar values are shown inline; objects/arrays are shown as compact JSON.
+func formatIssueCustomMetadata(issue *types.Issue) string {
+	if len(issue.Metadata) == 0 {
+		return ""
+	}
+	// Treat empty object as "no metadata"
+	trimmed := strings.TrimSpace(string(issue.Metadata))
+	if trimmed == "{}" || trimmed == "null" {
+		return ""
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(issue.Metadata, &data); err != nil {
+		// Not a JSON object — show raw value
+		return fmt.Sprintf("%s\n  %s", ui.RenderBold("METADATA"), trimmed)
+	}
+	if len(data) == 0 {
+		return ""
+	}
+
+	// Sort keys for stable output
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var lines []string
+	for _, k := range keys {
+		v := data[k]
+		lines = append(lines, fmt.Sprintf("  %s: %s", k, formatMetadataValue(v)))
+	}
+
+	return fmt.Sprintf("%s\n%s", ui.RenderBold("METADATA"), strings.Join(lines, "\n"))
+}
+
+// formatMetadataValue formats a single metadata value for display.
+// Strings are shown unquoted, numbers/bools as-is, objects/arrays as compact JSON.
+func formatMetadataValue(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		// JSON numbers unmarshal as float64; show integers without decimal
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case bool:
+		return fmt.Sprintf("%t", val)
+	case nil:
+		return "null"
+	default:
+		// Arrays and nested objects — compact JSON
+		b, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(b)
+	}
 }

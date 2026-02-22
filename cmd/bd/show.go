@@ -193,6 +193,11 @@ var showCmd = &cobra.Command{
 				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
 			}
 
+			// Show custom metadata (GH#1406)
+			if metaStr := formatIssueCustomMetadata(issue); metaStr != "" {
+				fmt.Printf("\n%s\n", metaStr)
+			}
+
 			// Collect related issues from both directions for deduplication
 			// (relates-to is bidirectional, so we merge and show once)
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
