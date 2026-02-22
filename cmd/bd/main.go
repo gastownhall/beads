@@ -192,7 +192,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables auto-sync")
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
-	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt backend: auto-commit after write commands (off|on|batch). Default: off. Override via config key dolt.auto-commit")
+	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd sync / bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
@@ -240,8 +240,10 @@ var rootCmd = &cobra.Command{
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
 
-		// Set up signal-aware context for graceful cancellation
-		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		// Set up signal-aware context with batch commit flush on shutdown.
+		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
+		// pending batch commits before canceling the context.
+		rootCtx, rootCancel = setupGracefulShutdown()
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
@@ -654,6 +656,61 @@ func checkBlockedEnvVars() error {
 		}
 	}
 	return nil
+}
+
+// setupGracefulShutdown creates a context that cancels on SIGINT/SIGTERM/SIGHUP.
+// Before cancellation, it flushes pending batch commits so that accumulated
+// changes in the Dolt working set are not lost on graceful shutdown.
+func setupGracefulShutdown() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		select {
+		case <-sigCh:
+			flushBatchCommitOnShutdown()
+			cancel()
+			// On second signal, force exit
+			<-sigCh
+			os.Exit(1)
+		case <-ctx.Done():
+			signal.Stop(sigCh)
+		}
+	}()
+
+	return ctx, cancel
+}
+
+// flushBatchCommitOnShutdown commits any pending batch changes before process exit.
+// This prevents data loss when SIGTERM/SIGHUP kills a process with uncommitted
+// batch writes sitting in the Dolt working set.
+func flushBatchCommitOnShutdown() {
+	mode, err := getDoltAutoCommitMode()
+	if err != nil || mode != doltAutoCommitBatch {
+		return
+	}
+
+	storeMutex.Lock()
+	active := storeActive
+	st := store
+	storeMutex.Unlock()
+
+	if !active || st == nil {
+		return
+	}
+
+	// Use a fresh context with timeout — rootCtx is about to be canceled.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	committed, commitErr := st.CommitPending(ctx, getActor())
+	if commitErr != nil {
+		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
+	} else if committed {
+		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+	}
 }
 
 func main() {

@@ -695,6 +695,8 @@ func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, erro
 
 // buildBatchCommitMessage generates a descriptive commit message summarizing
 // what changed since the last commit by querying dolt_diff against HEAD.
+// It reports issue-level create/update/delete counts and lists any other
+// tables (labels, comments, events, etc.) that have uncommitted changes.
 func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) string {
 	if actor == "" {
 		actor = s.committerName
@@ -723,6 +725,27 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 				}
 			}
 		}
+		if rowErr := rows.Err(); rowErr != nil {
+			// Best effort — proceed with whatever counts we gathered
+			_ = rowErr
+		}
+	}
+
+	// Check which other tables have uncommitted changes beyond issues.
+	// This surfaces label, comment, event, and dependency changes that
+	// would otherwise produce a generic fallback message.
+	var otherTables []string
+	statusRows, statusErr := s.db.QueryContext(ctx,
+		`SELECT table_name FROM dolt_status WHERE table_name != 'issues'`)
+	if statusErr == nil {
+		defer statusRows.Close()
+		for statusRows.Next() {
+			var table string
+			if scanErr := statusRows.Scan(&table); scanErr == nil {
+				otherTables = append(otherTables, table)
+			}
+		}
+		_ = statusRows.Err() // Best effort
 	}
 
 	// Build descriptive message
@@ -737,10 +760,18 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 		parts = append(parts, fmt.Sprintf("%d deleted", removed))
 	}
 
-	if len(parts) == 0 {
+	if len(parts) == 0 && len(otherTables) == 0 {
 		return fmt.Sprintf("bd: batch commit by %s", actor)
 	}
-	return fmt.Sprintf("bd: batch commit by %s — %s", actor, strings.Join(parts, ", "))
+
+	msg := fmt.Sprintf("bd: batch commit by %s", actor)
+	if len(parts) > 0 {
+		msg += " — " + strings.Join(parts, ", ")
+	}
+	if len(otherTables) > 0 {
+		msg += fmt.Sprintf(" (+ %s)", strings.Join(otherTables, ", "))
+	}
+	return msg
 }
 
 // Push pushes commits to the remote.
