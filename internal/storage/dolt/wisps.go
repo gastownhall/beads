@@ -25,22 +25,6 @@ func wispIssueTable(id string) string {
 	return "issues"
 }
 
-// wispLabelTable returns the label table name based on issue ID.
-func wispLabelTable(issueID string) string {
-	if IsEphemeralID(issueID) {
-		return "wisp_labels"
-	}
-	return "labels"
-}
-
-// wispDepTable returns the dependency table name based on issue ID.
-func wispDepTable(issueID string) string {
-	if IsEphemeralID(issueID) {
-		return "wisp_dependencies"
-	}
-	return "dependencies"
-}
-
 // wispEventTable returns the event table name based on issue ID.
 func wispEventTable(issueID string) string {
 	if IsEphemeralID(issueID) {
@@ -328,7 +312,13 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 }
 
 // updateWisp updates fields on a wisp in the wisps table.
-func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, _ string) error {
+func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	// Get old wisp for closed_at auto-management
+	oldWisp, err := s.getWisp(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to get wisp for update: %w", err)
+	}
+
 	setClauses := []string{"updated_at = ?"}
 	args := []interface{}{time.Now().UTC()}
 
@@ -355,11 +345,14 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 		}
 	}
 
+	// Auto-manage closed_at (set on close, clear on reopen)
+	setClauses, args = manageClosedAt(oldWisp, updates, setClauses, args)
+
 	args = append(args, id)
 
 	// nolint:gosec // G201: setClauses contains only column names
 	query := fmt.Sprintf("UPDATE wisps SET %s WHERE id = ?", strings.Join(setClauses, ", "))
-	_, err := s.execContext(ctx, query, args...)
+	_, err = s.execContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update wisp: %w", err)
 	}
@@ -461,7 +454,7 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 
 	if rowsAffected == 0 {
 		var currentAssignee string
-		err := s.db.QueryRowContext(ctx, `SELECT assignee FROM wisps WHERE id = ?`, id).Scan(&currentAssignee)
+		err := tx.QueryRowContext(ctx, `SELECT assignee FROM wisps WHERE id = ?`, id).Scan(&currentAssignee)
 		if err != nil {
 			return fmt.Errorf("failed to get current assignee: %w", err)
 		}

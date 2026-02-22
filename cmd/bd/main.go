@@ -111,7 +111,7 @@ var readOnlyCommands = map[string]bool{
 }
 
 // isReadOnlyCommand returns true if the command only reads from the database.
-// This is used to open SQLite in read-only mode, preventing file modifications
+// This is used to open the store in read-only mode, preventing file modifications
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
@@ -409,7 +409,7 @@ var rootCmd = &cobra.Command{
 				// Allow some commands to run without a database
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
-				// - config set/get for yaml-only keys: writes to config.yaml, not SQLite (GH#536)
+				// - config set/get for yaml-only keys: writes to config.yaml, not db (GH#536)
 				isYamlOnlyConfigOp := false
 				if (cmd.Name() == "set" || cmd.Name() == "get") && cmd.Parent() != nil && cmd.Parent().Name() == "config" {
 					if len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
@@ -487,8 +487,8 @@ var rootCmd = &cobra.Command{
 		trackBdVersion()
 
 		// Check if this is a read-only command (GH#804)
-		// Read-only commands open SQLite in read-only mode to avoid modifying
-		// the database file (which breaks file watchers).
+		// Read-only commands open the store in read-only mode to avoid modifying
+		// the database (which breaks file watchers).
 		useReadOnly := isReadOnlyCommand(cmd.Name())
 
 		// Auto-migrate database on version bump
@@ -644,7 +644,7 @@ var rootCmd = &cobra.Command{
 
 // blockedEnvVars lists environment variables that must not be set because they
 // could silently override the storage backend via viper's AutomaticEnv, causing
-// data fragmentation between sqlite and dolt (bd-hevyw).
+// data fragmentation (bd-hevyw).
 var blockedEnvVars = []string{"BD_BACKEND", "BD_DATABASE_BACKEND"}
 
 // checkBlockedEnvVars returns an error if any blocked env vars are set.

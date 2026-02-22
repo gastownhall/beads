@@ -543,6 +543,24 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		return &types.DeleteIssuesResult{}, nil
 	}
 
+	// Route wisp IDs to wisp deletion; process regular IDs in batch below.
+	ephIDs, regularIDs := partitionIDs(ids)
+	wispDeleteCount := 0
+	for _, eid := range ephIDs {
+		if s.isActiveWisp(ctx, eid) {
+			if !dryRun {
+				if err := s.deleteWisp(ctx, eid); err != nil {
+					return nil, fmt.Errorf("failed to delete wisp %s: %w", eid, err)
+				}
+			}
+			wispDeleteCount++
+		}
+	}
+	ids = regularIDs
+	if len(ids) == 0 {
+		return &types.DeleteIssuesResult{DeletedCount: wispDeleteCount}, nil
+	}
+
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
@@ -702,7 +720,7 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 	result.DependenciesCount = depsCount
 	result.LabelsCount = labelsCount
 	result.EventsCount = eventsCount
-	result.DeletedCount = len(expandedIDs)
+	result.DeletedCount = len(expandedIDs) + wispDeleteCount
 
 	if dryRun {
 		return result, nil
@@ -742,7 +760,7 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		rowsAffected, _ := deleteResult.RowsAffected()
 		totalDeleted += int(rowsAffected)
 	}
-	result.DeletedCount = totalDeleted
+	result.DeletedCount = totalDeleted + wispDeleteCount
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)

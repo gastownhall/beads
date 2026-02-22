@@ -53,7 +53,7 @@ func MigrateWispsTable(db *sql.DB) error {
 
 // wispsTableSchema mirrors the issues table schema exactly.
 // This table is ignored by dolt_ignore and will not appear in Dolt commits.
-const wispsTableSchema = `CREATE TABLE wisps (
+const wispsTableSchema = `CREATE TABLE IF NOT EXISTS wisps (
     id VARCHAR(255) PRIMARY KEY,
     content_hash VARCHAR(64),
     title VARCHAR(500) NOT NULL,
