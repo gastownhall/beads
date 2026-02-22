@@ -487,7 +487,6 @@ func TestDepBlocksFlag(t *testing.T) {
 	}
 }
 
-
 func TestDepTreeFormatFlag(t *testing.T) {
 	// Test that the --format flag exists on depTreeCmd
 	flag := depTreeCmd.Flags().Lookup("format")
@@ -1220,7 +1219,6 @@ func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
 //
 // These tests serve as regression tests ensuring the storage layer
 // continues to provide user-friendly error messages.
-
 
 func TestIsChildOf(t *testing.T) {
 	tests := []struct {
