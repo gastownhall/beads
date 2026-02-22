@@ -321,7 +321,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:       cfg.ReadOnly,
 	}
 
-	// Schema initialization for server mode (idempotent).
+	// Schema initialization on main (tracked tables only).
+	// This ensures main has committed schema before we create branches from it.
+	// Must happen before branch checkout so new branches inherit the schema.
 	if !cfg.ReadOnly {
 		if err := store.initSchema(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
@@ -350,6 +352,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			}
 		}
 		store.branch = bdBranch
+
+		// Re-run schema init on the working branch. Untracked tables
+		// (wisps, wisp_*) exist only in the working set and are lost on
+		// branch checkout. Re-init is idempotent and recreates them.
+		if !cfg.ReadOnly {
+			if err := store.initSchema(ctx); err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("failed to initialize schema on branch %s: %w", bdBranch, err)
+			}
+		}
 	}
 
 	// Start watchdog for server mode auto-recovery
