@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	dolt "github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -30,8 +29,6 @@ Commands:
   bd dolt show         Show current Dolt configuration with connection test
   bd dolt set <k> <v>  Set a configuration value
   bd dolt test         Test server connection
-  bd dolt start        Start a Dolt SQL server (background process)
-  bd dolt stop         Stop the running Dolt SQL server
   bd dolt commit       Commit pending changes
   bd dolt push         Push commits to Dolt remote
   bd dolt pull         Pull commits from Dolt remote
@@ -46,8 +43,6 @@ Flags for 'bd dolt set':
   --update-config  Also write to config.yaml for team-wide defaults
 
 Examples:
-  bd dolt start                              Start server with configured settings
-  bd dolt stop                               Stop the running server
   bd dolt set database myproject
   bd dolt set host 192.168.1.100 --update-config
   bd dolt test`,
@@ -99,35 +94,6 @@ This verifies that:
 Use this before switching to server mode to ensure the server is running.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		testDoltConnection()
-	},
-}
-
-var doltStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start a Dolt SQL server using configured settings",
-	Long: `Start a Dolt SQL server as a background process.
-
-Uses the host, port, and user from your Dolt configuration (see 'bd dolt show').
-The server runs in the background and persists after bd exits.
-
-Configuration sources (priority order):
-  1. Environment variables (BEADS_DOLT_*)
-  2. metadata.json (bd dolt set)
-  3. config.yaml (team defaults)`,
-	Run: func(cmd *cobra.Command, args []string) {
-		startDoltServer()
-	},
-}
-
-var doltStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop the running Dolt SQL server",
-	Long: `Stop the Dolt SQL server started by 'bd dolt start'.
-
-Sends a graceful shutdown signal (SIGTERM). If the server doesn't stop
-within 10 seconds, it is forcefully terminated.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		stopDoltServer()
 	},
 }
 
@@ -246,8 +212,6 @@ func init() {
 	doltCmd.AddCommand(doltShowCmd)
 	doltCmd.AddCommand(doltSetCmd)
 	doltCmd.AddCommand(doltTestCmd)
-	doltCmd.AddCommand(doltStartCmd)
-	doltCmd.AddCommand(doltStopCmd)
 	doltCmd.AddCommand(doltCommitCmd)
 	doltCmd.AddCommand(doltPushCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -481,178 +445,6 @@ func testServerConnection(cfg *configfile.Config) bool {
 	}
 	_ = conn.Close() // Best effort cleanup
 	return true
-}
-
-func startDoltServer() {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-
-	dataDir := filepath.Join(beadsDir, "dolt")
-	logFile := filepath.Join(beadsDir, "dolt-server.log")
-	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-
-	// Check if server is already running
-	if pid := dolt.GetRunningServerPID(dataDir); pid > 0 {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "server_already_running",
-				"message": fmt.Sprintf("Dolt server already running (PID %d)", pid),
-				"pid":     pid,
-				"host":    host,
-				"port":    port,
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: Dolt server already running (PID %d)\n", pid)
-			fmt.Fprintf(os.Stderr, "Stop it first: bd dolt stop\n")
-		}
-		os.Exit(1)
-	}
-
-	// Check if data directory exists
-	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "data_dir_not_found",
-				"message": fmt.Sprintf("Dolt data directory not found: %s", dataDir),
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: Dolt data directory not found: %s\n", dataDir)
-			fmt.Fprintf(os.Stderr, "Run 'bd init' first to create the database.\n")
-		}
-		os.Exit(1)
-	}
-
-	if !jsonOutput {
-		fmt.Println("Starting Dolt SQL server...")
-		fmt.Printf("  Host:     %s\n", host)
-		fmt.Printf("  Port:     %d\n", port)
-		fmt.Printf("  User:     %s\n", user)
-		fmt.Printf("  Database: %s\n", database)
-		fmt.Printf("  Data dir: %s\n", dataDir)
-		fmt.Printf("  Log file: %s\n", logFile)
-		fmt.Println()
-		fmt.Print("Waiting for server to accept connections...")
-	}
-
-	server := dolt.NewServer(dolt.ServerConfig{
-		DataDir:           dataDir,
-		SQLPort:           port,
-		Host:              host,
-		LogFile:           logFile,
-		User:              user,
-		DisableRemotesAPI: true, // remotesapi only needed for federation
-	})
-
-	if err := server.Start(context.Background()); err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "start_failed",
-				"message": err.Error(),
-			})
-		} else {
-			fmt.Println() // finish the "Waiting..." line
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			fmt.Fprintf(os.Stderr, "Check the log file for details: %s\n", logFile)
-		}
-		os.Exit(1)
-	}
-	if !jsonOutput {
-		fmt.Println() // finish the "Waiting..." line
-	}
-
-	pid := dolt.GetRunningServerPID(dataDir)
-
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"status":   "started",
-			"pid":      pid,
-			"host":     host,
-			"port":     port,
-			"user":     user,
-			"database": database,
-			"data_dir": dataDir,
-			"log_file": logFile,
-		})
-		return
-	}
-
-	fmt.Printf("  %s\n", ui.RenderPass(fmt.Sprintf("✓ Server started (PID %d)", pid)))
-	fmt.Println()
-	fmt.Println("To stop the server:")
-	fmt.Println("  bd dolt stop")
-}
-
-func stopDoltServer() {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	dataDir := filepath.Join(beadsDir, "dolt")
-
-	pid := dolt.GetRunningServerPID(dataDir)
-	if pid == 0 {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":  "not_running",
-				"message": "No Dolt server is running",
-			})
-		} else {
-			fmt.Println("No Dolt server is running.")
-		}
-		return
-	}
-
-	if !jsonOutput {
-		fmt.Printf("Stopping Dolt SQL server (PID %d)...\n", pid)
-	}
-
-	if err := dolt.StopServerByPID(pid); err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "stop_failed",
-				"message": err.Error(),
-				"pid":     pid,
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error stopping server: %v\n", err)
-		}
-		os.Exit(1)
-	}
-
-	// Clean up PID file
-	pidFile := filepath.Join(dataDir, "dolt-server.pid")
-	_ = os.Remove(pidFile)
-
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"status": "stopped",
-			"pid":    pid,
-		})
-		return
-	}
-
-	fmt.Printf("%s\n", ui.RenderPass("✓ Server stopped"))
-
-	fmt.Println()
-	fmt.Println("Note: bd commands require a running server.")
-	fmt.Println("Restart with: bd dolt start")
 }
 
 // logDoltConfigChange appends an audit entry to .beads/dolt-config.log.

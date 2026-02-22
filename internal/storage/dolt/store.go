@@ -35,6 +35,9 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
+// DefaultSQLPort is the default port for dolt sql-server.
+const DefaultSQLPort = 3307
+
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
 	db       *sql.DB
@@ -43,10 +46,6 @@ type DoltStore struct {
 	connStr  string       // Connection string for reconnection
 	mu       sync.RWMutex // Protects concurrent access
 	readOnly bool         // True if opened in read-only mode
-
-	// Watchdog for server mode auto-recovery
-	watchdogCancel context.CancelFunc
-	watchdogDone   chan struct{}
 
 	// Per-invocation caches (lifetime = DoltStore lifetime)
 	customStatusCache  []string // cached result of GetCustomStatuses
@@ -416,9 +415,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	// Start watchdog for server mode auto-recovery
-	store.startWatchdog(cfg)
-
 	return store, nil
 }
 
@@ -681,8 +677,6 @@ func isOnlyComments(stmt string) bool {
 // Close closes the database connection
 func (s *DoltStore) Close() error {
 	s.closed.Store(true)
-	// Stop watchdog before taking the lock (watchdog may hold RLock)
-	s.stopWatchdog()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var err error
