@@ -868,7 +868,7 @@ func TestFormatTreeNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatTreeNode(tt.node)
+			result := formatTreeNode(tt.node, false)
 			for _, want := range tt.contains {
 				if !strings.Contains(result, want) {
 					t.Errorf("formatTreeNode() = %q, want to contain %q", result, want)
@@ -883,6 +883,26 @@ func TestFormatTreeNode(t *testing.T) {
 			}
 		})
 	}
+
+	// Test that blocked root shows [BLOCKED] instead of [READY]
+	t.Run("blocked root shows BLOCKED not READY", func(t *testing.T) {
+		node := &types.TreeNode{
+			Issue: types.Issue{
+				ID:       "BD-10",
+				Title:    "Blocked Root",
+				Status:   types.StatusOpen,
+				Priority: 1,
+			},
+			Depth: 0,
+		}
+		result := formatTreeNode(node, true)
+		if strings.Contains(result, "[READY]") {
+			t.Errorf("blocked root should not show [READY], got: %q", result)
+		}
+		if !strings.Contains(result, "[BLOCKED]") {
+			t.Errorf("blocked root should show [BLOCKED], got: %q", result)
+		}
+	})
 }
 
 func TestRenderTreeOutput(t *testing.T) {

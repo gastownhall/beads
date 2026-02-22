@@ -702,6 +702,8 @@ type treeRenderer struct {
 	maxDepth int
 	// Direction of traversal
 	direction string
+	// Whether the root node has open children (i.e., is blocked)
+	rootBlocked bool
 }
 
 // renderTree renders the tree with proper box-drawing connectors
@@ -731,6 +733,18 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 
 	if root == nil && len(tree) > 0 {
 		root = tree[0]
+	}
+
+	// Check if root has open children (meaning it's blocked, not ready)
+	if root != nil {
+		hasOpenChildren := false
+		for _, child := range children[root.ID] {
+			if child.Status == types.StatusOpen || child.Status == types.StatusInProgress {
+				hasOpenChildren = true
+				break
+			}
+		}
+		r.rootBlocked = hasOpenChildren
 	}
 
 	// Render recursively from root
@@ -772,7 +786,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 	r.seen[node.ID] = true
 
 	// Format the node line
-	line := formatTreeNode(node)
+	line := formatTreeNode(node, depth == 0 && r.rootBlocked)
 
 	// Add truncation warning if at max depth and has children
 	if node.Truncated || (depth == r.maxDepth && len(children[node.ID]) > 0) {
@@ -794,7 +808,8 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 }
 
 // formatTreeNode formats a single tree node with status, ready indicator, etc.
-func formatTreeNode(node *types.TreeNode) string {
+// isBlocked indicates the node has open blocking dependencies and should not show [READY].
+func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	// Handle external dependencies specially
 	if IsExternalRef(node.ID) {
 		// External deps use their title directly which includes the status indicator
@@ -829,11 +844,13 @@ func formatTreeNode(node *types.TreeNode) string {
 	line := fmt.Sprintf("%s: %s [P%d] (%s)",
 		idStr, node.Title, node.Priority, node.Status)
 
-	// Add READY indicator for open issues (those that could be worked on)
-	// An issue is ready if it's open and has no blocking dependencies
-	// (In the tree view, depth 0 with status open implies ready in the "down" direction)
+	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
-		line += " " + ui.PassStyle.Bold(true).Render("[READY]")
+		if isBlocked {
+			line += " " + ui.FailStyle.Bold(true).Render("[BLOCKED]")
+		} else {
+			line += " " + ui.PassStyle.Bold(true).Render("[READY]")
+		}
 	}
 
 	return line

@@ -607,10 +607,10 @@ func (s *DoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDe
 
 	// Simple implementation - can be optimized with CTE
 	visited := make(map[string]bool)
-	return s.buildDependencyTree(ctx, issueID, 0, maxDepth, reverse, visited)
+	return s.buildDependencyTree(ctx, issueID, 0, maxDepth, reverse, visited, "")
 }
 
-func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool) ([]*types.TreeNode, error) {
+func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string) ([]*types.TreeNode, error) {
 	if depth >= maxDepth || visited[issueID] {
 		return nil, nil
 	}
@@ -644,14 +644,15 @@ func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, dep
 	}
 
 	node := &types.TreeNode{
-		Issue: *issue,
-		Depth: depth,
+		Issue:    *issue,
+		Depth:    depth,
+		ParentID: parentID,
 	}
 
 	// TreeNode doesn't have Children field - return flat list
 	nodes := []*types.TreeNode{node}
 	for _, childID := range childIDs {
-		children, err := s.buildDependencyTree(ctx, childID, depth+1, maxDepth, reverse, visited)
+		children, err := s.buildDependencyTree(ctx, childID, depth+1, maxDepth, reverse, visited, issueID)
 		if err != nil {
 			return nil, err
 		}
