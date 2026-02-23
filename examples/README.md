@@ -12,10 +12,9 @@ This directory contains examples of how to integrate bd with AI agents and workf
 
 ### Tools & Utilities
 - **[monitor-webui/](monitor-webui/)** - Standalone web interface for real-time issue monitoring and visualization
-- **[markdown-to-jsonl/](markdown-to-jsonl/)** - Convert markdown planning docs to bd issues
-- **[github-import/](github-import/)** - Import issues from GitHub repositories
 - **[git-hooks/](git-hooks/)** - Pre-configured git hooks for automatic Dolt sync
 <!-- REMOVED (bd-4c74): branch-merge example - collision resolution no longer needed with hash IDs -->
+<!-- REMOVED (bd-9ni.5): markdown-to-jsonl, github-import, jira-import converters - bd import removed; use native bd jira/linear/gitlab sync -->
 
 ### Workflow Patterns
 - **[contributor-workflow/](contributor-workflow/)** - OSS contributor setup with separate planning repo

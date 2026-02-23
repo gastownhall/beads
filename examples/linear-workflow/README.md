@@ -466,7 +466,7 @@ For large projects, initial sync fetches all issues. Subsequent syncs are increm
 ## See Also
 
 - [CONFIG.md](../../docs/CONFIG.md) - Full configuration documentation
-- [Jira Import Example](../jira-import/) - Similar integration for Jira
+- [Jira Sync](../../README.md) - Similar integration for Jira (`bd jira sync`)
 - [Linear GraphQL API](https://developers.linear.app/docs/graphql/working-with-the-graphql-api)
 
 ---
