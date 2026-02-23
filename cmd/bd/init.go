@@ -46,6 +46,7 @@ environment variable.`,
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		force, _ := cmd.Flags().GetBool("force")
+		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		// Dolt server connection flags
 		_, _ = cmd.Flags().GetBool("server") // no-op, kept for backward compatibility
 		serverHost, _ := cmd.Flags().GetString("server-host")
@@ -404,7 +405,23 @@ environment variable.`,
 			// Non-fatal - continue anyway
 		}
 
-		// Dolt backend bootstraps itself on first open — no explicit import needed.
+		// Import from local JSONL if requested (GH#2023).
+		// This must run after the store is created and prefix is set.
+		if fromJSONL {
+			localJSONLPath := filepath.Join(beadsDir, "issues.jsonl")
+			if _, statErr := os.Stat(localJSONLPath); os.IsNotExist(statErr) {
+				_ = store.Close()
+				FatalError("--from-jsonl specified but %s does not exist", localJSONLPath)
+			}
+			issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
+			if importErr != nil {
+				_ = store.Close()
+				FatalError("failed to import from JSONL: %v", importErr)
+			}
+			if !quiet {
+				fmt.Printf("  Imported %d issues from %s\n", issueCount, localJSONLPath)
+			}
+		}
 
 		// Prompt for contributor mode if:
 		// - In a git repo (needed to set beads.role config)
@@ -630,6 +647,7 @@ func init() {
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("force", false, "Force re-initialization even if database already has issues (may cause data loss)")
+	initCmd.Flags().Bool("from-jsonl", false, "Import issues from .beads/issues.jsonl instead of git history")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 
 	// Dolt server connection flags

@@ -1,0 +1,140 @@
+//go:build cgo
+
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestImportFromLocalJSONL(t *testing.T) {
+	skipIfNoDolt(t)
+
+	t.Run("imports issues from JSONL file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		// Create a JSONL file with test issues
+		jsonlContent := `{"id":"test-abc123","title":"First issue","type":"bug","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-def456","title":"Second issue","type":"task","status":"open","priority":3,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+
+		if count != 2 {
+			t.Errorf("Expected 2 issues imported, got %d", count)
+		}
+
+		// Verify issues exist in the store
+		issue1, err := store.GetIssue(ctx, "test-abc123")
+		if err != nil {
+			t.Fatalf("Failed to get first issue: %v", err)
+		}
+		if issue1.Title != "First issue" {
+			t.Errorf("Expected title 'First issue', got %q", issue1.Title)
+		}
+
+		issue2, err := store.GetIssue(ctx, "test-def456")
+		if err != nil {
+			t.Fatalf("Failed to get second issue: %v", err)
+		}
+		if issue2.Title != "Second issue" {
+			t.Errorf("Expected title 'Second issue', got %q", issue2.Title)
+		}
+	})
+
+	t.Run("empty JSONL file imports zero issues", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(""), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+
+		if count != 0 {
+			t.Errorf("Expected 0 issues imported from empty file, got %d", count)
+		}
+	})
+
+	t.Run("nonexistent file returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		ctx := context.Background()
+		_, err := importFromLocalJSONL(ctx, store, "/nonexistent/issues.jsonl")
+		if err == nil {
+			t.Error("Expected error for nonexistent file, got nil")
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte("not valid json\n"), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		_, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err == nil {
+			t.Error("Expected error for invalid JSON, got nil")
+		}
+	})
+
+	t.Run("sets prefix from first issue when not configured", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStoreWithPrefix(t, dbPath, "") // Empty prefix
+
+		jsonlContent := `{"id":"myprefix-abc123","title":"Test issue","type":"bug","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		// Clear any existing prefix
+		_ = store.SetConfig(ctx, "issue_prefix", "")
+
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Expected 1 issue imported, got %d", count)
+		}
+
+		// Verify prefix was auto-detected
+		prefix, err := store.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			t.Fatalf("Failed to get issue_prefix: %v", err)
+		}
+		if prefix != "myprefix" {
+			t.Errorf("Expected auto-detected prefix 'myprefix', got %q", prefix)
+		}
+	})
+}
