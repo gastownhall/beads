@@ -6,11 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 func TestDoltShowConfigNotInRepo(t *testing.T) {
@@ -510,57 +510,41 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 }
 
-func TestDoltServerPidFile(t *testing.T) {
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads dir: %v", err)
-	}
-
-	pidFile := doltServerPidFile(beadsDir)
-	expected := filepath.Join(beadsDir, "dolt", "dolt-server.pid")
-	if pidFile != expected {
-		t.Errorf("doltServerPidFile() = %s, want %s", pidFile, expected)
-	}
-}
-
-func TestIsDoltServerRunningByPid(t *testing.T) {
-	t.Run("missing PID file", func(t *testing.T) {
-		pid, alive := isDoltServerRunningByPid("/nonexistent/path/dolt-server.pid")
-		if pid != 0 || alive {
-			t.Errorf("expected pid=0, alive=false for missing file; got pid=%d, alive=%v", pid, alive)
+func TestDoltServerIsRunning(t *testing.T) {
+	t.Run("no server running", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		state, err := doltserver.IsRunning(beadsDir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
+		}
+		if state.Running {
+			t.Error("expected Running=false when no PID file exists")
 		}
 	})
 
-	t.Run("invalid PID content", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "dolt-server.pid")
-		os.WriteFile(tmpFile, []byte("not-a-number"), 0600)
-		pid, alive := isDoltServerRunningByPid(tmpFile)
-		if pid != 0 || alive {
-			t.Errorf("expected pid=0, alive=false for invalid content; got pid=%d, alive=%v", pid, alive)
+	t.Run("stale PID file", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		pidFile := filepath.Join(beadsDir, "dolt-server.pid")
+		os.WriteFile(pidFile, []byte("99999999"), 0600)
+		state, err := doltserver.IsRunning(beadsDir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
+		}
+		if state.Running {
+			t.Error("expected Running=false for stale PID")
 		}
 	})
 
-	t.Run("current process PID is alive", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "dolt-server.pid")
-		// Use our own PID — guaranteed to be alive
-		myPid := os.Getpid()
-		os.WriteFile(tmpFile, []byte(strconv.Itoa(myPid)), 0600)
-		pid, alive := isDoltServerRunningByPid(tmpFile)
-		if pid != myPid || !alive {
-			t.Errorf("expected pid=%d, alive=true for current process; got pid=%d, alive=%v", myPid, pid, alive)
+	t.Run("corrupt PID file", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		pidFile := filepath.Join(beadsDir, "dolt-server.pid")
+		os.WriteFile(pidFile, []byte("not-a-number"), 0600)
+		state, err := doltserver.IsRunning(beadsDir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
 		}
-	})
-
-	t.Run("dead PID", func(t *testing.T) {
-		tmpFile := filepath.Join(t.TempDir(), "dolt-server.pid")
-		// PID 99999999 is extremely unlikely to be a real process
-		os.WriteFile(tmpFile, []byte("99999999"), 0600)
-		pid, alive := isDoltServerRunningByPid(tmpFile)
-		if pid != 99999999 {
-			t.Errorf("expected pid=99999999, got pid=%d", pid)
-		}
-		if alive {
-			t.Error("expected alive=false for dead PID")
+		if state.Running {
+			t.Error("expected Running=false for corrupt PID file")
 		}
 	})
 }

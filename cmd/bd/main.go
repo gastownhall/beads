@@ -501,6 +501,19 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		}
 
+		// Auto-start: enabled by default for standalone users.
+		// Disabled under Gas Town (which manages its own server) or by explicit config.
+		doltCfg.AutoStart = true
+		if os.Getenv("GT_ROOT") != "" {
+			doltCfg.AutoStart = false
+		}
+		if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+			doltCfg.AutoStart = false
+		}
+		if v := config.GetString("dolt.auto-start"); v == "false" || v == "0" || v == "off" {
+			doltCfg.AutoStart = false
+		}
+
 		// Server mode defaults auto-commit to OFF because the server handles
 		// commits via its own transaction lifecycle; firing DOLT_COMMIT after
 		// every write under concurrent load causes 'database is read only' errors.

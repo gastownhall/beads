@@ -257,9 +257,11 @@ environment variable.`,
 			dbName = "beads_" + prefix
 		}
 		// Build config. Beads always uses dolt sql-server.
+		// AutoStart is always enabled during init — we need a server to initialize the database.
 		doltCfg := &dolt.Config{
-			Path:     storagePath,
-			Database: dbName,
+			Path:      storagePath,
+			Database:  dbName,
+			AutoStart: os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
@@ -275,9 +277,6 @@ environment variable.`,
 		store, err = dolt.New(ctx, doltCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to connect to dolt server: %v\n", err)
-			fmt.Fprintf(os.Stderr, "\nBeads requires a running dolt sql-server. Start one with:\n")
-			fmt.Fprintf(os.Stderr, "  gt dolt start    (if using Gas Town)\n")
-			fmt.Fprintf(os.Stderr, "  dolt sql-server  (standalone)\n")
 			os.Exit(1)
 		}
 

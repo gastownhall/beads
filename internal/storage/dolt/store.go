@@ -20,6 +20,7 @@ import (
 	"hash/fnv"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -97,6 +99,11 @@ type Config struct {
 
 	// Watchdog options
 	DisableWatchdog bool // Disable server health monitoring (default: enabled in server mode)
+
+	// AutoStart enables transparent server auto-start when connection fails.
+	// When true and the host is localhost, bd will start a dolt sql-server
+	// automatically if one isn't running. Disabled under Gas Town (GT_ROOT set).
+	AutoStart bool
 }
 
 // Retry configuration for transient connection errors (stale pool connections,
@@ -439,8 +446,31 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	addr := net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
 	conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	if dialErr != nil {
-		return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  bd dolt start    # If using Beads directly",
-			addr, dialErr)
+		// Auto-start: if enabled and connecting to localhost, start a server
+		if cfg.AutoStart && isLocalHost(cfg.ServerHost) && cfg.Path != "" {
+			beadsDir := filepath.Dir(cfg.Path) // cfg.Path is .beads/dolt → parent is .beads/
+			port, startErr := doltserver.EnsureRunning(beadsDir)
+			if startErr != nil {
+				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
+					"To start manually: bd dolt start\n"+
+					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
+					addr, startErr)
+			}
+			// Update port in case EnsureRunning used a derived port
+			if port != cfg.ServerPort {
+				cfg.ServerPort = port
+				addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+			}
+			// Retry connection with longer timeout (server just started)
+			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
+			if dialErr != nil {
+				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
+					"Check logs: %s", addr, dialErr, doltserver.LogPath(beadsDir))
+			}
+		} else {
+			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
+				addr, dialErr)
+		}
 	}
 	_ = conn.Close()
 
@@ -496,6 +526,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	store.branch = "main"
 
 	return store, nil
+}
+
+// isLocalHost returns true if the host refers to the local machine.
+func isLocalHost(host string) bool {
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
 }
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
@@ -561,7 +600,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			_ = db.Close()
 			// Check for connection refused - server likely not running
 			if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  gt dolt start    # If using Gas Town\n  bd dolt start # If using Beads directly",
+				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
 					cfg.ServerHost, cfg.ServerPort, err)
 			}
 			return nil, "", fmt.Errorf("failed to create database: %w", err)

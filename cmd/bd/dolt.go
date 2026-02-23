@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -25,14 +24,21 @@ var doltCmd = &cobra.Command{
 	Short:   "Configure Dolt database settings",
 	Long: `Configure and manage Dolt database settings and server lifecycle.
 
-Beads connects to a running dolt sql-server for all database operations.
+Beads uses a dolt sql-server for all database operations. The server is
+auto-started transparently when needed. Use these commands for explicit
+control or diagnostics.
 
-Commands:
-  bd dolt start        Start a local Dolt SQL server
-  bd dolt stop         Stop the local Dolt SQL server
+Server lifecycle:
+  bd dolt start        Start the Dolt server for this project
+  bd dolt stop         Stop the Dolt server for this project
+  bd dolt status       Show Dolt server status
+
+Configuration:
   bd dolt show         Show current Dolt configuration with connection test
   bd dolt set <k> <v>  Set a configuration value
   bd dolt test         Test server connection
+
+Version control:
   bd dolt commit       Commit pending changes
   bd dolt push         Push commits to Dolt remote
   bd dolt pull         Pull commits from Dolt remote
@@ -160,41 +166,6 @@ variables for authentication.`,
 	},
 }
 
-var doltStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start a local Dolt SQL server",
-	Long: `Start a dolt sql-server process for the current beads repository.
-
-The server runs in the background using the configured host, port, and database
-settings. A PID file is written to .beads/dolt/dolt-server.pid for lifecycle
-management.
-
-If a server is already running (PID file exists and process is alive), this
-command exits successfully without starting a second instance.
-
-Requires the 'dolt' CLI to be installed and available in PATH.
-
-Examples:
-  bd dolt start            # Start with default settings (127.0.0.1:3307)
-  bd dolt start --port 3308  # Start on a custom port`,
-	Run: func(cmd *cobra.Command, args []string) {
-		port, _ := cmd.Flags().GetInt("port")
-		startDoltServer(port)
-	},
-}
-
-var doltStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop the local Dolt SQL server",
-	Long: `Stop the dolt sql-server started by 'bd dolt start'.
-
-Reads the PID from .beads/dolt/dolt-server.pid, sends SIGTERM to the process,
-and removes the PID file. If the server is not running, exits successfully.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		stopDoltServer()
-	},
-}
-
 var doltCommitCmd = &cobra.Command{
 	Use:   "commit",
 	Short: "Create a Dolt commit from pending changes",
@@ -244,19 +215,113 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 	},
 }
 
+var doltStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the Dolt SQL server for this project",
+	Long: `Start a dolt sql-server for the current beads project.
+
+The server runs in the background on a per-project port derived from the
+project path. PID and logs are stored in .beads/.
+
+The server auto-starts transparently when needed, so manual start is rarely
+required. Use this command for explicit control or diagnostics.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
+			os.Exit(1)
+		}
+
+		state, err := doltserver.Start(beadsDir)
+		if err != nil {
+			if strings.Contains(err.Error(), "already running") {
+				fmt.Println(err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Dolt server started (PID %d, port %d)\n", state.PID, state.Port)
+		fmt.Printf("  Data: %s\n", state.DataDir)
+		fmt.Printf("  Logs: %s\n", doltserver.LogPath(beadsDir))
+	},
+}
+
+var doltStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the Dolt SQL server for this project",
+	Long: `Stop the dolt sql-server managed by beads for the current project.
+
+This sends a graceful shutdown signal. The server will restart automatically
+on the next bd command unless auto-start is disabled.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
+			os.Exit(1)
+		}
+
+		if err := doltserver.Stop(beadsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Dolt server stopped.")
+	},
+}
+
+var doltStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show Dolt server status",
+	Long: `Show the status of the dolt sql-server for the current project.
+
+Displays whether the server is running, its PID, port, and data directory.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
+			os.Exit(1)
+		}
+
+		state, err := doltserver.IsRunning(beadsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if jsonOutput {
+			outputJSON(state)
+			return
+		}
+
+		if state == nil || !state.Running {
+			cfg := doltserver.DefaultConfig(beadsDir)
+			fmt.Println("Dolt server: not running")
+			fmt.Printf("  Expected port: %d\n", cfg.Port)
+			return
+		}
+
+		fmt.Println("Dolt server: running")
+		fmt.Printf("  PID:  %d\n", state.PID)
+		fmt.Printf("  Port: %d\n", state.Port)
+		fmt.Printf("  Data: %s\n", state.DataDir)
+		fmt.Printf("  Logs: %s\n", doltserver.LogPath(beadsDir))
+	},
+}
+
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
-	doltStartCmd.Flags().Int("port", 0, "Override server port (default: from config or 3307)")
-	doltCmd.AddCommand(doltStartCmd)
-	doltCmd.AddCommand(doltStopCmd)
 	doltCmd.AddCommand(doltShowCmd)
 	doltCmd.AddCommand(doltSetCmd)
 	doltCmd.AddCommand(doltTestCmd)
 	doltCmd.AddCommand(doltCommitCmd)
 	doltCmd.AddCommand(doltPushCmd)
 	doltCmd.AddCommand(doltPullCmd)
+	doltCmd.AddCommand(doltStartCmd)
+	doltCmd.AddCommand(doltStopCmd)
+	doltCmd.AddCommand(doltStatusCmd)
 	rootCmd.AddCommand(doltCmd)
 }
 
@@ -468,8 +533,7 @@ func testDoltConnection() {
 		fmt.Printf("%s\n", ui.RenderPass("✓ Connection successful"))
 	} else {
 		fmt.Printf("%s\n", ui.RenderWarn("✗ Connection failed"))
-		fmt.Println("\nMake sure dolt sql-server is running:")
-		fmt.Printf("  bd dolt start\n")
+		fmt.Println("\nStart the server with: bd dolt start")
 		os.Exit(1)
 	}
 }
@@ -488,260 +552,6 @@ func testServerConnection(cfg *configfile.Config) bool {
 }
 
 // doltServerPidFile returns the path to the PID file for the managed dolt server.
-func doltServerPidFile(beadsDir string) string {
-	return filepath.Join(beadsDir, "dolt", "dolt-server.pid")
-}
-
-// isDoltServerRunningByPid checks whether the process recorded in the PID file is alive.
-func isDoltServerRunningByPid(pidFile string) (int, bool) {
-	data, err := os.ReadFile(pidFile) // #nosec G304 - controlled path
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	// Signal 0 checks process existence without actually signaling it.
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return pid, false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return pid, err == nil
-}
-
-func startDoltServer(portOverride int) {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-
-	// Verify dolt CLI is available
-	doltBin, err := exec.LookPath("dolt")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: dolt CLI not found in PATH\n")
-		fmt.Fprintf(os.Stderr, "Install dolt: https://docs.dolthub.com/introduction/installation\n")
-		os.Exit(1)
-	}
-
-	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
-	if portOverride > 0 {
-		port = portOverride
-	}
-
-	// Check if server already running via PID file
-	pidFile := doltServerPidFile(beadsDir)
-	if existingPid, alive := isDoltServerRunningByPid(pidFile); alive {
-		// Verify it's actually listening on our port
-		addr := net.JoinHostPort(host, strconv.Itoa(port))
-		if conn, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
-			_ = conn.Close()
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"status":  "already_running",
-					"pid":     existingPid,
-					"host":    host,
-					"port":    port,
-					"message": "Dolt server is already running",
-				})
-			} else {
-				fmt.Printf("Dolt server already running (PID %d) on %s\n", existingPid, addr)
-			}
-			return
-		}
-		// PID alive but not listening — stale PID file, clean up
-		_ = os.Remove(pidFile)
-	} else if existingPid > 0 {
-		// PID file exists but process dead — clean up
-		_ = os.Remove(pidFile)
-	}
-
-	// Determine the data directory: .beads/dolt/
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if _, err := os.Stat(doltDir); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: Dolt data directory not found: %s\n", doltDir)
-		fmt.Fprintf(os.Stderr, "Run 'bd init' first to initialize the beads repository.\n")
-		os.Exit(1)
-	}
-
-	// Build dolt sql-server arguments
-	args := []string{
-		"sql-server",
-		"--host", host,
-		"--port", strconv.Itoa(port),
-		"--no-auto-commit",
-	}
-
-	// Use --data-dir to serve all databases under the dolt directory
-	args = append(args, "--data-dir", doltDir)
-
-	cmd := exec.Command(doltBin, args...) // #nosec G204 - doltBin from LookPath
-	cmd.Dir = doltDir
-
-	// Redirect server output to a log file
-	logPath := filepath.Join(beadsDir, "dolt", "dolt-server.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600) // #nosec G304 - controlled path
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot create log file %s: %v\n", logPath, err)
-		os.Exit(1)
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-
-	// Start in background
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		fmt.Fprintf(os.Stderr, "Error: failed to start dolt sql-server: %v\n", err)
-		os.Exit(1)
-	}
-	_ = logFile.Close()
-
-	pid := cmd.Process.Pid
-
-	// Write PID file
-	if err := os.MkdirAll(filepath.Dir(pidFile), 0o750); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not create PID file directory: %v\n", err)
-	}
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
-	}
-
-	// Detach the child process so it survives after bd exits
-	go func() { _ = cmd.Wait() }()
-
-	// Wait for the server to become ready
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	ready := false
-	for i := 0; i < 50; i++ {
-		time.Sleep(200 * time.Millisecond)
-		if conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
-			_ = conn.Close()
-			ready = true
-			break
-		}
-	}
-
-	if !ready {
-		fmt.Fprintf(os.Stderr, "Warning: server started (PID %d) but not yet accepting connections on %s\n", pid, addr)
-		fmt.Fprintf(os.Stderr, "Check log: %s\n", logPath)
-		os.Exit(1)
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"status":   "started",
-			"pid":      pid,
-			"host":     host,
-			"port":     port,
-			"log_file": logPath,
-			"pid_file": pidFile,
-		})
-	} else {
-		fmt.Printf("Dolt server started (PID %d) on %s\n", pid, addr)
-	}
-}
-
-func stopDoltServer() {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	pidFile := doltServerPidFile(beadsDir)
-	pid, alive := isDoltServerRunningByPid(pidFile)
-
-	if pid == 0 {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":  "not_running",
-				"message": "No Dolt server PID file found",
-			})
-		} else {
-			fmt.Println("No Dolt server running (no PID file found).")
-		}
-		return
-	}
-
-	if !alive {
-		// Process already dead, just clean up
-		_ = os.Remove(pidFile)
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":  "not_running",
-				"pid":     pid,
-				"message": "Server process already exited, cleaned up PID file",
-			})
-		} else {
-			fmt.Printf("Server process (PID %d) already exited. Cleaned up PID file.\n", pid)
-		}
-		return
-	}
-
-	// Send SIGTERM for graceful shutdown
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: could not find process %d: %v\n", pid, err)
-		_ = os.Remove(pidFile)
-		os.Exit(1)
-	}
-
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: could not stop server (PID %d): %v\n", pid, err)
-		_ = os.Remove(pidFile)
-		os.Exit(1)
-	}
-
-	// Wait for the process to exit (up to 10 seconds)
-	stopped := false
-	for i := 0; i < 50; i++ {
-		time.Sleep(200 * time.Millisecond)
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			stopped = true
-			break
-		}
-	}
-
-	_ = os.Remove(pidFile)
-
-	if !stopped {
-		// Force kill if graceful shutdown didn't work
-		_ = proc.Signal(syscall.SIGKILL)
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":  "force_killed",
-				"pid":     pid,
-				"message": "Server did not stop gracefully, sent SIGKILL",
-			})
-		} else {
-			fmt.Printf("Server (PID %d) did not stop gracefully, sent SIGKILL.\n", pid)
-		}
-		return
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"status":  "stopped",
-			"pid":     pid,
-			"message": "Dolt server stopped",
-		})
-	} else {
-		fmt.Printf("Dolt server stopped (PID %d).\n", pid)
-	}
-}
-
 // logDoltConfigChange appends an audit entry to .beads/dolt-config.log.
 // Includes the beadsDir path for debugging worktree config pollution (bd-la2cl).
 func logDoltConfigChange(beadsDir, key, value string) {

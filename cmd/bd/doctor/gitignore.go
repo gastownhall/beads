@@ -37,6 +37,11 @@ ephemeral.sqlite3-journal
 ephemeral.sqlite3-wal
 ephemeral.sqlite3-shm
 
+# Dolt server management (auto-started by bd)
+dolt-server.pid
+dolt-server.log
+dolt-server.lock
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
@@ -76,6 +81,9 @@ var requiredPatterns = []string{
 	"dolt/",
 	"dolt-access.lock",
 	"ephemeral.sqlite3",
+	"dolt-server.pid",
+	"dolt-server.log",
+	"dolt-server.lock",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date
