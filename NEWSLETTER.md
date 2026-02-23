@@ -12,7 +12,7 @@ What was removed:
 - `internal/syncbranch/` -- 5,720 lines of worktree management
 - `snapshot_manager`, `deletion_tracking`, and the 3-way merge engine
 - Doctor sync-branch checks and fixes
-- Daemon infrastructure (lockfile activity signals, orchestrator)
+- Legacy daemon infrastructure (lockfile activity signals, orchestrator)
 - The dead `bd repair` command
 
 Manual `bd export` and `bd import` remain available as escape hatches.

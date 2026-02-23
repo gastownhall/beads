@@ -41,22 +41,21 @@ Sequential IDs (`#1`, `#2`) break when:
 
 Hash-based IDs are globally unique without coordination.
 
-### Why a daemon?
+### How does the Dolt server work?
 
-The daemon provides:
-- Auto-sync with 5-second debounce
-- Batched operations for performance
-- Background monitoring
+Beads uses Dolt server mode for concurrent access:
+- Transaction isolation for multiple agents
+- SQL-based queries for performance
+- Automatic retry on conflicts
 
-Use `--no-daemon` when not needed (CI, worktrees).
+In CI/CD or single-agent environments, beads uses embedded mode automatically (no server required).
 
 ## Usage
 
 ### How do I sync issues to git?
 
 ```bash
-# Auto-sync via daemon (default)
-# Or manual sync:
+# Manual sync:
 bd sync
 ```
 
@@ -79,11 +78,8 @@ Yes! That's what beads was designed for:
 ### How do I use beads in CI/CD?
 
 ```bash
-# Disable daemon in CI
-export BEADS_NO_DAEMON=true
-
-# Or per-command
-bd --no-daemon list
+# Just run commands directly — beads uses embedded mode in CI
+bd list
 ```
 
 ## Workflows
@@ -132,23 +128,23 @@ bd import --from github --repo owner/repo
 
 ## Troubleshooting
 
-### Why is the daemon not starting?
+### Why is the Dolt server not starting?
 
 ```bash
-# Remove stale socket
-rm -f .beads/bd.sock
+# Check server status
+bd doctor
 
-# Restart
-bd daemons killall
-bd info
+# Check server logs
+cat .beads/dolt/sql-server.log
+
+# Restart the server
+bd dolt stop
+bd dolt start
 ```
 
 ### Why aren't my changes syncing?
 
 ```bash
-# Check daemon status
-bd info
-
 # Force sync
 bd sync
 

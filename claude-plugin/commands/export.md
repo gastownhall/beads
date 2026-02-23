@@ -15,7 +15,7 @@ Issues are sorted by ID for consistent diffs, making git diffs readable.
 
 ## Automatic Export
 
-The daemon automatically exports to `.beads/issues.jsonl` after any CRUD operation (5-second debounce). Manual export is rarely needed unless you need a custom output location or filtered export.
+The Dolt server automatically exports to `.beads/issues.jsonl` after any CRUD operation (5-second debounce). Manual export is rarely needed unless you need a custom output location or filtered export.
 
 Export is used for:
 - Git version control

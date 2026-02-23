@@ -115,7 +115,7 @@ This format is:
 
 ## RPC Operations
 
-For daemon mode, add these operations to the RPC protocol:
+For server mode, add these operations to the RPC protocol:
 
 | Operation | Args | Response |
 |-----------|------|----------|

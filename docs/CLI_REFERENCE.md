@@ -19,14 +19,13 @@
 ### Check Status
 
 ```bash
-# Check database path and daemon status
+# Check database path and server status
 bd info --json
 
 # Example output:
 # {
 #   "database_path": "/path/to/.beads/beads.db",
 #   "issue_prefix": "bd",
-#   "daemon_running": true,
 #   "agent_mail_enabled": false
 # }
 ```
@@ -283,17 +282,14 @@ When detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 ```bash
 # Explicitly enable sandbox mode
 bd --sandbox <command>
-
-# Equivalent to combining these flags:
-bd --no-daemon --no-auto-flush --no-auto-import <command>
 ```
 
 **What it does:**
-- Disables daemon (uses direct SQLite mode)
+- Uses embedded database mode (no server needed)
 - Disables auto-export to JSONL
 - Disables auto-import from JSONL
 
-**When to use:** Sandboxed environments where daemon can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
+**When to use:** Sandboxed environments where the Dolt server can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
 
 ### Staleness Control
 
@@ -326,9 +322,6 @@ bd import --force -i .beads/issues.jsonl
 ```bash
 # JSON output for programmatic use
 bd --json <command>
-
-# Force direct mode (bypass daemon)
-bd --no-daemon <command>
 
 # Disable auto-sync
 bd --no-auto-flush <command>    # Disable auto-export to JSONL
@@ -553,7 +546,7 @@ bd mol burn <ephemeral-id> --dry-run
 bd mol burn <ephemeral-id> --force --json
 ```
 
-**Note:** Most mol commands require `--no-daemon` flag when daemon is running.
+**Note:** Mol commands use the standard Dolt database access path.
 
 ## Database Management
 

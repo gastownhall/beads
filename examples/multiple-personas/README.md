@@ -26,8 +26,8 @@ Use beads labels, priorities, and dependencies to organize work by persona, with
 cd my-project
 bd init
 
-# Start daemon for auto-sync (optional for teams)
-bd daemon start --auto-commit --auto-push
+# Start Dolt server for auto-sync (optional for teams)
+bd dolt start
 ```
 
 ## Persona: Architect

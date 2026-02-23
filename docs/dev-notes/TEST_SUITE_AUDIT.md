@@ -75,9 +75,9 @@ These tests only interact with the database and can safely share a single DB set
 
 These have a mix - some can share DB, some need isolation:
 
-#### Daemon Tests (Already have integration tags):
-- **daemon_test.go** (15 tests) - Mix of DB and daemon lifecycle
-  - Propose: Separate suites for DB-only vs daemon lifecycle tests
+#### Server/RPC Tests (Already have integration tags):
+- **daemon_test.go** (15 tests) - Mix of DB and server lifecycle
+  - Propose: Separate suites for DB-only vs server lifecycle tests
 
 - **daemon_autoimport_test.go** (2 tests)
 - **daemon_crash_test.go** (2 tests)
@@ -87,7 +87,7 @@ These have a mix - some can share DB, some need isolation:
 - **daemon_sync_branch_test.go** (11 tests)
 - **daemon_watcher_test.go** (7 tests)
 
-**Recommendation**: Keep daemon tests isolated (they already have `//go:build integration` tags)
+**Recommendation**: Keep server/RPC tests isolated (they already have `//go:build integration` tags)
 
 #### Git Operation Tests:
 - **git_sync_test.go** (1 test)
@@ -103,7 +103,7 @@ Tests that already use good patterns:
 
 1. **label_test.go** - Uses helper struct with shared DB ✓
 2. **delete_test.go** - Has `//go:build integration` tag ✓
-3. All daemon tests - Have `//go:build integration` tags ✓
+3. All server/RPC tests - Have `//go:build integration` tags ✓
 
 ### Category 4: Special Cases (50+ tests)
 
@@ -220,7 +220,7 @@ After Phase 1 success:
 ### Phase 3: Special Cases (P3) - Complex Refactors
 Handle tests that need mixed isolation:
 
-1. Review daemon tests for DB-only portions
+1. Review server/RPC tests for DB-only portions
 2. Review CLI tests for unit-testable logic
 3. Consider utility functions that don't need DB
 
@@ -233,7 +233,7 @@ Handle tests that need mixed isolation:
 
 ### After (Proposed):
 - **10-15 test suites** for DB tests = **~15 DB initializations**
-- **~65 isolated tests** (daemon, git, filesystem) = **~65 DB initializations**
+- **~65 isolated tests** (server/RPC, git, filesystem) = **~65 DB initializations**
 - **Total: ~80 DB initializations** (down from 280)
 - Expected time: **1-2 minutes** (5-8x speedup)
 
@@ -258,7 +258,7 @@ Handle tests that need mixed isolation:
 ## Key Insights
 
 1. **~150 tests** can immediately benefit from shared DB setup
-2. **~65 tests** need isolation (daemon, git, filesystem)
+2. **~65 tests** need isolation (server/RPC, git, filesystem)
 3. **~65 tests** need analysis (mixed or may not need DB)
 4. **label_test.go shows the ideal pattern** - use it as the template!
 5. **Primary bottleneck**: Repeated `newTestStore()` calls

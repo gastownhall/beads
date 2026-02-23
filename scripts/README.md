@@ -20,7 +20,7 @@ Utility scripts for maintaining the beads project.
 
 This master script automates the **entire release process**:
 
-1. ✅ Kills running daemons (avoids version conflicts)
+1. ✅ Stops running Dolt servers (avoids version conflicts)
 2. ✅ Runs tests and linting
 3. ✅ Bumps version in all files
 4. ✅ Commits and pushes version bump

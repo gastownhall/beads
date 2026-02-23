@@ -34,7 +34,7 @@ Jordan proposes adding chaos testing and E2E test coverage to beads. The PR:
 ### Test Coverage Additions
 - `internal/storage/memory/memory_more_coverage_test.go` (921 lines) - Memory storage tests
 - `cmd/bd/cli_coverage_show_test.go` (426 lines) - CLI show command tests
-- `cmd/bd/daemon_autostart_unit_test.go` (331 lines) - Daemon autostart tests
+- `cmd/bd/daemon_autostart_unit_test.go` (331 lines) - Server autostart tests
 - `internal/rpc/client_gate_shutdown_test.go` (107 lines) - RPC client tests
 - Various other test files
 
@@ -71,7 +71,7 @@ From `doctor_repair_chaos_test.go`:
 1. **Complete DB corruption** - Writes "not a database" garbage, verifies recovery from JSONL
 2. **Truncated DB without JSONL** - Tests graceful failure when no recovery source exists
 3. **Sidecar file backup** - Ensures -wal, -shm, -journal files are preserved during repair
-4. **Repair with running daemon** - Tests recovery while daemon holds locks
+4. **Repair with running server** - Tests recovery while server holds locks
 5. **JSONL integrity** - Malformed lines, re-export from DB
 
 Each test:

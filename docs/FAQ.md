@@ -174,7 +174,7 @@ bd init  # Auto-imports from .beads/issues.jsonl
 
 # Or initialize new project:
 cd ~/my-project
-bd init  # Creates .beads/, sets up daemon
+bd init  # Creates .beads/, sets up Dolt database
 git add .beads/
 git commit -m "Initialize beads"
 ```
@@ -195,7 +195,7 @@ bd automatically:
 - **Exports** to JSONL after CRUD operations (5-second debounce)
 - **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
 
-**How auto-import works:** The first bd command after `git pull` detects that `.beads/issues.jsonl` is newer than the database and automatically imports it. There's no background daemon watching for changes - the check happens when you run a bd command.
+**How auto-import works:** The first bd command after `git pull` detects that `.beads/issues.jsonl` is newer than the database and automatically imports it. There's no background process watching for changes - the check happens when you run a bd command.
 
 **Optional**: For immediate export (no 5-second wait) and guaranteed import after git operations, install the git hooks:
 ```bash
@@ -236,7 +236,7 @@ Each project gets its own `.beads/` directory with its own database and JSONL fi
 - Multiple agents working on different projects simultaneously → No conflicts
 - Same machine, different repos → Each finds its own `.beads/*.db` automatically
 - Agents in subdirectories → bd walks up to find the project root (like git)
-- **Per-project daemons** → Each project gets its own daemon at `.beads/bd.sock` (LSP model)
+- **Per-project Dolt servers** → Each project gets its own Dolt server (LSP model)
 
 **Limitation:** Issues cannot reference issues in other projects. Each database is isolated by design. If you need cross-project tracking, initialize bd in a parent directory that contains both projects.
 
@@ -248,10 +248,10 @@ cd ~/work/webapp && bd ready --json    # Uses ~/work/webapp/.beads/webapp.db
 # Agent 2 working on API
 cd ~/work/api && bd ready --json       # Uses ~/work/api/.beads/api.db
 
-# No conflicts! Completely isolated databases and daemons.
+# No conflicts! Completely isolated databases and Dolt servers.
 ```
 
-**Architecture:** bd uses per-project daemons (like LSP/language servers) for complete database isolation. See [ADVANCED.md#architecture-daemon-vs-mcp-vs-beads](ADVANCED.md#architecture-daemon-vs-mcp-vs-beads).
+**Architecture:** bd uses per-project Dolt servers (like LSP/language servers) for complete database isolation. See [ADVANCED.md](ADVANCED.md) for details.
 
 ### What happens if two agents work on the same issue?
 
@@ -407,16 +407,16 @@ Yes! bd has native Windows support (v0.9.0+):
 - No MSYS or MinGW required
 - PowerShell install script
 - Works with Windows paths and filesystem
-- Daemon uses TCP instead of Unix sockets
+- Dolt server uses TCP instead of Unix sockets
 
 See [INSTALLING.md](INSTALLING.md#windows-11) for details.
 
 ### Can I use bd with git worktrees?
 
-Yes, but with limitations. The daemon doesn't work correctly with worktrees, so use `--no-daemon` mode:
+Yes! Dolt handles worktrees natively. Use embedded mode if the Dolt server is not needed:
 
 ```bash
-export BEADS_NO_DAEMON=1
+bd dolt set mode embedded
 bd ready
 bd create "Fix bug" -p 1
 ```

@@ -51,4 +51,4 @@ The merge command includes safety checks:
 
 ## Note
 
-Most users should rely on the daemon's automatic sync (`bd daemon --auto-commit --auto-push`) instead of running manual sync. This command is useful for one-off syncs or when not using the daemon.
+Most users should rely on the Dolt server's automatic sync (with `dolt.auto-commit` enabled) instead of running manual sync. This command is useful for one-off syncs or when not using the Dolt server.

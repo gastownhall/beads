@@ -73,14 +73,14 @@ bd prime --export              # Dump default content for customization
 ### Check Status
 
 ```bash
-# Check database path and daemon status
+# Check database path and server status
 bd info --json
 
 # Example output:
 # {
 #   "database_path": "/path/to/.beads/beads.db",
 #   "issue_prefix": "bd",
-#   "daemon_running": true
+#   "server_running": true
 # }
 ```
 
@@ -361,7 +361,7 @@ Global flags work with any bd command and must appear **before** the subcommand.
 
 **Auto-detection (v0.21.1+):** bd automatically detects sandboxed environments and enables sandbox mode.
 
-When detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
+When detected, you'll see: `Sandbox detected, using embedded mode`
 
 **Manual override:**
 
@@ -370,15 +370,15 @@ When detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 bd --sandbox <command>
 
 # Equivalent to combining these flags:
-bd --no-daemon --no-auto-flush --no-auto-import <command>
+bd --no-auto-flush --no-auto-import <command>
 ```
 
 **What it does:**
-- Disables daemon (uses direct SQLite mode)
+- Uses embedded mode (direct database access, no Dolt server)
 - Disables auto-export to JSONL
 - Disables auto-import from JSONL
 
-**When to use:** Sandboxed environments where daemon can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
+**When to use:** Sandboxed environments where the Dolt server can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
 
 ### Staleness Control
 
@@ -412,8 +412,8 @@ bd import --force -i .beads/issues.jsonl
 # JSON output for programmatic use
 bd --json <command>
 
-# Force direct mode (bypass daemon)
-bd --no-daemon <command>
+# Force embedded mode (bypass Dolt server)
+bd --embedded <command>
 
 # Disable auto-sync
 bd --no-auto-flush <command>    # Disable auto-export to JSONL

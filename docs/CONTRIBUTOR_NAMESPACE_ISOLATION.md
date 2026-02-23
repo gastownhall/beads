@@ -265,16 +265,16 @@ Contributor routing works independently of the project repo's sync configuration
 | **Direct** | Uses `.beads/` directly | Uses `~/.beads-planning/.beads/` | Both use direct storage, no interaction |
 | **Sync-branch** | Uses separate branch for beads | Uses direct storage | Planning repo does NOT inherit `sync.branch` config |
 | **No-db mode** | JSONL-only operations | Routes JSONL operations to planning repo | Planning repo still uses database |
-| **Daemon mode** | Background auto-sync | Daemon bypassed for routed issues | Planning repo operations are synchronous |
+| **Server mode** | Background Dolt server | Server bypassed for routed issues | Planning repo operations are synchronous |
 | **Local-only** | No git remote | Works normally | Planning repo can have its own git remote independently |
 | **External (BEADS_DIR)** | Uses separate repo via env var | BEADS_DIR takes precedence over routing | If `BEADS_DIR` is set, routing config is ignored |
 
 ### Key Principles
 
 1. **Separate databases**: Planning repo is completely independent - it has its own `.beads/` directory
-2. **No config inheritance**: Planning repo does not inherit project's `sync.branch`, `no-db`, or daemon settings
+2. **No config inheritance**: Planning repo does not inherit project's `sync.branch`, `no-db`, or server mode settings
 3. **BEADS_DIR precedence**: If `BEADS_DIR` environment variable is set, it overrides routing configuration
-4. **Daemon bypass**: Issues routed to planning repo bypass daemon mode to avoid connection staleness
+4. **Direct access**: Issues routed to planning repo use direct database access to avoid connection staleness
 
 ## Configuration Reference
 

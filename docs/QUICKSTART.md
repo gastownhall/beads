@@ -37,7 +37,7 @@ The wizard will:
 - Import existing issues from git (if any)
 - Prompt to install git hooks (recommended)
 - Prompt to configure git merge driver (recommended)
-- Auto-start daemon for sync (SQLite backend only)
+- Auto-start Dolt server for database operations
 
 Notes:
 - SQLite backend stores data in `.beads/beads.db`.
@@ -229,10 +229,10 @@ As your project accumulates closed issues, the database grows. Manage size with 
 bd admin compact --stats
 
 # Preview compaction candidates (30+ days closed)
-bd admin compact --analyze --json --no-daemon
+bd admin compact --analyze --json
 
 # Apply agent-generated summary
-bd admin compact --apply --id bd-42 --summary summary.txt --no-daemon
+bd admin compact --apply --id bd-42 --summary summary.txt
 
 # Immediately delete closed issues (CAUTION: permanent!)
 bd admin cleanup --force

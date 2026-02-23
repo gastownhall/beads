@@ -12,7 +12,7 @@ The original auto-flush implementation suffered from a critical race condition w
 
 - **Concurrent access points:**
   - Auto-flush timer goroutine (5s debounce)
-  - Daemon sync goroutine
+  - Server sync goroutine
   - Concurrent CLI commands
   - Git hook execution
   - PersistentPostRun cleanup
@@ -151,11 +151,11 @@ The FlushManager is designed to work correctly when commands run multiple times 
 
 ## Related Subsystems
 
-### Daemon Mode
+### Server Mode
 
-When running with daemon mode (`--no-daemon=false`), the CLI delegates to an RPC server. The FlushManager is NOT used in daemon mode - the daemon process has its own flush coordination.
+When running with Dolt server mode, the CLI communicates with the Dolt SQL server for database operations. The FlushManager is NOT used in server mode - the server process has its own flush coordination.
 
-The `daemonClient != nil` check in `PersistentPostRun` ensures FlushManager shutdown only occurs in direct mode.
+The server mode check in `PersistentPostRun` ensures FlushManager shutdown only occurs in embedded mode.
 
 ### Auto-Import
 

@@ -22,23 +22,19 @@ If you prefer step-by-step control:
 
 ### Pre-Release Checklist
 
-1. **Kill all running daemons (CRITICAL)**:
+1. **Stop all running Dolt servers (CRITICAL)**:
    ```bash
-   # Kill by process name
-   pkill -f "bd.*daemon"
-   
-   # Verify no daemons are running
-   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
-   
-   # Alternative: find and kill by socket
-   find ~/.config -name "bd.sock" -type f 2>/dev/null | while read sock; do
-     echo "Found daemon socket: $sock"
-   done
+   # Stop Dolt servers in all workspaces
+   bd dolt stop
+
+   # Or find and stop by process
+   pkill -f "dolt sql-server" 2>/dev/null
+   pgrep -lf "dolt sql-server" || echo "No Dolt servers running ✓"
    ```
-   
-   **Why this matters**: Old daemon versions can cause:
+
+   **Why this matters**: Old server versions can cause:
    - Auto-flush race conditions leaving working tree dirty after commits
-   - Version mismatches between client (new) and daemon (old)
+   - Version mismatches between client (new) and server (old)
    - Confusing behavior where changes appear to sync incorrectly
 
 2. **Run tests and build**:
@@ -180,10 +176,11 @@ The release will appear at: https://github.com/steveyegge/beads/releases
 
 ## Post-Release
 
-1. **Kill old daemons again**:
+1. **Stop old Dolt servers**:
    ```bash
-   pkill -f "bd.*daemon"
-   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
+   bd dolt stop
+   pkill -f "dolt sql-server" 2>/dev/null
+   pgrep -lf "dolt sql-server" || echo "No Dolt servers running ✓"
    ```
    This ensures your local machine picks up the new version immediately.
 
@@ -191,13 +188,10 @@ The release will appear at: https://github.com/steveyegge/beads/releases
    ```bash
    # Homebrew
    brew update && brew upgrade beads && bd version
-   
+
    # PyPI
    pip install --upgrade beads-mcp
    beads-mcp --help
-   
-   # Check daemon version matches client
-   bd version --daemon  # Should match client version after first command
    ```
 
 3. **Announce** (optional):

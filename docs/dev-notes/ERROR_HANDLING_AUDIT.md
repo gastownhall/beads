@@ -567,22 +567,24 @@ The codebase demonstrates strong adherence to error handling patterns with a few
 
 ### daemon_sync.go ✅ MOSTLY CONSISTENT
 
+*Note: This file handles Dolt server sync operations.*
+
 **Pattern A (Exit):** Used for critical failures but returns early to channel instead of os.Exit
 ```go
 // daemon_sync.go - Returns error to channel, caller decides
 if err != nil {
-    log.log("daemon sync error: %v", err)
-    return // Logs and returns, daemon continues
+    log.log("server sync error: %v", err)
+    return // Logs and returns, server continues
 }
 ```
 
-**Pattern B (Warn):** Uses internal logging (log.log) which is appropriate for daemon background operations
+**Pattern B (Warn):** Uses internal logging (log.log) which is appropriate for server background operations
 ```go
 // Non-fatal warnings logged to internal log
 log.log("warning: failed to update metadata: %v", err)
 ```
 
-**Analysis:** ✅ Appropriate - Daemon operations use internal logging since there's no interactive stderr. Background process errors are logged for debugging but don't crash the daemon.
+**Analysis:** ✅ Appropriate - Server sync operations use internal logging since there's no interactive stderr. Background process errors are logged for debugging but don't crash the server.
 
 ---
 
@@ -643,7 +645,7 @@ if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
 **Pattern A (Exit):** Correctly applied for ID resolution and dependency operations
 ```go
 // dep.go:37-44 - ID resolution
-resp, err := daemonClient.ResolveID(resolveArgs)
+resp, err := rpcClient.ResolveID(resolveArgs)
 if err != nil {
     fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
     os.Exit(1)
@@ -701,11 +703,11 @@ if err != nil {
 }
 ```
 
-**Pattern A with fallback:** Interesting pattern for daemon compatibility
+**Pattern A with fallback:** Interesting pattern for RPC compatibility
 ```go
 // comments.go:42-50 - Fallback to direct mode
 if isUnknownOperationError(err) {
-    if err := fallbackToDirectMode("daemon does not support comment_list RPC"); err != nil {
+    if err := fallbackToDirectMode("server does not support comment_list RPC"); err != nil {
         fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
         os.Exit(1)
     }
@@ -715,7 +717,7 @@ if isUnknownOperationError(err) {
 }
 ```
 
-**Analysis:** ✅ Consistent - Uses Pattern A but with smart fallback for daemon compatibility.
+**Analysis:** ✅ Consistent - Uses Pattern A but with smart fallback for RPC compatibility.
 
 ---
 
@@ -829,10 +831,10 @@ if err := syncbranch.Set(ctx, store, value); err != nil {
 
 **Pattern A (Exit):** Core validation failures
 ```go
-// validate.go:28-32 - Daemon mode not supported
-if daemonClient != nil {
-    fmt.Fprintf(os.Stderr, "Error: validate command not yet supported in daemon mode\n")
-    fmt.Fprintf(os.Stderr, "Use: bd --no-daemon validate\n")
+// validate.go:28-32 - Server mode not supported
+if rpcClient != nil {
+    fmt.Fprintf(os.Stderr, "Error: validate command not yet supported in server mode\n")
+    fmt.Fprintf(os.Stderr, "Use: bd validate (in embedded mode)\n")
     os.Exit(1)
 }
 
@@ -878,9 +880,9 @@ func (r *validationResults) hasFailures() bool {
    }
    ```
 
-2. **Daemon Fallback Pattern:** Commands like comments.go implement a sophisticated fallback:
-   - Try daemon RPC first
-   - If daemon doesn't support operation, fall back to direct mode
+2. **RPC Fallback Pattern:** Commands like comments.go implement a sophisticated fallback:
+   - Try RPC server first
+   - If server doesn't support operation, fall back to direct mode
    - Only exit on failure after all options exhausted
 
 3. **Exit Code Propagation:** validate.go demonstrates proper exit code handling - aggregates results and returns appropriate exit code at the end.
@@ -896,7 +898,7 @@ func (r *validationResults) hasFailures() bool {
 ### Files Still Needing Audit
 
 - doctor/* (doctor package files)
-- daemon.go
+- server-related files
 - stats.go
 - duplicates.go
 - repair_deps.go

@@ -25,7 +25,7 @@ bd worktree remove .worktrees/{name}
 **Why?** `bd worktree` auto-configures:
 - Beads database redirect files
 - Proper gitignore entries
-- Daemon bypass for worktree operations
+- Embedded mode for worktree operations
 
 ## Architecture
 
@@ -41,7 +41,7 @@ main-repo/
         └── .beads       ← Redirect file
 ```
 
-**Key insight**: Daemon auto-bypasses for wisp operations in worktrees.
+**Key insight**: Wisp operations in worktrees use embedded mode automatically.
 
 ## Commands
 

@@ -180,13 +180,13 @@ go test -race -coverprofile=coverage.out ./...
 
 ### Dual-Mode Testing Pattern
 
-**IMPORTANT**: bd supports two execution modes: *direct mode* (Dolt database access) and *daemon mode* (RPC via background process). Commands must work identically in both modes. To prevent bugs like GH#719, GH#751, and bd-fu83, use the dual-mode test framework for testing commands.
+**IMPORTANT**: bd supports two execution modes: *embedded mode* (direct Dolt database access) and *server mode* (RPC via Dolt server). Commands must work identically in both modes. To prevent bugs like GH#719, GH#751, and bd-fu83, use the dual-mode test framework for testing commands.
 
 ```go
 // cmd/bd/dual_mode_test.go provides the framework
 
 func TestMyCommand(t *testing.T) {
-    // This test runs TWICE: once in direct mode, once with a live daemon
+    // This test runs TWICE: once in embedded mode, once with a live Dolt server
     RunDualModeTest(t, "my_test", func(t *testing.T, env *DualModeTestEnv) {
         // Create test data using mode-agnostic helpers
         issue := &types.Issue{
@@ -220,7 +220,7 @@ Available `DualModeTestEnv` helper methods:
 - `ListIssues(filter)` - List issues matching filter
 - `GetReadyWork()` - Get issues ready for work
 - `AddLabel(id, label)` - Add a label to an issue
-- `Mode()` - Returns "direct" or "daemon" for error messages
+- `Mode()` - Returns "embedded" or "server" for error messages
 
 Run dual-mode tests:
 ```bash

@@ -193,8 +193,8 @@ Run a complete health check:
 # Check version
 bd version
 
-# Check daemon
-bd info
+# Check project health
+bd doctor
 
 # Check hooks
 bd hooks status

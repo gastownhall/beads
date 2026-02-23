@@ -72,16 +72,6 @@ auto_export = true            # Auto-export on changes
 debounce_seconds = 5          # Debounce interval
 ```
 
-### Daemon
-
-```toml
-[daemon]
-auto_start = true             # Auto-start daemon
-sync_interval = "5s"          # Sync check interval
-log_level = "info"            # debug|info|warn|error
-mode = "poll"                 # poll|events (experimental)
-```
-
 ### Git
 
 ```toml
@@ -113,8 +103,6 @@ prune_on_sync = true          # Auto-prune old records
 | Variable | Description |
 |----------|-------------|
 | `BEADS_DB` | Database path |
-| `BEADS_NO_DAEMON` | Disable daemon |
-| `BEADS_DAEMON_MODE` | Daemon mode (poll/events) |
 | `BEADS_LOG_LEVEL` | Log level |
 | `BEADS_CONFIG` | Config file path |
 
@@ -123,9 +111,6 @@ prune_on_sync = true          # Auto-prune old records
 ```bash
 # Override database
 bd --db /tmp/test.db list
-
-# Disable daemon for single command
-bd --no-daemon create "Task"
 ```
 
 ## Example Configuration
@@ -140,11 +125,6 @@ hash_length = 6
 [import]
 orphan_handling = "resurrect"
 dedupe_on_import = true
-
-[daemon]
-auto_start = true
-sync_interval = "10s"
-mode = "events"
 
 [git]
 auto_commit = true

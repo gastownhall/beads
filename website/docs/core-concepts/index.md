@@ -40,13 +40,13 @@ Four types of relationships:
 | `discovered-from` | Track issues found during work | No |
 | `related` | Soft relationship | No |
 
-### Daemon
+### Dolt Server Mode
 
-Background process per workspace:
-- Auto-starts on first command
-- Handles auto-sync with 5s debounce
-- Socket at `.beads/bd.sock`
-- Manage with `bd daemons` commands
+Dolt provides the database backend for beads:
+- Start with `bd dolt start`
+- Handles auto-commit and sync
+- Logs available at `.beads/dolt/sql-server.log`
+- Check health with `bd doctor`
 
 ### JSONL Sync
 
@@ -71,6 +71,6 @@ Declarative workflow templates:
 ## Navigation
 
 - [Issues & Dependencies](/core-concepts/issues)
-- [Daemon Architecture](/core-concepts/daemon)
+- [Dolt Server Mode](/core-concepts/dolt-server)
 - [JSONL Sync](/core-concepts/jsonl-sync)
 - [Hash-based IDs](/core-concepts/hash-ids)

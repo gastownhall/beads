@@ -161,16 +161,22 @@ bd config set database.cache_size 10000
 
 ### Many Concurrent Agents
 
+Beads uses Dolt server mode to handle concurrent access from multiple agents.
+The server manages transaction isolation automatically.
+
 ```bash
-# Use event-driven daemon
-export BEADS_DAEMON_MODE=events
-bd daemons killall
+# Start the Dolt server
+bd dolt start
+
+# Check server health
+bd doctor
 ```
 
 ### CI/CD Optimization
 
+In CI/CD environments, beads uses embedded mode by default (no server required):
+
 ```bash
-# Disable daemon in CI
-export BEADS_NO_DAEMON=true
-bd --no-daemon list
+# Just run commands directly — no special flags needed
+bd list
 ```

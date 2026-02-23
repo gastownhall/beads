@@ -28,7 +28,7 @@ bd import -i issues.jsonl --dry-run
 
 ## Automatic Import
 
-The daemon automatically imports from `.beads/issues.jsonl` when it's newer than the database (e.g., after `git pull`). Manual import is rarely needed.
+The Dolt server automatically imports from `.beads/issues.jsonl` when it's newer than the database (e.g., after `git pull`). Manual import is rarely needed.
 
 ## Options
 

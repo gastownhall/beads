@@ -143,20 +143,23 @@ bd hooks uninstall
 
 ## Auto-Sync Behavior
 
-### With Daemon (Default)
+### With Dolt Server Mode (Default)
 
-The daemon handles sync automatically:
-- Exports to JSONL after changes (5s debounce)
+When the Dolt server is running, sync is handled automatically:
+- Dolt auto-commit tracks changes
+- JSONL export happens after changes (5s debounce)
 - Imports from JSONL when newer
 
-### Without Daemon
+Start the Dolt server with `bd dolt start`.
 
-Use `--no-daemon` flag:
-- Changes only written to SQLite
+### Embedded Mode (No Server)
+
+In CI/CD pipelines and ephemeral environments, no server is needed:
+- Changes written directly to the database
 - Must manually export/sync
 
 ```bash
-bd --no-daemon create "Task"
+bd create "CI-generated task"
 bd export  # Manual export needed
 ```
 
@@ -205,4 +208,4 @@ git pull  # Imports deletions from remote
 1. **Always sync at session end** - `bd sync`
 2. **Install git hooks** - `bd hooks install`
 3. **Use merge driver** - Avoids manual conflict resolution
-4. **Check sync status** - `bd info` shows daemon/sync state
+4. **Check sync status** - `bd info` shows sync state

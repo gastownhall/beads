@@ -157,50 +157,49 @@ When working across multiple machines or clones:
 
 See [Sync Failures Recovery](/recovery/sync-failures) for data loss prevention in multi-machine workflows (Pattern A5/C3).
 
-## The Daemon
+## Dolt Server Mode
 
-The Beads daemon (`bd daemon`) handles background synchronization:
+The Dolt server handles background synchronization and database operations:
 
-- Watches for file changes
-- Triggers sync on changes
+- Manages the Dolt database backend
+- Handles auto-commit for change tracking
 - Keeps SQLite in sync with JSONL
-- Manages lock files
+- Logs available at `.beads/dolt/sql-server.log`
 
 :::tip
-The daemon is optional but recommended for multi-agent workflows.
+Start the Dolt server with `bd dolt start`. Check health with `bd doctor`.
 :::
 
-### Running Without the Daemon
+### Embedded Mode (No Server)
 
-For CI/CD pipelines, containers, and single-use scenarios, run commands without spawning a daemon:
+For CI/CD pipelines, containers, and single-use scenarios, no server is needed. Beads operates in embedded mode automatically when no Dolt server is running:
 
 ```bash
-bd --no-daemon create "CI-generated issue"
-bd --no-daemon sync
+bd create "CI-generated issue"
+bd sync
 ```
 
-**When to use `--no-daemon`:**
+**When embedded mode is appropriate:**
 - CI/CD pipelines (Jenkins, GitHub Actions)
 - Docker containers
 - Ephemeral environments
 - Scripts that should not leave background processes
-- Debugging daemon-related issues
 
-### Daemon in Multi-Clone Scenarios
+### Multi-Clone Scenarios
 
 :::warning Race Conditions in Multi-Clone Workflows
-When multiple git clones of the same repository run daemons simultaneously, race conditions can occur during push/pull operations. This is particularly common in:
+When multiple git clones of the same repository run sync operations simultaneously, race conditions can occur during push/pull operations. This is particularly common in:
 - Multi-agent AI workflows (multiple Claude/GPT instances)
 - Developer workstations with multiple checkouts
 - Worktree-based development workflows
 
 **Prevention:**
-1. Use `bd daemons killall` before switching between clones
-2. Ensure only one clone's daemon is active at a time
-3. Consider `--no-daemon` mode for automated workflows
+1. Stop the Dolt server (`bd dolt stop`) before switching between clones
+2. Dolt handles worktrees natively in server mode
+3. Use embedded mode for automated workflows
 :::
 
-See [Sync Failures Recovery](/recovery/sync-failures) for daemon race condition troubleshooting (Pattern B2).
+See [Sync Failures Recovery](/recovery/sync-failures) for sync race condition troubleshooting (Pattern B2).
 
 ## Recovery Model
 
@@ -217,7 +216,7 @@ The following sequence demonstrates how the architecture enables quick recovery.
 This sequence resolves the majority of reported issues:
 
 ```bash
-bd daemons killall           # Stop daemons (prevents race conditions)
+bd dolt stop                 # Stop Dolt server (prevents race conditions)
 git worktree prune           # Clean orphaned worktrees
 rm .beads/beads.db*          # Remove potentially corrupted database
 bd sync --import-only        # Rebuild from JSONL source of truth

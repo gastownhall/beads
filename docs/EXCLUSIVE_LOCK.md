@@ -1,11 +1,11 @@
 # Exclusive Lock Protocol
 
-The exclusive lock protocol allows external tools to claim exclusive management of a beads database, preventing the bd daemon from interfering with their operations.
+The exclusive lock protocol allows external tools to claim exclusive management of a beads database, preventing the Dolt server from interfering with their operations.
 
 ## Use Cases
 
 - **Deterministic execution systems** (e.g., VibeCoder) that need full control over database state
-- **CI/CD pipelines** that perform atomic issue updates without daemon interference
+- **CI/CD pipelines** that perform atomic issue updates without server interference
 - **Custom automation tools** that manage their own git sync workflow
 
 ## How It Works
@@ -31,14 +31,14 @@ The lock file is located at `.beads/.exclusive-lock` and contains JSON:
 - `started_at` (RFC3339 timestamp, required): When the lock was acquired
 - `version` (string, optional): Version of the lock holder
 
-### Daemon Behavior
+### Server Behavior
 
-The bd daemon checks for exclusive locks at the start of each sync cycle:
+The Dolt server checks for exclusive locks at the start of each sync cycle:
 
-1. **No lock file**: Daemon proceeds normally with sync operations
-2. **Valid lock (process alive)**: Daemon skips all operations for this database
-3. **Stale lock (process dead)**: Daemon removes the lock and proceeds
-4. **Malformed lock**: Daemon fails safe and skips the database
+1. **No lock file**: Server proceeds normally with sync operations
+2. **Valid lock (process alive)**: Server skips all operations for this database
+3. **Stale lock (process dead)**: Server removes the lock and proceeds
+4. **Malformed lock**: Server fails safe and skips the database
 
 ### Stale Lock Detection
 
@@ -46,11 +46,11 @@ A lock is considered stale if:
 - The hostname matches the current machine (case-insensitive) AND
 - The PID does not exist on the local system (returns ESRCH)
 
-**Important:** The daemon only removes locks when it can definitively determine the process is dead (ESRCH error). If the daemon lacks permission to signal a PID (EPERM), it treats the lock as valid and skips the database. This fail-safe approach prevents accidentally removing locks owned by other users.
+**Important:** The server only removes locks when it can definitively determine the process is dead (ESRCH error). If the server lacks permission to signal a PID (EPERM), it treats the lock as valid and skips the database. This fail-safe approach prevents accidentally removing locks owned by other users.
 
-**Remote locks** (different hostname) are always assumed to be valid since the daemon cannot verify remote processes.
+**Remote locks** (different hostname) are always assumed to be valid since the server cannot verify remote processes.
 
-When a stale lock is successfully removed, the daemon logs: `Removed stale lock (holder-name), proceeding with sync`
+When a stale lock is successfully removed, the server logs: `Removed stale lock (holder-name), proceeding with sync`
 
 ## Usage Examples
 
@@ -141,9 +141,9 @@ func main() {
 
 ## Edge Cases and Limitations
 
-### Multiple Writers Without Daemon
+### Multiple Writers Without Server
 
-The exclusive lock protocol **only prevents daemon interference**. It does NOT provide:
+The exclusive lock protocol **only prevents Dolt server interference**. It does NOT provide:
 - ❌ Mutual exclusion between multiple external tools
 - ❌ Transaction isolation or ACID guarantees
 - ❌ Protection against direct file system manipulation
@@ -152,21 +152,21 @@ If you need coordination between multiple tools, implement your own locking mech
 
 ### Git Worktrees
 
-The daemon already has issues with git worktrees (see AGENTS.md). The exclusive lock protocol doesn't solve this—use `--no-daemon` mode in worktrees instead.
+Dolt handles git worktrees natively. The exclusive lock protocol is separate from worktree support.
 
 ### Remote Hosts
 
-Locks from remote hosts are always assumed valid because the daemon cannot verify remote PIDs. This means:
+Locks from remote hosts are always assumed valid because the server cannot verify remote PIDs. This means:
 - Stale locks from remote hosts will **not** be automatically cleaned up
 - You must manually remove stale remote locks
 
 ### Lock File Corruption
 
-If the lock file becomes corrupted (invalid JSON), the daemon **fails safe** and skips the database. You must manually fix or remove the lock file.
+If the lock file becomes corrupted (invalid JSON), the server **fails safe** and skips the database. You must manually fix or remove the lock file.
 
-## Daemon Logging
+## Server Logging
 
-The daemon logs lock-related events:
+The Dolt server logs lock-related events:
 
 ```
 Skipping database (locked by vc-executor)
@@ -174,17 +174,17 @@ Removed stale lock (vc-executor), proceeding with sync
 Skipping database (lock check failed: malformed lock file: unexpected EOF)
 ```
 
-Check daemon logs (default: `.beads/daemon.log`) to troubleshoot lock issues.
+Check server logs (`.beads/dolt/sql-server.log`) to troubleshoot lock issues.
 
-**Note:** The daemon checks for locks at the start of each sync cycle. If a lock is created during a sync cycle, that cycle will complete, but subsequent cycles will skip the database.
+**Note:** The server checks for locks at the start of each sync cycle. If a lock is created during a sync cycle, that cycle will complete, but subsequent cycles will skip the database.
 
 ## Testing Your Integration
 
-1. **Start the daemon**: `bd daemon start --interval 1m`
+1. **Start the Dolt server**: `bd dolt start`
 2. **Create a lock**: Use your tool to create `.beads/.exclusive-lock`
-3. **Verify daemon skips**: Check daemon logs for "Skipping database" message
+3. **Verify server skips**: Check server logs for "Skipping database" message
 4. **Release lock**: Remove `.beads/.exclusive-lock`
-5. **Verify daemon resumes**: Check daemon logs for normal sync cycle
+5. **Verify server resumes**: Check server logs for normal sync cycle
 
 ## Security Considerations
 
@@ -223,7 +223,7 @@ func IsProcessAlive(pid int, hostname string) bool
 
 For integration help, see:
 - **AGENTS.md** - General workflow guidance
-- **README.md** - Daemon configuration
+- **README.md** - Server configuration
 - **examples/** - Sample integrations
 
 File issues at: https://github.com/steveyegge/beads/issues

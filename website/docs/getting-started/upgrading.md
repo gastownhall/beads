@@ -68,7 +68,7 @@ sudo mv bd /usr/local/bin/
 
 ## After Upgrading
 
-**Important:** After upgrading, update your hooks and restart daemons:
+**Important:** After upgrading, update your hooks:
 
 ```bash
 # 1. Check what changed
@@ -77,11 +77,11 @@ bd info --whats-new
 # 2. Update git hooks to match new version
 bd hooks install
 
-# 3. Restart all daemons
-bd daemons killall
-
-# 4. Check for any outdated hooks
+# 3. Check for any outdated hooks
 bd info  # Shows warnings if hooks are outdated
+
+# 4. If using Dolt backend, restart the server
+bd dolt stop && bd dolt start
 ```
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss new auto-sync features or bug fixes.
@@ -104,28 +104,7 @@ bd migrate
 bd migrate --cleanup --yes
 ```
 
-## Daemon Version Mismatches
-
-If you see daemon version mismatch warnings:
-
-```bash
-# List all running daemons
-bd daemons list --json
-
-# Check for version mismatches
-bd daemons health --json
-
-# Restart all daemons with new version
-bd daemons killall --json
-```
-
 ## Troubleshooting Upgrades
-
-### Old daemon still running
-
-```bash
-bd daemons killall
-```
 
 ### Hooks out of date
 

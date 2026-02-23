@@ -45,7 +45,7 @@ bd ready
 |---------|-------------|
 | **Issues** | Work items with priorities, types, labels, and dependencies |
 | **Dependencies** | `blocks`, `parent-child`, `discovered-from`, `related` |
-| **Daemon** | Background process for auto-sync and performance |
+| **Dolt Server** | Database server for multi-writer access and performance |
 | **Formulas** | Declarative workflow templates (TOML or JSON) |
 | **Molecules** | Work graphs with parent-child relationships |
 | **Gates** | Async coordination primitives (human, timer, GitHub) |

@@ -6,15 +6,15 @@ Path: @/cmd/bd
 
 The `cmd/bd` directory contains the complete CLI application for the Beads issue tracker. It implements the `bd` command-line tool, which users interact with to create, query, manage, and synchronize issues across distributed systems.
 
-The CLI is built on the Cobra framework and consists of command implementations for core operations (create, list, delete, import, export, sync, etc.), daemon management for background operations, and version reporting that includes git commit and branch information from the build.
+The CLI is built on the Cobra framework and consists of command implementations for core operations (create, list, delete, import, export, sync, etc.), Dolt server management for background operations, and version reporting that includes git commit and branch information from the build.
 
 ### How it fits into the larger codebase
 
 - **Entry Point**: The CLI defined here (`cmd/bd/main.go`) is the user-facing interface to the entire beads system. All user interactions flow through this package.
 
-- **Integration with Core Libraries**: The CLI commands call into libraries at `@/internal/beads` (database discovery, version detection), `@/internal/storage` (database operations), `@/internal/rpc` (daemon communication), and other internal packages.
+- **Integration with Core Libraries**: The CLI commands call into libraries at `@/internal/beads` (database discovery, version detection), `@/internal/storage` (database operations), `@/internal/rpc` (Dolt server communication), and other internal packages.
 
-- **Daemon Communication**: Commands use RPC client logic to communicate with the background daemon (PersistentPreRun hook), allowing the CLI to operate either in daemon mode (delegating to the daemon) or direct mode (local database operations).
+- **Server Communication**: Commands use RPC client logic to communicate with the Dolt server (PersistentPreRun hook), allowing the CLI to operate either in server mode (delegating to the Dolt server) or embedded mode (local database operations).
 
 - **Version Reporting**: The version command (`@/cmd/bd/version.go`) reports full build information - it resolves git commit and branch from ldflags set at build time via the Makefile (`@/Makefile`) and goreleaser config (`@/.goreleaser.yml`). This enables users to identify exactly what code their binary was built from.
 
@@ -44,16 +44,16 @@ The CLI is built on the Cobra framework and consists of command implementations 
    - **Text Output** (lines 52-58 in `version.go`): Shows format like `bd version 0.29.0 (dev: main@7e70940)` when both commit and branch are available
    - **JSON Output** (lines 39-50): Includes optional `commit` and `branch` fields when available
 
-5. **Daemon Version Checking** (lines 63-109): The `--daemon` flag shows daemon/client compatibility by calling health RPC endpoints
+5. **Server Version Checking** (lines 63-109): The `--server` flag shows server/client compatibility by calling health RPC endpoints
 
 **Command Structure**:
 - All commands follow the Cobra pattern with `Command` structs and run functions
 - Commands register themselves via `init()` functions that add them to `rootCmd`
-- The daemon connection state is managed via PersistentPreRun hooks, allowing most commands to transparently work in daemon or direct mode
+- The server connection state is managed via PersistentPreRun hooks, allowing most commands to transparently work in server or embedded mode
 
 **Key Data Paths**:
 - User input → Cobra command parsing → Internal beads library calls → Storage layer → Git operations
-- Responses flow back through storage → RPC (if daemon) or direct return → formatted output
+- Responses flow back through storage → RPC (if server) or direct return → formatted output
 
 ### Things to Know
 

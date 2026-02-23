@@ -168,9 +168,8 @@ bd prime
 # Force sync
 bd sync
 
-# Check daemon
-bd info
-bd daemons health
+# Check system health
+bd doctor
 ```
 
 ### Database not found

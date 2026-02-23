@@ -152,8 +152,8 @@ as commands:
 
 ### "requires direct database access"
 
-Federation commands require the Dolt backend. Ensure you're not running in
-daemon mode for federation operations.
+Federation commands require the Dolt backend with direct database access. Ensure
+you have the Dolt backend configured for federation operations.
 
 ### "peer already exists"
 

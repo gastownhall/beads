@@ -33,9 +33,9 @@ If you see `-wal` or `-shm` files alongside `beads.db`, a transaction may have b
 Back up your `.beads/` directory before proceeding.
 :::
 
-**Step 1:** Stop the daemon
+**Step 1:** Stop the Dolt server
 ```bash
-bd daemon stop
+bd dolt stop
 ```
 
 **Step 2:** Back up current state
@@ -54,13 +54,13 @@ bd status
 bd list
 ```
 
-**Step 5:** Restart daemon
+**Step 5:** Restart the Dolt server
 ```bash
-bd daemon start
+bd dolt start
 ```
 
 ## Prevention
 
 - Avoid interrupting `bd sync` operations
-- Let the daemon handle synchronization
-- Use `bd daemon stop` before system shutdown
+- Let the Dolt server handle synchronization
+- Use `bd dolt stop` before system shutdown

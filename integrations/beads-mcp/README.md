@@ -60,7 +60,6 @@ Then use in Claude Desktop config:
 ```
 
 **Environment Variables** (all optional):
-- `BEADS_USE_DAEMON` - Use daemon RPC instead of CLI (default: `1`, set to `0` to disable)
 - `BEADS_PATH` - Path to bd executable (default: `~/.local/bin/bd`)
 - `BEADS_DB` - Path to beads database file (default: auto-discover from cwd)
 - `BEADS_WORKING_DIR` - Working directory for bd commands (default: `$PWD` or current directory). Used for multi-repo setups - see below
@@ -70,7 +69,7 @@ Then use in Claude Desktop config:
 
 ## Multi-Repository Setup
 
-**Recommended:** Use a single MCP server instance for all beads projects - it automatically routes to per-project local daemons.
+**Recommended:** Use a single MCP server instance for all beads projects - it automatically routes to per-project Dolt servers.
 
 ### Single MCP Server (Recommended)
 
@@ -86,28 +85,26 @@ Then use in Claude Desktop config:
 ```
 
 **How it works (LSP model):**
-1. MCP server checks for local daemon socket (`.beads/bd.sock`) in your current workspace
-2. Routes requests to the **per-project daemon** based on working directory
-3. Auto-starts the local daemon if not running
-4. **Each project gets its own isolated daemon** serving only its database
+1. MCP server detects the beads project in your current workspace
+2. Routes requests to the **per-project Dolt server** based on working directory
+3. Auto-starts the local Dolt server if not running
+4. **Each project gets its own isolated Dolt server** serving only its database
 
 **Architecture:**
 ```
 MCP Server (one instance)
     ↓
-Per-Project Daemons (one per workspace)
+Per-Project Dolt Servers (one per workspace)
     ↓
-SQLite Databases (complete isolation)
+Dolt Databases (complete isolation)
 ```
 
-**Why per-project daemons?**
-- ✅ Complete database isolation between projects
-- ✅ No cross-project pollution or git worktree conflicts
-- ✅ Simpler mental model: one project = one database = one daemon
-- ✅ Follows LSP (Language Server Protocol) architecture
-- ✅ One MCP config works for unlimited projects
-
-**Note:** Global daemon support was removed in v0.16.0 to prevent cross-project database pollution.
+**Why per-project Dolt servers?**
+- Complete database isolation between projects
+- No cross-project pollution or git worktree conflicts
+- Simpler mental model: one project = one database = one Dolt server
+- Follows LSP (Language Server Protocol) architecture
+- One MCP config works for unlimited projects
 
 ### Alternative: Per-Project MCP Instances (Not Recommended)
 
@@ -160,7 +157,7 @@ await beads_create_issue(
 ### Architecture
 
 **Connection Pool**: The MCP server maintains a connection pool keyed by canonical workspace path:
-- Each workspace gets its own daemon socket connection
+- Each workspace gets its own Dolt server connection
 - Paths are canonicalized (symlinks resolved, git toplevel detected)
 - Concurrent requests use `asyncio.Lock` to prevent race conditions
 - No LRU eviction (keeps all connections open for session)
@@ -203,9 +200,9 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 
 **Submodule handling**: Submodules with their own `.beads` directory are treated as separate projects.
 
-**Stale sockets**: Currently no health checks. Phase 2 will add retry-on-failure if monitoring shows need.
+**Stale connections**: Currently no health checks. Phase 2 will add retry-on-failure if monitoring shows need.
 
-**Version mismatches**: Daemon version is auto-checked since v0.16.0. Mismatched daemons are automatically restarted.
+**Version mismatches**: Dolt server version is auto-checked. Mismatched servers are automatically restarted.
 
 ## Features
 
@@ -284,15 +281,15 @@ Test suite includes both mocked unit tests and integration tests with real `bd` 
 
 ### Multi-Repo Integration Test
 
-Test daemon RPC with multiple repositories:
+Test Dolt server with multiple repositories:
 ```bash
-# Start the daemon first
+# Start the Dolt server first
 cd /path/to/beads
-./bd daemon start
+bd dolt start
 
 # Run multi-repo test
 cd integrations/beads-mcp
 uv run python test_multi_repo.py
 ```
 
-This test verifies that the daemon can handle operations across multiple repositories simultaneously using per-request context routing.
+This test verifies that the Dolt server can handle operations across multiple repositories simultaneously using per-request context routing.

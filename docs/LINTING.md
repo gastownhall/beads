@@ -6,7 +6,7 @@ This document explains our approach to `golangci-lint` warnings in this codebase
 
 Running `golangci-lint run ./...` currently reports **22 issues** as of Nov 6, 2025. These are not actual code quality problems - they are false positives or intentional patterns that reflect idiomatic Go practice.
 
-**Historical note**: The count was ~200 before extensive cleanup in October 2025, reduced to 34 by Oct 27, and now 22 after internal/daemonrunner removal. The remaining issues represent the acceptable baseline that doesn't warrant fixing.
+**Historical note**: The count was ~200 before extensive cleanup in October 2025, reduced to 34 by Oct 27, and now 22 after removing legacy daemon code. The remaining issues represent the acceptable baseline that doesn't warrant fixing.
 
 ## Issue Breakdown
 
@@ -37,7 +37,7 @@ Fixing these would add noise without improving code quality. The critical cleanu
 Examples:
 - Launching `$EDITOR` for issue editing
 - Executing git commands
-- Running bd daemon binary
+- Running external commands (e.g., git, dolt)
 
 **Pattern 2**: G304 - File inclusion via variable (3 issues)
 **Status**: Intended feature - user-specified file paths for import/export

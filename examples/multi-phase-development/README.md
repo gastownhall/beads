@@ -23,8 +23,8 @@ Use beads epics and hierarchical issues to organize work by phase, with priority
 cd my-project
 bd init
 
-# Start daemon for auto-sync (optional)
-bd daemon start --auto-commit --auto-push
+# Start Dolt server for auto-sync (optional)
+bd dolt start
 ```
 
 ## Phase 1: Research & Planning

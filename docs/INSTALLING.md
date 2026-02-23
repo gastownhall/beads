@@ -230,8 +230,7 @@ bd version
 ```
 
 **Windows notes:**
-- The background daemon listens on a loopback TCP endpoint recorded in `.beads\bd.sock`
-- Keep that metadata file intact
+- The Dolt server listens on a loopback TCP endpoint
 - Allow `bd.exe` loopback traffic through any host firewall
 
 ## IDE and Editor Integrations

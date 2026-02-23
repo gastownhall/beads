@@ -154,26 +154,26 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
-## Daemon Handling
+## Server Mode Handling
 
-### CLI vs Daemon Context
+### CLI vs Server Context
 
 For CLI commands, `GetRepoContext()` caches the result via `sync.Once` because:
 - CWD doesn't change during command execution
 - BEADS_DIR doesn't change during command execution
 - Repeated filesystem access would be wasteful
 
-For the daemon (long-running process), this caching is inappropriate:
+For the Dolt server (long-running process), this caching is inappropriate:
 - User may create new worktrees
 - BEADS_DIR may change via direnv
 - Multiple workspaces may be active simultaneously
 
 ### Workspace-Specific API
 
-The daemon uses `GetRepoContextForWorkspace()` for fresh resolution:
+The server uses `GetRepoContextForWorkspace()` for fresh resolution:
 
 ```go
-// For daemon: fresh resolution per-operation (no caching)
+// For server mode: fresh resolution per-operation (no caching)
 rc, err := beads.GetRepoContextForWorkspace(workspacePath)
 
 // Validation hook for detecting stale contexts

@@ -7,8 +7,8 @@ This guide explains how to completely remove Beads from a repository.
 Run these commands from your repository root:
 
 ```bash
-# 1. Stop any running bd process (optional)
-pkill -f "bd.*daemon" 2>/dev/null || true
+# 1. Stop any running Dolt server (optional)
+bd dolt stop 2>/dev/null || true
 
 # 2. Remove git hooks installed by Beads
 rm -f .git/hooks/pre-commit .git/hooks/prepare-commit-msg .git/hooks/post-merge .git/hooks/pre-push .git/hooks/post-checkout
@@ -31,14 +31,12 @@ rm -rf .git/beads-worktrees
 
 ## Detailed Steps
 
-### 1. Stop Legacy Daemon Processes (Optional)
+### 1. Stop the Dolt Server (Optional)
 
-Newer versions no longer expose daemon management commands, but you may have
-an old daemon process from a previous release. Stop it before cleanup:
+If a Dolt server is running, stop it before cleanup:
 
 ```bash
-pgrep -lf "bd.*daemon"                    # Check for legacy daemon processes
-pkill -f "bd.*daemon" 2>/dev/null || true # Stop them if present
+bd dolt stop 2>/dev/null || true
 ```
 
 ### 2. Remove Git Hooks
@@ -107,12 +105,10 @@ The `.beads/` directory contains:
 
 | File/Dir | Description |
 |----------|-------------|
-| `beads.db` | SQLite database with issues |
+| `dolt/` | Dolt database directory |
+| `dolt/sql-server.pid` | Running Dolt server PID (if server mode) |
+| `dolt/sql-server.log` | Dolt server logs (if server mode) |
 | `issues.jsonl` | Git-tracked issue data |
-| `daemon.pid` | Running daemon PID |
-| `daemon.log` | Daemon logs |
-| `daemon.lock` | Lock file for daemon |
-| `bd.sock` | Unix socket for daemon IPC |
 | `config.yaml` | Project configuration |
 | `metadata.json` | Version tracking |
 | `deletions.jsonl` | Soft-deleted issues |

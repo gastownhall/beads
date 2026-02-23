@@ -19,7 +19,6 @@ bd [global-flags] <command> [command-flags] [arguments]
 | Flag | Description |
 |------|-------------|
 | `--db <path>` | Use specific database file |
-| `--no-daemon` | Bypass daemon, direct database access |
 | `--json` | Output in JSON format |
 | `--quiet` | Suppress non-essential output |
 | `--verbose` | Verbose output |
@@ -91,7 +90,7 @@ Most frequently used:
 | `bd info` | Show system info |
 | `bd version` | Show version |
 | `bd config` | Manage configuration |
-| `bd daemons` | Manage daemons |
+| `bd doctor` | Check system health |
 | `bd hooks` | Manage git hooks |
 
 ### Workflows

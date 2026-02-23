@@ -25,8 +25,8 @@ Before diving into specific runbooks, try these quick checks:
 # Check Beads status
 bd status
 
-# Verify daemon is running
-bd daemon status
+# Verify Dolt server is running
+bd doctor
 
 # Check for blocked issues
 bd blocked

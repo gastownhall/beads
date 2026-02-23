@@ -53,8 +53,8 @@ bd --db .beads/beads.db list
 ### Database locked
 
 ```bash
-# Stop daemon
-bd daemons killall
+# Stop the Dolt server if running
+bd dolt stop
 
 # Try again
 bd list
@@ -68,20 +68,20 @@ rm .beads/beads.db
 bd import -i .beads/issues.jsonl
 ```
 
-## Daemon Issues
+## Dolt Server Issues
 
-### Daemon not starting
+### Server not starting
 
 ```bash
-# Check status
-bd info
+# Check server health
+bd doctor
 
-# Remove stale socket
-rm -f .beads/bd.sock
+# Check server logs
+cat .beads/dolt/sql-server.log
 
-# Restart
-bd daemons killall
-bd info
+# Restart the server
+bd dolt stop
+bd dolt start
 ```
 
 ### Version mismatch
@@ -89,16 +89,8 @@ bd info
 After upgrading bd:
 
 ```bash
-bd daemons killall
-bd info
-```
-
-### High CPU usage
-
-```bash
-# Switch to event-driven mode
-export BEADS_DAEMON_MODE=events
-bd daemons killall
+bd dolt stop
+bd dolt start
 ```
 
 ## Sync Issues
@@ -108,9 +100,6 @@ bd daemons killall
 ```bash
 # Force sync
 bd sync
-
-# Check daemon
-bd info | grep daemon
 
 # Check hooks
 bd hooks status
@@ -212,7 +201,7 @@ bd --verbose list
 ### Logs
 
 ```bash
-bd daemons logs . -n 100
+cat .beads/dolt/sql-server.log
 ```
 
 ### System info

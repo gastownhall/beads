@@ -84,15 +84,15 @@ AI clients would need to:
 1. Call `set_context` at session start with workspace root
 2. MCP protocol would need to support persistent session state
 
-**Option 3: Daemon with RPC (Future - Path 1.5 from bd-105)**
-- Add `cwd` parameter to daemon RPC protocol
-- Daemon performs tree-walking per request
+**Option 3: Dolt Server with RPC (Future - Path 1.5 from bd-105)**
+- Add `cwd` parameter to Dolt server RPC protocol
+- Server performs tree-walking per request
 - MCP server passes workspace_root via RPC
-- Benefits: Centralized routing, supports multiple contexts per daemon
+- Benefits: Centralized routing, supports multiple contexts per server
 
-**Option 4: Advanced Routing Daemon (Future - Path 2 from bd-105)**
+**Option 4: Advanced Routing Server (Future - Path 2 from bd-105)**
 For >50 repos:
-- Dedicated routing daemon with repo→DB mappings
+- Dedicated routing server with repo->DB mappings
 - MCP becomes thin shim
 - Enables shared connection pooling, cross-repo queries
 

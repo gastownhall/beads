@@ -24,7 +24,7 @@ Beads uses git for:
 ├── issues.jsonl       # Issue data (git-tracked)
 ├── deletions.jsonl    # Deletion manifest (git-tracked)
 ├── config.toml        # Project config (git-tracked)
-└── bd.sock            # Daemon socket (gitignored)
+└── dolt/              # Dolt server data (gitignored)
 ```
 
 ## Git Hooks
@@ -97,15 +97,13 @@ This:
 
 ## Git Worktrees
 
-Beads requires `--no-daemon` in git worktrees:
+Beads works in git worktrees using embedded mode:
 
 ```bash
-# In worktree
-bd --no-daemon create "Task"
-bd --no-daemon list
+# In worktree — just run commands directly
+bd create "Task"
+bd list
 ```
-
-Why: Daemon uses `.beads/bd.sock` which conflicts across worktrees.
 
 ## Branch Workflows
 
@@ -167,4 +165,4 @@ bd duplicates --auto-merge
 2. **Use merge driver** - Avoid manual conflict resolution
 3. **Sync regularly** - `bd sync` at session end
 4. **Pull before work** - Get latest issues
-5. **Use `--no-daemon` in worktrees**
+5. **Worktrees use embedded mode automatically**

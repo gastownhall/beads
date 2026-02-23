@@ -13,32 +13,32 @@ This runbook helps you recover from `bd sync` failures.
 - `bd sync` hangs or times out
 - Network-related error messages
 - "failed to push" or "failed to pull" errors
-- Daemon not responding
+- Dolt server not responding
 
 ## Diagnosis
 
 ```bash
-# Check daemon status
-bd daemon status
+# Check Dolt server health
+bd doctor
 
 # Check sync state
 bd status
 
-# View daemon logs
-cat .beads/daemon.log | tail -50
+# View Dolt server logs
+tail -50 .beads/dolt/sql-server.log
 ```
 
 ## Solution
 
-**Step 1:** Stop the daemon
+**Step 1:** Stop the Dolt server
 ```bash
-bd daemon stop
+bd dolt stop
 ```
 
 **Step 2:** Check for lock files
 ```bash
 ls -la .beads/*.lock
-# Remove stale locks if daemon is definitely stopped
+# Remove stale locks if Dolt server is definitely stopped
 rm -f .beads/*.lock
 ```
 
@@ -47,9 +47,9 @@ rm -f .beads/*.lock
 bd doctor --fix
 ```
 
-**Step 4:** Restart daemon
+**Step 4:** Restart the Dolt server
 ```bash
-bd daemon start
+bd dolt start
 ```
 
 **Step 5:** Verify sync works
@@ -63,7 +63,7 @@ bd status
 | Cause | Solution |
 |-------|----------|
 | Network timeout | Retry with better connection |
-| Stale lock file | Remove lock after stopping daemon |
+| Stale lock file | Remove lock after stopping Dolt server |
 | Corrupted state | Use `bd doctor --fix` |
 | Git conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 
@@ -71,4 +71,4 @@ bd status
 
 - Ensure stable network before sync
 - Let sync complete before closing terminal
-- Use `bd daemon stop` before system shutdown
+- Use `bd dolt stop` before system shutdown

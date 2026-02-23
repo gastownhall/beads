@@ -23,10 +23,10 @@ bd supports several environment variables for debugging specific subsystems. Ena
 | Variable | Purpose | Output Location | Usage |
 |----------|---------|----------------|-------|
 | `BD_DEBUG` | General debug logging | stderr | Set to any value to enable |
-| `BD_DEBUG_RPC` | RPC communication between CLI and daemon | stderr | Set to `1` or `true` |
+| `BD_DEBUG_RPC` | RPC communication between CLI and Dolt server | stderr | Set to `1` or `true` |
 | `BD_DEBUG_SYNC` | Sync and import timestamp protection | stderr | Set to any value to enable |
 | `BD_DEBUG_ROUTING` | Issue routing and multi-repo resolution | stderr | Set to any value to enable |
-| `BD_DEBUG_FRESHNESS` | Database file replacement detection | daemon logs | Set to any value to enable |
+| `BD_DEBUG_FRESHNESS` | Database file replacement detection | server logs | Set to any value to enable |
 
 ### Usage Examples
 
@@ -39,12 +39,12 @@ bd ready
 
 **RPC communication issues:**
 ```bash
-# Debug daemon communication
+# Debug Dolt server communication
 export BD_DEBUG_RPC=1
 bd list
 
 # Example output:
-# [RPC DEBUG] Connecting to daemon at .beads/bd.sock
+# [RPC DEBUG] Connecting to Dolt server
 # [RPC DEBUG] Sent request: list (correlation_id=abc123)
 # [RPC DEBUG] Received response: 200 OK
 ```
@@ -74,16 +74,15 @@ bd create "Test issue" --rig=planning
 ```bash
 # Debug database file replacement detection
 export BD_DEBUG_FRESHNESS=1
-bd daemon start --foreground
+bd dolt start
 
 # Example output:
 # [freshness] FreshnessChecker: inode changed 27548143 -> 7945906
 # [freshness] FreshnessChecker: triggering reconnection
 # [freshness] Database file replaced, reconnection triggered
 
-# Or check daemon logs
-BD_DEBUG_FRESHNESS=1 bd daemon restart
-bd daemons logs . -n 100 | grep freshness
+# Or check server logs
+tail -f .beads/dolt/sql-server.log | grep freshness
 ```
 
 **Multiple debug flags:**
@@ -92,7 +91,7 @@ bd daemons logs . -n 100 | grep freshness
 export BD_DEBUG=1
 export BD_DEBUG_RPC=1
 export BD_DEBUG_FRESHNESS=1
-bd daemon start --foreground
+bd dolt start
 ```
 
 ### Tips
@@ -109,13 +108,10 @@ bd daemon start --foreground
   BD_DEBUG=1 bd sync 2> debug.log
   ```
 
-- **Daemon logs**: `BD_DEBUG_FRESHNESS` output goes to daemon logs, not stderr:
+- **Server logs**: `BD_DEBUG_FRESHNESS` output goes to server logs, not stderr:
   ```bash
-  # View daemon logs
-  bd daemons logs . -n 200
-
-  # Or directly:
-  tail -f .beads/daemon.log
+  # View Dolt server logs
+  tail -f .beads/dolt/sql-server.log
   ```
 
 - **When filing bug reports**: Include relevant debug output to help maintainers diagnose issues faster.
@@ -557,8 +553,8 @@ See [WORKTREES.md](WORKTREES.md) for details on how beads uses worktrees.
 Check if auto-sync is enabled:
 
 ```bash
-# Check if daemon is running
-ps aux | grep "bd daemon"
+# Check if Dolt server is running
+bd doctor
 
 # Manually export/import
 bd export -o .beads/issues.jsonl
@@ -728,24 +724,23 @@ cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
 bd version
 bd ready
 
-# Check for daemon
-ps aux | grep "bd daemon"
+# Check Dolt server health
+bd doctor
 ```
 
 See [integrations/beads-mcp/README.md](../integrations/beads-mcp/README.md) for MCP-specific troubleshooting.
 
 ### Sandboxed environments (Codex, Claude Code, etc.)
 
-**Issue:** Sandboxed environments restrict permissions, preventing daemon control and causing "out of sync" errors.
+**Issue:** Sandboxed environments restrict permissions, preventing server control and causing "out of sync" errors.
 
 **Common symptoms:**
 - "Database out of sync with JSONL" errors that persist after running `bd import`
-- `bd daemon stop` fails with "operation not permitted"
-- Cannot kill daemon process with `kill <pid>`
+- `bd dolt stop` fails with "operation not permitted"
 - JSONL hash mismatch warnings (bd-160)
 - Commands intermittently fail with staleness errors
 
-**Root cause:** The sandbox can't signal/kill the existing daemon process, so the DB stays stale and refuses to import.
+**Root cause:** The sandbox can't signal/kill the existing Dolt server process, so the DB stays stale and refuses to import.
 
 ---
 
@@ -762,13 +757,10 @@ When auto-detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 bd --sandbox ready
 bd --sandbox create "Fix bug" -p 1
 bd --sandbox update bd-42 --status in_progress
-
-# Equivalent to:
-bd --no-daemon --no-auto-flush --no-auto-import <command>
 ```
 
 **What sandbox mode does:**
-- Disables daemon (uses direct database mode)
+- Uses embedded database mode (no server needed)
 - Disables auto-export to JSONL
 - Disables auto-import from JSONL
 - Allows bd to work in network-restricted environments
@@ -783,7 +775,7 @@ bd sync
 
 #### Escape hatches for stuck states
 
-If you're stuck in a "database out of sync" loop with a running daemon you can't stop, use these flags:
+If you're stuck in a "database out of sync" loop with a running server you can't stop, use these flags:
 
 **1. Force metadata update (`--force` flag on import)**
 
@@ -794,7 +786,7 @@ When `bd import` reports "0 created, 0 updated" but staleness persists:
 bd import --force
 
 # This updates internal metadata tracking without changing issues
-# Fixes: stuck state caused by stale daemon cache
+# Fixes: stuck state caused by stale server cache
 ```
 
 **Shows:** `Metadata updated (database already in sync with JSONL)`
@@ -848,7 +840,7 @@ bd sync
 
 | Flag | Purpose | When to use | Risk |
 |------|---------|-------------|------|
-| `--sandbox` | Disable daemon and auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
+| `--sandbox` | Use embedded mode, disable auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
 | `--force` (import) | Force metadata update | Stuck "0 created, 0 updated" loop | Low - updates metadata only |
 | `--allow-stale` | Skip staleness validation | Emergency access to database | **High** - may show stale data |
 
@@ -875,9 +867,9 @@ where.exe bd
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
 ```
 
-### Windows: Firewall blocking daemon
+### Windows: Firewall blocking Dolt server
 
-The daemon listens on loopback TCP. Allow `bd.exe` through Windows Firewall:
+The Dolt server listens on loopback TCP. Allow `bd.exe` through Windows Firewall:
 
 1. Open Windows Security → Firewall & network protection
 2. Click "Allow an app through firewall"

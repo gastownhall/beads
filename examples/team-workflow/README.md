@@ -66,7 +66,7 @@ If main isn't protected:
 # Create issue
 bd create "Implement feature X" -p 1
 
-# Daemon auto-commits to main
+# Dolt server auto-commits to main
 # (or run 'bd sync' manually)
 
 # Pull to see team's issues
@@ -82,7 +82,7 @@ If main is protected:
 # Create issue
 bd create "Implement feature X" -p 1
 
-# Daemon commits to beads-metadata branch
+# Auto-commits to beads-metadata branch
 # (or run 'bd sync' manually)
 
 # Push beads-metadata
@@ -100,9 +100,8 @@ team:
   enabled: true
   sync_branch: beads-metadata  # or main if not protected
 
-daemon:
-  auto_commit: true
-  auto_push: true
+dolt:
+  auto-commit: on
 ```
 
 ### Manual Configuration
@@ -114,9 +113,8 @@ bd config set team.enabled true
 # Set sync branch
 bd config set team.sync_branch beads-metadata
 
-# Enable auto-sync
-bd config set daemon.auto_commit true
-bd config set daemon.auto_push true
+# Enable auto-commit
+bd config set dolt.auto-commit on
 ```
 
 ## Example Workflows
@@ -127,7 +125,7 @@ bd config set daemon.auto_push true
 # Alice creates an issue
 bd create "Fix authentication bug" -p 1
 
-# Daemon commits and pushes to main
+# Auto-commits and pushes to main
 # (auto-sync enabled)
 
 # Bob pulls changes
@@ -137,7 +135,7 @@ bd list  # Sees Alice's issue
 # Bob claims it
 bd update bd-abc --status in_progress
 
-# Daemon commits Bob's update
+# Auto-commits Bob's update
 # Alice pulls and sees Bob is working on it
 ```
 
@@ -147,7 +145,7 @@ bd update bd-abc --status in_progress
 # Alice creates an issue
 bd create "Add new API endpoint" -p 1
 
-# Daemon commits to beads-metadata
+# Auto-commits to beads-metadata
 git push origin beads-metadata
 
 # Bob pulls beads-metadata
@@ -213,10 +211,11 @@ bd close bd-abc --reason "PR #123 merged"
 
 ### Auto-Sync (Recommended)
 
-Daemon commits and pushes automatically:
+The Dolt server commits and pushes automatically when auto-commit is enabled:
 
 ```bash
-bd daemon start --auto-commit --auto-push
+bd config set dolt.auto-commit on
+bd dolt start
 ```
 
 Benefits:
@@ -315,8 +314,7 @@ A: Hash-based IDs prevent collisions. Even if created simultaneously, they get d
 A: Turn it off:
 
 ```bash
-bd config set daemon.auto_commit false
-bd config set daemon.auto_push false
+bd config set dolt.auto-commit off
 
 # Sync manually
 bd sync
@@ -344,27 +342,25 @@ A: Add to your CI pipeline:
 
 ## Troubleshooting
 
-### Issue: Daemon not committing
+### Issue: Server not committing
 
-Check daemon status:
+Check server status:
 
 ```bash
-bd daemon status
-bd daemons list
+bd doctor
 ```
 
 Verify config:
 
 ```bash
-bd config get daemon.auto_commit
-bd config get daemon.auto_push
+bd config get dolt.auto-commit
 ```
 
-Restart daemon:
+Restart Dolt server:
 
 ```bash
-bd daemon stop
-bd daemon start --auto-commit --auto-push
+bd dolt stop
+bd dolt start
 ```
 
 ### Issue: Merge conflicts in JSONL

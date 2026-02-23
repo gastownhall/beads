@@ -250,7 +250,7 @@ brew upgrade beads
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-For post-upgrade steps (hooks, daemons, migrations), see [Upgrading](/getting-started/upgrading).
+For post-upgrade steps (hooks, migrations), see [Upgrading](/getting-started/upgrading).
 
 ## Next Steps
 

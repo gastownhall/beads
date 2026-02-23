@@ -162,7 +162,7 @@ When agents discover duplicate issues, they should:
 
 Git worktrees work with bd. Each worktree can have its own `.beads` directory, or worktrees can share a database via redirects (see [Database Redirects](#database-redirects)).
 
-**With Dolt backend:** Each worktree operates directly on the database — no daemon coordination needed. Use `bd sync` to synchronize JSONL with git when ready.
+**With Dolt backend:** Each worktree operates directly on the database — no special coordination needed. Use `bd sync` to synchronize JSONL with git when ready.
 
 **With Dolt server mode:** Multiple worktrees can connect to the same Dolt server for concurrent access without conflicts.
 
@@ -356,10 +356,10 @@ Understanding the role of each component:
 - **Business logic** — Ready work calculation, merge operations, import/export
 - **CLI commands** — Direct database access via `bd` command
 
-### RPC Layer (Dolt Server Mode)
-- **Multi-writer access** — Connects to a running `dolt sql-server` for concurrent clients
+### RPC Layer (Server Mode)
+- **Multi-writer access** — Connects to a running Dolt server (`bd dolt start`) for concurrent clients
 - **Used in multi-agent setups** — Gas Town and similar environments where multiple agents write simultaneously
-- **Not needed for single-user** — a single Dolt server handles all local operations
+- **Not needed for single-user** — embedded mode handles all local operations
 
 ### MCP Server (Optional)
 - **Protocol adapter** — Translates MCP calls to direct CLI invocations

@@ -8,7 +8,7 @@
 - Dependency-aware issue tracking
 - Auto-sync with Git via JSONL
 - AI-optimized CLI with JSON output
-- Built-in daemon for background operations
+- Dolt server mode for background operations
 - MCP server integration for Claude and other AI assistants
 
 ## Tech Stack

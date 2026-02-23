@@ -126,8 +126,8 @@ Use the version bump script to update all version references and create the rele
 | `--install` | Build and install bd to `~/go/bin` AND `~/.local/bin` |
 | `--mcp-local` | Install beads-mcp from local source via uv/pip |
 | `--upgrade-mcp` | Upgrade beads-mcp from PyPI (after PyPI publish) |
-| `--restart-daemons` | Restart all bd daemons to pick up new version |
-| `--all` | Shorthand for `--install --mcp-local --restart-daemons` |
+| `--restart-servers` | Restart all Dolt servers to pick up new version |
+| `--all` | Shorthand for `--install --mcp-local --restart-servers` |
 
 This updates:
 - `cmd/bd/version.go` - CLI version constant

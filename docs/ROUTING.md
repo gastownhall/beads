@@ -150,24 +150,24 @@ bd repo list
 Multi-repo hydration imports issues from all configured repos into the current database:
 
 1. **JSONL as source of truth**: Each repo maintains its own `issues.jsonl`
-2. **Periodic import**: Daemon imports from `repos.additional` every sync cycle
+2. **Periodic import**: Beads imports from `repos.additional` every sync cycle
 3. **Source tracking**: Each issue tagged with `source_repo` field
 4. **Unified view**: `bd list` shows issues from all repos
 
 ### Requirements
 
-**For optimal hydration, run daemons in all repos:**
+**For optimal hydration, start Dolt servers in all repos:**
 
 ```bash
 # In main repo
-bd daemon start
+bd dolt start
 
 # In planning repo
 cd ~/.beads-planning
-bd daemon start --local
+bd dolt start
 ```
 
-Without daemons, JSONL files become stale and hydration only sees old data.
+Without running servers, JSONL files become stale and hydration only sees old data.
 
 ### Troubleshooting
 
@@ -179,7 +179,7 @@ bd doctor
 # Checks:
 # - routing.mode=auto with routing targets but repos.additional not configured
 # - Routing targets not in repos.additional list
-# - Daemons not running in hydrated repos
+# - Dolt servers not running in hydrated repos
 ```
 
 **Common Issues:**
@@ -189,8 +189,8 @@ bd doctor
    - **Fix:** `bd repo add <routing-target>`
 
 2. **Issues appear but data is stale**
-   - **Cause:** Daemon not running in target repo
-   - **Fix:** `cd <target-repo> && bd daemon start --local`
+   - **Cause:** Dolt server not running in target repo
+   - **Fix:** `cd <target-repo> && bd dolt start`
 
 3. **After upgrading, routed issues missing**
    - **Cause:** Upgraded before hydration was automatic

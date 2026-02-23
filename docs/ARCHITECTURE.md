@@ -164,17 +164,17 @@ This eliminates the need for central coordination while ensuring all machines co
 
 See [COLLISION_MATH.md](COLLISION_MATH.md) for birthday paradox calculations on hash length vs collision probability.
 
-## Daemon Architecture
+## Server Architecture
 
-Each workspace runs its own background daemon for auto-sync:
+Each workspace can run its own Dolt server for multi-writer access:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       RPC Server                                 │
+│                     Dolt Server Mode                              │
 │                                                                  │
 │  ┌─────────────┐    ┌─────────────┐                             │
-│  │ RPC Server  │    │  Background │                             │
-│  │ (bd.sock)   │    │  Tasks      │                             │
+│  │ RPC Server  │    │ dolt        │                             │
+│  │             │    │ sql-server  │                             │
 │  └─────────────┘    └─────────────┘                             │
 │         │                  │                                     │
 │         └──────────────────┘                                     │
@@ -186,16 +186,20 @@ Each workspace runs its own background daemon for auto-sync:
 │                   └─────────────┘                                │
 └─────────────────────────────────────────────────────────────────┘
 
-     CLI commands ───RPC───▶ Server ───SQL───▶ Database
+     CLI commands ───SQL───▶ dolt sql-server ───▶ Database
                               or
-     CLI commands ───SQL───▶ Database (via dolt sql-server)
+     CLI commands ───SQL───▶ Database (embedded mode)
 ```
 
 **Server mode:**
 - Connects to `dolt sql-server` (multi-writer, high-concurrency)
+- PID file at `.beads/dolt/sql-server.pid`
+- Logs at `.beads/dolt/sql-server.log`
+
+**Embedded mode:**
+- Direct database access (single-writer, no server process)
 
 **Communication:**
-- Unix domain socket at `.beads/bd.sock` (Windows: named pipes)
 - Protocol defined in `internal/rpc/protocol.go`
 - Used by Dolt server mode for multi-writer access
 
@@ -303,11 +307,10 @@ Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. 
 
 ```
 .beads/
-├── dolt/             # Dolt database directory (gitignored)
+├── dolt/             # Dolt database, sql-server.pid, sql-server.log (gitignored)
 ├── issues.jsonl      # JSONL export (git-tracked, for portability)
 ├── metadata.json     # Backend config (local, gitignored)
-├── config.yaml       # Project config (optional)
-└── bd.sock           # RPC socket (gitignored, server mode only)
+└── config.yaml       # Project config (optional)
 ```
 
 ## Key Code Paths
