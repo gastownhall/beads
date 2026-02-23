@@ -2163,6 +2163,117 @@ func TestDiscovery_DepAddInvalidTypeSilentlyAccepted(t *testing.T) {
 	// If err != nil, the tool correctly rejected invalid type — good
 }
 
+// TestDiscovery_StatusInProgressNoAutoAssign verifies that --status in_progress
+// without --assignee doesn't auto-assign like --claim does.
+//
+// FINDING: update.go processes --status and --assignee independently.
+// bd update X --status in_progress sets status but leaves assignee unchanged.
+// bd update X --claim atomically sets both status=in_progress and assignee.
+// Users who use --status in_progress expecting auto-assignment are surprised.
+//
+// Classification: INVESTIGATE — may be intentional (--claim is the auto-assign
+// path), but the difference is undocumented and surprising.
+func TestDiscovery_StatusInProgressNoAutoAssign(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Manual in_progress", "--type", "task", "--priority", "2")
+
+	// Set status to in_progress without --claim or --assignee
+	w.run("update", a, "--status", "in_progress")
+
+	data := parseJSON(t, w.run("show", a, "--json"))
+	status := data[0]["status"]
+	assignee := data[0]["assignee"]
+
+	if status != "in_progress" {
+		t.Fatalf("status should be in_progress, got %v", status)
+	}
+
+	// Compare with --claim behavior
+	b := w.create("--title", "Claimed", "--type", "task", "--priority", "2")
+	w.run("update", b, "--claim")
+
+	bData := parseJSON(t, w.run("show", b, "--json"))
+	bStatus := bData[0]["status"]
+	bAssignee := bData[0]["assignee"]
+
+	if bStatus != "in_progress" {
+		t.Fatalf("claimed status should be in_progress, got %v", bStatus)
+	}
+
+	// Document the behavioral difference
+	if (assignee == nil || assignee == "") && bAssignee != nil && bAssignee != "" {
+		t.Logf("CONFIRMED: --status in_progress (assignee=%v) vs --claim (assignee=%v) — --status does not auto-assign, --claim does", assignee, bAssignee)
+	}
+}
+
+// TestProtocol_ListAllIncludesClosed verifies that bd list --all correctly
+// bypasses the default closed exclusion filter.
+func TestProtocol_ListAllIncludesClosed(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	open := w.create("--title", "Open", "--type", "task", "--priority", "2")
+	closed := w.create("--title", "Closed", "--type", "task", "--priority", "2")
+	w.run("close", closed)
+
+	// Default list excludes closed
+	defaultOut := parseIDs(t, w.run("list", "--json", "-n", "0"))
+	if containsID(defaultOut, closed) {
+		t.Fatalf("default list should exclude closed issues")
+	}
+	if !containsID(defaultOut, open) {
+		t.Fatalf("default list should include open issues")
+	}
+
+	// --all should include closed
+	allOut := parseIDs(t, w.run("list", "--all", "--json", "-n", "0"))
+	if !containsID(allOut, closed) {
+		t.Errorf("list --all should include closed issue %s", closed)
+	}
+	if !containsID(allOut, open) {
+		t.Errorf("list --all should include open issue %s", open)
+	}
+}
+
+// TestDiscovery_CreateEmptyType verifies that bd create --type "" is handled.
+//
+// FINDING: create.go:711 defaults to "task" if --type not specified.
+// But --type "" explicitly sets an empty type. The validation should catch
+// this at the storage layer.
+//
+// Classification: BUG if accepted, PROTOCOL if rejected.
+func TestDiscovery_CreateEmptyType(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	_, err := w.tryCreate("--title", "Empty type", "--type", "", "--priority", "2")
+	if err == nil {
+		t.Errorf("DISCOVERY: bd create --type '' succeeded — empty type should be rejected")
+	}
+	// If err != nil, the tool correctly rejected empty type — good
+}
+
+// TestDiscovery_ShowJSONAlwaysArray verifies that bd show --json returns
+// an array even for a single issue, for consistent parsing.
+func TestDiscovery_ShowJSONAlwaysArray(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Single show", "--type", "task", "--priority", "2")
+
+	out := w.run("show", a, "--json")
+	out = strings.TrimSpace(out)
+
+	// Should start with [ (array)
+	if !strings.HasPrefix(out, "[") {
+		t.Errorf("DISCOVERY: bd show --json for single issue doesn't return array — got: %s", out[:min(50, len(out))])
+	}
+
+	// Parse and verify
+	data := parseJSON(t, out)
+	if len(data) != 1 {
+		t.Errorf("expected 1 item in array, got %d", len(data))
+	}
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)

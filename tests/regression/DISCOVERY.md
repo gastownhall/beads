@@ -18,7 +18,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch, deps)** | Found 7 more bugs (BUG-21 through 27). Update bypasses close guard, reopen superseded corruption, defer past date invisible, wisp sort order, conditional-blocks cycle, epic wisp children. 2 new protocol tests. |
 | 2026-02-22 | **Session 5: Filter, flag interaction, migration seams** | Found 4 more bugs (BUG-28 through 31). Dead label-pattern filter, claim+status overwrite, --ready overrides --status, assignee empty string. Code review: pull doesn't check merge conflicts, schema migration non-transactional, import drops deps/comments silently. |
 | 2026-02-22 | **Session 6: Routing, validation, sort, edge cases** | Found 10 more bugs (BUG-32 through 42) + 2 protocol tests (BUG-35, 39). Stale negative days, sort unknown field, reparent cycle, reversed ranges, negative limit, whitespace title, config ambiguity, dep rm false positive. Code review: createInRig skips prefix validation, same-prefix rig ambiguity, batch import no UTC. |
-| 2026-02-22 | **Session 7: State corruption, filter conflicts, hierarchy** | Found 4 more bugs (BUG-43 through 46) + 1 protocol test (BUG-47). Deferred without date, comma status, assignee conflict, child of closed parent. Code review: bd sync is no-op, doctor --fix checks are no-ops. |
+| 2026-02-22 | **Session 7: State corruption, filter conflicts, hierarchy** | Found 4 more bugs (BUG-43 through 46) + 5 protocol tests (BUG-47 through 51). Deferred without date, comma status, assignee conflict, child of closed parent. Documented: custom dep types, in_progress vs claim, --all filter, empty type rejection, show JSON array. |
 
 ## Audit Summary
 
@@ -71,6 +71,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-45 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-46 | **DECISION** | OPEN (not PR'd yet) | — |
 | BUG-47 | **PROTOCOL** | PASS (by design) | — |
+| BUG-48 | **PROTOCOL** | PASS (docs behavior) | — |
+| BUG-49 | **PROTOCOL** | PASS (correct) | — |
+| BUG-50 | **PROTOCOL** | PASS (correct) | — |
+| BUG-51 | **PROTOCOL** | PASS (correct) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -119,6 +123,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 37. **BUG-45**: list --assignee alice --no-assignee contradictory, returns empty
 38. **BUG-46**: create --parent of closed issue succeeds (DECISION)
 39. **BUG-47**: dep add --type custom accepted by design (PROTOCOL)
+40. **BUG-48**: --status in_progress doesn't auto-assign (PROTOCOL — documents difference vs --claim)
+41. **BUG-49**: list --all includes closed (PROTOCOL — correct)
+42. **BUG-50**: create --type "" rejected (PROTOCOL — correct)
+43. **BUG-51**: show --json always returns array (PROTOCOL — correct)
 
 ### Investigate further
 
