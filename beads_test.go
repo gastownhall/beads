@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +13,16 @@ import (
 	"github.com/steveyegge/beads"
 )
 
+func skipIfNoDolt(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
+}
+
 func TestOpen(t *testing.T) {
+	skipIfNoDolt(t)
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test-dolt")
 
@@ -60,56 +70,6 @@ func TestFindJSONLPath(t *testing.T) {
 	}
 }
 
-func TestOpenFromConfig_Embedded(t *testing.T) {
-	// Create a .beads dir with metadata.json configured for embedded mode
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads dir: %v", err)
-	}
-
-	metadata := `{"backend":"dolt","database":"dolt","dolt_database":"testdb","dolt_mode":"embedded"}`
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
-		t.Fatalf("failed to write metadata.json: %v", err)
-	}
-
-	ctx := context.Background()
-	store, err := beads.OpenFromConfig(ctx, beadsDir)
-	if err != nil {
-		t.Fatalf("OpenFromConfig (embedded) failed: %v", err)
-	}
-	defer store.Close()
-
-	if store == nil {
-		t.Error("expected non-nil storage")
-	}
-}
-
-func TestOpenFromConfig_DefaultsToEmbedded(t *testing.T) {
-	// metadata.json without dolt_mode should default to embedded
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads dir: %v", err)
-	}
-
-	metadata := `{"backend":"dolt","database":"dolt"}`
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
-		t.Fatalf("failed to write metadata.json: %v", err)
-	}
-
-	ctx := context.Background()
-	store, err := beads.OpenFromConfig(ctx, beadsDir)
-	if err != nil {
-		t.Fatalf("OpenFromConfig (default) failed: %v", err)
-	}
-	defer store.Close()
-
-	if store == nil {
-		t.Error("expected non-nil storage")
-	}
-}
-
 func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 	// Server mode should fail-fast when no server is listening
 	tmpDir := t.TempDir()
@@ -143,7 +103,8 @@ func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 }
 
 func TestOpenFromConfig_NoMetadata(t *testing.T) {
-	// Missing metadata.json should use defaults (embedded mode)
+	skipIfNoDolt(t)
+	// Missing metadata.json should use defaults (server mode)
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

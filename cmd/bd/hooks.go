@@ -743,7 +743,6 @@ func isRebaseInProgress() bool {
 	return false
 }
 
-
 var hooksRunCmd = &cobra.Command{
 	Use:   "run <hook-name> [args...]",
 	Short: "Execute a git hook (called by thin shims)",

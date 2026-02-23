@@ -1493,7 +1493,9 @@ func TestTransitiveBlockingChain(t *testing.T) {
 }
 
 // TestDiamondDependency creates a diamond-shaped dependency graph:
-//   A ← B, A ← C, B ← D, C ← D (D blocked by both B and C, both blocked by A).
+//
+//	A ← B, A ← C, B ← D, C ← D (D blocked by both B and C, both blocked by A).
+//
 // Close A. B and C should become ready, D should stay blocked.
 func TestDiamondDependency(t *testing.T) {
 	scenario := func(w *workspace) [4]string {
@@ -2101,9 +2103,9 @@ func TestRapidDepAddRemoveStability(t *testing.T) {
 		w.run("dep", "add", a, b)
 		w.run("dep", "add", a, c)
 		w.run("dep", "add", a, d)
-		w.run("dep", "remove", a, c)  // remove middle
-		w.run("dep", "add", a, c)     // re-add
-		w.run("dep", "remove", a, b)  // remove first
+		w.run("dep", "remove", a, c) // remove middle
+		w.run("dep", "add", a, c)    // re-add
+		w.run("dep", "remove", a, b) // remove first
 	})
 }
 
@@ -2181,8 +2183,8 @@ func TestBlockedCommandParity(t *testing.T) {
 
 		// Set up deps using the IDs from createdIDs
 		ids := w.createdIDs
-		w.run("dep", "add", ids[1], a)  // "Blocked by A" depends on A
-		w.run("dep", "add", ids[4], b)  // "Was blocked by B" depends on B
+		w.run("dep", "add", ids[1], a) // "Blocked by A" depends on A
+		w.run("dep", "add", ids[4], b) // "Was blocked by B" depends on B
 		w.run("close", b, "--reason", "done")
 	}
 

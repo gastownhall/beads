@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ import (
 // For small counts, uses the store API. For large counts (>100), uses raw SQL bulk insert.
 func setupStaleClosedTestDB(t *testing.T, numClosed int, closedAt time.Time, pinnedIndices map[int]bool, thresholdDays int) string {
 	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.Mkdir(beadsDir, 0755); err != nil {

@@ -53,7 +53,7 @@ type CloneOptions struct {
 
 	// Atomic attachment: if set, adds a dependency from the spawned root to
 	// AttachToID within the same transaction as the clone, preventing orphans.
-	AttachToID  string               // Molecule ID to attach spawned root to
+	AttachToID    string               // Molecule ID to attach spawned root to
 	AttachDepType types.DependencyType // Dependency type for the attachment
 }
 

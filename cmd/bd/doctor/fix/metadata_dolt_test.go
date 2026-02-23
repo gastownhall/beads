@@ -18,6 +18,9 @@ import (
 // Returns the workspace root path.
 func setupDoltWorkspace(t *testing.T) string {
 	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")

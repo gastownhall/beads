@@ -262,8 +262,8 @@ func TestIsValidSyncMode(t *testing.T) {
 		valid bool
 	}{
 		{"dolt-native", true},
-		{"Dolt-Native", true},     // case insensitive
-		{"git-portable", false},   // removed
+		{"Dolt-Native", true},          // case insensitive
+		{"git-portable", false},        // removed
 		{"belt-and-suspenders", false}, // removed
 		{"invalid", false},
 		{"", false},

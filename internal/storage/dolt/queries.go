@@ -923,7 +923,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 				needsClosedChildren = true
 			}
 			waitsForDeps = append(waitsForDeps, waitsForDep{
-				issueID:   issueID,
+				issueID: issueID,
 				// depends_on_id is the canonical spawner ID for waits-for edges.
 				// metadata.spawner_id is parsed for compatibility but not required here.
 				spawnerID: dependsOnID,

@@ -5,6 +5,7 @@ package doctor
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 // newTestDoltStore creates a DoltStore in a temp directory with the given issue prefix.
 func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
 	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {

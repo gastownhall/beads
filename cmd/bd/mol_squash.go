@@ -296,7 +296,6 @@ func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, c
 	return result, nil
 }
 
-
 func init() {
 	molSquashCmd.Flags().Bool("dry-run", false, "Preview what would be squashed")
 	molSquashCmd.Flags().Bool("keep-children", false, "Don't delete ephemeral children after squash")

@@ -169,6 +169,10 @@ func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 
 	ensureTestMode(t)
 
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
 	cfg := &dolt.Config{Path: dbPath}
 	// Use the shared test Dolt server with a unique database for isolation
 	if testDoltServerPort != 0 {
@@ -216,6 +220,10 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 	t.Helper()
 
 	ensureTestMode(t)
+
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
 
 	cfg := &dolt.Config{Path: dbPath}
 	// Use the shared test Dolt server with a unique database for isolation

@@ -5,6 +5,7 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ import (
 // newTestStore creates a dolt store for engine tests with issue_prefix configured
 func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: t.TempDir()})
 	if err != nil {

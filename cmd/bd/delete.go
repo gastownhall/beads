@@ -229,7 +229,6 @@ func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
 }
 
-
 // deleteBatch handles deletion of multiple issues
 //
 //nolint:unparam // cmd parameter required for potential future use

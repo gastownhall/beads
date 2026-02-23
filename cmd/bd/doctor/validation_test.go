@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -19,6 +20,9 @@ import (
 // so that the factory (used by doctor checks) can find the database.
 func setupDoltTestDir(t *testing.T, beadsDir string) string {
 	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("Dolt not installed, skipping test")
+	}
 	cfg := configfile.DefaultConfig()
 	cfg.Backend = configfile.BackendDolt
 	if err := cfg.Save(beadsDir); err != nil {
