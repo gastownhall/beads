@@ -47,7 +47,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Verify this is a Dolt backend
 	if !IsDoltBackend(beadsDir) {
-		return nil, fmt.Errorf("not a Dolt backend (detected: SQLite). Use 'bd doctor perf' for SQLite")
+		return nil, fmt.Errorf("SQLite backend is no longer supported. Migrate to Dolt with 'bd migrate'")
 	}
 
 	metrics := &DoltPerfMetrics{
@@ -360,7 +360,7 @@ func CheckDoltPerformance(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Performance",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (not a Dolt backend)",
 			Category: CategoryPerformance,
 		}
 	}
