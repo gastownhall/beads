@@ -544,3 +544,53 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 
 	return updates
 }
+
+// ProjectToEpic converts a Linear Project to a Beads Epic issue.
+func ProjectToEpic(lp *Project) *types.Issue {
+	createdAt, err := time.Parse(time.RFC3339, lp.CreatedAt)
+	if err != nil {
+		createdAt = time.Now()
+	}
+
+	updatedAt, err := time.Parse(time.RFC3339, lp.UpdatedAt)
+	if err != nil {
+		updatedAt = time.Now()
+	}
+
+	// Map Linear project state to Beads status
+	var status types.Status
+	switch lp.State {
+	case "completed":
+		status = types.StatusClosed
+	case "canceled":
+		status = types.StatusClosed
+	case "started", "paused":
+		status = types.StatusInProgress
+	default:
+		status = types.StatusOpen // planned, or unknown
+	}
+
+	issue := &types.Issue{
+		ID:          lp.ID, // Use Linear UUID as ID for now
+		Title:       lp.Name,
+		Description: lp.Description,
+		Status:      status,
+		IssueType:   types.TypeEpic,
+		Priority:    2, // Default medium priority
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+		ExternalRef: &lp.URL,
+	}
+
+	return issue
+}
+
+// MapEpicToProjectState maps a Beads status to Linear project state.
+func MapEpicToProjectState(status types.Status) string {
+	switch status {
+	case types.StatusClosed:
+		return "completed"
+	default:
+		return "planned"
+	}
+}
