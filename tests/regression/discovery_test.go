@@ -923,6 +923,96 @@ func TestProtocol_LabelAddRemoveRoundTrip(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// CANDIDATE-ONLY DISCOVERY: SILENT LOSS SEAMS (session 3)
+// =============================================================================
+
+// TestDiscovery_ExternalBlockerIgnoredByReady verifies that issues with external
+// blocking dependencies are correctly excluded from bd ready.
+//
+// FINDING: computeBlockedIDs() in queries.go only marks issues blocked if BOTH
+// issue AND blocker are in the local activeIDs map. External blockers (e.g.
+// "external:project:capability") are never in activeIDs, so issues blocked by
+// external deps silently appear in bd ready as if unblocked.
+//
+// Classification: DECISION — maintainer must decide whether external blockers
+// should gate readiness or remain advisory-only.
+func TestDiscovery_ExternalBlockerIgnoredByReady(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Externally blocked", "--type", "task", "--priority", "2")
+	b := w.create("--title", "Locally blocked", "--type", "task", "--priority", "2")
+	blocker := w.create("--title", "Local blocker", "--type", "task", "--priority", "1")
+
+	// Add an external blocker to a
+	w.run("dep", "add", a, "external:otherproject:some-capability", "--type", "blocks")
+
+	// Add a local blocker to b (control group)
+	w.run("dep", "add", b, blocker, "--type", "blocks")
+
+	// b should NOT be in ready (locally blocked — control)
+	readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+	if containsID(readyIDs, b) {
+		t.Fatalf("control: locally blocked issue %s should NOT be in ready", b)
+	}
+
+	// a should NOT be in ready (externally blocked)
+	if containsID(readyIDs, a) {
+		t.Errorf("DISCOVERY: externally blocked issue %s appears in bd ready — external blockers are silently ignored by computeBlockedIDs()", a)
+	}
+
+	// Also verify close guard: closing an externally-blocked issue should warn
+	out := w.run("close", a)
+	showOut := parseJSON(t, w.run("show", a, "--json"))
+	if showOut[0]["status"] == "closed" {
+		t.Errorf("DISCOVERY: close guard did not prevent closing externally-blocked issue %s; close output: %s", a, out)
+	}
+}
+
+// TestDiscovery_ConditionalBlocksNotEvaluated verifies that conditional-blocks
+// dependencies are evaluated in readiness computation.
+//
+// FINDING: types.AffectsReadyWork() returns true for conditional-blocks, but
+// computeBlockedIDs() SQL only queries WHERE type IN ('blocks', 'waits-for').
+// conditional-blocks is never evaluated, so issues that should be conditionally
+// blocked appear as ready.
+//
+// Classification: DECISION — conditional-blocks semantics are complex (B runs
+// only if A fails). The maintainer must decide if they should gate readiness
+// while A is still open.
+func TestDiscovery_ConditionalBlocksNotEvaluated(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	precondition := w.create("--title", "Precondition (might fail)", "--type", "task", "--priority", "1")
+	fallback := w.create("--title", "Fallback (runs if precondition fails)", "--type", "task", "--priority", "2")
+
+	// fallback is conditionally-blocked by precondition
+	w.run("dep", "add", fallback, precondition, "--type", "conditional-blocks")
+
+	// While precondition is still open, fallback should NOT be ready
+	// (it can't run yet — we don't know if precondition will fail)
+	readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+	if containsID(readyIDs, fallback) {
+		t.Errorf("DISCOVERY: conditionally-blocked issue %s appears in bd ready while precondition %s is still open — conditional-blocks not evaluated by computeBlockedIDs()", fallback, precondition)
+	}
+
+	// precondition should be ready (it has no blockers)
+	if !containsID(readyIDs, precondition) {
+		t.Errorf("precondition %s should be in ready list", precondition)
+	}
+
+	// Also verify: bd blocked should include fallback
+	blockedIDs := parseIDs(t, w.run("blocked", "--json"))
+	if !containsID(blockedIDs, fallback) {
+		t.Errorf("DISCOVERY: conditionally-blocked issue %s not in bd blocked output", fallback)
+	}
+}
+
+// NOTE: Wisp dep type overwrite (same root cause as BUG-7 but in
+// wisp_dependencies table) confirmed via code review but not tested here
+// because ephemeral issue dep routing requires different test setup.
+// See PR #1999 (BUG-7 fix) for the shared root cause.
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)
