@@ -1,7 +1,7 @@
 package doctor
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,11 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // validRoutingModes are the allowed values for routing.mode
@@ -346,32 +345,37 @@ func checkDatabaseConfigValues(repoPath string) []string {
 		return issues // No .beads directory, nothing to check
 	}
 
-	// Get database path (backend-aware)
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		// For Dolt, cfg.DatabasePath() is a directory and sqlite checks are not applicable.
-		if cfg.GetBackend() == configfile.BackendDolt {
-			return issues
-		}
-		if cfg.Database != "" {
-			dbPath = cfg.DatabasePath(beadsDir)
-		}
+	// Check backend
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return issues
 	}
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	backend := configfile.BackendDolt
+	if cfg != nil {
+		backend = cfg.GetBackend()
+	}
+
+	if backend != configfile.BackendDolt {
+		return issues // Non-Dolt backend, skip database config validation
+	}
+
+	// Check if Dolt directory exists
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return issues // No database, nothing to check
 	}
 
-	// Open database in read-only mode
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	// Open Dolt store in read-only mode
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return issues // Can't open database, skip
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
 	// Check status.custom - custom status names should be lowercase alphanumeric with underscores
-	var statusCustom string
-	err = db.QueryRow("SELECT value FROM config WHERE key = 'status.custom'").Scan(&statusCustom)
+	statusCustom, err := store.GetConfig(ctx, "status.custom")
 	if err == nil && statusCustom != "" {
 		statuses := strings.Split(statusCustom, ",")
 		for _, status := range statuses {
