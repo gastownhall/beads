@@ -235,6 +235,24 @@ func TestLintIssue(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "bug with acceptance in dedicated field",
+			issue: &types.Issue{
+				IssueType:          types.TypeBug,
+				Description:        "## Steps to Reproduce\nClick button",
+				AcceptanceCriteria: "## Acceptance Criteria\nButton works",
+			},
+			wantErr: false,
+		},
+		{
+			name: "task with acceptance in dedicated field",
+			issue: &types.Issue{
+				IssueType:          types.TypeTask,
+				Description:        "Do the thing",
+				AcceptanceCriteria: "Acceptance Criteria: thing is done",
+			},
+			wantErr: false,
+		},
+		{
 			name: "chore always valid",
 			issue: &types.Issue{
 				IssueType:   types.TypeChore,

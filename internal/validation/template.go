@@ -73,10 +73,16 @@ func ValidateTemplate(issueType types.IssueType, description string) error {
 
 // LintIssue checks an existing issue for missing template sections.
 // Unlike ValidateTemplate, this operates on a full Issue struct.
+// It checks both Description and AcceptanceCriteria fields, since
+// required sections (like "## Acceptance Criteria") may appear in either.
 // Returns nil if the issue passes validation or has no requirements.
 func LintIssue(issue *types.Issue) error {
 	if issue == nil {
 		return nil
 	}
-	return ValidateTemplate(issue.IssueType, issue.Description)
+	text := issue.Description
+	if issue.AcceptanceCriteria != "" {
+		text = text + "\n" + issue.AcceptanceCriteria
+	}
+	return ValidateTemplate(issue.IssueType, text)
 }
