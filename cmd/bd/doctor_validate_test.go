@@ -108,10 +108,17 @@ func TestValidateCheck_DetectsOrphanedDeps(t *testing.T) {
 	}
 
 	db := store.UnderlyingDB()
-	_, err := db.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
 		issue.ID, "test-nonexistent", "blocks", "test")
 	if err != nil {
 		t.Fatalf("Failed to insert orphaned dep: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit orphaned dep: %v", err)
 	}
 	store.Close()
 
@@ -221,10 +228,17 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 	}
 
 	db := store.UnderlyingDB()
-	_, err := db.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
 		issue.ID, "test-nonexistent", "blocks", "test")
 	if err != nil {
 		t.Fatalf("Failed to insert orphaned dep: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit orphaned dep: %v", err)
 	}
 	store.Close()
 
